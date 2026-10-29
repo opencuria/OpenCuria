@@ -137,7 +137,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     @sio.on("operation:inspection")
     async def operation_inspection(sid: str, evidence: dict):
-        """Automatically reconcile only exact finished journal outcomes on current SID."""
+        """Reconcile exact finished journal outcomes on the current SID."""
         runner_id = await _require_runner_id(sio, sid, "operation:inspection")
         if (
             not runner_id
@@ -271,190 +271,47 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
-    # --- Harness workspace-access replies from runner ---
+    # RPC replies stay inside the backend; stream replies also ACK acceptance.
+    def register_reply(event: str, method: str, *, ack: bool = False) -> None:
+        @sio.on(event)
+        async def on_reply(sid: str, data: dict) -> dict | None:
+            runner_id = await _require_runner_id(sio, sid, event)
+            if not runner_id:
+                return {"ok": False, "error": "unauthenticated"} if ack else None
+            accepted = await sync_to_async(getattr(get_runner_service(), method))(
+                event, data, runner_id=runner_id
+            )
+            return {"ok": bool(accepted)} if ack else None
 
-    @sio.on("harness:exec_wait_result")
-    async def on_harness_exec_wait_result(sid: str, data: dict):
-        """Route buffered exec results to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:exec_wait_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:exec_wait_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:read_file_result")
-    async def on_harness_read_file_result(sid: str, data: dict):
-        """Route file content results to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:read_file_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:read_file_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:read_file_chunk")
-    async def on_harness_read_file_chunk(sid: str, data: dict):
-        """Route chunked file content to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:read_file_chunk")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:read_file_chunk", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:write_file_result")
-    async def on_harness_write_file_result(sid: str, data: dict):
-        """Route file write results to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:write_file_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:write_file_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:list_result")
-    async def on_harness_list_result(sid: str, data: dict):
-        """Route directory listing results to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:list_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:list_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:desktop_action_result")
-    async def on_harness_desktop_action_result(sid: str, data: dict):
-        """Route desktop action results to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:desktop_action_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:desktop_action_result", data, runner_id=runner_id
-        )
-
-    @sio.on("workspace:artifact_ensure_result")
-    async def on_workspace_artifact_ensure_result(sid: str, data: dict):
-        """Route trusted artifact replies through the workspace ownership guard."""
-        event = "workspace:artifact_ensure_result"
-        runner_id = await _require_runner_id(sio, sid, event)
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            event, data, runner_id=runner_id
-        )
-
-    # --- Background process replies from runner ---
-
-    @sio.on("git:operation_result")
-    async def on_git_operation_result(sid: str, data: dict):
-        """Route git operation results to the owning git waiter.
-
-        Never forwarded to the frontend event bus — replies only
-        resolve the correlated ``git:operation`` request future after
-        runner-ownership validation.
-        """
-        runner_id = await _require_runner_id(sio, sid, "git:operation_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_git_reply)(
-            "git:operation_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:process_start_result")
-    async def on_harness_process_start_result(sid: str, data: dict):
-        """Route process start results to the owning process waiter."""
-        runner_id = await _require_runner_id(sio, sid, "harness:process_start_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_process_reply)(
-            "harness:process_start_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:process_list_result")
-    async def on_harness_process_list_result(sid: str, data: dict):
-        """Route process list results to the owning process waiter."""
-        runner_id = await _require_runner_id(sio, sid, "harness:process_list_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_process_reply)(
-            "harness:process_list_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:process_get_result")
-    async def on_harness_process_get_result(sid: str, data: dict):
-        """Route process status results to the owning process waiter."""
-        runner_id = await _require_runner_id(sio, sid, "harness:process_get_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_process_reply)(
-            "harness:process_get_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:process_stop_result")
-    async def on_harness_process_stop_result(sid: str, data: dict):
-        """Route process stop results to the owning process waiter."""
-        runner_id = await _require_runner_id(sio, sid, "harness:process_stop_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_process_reply)(
-            "harness:process_stop_result", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:process_verify_result")
-    async def on_harness_process_verify_result(sid: str, data: dict):
-        """Route process verify results to the owning process waiter."""
-        runner_id = await _require_runner_id(sio, sid, "harness:process_verify_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_process_reply)(
-            "harness:process_verify_result", data, runner_id=runner_id
-        )
-
-    # --- Generic stream events from runner (never to frontend) ---
-
-    @sio.on("workspace:stream_output")
-    async def on_workspace_stream_output(sid: str, data: dict):
-        """Route stream output chunks to the owning byte stream.
-
-        Returns an ACK dict: ``{ok: True}`` when the chunk was accepted,
-        ``{ok: False}`` when it was unknown/mismatched/invalid/closed —
-        the runner closes its side on a negative ACK instead of
-        retrying forever.
-        """
-        runner_id = await _require_runner_id(sio, sid, "workspace:stream_output")
-        if not runner_id:
-            return {"ok": False, "error": "unauthenticated"}
-        service = get_runner_service()
-        accepted = await sync_to_async(service.handle_stream_reply)(
-            "workspace:stream_output", data, runner_id=runner_id
-        )
-        return {"ok": bool(accepted)}
-
-    @sio.on("workspace:stream_closed")
-    async def on_workspace_stream_closed(sid: str, data: dict):
-        """Route stream close notices to the owning byte stream."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:stream_closed")
-        if not runner_id:
-            return {"ok": False, "error": "unauthenticated"}
-        service = get_runner_service()
-        accepted = await sync_to_async(service.handle_stream_reply)(
-            "workspace:stream_closed", data, runner_id=runner_id
-        )
-        return {"ok": bool(accepted)}
+    for method, events in (
+        (
+            "handle_harness_reply",
+            (
+                "harness:exec_wait_result",
+                "harness:read_file_result",
+                "harness:read_file_chunk",
+                "harness:write_file_result",
+                "harness:list_result",
+                "harness:desktop_action_result",
+                "workspace:artifact_ensure_result",
+            ),
+        ),
+        ("handle_git_reply", ("git:operation_result",)),
+        (
+            "handle_process_reply",
+            (
+                "harness:process_start_result",
+                "harness:process_list_result",
+                "harness:process_get_result",
+                "harness:process_stop_result",
+                "harness:process_verify_result",
+            ),
+        ),
+    ):
+        for event in events:
+            register_reply(event, method)
+    for event in ("workspace:stream_output", "workspace:stream_closed"):
+        register_reply(event, "handle_stream_reply", ack=True)
 
     # --- Terminal events from runner ---
 
