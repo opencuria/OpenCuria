@@ -1,0 +1,63 @@
+{
+  "baseline_ref": "84c0055",
+  "time_utc": "2026-10-29T10:04:56.090093+00:00",
+  "method": "secrets.randbelow(3), OS randomness; one draw",
+  "shortlist": [
+    "backend-transcript-append-batching",
+    "backend-pending-question-index",
+    "runner-file-read-parsing"
+  ],
+  "index": 0,
+  "selected": "backend-transcript-append-batching",
+  "scouts": {
+    "transcript": [
+      {
+        "entries": 1,
+        "fresh_queries": 7,
+        "replay_queries": 6,
+        "p50_ms": 8.286
+      },
+      {
+        "entries": 50,
+        "fresh_queries": 105,
+        "replay_queries": 55,
+        "p50_ms": 52.527
+      },
+      {
+        "entries": 200,
+        "fresh_queries": 405,
+        "replay_queries": 205,
+        "p50_ms": 194.731
+      }
+    ],
+    "pending_questions": [
+      {
+        "retained": 50001,
+        "sessions": 1,
+        "p50_ms": 5.84
+      },
+      {
+        "retained": 50001,
+        "sessions": 50,
+        "p50_ms": 11.277
+      }
+    ],
+    "runner_file_read": [
+      {
+        "bytes": 4096,
+        "p50_ms": 0.023,
+        "peak_python_bytes": 17072
+      },
+      {
+        "bytes": 5242880,
+        "p50_ms": 17.021,
+        "peak_python_bytes": 19382933
+      }
+    ],
+    "feed_projection_rejected": {
+      "rows": 203,
+      "full_p50_ms": 6.542,
+      "projection_p50_ms": 7.237
+    }
+  }
+}

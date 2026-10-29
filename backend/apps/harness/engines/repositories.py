@@ -22,6 +22,10 @@ from ..models import (
     HarnessTranscriptBatch,
 )
 
+_TRANSCRIPT_LOOKUP_BATCH_SIZE = 500
+# Limit PostgreSQL's transient SQL buffers for encrypted payloads.
+_TRANSCRIPT_INSERT_BATCH_SIZE = 100
+
 
 class HarnessEngineRepository:
     """Persistence boundary for resumable Claude sessions and transcripts."""
@@ -290,7 +294,7 @@ class HarnessEngineRepository:
             raise ValueError("external_session_id must be 1..64 characters")
         if len(cleaned_subpath) > 255:
             raise ValueError("subpath must be at most 255 characters")
-        prepared: list[tuple[dict[str, Any], str, str, str | None]] = []
+        prepared: list[tuple[str, str, str | None]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ValueError("transcript entry must be an object")
@@ -308,16 +312,14 @@ class HarnessEngineRepository:
                 else f"unkeyed:{uuid.uuid4()}"
             )
             digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
-            prepared.append(
-                (
-                    entry,
-                    canonical,
-                    digest,
-                    stable_uuid if stable_uuid is not None else None,
-                )
-            )
+            prepared.append((canonical, digest, stable_uuid))
         if not prepared:
             return []
+        keyed_digests = list(
+            dict.fromkeys(
+                digest for _, digest, stable_uuid in prepared if stable_uuid is not None
+            )
+        )
 
         attempts = 0
         while attempts < 5:
@@ -343,36 +345,49 @@ class HarnessEngineRepository:
                         session.save(
                             update_fields=["external_session_id", "updated_at"]
                         )
-                    top = HarnessTranscriptBatch.objects.filter(
+                    transcript = HarnessTranscriptBatch.objects.filter(
                         session_id=session.id,
                         external_session_id=external_id,
                         subpath=cleaned_subpath,
-                    ).aggregate(top=Max("position"))["top"]
+                    )
+                    top = transcript.aggregate(top=Max("position"))["top"]
                     position = int(top) + 1 if top is not None else 0
+                    by_digest: dict[str, HarnessTranscriptBatch] = {}
+                    # Bound lookup parameters; retain the session's write lock.
+                    for offset in range(
+                        0, len(keyed_digests), _TRANSCRIPT_LOOKUP_BATCH_SIZE
+                    ):
+                        batch = keyed_digests[
+                            offset : offset + _TRANSCRIPT_LOOKUP_BATCH_SIZE
+                        ]
+                        by_digest.update(
+                            (row.digest, row)
+                            for row in transcript.filter(digest__in=batch).order_by()
+                        )
                     persisted: list[HarnessTranscriptBatch] = []
-                    for entry, canonical, digest, stable_uuid in prepared:
-                        existing = None
-                        if stable_uuid is not None:
-                            existing = HarnessTranscriptBatch.objects.filter(
-                                session_id=session.id,
-                                external_session_id=external_id,
-                                subpath=cleaned_subpath,
-                                digest=digest,
-                            ).first()
+                    new_rows: list[HarnessTranscriptBatch] = []
+                    for canonical, digest, stable_uuid in prepared:
+                        existing = (
+                            by_digest.get(digest) if stable_uuid is not None else None
+                        )
                         if existing is not None:
                             persisted.append(existing)
                             continue
-                        persisted.append(
-                            HarnessTranscriptBatch.objects.create(
-                                session=session,
-                                external_session_id=external_id,
-                                subpath=cleaned_subpath,
-                                digest=digest,
-                                payload_encrypted=encrypt_value(canonical),
-                                position=position,
-                            )
+                        row = HarnessTranscriptBatch(
+                            session=session,
+                            external_session_id=external_id,
+                            subpath=cleaned_subpath,
+                            digest=digest,
+                            payload_encrypted=encrypt_value(canonical),
+                            position=position,
                         )
+                        new_rows.append(row)
+                        persisted.append(row)
+                        by_digest[digest] = row
                         position += 1
+                    HarnessTranscriptBatch.objects.bulk_create(
+                        new_rows, batch_size=_TRANSCRIPT_INSERT_BATCH_SIZE
+                    )
                     return persisted
             except IntegrityError:
                 if attempts >= 5:
