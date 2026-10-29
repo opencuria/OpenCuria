@@ -215,6 +215,7 @@ def _domain_xml(
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>
+    <memballoon model='virtio' freePageReporting='on'/>
   </devices>
   <metadata>
     <opencuria:workspace xmlns:opencuria='https://opencuria.dev/libvirt'>
@@ -223,6 +224,29 @@ def _domain_xml(
   </metadata>
 </domain>
 """
+
+
+def _enable_free_page_reporting(root: ET.Element) -> bool:
+    """Enable returning free guest pages without reducing usable guest RAM.
+
+    Keep Linux's batched reporting and large-page defaults: reclaiming only
+    genuinely free pages leaves application memory and the guest cache intact.
+    Return whether the persistent definition needs updating.
+    """
+    devices = root.find("devices")
+    if devices is None:
+        devices = ET.SubElement(root, "devices")
+    balloon = devices.find("memballoon")
+    if balloon is None:
+        balloon = ET.SubElement(devices, "memballoon", model="virtio")
+    elif balloon.get("freePageReporting") == "on" and balloon.get("model") in (
+        "virtio", "virtio-transitional", "virtio-non-transitional"
+    ):
+        return False
+    if balloon.get("model") in (None, "none"):
+        balloon.set("model", "virtio")
+    balloon.set("freePageReporting", "on")
+    return True
 
 
 class QemuRuntime(RuntimeBackend):
@@ -336,6 +360,13 @@ class QemuRuntime(RuntimeBackend):
             return conn.lookupByName(name)
         except libvirt.libvirtError as exc:
             raise RuntimeError(f"VM '{name}' not found: {exc}") from exc
+
+    def _ensure_memory_reclaim(self, domain: libvirt.virDomain) -> None:
+        """Upgrade an existing stopped VM before boot, preserving its devices."""
+        root = ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
+        if _enable_free_page_reporting(root):
+            self._libvirt_conn().defineXML(ET.tostring(root, encoding="unicode"))
+            logger.info("vm_free_page_reporting_enabled", domain=domain.name())
 
     async def _create_overlay_disk(
         self,
@@ -1136,6 +1167,7 @@ class QemuRuntime(RuntimeBackend):
         if state != libvirt.VIR_DOMAIN_RUNNING:
             # An externally stopped guest may leave a silent cached transport.
             await self._invalidate_ssh(instance_id)
+            await asyncio.to_thread(self._ensure_memory_reclaim, domain)
             await asyncio.to_thread(domain.create)
             await self._wait_for_ssh(instance_id)
         logger.info("vm_workspace_started", instance_id=instance_id)
@@ -1154,7 +1186,7 @@ class QemuRuntime(RuntimeBackend):
         def _force_restart() -> None:
             conn_lv = self._libvirt_conn()
             try:
-                domain = conn_lv.lookupByName(instance_id)
+                domain = conn_lv.lookupByName(self._domain_name(instance_id))
             except libvirt.libvirtError:
                 return  # domain gone — nothing to restart
             state, _ = domain.state()
@@ -1163,6 +1195,7 @@ class QemuRuntime(RuntimeBackend):
                     domain.destroy()
                 except libvirt.libvirtError:
                     pass  # already stopped by the time we get here
+            self._ensure_memory_reclaim(domain)
             domain.create()
 
         await asyncio.to_thread(_force_restart)
@@ -1255,6 +1288,7 @@ class QemuRuntime(RuntimeBackend):
         vcpu_node.set("placement", "static")
         vcpu_node.text = str(qemu_vcpus)
 
+        _enable_free_page_reporting(root)
         updated_xml = ET.tostring(root, encoding="unicode")
         conn = self._libvirt_conn()
         await asyncio.to_thread(conn.defineXML, updated_xml)

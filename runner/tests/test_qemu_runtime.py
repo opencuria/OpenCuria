@@ -118,6 +118,7 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
         domain = MagicMock()
         domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
         self.runtime._get_domain = MagicMock(return_value=domain)
+        self.runtime._ensure_memory_reclaim = MagicMock()
         self.runtime._wait_for_ssh = AsyncMock()
         self.runtime._create_cloud_init_iso = AsyncMock(
             side_effect=AssertionError("Start must reuse the existing seed")

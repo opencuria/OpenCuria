@@ -24,6 +24,7 @@ def runtime(tmp_path: Path) -> QemuRuntime:
     runtime._disk_dir = tmp_path
     runtime._host_key_cache = {}
     runtime._get_workspace_vm_ip = MagicMock(return_value="127.0.0.1")
+    runtime._ensure_memory_reclaim = MagicMock()
     return runtime
 
 

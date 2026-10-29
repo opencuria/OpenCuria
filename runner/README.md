@@ -24,6 +24,35 @@ their libvirt domain is gone before removing the network, disk, seed ISO, or hos
 key. Failed stop, undefine, or domain enumeration retains those resources for
 retry. Incomplete storage inventories and physical dependents still block removal.
 
+## VM memory reclamation
+
+VMs enable virtio-balloon [free page reporting][free-page-reporting] so the host
+can reclaim genuinely free guest RAM after a workload releases it. The configured
+guest RAM remains available; running applications and the guest filesystem cache
+are not evicted. This requires libvirt 6.9+, QEMU 5.1+, and a Linux guest with
+virtio-balloon page reporting (Linux 5.7+, including the Ubuntu 22.04/24.04 images).
+
+Keep the [Linux reporting defaults][linux-page-reporting]: on these guest kernels,
+reports are batched with a two-second delay and use large free blocks (typically
+2 MiB on x86_64). This limits reclaim/reallocation churn and preserves useful
+cache without a runner polling loop or forced balloon inflation. Reusing reclaimed
+pages still requires host page faults. Repeated large allocations separated by
+pauses longer than the reporting delay can incur measurable overhead; zero
+overhead cannot be guaranteed for all workloads. Memory retained in an
+application's allocator or in useful guest cache is not free guest memory and
+will not immediately reduce QEMU's host RSS.
+
+After updating, restart the runner when no agent run is active. New workspaces,
+clones, and image-build VMs enable reporting automatically. Existing workspaces
+are upgraded on their next stop/start, recovery restart, or resource change;
+running VMs are not interrupted. No image rebuild or seed regeneration is needed.
+Verify host reclamation using the QEMU process's RSS after allocating, touching,
+and freeing guest memory; `virsh dommemstat` free-memory counters do not measure
+the host pages returned by this feature.
+
+[free-page-reporting]: https://libvirt.org/formatdomain.html#memory-balloon-device
+[linux-page-reporting]: https://docs.kernel.org/mm/free_page_reporting.html
+
 ## Workspace Git
 
 Git integration requires Git 2.31+ inside the workspace (`--porcelain=v2` and
