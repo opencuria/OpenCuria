@@ -383,7 +383,7 @@ async def test_real_codex_package_local_installer_contract(tmp_path):
         env,
         [result["path"]],
         expected_token=current_token(),
-        isolated_env=True,
+        process_profile="agent",
         isolated_home=str(home),
         config_root=config_root,
     )

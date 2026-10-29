@@ -11,12 +11,13 @@ from __future__ import annotations
 import abc
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from . import file_types
 from .safe_files import read_file_no_follow
 
 HARNESS_WORKSPACE_ROOT = "/workspace"
+ProcessProfile = Literal["agent", "helper"]
 
 #: Env vars never forwarded to the workspace (injected shell/runtime
 #: hijack surface). Matched case-insensitively by prefix; exact names
@@ -320,8 +321,13 @@ class WorkspaceAccessor(abc.ABC):
         timeout: float | None = None,
         *,
         owner: dict[str, str] | None = None,
+        process_profile: ProcessProfile | None = None,
     ) -> WorkspaceByteStream:
-        """Open stdio, optionally associated with a reserved desktop owner."""
+        """Open stdio with optional ownership and an isolated process profile.
+
+        Agent leases default to the agent profile. Helpers must explicitly select
+        ``helper`` and use an empty environment under the same agent lease.
+        """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support open_process"
         )

@@ -49,6 +49,44 @@ async def test_managed_owner_reaches_runner_payload() -> None:
     assert stream.connection_id not in client._byte_streams
 
 
+async def test_helper_profile_reaches_runner_with_same_owner() -> None:
+    transport = ManagedTransport()
+    client = accessor(transport)
+    owner = {"lease_id": "lease", "epoch": "epoch"}
+    stream = await client.open_process(
+        ["python3"], owner=owner, process_profile="helper"
+    )
+    payload = transport.calls[0][1]
+    assert payload["owner"] == owner
+    assert payload["process_profile"] == "helper"
+    assert payload["env"] == {}
+    assert client._byte_streams[stream.connection_id].managed
+    await stream.aclose()
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"process_profile": "unknown"}, "Invalid process profile"),
+        ({"process_profile": ""}, "Invalid process profile"),
+        ({"process_profile": "helper"}, "managed owner"),
+        (
+            {
+                "process_profile": "helper",
+                "owner": {"lease_id": "lease", "epoch": "epoch"},
+                "env": {"ANTHROPIC_API_KEY": "secret"},
+            },
+            "empty environment",
+        ),
+    ],
+)
+async def test_invalid_process_profile_rejected_before_rpc(kwargs, match) -> None:
+    transport = ManagedTransport()
+    with pytest.raises(ValueError, match=match):
+        await accessor(transport).open_process(["python3"], **kwargs)
+    assert not transport.calls
+
+
 @pytest.mark.parametrize(
     "result", [{"ok": True, "closed": False}, {"closed": True}, {"ok": False}]
 )

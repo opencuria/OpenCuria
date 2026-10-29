@@ -63,7 +63,7 @@ class LocalRuntime:
         *,
         control_path=None,
         expected_token=None,
-        isolated_env=False,
+        process_profile=None,
         isolated_home=None,
     ):
         if self.gate:
@@ -74,7 +74,7 @@ class LocalRuntime:
             env,
             command,
             expected_token=expected_token or current_token(),
-            isolated_env=isolated_env,
+            process_profile=process_profile,
             isolated_home=isolated_home,
             config_root=self.config_root,
         )
@@ -85,11 +85,13 @@ class LocalRuntime:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        if isolated_env:
+        if process_profile is not None:
             from src.runtime.managed_process import isolated_agent_env_preamble
 
             process.stdin.write(
-                isolated_agent_env_preamble(env, config_root=self.config_root)
+                isolated_agent_env_preamble(
+                    env, config_root=self.config_root, process_profile=process_profile
+                )
             )
             await process.stdin.drain()
         return ProcessHandle(instance_id, process, {"control_path": control_path})

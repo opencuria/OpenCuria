@@ -20,6 +20,7 @@ import structlog
 
 from ...models import WorkspaceInfo
 from ...runtime.base import ProcessHandle, RuntimeBackend
+from ...runtime.managed_process import ProcessProfile
 from ..capture_fence import CaptureFence, live_interaction
 from ..workspace_helpers import sanitize_exec_workdir
 from .stream_intents import StreamIntentStore
@@ -333,6 +334,7 @@ class StreamManager:
         env: dict[str, str] | None = None,
         *,
         owner: dict[str, str] | None = None,
+        process_profile: ProcessProfile | None = None,
     ) -> StreamSession:
         """Spawn a workspace-bound stdio process stream (least-privilege env).
 
@@ -345,6 +347,13 @@ class StreamManager:
         conn_id = self._sanitize_stream_connection_id(connection_id)
         argv = self._sanitize_stream_command(command)
         clean_env = self._sanitize_stream_env(env)
+        if process_profile is not None:
+            if process_profile not in ("agent", "helper"):
+                raise ValueError("Invalid process profile")
+            if owner is None:
+                raise ValueError("Process profiles require a managed owner")
+            if process_profile == "helper" and clean_env:
+                raise ValueError("Helper processes require an empty environment")
         sanitize_workdir = self._sanitize_exec_workdir or sanitize_exec_workdir
         safe_workdir = sanitize_workdir(workdir or "/workspace")
         info = self._get_cached(workspace_id)
@@ -353,7 +362,7 @@ class StreamManager:
             raise RuntimeError("Workspace has no instance assigned")
         control_path = None
         expected_token = None
-        isolated_env = False
+        isolated_profile: ProcessProfile | None = None
         isolated_home: str | None = None
         if owner is not None:
             if (
@@ -398,8 +407,12 @@ class StreamManager:
                 + "/"
                 + hashlib.sha256(identity.encode()).hexdigest()
             )
-            isolated_env = lease["kind"] == "agent"
-            if isolated_env:
+            if process_profile is not None and lease["kind"] != "agent":
+                raise ValueError("Process profiles require an agent lease")
+            if lease["kind"] == "agent":
+                isolated_profile = (
+                    process_profile if process_profile is not None else "agent"
+                )
                 isolated_home = (
                     "/tmp/opencuria-agent-home-"
                     + hashlib.sha256(
@@ -456,8 +469,8 @@ class StreamManager:
                 if owner
                 else {}
             )
-            if isolated_env:
-                kwargs["isolated_env"] = True
+            if isolated_profile is not None:
+                kwargs["process_profile"] = isolated_profile
                 kwargs["isolated_home"] = isolated_home
             handle = await runtime.spawn_process(
                 info.instance_id,

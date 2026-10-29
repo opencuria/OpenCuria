@@ -282,7 +282,8 @@ async def test_missing_executable_cleans_isolated_home(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_qemu_selects_codex_profile_and_transmits_only_private_preamble():
+@pytest.mark.parametrize("process_profile", ["agent", "helper"])
+async def test_qemu_selects_profile_and_transmits_only_private_preamble(process_profile):
     from unittest.mock import AsyncMock, MagicMock
 
     from src.runtime.qemu_runtime import QemuRuntime
@@ -294,8 +295,10 @@ async def test_qemu_selects_codex_profile_and_transmits_only_private_preamble():
     ssh = SimpleNamespace(create_process=AsyncMock(return_value=process))
     runtime._get_ssh = AsyncMock(return_value=ssh)
     runtime._stream_pidfile = MagicMock(return_value="/tmp/stream.pid")
-    env = codex_env()
-    env["OPENCURIA_CODEX_API_KEY"] = "private-codex-key"
+    env = {}
+    if process_profile == "agent":
+        env = codex_env()
+        env["OPENCURIA_CODEX_API_KEY"] = "private-codex-key"
     await runtime.spawn_process(
         "guest",
         ["/opt/opencuria/runtimes/codex-agent/0.163.0/bin/codex-app-server"],
@@ -303,17 +306,22 @@ async def test_qemu_selects_codex_profile_and_transmits_only_private_preamble():
         env=env,
         control_path="/tmp/control",
         expected_token=current_token(),
-        isolated_env=True,
+        process_profile=process_profile,
         isolated_home="/tmp/opencuria-agent-home-" + uuid.uuid4().hex,
     )
     import shlex
 
     argv = shlex.split(ssh.create_process.call_args.args[0])
     data = json.loads(argv[argv.index("start") + 1])
-    assert data["isolated_agent"]["profile"] == "codex"
-    assert data["isolated_agent"]["config_root"] == ISOLATED_CODEX_CONFIG_ROOT
+    assert data["isolated_agent"]["profile"] == (
+        "codex" if process_profile == "agent" else "helper"
+    )
+    if process_profile == "agent":
+        assert data["isolated_agent"]["config_root"] == ISOLATED_CODEX_CONFIG_ROOT
     assert "private-codex-key" not in str(ssh.create_process.call_args)
-    stdin.write.assert_called_once_with(isolated_agent_env_preamble(env))
+    stdin.write.assert_called_once_with(
+        isolated_agent_env_preamble(env, process_profile=process_profile)
+    )
     stdin.write_eof.assert_not_called()
 
 

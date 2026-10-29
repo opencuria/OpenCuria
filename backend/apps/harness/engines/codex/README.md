@@ -46,6 +46,10 @@ it does not decide model, prompt, tool or permission policy.
 - `on_owner` phases are `reserved`, `closing`, `released`. Runner release confirms
   tree closure, not answer finalization; durable ownership survives checkpoint
   and final binding/event writes.
+- Native MCP relays share the Codex agent lease and explicitly select the
+  `helper` process profile. Helpers get an isolated temporary home and controlled
+  path with no explicit or inherited credentials; lease closure fences all their
+  processes. Agent streams retain their provider-specific environment validation.
 - `CodexSessionStore` writes require exact `session_id`, `run_id`, `owner_token`
   and external thread. One encrypted generation replaces the previous row.
   Dirty/missing/mismatched state never falls back to an older generation.

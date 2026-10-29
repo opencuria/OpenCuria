@@ -64,6 +64,7 @@ from common.exceptions import ConflictError
 
 from .base import (
     ExecResult,
+    ProcessProfile,
     StreamClosedError,
     WorkspaceAccessor,
     WorkspaceByteStream,
@@ -1677,8 +1678,16 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
         *,
         owner: dict[str, str] | None = None,
+        process_profile: ProcessProfile | None = None,
     ) -> WorkspaceByteStream:
-        """Open stdio with an optional runner-managed desktop owner."""
+        """Open stdio with independent runner ownership and isolation profile."""
+        if process_profile is not None:
+            if process_profile not in ("agent", "helper"):
+                raise ValueError("Invalid process profile")
+            if owner is None:
+                raise ValueError("Process profiles require a managed owner")
+            if process_profile == "helper" and env:
+                raise ValueError("Helper processes require an empty environment")
         safe_workdir = sanitize_exec_workdir(workdir)
         if not isinstance(command, list) or not command:
             raise ValueError("command must be a non-empty argv list")
@@ -1706,6 +1715,11 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                     "workdir": safe_workdir,
                     "env": dict(env or {}),
                     **({"owner": dict(owner)} if owner is not None else {}),
+                    **(
+                        {"process_profile": process_profile}
+                        if process_profile is not None
+                        else {}
+                    ),
                 },
                 timeout,
             )

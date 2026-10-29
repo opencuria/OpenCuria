@@ -40,6 +40,7 @@ from .base import (
 )
 from .inventory import RuntimeInventory, StorageResource
 from .managed_process import (
+    ProcessProfile,
     isolated_agent_env_preamble,
     managed_argv,
     managed_isolated_argv,
@@ -1557,7 +1558,7 @@ class QemuRuntime(RuntimeBackend):
         *,
         control_path: str | None = None,
         expected_token: dict[str, str] | None = None,
-        isolated_env: bool = False,
+        process_profile: ProcessProfile | None = None,
         isolated_home: str | None = None,
     ) -> ProcessHandle:
         """Spawn a non-TTY bidirectional process (stdin/stdout/stderr split)."""
@@ -1569,7 +1570,7 @@ class QemuRuntime(RuntimeBackend):
         if control_path and expected_token is None:
             expected_token = await self.probe_managed_token(instance_id)
         pidfile = self._stream_pidfile()
-        if isolated_env:
+        if process_profile is not None:
             if not control_path or expected_token is None or isolated_home is None:
                 raise ValueError("Isolated agent streams require managed identity")
             argv = managed_isolated_argv(
@@ -1579,6 +1580,7 @@ class QemuRuntime(RuntimeBackend):
                 expected_token=expected_token,
                 isolated_home=isolated_home,
                 env=env,
+                process_profile=process_profile,
             )
         elif control_path:
             argv = managed_argv(
@@ -1600,9 +1602,11 @@ class QemuRuntime(RuntimeBackend):
             stderr=asyncssh.PIPE,
             encoding=None,  # binary mode: bytes on all three streams
         )
-        if isolated_env:
+        if process_profile is not None:
             try:
-                process.stdin.write(isolated_agent_env_preamble(env))
+                process.stdin.write(
+                    isolated_agent_env_preamble(env, process_profile=process_profile)
+                )
                 await process.stdin.drain()
             except Exception:
                 process.close()

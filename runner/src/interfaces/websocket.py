@@ -1912,6 +1912,11 @@ class WebSocketInterface(Interface):
                             if raw.get("owner") is not None
                             else {}
                         ),
+                        **(
+                            {"process_profile": raw["process_profile"]}
+                            if "process_profile" in raw
+                            else {}
+                        ),
                     )
                 elif kind == "tcp":
                     await self._service.streams.stream_start_tcp(

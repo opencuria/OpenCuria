@@ -109,7 +109,11 @@ class ManagedMcpBridge:
     ) -> dict[str, Any]:
         """Start the owned relay and return the native Codex MCP configuration."""
         self.stream = await accessor.open_process(
-            ["/usr/bin/python3", "-u", "-c", RELAY_SERVER], cwd, {}, owner=owner
+            ["/usr/bin/python3", "-I", "-u", "-c", RELAY_SERVER],
+            cwd,
+            {},
+            owner=owner,
+            process_profile="helper",
         )
         ready = await asyncio.wait_for(self._receive(), 10)
         path = ready.get("ready", "")
@@ -118,7 +122,7 @@ class ManagedMcpBridge:
         self.task = asyncio.create_task(self._serve())
         return {
             "command": "/usr/bin/python3",
-            "args": ["-u", "-c", RELAY_CLIENT, path],
+            "args": ["-I", "-u", "-c", RELAY_CLIENT, path],
             "omit_tools_from": ["code_mode", "deferred"],
             "startup_timeout_sec": 15,
             "tool_timeout_sec": 2_147_500,

@@ -439,7 +439,7 @@ class QemuRuntimeAgentStdinTests(unittest.IsolatedAsyncioTestCase):
             env=env,
             control_path="/var/lib/opencuria/streams/test",
             expected_token={"boot_id": "boot", "init_starttime": "1"},
-            isolated_env=True,
+            process_profile="agent",
             isolated_home="/tmp/opencuria-agent-home-0123456789abcdef0123456789abcdef",
         )
 

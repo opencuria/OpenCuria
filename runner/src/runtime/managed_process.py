@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
+
+ProcessProfile = Literal["agent", "helper"]
 
 TOKEN_PROBE_CODE = """import json
 boot = open('/proc/sys/kernel/random/boot_id').read().strip()
@@ -125,10 +128,18 @@ def _config_root_for_env(
 def isolated_agent_profile(
     env: dict[str, str] | None,
     config_root: str = ISOLATED_AGENT_CONFIG_ROOT,
+    *,
+    process_profile: ProcessProfile = "agent",
 ) -> tuple[str, str]:
     """Select a controlled profile from an explicit, validated config path."""
+    if process_profile not in ("agent", "helper"):
+        raise ValueError("Invalid process profile")
     if not isinstance(env, dict):
         raise TypeError("Invalid isolated agent environment")
+    if process_profile == "helper":
+        if env:
+            raise ValueError("Helper processes require an empty environment")
+        return "helper", _validate_config_root(config_root)
     if "CODEX_HOME" in env:
         root = ISOLATED_CODEX_CONFIG_ROOT
         # A custom root is an internal test seam, not exposed through runtime RPC.
@@ -152,9 +163,11 @@ def _isolated_agent_env(
     env: dict[str, str] | None,
     *,
     config_root: str = ISOLATED_AGENT_CONFIG_ROOT,
-    auth_required: bool = True,
+    process_profile: ProcessProfile = "agent",
 ) -> dict[str, str]:
     """Validate the engine's child environment without accepting HOME/PATH."""
+    if process_profile not in ("agent", "helper"):
+        raise ValueError("Invalid process profile")
     if env is not None and not isinstance(env, dict):
         raise TypeError("Invalid isolated agent environment")
     explicit = env or {}
@@ -162,6 +175,9 @@ def _isolated_agent_env(
         raise TypeError("Invalid isolated agent environment")
     if any(not isinstance(key, str) for key in explicit):
         raise TypeError("Invalid isolated agent environment")
+    if process_profile == "helper":
+        isolated_agent_profile(explicit, config_root, process_profile=process_profile)
+        return {}
     if "CODEX_HOME" in explicit:
         _, root = isolated_agent_profile(explicit, config_root)
         if set(explicit) - {"CODEX_HOME", "OPENCURIA_CODEX_API_KEY"}:
@@ -187,7 +203,7 @@ def _isolated_agent_env(
         ):
             raise ValueError("Invalid isolated agent environment")
     auth_keys = set(explicit) & _AGENT_AUTH_ENV
-    if auth_required and len(auth_keys) != 1:
+    if len(auth_keys) != 1:
         raise ValueError("Exactly one Claude authentication variable is required")
     if any(not explicit.get(key, "").strip() for key in auth_keys):
         raise ValueError("Claude authentication value must not be empty")
@@ -292,7 +308,7 @@ if action == 'start':
         explicit = json.loads(bytes(raw).decode('utf-8'))
         if not isinstance(explicit, dict): sys.exit(125)
         profile = isolated.get('profile', 'claude')
-        if profile not in ('claude', 'codex'): sys.exit(125)
+        if profile not in ('claude', 'codex', 'helper'): sys.exit(125)
         allowed = {
             'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR',
             'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_AGENT_SDK_VERSION',
@@ -308,6 +324,7 @@ if action == 'start':
             'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS', 'MAX_CONCURRENT_SUBAGENTS',
         }
         if profile == 'codex': allowed = {'CODEX_HOME', 'OPENCURIA_CODEX_API_KEY'}
+        if profile == 'helper': allowed = set()
         if any(not isinstance(k, str) or k not in allowed or
                not isinstance(v, str) or len(v) > 8192 or '\x00' in v
                for k, v in explicit.items()): sys.exit(125)
@@ -315,47 +332,48 @@ if action == 'start':
             auth_keys = set(explicit) & {'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'}
             if len(auth_keys) != 1 or any(not explicit[key].strip() for key in auth_keys):
                 sys.exit(125)
-        prefix = config_root.rstrip('/') + '/'
-        config_key = 'CODEX_HOME' if profile == 'codex' else 'CLAUDE_CONFIG_DIR'
-        config_dir = explicit.get(config_key)
-        if not isinstance(config_dir, str) or not config_dir.startswith(prefix): sys.exit(125)
-        parts = config_dir[len(prefix):].split('/')
-        session_re = r'(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{1,40}-[0-9a-f]{12})'
-        if (len(parts) not in (2, 3) or not re.fullmatch(session_re, parts[0]) or
-                parts[1] != 'config' or
-                (len(parts) == 3 and not re.fullmatch(r'resume-[0-9a-f]{16}', parts[2]))):
-            sys.exit(125)
-        if profile == 'codex':
-            if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', parts[0]):
+        if profile != 'helper':
+            prefix = config_root.rstrip('/') + '/'
+            config_key = 'CODEX_HOME' if profile == 'codex' else 'CLAUDE_CONFIG_DIR'
+            config_dir = explicit.get(config_key)
+            if not isinstance(config_dir, str) or not config_dir.startswith(prefix): sys.exit(125)
+            parts = config_dir[len(prefix):].split('/')
+            session_re = r'(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[A-Za-z0-9_-]{1,40}-[0-9a-f]{12})'
+            if (len(parts) not in (2, 3) or not re.fullmatch(session_re, parts[0]) or
+                    parts[1] != 'config' or
+                    (len(parts) == 3 and not re.fullmatch(r'resume-[0-9a-f]{16}', parts[2]))):
                 sys.exit(125)
-            if 'OPENCURIA_CODEX_API_KEY' in explicit and not explicit['OPENCURIA_CODEX_API_KEY'].strip():
-                sys.exit(125)
-        if profile == 'claude':
-            fixed = {
-                'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
-                'CLAUDE_AGENT_SDK_VERSION': '0.2.174',
-                'CLAUDE_CODE_SDK_READS_SESSION_STATE': '1',
-                'DISABLE_UPDATES': '1', 'DISABLE_TELEMETRY': '1',
-                'DISABLE_ERROR_REPORTING': '1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1',
-                'CLAUDE_CODE_FORK_SUBAGENT': '0',
-            }
-            if any(explicit.get(key) != value for key, value in fixed.items()): sys.exit(125)
-            flags = ('DISABLE_AUTOUPDATER', 'CLAUDE_CODE_DISABLE_NON_ESSENTIAL_MODEL_CALLS',
-                     'CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC', 'ENABLE_CLAUDEAI_MCP_SERVERS',
-                     'CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING')
-            if any(explicit.get(key) not in ('0', '1') for key in flags if key in explicit):
-                sys.exit(125)
-            limits = ('CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH',
-                      'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS', 'MAX_CONCURRENT_SUBAGENTS')
-            if any(not explicit[key].isdigit() or len(explicit[key]) > 3 or
-                   int(explicit[key]) > 128 for key in limits if key in explicit):
-                sys.exit(125)
-        current = '/'
-        for component in config_root.strip('/').split('/') + parts:
-            current = os.path.join(current, component)
-            try: os.lstat(current)
-            except OSError: sys.exit(125)
-            if os.path.islink(current) or not os.path.isdir(current): sys.exit(125)
+            if profile == 'codex':
+                if not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', parts[0]):
+                    sys.exit(125)
+                if 'OPENCURIA_CODEX_API_KEY' in explicit and not explicit['OPENCURIA_CODEX_API_KEY'].strip():
+                    sys.exit(125)
+            if profile == 'claude':
+                fixed = {
+                    'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
+                    'CLAUDE_AGENT_SDK_VERSION': '0.2.174',
+                    'CLAUDE_CODE_SDK_READS_SESSION_STATE': '1',
+                    'DISABLE_UPDATES': '1', 'DISABLE_TELEMETRY': '1',
+                    'DISABLE_ERROR_REPORTING': '1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1',
+                    'CLAUDE_CODE_FORK_SUBAGENT': '0',
+                }
+                if any(explicit.get(key) != value for key, value in fixed.items()): sys.exit(125)
+                flags = ('DISABLE_AUTOUPDATER', 'CLAUDE_CODE_DISABLE_NON_ESSENTIAL_MODEL_CALLS',
+                         'CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC', 'ENABLE_CLAUDEAI_MCP_SERVERS',
+                         'CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING')
+                if any(explicit.get(key) not in ('0', '1') for key in flags if key in explicit):
+                    sys.exit(125)
+                limits = ('CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH',
+                          'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS', 'MAX_CONCURRENT_SUBAGENTS')
+                if any(not explicit[key].isdigit() or len(explicit[key]) > 3 or
+                       int(explicit[key]) > 128 for key in limits if key in explicit):
+                    sys.exit(125)
+            current = '/'
+            for component in config_root.strip('/').split('/') + parts:
+                current = os.path.join(current, component)
+                try: os.lstat(current)
+                except OSError: sys.exit(125)
+                if os.path.islink(current) or not os.path.isdir(current): sys.exit(125)
         expected_path = '/usr/local/bin:/usr/bin:/bin'
         if profile == 'codex':
             expected_path = '/opt/opencuria/runtimes/codex-agent/0.163.0/codex-path:' + expected_path
@@ -451,12 +469,15 @@ def isolated_agent_env_preamble(
     env: dict[str, str] | None,
     *,
     config_root: str = ISOLATED_AGENT_CONFIG_ROOT,
+    process_profile: ProcessProfile = "agent",
 ) -> bytes:
     """Encode explicit credentials into a bounded, length-framed stdin payload."""
     import struct
 
     payload = json.dumps(
-        _isolated_agent_env(env, config_root=config_root),
+        _isolated_agent_env(
+            env, config_root=config_root, process_profile=process_profile
+        ),
         separators=(",", ":"),
     ).encode("utf-8")
     if len(payload) > ISOLATED_AGENT_ENV_MAX_SIZE:
@@ -471,12 +492,12 @@ def managed_argv(
     command: list[str],
     *,
     expected_token: dict[str, str],
-    isolated_env: bool = False,
+    process_profile: ProcessProfile | None = None,
     isolated_home: str | None = None,
     config_root: str = ISOLATED_AGENT_CONFIG_ROOT,
 ) -> list[str]:
     """Build an opaque argv launch with the predetermined durable control path."""
-    if isolated_env:
+    if process_profile is not None:
         if isolated_home is None:
             raise ValueError("Invalid isolated agent home")
         return managed_isolated_argv(
@@ -487,6 +508,7 @@ def managed_argv(
             isolated_home=isolated_home,
             config_root=config_root,
             env=env,
+            process_profile=process_profile,
         )
     child_env = env or {}
     isolated = None
@@ -520,6 +542,7 @@ def managed_isolated_argv(
     isolated_home: str,
     config_root: str = ISOLATED_AGENT_CONFIG_ROOT,
     env: dict[str, str] | None = None,
+    process_profile: ProcessProfile = "agent",
 ) -> list[str]:
     """Build the isolated agent supervisor without secret values in argv."""
     if not isinstance(isolated_home, str) or not re.fullmatch(
@@ -538,9 +561,13 @@ def managed_isolated_argv(
     if not isinstance(workdir, str) or not workdir.startswith("/") or "\x00" in workdir:
         raise ValueError("Invalid isolated agent workdir")
     profile = "claude"
-    if env is not None:
-        _isolated_agent_env(env, config_root=config_root)
-        profile, config_root = isolated_agent_profile(env, config_root)
+    if env is not None or process_profile != "agent":
+        _isolated_agent_env(
+            env, config_root=config_root, process_profile=process_profile
+        )
+        profile, config_root = isolated_agent_profile(
+            env or {}, config_root, process_profile=process_profile
+        )
     config_root = _validate_config_root(config_root)
     config = {
         "workdir": workdir,

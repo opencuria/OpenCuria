@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .inventory import RuntimeInventory
-from .managed_process import managed_close_argv, TOKEN_PROBE_CODE, validate_guest_token
+from .managed_process import (
+    TOKEN_PROBE_CODE,
+    ProcessProfile,
+    managed_close_argv,
+    validate_guest_token,
+)
 
 
 @dataclass(frozen=True)
@@ -241,6 +246,8 @@ class RuntimeBackend(abc.ABC):
         *,
         control_path: str | None = None,
         expected_token: dict[str, str] | None = None,
+        process_profile: ProcessProfile | None = None,
+        isolated_home: str | None = None,
     ) -> ProcessHandle:
         """Spawn a non-TTY bidirectional process inside the workspace.
 
@@ -254,6 +261,9 @@ class RuntimeBackend(abc.ABC):
             workdir: Working directory inside the workspace.
             env: Extra environment for the child only (least privilege:
                 persistent workspace credentials are NOT sourced).
+            process_profile: Optional isolated agent or credential-free helper
+                environment, independent of the managed process owner.
+            isolated_home: Runner-selected temporary home for isolated profiles.
 
         Returns a ``ProcessHandle`` with split stdout/stderr streams.
         """

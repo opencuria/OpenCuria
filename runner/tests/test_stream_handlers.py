@@ -105,6 +105,31 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["connection_id"], "c1")
         interface._sio.emit.assert_not_awaited()
 
+    async def test_helper_profile_reaches_stream_manager(self) -> None:
+        svc, _rt, ws_id, interface, handlers = _setup()
+        svc.streams.stream_start_process = AsyncMock()
+        payload = {
+            "connection_id": "helper-profile",
+            "workspace_id": str(ws_id),
+            "kind": "process",
+            "command": ["python3"],
+            "env": {},
+            "owner": {"lease_id": "lease", "epoch": "epoch"},
+            "process_profile": "helper",
+        }
+        result = await handlers["workspace:stream_start"](payload)
+        self.assertTrue(result["ok"])
+        svc.streams.stream_start_process.assert_awaited_once_with(
+            ws_id,
+            payload["connection_id"],
+            payload["command"],
+            workdir="/workspace",
+            env={},
+            owner=payload["owner"],
+            process_profile="helper",
+        )
+        await interface._running_tasks["stream:helper-profile"]
+
     async def test_start_duplicate_id_rejected(self) -> None:
         _svc, _rt, ws_id, _if, handlers = _setup()
         payload = {
