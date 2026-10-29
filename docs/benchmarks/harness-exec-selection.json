@@ -1,0 +1,79 @@
+{
+  "baseline_ref": "dbfd15cdbad786385540c543d15fc39fcbe1687c",
+  "time_utc": "2026-10-29T02:02:51.005337+00:00",
+  "method": "secrets.randbelow(3), OS randomness",
+  "index": 0,
+  "shortlist": [
+    "Runner harness exec frame decoding",
+    "Backend pending question lookups",
+    "Backend tool-output truncation"
+  ],
+  "scouts": {
+    "runner_exec_decode": [
+      {
+        "bytes_per_stream": 4096,
+        "p50_ms": 0.03928999649360776,
+        "p95_ms": 0.08736099698580801,
+        "peak_bytes": 36315
+      },
+      {
+        "bytes_per_stream": 262144,
+        "p50_ms": 2.7072830125689507,
+        "p95_ms": 3.385606993106194,
+        "peak_bytes": 2286315
+      },
+      {
+        "bytes_per_stream": 5242880,
+        "p50_ms": 74.32142700417899,
+        "p95_ms": 86.35128100286238,
+        "peak_bytes": 45714829
+      }
+    ],
+    "backend_pending_questions": [
+      {
+        "sessions": 1,
+        "retained_rows": 50001,
+        "p50_ms": 7.730844998150133,
+        "p95_ms": 12.52396500785835,
+        "plan": "SCAN harness_question_request; USE TEMP B-TREE FOR ORDER BY"
+      },
+      {
+        "sessions": 50,
+        "retained_rows": 50001,
+        "p50_ms": 16.123312001582235,
+        "p95_ms": 17.4447369936388,
+        "plan": "SCAN harness_question_request; USE TEMP B-TREE FOR ORDER BY"
+      }
+    ],
+    "backend_truncation": [
+      {
+        "workload": "small",
+        "input_utf8_bytes": 4096,
+        "p50_ms": 0.008544011507183313,
+        "p95_ms": 0.009812996722757816,
+        "peak_bytes": 20126
+      },
+      {
+        "workload": "build-log",
+        "input_utf8_bytes": 10485760,
+        "p50_ms": 21.086103006382473,
+        "p95_ms": 22.966481003095396,
+        "peak_bytes": 32563550
+      },
+      {
+        "workload": "short-lines",
+        "input_utf8_bytes": 10485760,
+        "p50_ms": 57.69050199887715,
+        "p95_ms": 59.75885099906009,
+        "peak_bytes": 54518325
+      },
+      {
+        "workload": "huge-line",
+        "input_utf8_bytes": 31457280,
+        "p50_ms": 53.23206799221225,
+        "p95_ms": 56.991327001014724,
+        "peak_bytes": 31508878
+      }
+    ]
+  }
+}

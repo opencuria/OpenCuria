@@ -6,6 +6,7 @@ using the shared execution and path helpers.
 
 from __future__ import annotations
 
+import binascii
 import shlex
 import uuid
 from collections.abc import Callable
@@ -109,20 +110,25 @@ class HarnessExecService:
         """Split tagged exec wrapper output into (stdout, stderr)."""
         marker_out = "OPENCURIA_STDOUT"
         marker_err = "OPENCURIA_STDERR"
-        if marker_out not in output or marker_err not in output:
+        out_marker = output.find(marker_out)
+        err_marker = output.find(marker_err)
+        if out_marker < 0 or err_marker < 0:
             return output, ""
-        stdout_b64 = output.split(marker_out, 1)[1].split(marker_err, 1)[0]
-        remainder = output.split(marker_err, 1)[1]
-        stderr_b64 = remainder.split("EXIT:", 1)[0]
-        import base64 as _b64
+        stdout_start = out_marker + len(marker_out)
+        stderr_start = err_marker + len(marker_err)
+        stdout_end = output.find(marker_err, stdout_start)
+        stderr_end = output.find("EXIT:", stderr_start)
 
-        def _decode(payload: str) -> str:
-            cleaned = "".join(payload.split())
-            if not cleaned:
-                return ""
-            return _b64.b64decode(cleaned).decode("utf-8", errors="replace")
+        def _decode(start: int, end: int) -> str:
+            payload = output[start : end if end >= 0 else len(output)]
+            # Native decoding skips ASCII whitespace without a per-line list
+            # or an ASCII bytes copy. Retain split()'s Unicode whitespace
+            # handling for non-ASCII frames, including its validation errors.
+            if not payload.isascii():
+                payload = "".join(payload.split())
+            return binascii.a2b_base64(payload).decode("utf-8", errors="replace")
 
-        return _decode(stdout_b64), _decode(stderr_b64)
+        return _decode(stdout_start, stdout_end), _decode(stderr_start, stderr_end)
 
 
 __all__ = ["HarnessExecService"]
