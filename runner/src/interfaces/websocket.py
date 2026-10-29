@@ -2900,6 +2900,25 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("files_find_failed")
 
+        @sio.on("files:editor_read")
+        async def on_editor_read(data: dict) -> dict:
+            try:
+                return await self._service.files.read_editor_file(
+                    uuid.UUID(data["workspace_id"]), data["path"]
+                )
+            except Exception as exc:
+                return {"ok": False, "code": "file_read_failed", "message": str(exc)}
+
+        @sio.on("files:editor_write")
+        async def on_editor_write(data: dict) -> dict:
+            try:
+                return await self._service.files.save_editor_file(
+                    uuid.UUID(data["workspace_id"]), data["path"], data["content"],
+                    data["expected_revision"],
+                )
+            except Exception as exc:
+                return {"ok": False, "code": "file_write_failed", "message": str(exc)}
+
         @sio.on("files:read")
         async def on_files_read(data: dict) -> None:
             raw = data if isinstance(data, dict) else {}

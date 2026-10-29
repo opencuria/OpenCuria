@@ -119,6 +119,15 @@ describe('git store (productive)', () => {
     }) as never)
   })
 
+  it('reloads cached status immediately after an editor mutation', async () => {
+    const store = await initWith()
+    getRepo.mockClear()
+    setRepos([makeRepoSnapshot({ changes: [] })])
+    await store.refresh({ silent: true, forceDetails: true })
+    expect(getRepo).toHaveBeenCalledWith('ws-1', '/workspace/repo-app')
+    expect(store.currentRepo?.changes).toEqual([])
+  })
+
   it('starts empty and loads summaries then details (normalized)', async () => {
     const store = useGitStore()
     expect(store.repos).toEqual([])

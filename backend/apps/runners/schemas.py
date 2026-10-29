@@ -641,6 +641,9 @@ class ImageDefinitionDuplicateIn(Schema):
 
 #: Git mutations accepted by POST /git/operation/; reads have GET endpoints.
 GitOperation = Literal[
+    "stage_patch",
+    "unstage_patch",
+    "discard_patch",
     "stage",
     "unstage",
     "discard",
@@ -690,7 +693,7 @@ def _validate_file_paths(value: list[str]) -> list[str]:
         raise ValueError("Too many paths (max 256)")
     cleaned: list[str] = []
     for item in value:
-        text = str(item).strip()
+        text = str(item)
         if not text:
             raise ValueError("paths must not contain empty entries")
         if len(text) > 256:
@@ -748,6 +751,16 @@ class GitRepoQuery(Schema):
         return _validate_repo_path(value)
 
 
+class EditorFileWriteIn(Schema):
+    """Complete text and the revision the editor originally read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(..., min_length=1, max_length=4096)
+    content: str = Field(..., max_length=5 * 1024 * 1024)
+    expected_revision: str = Field(..., min_length=7, max_length=64)
+
+
 class GitHistoryQuery(GitRepoQuery):
     """Query params for GET /git/history (paged per-repo commit history)."""
 
@@ -775,6 +788,12 @@ class GitOperationIn(GitRepoQuery):
     """
 
     operation: GitOperation
+    path: str | None = Field(default=None, max_length=1024)
+    patch: str | None = Field(default=None, max_length=200 * 1024)
+    expected_index_revision: str | None = Field(default=None, max_length=64)
+    expected_worktree_revision: str | None = Field(default=None, max_length=64)
+    expected_head_revision: str | None = Field(default=None, max_length=64)
+    old_path: str | None = Field(default=None, max_length=1024)
     paths: list[str] | None = Field(default=None, max_length=256)
     message: str | None = Field(default=None, max_length=10000)
     branch: str | None = Field(default=None, max_length=255)
@@ -861,6 +880,13 @@ class GitOperationIn(GitRepoQuery):
     def _check_operation_fields(self) -> GitOperationIn:
         """Require the fields each operation needs (fail fast, 422)."""
         op = self.operation
+        if op in {"stage_patch", "unstage_patch", "discard_patch"}:
+            if not self.path or not self.patch:
+                raise ValueError("path and patch are required")
+            if not self.expected_index_revision or not self.expected_worktree_revision:
+                raise ValueError("Expected file and index revisions are required")
+            if op == "unstage_patch" and not self.expected_head_revision:
+                raise ValueError("Expected HEAD revision is required")
         if op in {"stage", "unstage", "discard"} and not self.paths:
             raise ValueError(f"paths is required for operation {op!r}")
         if op == "commit" and not (self.message or "").strip():

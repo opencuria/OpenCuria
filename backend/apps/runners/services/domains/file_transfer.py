@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 class FileTransferMixin:
     """Stateless file-explorer relay shared by RunnerService."""
 
+    async def editor_file_operation(
+        self, workspace_id: uuid.UUID, operation: str, payload: dict,
+    ) -> dict:
+        """Relay an owned editor read/save through the existing runner channel."""
+        if operation not in {"read", "write"}:
+            raise ValueError("Invalid editor operation")
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None:
+            from ...exceptions import WorkspaceNotFoundError
+
+            raise WorkspaceNotFoundError(str(workspace_id))
+        runner = self._ensure_git_dispatchable(workspace)
+        result = await self._call_runner(
+            runner, f"files:editor_{operation}",
+            {**payload, "workspace_id": str(workspace_id)}, timeout=60,
+        )
+        await self.touch_workspace_activity(workspace_id)
+        return result
+
     async def forward_files_event(
         self,
         workspace_id: str,

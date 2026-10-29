@@ -54,6 +54,7 @@ from .schemas import (
     DesktopStopOut,
     DesktopTakeControlOut,
     DesktopViewerIntentIn,
+    EditorFileWriteIn,
     GitHistoryQuery,
     GitOperationIn,
     GitRepoQuery,
@@ -1111,7 +1112,7 @@ def _git_result_to_response(result: dict):
     if result.get("ok"):
         return 200, result
     code = str(result.get("code") or "")
-    if code == "conflict":
+    if code in {"conflict", "stale_document"}:
         return 409, result
     if code == "timeout" or "timeout" in code:
         return 504, result
@@ -1137,6 +1138,75 @@ _GIT_RESPONSES: dict = {
 
 
 git_router = Router(tags=["workspaces-git"])
+
+
+@workspace_router.get(
+    "/{workspace_id}/files/content/", response=_GIT_RESPONSES,
+    summary="Read complete editor text",
+)
+async def editor_file_content(
+    request: HttpRequest, workspace_id: uuid.UUID, path: str,
+):
+    """Read text through owner-scoped workspace access."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_READ)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await _get_service().editor_file_operation(
+            workspace_id, "read", {"path": path}
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@workspace_router.put(
+    "/{workspace_id}/files/content/", response=_GIT_RESPONSES,
+    summary="Save editor text if its revision still matches",
+)
+async def save_editor_file_content(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: EditorFileWriteIn,
+):
+    """Save complete text through owner-scoped workspace access."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await _get_service().editor_file_operation(
+            workspace_id, "write", payload.model_dump()
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/file-content/", response=_GIT_RESPONSES,
+    summary="Read complete text from an index, worktree, or commit",
+)
+async def git_file_content(
+    request: HttpRequest, workspace_id: uuid.UUID, repo_path: str,
+    path: str, revision: str = "index",
+):
+    """Read an editor diff side with a token for stale-operation protection."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        query = GitRepoQuery(repo_path=repo_path)
+        result = await _get_service().run_git_operation(
+            workspace_id, "file_content", repo_path=query.repo_path,
+            args={"path": path, "revision": revision},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
 
 
 @git_router.get(

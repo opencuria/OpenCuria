@@ -9,14 +9,26 @@ import ImageLightbox from './ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useEditorStore } from '@/stores/editor'
 import { useSidePanelStore } from '@/stores/sidePanel'
-import FileViewer from '@/components/files/FileViewer.vue'
+import WorkspaceEditor from '@/components/editor/WorkspaceEditor.vue'
 import { readWorkspaceFile, sendFilesList } from '@/services/socket'
+import { readEditorFile } from '@/services/editor.api'
 
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
   readWorkspaceFile: vi.fn(() => new Promise(() => {})),
+}))
+
+vi.mock('@/services/editor.api', () => ({
+  readEditorFile: vi.fn(() => new Promise(() => {})),
+  saveEditorFile: vi.fn(),
+  readGitFileContent: vi.fn(),
+}))
+
+vi.mock('@/components/editor/MonacoEditor.vue', () => ({
+  default: { name: 'MonacoEditor', template: '<div data-testid="monaco-editor" />' },
 }))
 
 function mountMarkdown(
@@ -52,6 +64,7 @@ describe('HarnessMarkdown', () => {
 
   afterEach(() => {
     useFileExplorerStore().reset()
+    useEditorStore().reset()
     vi.restoreAllMocks()
     vi.useRealTimers()
   })
@@ -216,7 +229,7 @@ describe('HarnessMarkdown', () => {
     'sb-laden-konzept/sb-laden-konzept.pdf',
     '/workspace/sb-laden-konzept/sb-laden-konzept.pdf',
     './sb-laden-konzept/../sb-laden-konzept/sb-laden-konzept.pdf?download=1#page=2',
-  ])('opens the existing PDF viewer from a formatted file link: %s', async (href) => {
+  ])('opens a PDF editor tab from a formatted file link: %s', async (href) => {
     const path = '/workspace/sb-laden-konzept/sb-laden-konzept.pdf'
     const store = useFileExplorerStore()
     useSidePanelStore().close()
@@ -226,10 +239,12 @@ describe('HarnessMarkdown', () => {
     })
     let resolveRead!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void
     vi.mocked(readWorkspaceFile).mockReturnValueOnce(
-      new Promise((resolve) => { resolveRead = resolve }),
+      new Promise((resolve) => {
+        resolveRead = resolve
+      }),
     )
     const wrapper = mountMarkdown(`**[Aktualisierte PDF öffnen](${href})**`)
-    const viewer = mount(FileViewer, { props: { workspaceId: 'ws-1' } })
+    const viewer = mount(WorkspaceEditor)
 
     expect(wrapper.get('strong a').text()).toBe('Aktualisierte PDF öffnen')
     expect(wrapper.get('a').attributes('target')).toBeUndefined()
@@ -239,7 +254,7 @@ describe('HarnessMarkdown', () => {
     expect(useSidePanelStore().isOpen).toBe(false)
     expect(store.selectedPath).toBe(path)
     expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', path, undefined, expect.any(AbortSignal))
-    expect(viewer.find('[data-testid="file-viewer-loading"]').exists()).toBe(true)
+    expect(viewer.find('[data-testid="editor-loading"]').exists()).toBe(true)
 
     resolveRead({
       workspace_id: 'ws-1',
@@ -250,12 +265,13 @@ describe('HarnessMarkdown', () => {
       truncated: false,
     })
     await flushPromises()
-    expect(viewer.get('[data-testid="file-viewer-name"]').text()).toBe('sb-laden-konzept.pdf')
+    expect(useEditorStore().activeTab!.name).toBe('sb-laden-konzept.pdf')
     expect(viewer.get('iframe[title="PDF preview"]').attributes('src')).toMatch(
       /^data:application\/pdf;base64,/,
     )
-    await viewer.get('[data-testid="file-viewer-close"]').trigger('click')
-    expect(store.viewingFile).toBeNull()
+    expect(useEditorStore().closeTab(useEditorStore().activeTab!.id)).toBe(true)
+    await nextTick()
+    expect(viewer.find('[data-testid="workspace-editor"]').exists()).toBe(false)
     wrapper.unmount()
     viewer.unmount()
   })
@@ -275,11 +291,11 @@ describe('HarnessMarkdown', () => {
     const wrapper = mountMarkdown(text)
     await wrapper.get('a').trigger('click')
     await flushPromises()
-    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', path, undefined, expect.any(AbortSignal))
+    expect(readEditorFile).toHaveBeenCalledWith('ws-1', path, expect.any(AbortSignal))
     wrapper.unmount()
   })
 
-  it('shows existing viewer errors when a linked file cannot be read', async () => {
+  it('shows editor errors when a linked file cannot be read', async () => {
     const store = useFileExplorerStore()
     vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
       queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
@@ -287,10 +303,10 @@ describe('HarnessMarkdown', () => {
     })
     vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error('Permission denied'))
     const wrapper = mountMarkdown('[Missing](missing.pdf)')
-    const viewer = mount(FileViewer, { props: { workspaceId: 'ws-1' } })
+    const viewer = mount(WorkspaceEditor)
     await wrapper.get('a').trigger('click')
     await flushPromises()
-    expect(viewer.get('[data-testid="file-viewer-error"]').text()).toContain('Permission denied')
+    expect(viewer.get('[data-testid="editor-error"]').text()).toContain('Permission denied')
     expect(viewer.find('iframe').exists()).toBe(false)
     wrapper.unmount()
     viewer.unmount()
@@ -348,7 +364,9 @@ describe('HarnessMarkdown', () => {
     })
     workspaceId.value = 'ws-2'
     click(wrapper.get('a strong').element, { detail: 0 })
-    expect(openPath).toHaveBeenCalledWith('ws-2', '/workspace/plan.pdf', { revealInExplorer: false })
+    expect(openPath).toHaveBeenCalledWith('ws-2', '/workspace/plan.pdf', {
+      revealInExplorer: false,
+    })
     wrapper.unmount()
   })
 
@@ -429,7 +447,10 @@ describe('HarnessMarkdown', () => {
     const wrapper = mountMarkdown('[![Photo](/workspace/photo.png)](https://example.com/full)')
 
     expect(readWorkspaceFile).toHaveBeenCalledWith(
-      'ws-1', '/workspace/photo.png', undefined, expect.any(AbortSignal),
+      'ws-1',
+      '/workspace/photo.png',
+      undefined,
+      expect.any(AbortSignal),
     )
     store.imageCache['/workspace/photo.png'] = 'data:image/png;base64,abc'
     await wrapper.vm.$nextTick()

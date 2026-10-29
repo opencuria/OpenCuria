@@ -50,6 +50,10 @@ class GitOperationsMixin:
         "repo_history",
         "working_diff",
         "commit_details",
+        "file_content",
+        "stage_patch",
+        "unstage_patch",
+        "discard_patch",
         "stage",
         "unstage",
         "discard",
@@ -75,7 +79,10 @@ class GitOperationsMixin:
 
     #: Read-only operations (short timeout budget).
     GIT_READ_OPERATIONS = frozenset(
-        {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
+        {
+            "list_repos", "repo_snapshot", "repo_history", "working_diff",
+            "commit_details", "file_content",
+        }
     )
 
     #: Timeout budgets (seconds): reads are fast; network ops may take
@@ -395,6 +402,17 @@ class GitOperationsMixin:
         "repo_history": frozenset({"history_limit", "history_skip", "branch"}),
         "working_diff": frozenset(),
         "commit_details": frozenset({"commit"}),
+        "file_content": frozenset({"path", "revision"}),
+        "stage_patch": frozenset({
+            "path", "patch", "expected_index_revision", "expected_worktree_revision",
+        }),
+        "unstage_patch": frozenset({
+            "path", "patch", "old_path", "expected_head_revision",
+            "expected_index_revision", "expected_worktree_revision",
+        }),
+        "discard_patch": frozenset({
+            "path", "patch", "expected_index_revision", "expected_worktree_revision",
+        }),
         "stage": frozenset({"paths"}),
         "unstage": frozenset({"paths"}),
         "discard": frozenset({"paths"}),
@@ -454,7 +472,7 @@ class GitOperationsMixin:
             raise ValueError("Too many paths (max 256)")
         cleaned: list[str] = []
         for item in items:
-            text = str(item).strip()
+            text = str(item)
             if not text:
                 raise ValueError("paths must not contain empty entries")
             if len(text) > 256:
@@ -512,6 +530,48 @@ class GitOperationsMixin:
             if not commit:
                 raise ValueError("commit is required for commit_details")
             return {"commit": cls._validate_git_commit_hash(commit)}
+        if operation in {
+            "file_content", "stage_patch", "unstage_patch", "discard_patch",
+        }:
+            paths = {"path": incoming.get("path")}
+            if operation == "unstage_patch":
+                paths["old_path"] = incoming.get("old_path", paths["path"])
+            for path in paths.values():
+                if not isinstance(path, str) or not path or len(path) > 1024:
+                    raise ValueError("path is required (maximum 1024 characters)")
+                if path.startswith("/") or any(
+                    part in {"..", ".git"} for part in path.split("/")
+                ):
+                    raise ValueError("path must be inside the repository")
+                if any(char in path for char in "\x00\r\n"):
+                    raise ValueError("Invalid file path")
+            path = paths["path"]
+            if operation == "file_content":
+                revision = incoming.get("revision", "index")
+                if not isinstance(revision, str) or not (
+                    revision in {"index", "head", "worktree"}
+                    or re.fullmatch(r"[0-9a-fA-F]{4,64}\^?", revision)
+                ):
+                    raise ValueError("Invalid file revision")
+                return {"path": path, "revision": revision}
+            patch = incoming.get("patch")
+            if (
+                not isinstance(patch, str) or not patch.startswith("@@ ")
+                or len(patch.encode("utf-8")) > 200 * 1024
+            ):
+                raise ValueError("Expected unified diff hunks (maximum 200 KiB)")
+            out = {**paths, "patch": patch}
+            revision_keys = ["expected_index_revision", "expected_worktree_revision"]
+            if operation == "unstage_patch":
+                revision_keys.append("expected_head_revision")
+            for key in revision_keys:
+                value = incoming.get(key)
+                if not isinstance(value, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}|missing", value
+                ):
+                    raise ValueError(f"Invalid {key}")
+                out[key] = value
+            return out
         if operation in {"stage", "unstage", "discard"}:
             paths = cls._validate_git_file_paths(
                 incoming.get("paths"), operation=operation

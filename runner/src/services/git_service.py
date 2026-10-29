@@ -8,6 +8,7 @@ lookups are injected by the runner composition.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import Callable
@@ -16,6 +17,7 @@ from typing import Any
 import structlog
 
 from .. import git as git_ops
+from ..editor_protocol import EDITOR_GIT_SCRIPT, editor_command
 from ..git_reads import head_read_argv, parse_git_reads, snapshot_read_argv
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
@@ -1274,6 +1276,10 @@ class GitService:
                 handler = {
                     "working_diff": self._git_op_working_diff,
                     "commit_details": self._git_op_commit_details,
+                    "file_content": self._git_op_editor,
+                    "stage_patch": self._git_op_editor,
+                    "unstage_patch": self._git_op_editor,
+                    "discard_patch": self._git_op_editor,
                     "stage": self._git_op_stage,
                     "unstage": self._git_op_unstage,
                     "discard": self._git_op_discard,
@@ -1298,8 +1304,52 @@ class GitService:
                 }[operation]
                 return await handler(
                     runtime, instance_id, repo_root, env, params, timeout,
-                    workspace_id=workspace_id,
+                    workspace_id=workspace_id, operation=operation,
                 )
+
+    async def _git_op_editor(
+        self, runtime, instance_id, repo_root, env, params, timeout,
+        *, operation: str, **_: Any,
+    ) -> dict[str, Any]:
+        """Read complete Git text or apply a version-checked single-file patch."""
+        path = git_ops.normalize_relative_path(params.get("path", ""))
+        arguments = {**params, "path": path, "operation": operation}
+        if operation == "file_content":
+            revision = params.get("revision", "index")
+            if not isinstance(revision, str) or not (
+                revision in {"index", "head", "worktree"}
+                or re.fullmatch(r"[0-9a-fA-F]{4,64}\^?", revision)
+            ):
+                raise ValueError("Invalid file revision")
+            arguments["revision"] = revision
+        else:
+            revision_keys = ["expected_index_revision", "expected_worktree_revision"]
+            if operation == "unstage_patch":
+                arguments["old_path"] = git_ops.normalize_relative_path(
+                    params.get("old_path", path)
+                )
+                revision_keys.append("expected_head_revision")
+            for key in revision_keys:
+                value = params.get(key)
+                if not isinstance(value, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}|missing", value
+                ):
+                    raise ValueError(f"Invalid {key}")
+            if not isinstance(params.get("patch"), str):
+                raise ValueError("patch must be unified diff hunks")
+        code, output = await self._git_exec(
+            runtime, instance_id, editor_command(EDITOR_GIT_SCRIPT, arguments),
+            workdir=repo_root, env=env, timeout=timeout,
+        )
+        if code:
+            raise git_ops.GitError("git_failed", "Editor Git operation failed")
+        result = json.loads(output)
+        if result.get("ok") and operation != "file_content":
+            snapshot = await self._git_fresh_snapshot(
+                runtime, instance_id, repo_root, env
+            )
+            return self._git_mutation_result(snapshot, repo_path=repo_root)
+        return {**result, "repo_path": repo_root, "path": path}
 
     async def _git_fresh_snapshot(
         self,

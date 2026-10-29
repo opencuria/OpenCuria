@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRoute } from 'vue-router'
 import ChatSidebar from './ChatSidebar.vue'
@@ -11,9 +11,11 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/s
 import { Separator } from '@/components/ui/separator'
 import { useAttentionTabTitle } from '@/composables/useAttentionTabTitle'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
+import { useEditorStore } from '@/stores/editor'
 
 const route = useRoute()
 const conversationStore = useHarnessConversationStore()
+const editorStore = useEditorStore()
 const { attentionCount } = storeToRefs(conversationStore)
 useAttentionTabTitle(attentionCount)
 
@@ -23,6 +25,14 @@ const showMobileTopBar = computed(() => !route.meta.hideTopBar)
 const isFullBleed = computed(
   () => Boolean(route.meta.fullBleed) || route.name === 'workspace-detail',
 )
+
+function protectUnsavedFiles(event: BeforeUnloadEvent): void {
+  if (!editorStore.hasUnsavedChanges) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+onMounted(() => window.addEventListener('beforeunload', protectUnsavedFiles))
+onUnmounted(() => window.removeEventListener('beforeunload', protectUnsavedFiles))
 </script>
 
 <template>

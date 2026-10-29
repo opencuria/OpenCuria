@@ -21,6 +21,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useRunnerStore } from '@/stores/runners'
+import { ArrowLeft, Plus } from '@lucide/vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -51,7 +52,9 @@ const workspaceTransitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(workspaceId.value),
 )
 const autoStopCountdownLabel = computed(() =>
-  workspace.value?.auto_stop_at ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}` : null,
+  workspace.value?.auto_stop_at
+    ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}`
+    : null,
 )
 const navbarStatusLabel = computed(() => {
   if (!showImminentAutoStop.value || !autoStopCountdownLabel.value) return null
@@ -75,6 +78,21 @@ const activeChatTitle = computed(() =>
     conversationStore.conversations,
   ),
 )
+const parentChat = computed(() => {
+  const lineage = harnessStore.activeSessionLineage
+  return lineage.length >= 2 ? lineage[lineage.length - 2] : null
+})
+const parentChatId = computed(
+  () => parentChat.value?.id ?? harnessStore.activeSession?.parent_id ?? null,
+)
+const backToParentTitle = computed(() => {
+  const title = parentChat.value?.title?.trim()
+  return title ? `Back to ${title}` : 'Back to parent chat'
+})
+
+function handleBackToParentChat(): void {
+  if (parentChatId.value) harnessStore.setActiveSession(parentChatId.value)
+}
 
 function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
@@ -253,15 +271,39 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <!-- Loading state -->
-    <div v-if="workspaceStore.loading && !workspace" class="flex-1 flex items-center justify-center">
+    <div
+      v-if="workspaceStore.loading && !workspace"
+      class="flex-1 flex items-center justify-center"
+    >
       <LoadingSpinner :size="24" />
     </div>
 
-    <WorkspaceToolsSplit
-      v-else-if="workspace"
-      :workspace-id="workspaceId"
-      :can-prompt="canPrompt"
-    >
+    <WorkspaceToolsSplit v-else-if="workspace" :workspace-id="workspaceId" :can-prompt="canPrompt">
+      <template #chat-header>
+        <Button
+          v-if="parentChatId"
+          variant="ghost"
+          size="icon-sm"
+          class="size-6 shrink-0"
+          :title="backToParentTitle"
+          :aria-label="backToParentTitle"
+          data-testid="sidebar-chat-back-to-parent"
+          @click="handleBackToParentChat"
+          ><ArrowLeft :size="14"
+        /></Button>
+        <span class="min-w-0 flex-1 truncate" :title="activeChatTitle ?? 'New chat'">{{
+          activeChatTitle || 'New chat'
+        }}</span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="size-6 shrink-0"
+          title="New chat"
+          aria-label="New chat"
+          @click="handleNewHarnessChat"
+          ><Plus :size="14"
+        /></Button>
+      </template>
       <template #header>
         <WorkspaceChatHeader
           :workspace="workspace"
@@ -300,15 +342,10 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
     </WorkspaceToolsSplit>
 
     <!-- Error -->
-    <div
-      v-else-if="workspaceStore.error"
-      class="flex-1 flex items-center justify-center"
-    >
+    <div v-else-if="workspaceStore.error" class="flex-1 flex items-center justify-center">
       <div class="text-center">
         <p class="text-error mb-2">{{ workspaceStore.error }}</p>
-        <Button variant="outline" @click="goBack">
-          Back
-        </Button>
+        <Button variant="outline" @click="goBack"> Back </Button>
       </div>
     </div>
   </div>

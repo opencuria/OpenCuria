@@ -6,6 +6,15 @@ license continues to apply to the repository as a whole, including to the
 files listed below. Nothing in this notice replaces or weakens the AGPL-3.0-only
 license of the surrounding OpenCuria project.
 
+## Monaco Editor
+
+The webapp bundles **Monaco Editor 0.57.0**, the standalone
+editor from VS Code, by Microsoft Corporation under the **MIT License**.
+Its copyright and complete license are distributed with the webapp at
+`/third-party/monaco-editor-LICENSE.txt` (source:
+`webapp/public/third-party/monaco-editor-LICENSE.txt`). Upstream:
+[microsoft/monaco-editor](https://github.com/microsoft/monaco-editor).
+
 ## Computer Use runtime
 
 The Computer Use runtime in `packages/computer-use` is independently written

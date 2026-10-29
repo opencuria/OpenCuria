@@ -15,6 +15,7 @@ import {
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
 import { useSidePanelStore } from '@/stores/sidePanel'
+import { useEditorStore } from '@/stores/editor'
 
 let requestCounter = 0
 
@@ -217,7 +218,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   function selectFile(path: string, workspaceId: string): void {
     selectedPath.value = path
-    fetchFileContent(workspaceId, path)
+    void useEditorStore().openFile(workspaceId, path)
   }
 
   const IMAGE_EXTENSIONS: Record<string, string> = {

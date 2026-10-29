@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import os
 import re
 import shlex
@@ -18,6 +19,7 @@ from collections.abc import Callable
 
 import structlog
 
+from ..editor_protocol import EDITOR_FILE_SCRIPT, EDITOR_MAX_BYTES, editor_command
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
@@ -156,6 +158,80 @@ class FileManager:
         # Keep conversion serial across this runner's workspaces, as it was on
         # the event loop, without blocking other requests or multiplying workers.
         self._archive_conversion_lock = asyncio.Lock()
+        self._editor_write_lock = asyncio.Lock()
+
+    @live_interaction
+    async def read_editor_file(self, workspace_id: uuid.UUID, path: str) -> dict:
+        """Read complete UTF-8 text and its revision for an editor document."""
+        safe_path = self._file_path(path, allow_external=False)
+        assert self._get_cached is not None and self._get_runtime is not None
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        safe_path = await self._realpath_under_workspace(
+            runtime, info.instance_id, safe_path
+        )
+        code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            command=editor_command(EDITOR_FILE_SCRIPT, {
+                "operation": "read", "path": safe_path,
+            }),
+            workdir="/workspace",
+        )
+        if code:
+            raise RuntimeError("Could not read editor file")
+        return json.loads(output)
+
+    @live_interaction
+    async def save_editor_file(
+        self, workspace_id: uuid.UUID, path: str, content: str,
+        expected_revision: str,
+    ) -> dict:
+        """Atomically save complete text after checking the on-disk revision."""
+        safe_path = self._file_path(path, allow_external=False)
+        if not isinstance(content, str) or "\x00" in content:
+            raise ValueError("Expected UTF-8 text")
+        decoded = content.encode("utf-8")
+        if len(decoded) > EDITOR_MAX_BYTES:
+            raise ValueError("The editor supports files up to 5 MiB")
+        if not isinstance(expected_revision, str) or not re.fullmatch(
+            r"[0-9a-f]{64}|missing", expected_revision
+        ):
+            raise ValueError("Invalid expected_revision")
+        assert self._get_cached is not None and self._get_runtime is not None
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not info.instance_id:
+            raise RuntimeError("Workspace has no instance assigned")
+        async with self._editor_write_lock:
+            safe_path = await self._realpath_under_workspace(
+                runtime, info.instance_id, safe_path
+            )
+            name = f".opencuria-editor-{uuid.uuid4().hex}"
+            directory = os.path.dirname(safe_path)
+            temporary = os.path.join(directory, name)
+            try:
+                await runtime.put_archive(
+                    info.instance_id, directory, build_single_file_tar(name, decoded)
+                )
+                code, output = await runtime.exec_command_wait(
+                    info.instance_id,
+                    command=editor_command(EDITOR_FILE_SCRIPT, {
+                        "operation": "write", "path": safe_path,
+                        "temporary": temporary,
+                        "expected_revision": expected_revision,
+                    }),
+                    workdir="/workspace",
+                )
+                if code:
+                    raise RuntimeError("Could not save editor file")
+                return json.loads(output)
+            finally:
+                await runtime.exec_command_wait(
+                    info.instance_id, command=["rm", "-f", "--", temporary],
+                    workdir="/workspace",
+                )
 
     async def _convert_upload_archive(self, content: bytes) -> bytes:
         """Convert off-loop and retain capacity/admission until the worker exits."""
@@ -220,10 +296,11 @@ class FileManager:
         )
         if exit_code != 0:
             return path
-        resolved = output.strip().splitlines()
-        if not resolved or not resolved[0]:
+        real = output.removesuffix("\n")
+        if not real:
             return path
-        real = resolved[0].strip()
+        if "\n" in real or "\x00" in real:
+            raise ValueError("Invalid resolved file path")
         if not allow_external and real != "/workspace" and not real.startswith(
             "/workspace/"
         ):

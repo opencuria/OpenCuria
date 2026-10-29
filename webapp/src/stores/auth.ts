@@ -16,6 +16,7 @@ import { useNotificationStore } from './notifications'
 import { clearWorkspaceDrafts } from '@/lib/workspaceDraft'
 import { clearQuestionInputCaches } from '@/lib/questionInputCache'
 import { notifyProviderCatalogContextChanged } from '@/lib/providerCatalog'
+import { useEditorStore } from '@/stores/editor'
 
 const ACCESS_TOKEN_KEY = 'kern_access_token'
 const REFRESH_TOKEN_KEY = 'kern_refresh_token'
@@ -82,6 +83,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function _clearAuth(): void {
+    useEditorStore().reset()
     clearQuestionInputCaches()
     clearWorkspaceDrafts()
     accessToken.value = null
@@ -152,6 +154,7 @@ export const useAuthStore = defineStore('auth', () => {
       const data = await authApi.getMe()
       const userChanged = Boolean(user.value && user.value.id !== data.id)
       if (userChanged) {
+        useEditorStore().reset()
         clearWorkspaceDrafts()
         clearQuestionInputCaches()
       }
@@ -190,6 +193,7 @@ export const useAuthStore = defineStore('auth', () => {
           localStorage.removeItem(ACTIVE_ORG_KEY)
         }
       }
+      if (organizationChanged) useEditorStore().reset()
       if (userChanged || organizationChanged) notifyProviderCatalogContextChanged()
     } catch (e) {
       // Only clear auth state on confirmed auth failures (401 after failed refresh).
@@ -204,7 +208,10 @@ export const useAuthStore = defineStore('auth', () => {
 
   function setActiveOrganization(orgId: string): void {
     const changed = Boolean(activeOrganizationId.value && activeOrganizationId.value !== orgId)
-    if (changed) clearWorkspaceDrafts()
+    if (changed) {
+      clearWorkspaceDrafts()
+      useEditorStore().reset()
+    }
     activeOrganizationId.value = orgId
     localStorage.setItem(ACTIVE_ORG_KEY, orgId)
     if (changed) notifyProviderCatalogContextChanged()

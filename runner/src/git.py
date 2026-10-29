@@ -46,7 +46,7 @@ _GIT_US = "\x1f"
 _GIT_RS = "\x1e"
 
 _NET_OPS = frozenset({"fetch", "pull", "push", "sync", "checkout_remote_branch"})
-_READ_OPS = frozenset({"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"})
+_READ_OPS = frozenset({"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details", "file_content"})
 
 GIT_OPERATIONS = (
     "list_repos",
@@ -54,6 +54,10 @@ GIT_OPERATIONS = (
     "repo_history",
     "working_diff",
     "commit_details",
+    "file_content",
+    "stage_patch",
+    "unstage_patch",
+    "discard_patch",
     "stage",
     "unstage",
     "discard",
@@ -89,6 +93,13 @@ GIT_ALLOWED_ARGS: dict[str, frozenset] = {
     "repo_history": frozenset({"history_limit", "history_skip", "branch"}),
     "working_diff": frozenset(),
     "commit_details": frozenset({"commit"}),
+    "file_content": frozenset({"path", "revision"}),
+    "stage_patch": frozenset({"path", "patch", "expected_index_revision", "expected_worktree_revision"}),
+    "unstage_patch": frozenset({
+        "path", "patch", "old_path", "expected_head_revision",
+        "expected_index_revision", "expected_worktree_revision",
+    }),
+    "discard_patch": frozenset({"path", "patch", "expected_index_revision", "expected_worktree_revision"}),
     "stage": frozenset({"paths"}),
     "unstage": frozenset({"paths"}),
     "discard": frozenset({"paths"}),
@@ -355,11 +366,11 @@ def merge_state_probe_args(git_dir: str) -> list[str]:
 
 def normalize_relative_path(path: str) -> str:
     """Validate a repo-relative file path (no absolute, no ``..`` escape)."""
-    if not isinstance(path, str) or not path.strip():
+    if not isinstance(path, str) or not path:
         raise ValueError("path must be a non-empty string")
     if "\x00" in path or "\n" in path or "\r" in path:
         raise ValueError(f"Invalid path: {path!r}")
-    cleaned = path.strip()
+    cleaned = path
     if os.path.isabs(cleaned):
         raise ValueError(f"path must be repo-relative: {path!r}")
     normalized = os.path.normpath(cleaned)
@@ -463,6 +474,8 @@ def validate_optional_branch(value: Any, *, field: str = "branch") -> str | None
 # --- git environment / auth ---------------------------------------------------
 
 GIT_BASE_ENV: dict[str, str] = {
+    # File paths originate in the explorer/status list, never pathspec queries.
+    "GIT_LITERAL_PATHSPECS": "1",
     "LANG": "C",
     "LC_ALL": "C",
     "GIT_PAGER": "cat",

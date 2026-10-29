@@ -20,7 +20,7 @@ import { useSidePanelStore } from '@/stores/sidePanel'
 import type { SidePanelTab } from '@/lib/sidePanel'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
-import { GitBranch, Monitor, TerminalSquare, FolderTree, PanelRightClose } from '@lucide/vue'
+import { GitBranch, Monitor, TerminalSquare, FolderTree, PanelRightClose, X } from '@lucide/vue'
 
 const WorkspaceTerminal = defineAsyncComponent(() => import('./WorkspaceTerminal.vue'))
 const SidePanelDesktop = defineAsyncComponent(() => import('./SidePanelDesktop.vue'))
@@ -29,9 +29,15 @@ const FileExplorerPanel = defineAsyncComponent(
 )
 const GitPanel = defineAsyncComponent(() => import('@/components/git/GitPanel.vue'))
 
-const props = defineProps<{
-  workspaceId: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    workspaceId: string
+    chatOpen?: boolean
+  }>(),
+  { chatOpen: false },
+)
+
+const emit = defineEmits<{ 'close-chat': [] }>()
 
 const sidePanel = useSidePanelStore()
 
@@ -43,12 +49,13 @@ const tabs = [
 ] as const
 
 // Lazily mount tab contents on first activation, then keep them alive.
-const mountedTabs = ref<Set<SidePanelTab>>(new Set([sidePanel.activeTab]))
+const mountedTabs = ref<Set<SidePanelTab>>(new Set())
 watch(
-  () => sidePanel.activeTab,
-  (tab) => {
-    mountedTabs.value.add(tab)
+  () => [sidePanel.activeTab, sidePanel.isOpen, props.chatOpen] as const,
+  ([tab, open, chatOpen]) => {
+    if (open && !chatOpen) mountedTabs.value.add(tab)
   },
+  { immediate: true },
 )
 
 function handleTabChange(value: string | number): void {
@@ -106,8 +113,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div
-    class="relative flex h-full min-h-0 shrink-0 flex-col border-l border-border bg-card max-lg:fixed max-lg:inset-y-0 max-lg:right-0 max-lg:z-30 max-lg:w-full"
-    :class="{ 'select-none': isResizing }"
+    class="relative flex h-full min-h-0 min-w-0 shrink-0 flex-col border-l border-border bg-card"
+    :class="[
+      { 'select-none': isResizing },
+      chatOpen
+        ? 'max-lg:h-1/2 max-lg:w-full max-lg:border-t max-lg:border-l-0'
+        : 'max-lg:fixed max-lg:inset-y-0 max-lg:right-0 max-lg:z-30 max-lg:w-full',
+    ]"
     :style="panelStyle"
     data-testid="workspace-side-panel"
   >
@@ -118,7 +130,7 @@ onBeforeUnmount(() => {
       aria-orientation="vertical"
       aria-label="Resize panel"
       title="Drag to resize panel"
-      class="absolute -left-0.5 top-0 z-10 hidden h-full w-1 cursor-col-resize touch-none bg-transparent transition-colors hover:bg-primary lg:block"
+      class="absolute -left-0.5 top-0 z-30 hidden h-full w-1 cursor-col-resize touch-none bg-transparent transition-colors hover:bg-primary lg:block"
       :class="{ 'bg-primary': isResizing }"
       @pointerdown="onResizePointerDown"
       @pointermove="onResizePointerMove"
@@ -128,7 +140,10 @@ onBeforeUnmount(() => {
     />
 
     <!-- Tab bar (full panel width; closing happens via the chat header toggle) -->
-    <div class="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1.5">
+    <div
+      v-show="!chatOpen"
+      class="flex shrink-0 items-center gap-1 border-b border-border px-2 py-1.5"
+    >
       <Tabs
         :model-value="sidePanel.activeTab"
         class="min-w-0 flex-1"
@@ -161,7 +176,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Tab contents (lazy mounted, kept alive) -->
-    <div class="min-h-0 flex-1">
+    <div v-show="!chatOpen" class="min-h-0 flex-1" data-testid="workspace-side-panel-tools">
       <GitPanel
         v-if="mountedTabs.has('git')"
         v-show="sidePanel.activeTab === 'git'"
@@ -184,5 +199,31 @@ onBeforeUnmount(() => {
         :workspace-id="props.workspaceId"
       />
     </div>
+
+    <section
+      v-show="chatOpen"
+      class="absolute inset-0 z-20 flex min-h-0 min-w-0 flex-col bg-background"
+      aria-label="Workspace chat"
+      data-testid="workspace-sidebar-chat"
+    >
+      <header
+        class="flex h-10 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-card px-3"
+      >
+        <div class="flex min-w-0 flex-1 items-center gap-1 text-xs font-medium">
+          <slot name="chat-header">Chat</slot>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="size-6 shrink-0"
+          title="Close chat"
+          aria-label="Close chat"
+          data-testid="sidebar-chat-close"
+          @click="emit('close-chat')"
+          ><X :size="14"
+        /></Button>
+      </header>
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"><slot name="chat" /></div>
+    </section>
   </div>
 </template>

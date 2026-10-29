@@ -72,6 +72,7 @@ import {
 } from '@/services/git.api'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
+import { useEditorStore } from '@/stores/editor'
 
 export type { GitRefTag } from '@/types/git'
 
@@ -832,7 +833,7 @@ export const useGitStore = defineStore('git', () => {
   // checks when it settles.
 
   async function refresh(
-    options?: { silent?: boolean; withDetails?: boolean },
+    options?: { silent?: boolean; withDetails?: boolean; forceDetails?: boolean },
   ): Promise<boolean> {
     const wsId = workspaceId.value
     if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return false
@@ -867,7 +868,7 @@ export const useGitStore = defineStore('git', () => {
         }
         if (withDetails) {
           const selected = selectedSummary()
-          if (selected) await ensureDetails(selected.path)
+          if (selected) await ensureDetails(selected.path, { force: options?.forceDetails, silent })
           if (!isCurrentWorkspaceRequest(wsId, gen)) return false
         }
         return true
@@ -1342,6 +1343,15 @@ export const useGitStore = defineStore('git', () => {
     expandedFilePath.value = null
     viewingDiffPath.value = path
     viewingDiffStaged.value = staged ?? null
+    if (workspaceId.value && currentRepo.value) {
+      void useEditorStore().openDiff(
+        workspaceId.value,
+        currentRepo.value.path,
+        path,
+        staged ?? currentRepo.value.changes.find((change) => change.path === path)?.staged ?? false,
+        currentRepo.value.changes.find((change) => change.path === path)?.oldPath ?? path,
+      )
+    }
     await loadWorkingDiffForCurrentRepo()
   }
 
@@ -1379,6 +1389,16 @@ export const useGitStore = defineStore('git', () => {
     useGitWorkingDiffSeq.invalidate()
     workingDiffLoading.value = false
     expandedFilePath.value = path
+    const selected = viewingCommitDiff.value
+    if (selected && workspaceId.value && currentRepo.value) {
+      void useEditorStore().openCommitDiff(
+        workspaceId.value,
+        currentRepo.value.path,
+        path!,
+        selected.hash,
+        selected.file.oldPath,
+      )
+    }
   }
 
   function setCdvHeight(h: number): void {

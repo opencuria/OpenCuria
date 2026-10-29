@@ -180,10 +180,11 @@ describe('browser realtime adapter', () => {
 
   it('loads explorer previews and downloads without view-level file event listeners', async () => {
     const { useFileExplorerStore } = await import('@/stores/fileExplorer')
+    const { useEditorStore } = await import('@/stores/editor')
     service.connect()
     socket.connect()
     const store = useFileExplorerStore()
-    const path = '/workspace/a.txt'
+    const path = '/workspace/a.pdf'
     store.selectFile(path, 'ws-1')
     const read = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_read')![1]
     const readIdentity = { workspace_id: 'ws-1', request_id: read.request_id, path }
@@ -200,11 +201,17 @@ describe('browser realtime adapter', () => {
       truncated: true,
       chunked: true,
       total_chunks: 1,
-      mime_type: 'text/plain',
+      mime_type: 'application/pdf',
     })
     await flushPromises()
-    expect(store.viewingFile).toMatchObject({ content: 'abc', size: 10_000_000, truncated: true })
-    expect(store.isLoadingContent).toBe(false)
+    expect(useEditorStore().activeTab).toMatchObject({
+      rawBase64: 'YWJj',
+      size: 10_000_000,
+      truncated: true,
+      mediaType: 'pdf',
+      readOnly: true,
+      loading: false,
+    })
 
     vi.useFakeTimers()
     const save = vi.fn(() => 'blob:download')
@@ -230,7 +237,7 @@ describe('browser realtime adapter', () => {
     socket.trigger('files:download_result', {
       ...downloadIdentity,
       content: '',
-      filename: 'a.txt',
+      filename: 'a.pdf',
       is_archive: false,
       size: 3,
       chunked: true,

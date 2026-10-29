@@ -222,6 +222,9 @@ export type GitOperationName =
   | 'stage'
   | 'unstage'
   | 'discard'
+  | 'stage_patch'
+  | 'unstage_patch'
+  | 'discard_patch'
   | 'commit'
   | 'fetch'
   | 'pull'
@@ -246,6 +249,14 @@ export interface GitOperationRequest {
   /** Absolute repo path under /workspace. */
   repo_path: string
   paths?: string[]
+  /** Repo-relative file and unified hunks for a guarded partial operation. */
+  path?: string
+  patch?: string
+  expected_index_revision?: string
+  expected_worktree_revision?: string
+  /** Original HEAD blob guard and rename source for partial unstaging. */
+  expected_head_revision?: string
+  old_path?: string
   message?: string
   branch?: string
   commit?: string
