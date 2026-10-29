@@ -22,8 +22,8 @@ from ..models import (
     Workspace,
     WorkspaceRecreateRequest,
 )
-from ..recreate_repository import RecreateRepository
 from ..workspace_operation_repository import WorkspaceOperationRepository
+from .recreate import RecreateService
 
 logger = structlog.get_logger("apps.runners.capture_repository")
 
@@ -48,7 +48,7 @@ class CaptureService:
         runner lock that also serializes agent run admission.
         """
         with CaptureRepository.lock_workspace(workspace_id) as ws:
-            approvals = CaptureRepository.forced_deletion_approvals(
+            approvals = WorkspaceOperationRepository.forced_deletion_approvals(
                 ws.runner.organization_id
             )
             for approval in approvals:
@@ -64,7 +64,7 @@ class CaptureService:
                 raise ConflictError(
                     "Workspace has an unresolved capture/lifecycle operation"
                 )
-            if CaptureRepository.credentials_synchronizing(ws.id):
+            if WorkspaceOperationRepository.credentials_synchronizing(ws.id):
                 raise ConflictError(
                     "Workspace credentials are synchronizing. "
                     "Wait for synchronization before capturing."
@@ -264,7 +264,7 @@ class CaptureService:
         CaptureRepository.save_request(request, ["phase", "diagnostic"])
         # Cloned repositories are part of the captured image from now on.
         CaptureRepository.clear_repos(ws)
-        RecreateRepository.begin(
+        RecreateService.begin(
             ws,
             CaptureRepository.image(request.image_id),
             reason=WorkspaceRecreateRequest.Reason.CAPTURE,

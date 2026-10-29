@@ -7,6 +7,7 @@ from ..deletion_repository import DeletionRepository
 from ..operations import OperationRepository
 from .capture import CaptureService
 from .image_retention import ImageRetentionService
+from .recreate import RecreateService
 
 logger = structlog.get_logger(__name__)
 
@@ -17,10 +18,8 @@ class RecoveryService:
     async def tick(self, transport) -> None:
         """Advance durable coordinators and deliver due commands independently."""
         await sync_to_async(DeletionRepository.tick)()
-        from ..recreate_repository import RecreateRepository
-
         finished = await sync_to_async(CaptureService.tick)()
-        finished += await sync_to_async(RecreateRepository.tick)()
+        finished += await sync_to_async(RecreateService.tick)()
         if finished:
             from . import RunnerService
 

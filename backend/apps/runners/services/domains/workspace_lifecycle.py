@@ -46,6 +46,7 @@ from ...exceptions import (
 )
 from ...provisioning import disk_size_for, provisioning_command, uses_artifact_clone
 from ...workspace_operation_repository import WorkspaceOperationRepository
+from ..recreate import RecreateService
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import ImageInstance, Runner, Task, Workspace
@@ -702,8 +703,6 @@ class WorkspaceLifecycleMixin:
         workspace keeps its id, chats, credentials, plugins and schedules;
         all data stored only inside the workspace is permanently lost.
         """
-        from ...recreate_repository import RecreateRepository
-
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None or (
             organization_id and workspace.runner.organization_id != organization_id
@@ -742,7 +741,7 @@ class WorkspaceLifecycleMixin:
             ) from exc
 
         workspace, task, _ = await sync_to_async(
-            RecreateRepository.allocate, thread_sensitive=True
+            RecreateService.allocate, thread_sensitive=True
         )(
             workspace_id,
             image_id,
@@ -1132,8 +1131,6 @@ class WorkspaceLifecycleMixin:
         if not self._validate_task_runner(task, runner_id):
             return
 
-        from ...recreate_repository import RecreateRepository
-
         recreating = WorkspaceOperationRepository.owns_recreate_child(task.id)
         delete_result = result or ("already_absent" if already_absent else "deleted")
         if delete_result not in {"deleted", "already_absent"}:
@@ -1151,7 +1148,7 @@ class WorkspaceLifecycleMixin:
         workspace = task.workspace
         if workspace:
             if recreating:
-                RecreateRepository.removed(workspace)
+                RecreateService.removed(workspace)
             else:
                 self.workspaces.mark_deleted(workspace.id)
             self.mark_processes_killed(str(workspace.id), reason="workspace_removed")

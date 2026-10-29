@@ -1,7 +1,7 @@
 """Read durable workspace reservations without importing their coordinators.
 
 Task admission, persisted operation updates and frontend projections share this
-read boundary. The capture service and recreate coordinator own phase progression
+read boundary. The capture and recreate services own phase progression
 and depend on these reads, never the other way round.
 """
 
@@ -11,7 +11,9 @@ import uuid
 
 from .models import (
     CaptureRequest,
+    ImageDeletionRequest,
     LifecycleCommand,
+    Task,
     Workspace,
     WorkspaceRecreateRequest,
 )
@@ -26,6 +28,26 @@ OPERATION_BY_REASON = {
 
 class WorkspaceOperationRepository:
     """Read reservation ownership and the committed blocking operation."""
+
+    @staticmethod
+    def forced_deletion_approvals(organization_id: uuid.UUID) -> list[dict]:
+        """Load live forced-deletion approvals for admission checks."""
+        return list(
+            ImageDeletionRequest.objects.filter(
+                organization_id=organization_id, mode="force"
+            )
+            .exclude(phase__in=["completed", "cancelled"])
+            .values_list("approval", flat=True)
+        )
+
+    @staticmethod
+    def credentials_synchronizing(workspace_id: uuid.UUID) -> bool:
+        """Whether credential injection is pending or executing."""
+        return Task.objects.filter(
+            workspace_id=workspace_id,
+            type="inject_credentials",
+            status__in=["pending", "in_progress"],
+        ).exists()
 
     @staticmethod
     def live_capture(workspace_id: uuid.UUID | str) -> CaptureRequest | None:

@@ -18,9 +18,9 @@ from apps.runners.models import (
     WorkspaceRecreateRequest,
 )
 from apps.runners.operations import OperationRepository
-from apps.runners.recreate_repository import RecreateRepository
 from apps.runners.services import RunnerService
 from apps.runners.services.capture import CaptureService
+from apps.runners.services.recreate import RecreateService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
@@ -179,7 +179,7 @@ def test_failed_replacement_rolls_back_handoff_and_can_retry(
         raise RuntimeError("replacement allocation failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(RecreateRepository, "begin", fail)
+        patch.setattr(RecreateService, "begin", fail)
         assert CaptureService.tick() == []
     request.refresh_from_db()
     workspace.refresh_from_db()
