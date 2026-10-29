@@ -1,4 +1,4 @@
-"""Tests for harness tool ABC, registry and hooks."""
+"""Tests for harness tool ABC and registry."""
 
 from __future__ import annotations
 
@@ -115,25 +115,6 @@ async def test_registry_execute_propagates_tool_error(
     registry.register(_FailingTool())
     with pytest.raises(ToolError, match="nope"):
         await registry.execute("failing", {}, _ctx(fake_accessor))
-
-
-async def test_before_after_hooks_run_in_order(fake_accessor) -> None:
-    """Hooks observe invocations without changing the result."""
-    registry = ToolRegistry()
-    registry.register(_DummyTool())
-    calls: list[str] = []
-
-    async def before(name, args, ctx) -> None:
-        calls.append(f"before:{name}")
-
-    async def after(name, args, ctx, result) -> None:
-        calls.append(f"after:{name}:{result.output}")
-
-    registry.add_before_hook(before)
-    registry.add_after_hook(after)
-    result = await registry.execute("dummy", {"text": "x"}, _ctx(fake_accessor))
-    assert result.output == "x"
-    assert calls == ["before:dummy", "after:dummy:x"]
 
 
 async def test_registry_bash_tail_spills_full_output(fake_accessor) -> None:

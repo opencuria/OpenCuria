@@ -1,12 +1,9 @@
-"""Tool ABC, context, registry and hook extension points.
+"""Tool ABC, context and registry.
 
 Every harness tool reaches the workspace exclusively through a
 :class:`~apps.harness.access.base.WorkspaceAccessor` (provided via
 :class:`ToolContext`). Tools never touch the local filesystem, never spawn
 local shells, and never use the ORM directly.
-
-Before/after hooks are an intentionally empty extension point: later
-milestones (plugins, MCP) can attach observers without changing tools.
 """
 
 from __future__ import annotations
@@ -96,10 +93,6 @@ class ToolResult:
     content: list[dict[str, Any]] | None = None
 
 
-BeforeHook = Callable[[str, BaseModel, ToolContext], Awaitable[None]]
-AfterHook = Callable[[str, BaseModel, ToolContext, ToolResult], Awaitable[None]]
-
-
 class Tool(abc.ABC):
     """Abstract base class for all harness tools."""
 
@@ -148,17 +141,10 @@ class Tool(abc.ABC):
 
 
 class ToolRegistry:
-    """Registry for harness tools plus before/after hook extension points.
-
-    Hooks are plain async callables. They observe (never mutate) tool
-    invocations; future plugin/MCP support will attach here without any
-    change to the tools themselves.
-    """
+    """Register, validate and execute harness tools."""
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
-        self.before_hooks: list[BeforeHook] = []
-        self.after_hooks: list[AfterHook] = []
 
     def register(self, tool: Tool) -> Tool:
         """Register *tool* under its ``name``."""
@@ -206,37 +192,13 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
-    def add_before_hook(self, hook: BeforeHook) -> None:
-        """Attach an observer run before each tool execution."""
-        self.before_hooks.append(hook)
-
-    def add_after_hook(self, hook: AfterHook) -> None:
-        """Attach an observer run after each tool execution."""
-        self.after_hooks.append(hook)
-
-    async def run_before(self, name: str, args: BaseModel, ctx: ToolContext) -> None:
-        """Run all before-hooks for a tool invocation."""
-        for hook in self.before_hooks:
-            await hook(name, args, ctx)
-
-    async def run_after(
-        self,
-        name: str,
-        args: BaseModel,
-        ctx: ToolContext,
-        result: ToolResult,
-    ) -> None:
-        """Run all after-hooks for a tool invocation."""
-        for hook in self.after_hooks:
-            await hook(name, args, ctx, result)
-
     async def execute(
         self,
         name: str,
         args: BaseModel | dict[str, Any],
         ctx: ToolContext,
     ) -> ToolResult:
-        """Validate *args*, run hooks, and execute the named tool."""
+        """Validate *args*, execute the named tool and bound its output."""
         tool = self.get(name)
         validated = tool.coerce_args(args)
         log.info(
@@ -245,7 +207,6 @@ class ToolRegistry:
             session_id=ctx.session_id,
             agent=ctx.agent_name,
         )
-        await self.run_before(tool.name, validated, ctx)
         result = await tool.execute(validated, ctx)
         direction = getattr(tool, "truncate_direction", "head")
         if direction not in ("head", "tail"):
@@ -260,5 +221,4 @@ class ToolRegistry:
             full_output = result.output
             result.output = clipped.content
             await preserve_full_output(ctx, result, full_output)
-        await self.run_after(tool.name, validated, ctx, result)
         return result
