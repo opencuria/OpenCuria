@@ -150,7 +150,9 @@ class CodexEventProjector:
                         "id": key,
                         "tool": "spawnAgent",
                         "receiverThreadIds": [item["agentThreadId"]],
-                        "prompt": item.get("agentPath") or "Subagent",
+                        # This event identifies the child, but does not expose
+                        # its delegated instructions. Never use its name as a prompt.
+                        "agentPath": item.get("agentPath"),
                         "model": item.get("model"),
                         "reasoningEffort": item.get("reasoningEffort"),
                     }
@@ -237,6 +239,10 @@ class CodexEventProjector:
             state = states.get(thread) or {}
             child = self.children.get(thread)
             if child is None:
+                prompt = item.get("prompt")
+                if not isinstance(prompt, str) or not prompt.strip():
+                    prompt = None
+                agent_path = item.get("agentPath") or ""
                 native_model = str(item.get("model") or "")
                 parent_model = self._model()
                 provider = parent_model.split("/", 1)[0]
@@ -250,7 +256,9 @@ class CodexEventProjector:
                     "subtask_id": thread,
                     "parent_tool_use_id": item["id"],
                     "agent": "general",
-                    "description": item.get("prompt") or "Subagent",
+                    "description": agent_path or prompt or "Subagent",
+                    "agent_path": agent_path,
+                    "prompt": prompt,
                     "model": model,
                     "reasoning_effort": item.get("reasoningEffort") or "",
                     "finished": False,

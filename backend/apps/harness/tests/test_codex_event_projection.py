@@ -5,15 +5,21 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from apps.harness.access.file_types import FileContent
 from apps.harness.agents.definitions import get_agent
+from apps.harness.conversation_service import ConversationService
 from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.engine import CodexEngine
 from apps.harness.engines.codex.events import CodexEventProjector
+from apps.harness.harness_service import HarnessService
+from apps.harness.models import HarnessMessage, HarnessPart, HarnessSession
+from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
+from apps.harness.schemas import timeline_to_out
 from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_codex_core_safety import auth
 from apps.harness.tools.base import ToolRegistry
@@ -166,6 +172,134 @@ async def test_projection_uses_current_run_inputs_and_replays_early_children() -
     await engine.projector.finish_child("native-child", "completed", "Duplicate")
     assert root.await_count == 2
     assert root.await_args_list[-1].args[0]["summary"] == "Done"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("kind", "prompt"),
+    [
+        pytest.param("subAgentActivity", None, id="activity-without-instructions"),
+        pytest.param("collabAgentToolCall", None, id="classic-without-prompt"),
+        pytest.param("collabAgentToolCall", " \n ", id="classic-blank-prompt"),
+        pytest.param(
+            "collabAgentToolCall",
+            "Inspect the VM lifecycle.\nPreserve existing VM configuration.\n" * 30,
+            id="classic-full-prompt",
+        ),
+    ],
+)
+async def test_child_start_keeps_identity_separate_from_task_instructions(
+    harness_workspace, kind: str, prompt: str | None
+) -> None:
+    """Native frames produce honest child transcripts in the shared UI/MCP timeline."""
+    frontend = AsyncMock()
+    service = HarnessService(emit=frontend)
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+        harness_id="codex",
+        model="chatgpt/gpt-6.1-sol",
+        reasoning_effort="ultra",
+        created_by_id=harness_workspace.created_by_id,
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", harness_id="codex"
+    )
+    root_key = str(session.id)
+    service._runs[root_key] = {
+        "session_id": root_key,
+        "message_id": str(assistant.id),
+        "tool_parts": {},
+        "step_parts": {},
+        "subtask_parts": {},
+    }
+
+    async def emit(event: dict[str, Any], parent: str | None) -> None:
+        if parent:
+            await service._on_external_child_event(root_key, parent, event)
+        else:
+            await service._on_external_root_event(session, assistant, event)
+
+    projector = CodexEventProjector(
+        emit=emit,
+        model=lambda: session.model,
+        is_managed_tool=lambda _: False,
+        image_attachments=AsyncMock(return_value=[]),
+    )
+    agent_path = "/root/memory_reclaim_research"
+    item = {"id": "spawn", "type": kind, "reasoningEffort": "xhigh"}
+    if kind == "subAgentActivity":
+        item.update(kind="started", agentThreadId="native-child", agentPath=agent_path)
+    else:
+        item.update(
+            tool="spawnAgent", receiverThreadIds=["native-child"], prompt=prompt
+        )
+    await projector.item(item, completed=False)
+    await projector.item(item, completed=True)
+    await projector.item(item, completed=True)
+
+    child = HarnessSession.objects.get(parent=session)
+    child_user = HarnessMessage.objects.get(session=child, role="user")
+    available = prompt is not None and bool(prompt.strip())
+    assert child.title == (
+        agent_path
+        if kind == "subAgentActivity"
+        else prompt[:255]
+        if available
+        else "Subagent"
+    )
+    assert child_user.content == (
+        prompt
+        if available
+        else "The agent did not provide readable task instructions for this subagent."
+    )
+    assert child_user.engine_meta == {
+        "delegation": {
+            "prompt_available": available,
+            "agent_path": agent_path if kind == "subAgentActivity" else "",
+        }
+    }
+    assert child.created_by_id == session.created_by_id
+    assert child.workspace_id == session.workspace_id
+    assert child.harness_id == "codex"
+    assert child.reasoning_effort == "xhigh"
+    timeline = timeline_to_out(service, child, conversations=ConversationService())
+    assert timeline["messages"][0]["content"] == child_user.content
+    part = HarnessPart.objects.get(message=assistant, type="subtask")
+    assert part.meta["child_session_id"] == str(child.id)
+    starts = [
+        call.args[1]
+        for call in frontend.await_args_list
+        if call.args[0] == "harness.subtask_started"
+    ]
+    assert len(starts) == 1
+    assert starts[0]["description"] == part.title
+
+    await projector.child_notification(
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "native-child",
+                "turn": {
+                    "id": "child-turn",
+                    "status": "completed",
+                    "items": [
+                        {"id": "answer", "type": "agentMessage", "text": "Found it"}
+                    ],
+                },
+            },
+        }
+    )
+    child.refresh_from_db()
+    part.refresh_from_db()
+    assert child.status == "idle"
+    assert part.state == "completed"
+    assert (
+        HarnessMessage.objects.get(session=child, role="assistant").content
+        == "Found it"
+    )
+    assert HarnessMessage.objects.get(id=assistant.id).content == ""
 
 
 @pytest.mark.parametrize("failure", ["read_error", "truncated", "oversized", "mime"])

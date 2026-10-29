@@ -869,6 +869,9 @@ async def test_native_codex_child_projection_and_shared_checkpoint(runtime, chil
     assert_settled(data, session, assistant)
     child = HarnessSession.objects.get(parent=session)
     child_assistant = HarnessMessage.objects.get(session=child, role="assistant")
+    child_user = HarnessMessage.objects.get(session=child, role="user")
+    assert child_user.content == "NATIVE_CHILD_PROMPT"
+    assert child_user.engine_meta["delegation"]["prompt_available"] is True
     assert child.harness_id == "codex"
     assert child.model == session.model
     assert child.created_by_id == session.created_by_id

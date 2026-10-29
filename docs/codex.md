@@ -43,6 +43,11 @@ not a compatibility guarantee. See [OpenRouter's Codex guide][openrouter].
   OpenCuria-managed inference run. Upstream decides child tool inheritance;
   in the pinned native v1 delegation, client dynamic tools are not inherited.
   Child shell/file tools remain native and are projected into the child timeline.
+  Codex's `subAgentActivity` format exposes the agent path, not readable task
+  instructions. These children retain their name and show an explicit notice
+  that instructions are unavailable. The initial message records prompt
+  availability in its delegation metadata; classic `collabAgentToolCall`
+  prompts are preserved when provided.
 - Explicit global permission rules also force native read-only mode with native
   shell off, so managed actions go through OpenCuria's permission evaluator.
 - The only additional OpenCuria tools are `question`, `todowrite`, `process_*`

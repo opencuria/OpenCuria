@@ -1149,6 +1149,9 @@ async def test_claude_abort_finishes_attempt_and_child_projection(harness_worksp
     assert child.harness_id == "claude"
     assert child.agent_name == "explore"
     assert child.status == "idle"
+    child_user = HarnessMessage.objects.get(session=child, role="user")
+    assert child_user.content == "Inspect the code"
+    assert child_user.engine_meta == {}
     assert child_assistant.content == "found it"
     assert HarnessPart.objects.filter(
         message=assistant, type="subtask", meta__child_session_id=str(child.id)

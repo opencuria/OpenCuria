@@ -2563,6 +2563,23 @@ class HarnessService:
     ) -> None:
         """Project native task notifications to persisted OpenCuria child sessions."""
         if event.get("type") == "subtask_started":
+            content = str(event.get("description") or "")
+            engine_meta: dict[str, Any] = {}
+            # Older adapters use description as the prompt; an explicit null
+            # instead means upstream did not expose the delegated instructions.
+            if "prompt" in event:
+                prompt = event["prompt"]
+                available = isinstance(prompt, str) and bool(prompt.strip())
+                content = (
+                    prompt
+                    if available
+                    else "The agent did not provide readable task instructions "
+                    "for this subagent."
+                )
+                engine_meta["delegation"] = {
+                    "prompt_available": available,
+                    "agent_path": str(event.get("agent_path") or ""),
+                }
             raw_agent = str(event.get("agent") or "general").strip().lower()
             agent = "explore" if raw_agent in {"explore", "explorer"} else "general"
             child = await sync_to_async(self.sessions.create, thread_sensitive=True)(
@@ -2585,7 +2602,8 @@ class HarnessService:
             )(
                 session_id=child.id,
                 role="user",
-                content=str(event.get("description") or ""),
+                content=content,
+                engine_meta=engine_meta,
                 skill_ids=list(session.skill_ids or []),
                 harness_id=session.harness_id,
             )
