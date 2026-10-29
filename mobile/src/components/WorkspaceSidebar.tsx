@@ -554,6 +554,7 @@ function SidebarRow({
       <View style={styles.rowIcon}>{icon}</View>
       <Text
         numberOfLines={1}
+        ellipsizeMode="tail"
         style={[
           styles.rowTitle,
           { color: theme.text, fontWeight: strong ? "600" : "400" },
@@ -798,8 +799,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 14,
   },
-  rowIcon: { width: 24, alignItems: "center", justifyContent: "center" },
-  rowTitle: { flex: 1, fontSize: TITLE_SIZE, letterSpacing: -0.2 },
+  rowIcon: {
+    width: 24,
+    flexShrink: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  rowTitle: {
+    flex: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    fontSize: TITLE_SIZE,
+    letterSpacing: -0.2,
+  },
   rowMeta: { maxWidth: 96, fontSize: 13 },
   groupHeader: {
     flexDirection: "row",

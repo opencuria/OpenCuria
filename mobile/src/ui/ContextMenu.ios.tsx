@@ -22,6 +22,7 @@ export function NativeContextMenu({
   return (
     <Host
       matchContents={{ vertical: true }}
+      style={{ width: "100%" }}
       colorScheme={theme.scheme}
       seedColor={theme.primary}
       ignoreSafeArea="all"
