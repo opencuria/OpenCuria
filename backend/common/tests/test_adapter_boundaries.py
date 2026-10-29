@@ -80,6 +80,9 @@ never imports live orchestration or its scheduling consumers. Scheduled tasks
 persist only their own ledger: workspace launch state, ownership, activity and
 the single auto-stop policy come from the runner service, and unstarted chats
 are rolled back through ConversationService.
+Notification workers schedule service operations without reaching repositories
+or harness activity directly. Notification eligibility uses OrganizationService;
+repositories receive freshness/retention cutoffs and never own membership rules.
 """
 
 from __future__ import annotations
@@ -126,6 +129,7 @@ REPOSITORY_ONLY_APPS = {
     "apps.credentials",
     "apps.harness",
     "apps.mcp_app",
+    "apps.notifications",
     "apps.organizations",
     "apps.plugins",
     "apps.scheduled_tasks",
@@ -229,6 +233,60 @@ def test_notifications_reach_harness_only_through_activity_service_and_events() 
         "Notifications must consume immutable activity from the harness service "
         "and its lifecycle events; notification repositories must not import "
         "the harness, even through function-local imports:\n"
+        + "\n".join(sorted(violations))
+    )
+
+
+def test_notification_worker_and_persistence_leave_policy_to_services() -> None:
+    """Workers schedule; notification services own eligibility and retention."""
+    package = APPS_ROOT / "notifications"
+    worker = package / "worker.py"
+    forbidden = {
+        "apps.notifications.repositories",
+        "apps.notifications.models",
+        "apps.harness",
+    }
+    violations = [
+        f"worker -> {module}"
+        for module in _imported_modules(worker, ast.parse(worker.read_text()))
+        if any(
+            module == target or module.startswith(f"{target}.") for target in forbidden
+        )
+    ]
+    violations.extend(
+        f"worker:{node.lineno} -> {node.attr}"
+        for node in ast.walk(ast.parse(worker.read_text()))
+        if isinstance(node, ast.Attribute) and node.attr in {"repo", "activity"}
+    )
+    for path in package.rglob("*.py"):
+        if "tests" in path.parts or not _is_persistence_module(path):
+            continue
+        tree = ast.parse(path.read_text())
+        violations.extend(
+            f"{_module_name(path)} -> {module}"
+            for module in _imported_modules(path, tree)
+            if module == "apps.notifications.services"
+            or module.startswith("apps.")
+            and not module.startswith("apps.notifications.")
+        )
+        violations.extend(
+            f"{_module_name(path)}:{node.lineno} -> {node.value}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("user__")
+        )
+        violations.extend(
+            f"{_module_name(path)}:{node.lineno} -> {node.arg}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.keyword)
+            and node.arg is not None
+            and node.arg.startswith("user__")
+        )
+    assert violations == [], (
+        "Route notification workflows through NotificationService and account/"
+        "membership checks through OrganizationService; notification persistence "
+        "must not query identity policy or import its consumers:\n"
         + "\n".join(sorted(violations))
     )
 

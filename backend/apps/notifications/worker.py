@@ -7,7 +7,6 @@ import contextlib
 import time
 
 import structlog
-from asgiref.sync import sync_to_async
 
 from .providers import PushProviders
 from .services import NotificationService
@@ -46,26 +45,10 @@ class NotificationWorker:
         while True:
             try:
                 if time.monotonic() - last_repair >= 60:
-                    for message_id in await sync_to_async(
-                        self.service.activity.recent_completions
-                    )():
-                        await sync_to_async(self.service.record_finished)(message_id)
-                    await sync_to_async(self.service.repo.prune)()
-                    for event, data in await sync_to_async(
-                        self.service.activity.recent_attention_events
-                    )():
-                        await sync_to_async(self.service.record_activity)(event, data)
+                    await self.service.repair()
                     last_repair = time.monotonic()
                 if time.monotonic() - last_heartbeat >= 300:
-                    for device in await sync_to_async(
-                        self.service.repo.activity_devices
-                    )():
-                        await sync_to_async(self.service.repo.enqueue)(
-                            device,
-                            f"heartbeat:{int(time.time()) // 300}",
-                            "activity",
-                            {"organization_id": str(device.organization_id)},
-                        )
+                    await self.service.record_heartbeat()
                     last_heartbeat = time.monotonic()
                 worked = await self.service.process_one()
                 await asyncio.sleep(0 if worked else 1)

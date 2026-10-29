@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.organizations.models import Membership
 from common.exceptions import NotFoundError
 
 from .models import MobileDevice, PushConfiguration, PushDelivery
@@ -30,6 +29,11 @@ class NotificationRepository:
     def current_device(device_id: uuid.UUID) -> MobileDevice | None:
         """Read preferences and destinations again after claiming queued work."""
         return MobileDevice.objects.select_related("user").filter(id=device_id).first()
+
+    @staticmethod
+    def device_exists(device_id: uuid.UUID) -> bool:
+        """Recheck that a loaded registration has not been removed."""
+        return MobileDevice.objects.filter(id=device_id).exists()
 
     @staticmethod
     def configuration(org_id: uuid.UUID) -> PushConfiguration | None:
@@ -142,28 +146,15 @@ class NotificationRepository:
 
     @staticmethod
     def devices_for_owner(
-        org_id: uuid.UUID, user_id: int | None
+        org_id: uuid.UUID, user_id: int, *, seen_since: datetime
     ) -> list[MobileDevice]:
-        """Match REST's workspace-owner boundary and current organization membership."""
+        """Read the owner's registrations within the supplied freshness window."""
         return list(
             MobileDevice.objects.filter(
                 organization_id=org_id,
                 user_id=user_id,
-                user__is_active=True,
-                last_seen_at__gte=timezone.now() - timedelta(days=30),
-                user__memberships__organization_id=org_id,
-            ).distinct()
-        )
-
-    @staticmethod
-    def is_authorized(device: MobileDevice) -> bool:
-        """Recheck revocation, membership and registration age at delivery time."""
-        return (
-            MobileDevice.objects.filter(id=device.id, user__is_active=True).exists()
-            and device.last_seen_at >= timezone.now() - timedelta(days=30)
-            and Membership.objects.filter(
-                user_id=device.user_id, organization_id=device.organization_id
-            ).exists()
+                last_seen_at__gte=seen_since,
+            )
         )
 
     @staticmethod
@@ -218,19 +209,18 @@ class NotificationRepository:
         )
 
     @staticmethod
-    def activity_devices() -> list[MobileDevice]:
-        """Refresh long-running activities without depending on token streaming."""
+    def activity_devices(*, seen_since: datetime) -> list[MobileDevice]:
+        """Read iOS activity destinations within the supplied freshness window."""
         return list(
             MobileDevice.objects.filter(
                 live_activities_enabled=True,
                 platform="ios",
-                last_seen_at__gte=timezone.now() - timedelta(days=30),
+                last_seen_at__gte=seen_since,
             ).exclude(encrypted_activity_token="")
         )
 
     @staticmethod
-    def prune() -> None:
-        """Bound destination and outbox retention; stale registrations stop delivery."""
-        now = timezone.now()
-        PushDelivery.objects.filter(created_at__lt=now - timedelta(days=2)).delete()
-        MobileDevice.objects.filter(last_seen_at__lt=now - timedelta(days=30)).delete()
+    def prune(*, deliveries_before: datetime, devices_before: datetime) -> None:
+        """Remove outbox rows and registrations older than the supplied cutoffs."""
+        PushDelivery.objects.filter(created_at__lt=deliveries_before).delete()
+        MobileDevice.objects.filter(last_seen_at__lt=devices_before).delete()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -29,6 +30,8 @@ from .repositories import NotificationRepository
 from .schemas import ActivityRegistrationIn, DeviceRegistrationIn, PushConfigurationIn
 
 log = structlog.get_logger(__name__)
+REGISTRATION_MAX_AGE = timedelta(days=30)
+OUTBOX_RETENTION = timedelta(days=2)
 ALERT_LABELS = {
     "completed": "Agent finished",
     "error": "Agent run failed",
@@ -65,20 +68,21 @@ class NotificationService:
         *,
         repository: type[NotificationRepository] | None = None,
         activity: ConversationActivityService | None = None,
+        organizations: OrganizationService | None = None,
         providers: PushProviders | None = None,
     ) -> None:
         self.repo = repository or NotificationRepository
         self.activity = activity or ConversationActivityService()
+        self.organizations = organizations or OrganizationService()
         self.providers = providers
 
     def configuration(
         self, user: User, org_id: uuid.UUID, *, admin: bool = False
     ) -> dict:
         """Return setup readiness, exposing credential references only to admins."""
-        organizations = OrganizationService()
-        organizations.require_admin(
+        self.organizations.require_admin(
             user, org_id
-        ) if admin else organizations.require_membership(user, org_id)
+        ) if admin else self.organizations.require_membership(user, org_id)
         config = self.repo.configuration(org_id)
         apns = self._credential(config, "apns", org_id)
         fcm = self._credential(config, "fcm", org_id)
@@ -98,7 +102,7 @@ class NotificationService:
         self, user: User, org_id: uuid.UUID, data: PushConfigurationIn
     ) -> dict:
         """Only organization admins may select scope-matched vault credentials."""
-        OrganizationService().require_admin(user, org_id)
+        self.organizations.require_admin(user, org_id)
         credentials = {
             credential.id: credential
             for credential in CredentialSvc().list_credentials(user, org_id)
@@ -163,7 +167,7 @@ class NotificationService:
         data: ActivityRegistrationIn,
     ) -> None:
         """Bind and immediately reconcile each ActivityKit token replacement."""
-        OrganizationService().require_membership(user, org_id)
+        self.organizations.require_membership(user, org_id)
         device = self.repo.device(device_id, user.id, org_id)
         if device.platform != "ios" or not device.live_activities_enabled:
             raise ValueError("Live Activities are disabled for this device")
@@ -189,7 +193,7 @@ class NotificationService:
 
     def snapshot(self, user: User, org_id: uuid.UUID, device_id: uuid.UUID) -> dict:
         """Hydrate foreground activities from durable state."""
-        OrganizationService().require_membership(user, org_id)
+        self.organizations.require_membership(user, org_id)
         device = self.repo.device(device_id, user.id, org_id)
         return self._snapshot(device)
 
@@ -249,6 +253,46 @@ class NotificationService:
             key = f"gate:{data['request_id']}:{phase}"
         self._enqueue(session, key, phase, request_id=data.get("request_id", ""))
 
+    async def repair(self) -> None:
+        """Recover missed lifecycle events and enforce notification retention."""
+        for message_id in await sync_to_async(self.activity.recent_completions)():
+            await sync_to_async(self.record_finished)(message_id)
+        now = timezone.now()
+        await sync_to_async(self.repo.prune)(
+            deliveries_before=now - OUTBOX_RETENTION,
+            devices_before=self._registration_cutoff(now),
+        )
+        for event, data in await sync_to_async(self.activity.recent_attention_events)():
+            await sync_to_async(self.record_activity)(event, data)
+
+    async def record_heartbeat(self) -> None:
+        """Refresh recent iOS activities with repeat-safe five-minute time keys."""
+        for device in await sync_to_async(self.repo.activity_devices)(
+            seen_since=self._registration_cutoff()
+        ):
+            await sync_to_async(self.repo.enqueue)(
+                device,
+                f"heartbeat:{int(time.time()) // 300}",
+                "activity",
+                {"organization_id": str(device.organization_id)},
+            )
+
+    @staticmethod
+    def _registration_cutoff(now: datetime | None = None) -> datetime:
+        """Share the registration lifetime across enqueue, delivery and cleanup."""
+        return (now if now is not None else timezone.now()) - REGISTRATION_MAX_AGE
+
+    def _is_authorized(self, device: MobileDevice) -> bool:
+        """Require a live registration and current active organization membership."""
+        return (
+            self.repo.device_exists(device.id)
+            and device.last_seen_at >= self._registration_cutoff()
+            and self.organizations.get_active_membership(
+                device.user_id, device.organization_id
+            )
+            is not None
+        )
+
     def _enqueue(
         self,
         session: ConversationActivity,
@@ -268,8 +312,19 @@ class NotificationService:
             "request_id": request_id,
             "row": activity_row(session, phase),
         }
+        owner_id = session.workspace_owner_id
+        if (
+            owner_id is None
+            or self.organizations.get_active_membership(
+                owner_id, session.organization_id
+            )
+            is None
+        ):
+            return
         for device in self.repo.devices_for_owner(
-            session.organization_id, session.workspace_owner_id
+            session.organization_id,
+            owner_id,
+            seen_since=self._registration_cutoff(),
         ):
             # Do not replay old completions to newly registered installations.
             if occurred_at and (
@@ -303,7 +358,7 @@ class NotificationService:
         device = await sync_to_async(self.repo.current_device)(job.device_id)
         if device is None:
             return DeliveryResult("failed", "registration_revoked")
-        if not await sync_to_async(self.repo.is_authorized)(device):
+        if not await sync_to_async(self._is_authorized)(device):
             return DeliveryResult("failed", "registration_expired")
         if str(device.organization_id) != job.payload.get("organization_id"):
             return DeliveryResult("failed", "organization_changed")
