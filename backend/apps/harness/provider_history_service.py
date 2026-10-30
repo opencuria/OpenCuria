@@ -19,7 +19,7 @@ from .media.attachments import (
     build_tool_message_content,
     select_persisted_tool_attachments,
 )
-from .models import HarnessMessage, HarnessPart, HarnessSession
+from .models import HarnessPart, HarnessSession
 from .providers.base import LLMMessage
 from .repositories import HarnessMessageRepository, HarnessPartRepository
 from .tools.truncate import truncate_tool_output
@@ -65,6 +65,8 @@ class ProviderHistoryService:
         When a completed compaction part exists, only the checkpoint summary
         plus messages from ``tail_start_id`` onward are sent to the provider
         (OpenCode ``filterCompacted`` equivalent). Full history stays in the DB.
+        Assistant responses come only from ordered parts; empty shells and
+        compaction-only messages emit no assistant turn.
         """
         excluded_ids = {
             message_id
@@ -82,11 +84,9 @@ class ProviderHistoryService:
             session.id, exclude_message_ids=excluded_ids
         )
         checkpoint_summary = ""
-        compaction_msg_id: uuid.UUID | None = None
         from_position = 0
         tail_id: uuid.UUID | None = None
         if checkpoint is not None:
-            compaction_msg_id = checkpoint.message_id
             checkpoint_summary = str(checkpoint.output or "").strip()
             from_position = checkpoint.message_position
             raw_tail = str(
@@ -119,7 +119,7 @@ class ProviderHistoryService:
                 history.append(
                     LLMMessage(
                         role="user",
-                        content=message.content or "",
+                        content=message.history_content,
                         message_id=str(message.id),
                     )
                 )
@@ -134,40 +134,12 @@ class ProviderHistoryService:
                 # Keep cancellation and scheduling points between assistant replays.
                 await asyncio.sleep(0)
             parts = parts_by_message.pop(message.id)
-            tool_parts = [
-                part
-                for part in parts
-                if part.type == "tool"
-                and part.state in ("completed", "error")
-                and part.call_id
-            ]
-            assistant_content = self._assistant_history_content(
-                message,
-                parts,
-                summary=checkpoint_summary if message.id == compaction_msg_id else "",
-            )
-            has_steers = any(part.type == "steer" and part.output for part in parts)
-            if not tool_parts and not has_steers:
-                history.append(
-                    LLMMessage(
-                        role="assistant",
-                        content=assistant_content,
-                        message_id=str(message.id),
-                    )
-                )
-                continue
             # Rebuild conversational turns from ordered parts, not from the
             # flattened message.content. A response can contain text, tools,
             # more text, and more tools; provider replay must keep these
             # segments in the same order as the persisted timeline.
-            tool_ids = {part.id for part in tool_parts}
-            has_text_parts = any(part.type == "text" and part.output for part in parts)
             text = ""
             pending_calls: list[HarnessPart] = []
-            if not has_text_parts and assistant_content:
-                # Legacy messages without text parts only have a flattened
-                # content field; place it before tools as the best effort.
-                text = assistant_content
 
             def flush_segment() -> None:
                 nonlocal text, pending_calls
@@ -230,27 +202,11 @@ class ProviderHistoryService:
                             message_id=str(message.id),
                         )
                     )
-                elif part.id in tool_ids:
+                elif (
+                    part.type == "tool"
+                    and part.state in ("completed", "error")
+                    and part.call_id
+                ):
                     pending_calls.append(part)
             flush_segment()
         return history
-
-    @staticmethod
-    def _assistant_history_content(
-        message: HarnessMessage,
-        parts: list[HarnessPart],
-        *,
-        summary: str = "",
-    ) -> str | None:
-        """Resolve assistant text for history without the compaction summary."""
-        text_output = "".join(
-            part.output for part in parts if part.type == "text" and part.output
-        )
-        if text_output:
-            return text_output
-        content = (message.content or "").strip()
-        if not content:
-            return None
-        if summary and content == summary.strip():
-            return None
-        return message.content

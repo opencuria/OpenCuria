@@ -21,6 +21,7 @@ from apps.harness.provider_history_service import (
     HISTORY_PART_BATCH_SIZE,
     ProviderHistoryService,
 )
+from apps.harness.providers.base import LLMMessage
 from apps.harness.repositories import HarnessPartRepository, HarnessSessionRepository
 
 
@@ -164,7 +165,14 @@ def test_history_batches_only_load_retained_replay_parts(
     assert {message.id for message in loaded_messages} == {
         message.id for message in messages[tail_index * 2 :]
     }
-    assert all("engine_meta" in row.get_deferred_fields() for row in loaded_messages)
+    assert all(
+        {"content", "engine_meta"} <= row.get_deferred_fields()
+        for row in loaded_messages
+    )
+    assert {row.id: row.history_content for row in loaded_messages} == {
+        row.id: row.content if row.role == "user" else ""
+        for row in messages[tail_index * 2 :]
+    }
     assert len(loaded_messages) == (turns - tail_index) * 2
     assert {part.id for part in loaded} == retained_ids
     assert len(loaded) == len(retained_ids)
@@ -205,6 +213,7 @@ def test_history_selects_last_completed_checkpoint_in_timeline_order(
     old = _message(session, 0, role="assistant", content="old")
     tail = _message(session, 1, role="user", content="retained user")
     latest = _message(session, 2, role="assistant", content="retained answer")
+    _part(latest, 11, type="text", output="retained answer")
     _part(
         latest,
         8,
@@ -260,7 +269,6 @@ def test_history_excludes_messages_before_checkpoint_selection(
     assert [row.content for row in history] == [
         f"{CHECKPOINT_PREFIX}\nold summary",
         "first retained",
-        None,
         "next retained",
     ]
 
@@ -289,10 +297,15 @@ def test_history_checkpoint_missing_tail_falls_back_to_assistant(
         output="summary",
         meta={"tail_start_id": tail_id},
     )
+    _part(assistant, 1, type="text", output="retained answer")
     history = async_to_sync(ProviderHistoryService().build)(
         session, exclude_user_message_id=user.id if tail == "excluded" else None
     )
-    assert [row.content for row in history] == [f"{CHECKPOINT_PREFIX}\nsummary", None]
+    assert [row.content for row in history] == [
+        f"{CHECKPOINT_PREFIX}\nsummary",
+        "retained answer",
+    ]
+    assert history[-1].message_id == str(assistant.id)
 
 
 @pytest.mark.django_db
@@ -301,7 +314,9 @@ def test_history_replay_keeps_text_tools_and_steers_in_position_order(
 ) -> None:
     """Checkpoint discovery must not change tool, steer or text replay."""
     session = _session(harness_workspace)
-    first = _message(session, 0, role="assistant", content="legacy answer")
+    first = _message(session, 0, role="assistant", content="stale aggregate")
+    _part(first, 0, type="text", output="first ")
+    _part(first, 1, type="text", output="answer")
     second = _message(session, 1, role="assistant", content="flattened text")
     # Insert rows out of position order; unused parts must not affect replay.
     _part(second, 9, type="text", output="after")
@@ -334,7 +349,7 @@ def test_history_replay_keeps_text_tools_and_steers_in_position_order(
     )
     history = async_to_sync(ProviderHistoryService().build)(session)
     assert [(row.role, row.content) for row in history] == [
-        ("assistant", "legacy answer"),
+        ("assistant", "first answer"),
         ("assistant", "before"),
         ("tool", "body"),
         ("user", "user correction"),
@@ -372,7 +387,6 @@ def test_history_tail_at_position_zero_and_position_gaps(
     assert [row.content for row in history] == [
         f"{CHECKPOINT_PREFIX}\ncheckpoint",
         "keep first",
-        None,
         "keep last",
     ]
 
@@ -416,23 +430,20 @@ def test_history_range_failure_aborts_before_replay(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("turns", [8, 9, 17])
-def test_history_batches_include_assistants_without_parts(
+def test_history_batches_skip_empty_assistant_shells(
     harness_workspace: Any, turns: int
 ) -> None:
     """Empty groups must not skip later assistants or trigger extra batch reads."""
     session = _session(harness_workspace)
     for index in range(turns):
-        _message(session, index, role="assistant", content=f"legacy {index}")
+        _message(session, index, role="assistant", content="unused aggregate")
     # The last assistant owns replayable parts after batches of empty groups.
     last = _message(session, turns, role="assistant", content="flattened")
     _part(last, 1, type="text", output="last answer")
     with CaptureQueriesContext(connection) as queries:
         history = async_to_sync(ProviderHistoryService().build)(session)
     assert len(queries) == 2 + ceil((turns + 1) / HISTORY_PART_BATCH_SIZE)
-    assert [row.content for row in history] == [
-        *(f"legacy {index}" for index in range(turns)),
-        "last answer",
-    ]
+    assert [row.content for row in history] == ["last answer"]
 
 
 @pytest.mark.django_db
@@ -469,18 +480,22 @@ def test_history_cancellation_stops_replay_between_assistants(
     """Batching must preserve cancellation points without preloading all parts."""
     session = _session(harness_workspace)
     for index in range(HISTORY_PART_BATCH_SIZE * 2 + 1):
-        _message(session, index, role="assistant", content="answer")
+        message = _message(session, index, role="assistant")
+        _part(message, 0, type="text", output="answer")
     service = ProviderHistoryService()
-    replayed: list[uuid.UUID] = []
+    replayed: list[LLMMessage] = []
 
-    def cancel_after_first(message: HarnessMessage, *args: Any, **kwargs: Any) -> str:
-        replayed.append(message.id)
+    def cancel_after_first(**kwargs: Any) -> LLMMessage:
+        message = LLMMessage(**kwargs)
+        replayed.append(message)
         task = asyncio.current_task()
         assert task is not None
         task.cancel()
-        return message.content
+        return message
 
-    monkeypatch.setattr(service, "_assistant_history_content", cancel_after_first)
+    monkeypatch.setattr(
+        "apps.harness.provider_history_service.LLMMessage", cancel_after_first
+    )
 
     async def cancel_history() -> None:
         with pytest.raises(asyncio.CancelledError):

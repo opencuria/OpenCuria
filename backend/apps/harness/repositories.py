@@ -850,7 +850,7 @@ class HarnessMessageRepository:
         from_message_id: uuid.UUID | None = None,
         exclude_message_ids: set[uuid.UUID],
     ) -> list[HarnessMessage]:
-        """Read replay fields from a start ID, falling back to *from_position*.
+        """Read replay headers and user text from the retained message suffix.
 
         The caller chooses the fallback. Resolve only session-scoped, eligible
         anchors in the body query, without loading the discarded prefix.
@@ -864,7 +864,14 @@ class HarnessMessageRepository:
             start = Coalesce(Subquery(anchor), Value(from_position))
         return list(
             query.filter(position__gte=start)
-            .only("id", "role", "content")
+            .annotate(
+                history_content=Case(
+                    When(role=HarnessMessageRole.USER, then=F("content")),
+                    default=Value(""),
+                    output_field=TextField(),
+                )
+            )
+            .only("id", "role")
             .order_by("position", "created_at", "id")
         )
 
