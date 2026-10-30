@@ -8,9 +8,14 @@ import difflib
 from pydantic import BaseModel, Field
 
 from ..access.base import sanitize_harness_path
-from ..access.file_types import guess_mime_type
 from ..access.runner_accessor import RunnerAccessorError
 from ..image_processing import image_path_notice, prepare_image
+from ..media.formats import (
+    SUPPORTED_IMAGE_MIMES,
+    is_pdf_attachment,
+    sniff_attachment_mime,
+)
+from ..media.limits import MAX_MEDIA_INGEST_BYTES
 from .base import Tool, ToolContext, ToolError, ToolResult
 from .file_locks import get_lock
 from .truncate import MAX_BYTES, MAX_LINES
@@ -32,16 +37,6 @@ _READ_FOOTER_RESERVE = 256
 # Binary detection: NUL byte in the probed prefix means "not text".
 _BINARY_PROBE_BYTES = 4096
 
-# OpenCode parity: media sniffing + ingestion cap.
-SUPPORTED_IMAGE_MIMES = {
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-}
-SUPPORTED_PDF_MIME = "application/pdf"
-MAX_MEDIA_INGEST_BYTES = 20 * 1024 * 1024
-
 # Bytes probed for magic-byte sniffing (OpenCode ``SAMPLE_BYTES``).
 _MEDIA_SNIFF_BYTES = 4096
 
@@ -49,55 +44,6 @@ _MEDIA_SNIFF_BYTES = 4096
 def _is_binary(content: bytes) -> bool:
     """Return True when *content* looks like a binary file."""
     return b"\x00" in content[:_BINARY_PROBE_BYTES]
-
-
-def _starts_with(content: bytes, prefix: tuple[int, ...]) -> bool:
-    """Return True when *content* starts with the given byte prefix."""
-    if len(content) < len(prefix):
-        return False
-    return all(byte == value for byte, value in zip(content, prefix))
-
-
-def _sniff_image_mime(sample: bytes) -> str | None:
-    """Detect an image MIME from magic bytes (OpenCode ``imageMime``).
-
-    PNG/JPEG/GIF/WEBP are recognized from the first bytes, independent
-    of the file extension. Returns None when no magic matches.
-    """
-    if _starts_with(sample, (0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)):
-        return "image/png"
-    if _starts_with(sample, (0xFF, 0xD8, 0xFF)):
-        return "image/jpeg"
-    if _starts_with(sample, (0x47, 0x49, 0x46, 0x38)):
-        return "image/gif"
-    if _starts_with(sample, (0x52, 0x49, 0x46, 0x46)) and _starts_with(
-        sample[8:], (0x57, 0x45, 0x42, 0x50)
-    ):
-        return "image/webp"
-    return None
-
-
-def sniff_attachment_mime(sample: bytes, path: str, stored_mime: str = "") -> str:
-    """Return the attachment MIME for *sample* (OpenCode parity).
-
-    Magic bytes win over the stored/extension MIME so a JPEG saved as
-    ``.bin`` is still detected as ``image/jpeg``. Falls back to
-    *stored_mime* (runner ``file --mime-type``) and finally to the
-    extension guess.
-    """
-    sniffed = _sniff_image_mime(sample)
-    if sniffed is not None:
-        return sniffed
-    if _starts_with(sample, (0x25, 0x50, 0x44, 0x46)):
-        return SUPPORTED_PDF_MIME
-    if stored_mime and stored_mime != "application/octet-stream":
-        return stored_mime
-    return guess_mime_type(path)
-
-
-def is_pdf_attachment(mime: str) -> bool:
-    """Return True when *mime* denotes a PDF attachment."""
-    return mime == SUPPORTED_PDF_MIME
 
 
 def _media_attachment(

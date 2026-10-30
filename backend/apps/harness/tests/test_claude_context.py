@@ -9,12 +9,11 @@ from typing import Any
 import pytest
 
 from apps.harness.access.file_types import FileContent
-from apps.harness.engines.shared import media
-from apps.harness.engines.shared.media import (
+from apps.harness.media import context as media
+from apps.harness.media.context import MediaLimitError, build_user_content
+from apps.harness.media.limits import (
     MAX_CLAUDE_TOOL_ARGUMENT_BYTES,
     MAX_USER_CONTENT_BYTES,
-    MediaLimitError,
-    build_user_content,
 )
 from apps.harness.providers.base import LLMMessage
 from apps.harness.tests.conftest import TINY_PNG

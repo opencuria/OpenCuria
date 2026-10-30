@@ -24,7 +24,8 @@ from apps.harness.engines.claude.message_projection import (
     MAX_NATIVE_FILE_SNAPSHOT_BYTES,
     NativeFileChangeTracker,
 )
-from apps.harness.engines.shared.media import build_user_content, data_url_block
+from apps.harness.media.context import build_user_content
+from apps.harness.media.formats import data_url_block
 from apps.harness.providers.base import LLMMessage
 from apps.harness.tests.conftest import TINY_PNG, make_image
 from apps.harness.tools import default_tool_registry

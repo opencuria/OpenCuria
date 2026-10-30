@@ -19,7 +19,7 @@ from claude_agent_sdk.types import Message
 
 from ...agents.definitions import canonical_subagent_type
 from ...providers.base import Usage
-from ..shared.security import redact_text
+from ...redaction import redact_text
 from .events import ClaudeEventNormalizer, StepState
 from .runtime_state import CLI_TOTAL_COST_KEY
 

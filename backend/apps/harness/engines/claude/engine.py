@@ -25,10 +25,12 @@ from ...access.base import (
 )
 from ...agents.definitions import AgentDefinition, get_agent
 from ...constants import DEFAULT_MAX_DEPTH
+from ...media.context import build_user_content, mcp_content_blocks
 from ...permissions.evaluator import DEFAULT_GLOBAL_RULES, PermissionEvaluator
 from ...prompts.composer import ComposedPrompt
 from ...prompts.opencuria import opencuria_context
 from ...providers.base import LLMMessage, ToolSchema, Usage
+from ...redaction import StreamingRedactor, redact_text, redact_value
 from ...todos.service import TodoService
 from ...tools.base import ToolContext, ToolError, ToolRegistry, ToolResult
 from ..base import RunOptions, RunResult
@@ -38,8 +40,6 @@ from ..catalog import (
     normalize_claude_effort,
     resolve_claude_sdk_model,
 )
-from ..shared.media import build_user_content, mcp_content_blocks
-from ..shared.security import StreamingRedactor, redact_text, redact_value
 from .errors import ClaudeTranscriptError
 from .events import ClaudeEventNormalizer, StepState
 from .mcp_bridge import mcp_attachment_content, sanitize_mcp_attachments

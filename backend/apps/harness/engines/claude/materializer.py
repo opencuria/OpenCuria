@@ -9,7 +9,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ...tools.files import MAX_MEDIA_INGEST_BYTES
+from ...media.limits import MAX_MEDIA_INGEST_BYTES
 
 MAX_STAGED_ATTACHMENT_COUNT = 8
 MAX_STAGED_ATTACHMENT_TOTAL_BYTES = 24 * 1024 * 1024

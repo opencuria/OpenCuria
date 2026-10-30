@@ -13,13 +13,13 @@ from PIL import Image
 
 from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.media import user_input
-from apps.harness.engines.shared import media
 from apps.harness.image_processing import (
     MAX_IMAGE_EDGE,
     MAX_IMAGE_PREVIEW_BYTES,
     MAX_IMAGE_SOURCE_BYTES,
     prepare_image,
 )
+from apps.harness.media import context as media
 from apps.harness.providers.base import LLMMessage
 from apps.harness.tests.conftest import TINY_PNG, make_image
 from apps.harness.tests.test_claude_context import MediaAccessor

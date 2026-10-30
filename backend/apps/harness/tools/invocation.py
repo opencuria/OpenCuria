@@ -12,7 +12,7 @@ from asgiref.sync import sync_to_async
 
 from ..access.base import WorkspaceAccessor
 from ..agents.definitions import AgentDefinition
-from ..images import build_tool_message_content
+from ..media.attachments import build_tool_message_content
 from ..permissions.evaluator import ASK, DEFAULT_GLOBAL_RULES, DENY, PermissionEvaluator
 from ..providers.base import LLMMessage, ToolSchema
 from ..todos.service import TodoService

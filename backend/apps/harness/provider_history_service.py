@@ -15,7 +15,10 @@ from typing import Any
 from asgiref.sync import sync_to_async
 
 from .compaction import CHECKPOINT_PREFIX
-from .images import build_tool_message_content, select_persisted_tool_attachments
+from .media.attachments import (
+    build_tool_message_content,
+    select_persisted_tool_attachments,
+)
 from .models import HarnessMessage, HarnessPart, HarnessSession
 from .providers.base import LLMMessage
 from .repositories import HarnessMessageRepository, HarnessPartRepository

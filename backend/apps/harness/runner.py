@@ -47,12 +47,8 @@ from .compaction import (
 )
 from .constants import DEFAULT_MAX_DEPTH
 from .engines import base as engine_contracts
-from .engines.shared.media import (
-    AuthorizeRead,
-    hydrate_image_messages,
-    limit_image_messages,
-)
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
+from .media.context import AuthorizeRead, hydrate_image_messages, limit_image_messages
 from .permissions.evaluator import PermissionEvaluator
 from .prompts.composer import compose_system_prompt
 from .provider_retry import (

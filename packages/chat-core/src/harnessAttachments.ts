@@ -1,7 +1,7 @@
 /**
  * Tool image/PDF attachments persisted in `HarnessPart.meta.attachments`.
  *
- * Mirrors `backend/apps/harness/images.py::select_persisted_tool_attachments`:
+ * Mirrors `backend/apps/harness/media/attachments.py::select_persisted_tool_attachments`:
  * the backend stores at most `TOOL_ATTACHMENT_MAX_COUNT` entries shaped as
  * `{type: "file", mime, url: "data:...;base64,..."}` (images and PDFs alike).
  * All readers here are defensive: broken `meta` never throws, invalid entries
@@ -15,11 +15,11 @@ export interface ToolAttachment {
   type: string;
   mime: string;
   url: string;
-  /** Original filename (backend `images.py` persists it, may be `""`). */
+  /** Original filename (backend `media/attachments.py` persists it, may be `""`). */
   filename?: string;
 }
 
-/** Backend cap (`TOOL_ATTACHMENT_MAX_COUNT` in `images.py`): max 2 entries. */
+/** Backend cap (`TOOL_ATTACHMENT_MAX_COUNT` in `media/limits.py`): max 2 entries. */
 export const TOOL_ATTACHMENT_MAX_COUNT = 2;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

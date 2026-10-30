@@ -19,7 +19,6 @@ from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from common.exceptions import NotFoundError
 
 from .agents.definitions import get_agent
-from .engines.shared.security import redact_action, redact_title
 from .models import HarnessMessage, HarnessSession
 from .permissions.evaluator import ASK, DENY, PermissionEvaluator
 from .permissions.scopes import (
@@ -28,6 +27,7 @@ from .permissions.scopes import (
     permission_scope,
 )
 from .permissions.service import PermissionService
+from .redaction import redact_action, redact_title
 from .repositories import HarnessSessionRepository, QuestionRequestRepository
 
 log = structlog.get_logger(__name__)

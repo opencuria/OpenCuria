@@ -384,7 +384,7 @@ class ChatGPTAdapter(ProviderAdapter):
         Agent-S wire messages carry PNG ``image_url`` data URLs (see
         ``HarnessCompletionAdapter._wire_to_harness``); without this the
         run would go blind on ``chatgpt/*``. Canonical PDF ``file`` parts
-        (see :mod:`apps.harness.images`) also lower to ``input_file``
+        (see :mod:`apps.harness.media.attachments`) also lower to ``input_file``
         items so read-tool PDF attachments reach the model. Keeps the
         OpenAI-Responses shapes (``openai-responses.ts`` parity:
         ``{type: "input_image", image_url}`` / ``input_file``).

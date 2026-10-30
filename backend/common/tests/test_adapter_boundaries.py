@@ -94,6 +94,7 @@ import ast
 import os
 import subprocess
 import sys
+from graphlib import TopologicalSorter
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -1519,3 +1520,84 @@ def test_credentials_and_plugins_delegate_queryset_operations_to_repositories() 
         "credential and plugin services consume their results:\n"
         + "\n".join(violations)
     )
+
+
+def test_shared_media_never_imports_its_engine_or_tool_consumers() -> None:
+    """Media formats, hydration and redaction belong below all harness engines."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    roots = {
+        module
+        for module in modules
+        if module == "apps.harness.media"
+        or module.startswith("apps.harness.media.")
+        or module == "apps.harness.redaction"
+    }
+    assert "apps.harness.media.context" in roots
+    dependencies = {
+        module: _imported_modules(modules[module], trees[modules[module]])
+        for module in modules
+    }
+    # The shared package must also remain internally acyclic.
+    tuple(TopologicalSorter({m: dependencies[m] & roots for m in roots}).static_order())
+    consumers = {
+        "apps.harness.engines",
+        "apps.harness.tools",
+        "apps.harness.runner",
+        "apps.harness.harness_service",
+    }
+    pending = set(roots)
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        for imported in dependencies[module]:
+            if any(
+                imported == name or imported.startswith(f"{name}.")
+                for name in consumers
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Engines and tools consume shared media policy, formats and redaction; "
+        "the shared implementation must not import them, even transitively "
+        "or through function-local imports:\n" + "\n".join(sorted(violations))
+    )
+
+
+def test_media_formats_and_references_load_without_application_setup() -> None:
+    """Shared attachment records and parsers never load tool or engine adapters."""
+    env = os.environ.copy()
+    env.pop("DJANGO_SETTINGS_MODULE", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from apps.harness.media import attachments, formats, references\n"
+            "from apps.harness import redaction\n"
+            "assert not {'django', 'apps.harness.engines', 'apps.harness.tools'} "
+            "& sys.modules.keys()\n",
+        ],
+        cwd=BACKEND_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_engines_never_source_media_policy_from_the_read_tool() -> None:
+    """MIME detection and ingestion limits have one shared, tool-free owner."""
+    engine_root = APPS_ROOT / "harness" / "engines"
+    violations = sorted(
+        str(path.relative_to(BACKEND_ROOT))
+        for path in engine_root.rglob("*.py")
+        if "apps.harness.tools.files"
+        in _imported_modules(path, ast.parse(path.read_text()))
+    )
+    assert violations == [], "Import media formats/limits directly: " + str(violations)

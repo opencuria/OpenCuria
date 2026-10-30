@@ -93,7 +93,7 @@ async def test_read_image_detected_from_content_not_extension() -> None:
     """JPEG magic bytes with a .bin name return an image attachment."""
     import base64
 
-    from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
+    from apps.harness.media.limits import MAX_MEDIA_INGEST_BYTES
 
     jpeg = make_image(format="JPEG")
     accessor = FakeAccessor(files={"/workspace/image.bin": jpeg})
@@ -148,7 +148,7 @@ async def test_read_pdf_happy_path() -> None:
 async def test_read_image_over_ingestion_limit_returns_path() -> None:
     """Oversized images return a usable file reference without an attachment."""
     from apps.harness.access.file_types import FileContent
-    from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
+    from apps.harness.media.limits import MAX_MEDIA_INGEST_BYTES
 
     jpeg = b"\xff\xd8\xff" + b"x" * 8
 

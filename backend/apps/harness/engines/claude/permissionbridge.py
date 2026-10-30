@@ -10,9 +10,9 @@ from typing import Any
 from ...agents.definitions import AgentDefinition, canonical_subagent_type, get_agent
 from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
+from ...redaction import redact_action, redact_arguments, redact_title
 from ...tools.base import ToolRegistry
 from ..base import RunOptions
-from ..shared.security import redact_action, redact_arguments, redact_title
 from ..shared.shellpolicy import shell_command_is_explore_safe
 from .events import ClaudeEventNormalizer, StepState
 from .policy import (

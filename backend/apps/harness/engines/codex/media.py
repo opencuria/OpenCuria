@@ -12,15 +12,10 @@ from typing import Any
 
 from ...access.base import WorkspaceAccessor, sanitize_harness_path
 from ...access.file_types import guess_mime_type
+from ...media.context import _read_media_no_follow, build_user_content
+from ...media.formats import content_blocks, data_url_block
+from ...media.limits import MAX_CLAUDE_DOCUMENT_BYTES, MAX_USER_CONTENT_BYTES
 from ..base import RunOptions
-from ..shared.media import (
-    MAX_CLAUDE_DOCUMENT_BYTES,
-    MAX_USER_CONTENT_BYTES,
-    _read_media_no_follow,
-    build_user_content,
-    content_blocks,
-    data_url_block,
-)
 
 PDF_TIMEOUT = 10
 MAX_PDF_TEXT_BYTES = 512 * 1024

@@ -7,12 +7,9 @@ import base64
 import pytest
 
 from apps.harness.compaction import build_compaction_prompt, estimate_message_tokens
-from apps.harness.images import (
-    IMAGE_TOKEN_ESTIMATE,
-    hydrate_user_messages,
-    hydrate_workspace_images,
-    resolve_workspace_image_path,
-)
+from apps.harness.media.context import hydrate_image_messages
+from apps.harness.media.limits import IMAGE_TOKEN_ESTIMATE
+from apps.harness.media.references import resolve_workspace_image_path
 from apps.harness.providers.base import LLMMessage
 from apps.harness.tests.conftest import TINY_PNG, FakeAccessor
 
@@ -23,7 +20,11 @@ async def test_hydrate_workspace_image_adds_data_url() -> None:
     png_bytes = TINY_PNG
     accessor = FakeAccessor(files={"/workspace/cat.png": png_bytes})
     content = "see ![cat](/workspace/cat.png)"
-    hydrated = await hydrate_workspace_images(content, accessor)
+    hydrated = (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=content)], accessor
+        )
+    )[0].content
     assert isinstance(hydrated, list)
     assert hydrated[0] == {"type": "text", "text": "see "}
     assert hydrated[1] == {"type": "text", "text": "![cat](/workspace/cat.png)"}
@@ -37,7 +38,11 @@ async def test_hydrate_missing_image_keeps_text_only() -> None:
     """Missing files are skipped without raising."""
     accessor = FakeAccessor(files={})
     content = "see ![cat](/workspace/missing.png)"
-    hydrated = await hydrate_workspace_images(content, accessor)
+    hydrated = (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=content)], accessor
+        )
+    )[0].content
     assert isinstance(hydrated, str)
     assert hydrated.startswith(content)
     assert "Image not loaded" in hydrated
@@ -48,7 +53,11 @@ async def test_hydrate_non_image_markdown_stays_text() -> None:
     """Non-image workspace paths remain plain text."""
     accessor = FakeAccessor(files={"/workspace/a.txt": b"hello"})
     content = "![doc](/workspace/a.txt)"
-    hydrated = await hydrate_workspace_images(content, accessor)
+    hydrated = (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=content)], accessor
+        )
+    )[0].content
     assert hydrated == content
 
 
@@ -62,7 +71,7 @@ async def test_hydrate_user_messages_only_touches_user_role() -> None:
         LLMMessage(role="user", content="![a](/workspace/a.png)"),
         LLMMessage(role="assistant", content="ok"),
     ]
-    hydrated = await hydrate_user_messages(messages, accessor)
+    hydrated = await hydrate_image_messages(messages, accessor)
     assert isinstance(hydrated[1].content, list)
     assert hydrated[0].content == "sys"
     assert hydrated[2].content == "ok"
@@ -90,12 +99,20 @@ async def test_hydrate_relative_image_path() -> None:
     """Relative markdown images hydrate from /workspace."""
     png_bytes = TINY_PNG
     accessor = FakeAccessor(files={"/workspace/cat.png": png_bytes})
-    hydrated = await hydrate_workspace_images("see ![cat](cat.png)", accessor)
+    hydrated = (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content="see ![cat](cat.png)")], accessor
+        )
+    )[0].content
     assert isinstance(hydrated, list)
     assert hydrated[0] == {"type": "text", "text": "see "}
     assert hydrated[2]["type"] == "image_url"
 
-    dotted = await hydrate_workspace_images("![cat](./cat.png)", accessor)
+    dotted = (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content="![cat](./cat.png)")], accessor
+        )
+    )[0].content
     assert isinstance(dotted, list)
     assert dotted[1]["type"] == "image_url"
 
@@ -105,11 +122,23 @@ async def test_hydrate_skips_remote_and_escape_images() -> None:
     """HTTPS and sandbox-escaping dests stay plain text."""
     accessor = FakeAccessor(files={"/workspace/cat.png": b"x"})
     remote = "see ![x](https://example.com/a.png)"
-    assert await hydrate_workspace_images(remote, accessor) == remote
+    assert (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=remote)], accessor
+        )
+    )[0].content == remote
     escaped = "![x](../etc/passwd.png)"
-    assert await hydrate_workspace_images(escaped, accessor) == escaped
+    assert (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=escaped)], accessor
+        )
+    )[0].content == escaped
     outside = "![x](/tmp/x.png)"
-    assert await hydrate_workspace_images(outside, accessor) == outside
+    assert (
+        await hydrate_image_messages(
+            [LLMMessage(role="user", content=outside)], accessor
+        )
+    )[0].content == outside
 
 
 def test_compaction_estimates_image_tokens_without_base64() -> None:
@@ -135,13 +164,13 @@ def test_compaction_estimates_image_tokens_without_base64() -> None:
 
 def test_images_helpers_map_and_cap_attachments() -> None:
     """Image/file helpers map image_url + file parts, keep filename, cap."""
-    from apps.harness.images import (
-        TOOL_ATTACHMENT_MAX_CHARS,
+    from apps.harness.media.attachments import (
         build_tool_message_content,
         select_persisted_tool_attachments,
         tool_message_file_parts,
         tool_message_image_parts,
     )
+    from apps.harness.media.limits import TOOL_ATTACHMENT_MAX_CHARS
 
     attachments = [
         {

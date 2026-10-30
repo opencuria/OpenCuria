@@ -19,9 +19,9 @@ from ...desktop_leases import DesktopLease
 from ...permissions.evaluator import PermissionEvaluator
 from ...prompts.opencuria import opencuria_context
 from ...providers.base import LLMMessage, Usage
+from ...redaction import StreamingRedactor, redact_text, redact_value
 from ...tools.base import ToolRegistry
 from ..base import RunOptions, RunResult
-from ..shared.security import StreamingRedactor, redact_text, redact_value
 from .auth import CodexAuthConfiguration
 from .catalog import CODEX_VERSION, codex_provider
 from .configuration import _toml, runtime_argv, runtime_settings

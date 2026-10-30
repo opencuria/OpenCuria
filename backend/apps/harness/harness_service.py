@@ -60,6 +60,7 @@ from .provider_history_service import ProviderHistoryService
 from .providers.base import ChatOptions, LLMMessage, ProviderAdapter
 from .providers.model_ref import namespaced_model_id, parse_model_ref
 from .providers.models_catalog import normalize_reasoning_effort
+from .redaction import redact_text
 from .repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
@@ -2489,8 +2490,6 @@ class HarnessService:
     @staticmethod
     def _redact_claude_error(error: object, auth: Any | None) -> str:
         """Redact the resolved per-run secret before logging SDK failures."""
-        from .engines.shared.security import redact_text
-
         value = str(error or "Claude run failed")
         token = str(getattr(auth, "token", "") or "")
         if token:

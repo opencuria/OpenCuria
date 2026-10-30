@@ -9,6 +9,8 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
+from ..redaction import redact_text
+
 
 @dataclass
 class ExternalRuntime:
@@ -22,8 +24,6 @@ class ExternalRuntime:
 
     def redact_error(self, error: object) -> str:
         """Bound and redact diagnostics before logging, never expose wire payloads."""
-        from .shared.security import redact_text
-
         return redact_text(str(error), self._secrets)[:1000]
 
     @staticmethod

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from apps.harness.engines.shared.security import StreamingRedactor, redact_text
 from apps.harness.engines.shared.shellpolicy import shell_command_is_explore_safe
+from apps.harness.redaction import StreamingRedactor, redact_text
 
 
 @pytest.mark.parametrize(
@@ -245,7 +245,7 @@ def test_strict_explore_rejects_unknown_or_mutating_commands(command: str) -> No
 
 
 def test_numeric_usage_metadata_is_not_redacted_as_a_token_secret() -> None:
-    from apps.harness.engines.shared.security import redact_value
+    from apps.harness.redaction import redact_value
 
     event = {
         "type": "step_finish",

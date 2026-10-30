@@ -164,7 +164,7 @@ def test_serialize_tool_pdf_file_part_has_no_base64() -> None:
 def test_estimate_tool_image_tokens_uses_image_estimate() -> None:
     """Tool image parts use the constant estimate, not base64 length."""
     from apps.harness.compaction import estimate_message_tokens
-    from apps.harness.images import IMAGE_TOKEN_ESTIMATE
+    from apps.harness.media.limits import IMAGE_TOKEN_ESTIMATE
 
     messages = [
         LLMMessage(

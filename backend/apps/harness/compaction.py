@@ -14,7 +14,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from .images import IMAGE_TOKEN_ESTIMATE
+from .media.limits import IMAGE_TOKEN_ESTIMATE
 from .providers.base import LLMMessage
 
 #: Reserved headroom hint for future compaction selection (not used in usable).

@@ -9,12 +9,13 @@ from typing import Any
 
 from ...access.base import WorkspaceAccessor
 from ...agents.definitions import AgentDefinition
+from ...media.context import mcp_content_blocks
 from ...permissions.evaluator import PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
+from ...redaction import redact_action, redact_title
 from ...tools.base import Tool, ToolContext, ToolRegistry
 from ...tools.invocation import AuthorizedToolDispatcher, _PendingToolCall
 from ..base import RunOptions
-from ..shared.security import redact_action, redact_title
 from ..shared.shellpolicy import shell_command_is_explore_safe
 
 
@@ -259,8 +260,6 @@ class ManagedToolInvoker(AuthorizedToolDispatcher):
 
     async def invoke_mcp(self, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         """Expose checked dynamic content as native MCP without string conversion."""
-        from ..shared.media import mcp_content_blocks
-
         response = await self.invoke(params, **kwargs)
         return {
             "content": mcp_content_blocks(response["contentItems"]),

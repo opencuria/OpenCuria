@@ -145,7 +145,7 @@ def test_normalize_resource_link_and_embedded():
     "mime", ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
 )
 def test_normalize_image_attachment_reaches_model_and_persistence(mime):
-    from apps.harness.images import (
+    from apps.harness.media.attachments import (
         build_tool_message_content,
         select_persisted_tool_attachments,
     )

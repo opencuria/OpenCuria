@@ -1,36 +1,14 @@
-"""Hydrate workspace image markdown into multimodal provider message parts."""
+"""Map tool attachments to provider content and bounded persisted metadata."""
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import structlog
 
-from .access.base import WorkspaceAccessor, sanitize_harness_path
-from .providers.base import LLMMessage
+from .limits import TOOL_ATTACHMENT_MAX_CHARS, TOOL_ATTACHMENT_MAX_COUNT
 
 log = structlog.get_logger(__name__)
-
-#: Any markdown image; workspace vs remote is decided after dest parsing.
-MARKDOWN_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
-
-#: Hydration is image-only (png/jpeg/gif/webp). Videos stay frontend-only.
-_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
-
-_REMOTE_DEST_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|//)", re.IGNORECASE)
-
-IMAGE_TOKEN_ESTIMATE = 1000
-
-#: Max tool attachments persisted into ``HarnessPart.meta`` (no DB column).
-#: Keeps restarts bounded: the read tool emits at most one attachment per
-#: call, so two covers parallel rounds without bloating the JSON meta.
-TOOL_ATTACHMENT_MAX_COUNT = 2
-
-#: Max base64 data-URL chars kept per persisted attachment (~6 MB binary).
-#: Oversized attachments are dropped (text output survives); base64 can
-#: never be truncated without corrupting the image.
-TOOL_ATTACHMENT_MAX_CHARS = 8_000_000
 
 
 def _attachment_mime(attachment: object) -> str:
@@ -180,64 +158,3 @@ def select_persisted_tool_attachments(
             }
         )
     return kept
-
-
-def parse_markdown_link_dest(raw: str) -> str:
-    """Return the destination path from a markdown link/image dest.
-
-    Strips ``<...>`` wrapping and an optional title (``"..."``, ``'...'``,
-    or parenthesized) so ``foo.png "caption"`` becomes ``foo.png``.
-    """
-    dest = (raw or "").strip()
-    if dest.startswith("<"):
-        close = dest.find(">")
-        if close >= 0:
-            return dest[1:close].strip()
-        dest = dest[1:].lstrip()
-    for index, char in enumerate(dest):
-        if char.isspace():
-            return dest[:index]
-    return dest
-
-
-def resolve_workspace_image_path(raw_dest: str) -> str | None:
-    """Return a sandboxed ``/workspace/...`` image path, or None.
-
-    Relative dests resolve against ``/workspace``. Remote URLs, path
-    escapes, and non-image extensions return None.
-    """
-    dest = parse_markdown_link_dest(raw_dest)
-    if not dest or _REMOTE_DEST_RE.match(dest):
-        return None
-    try:
-        normalized = sanitize_harness_path(dest)
-        if normalized != "/workspace" and not normalized.startswith("/workspace/"):
-            return None
-    except ValueError:
-        return None
-    lower = normalized.lower()
-    if not any(lower.endswith(ext) for ext in _IMAGE_EXTENSIONS):
-        return None
-    return normalized
-
-
-async def hydrate_workspace_images(
-    content: str,
-    accessor: WorkspaceAccessor,
-) -> str | list[dict[str, Any]]:
-    """Hydrate image mentions and Markdown using the policy shared by all engines."""
-    messages = await hydrate_user_messages(
-        [LLMMessage(role="user", content=content)], accessor
-    )
-    return messages[0].content
-
-
-async def hydrate_user_messages(
-    messages: list[LLMMessage],
-    accessor: WorkspaceAccessor,
-) -> list[LLMMessage]:
-    """Hydrate user images with one count and byte budget for the conversation."""
-    # Shared media also uses this module's Markdown parser and attachment helpers.
-    from .engines.shared.media import hydrate_image_messages
-
-    return await hydrate_image_messages(messages, accessor)

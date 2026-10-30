@@ -1,52 +1,41 @@
-"""Build bounded canonical media blocks and hydrate authorized workspace context.
-
-The base64 block representation is shared across engines. Historical Claude
-limit names remain compatibility aliases for the existing bounded contract.
-"""
+"""Hydrate authorized workspace media against one conversation-wide budget."""
 
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import os
-import re
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ...access.base import WorkspaceAccessor, sanitize_harness_path
-from ...access.file_types import FileContent
-from ...access.runner_accessor import RunnerAccessorError
-from ...image_processing import (
-    MAX_IMAGE_SOURCE_BYTES,
-    image_path_notice,
-    prepare_image,
-)
-from ...images import (
-    MARKDOWN_IMAGE_RE,
-    parse_markdown_link_dest,
-    resolve_workspace_image_path,
-)
-from ...providers.base import LLMMessage
-from ...tools.files import (
-    MAX_MEDIA_INGEST_BYTES,
+from ..access.base import WorkspaceAccessor
+from ..access.file_types import FileContent
+from ..access.runner_accessor import RunnerAccessorError
+from ..access.safe_files import read_file_no_follow
+from ..image_processing import MAX_IMAGE_SOURCE_BYTES, image_path_notice, prepare_image
+from ..providers.base import LLMMessage
+from ..redaction import redact_arguments, redact_text, redact_value
+from .formats import (
+    DATA_URL_RE,
     SUPPORTED_IMAGE_MIMES,
+    content_blocks,
+    document_block,
+    image_block,
+    part_blocks,
     sniff_attachment_mime,
 )
-from .security import redact_arguments, redact_text, redact_value
+from .limits import (
+    MAX_CLAUDE_DOCUMENT_BYTES,
+    MAX_CLAUDE_IMAGE_BASE64_CHARS,
+    MAX_CLAUDE_TOOL_ARGUMENT_BYTES,
+    MAX_USER_CONTENT_BYTES,
+    MAX_USER_IMAGE_BLOCKS,
+    MAX_USER_MEDIA_BLOCKS,
+)
+from .references import media_references, workspace_media_path
 
-MAX_CLAUDE_IMAGE_BASE64_CHARS = 5_000_000
-MAX_CLAUDE_DOCUMENT_BYTES = MAX_MEDIA_INGEST_BYTES
-MAX_USER_IMAGE_BLOCKS = 16
-MAX_USER_MEDIA_BLOCKS = 16
-MAX_USER_CONTENT_BYTES = 12 * 1024 * 1024
-MAX_CLAUDE_TOOL_ARGUMENT_BYTES = 64 * 1024
-_DATA_URL = re.compile(r"^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$")
-_FILE_REFERENCE = re.compile(r'(?<![\w@])@file:(/workspace/[^\s<>"`\\]+)')
-_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
-_MEDIA_EXTENSIONS = (*_IMAGE_EXTENSIONS, ".pdf")
 AuthorizeRead = Callable[[str], Awaitable[bool]]
 _MediaKey = tuple[str, str]
 
@@ -62,24 +51,11 @@ async def _read_media_no_follow(
     reader = getattr(accessor, "read_file_no_follow", None)
     if callable(reader):
         return await reader(path, max_size=max_size)
-    from ...access.safe_files import read_file_no_follow
-
     return await read_file_no_follow(accessor, path, max_size=max_size)
 
 
 class MediaLimitError(ValueError):
     """Raised when user media exceeds a bounded Claude request limit."""
-
-
-@dataclass(frozen=True)
-class _MediaReference:
-    """A user-authored media reference and its exact source span."""
-
-    start: int
-    end: int
-    path: str
-    kind: str
-    markdown: bool
 
 
 @dataclass
@@ -115,13 +91,13 @@ class _RequestPlan:
             if not isinstance(mime, str) or not isinstance(encoded, str):
                 raise ValueError("Claude media block has no valid base64 source")
             if kind == "image":
-                checked = _image_block(mime, encoded)
+                checked = image_block(mime, encoded)
                 self.image_count += 1
                 self.image_bytes += len(
                     base64.b64decode(checked["source"]["data"], validate=True)
                 )
             elif kind == "document":
-                checked = _document_block(mime, encoded, str(block.get("title") or ""))
+                checked = document_block(mime, encoded, str(block.get("title") or ""))
                 self.document_bytes += len(
                     base64.b64decode(checked["source"]["data"], validate=True)
                 )
@@ -135,7 +111,7 @@ class _RequestPlan:
     def add_user_text(self, text: str) -> None:
         """Account for text and media references without opening any files."""
         self.add_text(text)
-        for reference in _media_references(text):
+        for reference in media_references(text):
             if reference.kind == "image" and self.images_as_paths:
                 continue
             if reference.kind == "document" and not self.include_documents:
@@ -161,118 +137,6 @@ class _RequestPlan:
             and self.text_bytes + self.media_chars > MAX_USER_CONTENT_BYTES
         ):
             raise MediaLimitError("Claude request content exceeds the input limit")
-
-
-def _workspace_media_path(path: str) -> str | None:
-    """Return a safe workspace media path, rejecting traversal and external paths."""
-    if not path.startswith("/workspace/") or any(
-        part in {".", ".."} for part in path.split("/")
-    ):
-        return None
-    try:
-        normalized = sanitize_harness_path(path)
-    except ValueError:
-        return None
-    return (
-        normalized
-        if normalized == path and normalized.startswith("/workspace/")
-        else None
-    )
-
-
-def _image_block(mime: str, encoded: str) -> dict[str, Any]:
-    """Return an Anthropic image block from strictly validated base64."""
-    normalized = "image/jpeg" if mime.lower() == "image/jpg" else mime.lower()
-    if normalized not in SUPPORTED_IMAGE_MIMES:
-        raise ValueError(f"Unsupported Claude image media type: {mime}")
-    if not encoded or len(encoded) > MAX_CLAUDE_IMAGE_BASE64_CHARS:
-        raise ValueError("Claude image exceeds the per-image input limit")
-    try:
-        payload = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError):
-        raise ValueError("Claude image contains invalid base64 data") from None
-    if not payload:
-        raise ValueError("Claude image is empty")
-    return {
-        "type": "image",
-        "source": {"type": "base64", "media_type": normalized, "data": encoded},
-    }
-
-
-def _document_block(mime: str, encoded: str, filename: str = "") -> dict[str, Any]:
-    """Return a Claude PDF document block from strictly validated base64."""
-    if mime.lower() != "application/pdf" or not encoded:
-        raise ValueError("Unsupported Claude document media type")
-    if len(encoded) > MAX_CLAUDE_DOCUMENT_BYTES * 4 // 3 + 4:
-        raise ValueError("Claude PDF exceeds the input limit")
-    try:
-        payload = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError):
-        raise ValueError("Claude PDF contains invalid base64 data") from None
-    if not payload.startswith(b"%PDF-") or len(payload) > MAX_CLAUDE_DOCUMENT_BYTES:
-        raise ValueError("Claude PDF is invalid or exceeds the input limit")
-    block: dict[str, Any] = {
-        "type": "document",
-        "source": {"type": "base64", "media_type": "application/pdf", "data": encoded},
-    }
-    if filename:
-        block["title"] = filename[:255]
-    return block
-
-
-def data_url_block(url: str, *, filename: str = "") -> dict[str, Any]:
-    """Parse a data URL without remote fetches or permissive MIME coercion."""
-    match = _DATA_URL.fullmatch(url)
-    if match is None:
-        raise ValueError("Claude multimodal input must use a valid base64 data URL")
-    mime, encoded = match.groups()
-    if mime.lower() == "application/pdf":
-        return _document_block(mime, encoded, filename)
-    return _image_block(mime, encoded)
-
-
-def _part_blocks(part: Any) -> list[dict[str, Any]]:
-    """Convert canonical harness text/image/file parts to Anthropic blocks."""
-    if not isinstance(part, dict):
-        raise ValueError("Claude message content part must be an object")
-    kind = str(part.get("type") or "")
-    if kind == "text":
-        text = part.get("text")
-        return (
-            [{"type": "text", "text": text}] if isinstance(text, str) and text else []
-        )
-    if kind == "image_url":
-        value = part.get("image_url")
-        url = value.get("url") if isinstance(value, dict) else value
-        if not isinstance(url, str):
-            raise ValueError("Claude image_url part has no data URL")
-        block = data_url_block(url)
-        if block["type"] != "image":
-            raise ValueError("Claude image_url part must contain an image")
-        return [block]
-    if kind == "file":
-        url = part.get("url")
-        if not isinstance(url, str):
-            raise ValueError("Claude file part has no data URL")
-        block = data_url_block(url, filename=str(part.get("filename") or ""))
-        if block["type"] != "document":
-            raise ValueError("Claude file part must contain a PDF")
-        mime = str(part.get("mime") or "").lower()
-        if mime and mime != "application/pdf":
-            raise ValueError("Claude file MIME does not match its PDF data URL")
-        return [block]
-    raise ValueError(f"Unsupported Claude message part: {kind or 'unknown'}")
-
-
-def content_blocks(content: str | list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """Convert canonical message content without interpreting arbitrary URLs."""
-    if content is None:
-        return []
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}] if content else []
-    if not isinstance(content, list):
-        raise ValueError("Claude message content has an unsupported shape")
-    return [block for part in content for block in _part_blocks(part)]
 
 
 def checked_content(blocks: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
@@ -315,93 +179,6 @@ def mcp_content_blocks(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             raise ValueError("Inline MCP results support text and images")
     return result or [{"type": "text", "text": ""}]
-
-
-def _code_mask(text: str) -> list[bool]:
-    """Mark fenced and inline code so code examples never trigger file reads."""
-    mask = [False] * len(text)
-    fence: tuple[str, int] | None = None
-    offset = 0
-    for line in text.splitlines(keepends=True):
-        marker = re.match(r" {0,3}(`{3,}|~{3,})", line)
-        if fence is not None:
-            char, length = fence
-            closing = re.match(
-                rf" {{0,3}}{re.escape(char)}{{{length},}}\s*$", line.rstrip("\r\n")
-            )
-            if closing:
-                fence = None
-            mask[offset : offset + len(line)] = [True] * len(line)
-        elif marker:
-            run = marker.group(1)
-            fence = (run[0], len(run))
-            mask[offset : offset + len(line)] = [True] * len(line)
-        offset += len(line)
-
-    ticks = re.compile(r"(?<!`)`+(?!`)")
-    cursor = 0
-    while match := ticks.search(text, cursor):
-        if mask[match.start()]:
-            cursor = match.end()
-            continue
-        delimiter = "`" * (match.end() - match.start())
-        close = re.compile(rf"(?<!`){re.escape(delimiter)}(?!`)").search(
-            text, match.end()
-        )
-        if close is None or mask[close.start()]:
-            cursor = match.end()
-            continue
-        mask[match.start() : close.end()] = [True] * (close.end() - match.start())
-        cursor = close.end()
-    return mask
-
-
-def _media_references(text: str) -> list[_MediaReference]:
-    """Find supported, safe media references outside code using shared spans."""
-    masked = _code_mask(text)
-    found: list[_MediaReference] = []
-    for match in MARKDOWN_IMAGE_RE.finditer(text):
-        if any(masked[match.start() : match.end()]):
-            continue
-        raw_dest = match.group(2)
-        dest = parse_markdown_link_dest(raw_dest)
-        path = resolve_workspace_image_path(raw_dest)
-        if (
-            path is None
-            or ".." in dest.split("/")
-            or not path.lower().endswith(_IMAGE_EXTENSIONS)
-        ):
-            continue
-        found.append(_MediaReference(match.start(), match.end(), path, "image", True))
-
-    for match in _FILE_REFERENCE.finditer(text):
-        raw_path = match.group(1)
-        path = raw_path.rstrip("),;!?]")
-        end = match.start(1) + len(path)
-        if any(masked[match.start() : end]):
-            continue
-        suffix = text[end:]
-        if not path or (suffix and not re.match(r"[\s),;!?\]]", suffix)):
-            continue
-        if any(masked[match.start() : end]):
-            continue
-        safe_path = _workspace_media_path(path)
-        if safe_path is None or not safe_path.lower().endswith(_MEDIA_EXTENSIONS):
-            continue
-        kind = "document" if safe_path.lower().endswith(".pdf") else "image"
-        found.append(_MediaReference(match.start(), end, safe_path, kind, False))
-
-    # Markdown image destinations and visible @file text are mutually exclusive
-    # spans. Prefer the larger Markdown construct if unusual text overlaps them.
-    found.sort(key=lambda item: (item.start, not item.markdown, -item.end))
-    ordered: list[_MediaReference] = []
-    end = -1
-    for reference in found:
-        if reference.start < end:
-            continue
-        ordered.append(reference)
-        end = reference.end
-    return ordered
 
 
 def _tool_call_text(call: dict[str, Any]) -> str:
@@ -462,7 +239,7 @@ def _image_count(messages: list[LLMMessage]) -> int:
             count += sum(
                 reference.kind == "image"
                 for text in _user_texts(message.content)
-                for reference in _media_references(text)
+                for reference in media_references(text)
             )
         if isinstance(message.content, list):
             count += sum(
@@ -489,7 +266,7 @@ async def _prepare_inline_images(
             try:
                 value = part.get("image_url")
                 url = value.get("url") if isinstance(value, dict) else value
-                match = _DATA_URL.fullmatch(url) if isinstance(url, str) else None
+                match = DATA_URL_RE.fullmatch(url) if isinstance(url, str) else None
                 if (
                     match is None
                     or match.group(1).lower() not in SUPPORTED_IMAGE_MIMES
@@ -548,7 +325,7 @@ def _request_plan(
                             if not (
                                 isinstance(part, dict) and part.get("type") == "text"
                             )
-                            for block in _part_blocks(part)
+                            for block in part_blocks(part)
                         ]
                     )
             else:
@@ -665,7 +442,7 @@ class _MediaLoader:
 
     async def load(self, path: str, kind: str) -> dict[str, Any]:
         """Return one validated media block, reading/authorizing a path once."""
-        safe_path = _workspace_media_path(path)
+        safe_path = workspace_media_path(path)
         if safe_path is None:
             raise ValueError("User media reference must stay inside /workspace")
         key = (safe_path, kind)
@@ -721,9 +498,9 @@ class _MediaLoader:
             raise MediaLimitError("Image preview exceeds the remaining request budget")
         encoded = base64.b64encode(stored.content).decode("ascii")
         block = (
-            _image_block(mime, encoded)
+            image_block(mime, encoded)
             if kind == "image"
-            else _document_block(mime, encoded, os.path.basename(safe_path))
+            else document_block(mime, encoded, os.path.basename(safe_path))
         )
         self._remaining[key] -= 1
         self._file_chars += len(encoded)
@@ -744,7 +521,7 @@ async def _user_text_blocks(text: str, loader: _MediaLoader) -> list[dict[str, A
     """Hydrate user refs in-place while retaining visible text and punctuation."""
     output: list[dict[str, Any]] = []
     cursor = 0
-    for reference in _media_references(text):
+    for reference in media_references(text):
         if reference.kind == "document" and not loader._plan.include_documents:
             continue
         if reference.start > cursor:
@@ -807,7 +584,7 @@ async def _history_message_blocks(
                     if isinstance(text, str):
                         blocks.extend(await _user_text_blocks(text, loader))
                         continue
-                blocks.extend(_part_blocks(part))
+                blocks.extend(part_blocks(part))
         else:
             blocks = content_blocks(message.content)
     else:
@@ -943,21 +720,3 @@ def limit_image_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
         else message
         for message in messages
     ]
-
-
-__all__ = [
-    "MAX_CLAUDE_DOCUMENT_BYTES",
-    "MAX_CLAUDE_IMAGE_BASE64_CHARS",
-    "MAX_CLAUDE_TOOL_ARGUMENT_BYTES",
-    "MAX_USER_CONTENT_BYTES",
-    "MAX_USER_IMAGE_BLOCKS",
-    "MAX_USER_MEDIA_BLOCKS",
-    "MediaAuthorizationError",
-    "build_user_content",
-    "checked_content",
-    "content_blocks",
-    "data_url_block",
-    "hydrate_image_messages",
-    "limit_image_messages",
-    "mcp_content_blocks",
-]

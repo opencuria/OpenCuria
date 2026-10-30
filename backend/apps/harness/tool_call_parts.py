@@ -14,7 +14,7 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from .images import select_persisted_tool_attachments
+from .media.attachments import select_persisted_tool_attachments
 from .models import HarnessMessage, HarnessPart, HarnessSession
 from .repositories import HarnessPartRepository
 
