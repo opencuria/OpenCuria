@@ -33,14 +33,9 @@ class _ServerControl:
     def __init__(self) -> None:
         self.max_sessions: int | None = None
         self.active_sessions = 0
-        self.opened_sessions = 0
         self.closed_sessions = 0
         self.refused_sessions = 0
         self.commands: list[str] = []
-        self.probe_sessions_started = 0
-        self.delay_session_open = False
-        self.release_session_open = asyncio.Event()
-        self.pending_session_opens = 0
         self.stream_releases = {
             "stream-alpha": asyncio.Event(),
             "stream-beta": asyncio.Event(),
@@ -167,7 +162,6 @@ class _TCPRelay:
 class _LocalSSHServer(asyncssh.SSHServer):
     def __init__(self, control: _ServerControl) -> None:
         self._control = control
-        self._connection_closed = asyncio.Event()
 
     def connection_made(self, conn) -> None:
         self._conn = conn
@@ -176,7 +170,6 @@ class _LocalSSHServer(asyncssh.SSHServer):
         self._control.notify()
 
     def connection_lost(self, exc) -> None:
-        self._connection_closed.set()
         if hasattr(self, "_conn"):
             self._control.connections.discard(self._conn)
         self._control.notify()
@@ -199,40 +192,7 @@ class _LocalSSHServer(asyncssh.SSHServer):
                 asyncssh.OPEN_RESOURCE_SHORTAGE, "test MaxSessions limit reached"
             )
 
-        if control.delay_session_open:
-            control.pending_session_opens += 1
-            control.notify()
-            release_task = asyncio.create_task(control.release_session_open.wait())
-            closed_task = asyncio.create_task(self._connection_closed.wait())
-            try:
-                await asyncio.wait(
-                    {release_task, closed_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                # Closing the probe transport must unblock a deliberately
-                # delayed session request without opening a late channel.
-                if self._connection_closed.is_set():
-                    return False
-            finally:
-                for task in (release_task, closed_task):
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(release_task, closed_task, return_exceptions=True)
-                control.pending_session_opens -= 1
-                control.notify()
-
-            if (
-                control.max_sessions is not None
-                and control.active_sessions >= control.max_sessions
-            ):
-                control.refused_sessions += 1
-                control.notify()
-                raise asyncssh.ChannelOpenError(
-                    asyncssh.OPEN_RESOURCE_SHORTAGE, "test MaxSessions limit reached"
-                )
-
         control.active_sessions += 1
-        control.opened_sessions += 1
         control.notify()
         return _LocalSSHSession(control)
 
@@ -254,19 +214,10 @@ class _LocalSSHSession(asyncssh.SSHServerSession):
         return True
 
     def session_started(self) -> None:
-        if self._command == "echo ok":
-            self._control.probe_sessions_started += 1
-            self._control.notify()
         self._control.start_task(self._serve())
 
     async def _serve(self) -> None:
         try:
-            if self._command == "echo ok":
-                # Keep health channels open until the owning probe transport
-                # closes, forcing check_reachable to be cancelled by its caller.
-                await self._closed.wait()
-                return
-
             for marker in self._control.stream_releases:
                 if marker in self._command:
                     self._channel.write(f"{marker}:ready\n")
@@ -342,9 +293,6 @@ async def ssh_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     try:
         yield runtime, control
     finally:
-        # Unblock fallback cases where an assertion failed during a delayed
-        # open, then close every client transport, including ephemeral probes.
-        control.release_session_open.set()
         for conn in control.client_connections:
             conn.close()
         await asyncio.gather(
@@ -398,73 +346,6 @@ async def _finish_stream(
     await _wait_until(lambda: control.closed_sessions == closed_before + 1)
 
 
-async def _cancel_probe_after_open(
-    runtime: QemuRuntime, control: _ServerControl, expected_probe: int
-) -> None:
-    task = asyncio.create_task(runtime.check_reachable("vm"))
-    await control.wait_for(
-        lambda count=expected_probe: control.probe_sessions_started >= count
-    )
-    state = runtime._ssh_state("vm")
-    probe_connection = state.probe_connection
-    assert state.probing
-    assert probe_connection is not None
-    assert probe_connection is not state.connection
-
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await _wait_until(lambda: probe_connection.is_closed())
-    await _wait_until(lambda count=expected_probe: control.closed_sessions >= count)
-    assert not state.probing
-    assert state.probe_connection is None
-
-
-async def test_repeated_timed_out_and_cancelled_probes_preserve_two_streams(
-    ssh_harness,
-) -> None:
-    runtime, control = ssh_harness
-    alpha = await _start_stream(runtime, "stream-alpha")
-    beta = await _start_stream(runtime, "stream-beta")
-    await control.wait_for(lambda: control.active_sessions == 2)
-    state = runtime._ssh_state("vm")
-    shared_connection = state.connection
-    assert shared_connection is not None and not shared_connection.is_closed()
-
-    # Timed-out probes use separate transports and close those transports,
-    # while both long-lived agent streams retain their shared parent channel.
-    for expected in (1, 2):
-        probe = asyncio.create_task(runtime.check_reachable("vm"))
-        await control.wait_for(
-            lambda count=expected: control.probe_sessions_started >= count
-        )
-        probe_connection = state.probe_connection
-        assert state.probing
-        assert probe_connection is not None
-        assert probe_connection is not shared_connection
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(probe, timeout=0.03)
-        await _wait_until(lambda count=expected: control.closed_sessions >= count)
-        await _wait_until(lambda conn=probe_connection: conn.is_closed())
-        assert not state.probing
-        assert state.probe_connection is None
-        assert state.connection is shared_connection
-        assert not shared_connection.is_closed()
-        assert control.active_sessions == 2
-        await control.wait_for(lambda: len(control.connections) == 1)
-
-    await _cancel_probe_after_open(runtime, control, 3)
-    assert state.connection is shared_connection
-    assert not shared_connection.is_closed()
-    assert control.active_sessions == 2
-
-    await _finish_stream(runtime, control, alpha, "stream-alpha")
-    await _finish_stream(runtime, control, beta, "stream-beta")
-    await control.wait_for(lambda: control.active_sessions == 0)
-    assert state.connection is shared_connection
-    assert not shared_connection.is_closed()
-
-
 async def test_channel_resource_shortage_does_not_close_parent_or_streams(
     ssh_harness,
 ) -> None:
@@ -478,10 +359,8 @@ async def test_channel_resource_shortage_does_not_close_parent_or_streams(
     assert shared_connection is not None
 
     with pytest.raises(asyncssh.ChannelOpenError):
-        await runtime.check_reachable("vm")
+        await runtime.exec_command_wait("vm", ["refused-command"])
     assert control.refused_sessions == 1
-    await _wait_until(lambda: not state.probing)
-    assert state.probe_connection is None
     await control.wait_for(lambda: len(control.connections) == 1)
     assert control.active_sessions == 2
     assert state.connection is shared_connection
@@ -491,46 +370,6 @@ async def test_channel_resource_shortage_does_not_close_parent_or_streams(
     await _finish_stream(runtime, control, beta, "stream-beta")
     await control.wait_for(lambda: control.active_sessions == 0)
     assert not shared_connection.is_closed()
-
-
-async def test_cancelled_probe_at_delayed_channel_open_closes_its_transport(
-    ssh_harness,
-) -> None:
-    runtime, control = ssh_harness
-    control.delay_session_open = True
-
-    probe = asyncio.create_task(runtime.check_reachable("vm"))
-    await control.wait_for(lambda: control.pending_session_opens == 1)
-    state = runtime._ssh_state("vm")
-    delayed_connection = state.probe_connection
-    assert state.probing
-    assert delayed_connection is not None
-
-    # A concurrent check observes the active probe and does not open another
-    # client transport while the server is withholding its channel-open reply.
-    assert await runtime.check_reachable("vm") is False
-    assert control.connection_count == 1
-    assert control.pending_session_opens == 1
-
-    probe.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await probe
-    await _wait_until(lambda: delayed_connection.is_closed())
-    await _wait_until(lambda: control.pending_session_opens == 0)
-    await _wait_until(lambda: not control.connections)
-    assert not state.probing
-    assert state.probe_connection is None
-    assert control.opened_sessions == 0
-
-    # A new check can immediately open its own connection and channel; the
-    # aborted open above did not linger or consume a server session slot.
-    control.delay_session_open = False
-    await _cancel_probe_after_open(runtime, control, 1)
-    await _wait_until(lambda: control.active_sessions == 0)
-    await _wait_until(lambda: not control.connections)
-    assert control.opened_sessions == 1
-    assert control.closed_sessions == 1
-    assert control.connection_count == 2
 
 
 async def test_parallel_get_ssh_reconnects_after_real_disconnect_without_replay(
@@ -594,13 +433,9 @@ async def test_keepalive_survives_exec_channel_refusals(ssh_harness) -> None:
     shared_connection = await runtime._get_ssh("vm")
     shared_connection.set_keepalive(0.02, 1)
 
-    # Check one refusal on the shared transport itself, then exercise the
-    # runtime health probe which owns and closes a separate refused transport.
     with pytest.raises(asyncssh.ChannelOpenError):
-        await shared_connection.create_process("echo ok")
-    with pytest.raises(asyncssh.ChannelOpenError):
-        await runtime.check_reachable("vm")
-    await control.wait_for(lambda: control.refused_sessions == 2)
+        await runtime.exec_command_wait("vm", ["refused-command"])
+    await control.wait_for(lambda: control.refused_sessions == 1)
     await _wait_until(lambda: len(control.connections) == 1)
 
     await asyncio.wait_for(asyncio.sleep(0.1), timeout=0.2)

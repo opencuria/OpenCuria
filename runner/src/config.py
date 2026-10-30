@@ -50,12 +50,6 @@ class RunnerSettings(BaseSettings):
     desktop_lease_workers: int = 4
     stream_shutdown_timeout: float = 10
 
-    # SSH health check — self-healing for QEMU workspaces that become unreachable
-    ssh_health_check_interval: int = 30  # seconds between SSH reachability checks
-    ssh_unreachable_timeout: int = (
-        90  # seconds before an unreachable workspace is restarted
-    )
-
     # Logging
     log_level: str = "INFO"
     log_format: Literal["json", "console"] = "console"

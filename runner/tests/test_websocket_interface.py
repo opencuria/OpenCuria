@@ -26,7 +26,6 @@ class DummyService:
             get_workspace_heartbeat_statuses=AsyncMock(return_value=[]),
         )
         self.lifecycle = SimpleNamespace(
-            run_health_check_loop=AsyncMock(),
             create_workspace=AsyncMock(side_effect=self._create_workspace),
             inject_credentials=AsyncMock(side_effect=self._inject_credentials),
         )

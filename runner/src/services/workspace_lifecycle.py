@@ -8,9 +8,7 @@ websocket's durable workspace state.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import wraps
@@ -60,7 +58,6 @@ class WorkspaceLifecycle:
     def __init__(
         self,
         registry: WorkspaceRegistry,
-        settings: Any | None = None,
         runtime: RuntimeBackend | None = None,
         credentials: Any | None = None,
         exec_harness_command: (
@@ -74,17 +71,12 @@ class WorkspaceLifecycle:
         self.checkpoint_hook = None
         self.scrub_proof_hook = None
         self._registry = registry
-        self._settings = settings
         self._runtime = runtime
         self._credentials = credentials
         self._exec_harness_command = exec_harness_command
         self._background = background
         self._streams = streams
         self._desktop = desktop
-        # Self-healing: tracks when each workspace was first found
-        # unreachable. Cleared once the workspace becomes reachable
-        # again.
-        self._unreachable_since: dict[uuid.UUID, float] = {}
 
     async def _confirm_workspace_ended(
         self, info: WorkspaceInfo, operation: str
@@ -419,82 +411,3 @@ class WorkspaceLifecycle:
         await runtime.remove_workspace(info.instance_id)
         await self._confirm_workspace_ended(info, "remove")
         self._registry._cache.pop(workspace_id, None)
-        self._unreachable_since.pop(workspace_id, None)
-
-    # -- self-healing SSH health check -------------------------------------
-
-    async def _check_workspace_reachable(
-        self, workspace_id: uuid.UUID, info: WorkspaceInfo
-    ) -> bool:
-        """Return True if the runtime's lightweight reachability probe succeeds.
-
-        Uses a short timeout so the loop does not block for a long time.
-        """
-        runtime = self._runtime
-        if runtime is None or not info.instance_id:
-            return True  # cannot check — assume reachable to avoid false restarts
-
-        try:
-            return await asyncio.wait_for(
-                runtime.check_reachable(info.instance_id),
-                timeout=15,
-            )
-        except Exception:
-            return False
-
-    async def run_health_check_loop(self) -> None:
-        """Report unreachable guests without altering their runtime state."""
-        interval = self._settings.ssh_health_check_interval
-        timeout = self._settings.ssh_unreachable_timeout
-
-        log = logger.bind(loop="health_check")
-        log.info(
-            "health_check_loop_started",
-            check_interval_s=interval,
-            unreachable_timeout_s=timeout,
-        )
-
-        while True:
-            try:
-                await asyncio.sleep(interval)
-
-                # Snapshot the cache — do not hold it across awaits.
-                candidates = [
-                    (ws_id, info)
-                    for ws_id, info in self._registry._cache.items()
-                    if info.status == "running"
-                ]
-
-                for ws_id, info in candidates:
-                    reachable = await self._check_workspace_reachable(ws_id, info)
-
-                    if reachable:
-                        # Clear any existing failure timer.
-                        self._unreachable_since.pop(ws_id, None)
-                        continue
-
-                    # Workspace is unreachable.
-                    first_failure = self._unreachable_since.setdefault(
-                        ws_id, time.monotonic()
-                    )
-                    unreachable_for = time.monotonic() - first_failure
-
-                    log.warning(
-                        "workspace_unreachable",
-                        workspace_id=str(ws_id),
-                        unreachable_for_s=round(unreachable_for),
-                        threshold_s=timeout,
-                    )
-
-                    # Unreachable SSH is health evidence, never reset authority.
-                    if unreachable_for >= timeout:
-                        log.error(
-                            "workspace_unhealthy_requires_intervention",
-                            workspace_id=str(ws_id),
-                        )
-
-            except asyncio.CancelledError:
-                log.info("health_check_loop_stopped")
-                break
-            except Exception:
-                log.exception("health_check_loop_error")

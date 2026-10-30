@@ -218,8 +218,8 @@ async def test_public_start_replaces_silent_transport_from_stopped_guest(runtime
     assert runtime._ssh_state("vm").connection is new
 
 
-@pytest.mark.parametrize("operation", ["stop", "restart", "remove"])
-async def test_public_lifecycle_fences_late_probe_and_shared_connect(
+@pytest.mark.parametrize("operation", ["stop", "remove"])
+async def test_public_lifecycle_fences_late_and_queued_connections(
     runtime, operation
 ):
     import libvirt
@@ -240,58 +240,15 @@ async def test_public_lifecycle_fences_late_probe_and_shared_connect(
     runtime._libvirt_conn.return_value.lookupByName.return_value = domain
     runtime._assert_workspace_resources_unconsumed = AsyncMock()
     runtime._destroy_workspace_network = AsyncMock()
-    # Test restart invalidation independently of subsequent startup readiness.
-    if operation == "restart":
-        runtime._wait_for_ssh = AsyncMock()
     with patch("src.runtime.qemu_runtime.asyncssh.connect", new=delayed_connect):
-        probe = asyncio.create_task(runtime.check_reachable("vm"))
-        await connecting.wait()
         acquire = asyncio.create_task(runtime._get_ssh("vm"))
+        await connecting.wait()
+        queued = asyncio.create_task(runtime._get_ssh("vm"))
         await asyncio.sleep(0)
         await getattr(runtime, f"{operation}_workspace")("vm")
         finish.set()
-        for task in (probe, acquire):
+        for task in (acquire, queued):
             with pytest.raises(RuntimeError, match="SSH lifecycle changed"):
                 await task
     candidate.close.assert_called_once()
-    assert not runtime._ssh_state("vm").probing
     assert runtime._ssh_state("vm").connection is None
-
-
-async def test_invalidation_closes_only_owned_probe_and_shared_transport(runtime):
-    state = runtime._ssh_state("vm")
-    shared, probe = connection(), connection()
-    state.connection = shared
-    state.probe_connection = probe
-    await runtime._invalidate_ssh("vm")
-    for conn in (shared, probe):
-        conn.close.assert_called_once()
-        conn.wait_closed.assert_awaited_once()
-    assert state.blocked
-    assert state.connection is None and state.probe_connection is None
-
-
-async def test_probe_cancellation_during_cleanup_aborts_its_transport(runtime):
-    waiting = asyncio.Event()
-    conn = connection()
-    process = MagicMock(exit_status=0)
-    process.wait_closed = AsyncMock()
-    conn.create_process = AsyncMock(return_value=process)
-
-    async def stalled_close():
-        waiting.set()
-        await asyncio.Event().wait()
-
-    conn.wait_closed = stalled_close
-    runtime._save_tofu_key = AsyncMock()
-    with patch(
-        "src.runtime.qemu_runtime.asyncssh.connect", new=AsyncMock(return_value=conn)
-    ):
-        task = asyncio.create_task(runtime.check_reachable("vm"))
-        await waiting.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    conn.abort.assert_called_once()
-    assert not runtime._ssh_state("vm").probing
-    assert runtime._ssh_state("vm").probe_connection is None

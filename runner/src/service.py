@@ -86,7 +86,6 @@ class WorkspaceService:
         self.desktop = DesktopManager(runtime, get_cached, get_runtime)
         self.lifecycle = WorkspaceLifecycle(
             self.registry,
-            settings,
             runtime,
             self.credentials,
             self.harness.exec_harness_command,

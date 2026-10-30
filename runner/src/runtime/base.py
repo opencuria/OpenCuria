@@ -150,17 +150,6 @@ class RuntimeBackend(abc.ABC):
             f"{self.__class__.__name__} does not support reconfigure_workspace"
         )
 
-    async def restart_workspace(self, instance_id: str) -> None:
-        """Force-restart a workspace (hard reset, then start).
-
-        Used by the self-healing health-check loop when a workspace becomes
-        unreachable.  The default implementation performs a stop followed by
-        a start.  Runtimes that support a faster hard-reset (e.g. QEMU
-        virDomainDestroy + virDomainCreate) should override this method.
-        """
-        await self.stop_workspace(instance_id)
-        await self.start_workspace(instance_id)
-
     async def inventory(self) -> RuntimeInventory:
         """Return a full physical graph or explicit incomplete inspection."""
         return RuntimeInventory(errors=["Inventory unsupported"])
@@ -174,15 +163,6 @@ class RuntimeBackend(abc.ABC):
     @abc.abstractmethod
     async def get_workspace_status(self, instance_id: str) -> RuntimeStatus:
         """Return current status information for the workspace."""
-
-    async def check_reachable(self, instance_id: str) -> bool:
-        """Return whether a lightweight command can run in the workspace.
-
-        Runtime implementations may override this with a transport-specific
-        probe. The default uses the runtime's normal command execution path.
-        """
-        exit_code, _ = await self.exec_command_wait(instance_id, ["echo", "ok"])
-        return exit_code == 0
 
     @abc.abstractmethod
     async def list_workspaces(self) -> list[RuntimeWorkspaceInfo]:

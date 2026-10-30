@@ -94,8 +94,6 @@ class _SSHState:
     connection: asyncssh.SSHClientConnection | None = None
     generation: int = 0
     blocked: bool = False
-    probing: bool = False
-    probe_connection: asyncssh.SSHClientConnection | None = None
 
 
 # Cloud-init template for initial VM network config
@@ -906,14 +904,8 @@ class QemuRuntime(RuntimeBackend):
         state.generation += 1
         state.blocked = True
         conn, state.connection = state.connection, None
-        probe, state.probe_connection = state.probe_connection, None
-        await asyncio.gather(
-            *(
-                self._close_ssh_connection(owned)
-                for owned in (conn, probe)
-                if owned is not None
-            )
-        )
+        if conn is not None:
+            await self._close_ssh_connection(conn)
 
     async def _connect_ssh(
         self,
@@ -1017,46 +1009,6 @@ class QemuRuntime(RuntimeBackend):
                 raise RuntimeError(
                     f"SSH reconnect to VM {instance_id} failed: {exc}"
                 ) from exc
-
-    async def check_reachable(self, instance_id: str) -> bool:
-        """Probe guest execution on an owned, disposable SSH transport.
-
-        A session open can stall before AsyncSSH exposes its channel handle.
-        Owning the probe transport lets cancellation close even that pending
-        channel without disturbing agent streams. The caller bounds the probe;
-        cleanup is bounded separately. At most one probe runs per instance.
-        """
-        state = self._ssh_state(instance_id)
-        generation = state.generation
-        self._check_ssh_generation(state, generation)
-        if state.probing:
-            return False
-        state.probing = True
-        conn = None
-        try:
-            # Serialize authentication/TOFU publication, not probe execution.
-            async with state.lock:
-                conn = await self._open_ssh_transport(
-                    instance_id, state, generation, 10
-                )
-                state.probe_connection = conn
-            process = await conn.create_process(
-                "echo ok",
-                stdin=asyncssh.DEVNULL,
-                stdout=asyncssh.DEVNULL,
-                stderr=asyncssh.DEVNULL,
-            )
-            await process.wait_closed()
-            self._check_ssh_generation(state, generation)
-            return process.exit_status == 0
-        finally:
-            try:
-                if conn is not None:
-                    await self._close_ssh_connection(conn)
-            finally:
-                if state.probe_connection is conn:
-                    state.probe_connection = None
-                state.probing = False
 
     async def _get_vm_ip(self, instance_id: str) -> str:
         """Get the IP address of a running VM.
@@ -1171,36 +1123,6 @@ class QemuRuntime(RuntimeBackend):
             await asyncio.to_thread(domain.create)
             await self._wait_for_ssh(instance_id)
         logger.info("vm_workspace_started", instance_id=instance_id)
-
-    @storage_mutation
-    async def restart_workspace(self, instance_id: str) -> None:
-        """Force-restart a VM for self-healing.
-
-        Unlike ``stop_workspace`` (which waits up to 30 s for graceful ACPI
-        shutdown), this method immediately destroys the domain and starts it
-        again.  It is intentionally fast because it is called only when the
-        VM is already unresponsive.
-        """
-        await self._invalidate_ssh(instance_id)
-
-        def _force_restart() -> None:
-            conn_lv = self._libvirt_conn()
-            try:
-                domain = conn_lv.lookupByName(self._domain_name(instance_id))
-            except libvirt.libvirtError:
-                return  # domain gone — nothing to restart
-            state, _ = domain.state()
-            if state == libvirt.VIR_DOMAIN_RUNNING:
-                try:
-                    domain.destroy()
-                except libvirt.libvirtError:
-                    pass  # already stopped by the time we get here
-            self._ensure_memory_reclaim(domain)
-            domain.create()
-
-        await asyncio.to_thread(_force_restart)
-        await self._wait_for_ssh(instance_id)
-        logger.info("vm_workspace_force_restarted", instance_id=instance_id)
 
     @storage_mutation
     async def reconfigure_workspace(

@@ -89,7 +89,6 @@ class WebSocketInterface(Interface):
         self._cached_heartbeat_workspaces: list[dict] = []
         self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self._health_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._system_metrics = SystemMetricsCollector(settings)
         self._desktop_proxy = DesktopProxy(
             get_guest_ip=lambda workspace_id: (
@@ -557,11 +556,6 @@ class WebSocketInterface(Interface):
             # Start system metrics loop
             if self._metrics_task is None or self._metrics_task.done():
                 self._metrics_task = asyncio.create_task(self._metrics_loop())
-            # Start SSH health check loop (self-healing)
-            if self._health_check_task is None or self._health_check_task.done():
-                self._health_check_task = asyncio.create_task(
-                    self._service.lifecycle.run_health_check_loop()
-                )
 
         @sio.event
         async def disconnect() -> None:
@@ -579,9 +573,6 @@ class WebSocketInterface(Interface):
             # backend waiter is gone after a reconnect, so drop them to
             # bound memory and avoid reassembling stale data.
             self._upload_transfers.clear()
-            # Keep the health check loop running across reconnects — workspaces
-            # can still be unreachable even when the backend connection is down.
-            # The loop will restart automatically on the next connect() if needed.
 
         @sio.event
         async def connect_error(data: object) -> None:
@@ -3130,9 +3121,6 @@ class WebSocketInterface(Interface):
         # Cancel metrics loop
         if self._metrics_task and not self._metrics_task.done():
             self._metrics_task.cancel()
-        # Cancel health check loop
-        if self._health_check_task and not self._health_check_task.done():
-            self._health_check_task.cancel()
 
         for task_id, task in self._running_tasks.items():
             task.cancel()

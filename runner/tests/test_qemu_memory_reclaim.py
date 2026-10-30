@@ -182,38 +182,14 @@ async def test_start_of_running_domain_leaves_the_guest_undisturbed(runtime) -> 
     instance._invalidate_ssh.assert_not_awaited()
 
 
-@pytest.mark.parametrize(
-    "state", [libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_SHUTOFF]
-)
-async def test_restart_upgrades_the_canonical_workspace_domain(runtime, state) -> None:
-    instance, domain = runtime
-    domain.state.return_value = (state, 0)
-    events: list[str] = []
-    domain.destroy.side_effect = lambda: events.append("destroy")
-    instance._libvirt_conn.return_value.defineXML.side_effect = (
-        lambda _xml: events.append("define")
-    )
-    domain.create.side_effect = lambda: events.append("create")
-
-    await instance.restart_workspace(_WORKSPACE_ID)
-
-    expected = ["destroy"] if state == libvirt.VIR_DOMAIN_RUNNING else []
-    assert events == expected + ["define", "create"]
-    instance._libvirt_conn.return_value.lookupByName.assert_called_once_with(
-        f"opencuria-workspace-{_WORKSPACE_ID}"
-    )
-    instance._wait_for_ssh.assert_awaited_once_with(_WORKSPACE_ID)
-
-
-@pytest.mark.parametrize("operation", ["start", "restart"])
-async def test_failed_persistent_upgrade_prevents_boot(runtime, operation) -> None:
+async def test_failed_persistent_upgrade_prevents_boot(runtime) -> None:
     instance, domain = runtime
     instance._libvirt_conn.return_value.defineXML.side_effect = libvirt.libvirtError(
         "free page reporting unavailable"
     )
 
     with pytest.raises(libvirt.libvirtError, match="free page reporting unavailable"):
-        await getattr(instance, f"{operation}_workspace")(_WORKSPACE_ID)
+        await instance.start_workspace(_WORKSPACE_ID)
 
     domain.create.assert_not_called()
     instance._wait_for_ssh.assert_not_awaited()
