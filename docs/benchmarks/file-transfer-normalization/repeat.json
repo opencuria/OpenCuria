@@ -1,0 +1,56 @@
+{
+  "baseline_ref": "798b307ab6cda542c973df6d91d7b8973a600cd5",
+  "samples": 31,
+  "warmups": 3,
+  "results": [
+    {
+      "file_bytes": 10485760,
+      "input_bytes": 10485760,
+      "transfer_chunks": 54,
+      "tar_bytes": 10496000,
+      "variants": {
+        "current": {
+          "upload_latency": {
+            "p50_ms": 90.42,
+            "p95_ms": 102.356
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 31.759,
+            "p95_ms": 35.517
+          },
+          "runner_cpu": {
+            "p50_ms": 87.964,
+            "p95_ms": 98.172
+          },
+          "peak_python_allocated_bytes": 50628701
+        },
+        "baseline": {
+          "upload_latency": {
+            "p50_ms": 242.768,
+            "p95_ms": 277.616
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 32.136,
+            "p95_ms": 34.49
+          },
+          "runner_cpu": {
+            "p50_ms": 240.332,
+            "p95_ms": 274.88
+          },
+          "peak_python_allocated_bytes": 50628397
+        }
+      },
+      "archive_sha256": "6ed5d792d460b793ed8ee838d79178dc62eab038a548e0d3e40ca2c29a7c9bb8"
+    }
+  ],
+  "notes": [
+    "Real chunk-upload Socket.IO handlers, FileManager and capture fence.",
+    "Real local containment/mkdir and tar extraction; no QEMU/SSH/network.",
+    "Five-ms periodic probe; report the worst excess delay per upload.",
+    "CPU is runner process CPU including threads, excluding local tar child.",
+    "Separate tracemalloc sample; Python allocations, not total RSS.",
+    "Every extracted file is verified outside the timing interval.",
+    "Baseline/current order alternates; fixtures and runtime are shared.",
+    "Chunk handlers run in separate event-loop turns, without network delay."
+  ]
+}

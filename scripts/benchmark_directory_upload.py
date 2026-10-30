@@ -2,6 +2,7 @@
 
 Run with ``runner/.venv/bin/python scripts/benchmark_directory_upload.py``.
 ``--baseline-ref REV`` compares with that revision in alternating sample order.
+``--file-bytes 1048576 10485760`` measures ordinary binary files instead.
 No QEMU/SSH/network latency or frontend rendering is measured.
 """
 
@@ -24,6 +25,7 @@ import time
 import tracemalloc
 import types
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,8 @@ import structlog
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "runner"))
 
+from src import chunking  # noqa: E402
+from src.chunking import CHUNK_B64_SIZE  # noqa: E402
 from src.config import RunnerSettings  # noqa: E402
 from src.interfaces.websocket import WebSocketInterface  # noqa: E402
 from src.models import WorkspaceInfo  # noqa: E402
@@ -53,6 +57,18 @@ def _manager_type(revision: str | None) -> type[FileManager]:
     module.__package__ = "src.services"
     exec(compile(source, f"{revision}:files.py", "exec"), module.__dict__)
     return module.FileManager
+
+
+def _normalizer(revision: str | None) -> Callable[[str], str]:
+    """Compare the transfer helper as well as the FileManager implementation."""
+    if revision is None:
+        return chunking.normalize_base64
+    source = subprocess.check_output(
+        ["git", "show", f"{revision}:runner/src/chunking.py"], cwd=REPO, text=True
+    )
+    module = types.ModuleType("src._benchmark_baseline_chunking")
+    exec(compile(source, f"{revision}:chunking.py", "exec"), module.__dict__)
+    return module.normalize_base64
 
 
 def _payload(count: int) -> str:
@@ -92,6 +108,9 @@ async def _measure(
     if args.baseline_ref:
         revisions["baseline"] = args.baseline_ref
     managers = {}
+    normalizers = {
+        variant: _normalizer(revision) for variant, revision in revisions.items()
+    }
     for variant, revision in revisions.items():
         manager = _manager_type(revision)(
             get_cached=service.registry.get_cached,
@@ -109,22 +128,39 @@ async def _measure(
     interface._sio.emit = emit
     handlers = interface._sio.handlers["/"]
     destination = directory / f"upload-{count}"
-    content = _payload(count)
+    if args.file_bytes:
+        content = base64.b64encode(
+            (bytes(range(256)) * math.ceil(count / 256))[:count]
+        ).decode()
+    else:
+        content = _payload(count)
+    chunks = [
+        content[offset : offset + CHUNK_B64_SIZE]
+        for offset in range(0, len(content), CHUNK_B64_SIZE)
+    ]
     context = {
         "workspace_id": str(workspace_id),
         "request_id": "benchmark",
         "path": str(destination),
-        "total_chunks": 1,
+        "total_chunks": len(chunks),
     }
 
     async def upload() -> None:
         emitted.clear()
         await handlers["files:upload_start"](
-            {**context, "filename": "project.tar.gz", "is_directory": True}
+            {
+                **context,
+                "filename": "file.bin" if args.file_bytes else "project.tar.gz",
+                "is_directory": not args.file_bytes,
+            }
         )
-        await handlers["files:upload_chunk"](
-            {**context, "index": 0, "content": content}
-        )
+        for index, chunk in enumerate(chunks):
+            await handlers["files:upload_chunk"](
+                {**context, "index": index, "content": chunk}
+            )
+            # Incoming Socket.IO chunks arrive as separate events. Give the
+            # loop a turn instead of synchronously replaying the whole wire.
+            await asyncio.sleep(0)
         await handlers["files:upload_finish"](context)
         assert emitted == [
             {
@@ -135,7 +171,8 @@ async def _measure(
         assert not interface._upload_transfers
 
     async def timed(variant: str) -> tuple[float, float, float]:
-        service._files_manager = managers[variant]
+        service.files = managers[variant]
+        chunking.normalize_base64 = normalizers[variant]
         ready, stop = asyncio.Event(), asyncio.Event()
         stalls = []
 
@@ -175,14 +212,20 @@ async def _measure(
                 observations[variant]["stalls"].append(stall)
                 observations[variant]["cpu"].append(cpu_ms)
     assert len(digests) == 1
-    assert len(list((destination / "project").iterdir())) == count
-    for index in range(count):
-        assert (destination / "project" / f"file-{index:05}.txt").read_bytes() == (
-            f"source file {index}\n".encode() * 64
-        )
+    if args.file_bytes:
+        path = destination / "file.bin"
+        assert path.read_bytes() == base64.b64decode(content)
+        assert path.stat().st_mode & 0o777 == 0o644
+    else:
+        assert len(list((destination / "project").iterdir())) == count
+        for index in range(count):
+            assert (destination / "project" / f"file-{index:05}.txt").read_bytes() == (
+                f"source file {index}\n".encode() * 64
+            )
     variants = {}
     for variant, observation in observations.items():
-        service._files_manager = managers[variant]
+        service.files = managers[variant]
+        chunking.normalize_base64 = normalizers[variant]
         gc.collect()
         tracemalloc.start()
         await upload()
@@ -194,9 +237,16 @@ async def _measure(
             "runner_cpu": _percentiles(observation["cpu"]),
             "peak_python_allocated_bytes": peak,
         }
+    chunking.normalize_base64 = normalizers["current"]
+    input_bytes = len(base64.b64decode(content))
     return {
-        "files": count,
-        "compressed_bytes": len(base64.b64decode(content)),
+        **(
+            {"file_bytes": count}
+            if args.file_bytes
+            else {"files": count, "compressed_bytes": input_bytes}
+        ),
+        "input_bytes": input_bytes,
+        "transfer_chunks": len(chunks),
         "tar_bytes": runtime.archive_bytes,
         "variants": variants,
         "archive_sha256": digests.pop(),
@@ -204,11 +254,19 @@ async def _measure(
 
 
 async def _run(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
+    original = chunking.normalize_base64
+    try:
+        results = [
+            await _measure(args, directory, count)
+            for count in args.file_bytes or args.files
+        ]
+    finally:
+        chunking.normalize_base64 = original
     return {
         "baseline_ref": args.baseline_ref,
         "samples": args.samples,
         "warmups": args.warmups,
-        "results": [await _measure(args, directory, count) for count in args.files],
+        "results": results,
         "notes": [
             "Real chunk-upload Socket.IO handlers, FileManager and capture fence.",
             "Real local containment/mkdir and tar extraction; no QEMU/SSH/network.",
@@ -217,6 +275,7 @@ async def _run(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
             "Separate tracemalloc sample; Python allocations, not total RSS.",
             "Every extracted file is verified outside the timing interval.",
             "Baseline/current order alternates; fixtures and runtime are shared.",
+            "Chunk handlers run in separate event-loop turns, without network delay.",
         ],
     }
 
@@ -226,11 +285,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-ref")
     parser.add_argument("--files", type=int, nargs="+", default=[200, 5000])
+    parser.add_argument("--file-bytes", type=int, nargs="+")
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--warmups", type=int, default=3)
     args = parser.parse_args()
-    if min(args.files) < 1 or args.samples < 2 or args.warmups < 0:
-        parser.error("files >= 1, samples >= 2 and warmups >= 0 required")
+    if min(args.file_bytes or args.files) < 1 or args.samples < 2 or args.warmups < 0:
+        parser.error("files/bytes >= 1, samples >= 2 and warmups >= 0 required")
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(50))
     with tempfile.TemporaryDirectory(prefix="upload-bench-", dir=REPO) as directory:
         result = asyncio.run(_run(args, Path(directory)))

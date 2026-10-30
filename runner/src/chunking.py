@@ -7,8 +7,6 @@ and harness writes always use start/chunk/finish, with zero chunks for empty fil
 
 from __future__ import annotations
 
-import re
-
 #: Base64 characters per chunk event, a multiple of 4 so concatenated chunks
 #: stay valid without re-padding. Must stay in sync with the backend copy in
 #: ``backend/apps/harness/access/runner_accessor.py`` (``HARNESS_CHUNK_B64_SIZE``)
@@ -27,19 +25,17 @@ MAX_UPLOAD_CHUNKS_PER_TRANSFER = 64
 #: 256 KiB; 560 leaves headroom for padding and slack.
 MAX_READ_CHUNKS_PER_TRANSFER = 560
 
-_BASE64_WS_RE = re.compile(r"\s+")
-
 
 def normalize_base64(payload: str) -> str:
     """Return *payload* with all whitespace removed."""
     if not payload:
         return ""
-    return _BASE64_WS_RE.sub("", payload)
+    # The native splitter shares regex \s's Unicode whitespace rules without
+    # invoking the regex engine on every file-transfer chunk.
+    return "".join(payload.split())
 
 
-def split_base64_chunks(
-    payload: str, size: int = CHUNK_B64_SIZE
-) -> list[str]:
+def split_base64_chunks(payload: str, size: int = CHUNK_B64_SIZE) -> list[str]:
     """Split whitespace-free base64 into chunks of at most *size* chars.
 
     The chunk size is rounded down to a multiple of 4 so every non-final

@@ -1,0 +1,9 @@
+{
+  "ordered_top_three": [
+    "backend patch display projection",
+    "runner single-file upload preparation",
+    "backend completion-repair query indexing"
+  ],
+  "selected_index": 1,
+  "selected": "runner single-file upload preparation"
+}

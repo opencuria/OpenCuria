@@ -1,0 +1,134 @@
+{
+  "baseline_ref": "798b307ab6cda542c973df6d91d7b8973a600cd5",
+  "samples": 31,
+  "warmups": 3,
+  "results": [
+    {
+      "file_bytes": 1024,
+      "input_bytes": 1024,
+      "transfer_chunks": 1,
+      "tar_bytes": 10240,
+      "variants": {
+        "current": {
+          "upload_latency": {
+            "p50_ms": 4.325,
+            "p95_ms": 5.079
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 0.429,
+            "p95_ms": 0.814
+          },
+          "runner_cpu": {
+            "p50_ms": 2.173,
+            "p95_ms": 2.588
+          },
+          "peak_python_allocated_bytes": 301143
+        },
+        "baseline": {
+          "upload_latency": {
+            "p50_ms": 4.345,
+            "p95_ms": 5.049
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 0.46,
+            "p95_ms": 0.923
+          },
+          "runner_cpu": {
+            "p50_ms": 2.217,
+            "p95_ms": 2.399
+          },
+          "peak_python_allocated_bytes": 301431
+        }
+      },
+      "archive_sha256": "c7d9475c45146b5eb9e1953221ba4366e98586b0332eefc2a1857f75aa4117f8"
+    },
+    {
+      "file_bytes": 1048576,
+      "input_bytes": 1048576,
+      "transfer_chunks": 6,
+      "tar_bytes": 1054720,
+      "variants": {
+        "current": {
+          "upload_latency": {
+            "p50_ms": 13.812,
+            "p95_ms": 15.286
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 1.759,
+            "p95_ms": 2.902
+          },
+          "runner_cpu": {
+            "p50_ms": 11.58,
+            "p95_ms": 12.804
+          },
+          "peak_python_allocated_bytes": 4988891
+        },
+        "baseline": {
+          "upload_latency": {
+            "p50_ms": 28.621,
+            "p95_ms": 32.126
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 7.187,
+            "p95_ms": 9.435
+          },
+          "runner_cpu": {
+            "p50_ms": 26.511,
+            "p95_ms": 29.741
+          },
+          "peak_python_allocated_bytes": 4988027
+        }
+      },
+      "archive_sha256": "cfb69e8885fd9f28d587cd9ac63ddb408f7b4068791edee4607d74ebef11fa4f"
+    },
+    {
+      "file_bytes": 10485760,
+      "input_bytes": 10485760,
+      "transfer_chunks": 54,
+      "tar_bytes": 10496000,
+      "variants": {
+        "current": {
+          "upload_latency": {
+            "p50_ms": 92.163,
+            "p95_ms": 102.392
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 32.639,
+            "p95_ms": 36.224
+          },
+          "runner_cpu": {
+            "p50_ms": 89.645,
+            "p95_ms": 99.108
+          },
+          "peak_python_allocated_bytes": 50636965
+        },
+        "baseline": {
+          "upload_latency": {
+            "p50_ms": 240.735,
+            "p95_ms": 249.252
+          },
+          "worst_event_loop_stall_per_upload": {
+            "p50_ms": 32.373,
+            "p95_ms": 34.626
+          },
+          "runner_cpu": {
+            "p50_ms": 238.325,
+            "p95_ms": 246.195
+          },
+          "peak_python_allocated_bytes": 50616430
+        }
+      },
+      "archive_sha256": "6ed5d792d460b793ed8ee838d79178dc62eab038a548e0d3e40ca2c29a7c9bb8"
+    }
+  ],
+  "notes": [
+    "Real chunk-upload Socket.IO handlers, FileManager and capture fence.",
+    "Real local containment/mkdir and tar extraction; no QEMU/SSH/network.",
+    "Five-ms periodic probe; report the worst excess delay per upload.",
+    "CPU is runner process CPU including threads, excluding local tar child.",
+    "Separate tracemalloc sample; Python allocations, not total RSS.",
+    "Every extracted file is verified outside the timing interval.",
+    "Baseline/current order alternates; fixtures and runtime are shared.",
+    "Chunk handlers run in separate event-loop turns, without network delay."
+  ]
+}
