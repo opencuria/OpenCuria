@@ -594,7 +594,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
 
-        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        interface._desktop_proxy.close_workspace = _fake_close  # type: ignore[assignment]
         handler = interface._sio.handlers["/"]["harness:desktop_action"]
         await handler(
             _payload(
@@ -629,7 +629,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             closed.append(ws_id)
             close_order.append("close")
 
-        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        interface._desktop_proxy.close_workspace = _fake_close  # type: ignore[assignment]
 
         async def _spy_emit(event, payload=None, *args, **kwargs):
             if event == "desktop:process":
@@ -697,13 +697,13 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
 
         service2 = StoppingService()
         interface2 = _interface(service2)
-        interface2._desktop_proxy_tunnels["t1"] = object()
+        interface2._desktop_proxy._tunnels["t1"] = object()
         closed: list = []
 
         async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
 
-        interface2._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        interface2._desktop_proxy.close_workspace = _fake_close  # type: ignore[assignment]
         await interface2._sio.handlers["/"]["harness:desktop_action"](
             _payload(
                 workspace_id,
@@ -731,13 +731,13 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
 
         service = _FakeService()
         interface = _interface(service)
-        interface._desktop_proxy_tunnels["t1"] = object()
+        interface._desktop_proxy._tunnels["t1"] = object()
         closed: list = []
 
         async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
 
-        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        interface._desktop_proxy.close_workspace = _fake_close  # type: ignore[assignment]
         workspace_id = uuid.uuid4()
         session = MagicMock()
         session.port = 6901
@@ -805,7 +805,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             closed.append(ws_id)
             close_order.append("close")
 
-        interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
+        interface._desktop_proxy.close_workspace = _fake_close  # type: ignore[assignment]
 
         async def _spy_emit(event, payload=None, *args, **kwargs):
             if event == "desktop:started":

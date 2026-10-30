@@ -116,7 +116,6 @@ def live_interaction(method: Method) -> Method:
         for argument, attribute in (
             ("terminal_id", "_terminals"),
             ("connection_id", "_streams"),
-            ("tunnel_id", "_desktop_proxy_tunnels"),
         ):
             if argument in bound:
                 entry = getattr(self, attribute).get(bound[argument])

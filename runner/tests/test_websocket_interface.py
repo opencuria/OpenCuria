@@ -623,7 +623,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 close_entered.set()
                 await release_close.wait()
 
-        interface._close_desktop_proxy_tunnels_for_workspace = blocked_close
+        interface._desktop_proxy.close_workspace = blocked_close
         stale_stop = asyncio.create_task(
             interface._announce_desktop_change(
                 workspace_id,
@@ -653,18 +653,18 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         finalize = AsyncMock()
-        interface._finalize_desktop_proxy_tunnel = finalize
-        interface._desktop_proxy_tunnels["unknown"] = SimpleNamespace(
+        interface._desktop_proxy._finalize = finalize
+        interface._desktop_proxy._tunnels["unknown"] = SimpleNamespace(
             workspace_id=workspace_id, desktop_generation=None
         )
-        interface._desktop_proxy_tunnels["known"] = SimpleNamespace(
+        interface._desktop_proxy._tunnels["known"] = SimpleNamespace(
             workspace_id=workspace_id, desktop_generation=5
         )
-        interface._desktop_proxy_tunnels["other-workspace"] = SimpleNamespace(
+        interface._desktop_proxy._tunnels["other-workspace"] = SimpleNamespace(
             workspace_id=other_workspace_id, desktop_generation=None
         )
 
-        await interface._close_desktop_proxy_tunnels_for_workspace(workspace_id)
+        await interface._desktop_proxy.close_workspace(workspace_id)
 
         self.assertCountEqual(
             [call.args[0] for call in finalize.await_args_list], ["unknown", "known"]
@@ -734,7 +734,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 close_entered.set()
                 await release_start_close.wait()
 
-        interface._close_desktop_proxy_tunnels_for_workspace = blocked_close
+        interface._desktop_proxy.close_workspace = blocked_close
         start = asyncio.create_task(
             interface._sio.handlers["/"]["task:start_desktop"](
                 {"task_id": "start-race", "workspace_id": str(workspace_id), **lease}
@@ -837,7 +837,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        interface._fetch_desktop_http = AsyncMock(
+        interface._desktop_proxy.fetch_http = AsyncMock(
             return_value={
                 "status": 200,
                 "headers": [["Content-Type", "text/plain"]],
@@ -856,7 +856,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        interface._fetch_desktop_http.assert_awaited_once_with(
+        interface._desktop_proxy.fetch_http.assert_awaited_once_with(
             workspace_id,
             "/vnc.html",
             "autoconnect=true",
@@ -868,7 +868,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        interface._open_desktop_proxy_tunnel = AsyncMock(
+        interface._desktop_proxy.open_tunnel = AsyncMock(
             return_value={"ok": True, "subprotocol": "binary"}
         )
 
@@ -882,7 +882,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        interface._open_desktop_proxy_tunnel.assert_awaited_once_with(
+        interface._desktop_proxy.open_tunnel.assert_awaited_once_with(
             workspace_id,
             "tunnel-1",
             ["binary"],
@@ -894,7 +894,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        interface._send_desktop_proxy_tunnel_message = AsyncMock()
+        interface._desktop_proxy.send = AsyncMock()
 
         handler = interface._sio.handlers["/"]["desktop:proxy_ws_send"]
         await handler(
@@ -905,12 +905,32 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        interface._send_desktop_proxy_tunnel_message.assert_awaited_once_with(
+        interface._desktop_proxy.send.assert_awaited_once_with(
             "tunnel-1",
             text=None,
             data="aGVsbG8=",
             encoding="base64",
         )
+
+    async def test_desktop_proxy_ws_close_delegates_to_proxy(self) -> None:
+        interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._desktop_proxy.close_tunnel = AsyncMock()
+        await interface._sio.handlers["/"]["desktop:proxy_ws_close"](
+            {"tunnel_id": "tunnel-1"}
+        )
+        interface._desktop_proxy.close_tunnel.assert_awaited_once_with("tunnel-1")
+
+    async def test_disconnect_closes_proxy_and_drops_partial_uploads(self) -> None:
+        interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._desktop_proxy.close_all = AsyncMock()
+        interface._upload_transfers["partial"] = {"chunks": []}
+        await interface._sio.handlers["/"]["disconnect"]()
+        interface._desktop_proxy.close_all.assert_awaited_once_with()
+        self.assertEqual(interface._upload_transfers, {})
 
 
 @pytest.mark.asyncio

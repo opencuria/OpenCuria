@@ -182,12 +182,12 @@ async def test_websocket_exec_rejection_keeps_result_envelope(service, tmp_path)
 async def test_desktop_proxy_paths_are_guarded(service, tmp_path):
     svc, ws, _ = service
     interface = WebSocketInterface(svc, RunnerSettings(state_dir=str(tmp_path)))
-    interface._desktop_proxy_tunnels["tunnel"] = SimpleNamespace(workspace_id=ws)
+    interface._desktop_proxy._tunnels["tunnel"] = SimpleNamespace(workspace_id=ws)
     async with svc.capture_fence.capture(ws):
         for method, args in [
-            (interface._fetch_desktop_http, (ws, "/", "")),
-            (interface._open_desktop_proxy_tunnel, (ws, "new")),
-            (interface._send_desktop_proxy_tunnel_message, ("tunnel",)),
+            (interface._desktop_proxy.fetch_http, (ws, "/", "")),
+            (interface._desktop_proxy.open_tunnel, (ws, "new")),
+            (interface._desktop_proxy.send, ("tunnel",)),
         ]:
             with pytest.raises(RuntimeError, match="capturing image"):
                 await method(*args)
