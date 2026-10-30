@@ -79,13 +79,38 @@ export function mergeMentionFilePaths(
 
 function fileMatchScore(path: string, query: string): number {
   if (!query) return 3;
-  const q = query.toLowerCase();
-  const name = (path.split("/").pop() ?? "").toLowerCase();
-  const relative = workspaceRelativePath(path).toLowerCase();
-  if (name.startsWith(q)) return 0;
-  if (name.includes(q)) return 1;
-  if (relative.includes(q) || path.toLowerCase().includes(q)) return 2;
+  const normalized = path.toLowerCase();
+  const name = normalized.slice(normalized.lastIndexOf("/") + 1);
+  if (name.startsWith(query)) return 0;
+  if (name.includes(query)) return 1;
+  if (normalized.includes(query)) return 2;
   return 99;
+}
+
+function topMentionFiles(query: string, paths: string[]): MentionCandidate[] {
+  const best: { path: string; label: string; score: number }[] = [];
+  for (const path of paths) {
+    const score = fileMatchScore(path, query);
+    if (score === 99) continue;
+    const label = workspaceRelativePath(path);
+    let index = best.length;
+    while (index > 0) {
+      const previous = best[index - 1]!;
+      const order =
+        score - previous.score || label.localeCompare(previous.label);
+      // Equal ranks stay in input order, as with a stable full sort.
+      if (order >= 0) break;
+      index -= 1;
+    }
+    if (index >= MENTION_FILE_LIMIT) continue;
+    best.splice(index, 0, { path, label, score });
+    if (best.length > MENTION_FILE_LIMIT) best.pop();
+  }
+  return best.map(({ path, label }) => ({
+    kind: "file",
+    label,
+    insert: `file:${path}`,
+  }));
 }
 
 /**
@@ -105,33 +130,9 @@ export function filterMentionCandidates(
   const fileQuery = q.startsWith("file:") ? q.slice("file:".length) : q;
   const agentQuery = q.startsWith("agent:") ? q.slice("agent:".length) : q;
 
-  const files: MentionCandidate[] = wantsFiles
-    ? filePaths
-        .filter((path) => {
-          if (!fileQuery) return true;
-          const relative = workspaceRelativePath(path).toLowerCase();
-          const name = (path.split("/").pop() ?? "").toLowerCase();
-          return (
-            name.includes(fileQuery) ||
-            relative.includes(fileQuery) ||
-            path.toLowerCase().includes(fileQuery)
-          );
-        })
-        .sort((left, right) => {
-          const scoreDelta =
-            fileMatchScore(left, fileQuery) - fileMatchScore(right, fileQuery);
-          if (scoreDelta !== 0) return scoreDelta;
-          return workspaceRelativePath(left).localeCompare(
-            workspaceRelativePath(right),
-          );
-        })
-        .slice(0, MENTION_FILE_LIMIT)
-        .map((path) => ({
-          kind: "file" as const,
-          label: workspaceRelativePath(path),
-          insert: `file:${path}`,
-        }))
-    : [];
+  // Rank once per path and retain only the visible window: O(n * limit)
+  // work. Ranking storage stays O(limit) as the loaded explorer grows.
+  const files = wantsFiles ? topMentionFiles(fileQuery, filePaths) : [];
   const agents: MentionCandidate[] = wantsAgents
     ? HARNESS_AGENT_NAMES.filter((name) =>
         name.toLowerCase().includes(agentQuery),
