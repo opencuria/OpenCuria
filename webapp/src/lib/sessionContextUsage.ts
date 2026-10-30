@@ -2,23 +2,7 @@
  * Session context-window occupancy for the composer usage ring and sheet.
  */
 
-import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
-
-export interface SessionContextUsage {
-  used: number
-  limit: number
-  percent: number
-  promptTokens: number
-  completionTokens: number
-}
-
-export interface SessionContextUsageInput {
-  messages: HarnessMessage[]
-  models: ProviderModel[]
-  modelId: string
-  defaultModel?: string
-}
 
 function asFiniteNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
@@ -107,18 +91,4 @@ export function formatTokenCount(value: number): string {
   if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(1)}M`
   if (amount >= 1_000) return `${(amount / 1_000).toFixed(1)}K`
   return String(Math.round(amount))
-}
-
-/** Resolve used, limit, and fill percent for the active session model. */
-export function getSessionContextUsage(input: SessionContextUsageInput): SessionContextUsage {
-  const { used, promptTokens, completionTokens, limit: runtimeLimit } =
-    resolveSessionUsedTokens(input.messages)
-  const catalogModel = resolveCatalogModel(
-    input.models,
-    input.modelId,
-    input.defaultModel ?? '',
-  )
-  const limit = runtimeLimit ?? catalogModel?.context_length ?? 0
-  const percent = limit > 0 ? Math.round((used / limit) * 100) : 0
-  return { used, limit, percent, promptTokens, completionTokens }
 }
