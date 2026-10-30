@@ -94,7 +94,7 @@ export function startDesktop(
   intent: DesktopViewerIntent,
   signal?: AbortSignal,
 ): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, intent, undefined, signal)
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, intent, signal)
 }
 
 export function stopDesktop(id: string, intent: DesktopViewerIntent): Promise<{ task_id: string }> {
@@ -106,7 +106,7 @@ export function renewDesktop(
   intent: DesktopViewerIntent,
   signal?: AbortSignal,
 ): Promise<DesktopStatus> {
-  return post<DesktopStatus>(`/workspaces/${id}/desktop/renew/`, intent, undefined, signal)
+  return post<DesktopStatus>(`/workspaces/${id}/desktop/renew/`, intent, signal)
 }
 
 export function getDesktopStatus(

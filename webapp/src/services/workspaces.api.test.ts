@@ -31,13 +31,12 @@ describe('desktop viewer transport', () => {
     startDesktop('ws', intent)
     stopDesktop('ws', intent)
     renewDesktop('ws', intent)
-    expect(post).toHaveBeenNthCalledWith(1, '/workspaces/ws/desktop/', intent, undefined, undefined)
+    expect(post).toHaveBeenNthCalledWith(1, '/workspaces/ws/desktop/', intent, undefined)
     expect(post).toHaveBeenNthCalledWith(2, '/workspaces/ws/desktop/stop/', intent)
     expect(post).toHaveBeenNthCalledWith(
       3,
       '/workspaces/ws/desktop/renew/',
       intent,
-      undefined,
       undefined,
     )
   })
@@ -51,14 +50,12 @@ describe('desktop viewer transport', () => {
       1,
       '/workspaces/ws/desktop/',
       intent,
-      undefined,
       controller.signal,
     )
     expect(post).toHaveBeenNthCalledWith(
       2,
       '/workspaces/ws/desktop/renew/',
       intent,
-      undefined,
       controller.signal,
     )
     expect(get).toHaveBeenNthCalledWith(

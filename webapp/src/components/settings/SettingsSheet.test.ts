@@ -39,7 +39,7 @@ vi.mock('@/services/organizations.api', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
-  getApiClient: () => ({ requestWithCredentials: vi.fn(async () => []) }),
+  getApiClient: () => ({ request: vi.fn(async () => []) }),
   get: vi.fn(async () => []),
   post: vi.fn(async () => ({})),
   patch: vi.fn(async () => ({})),

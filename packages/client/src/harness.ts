@@ -37,7 +37,7 @@ export function createHarnessApi(getApi: () => ApiClient) {
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<T> =>
-    getApi().requestWithCredentials<T>(method, path, body, undefined, signal);
+    getApi().request<T>(method, path, body, signal);
 
   return {
     listConversations: (signal?: AbortSignal) =>

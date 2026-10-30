@@ -45,7 +45,6 @@ export function getApiClient(): ApiClient {
       // after module import retain the same behavior as the former wrapper.
       fetch: ((...args) => globalThis.fetch(...args)) as FetchLike,
       credentials: 'same-origin',
-      refreshCredentials: 'same-origin',
     })
   }
   return client
@@ -83,28 +82,27 @@ export function postDuringClipboardGesture<T>(path: string, body: unknown, conte
 }
 
 export function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return getApiClient().requestWithCredentials<T>('GET', path, undefined, 'same-origin', signal)
+  return getApiClient().get<T>(path, signal)
 }
 
 export function post<T>(
   path: string,
   body?: unknown,
-  credentials?: RequestCredentials,
   signal?: AbortSignal,
 ): Promise<T> {
-  return getApiClient().postWithCredentials<T>(path, body, credentials, signal)
+  return getApiClient().post<T>(path, body, signal)
 }
 
-export function del<T>(path: string, credentials?: RequestCredentials): Promise<T> {
-  return getApiClient().deleteWithCredentials<T>(path, credentials)
+export function del<T>(path: string): Promise<T> {
+  return getApiClient().delete<T>(path)
 }
 
 export function patch<T>(path: string, body?: unknown): Promise<T> {
-  return getApiClient().requestWithCredentials<T>('PATCH', path, body, 'same-origin')
+  return getApiClient().patch<T>(path, body)
 }
 
 export function put<T>(path: string, body?: unknown): Promise<T> {
-  return getApiClient().requestWithCredentials<T>('PUT', path, body, 'same-origin')
+  return getApiClient().put<T>(path, body)
 }
 
 /** Fetch JSON and return HTTP status without throwing for non-2xx responses. */
@@ -113,5 +111,5 @@ export function requestWithStatus<T>(
   path: string,
   body?: unknown,
 ): Promise<{ ok: boolean; status: number; data: T }> {
-  return getApiClient().requestWithStatus<T>(method, path, body, undefined, 'same-origin')
+  return getApiClient().requestWithStatus<T>(method, path, body)
 }

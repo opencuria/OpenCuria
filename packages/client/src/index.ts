@@ -1,4 +1,4 @@
-export { ApiClient, ApiRequestError, extractApiError } from "./api";
+export { ApiClient, ApiRequestError } from "./api";
 export type { ApiClientOptions, FetchLike } from "./api";
 export { createClient } from "./client";
 export type { ClientApi, CreateClientOptions, OpenCuriaClient } from "./client";

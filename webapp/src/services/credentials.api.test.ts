@@ -1,14 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as http from './api'
 import {
-  connectOAuthService,
   createCredential,
   createOrganizationCredentialService,
   deleteCredential,
-  disconnectOAuthCredential,
   listCredentialServices,
   listCredentials,
-  reconnectOAuthCredential,
   toggleOrganizationCredentialService,
   updateCredential,
 } from './credentials.api'
@@ -24,26 +21,6 @@ describe('credential REST APIs', () => {
     await listCredentials()
     expect(http.get).toHaveBeenNthCalledWith(1, '/credential-services/')
     expect(http.get).toHaveBeenNthCalledWith(2, '/credentials/')
-  })
-
-  it('uses service-owned OAuth connect and credential-owned reconnect/disconnect endpoints', async () => {
-    await connectOAuthService('svc-id', { name: 'Notion', organization_credential: false })
-    expect(http.post).toHaveBeenCalledWith(
-      '/credential-services/svc-id/oauth/connect/',
-      {
-        name: 'Notion',
-        organization_credential: false,
-      },
-      'include',
-    )
-    await reconnectOAuthCredential('credential-id', 'Notion')
-    expect(http.post).toHaveBeenCalledWith(
-      '/credentials/credential-id/oauth/reconnect/',
-      { name: 'Notion' },
-      'include',
-    )
-    await disconnectOAuthCredential('credential-id')
-    expect(http.del).toHaveBeenCalledWith('/credentials/credential-id/oauth/disconnect/', 'include')
   })
 
   it('creates and renames regular credentials and uses organization service APIs', async () => {

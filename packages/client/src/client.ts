@@ -110,7 +110,6 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
   const apiOptions: ApiClientOptions = {
     apiBaseUrl: options.apiBaseUrl,
     credentials: "omit",
-    refreshCredentials: "omit",
     getAccessToken: options.getAccessToken,
     getRefreshToken: options.getRefreshToken,
     setTokens: options.setTokens,

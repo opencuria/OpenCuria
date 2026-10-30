@@ -1,10 +1,31 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiRequestError, get, post, postDuringClipboardGesture } from './api'
+import { connectOAuthService, disconnectOAuthCredential, reconnectOAuthCredential } from './credentials.api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   localStorage.clear()
   sessionStorage.clear()
+})
+
+it('includes OAuth cookies without changing the policy of subsequent requests', async () => {
+  const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'))
+  vi.stubGlobal('fetch', fetchMock)
+
+  await connectOAuthService('service/id', { name: 'Notion', organization_credential: false })
+  await reconnectOAuthCredential('credential/id', 'Notion')
+  await disconnectOAuthCredential('credential/id')
+  await get('/ordinary/')
+
+  expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method, init?.credentials])).toEqual([
+    ['/api/v1/credential-services/service%2Fid/oauth/connect/', 'POST', 'include'],
+    ['/api/v1/credentials/credential%2Fid/oauth/reconnect/', 'POST', 'include'],
+    ['/api/v1/credentials/credential%2Fid/oauth/disconnect/', 'DELETE', 'include'],
+    ['/api/v1/ordinary/', 'GET', 'same-origin'],
+  ])
+  expect(fetchMock.mock.calls.slice(0, 2).map(([, init]) => JSON.parse(init!.body as string))).toEqual([
+    { name: 'Notion', organization_credential: false }, { name: 'Notion' },
+  ])
 })
 
 describe('synchronous clipboard-gesture requests', () => {
@@ -120,7 +141,7 @@ describe('abortable requests', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(
-      post('/desktop/', { intent_revision: 3 }, undefined, controller.signal),
+      post('/desktop/', { intent_revision: 3 }, controller.signal),
     ).resolves.toEqual({
       ok: true,
     })
@@ -128,13 +149,15 @@ describe('abortable requests', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/v1/desktop/',
-      expect.objectContaining({ signal: controller.signal }),
+      expect.objectContaining({ signal: controller.signal, credentials: 'same-origin' }),
     )
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/refresh/', expect.any(Object))
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2, '/api/v1/auth/refresh/', expect.objectContaining({ credentials: 'same-origin' }),
+    )
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       '/api/v1/desktop/',
-      expect.objectContaining({ signal: controller.signal }),
+      expect.objectContaining({ signal: controller.signal, credentials: 'same-origin' }),
     )
   })
 

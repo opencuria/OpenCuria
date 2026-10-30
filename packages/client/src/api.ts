@@ -24,9 +24,8 @@ export interface ApiClientOptions {
   getOrganizationId: () => string | null;
   onAuthenticationExpired: () => void;
   fetch?: FetchLike;
-  /** Browser wrappers may preserve their historical ambient cookie policy. */
+  /** Ambient cookie policy: browser clients use same-origin; native clients omit cookies. */
   credentials?: RequestCredentials;
-  refreshCredentials?: RequestCredentials;
 }
 
 export interface ApiContext {
@@ -96,15 +95,6 @@ function errorPayload(data: unknown): { detail: string; code: string } {
   return { detail, code };
 }
 
-function responseData(data: unknown): { detail?: string; code?: string } {
-  if (!data || typeof data !== "object") return {};
-  const payload = data as Record<string, unknown>;
-  return {
-    detail: typeof payload.detail === "string" ? payload.detail : undefined,
-    code: typeof payload.code === "string" ? payload.code : undefined,
-  };
-}
-
 /** Framework-neutral REST client with context-safe single-flight token refresh. */
 export class ApiClient {
   private readonly fetchImpl: FetchLike;
@@ -118,7 +108,6 @@ export class ApiClient {
   constructor(private readonly options: ApiClientOptions) {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.request = this.request.bind(this);
-    this.requestWithCredentials = this.requestWithCredentials.bind(this);
     this.requestWithStatus = this.requestWithStatus.bind(this);
     this.get = this.get.bind(this);
     this.post = this.post.bind(this);
@@ -151,23 +140,13 @@ export class ApiClient {
     };
   }
 
-  /** Native-safe request API: ambient credentials are always omitted. */
+  /** Request with the client's cookie policy, overridable for OAuth actions. */
   request<T>(
     method: string,
     path: string,
     body?: unknown,
     signal?: AbortSignal,
-  ): Promise<T> {
-    return this.requestWithCredentials<T>(method, path, body, "omit", signal);
-  }
-
-  /** Request using an explicit credential policy for the browser compatibility adapter. */
-  requestWithCredentials<T>(
-    method: string,
-    path: string,
-    body?: unknown,
     credentials: RequestCredentials = this.options.credentials ?? "omit",
-    signal?: AbortSignal,
   ): Promise<T> {
     return this.performRequest<T>(method, path, body, credentials, signal).then(
       (result) => {
@@ -211,41 +190,12 @@ export class ApiClient {
     return this.request<T>("POST", path, body, signal);
   }
 
-  /** Adapter-compatible POST preserving the historical credentials/signal order. */
-  postWithCredentials<T>(
-    path: string,
-    body?: unknown,
-    credentials?: RequestCredentials,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    return this.requestWithCredentials<T>(
-      "POST",
-      path,
-      body,
-      credentials ?? this.options.credentials ?? "omit",
-      signal,
-    );
-  }
-
   put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return this.request<T>("PUT", path, body, signal);
   }
 
   patch<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return this.request<T>("PATCH", path, body, signal);
-  }
-
-  /** Adapter-compatible DELETE preserving the historical credentials parameter. */
-  deleteWithCredentials<T>(
-    path: string,
-    credentials?: RequestCredentials,
-  ): Promise<T> {
-    return this.requestWithCredentials<T>(
-      "DELETE",
-      path,
-      undefined,
-      credentials ?? this.options.credentials ?? "omit",
-    );
   }
 
   delete<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -379,7 +329,7 @@ export class ApiClient {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ refresh_token: context.refreshToken }),
-            credentials: this.options.refreshCredentials ?? "omit",
+            credentials: this.options.credentials ?? "omit",
           },
         );
         if (response.status === 401 || response.status === 403) {
@@ -471,12 +421,4 @@ export class ApiClient {
     }
     return { ok: response.ok, status: response.status, data: data as T };
   }
-}
-
-/** Extract backend-style detail/code from an arbitrary response payload. */
-export function extractApiError(data: unknown): {
-  detail?: string;
-  code?: string;
-} {
-  return responseData(data);
 }
