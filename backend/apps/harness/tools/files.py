@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import difflib
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +16,7 @@ from ..media.formats import (
 )
 from ..media.limits import MAX_MEDIA_INGEST_BYTES
 from .base import Tool, ToolContext, ToolError, ToolResult
+from .file_diffs import build_patch_metadata
 from .file_locks import get_lock
 from .truncate import MAX_BYTES, MAX_LINES
 
@@ -143,42 +143,6 @@ async def _sibling_suggestions_async(safe_path: str, ctx: ToolContext) -> list[s
         ),
     )
     return ranked[:3]
-
-
-def _patch_metadata(
-    path: str,
-    *,
-    old_text: str,
-    new_text: str,
-) -> dict[str, str]:
-    """Build unified-diff patch metadata for write/edit tools."""
-    old_lines = old_text.splitlines(keepends=True)
-    new_lines = new_text.splitlines(keepends=True)
-    diff_lines = difflib.unified_diff(
-        old_lines,
-        new_lines,
-        fromfile=f"a/{path.lstrip('/')}",
-        tofile=f"b/{path.lstrip('/')}",
-        lineterm="",
-    )
-    unified = "\n".join(diff_lines)
-    if not unified and old_text != new_text:
-        unified = f"--- a/{path}\n+++ b/{path}\n(content changed)"
-    diff_lines = unified.splitlines()
-    return {
-        "path": path,
-        "unified_diff": unified,
-        "additions": sum(
-            1
-            for line in diff_lines
-            if line.startswith("+") and not line.startswith("+++")
-        ),
-        "deletions": sum(
-            1
-            for line in diff_lines
-            if line.startswith("-") and not line.startswith("---")
-        ),
-    }
 
 
 class ReadArgs(BaseModel):
@@ -436,7 +400,9 @@ class WriteTool(Tool):
                 await ctx.accessor.write_file(safe_path, args.content.encode("utf-8"))
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
-        patch = _patch_metadata(safe_path, old_text=old_text, new_text=args.content)
+        patch = await build_patch_metadata(
+            safe_path, old_text=old_text, new_text=args.content
+        )
         return ToolResult(
             output=f"Wrote {len(args.content.encode('utf-8'))} bytes to {safe_path}",
             metadata=patch,
@@ -511,7 +477,9 @@ class EditTool(Tool):
                 await ctx.accessor.write_file(safe_path, updated.encode("utf-8"))
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
-            patch = _patch_metadata(safe_path, old_text=text, new_text=updated)
+            patch = await build_patch_metadata(
+                safe_path, old_text=text, new_text=updated
+            )
             patch["replacements"] = occurrences if args.replace_all else 1
             return ToolResult(
                 output=f"Replaced {occurrences if args.replace_all else 1} "
