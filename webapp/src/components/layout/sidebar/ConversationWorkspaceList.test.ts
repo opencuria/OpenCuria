@@ -249,7 +249,11 @@ describe('ConversationWorkspaceList', () => {
   })
 
   it('does not show history without a known running workspace', () => {
-    const wrapper = mountList({ workspaces: [], conversations: chats('Alpha', 1) })
+    const wrapper = mountList({
+      workspaces: [],
+      conversations: chats('Alpha', 1),
+      activeWorkspaceId: 'Alpha',
+    })
     expect(wrapper.find(groupSelector('Alpha')).exists()).toBe(false)
     expect(wrapper.text()).toContain('No running workspaces')
   })
@@ -309,6 +313,60 @@ describe('ConversationWorkspaceList', () => {
     expect(wrapper.find('[data-testid="workspace-conversation-group"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="mark-all-read"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('No running workspaces')
+  })
+
+  it('temporarily shows only the opened stopped workspace alongside running workspaces', async () => {
+    const wrapper = mountList({
+      workspaces: [
+        workspace('Alpha'),
+        workspace('Stopped', { status: WorkspaceStatus.STOPPED }),
+        workspace('Other', { status: WorkspaceStatus.STOPPED }),
+      ],
+      conversations: [...chats('Stopped', 6), ...chats('Other', 1)],
+      activeWorkspaceId: 'Stopped',
+      activeSessionId: 'Stopped-5',
+    })
+    await nextTick()
+    const stopped = wrapper.get(groupSelector('Stopped'))
+    expect(stopped.findAll(rows)).toHaveLength(6)
+    expect(stopped.get('[data-testid="workspace-stopped"]').text()).toBe('Stopped')
+    expect(stopped.get('[data-testid="workspace-row"]').attributes('title')).toBe(
+      'Stopped — Stopped',
+    )
+    expect(stopped.get('[data-testid="workspace-row"]').classes()).toContain(
+      'text-muted-foreground',
+    )
+    expect(
+      wrapper.get(groupSelector('Alpha')).find('[data-testid="workspace-stopped"]').exists(),
+    ).toBe(false)
+    expect(wrapper.find(groupSelector('Other')).exists()).toBe(false)
+
+    await wrapper.setProps({ activeWorkspaceId: 'Other', activeSessionId: null })
+    expect(wrapper.find(groupSelector('Stopped')).exists()).toBe(false)
+    expect(wrapper.get(groupSelector('Other')).findAll(rows)).toHaveLength(1)
+    await wrapper.setProps({ activeWorkspaceId: null })
+    expect(wrapper.find(groupSelector('Other')).exists()).toBe(false)
+    expect(wrapper.find(groupSelector('Alpha')).exists()).toBe(true)
+  })
+
+  it('keeps the opened stopped group when history arrives and removes its label on start', async () => {
+    const wrapper = mountList({
+      workspaces: [workspace('Stopped', { status: WorkspaceStatus.STOPPED })],
+      conversations: [],
+      activeWorkspaceId: 'Stopped',
+    })
+    expect(wrapper.get(groupSelector('Stopped')).text()).toContain('No chats yet')
+    await wrapper.setProps({ conversations: chats('Stopped', 6) })
+    await wrapper.get(groupSelector('Stopped')).get(more).trigger('click')
+    await wrapper.setProps({ workspaces: [workspace('Stopped')] })
+    const running = wrapper.get(groupSelector('Stopped'))
+    expect(running.findAll(rows)).toHaveLength(6)
+    expect(running.find('[data-testid="workspace-stopped"]').exists()).toBe(false)
+    expect(running.get('[data-testid="workspace-row"]').classes()).not.toContain(
+      'text-muted-foreground',
+    )
+    await wrapper.setProps({ activeWorkspaceId: null })
+    expect(wrapper.find(groupSelector('Stopped')).exists()).toBe(true)
   })
 
   it.each([

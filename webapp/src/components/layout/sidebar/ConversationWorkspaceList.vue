@@ -41,7 +41,9 @@ function setVisibleCount(workspaceId: string, count: number): void {
   visibleCounts.value = { ...visibleCounts.value, [workspaceId]: count }
 }
 
-const groups = computed(() => groupConversationsByWorkspace(props.workspaces, props.conversations))
+const groups = computed(() =>
+  groupConversationsByWorkspace(props.workspaces, props.conversations, props.activeWorkspaceId),
+)
 const hasUnread = computed(() =>
   groups.value.some((group) => group.conversations.some((conversation) => conversation.unread)),
 )

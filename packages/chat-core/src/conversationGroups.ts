@@ -122,16 +122,18 @@ export function extractInboxConversations(
 }
 
 /**
- * Group running and lifecycle-reserved workspaces' chats, online first.
- * Ordinary stopped, deleted and unknown history stays outside grouped navigation.
+ * Group running, lifecycle-reserved and the currently open stopped workspace's
+ * chats, online first. Deleted and unknown history stays outside navigation.
  */
 export function groupConversationsByWorkspace<W extends ConversationWorkspace>(
   workspaces: readonly W[],
   conversations: readonly HarnessConversation[],
+  activeWorkspaceId: string | null = null,
 ): WorkspaceConversationGroup<W>[] {
   const groups = new Map<string, WorkspaceConversationGroup<W>>();
   for (const workspace of workspaces) {
-    if (!isConversationWorkspaceEligible(workspace)) continue;
+    if (!isConversationWorkspaceEligible(workspace, activeWorkspaceId))
+      continue;
     groups.set(workspace.id, {
       workspaceId: workspace.id,
       name:
@@ -197,13 +199,15 @@ export function selectSidebarWorkspaces<W extends ConversationWorkspace>(
     .slice(0, limit);
 }
 
-/** Capture/recovery reserves history navigation even while the runtime is stopped. */
+/** Capture/recovery and the open stopped workspace retain history navigation. */
 export function isConversationWorkspaceEligible(
   workspace: ConversationWorkspace,
+  activeWorkspaceId: string | null = null,
 ): boolean {
   if (HIDDEN_WORKSPACE_STATUSES.has(workspace.status)) return false;
   return (
     workspace.status === "running" ||
+    (workspace.status === "stopped" && workspace.id === activeWorkspaceId) ||
     workspace.active_operation === "capturing_image" ||
     Boolean(workspace.intervention_required)
   );

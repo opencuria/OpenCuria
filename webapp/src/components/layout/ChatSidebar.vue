@@ -37,6 +37,7 @@ import {
   countableWorkspaces,
   conversationTitle,
   extractInboxConversations,
+  isConversationWorkspaceEligible,
 } from '@/lib/conversationGroups'
 import { useAuthStore } from '@/stores/auth'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
@@ -93,6 +94,7 @@ const activeSessionId = computed(() => {
 })
 
 const activeWorkspaceId = computed(() => {
+  if (route.name !== 'workspace-detail') return null
   const id = route.params.id
   return typeof id === 'string' ? id : null
 })
@@ -131,8 +133,13 @@ function handleOpenScheduledTasks(): void {
 }
 
 function handleMarkAllRead(): void {
+  const visibleWorkspaceIds = new Set(
+    workspaceStore.workspaces
+      .filter((workspace) => isConversationWorkspaceEligible(workspace, activeWorkspaceId.value))
+      .map((workspace) => workspace.id),
+  )
   const unread = conversationStore.conversations.filter(
-    (row) => row.unread && runningWorkspaceIds.value.has(row.workspace_id),
+    (row) => row.unread && visibleWorkspaceIds.has(row.workspace_id),
   )
   void Promise.all(unread.map((row) => conversationStore.markAsRead(row.session_id)))
 }

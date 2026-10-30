@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, nextTick } from 'vue'
+import { defineComponent, nextTick, reactive } from 'vue'
 import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -85,19 +85,20 @@ const harnessStore = {
 }
 
 const routerPush = vi.fn()
+const currentRoute = reactive({
+  path: '/',
+  name: 'home',
+  params: {} as Record<string, string>,
+  query: {} as Record<string, string>,
+  meta: {},
+})
 
 vi.mock('vue-router', () => ({
   RouterLink: {
     name: 'RouterLink',
     template: '<a><slot /></a>',
   },
-  useRoute: () => ({
-    path: '/',
-    name: 'home',
-    params: {},
-    query: {},
-    meta: {},
-  }),
+  useRoute: () => currentRoute,
   useRouter: () => ({
     go: vi.fn(),
     push: routerPush,
@@ -177,6 +178,7 @@ describe('ChatSidebar', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+    Object.assign(currentRoute, { path: '/', name: 'home', params: {}, query: {} })
     workspaceStore.getWorkspaceTransitionLabel.mockReturnValue(null)
     workspaceStore.isWorkspaceTransitioning.mockReturnValue(false)
     conversationStore.conversations = [makeConversation({ unread: true })]
@@ -266,6 +268,50 @@ describe('ChatSidebar', () => {
     expect(wrapper.find('[data-testid="inbox-section"]').exists()).toBe(false)
     expect(wrapper.find('[aria-label="Open workspace Beta"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('First chat')
+  })
+
+  it('shows stopped history only while its workspace detail route is open', async () => {
+    Object.assign(currentRoute, {
+      path: '/workspaces/ws-2',
+      name: 'workspace-detail',
+      params: { id: 'ws-2' },
+      query: { session: 's-2' },
+    })
+    conversationStore.conversations = [
+      makeConversation({ session_id: 's-2', workspace_id: 'ws-2', title: 'Archived chat' }),
+    ]
+    const wrapper = mountSidebar()
+    const stopped = wrapper.get('[data-workspace-id="ws-2"]')
+    expect(stopped.get('[data-testid="workspace-stopped"]').text()).toBe('Stopped')
+    const chat = stopped.get('[aria-label="Open chat Archived chat"]')
+    expect(chat.attributes('aria-selected')).toBe('true')
+    await chat.trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith({
+      path: '/workspaces/ws-2',
+      query: { session: 's-2' },
+    })
+
+    // A retained parameter on another route must not retain stopped history.
+    currentRoute.name = 'home'
+    await nextTick()
+    expect(wrapper.find('[data-workspace-id="ws-2"]').exists()).toBe(false)
+    expect(wrapper.find('[data-workspace-id="ws-1"]').exists()).toBe(true)
+  })
+
+  it('marks unread chats in the opened stopped workspace and running workspaces as read', async () => {
+    Object.assign(currentRoute, { name: 'workspace-detail', params: { id: 'ws-2' } })
+    workspaceStore.workspaces.push({ ...workspaceStore.workspaces[1]!, id: 'ws-3' })
+    conversationStore.conversations = [
+      makeConversation({ session_id: 'running-unread', unread: true }),
+      makeConversation({ session_id: 'opened-unread', workspace_id: 'ws-2', unread: true }),
+      makeConversation({ session_id: 'hidden-unread', workspace_id: 'ws-3', unread: true }),
+    ]
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="mark-all-read"]').trigger('click')
+    expect(conversationStore.markAsRead.mock.calls).toEqual([
+      ['running-unread'],
+      ['opened-unread'],
+    ])
   })
 
   it('combines gates and idle unread across workspaces with one count and no busy results', () => {

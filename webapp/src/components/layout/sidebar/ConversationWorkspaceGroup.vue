@@ -3,6 +3,7 @@
 import { computed, watch } from 'vue'
 import { ChevronRight, Loader2 } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { WorkspaceStatus } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
@@ -54,10 +55,17 @@ const busy = computed(
     props.group.workspace?.has_active_session ||
     props.group.conversations.some((conversation) => conversation.status === 'busy'),
 )
+const stopped = computed(() => props.group.workspace?.status === WorkspaceStatus.STOPPED)
 const statusLabel = computed(
   () =>
     transitionLabel.value ??
-    (operating.value ? 'In progress' : props.group.online ? 'Online' : 'Offline'),
+    (operating.value
+      ? 'In progress'
+      : stopped.value
+        ? 'Stopped'
+        : props.group.online
+          ? 'Online'
+          : 'Offline'),
 )
 
 // Also runs when history arrives after the route or a refresh changes its order.
@@ -108,6 +116,7 @@ watch(
         :aria-label="`Open workspace ${props.group.name}`"
         :title="`${props.group.name} — ${statusLabel}`"
         class="h-7 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-1 text-left"
+        :class="stopped && !operating ? 'text-muted-foreground' : ''"
         @click="emit('open', props.group.workspaceId)"
       >
         <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{
@@ -116,6 +125,12 @@ watch(
         <span v-if="transitionLabel" class="text-xs text-muted-foreground">{{
           transitionLabel
         }}</span>
+        <span
+          v-else-if="stopped && !operating"
+          data-testid="workspace-stopped"
+          class="text-[10px] font-normal text-muted-foreground"
+          >Stopped</span
+        >
         <Loader2
           v-if="busy || operating"
           data-testid="workspace-busy"

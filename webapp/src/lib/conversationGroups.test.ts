@@ -10,6 +10,7 @@ import {
   extractInboxConversations,
   formatTimeAgo,
   groupConversationsByWorkspace,
+  isConversationWorkspaceEligible,
   selectSidebarWorkspaces,
 } from './conversationGroups'
 
@@ -313,6 +314,85 @@ describe('groupConversationsByWorkspace', () => {
     ])
   })
 
+  it('includes only the currently open stopped workspace until selection changes', () => {
+    const workspaces = [
+      workspace({ id: 'running', name: 'Zebra' }),
+      workspace({ id: 'stopped-a', name: 'Alpha', status: WorkspaceStatus.STOPPED }),
+      workspace({ id: 'stopped-b', name: 'Beta', status: WorkspaceStatus.STOPPED }),
+    ]
+    const conversations = workspaces.map(({ id }) =>
+      conversation({ workspace_id: id, session_id: `${id}-chat` }),
+    )
+    const groupedIds = (activeWorkspaceId: string | null = null) =>
+      groupConversationsByWorkspace(workspaces, conversations, activeWorkspaceId).map((group) => [
+        group.workspaceId,
+        group.online,
+        group.conversations.map((row) => row.session_id),
+      ])
+
+    expect(groupedIds()).toEqual([['running', true, ['running-chat']]])
+    expect(groupedIds('stopped-a')).toEqual([
+      ['running', true, ['running-chat']],
+      ['stopped-a', false, ['stopped-a-chat']],
+    ])
+    expect(groupedIds('stopped-b')).toEqual([
+      ['running', true, ['running-chat']],
+      ['stopped-b', false, ['stopped-b-chat']],
+    ])
+    expect(groupedIds('running')).toEqual(groupedIds())
+    expect(groupedIds(null)).toEqual(groupedIds())
+    expect(isConversationWorkspaceEligible(workspaces[1]!, 'stopped-a')).toBe(true)
+    expect(isConversationWorkspaceEligible(workspaces[1]!)).toBe(false)
+  })
+
+  it.each([
+    ...Object.values(WorkspaceStatus).filter(
+      (status) => status !== WorkspaceStatus.RUNNING && status !== WorkspaceStatus.STOPPED,
+    ),
+    'unknown' as WorkspaceStatus,
+  ])('does not reveal an active ordinary %s workspace', (status) => {
+    const active = workspace({ id: 'active', status })
+    const conversations = [conversation({ workspace_id: 'active' })]
+
+    expect(groupConversationsByWorkspace([active], conversations, 'active')).toEqual([])
+    expect(isConversationWorkspaceEligible(active, 'active')).toBe(false)
+    expect(groupConversationsByWorkspace([], conversations, 'active')).toEqual([])
+  })
+
+  it('keeps all active stopped chats sorted without mutating raw inputs', () => {
+    const workspaces = [
+      workspace({ id: 'stopped', status: WorkspaceStatus.STOPPED }),
+      workspace({ id: 'running', name: 'Zebra' }),
+    ]
+    const conversations = Array.from({ length: 8 }, (_, index) =>
+      conversation({
+        workspace_id: 'stopped',
+        session_id: `chat-${index}`,
+        last_message_at: new Date(NOW + (index % 2)).toISOString(),
+      }),
+    ).reverse()
+    const before = structuredClone({ workspaces, conversations })
+    workspaces.forEach(Object.freeze)
+    conversations.forEach(Object.freeze)
+    Object.freeze(workspaces)
+    Object.freeze(conversations)
+
+    const groups = groupConversationsByWorkspace(workspaces, conversations, 'stopped')
+    expect(groups.map((group) => group.workspaceId)).toEqual(['running', 'stopped'])
+    expect(groups[1]?.conversations.map((row) => row.session_id)).toEqual([
+      'chat-1',
+      'chat-3',
+      'chat-5',
+      'chat-7',
+      'chat-0',
+      'chat-2',
+      'chat-4',
+      'chat-6',
+    ])
+    expect(groups[1]?.conversations[0]).toBe(conversations[6])
+    expect({ workspaces, conversations }).toEqual(before)
+  })
+
   it('ignores activity, updated timestamps, busy and unread, sorting chats by last message then session ID', () => {
     const workspaces = [
       workspace({ id: 'z', name: 'Zebra', last_activity_at: new Date(NOW + 60_000).toISOString() }),
@@ -443,8 +523,16 @@ describe('groupConversationsByWorkspace', () => {
       WorkspaceStatus.DELETED,
       WorkspaceStatus.DELETING,
       WorkspaceStatus.PENDING_DELETION,
-    ])
+    ]) {
       expect(groups.map((group) => group.workspaceId)).not.toContain(status)
+      expect(
+        groupConversationsByWorkspace(
+          workspaces,
+          workspaces.map(({ id }) => conversation({ workspace_id: id })),
+          status,
+        ).map((group) => group.workspaceId),
+      ).not.toContain(status)
+    }
     expect(groups.every((group) => group.conversations.length === 1)).toBe(true)
     expect(
       groupConversationsByWorkspace(
