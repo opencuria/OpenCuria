@@ -141,7 +141,6 @@ def test_rest_operation_inspection_and_scopes(runner, workspace, user):
     assert (
         client.post(f"/api/v1/runners/operations/{task.id}/retry/").status_code == 403
     )
-    assert client.get("/api/v1/runners/operations/").status_code == 200
 
 
 @pytest.mark.django_db(transaction=True)

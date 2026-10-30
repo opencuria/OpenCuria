@@ -363,8 +363,8 @@ See [Django's SQLite transaction guidance](https://docs.djangoproject.com/en/5.2
 Backend tests use a separate temporary SQLite file, so concurrency checks exercise
 the same lock waiting as the application rather than shared-cache memory locks.
 
-For an unresolved operation, use `GET /api/v1/runners/operations/` then
-`GET /api/v1/runners/operations/{id}/`. Offline inspection returns unknown;
+For an unresolved operation, select **Check status** in the runner's activity
+list (`GET /api/v1/runners/operations/{id}/`). Offline inspection returns unknown;
 it never clears a fence. `POST .../{id}/reconcile/` applies proven journal
 completion; `retry/` is only for known finished failed start/stop/remove, bounded
 and requiring fresh resource evidence. Organization admins can explicitly

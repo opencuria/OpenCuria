@@ -15,6 +15,7 @@ from config.urls import api
             "/workspaces/{workspace_id}/git/file-content/",
         ),
         ("get", "/organizations/", "/auth/me/"),
+        ("get", "/runners/operations/", "/runners/operations/{operation_id}/"),
         ("get", "/plugins/{plugin_id}/", "/plugins/"),
         ("get", "/captured-images/{captured_image_id}/", "/captured-images/"),
         (

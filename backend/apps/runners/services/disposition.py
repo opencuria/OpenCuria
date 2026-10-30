@@ -26,19 +26,6 @@ class DispositionService:
     """Inspect is non-destructive, including offline; disposition requires proof."""
 
     @staticmethod
-    def list_operations(user: Any, organization_id: uuid.UUID) -> list[dict]:
-        """List sanitized operations visible to an owner or organization admin."""
-        OrganizationService().require_membership(user, organization_id)
-        visible = []
-        for state in DispositionRepository.list_by_org(organization_id):
-            try:
-                DispositionService.authorized(user, organization_id, state.operation_id)
-            except (AuthenticationError, NotFoundError):
-                continue
-            visible.append(DispositionService._summary(state))
-        return visible
-
-    @staticmethod
     def authorized(
         user: Any,
         organization_id: uuid.UUID,

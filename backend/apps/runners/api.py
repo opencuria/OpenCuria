@@ -159,20 +159,6 @@ async def _get_owned_workspace_async(
 runner_router = Router(tags=["runners"])
 
 
-@runner_router.get("/operations/", response={200: dict, 403: ErrorOut})
-def list_lifecycle_operations(request: HttpRequest):
-    """List sanitized lifecycle state visible to the current owner/admin."""
-    from .services.disposition import DispositionService
-
-    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
-        return _perm_denied(APIKeyPermission.RUNNERS_READ)
-    return {
-        "operations": DispositionService.list_operations(
-            request.user, get_organization_id(request)
-        )
-    }
-
-
 @runner_router.get(
     "/", response={200: list[RunnerOut], 403: ErrorOut}, summary="List runners"
 )

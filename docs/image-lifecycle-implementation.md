@@ -284,7 +284,6 @@ single deletion progress truth, not duplicate stale assignment error labels.
 
 ## Operator API
 
-- `GET /api/v1/runners/operations/` lists sanitized visible operations.
 - `GET /api/v1/runners/operations/{operation_id}/` requests current-session
   `operation:inspect`: identity, process instance, running/terminal/unknown,
   safe result, `outcome_known`, `execution_finished`, fresh inventory and

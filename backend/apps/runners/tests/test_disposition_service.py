@@ -12,20 +12,17 @@ from apps.runners.models import LifecycleCommand, Runner, Workspace
 from apps.runners.operations import OperationRepository
 from apps.runners.repositories import TaskRepository
 from apps.runners.services.disposition import DispositionService
-from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.exceptions import AuthenticationError, ConflictError
 
 pytestmark = pytest.mark.django_db
 
 
-def _operation(
-    runner: Runner, workspace: Workspace, **payload: Any
-) -> LifecycleCommand:
+def _operation(runner: Runner, workspace: Workspace) -> LifecycleCommand:
     task = TaskRepository.create(
         task_id=uuid.uuid4(),
         runner=runner,
         workspace=workspace,
         task_type="stop_workspace",
-        operation_payload=payload,
     )
     return LifecycleCommand.objects.select_related(
         "task__runner", "task__workspace"
@@ -42,37 +39,6 @@ def _evidence(row: LifecycleCommand, *, known: bool = True) -> dict[str, Any]:
         "event": "workspace:error",
         "identity": OperationRepository.envelope(row, {}),
     }
-
-
-def test_listing_scopes_and_sanitizes_operations(
-    runner: Runner, workspace: Workspace, user: Any, django_user_model: Any
-) -> None:
-    Membership.objects.create(
-        user=user, organization=runner.organization, role="member"
-    )
-    other = django_user_model.objects.create_user(email="disposition-list@example.com")
-    row = _operation(runner, workspace, repos=["private-repo"], token="private-token")
-    workspace.created_by = other
-    workspace.save(update_fields=["created_by"])
-    service = DispositionService()
-    assert service.list_operations(user, runner.organization_id) == []
-    Membership.objects.filter(user=user).update(role="admin")
-    assert service.list_operations(user, runner.organization_id) == [
-        {
-            "operation_id": str(row.task_id),
-            "task_type": "stop_workspace",
-            "status": row.task.status,
-            "phase": row.phase,
-            "runner_id": str(runner.id),
-            "target": row.target,
-            "attempt": row.attempt,
-            "diagnostic": "",
-            "intervention_required": False,
-        }
-    ]
-    Membership.objects.filter(user=user).delete()
-    with pytest.raises(NotFoundError):
-        service.list_operations(user, runner.organization_id)
 
 
 @pytest.mark.parametrize("admin", [False, True])

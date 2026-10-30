@@ -87,18 +87,6 @@ class DispositionRepository:
         return _snapshot(row) if row is not None else None
 
     @staticmethod
-    def list_by_org(organization_id: uuid.UUID) -> list[DispositionState]:
-        """Read at most 100 operations, newest first, without applying visibility."""
-        rows = (
-            LifecycleCommand.objects.filter(
-                task__runner__organization_id=organization_id
-            )
-            .select_related("task__runner", "task__workspace")
-            .order_by("-created_at")[:100]
-        )
-        return [_snapshot(row) for row in rows]
-
-    @staticmethod
     @contextmanager
     def locked(state: DispositionState) -> Iterator[DispositionRepository]:
         """Keep the existing allocation/callback lock order through all writes.
