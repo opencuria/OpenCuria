@@ -1,5 +1,9 @@
 # Git diff traversal consolidation
 
+Historical measurements for revision `22f0011`. The current app computes diffs
+with Monaco; commit details now return metadata only, and commit suggestions
+consume patch text directly. See [Workspace editor](workspace-editor.md).
+
 ## Investigation and selection
 
 Baseline: `b60d90f9e5a21b22cc37d534c19ad9e94a07c4a0` on `origin/dev`.
@@ -50,12 +54,9 @@ existing implementations.
 
 ## Measurements
 
-Reproduce from `runner/`:
-
-```bash
-PYTHONPATH=. .venv/bin/python tests/benchmark_git_diff.py \
-  --baseline-ref b60d90f --samples 40
-```
+Reproduction requires the matching source and comparison script from revision
+`22f0011` (`--baseline-ref b60d90f --samples 40`). The script compared structured
+diff responses for equality and was removed with that obsolete representation.
 
 Python 3.12.3, Git 2.43.0, Linux x86_64. The baseline service is loaded from
 the Git revision without changing the checkout. The existing test runtime

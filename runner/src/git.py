@@ -31,8 +31,6 @@ GIT_DIFF_CONTEXT_LINES = 3
 GIT_MAX_DIFF_BYTES = 200 * 1024  # 200 KiB
 #: Max files with inline patch text per diff response.
 GIT_MAX_DIFF_FILES_WITH_PATCH = 100
-#: Max raw bytes read when rendering an untracked file as "added".
-GIT_MAX_UNTRACKED_BYTES = 200 * 1024
 
 #: stderr bytes returned in structured errors (after redaction).
 GIT_MAX_STDERR_BYTES = 8 * 1024
@@ -1079,12 +1077,12 @@ def parse_raw_z(output: str) -> dict[str, dict[str, Any]]:
 
 
 def parse_diff_z(output: str) -> list[dict[str, Any]]:
-    """Read ``--raw --numstat --patch -z`` from a single Git traversal.
+    """Read ``--raw --numstat -z`` and optional patch text in one traversal.
 
     Git emits raw records, numstat records, then an extra NUL before the
     patch. Consume whole raw records to find the numstat boundary: paths
     can themselves look like raw headers or tab-separated statistics.
-    Existing parsers retain ownership of paths, hunks and response limits.
+    Commit details need only metadata; commit suggestions also request patches.
     """
     metadata, _, patch = output.partition("\x00\x00")
     fields = _iter_nul_fields(metadata)
@@ -1164,62 +1162,12 @@ def _c_style_unquote(token: str) -> str:
     return "".join(out)
 
 
-def _truncate_text(text: str, limit: int = GIT_MAX_DIFF_BYTES) -> tuple[str, bool]:
-    """Truncate *text* to *limit* bytes, returning ``(text, truncated)``."""
+def _truncate_text(text: str, limit: int = GIT_MAX_DIFF_BYTES) -> str:
+    """Bound patch text before returning it to the commit suggestion service."""
     raw = text.encode("utf-8", "ignore")
     if len(raw) <= limit:
-        return text, False
-    return raw[:limit].decode("utf-8", "ignore") + "\n…[truncated]", True
-
-
-_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
-
-
-def parse_patch_hunks(patch: str) -> tuple[list[dict[str, Any]], bool]:
-    """Parse a unified patch into ``[{"header", "old_start", ...}]`` hunks.
-
-    Returns ``(hunks, has_textual_diff)``.  Binary patches (``Binary files
-    … differ``) yield ``([], False)``.
-    """
-    if not patch.strip():
-        return [], False
-    if "Binary files " in patch and " differ" in patch:
-        return [], False
-    hunks: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    for raw_line in patch.splitlines():
-        if raw_line.startswith("@@ "):
-            match = _HUNK_RE.match(raw_line)
-            if match:
-                old_start = int(match.group(1))
-                new_start = int(match.group(3))
-            else:
-                old_start = new_start = 0
-            current = {
-                "header": raw_line,
-                "old_start": old_start,
-                "new_start": new_start,
-                "lines": [],
-            }
-            hunks.append(current)
-            continue
-        if current is None:
-            continue
-        if not raw_line:
-            current["lines"].append({"type": "context", "content": ""})
-        elif raw_line[0] == "+":
-            current["lines"].append({"type": "add", "content": raw_line[1:]})
-        elif raw_line[0] == "-":
-            current["lines"].append({"type": "del", "content": raw_line[1:]})
-        elif raw_line[0] == " ":
-            current["lines"].append({"type": "context", "content": raw_line[1:]})
-        elif raw_line[0] == "\\":
-            continue
-        else:
-            continue
-    if not hunks:
-        return [], False
-    return hunks, True
+        return text
+    return raw[:limit].decode("utf-8", "ignore") + "\n…[truncated]"
 
 
 def split_patch_per_file(patch: str) -> dict[str, str]:
@@ -1458,20 +1406,14 @@ def build_file_changes(
     raw: dict[str, dict[str, Any]],
     numstat: dict[str, dict[str, Any]],
     patches: dict[str, str],
-    changes: list[dict[str, Any]] | None = None,
-    patch_budget: int = GIT_MAX_DIFF_FILES_WITH_PATCH,
 ) -> list[dict[str, Any]]:
-    """Assemble frontend-facing file change dicts.
+    """Assemble file metadata and bounded patches for commit suggestions.
 
     ``raw`` comes from :func:`parse_raw_z`, ``numstat`` from
     :func:`parse_numstat_z`, ``patches`` from :func:`split_patch_per_file`.
-    ``changes`` optionally restricts output to status-known paths.
     """
     entries: list[dict[str, Any]] = []
     paths = sorted(set(raw) | set(numstat) | set(patches))
-    if changes is not None:
-        known = {item["path"] for item in changes}
-        paths = [p for p in paths if p in known]
     with_patch = 0
     for path in paths:
         info = raw.get(path, {})
@@ -1479,33 +1421,18 @@ def build_file_changes(
         status = info.get("status") or "M"
         old_path = info.get("old_path") or stat.get("old_path")
         patch_text = patches.get(path, "")
-        hunks: list[dict[str, Any]] = []
-        has_textual = False
-        truncated = False
-        if patch_text and with_patch < patch_budget:
-            truncated_patch, was_truncated = _truncate_text(patch_text)
-            hunks, has_textual = parse_patch_hunks(truncated_patch)
-            truncated = was_truncated
+        entry = {
+            "old_path": old_path or path,
+            "new_path": path,
+            "status": status,
+            "additions": int(stat.get("additions", 0)),
+            "deletions": int(stat.get("deletions", 0)),
+            "binary": bool(stat.get("binary")),
+        }
+        if patch_text and with_patch < GIT_MAX_DIFF_FILES_WITH_PATCH:
+            entry["patch"] = _truncate_text(patch_text)
             with_patch += 1
-        elif patch_text:
-            truncated = True
-        binary = bool(stat.get("binary")) or (
-            bool(patch_text) and not has_textual and "Binary files " in patch_text
-        )
-        entries.append(
-            {
-                "old_path": old_path or path,
-                "new_path": path,
-                "status": status,
-                "additions": int(stat.get("additions", 0)),
-                "deletions": int(stat.get("deletions", 0)),
-                "binary": binary,
-                "truncated": truncated,
-                "has_textual_diff": has_textual and not binary,
-                "diff": hunks,
-            }
-        )
-    entries.sort(key=lambda item: item["new_path"])
+        entries.append(entry)
     return entries
 
 
@@ -1564,7 +1491,6 @@ __all__ = [
     "GIT_DIFF_CONTEXT_LINES",
     "GIT_MAX_DIFF_BYTES",
     "GIT_MAX_DIFF_FILES_WITH_PATCH",
-    "GIT_MAX_UNTRACKED_BYTES",
     "GIT_MAX_STDERR_BYTES",
     "GIT_READ_TIMEOUT_S",
     "GIT_NETWORK_TIMEOUT_S",
@@ -1592,7 +1518,6 @@ __all__ = [
     "parse_for_each_ref",
     "parse_log_us_rs",
     "parse_numstat_z",
-    "parse_patch_hunks",
     "parse_raw_z",
     "parse_status_v2",
     "split_patch_per_file",

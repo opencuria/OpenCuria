@@ -15,19 +15,6 @@ export type GitStagedKind = 'M' | 'A' | 'D' | 'R' | 'C' | 'U' | null
 /** Unstaged-side change kind (worktree vs index), incl. untracked marker. */
 export type GitUnstagedKind = 'M' | 'D' | 'R' | 'C' | 'U' | 'untracked' | null
 
-export interface GitDiffLine {
-  type: 'context' | 'add' | 'del'
-  content: string
-}
-
-export interface GitDiffHunk {
-  /** Hunk header, e.g. "@@ -12,6 +12,7 @@". */
-  header: string
-  oldStart: number
-  newStart: number
-  lines: GitDiffLine[]
-}
-
 export interface GitFileChange {
   path: string
   oldPath: string | null
@@ -40,7 +27,6 @@ export interface GitFileChange {
   unstaged: GitUnstagedKind
   /** Merge conflict code (e.g. 'UU', 'AA', 'UD'), null when not conflicted. */
   conflict: string | null
-  diff: GitDiffHunk[]
 }
 
 export interface GitCommit {
@@ -97,10 +83,6 @@ export interface GitCommitFile {
   status: GitCommitFileStatus
   additions: number
   deletions: number
-  binary: boolean
-  truncated: boolean
-  hasTextualDiff: boolean
-  diff: GitDiffHunk[]
 }
 
 export interface GitCommitDetails {

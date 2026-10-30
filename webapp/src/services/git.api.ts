@@ -22,28 +22,12 @@ import { get, post } from './api'
 // Raw wire shapes (snake_case, as returned by the backend)
 // ---------------------------------------------------------------------------
 
-export interface RawGitDiffLine {
-  type: 'context' | 'add' | 'del'
-  content: string
-}
-
-export interface RawGitDiffHunk {
-  header: string
-  old_start: number
-  new_start: number
-  lines: RawGitDiffLine[]
-}
-
 export interface RawGitCommitFile {
   old_path: string
   new_path: string
   status: string
   additions: number
   deletions: number
-  binary: boolean
-  truncated: boolean
-  has_textual_diff: boolean
-  diff: RawGitDiffHunk[]
 }
 
 export interface RawGitChange {
@@ -54,7 +38,6 @@ export interface RawGitChange {
   staged_kind: string | null
   unstaged: string | null
   conflict: string | null
-  diff: RawGitDiffHunk[]
 }
 
 export interface RawGitCommit {

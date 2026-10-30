@@ -63,7 +63,6 @@ import {
   type RawGitCommit,
   type RawGitCommitDetails,
   type RawGitCommitFile,
-  type RawGitDiffHunk,
   type RawGitRepoSnapshot,
   type RawGitRepoSummary,
   type RawGitStash,
@@ -196,15 +195,6 @@ function asUnstagedKind(value: unknown): GitUnstagedKind {
     : null
 }
 
-export function normalizeDiffHunk(raw: RawGitDiffHunk): GitCommitFile['diff'][number] {
-  return {
-    header: raw.header,
-    oldStart: raw.old_start,
-    newStart: raw.new_start,
-    lines: (raw.lines ?? []).map((line) => ({ ...line })),
-  }
-}
-
 export function normalizeCommitFile(raw: RawGitCommitFile): GitCommitFile {
   return {
     oldPath: raw.old_path,
@@ -212,10 +202,6 @@ export function normalizeCommitFile(raw: RawGitCommitFile): GitCommitFile {
     status: asCommitFileStatus(raw.status),
     additions: raw.additions ?? 0,
     deletions: raw.deletions ?? 0,
-    binary: raw.binary ?? false,
-    truncated: raw.truncated ?? false,
-    hasTextualDiff: raw.has_textual_diff ?? false,
-    diff: (raw.diff ?? []).map(normalizeDiffHunk),
   }
 }
 
@@ -228,7 +214,6 @@ export function normalizeChange(raw: RawGitChange): GitFileChange {
     stagedKind: asStagedKind(raw.staged_kind),
     unstaged: asUnstagedKind(raw.unstaged),
     conflict: typeof raw.conflict === 'string' && raw.conflict ? raw.conflict : null,
-    diff: (raw.diff ?? []).map(normalizeDiffHunk),
   }
 }
 

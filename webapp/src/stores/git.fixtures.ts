@@ -12,24 +12,10 @@ import type {
   RawGitCommit,
   RawGitCommitDetails,
   RawGitCommitFile,
-  RawGitDiffHunk,
   RawGitRepoSnapshot,
   RawGitRepoSummary,
   RawGitStash,
 } from '@/services/git.api'
-
-export function makeHunk(suffix: string): RawGitDiffHunk {
-  return {
-    header: `@@ -1,2 +1,2 @@ ${suffix}`,
-    old_start: 1,
-    new_start: 1,
-    lines: [
-      { type: 'context', content: `// ${suffix}` },
-      { type: 'del', content: 'const before = 1' },
-      { type: 'add', content: 'const after = 2' },
-    ],
-  }
-}
 
 export function makeCommitFile(
   path: string,
@@ -41,10 +27,6 @@ export function makeCommitFile(
     status: 'M',
     additions: 3,
     deletions: 1,
-    binary: false,
-    truncated: false,
-    has_textual_diff: true,
-    diff: [makeHunk(path)],
     ...overrides,
   }
 }
@@ -81,7 +63,6 @@ export function makeRawChange(
     staged_kind: null,
     unstaged: 'M',
     conflict: null,
-    diff: [],
     ...overrides,
   }
 }

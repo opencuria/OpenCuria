@@ -34,6 +34,9 @@ the window regains focus.
 - `GET /workspaces/{id}/git/file-content/` selects a repository path, file and
   `revision` (`worktree`, `index`, `head`, a commit hash or its first parent).
   Missing sides of additions, deletions and root commits are empty text.
+- Commit details contain file paths and change statistics. Monaco computes
+  displayed diffs from file contents; the runner returns bounded patch text
+  only for commit message suggestions.
 - Existing `POST /workspaces/{id}/git/operation/` accepts `stage_patch`,
   `unstage_patch` and `discard_patch`. Requests contain `path`, unified hunks
   without file headers, and expected index/worktree tokens. Unstaging also

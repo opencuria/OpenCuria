@@ -556,7 +556,6 @@ class GitService:
                     "staged_kind": item.get("staged"),
                     "unstaged": item.get("unstaged"),
                     "conflict": item.get("conflict"),
-                    "diff": [],
                 }
                 for item in changes
             ],
@@ -800,26 +799,24 @@ class GitService:
         instance_id: str,
         repo_root: str,
         env: dict[str, str],
-        changes: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build staged/unstaged/untracked diff entries for a repo."""
         timeout = git_ops.GIT_READ_TIMEOUT_S
-        if changes is None:
-            exit_code, status_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "status", "--porcelain=v2", "--branch",
-                 "--untracked-files=all", "-z"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
+        exit_code, status_out = await self._git_exec(
+            runtime,
+            instance_id,
+            ["git", "status", "--porcelain=v2", "--branch",
+             "--untracked-files=all", "-z"],
+            workdir=repo_root,
+            env=env,
+            timeout=timeout,
+        )
+        if exit_code != 0:
+            raise git_ops.GitError(
+                "git_failed", "git status failed",
+                exit_code=exit_code, stderr=status_out,
             )
-            if exit_code != 0:
-                raise git_ops.GitError(
-                    "git_failed", "git status failed",
-                    exit_code=exit_code, stderr=status_out,
-                )
-            changes, _ = git_ops.changes_from_status_v2(status_out)
+        changes, _ = git_ops.changes_from_status_v2(status_out)
 
         staged_entries: list[dict[str, Any]] = []
         unstaged_entries: list[dict[str, Any]] = []
@@ -839,6 +836,7 @@ class GitService:
             staged_entries = await self._git_diff_file_changes(
                 runtime, instance_id, repo_root, env,
                 ["git", "diff", "--cached", "--", *staged_paths],
+                include_patch=True,
             )
 
         if unstaged_paths:
@@ -858,6 +856,7 @@ class GitService:
                     await self._git_diff_file_changes(
                         runtime, instance_id, repo_root, env,
                         ["git", "diff", "--", *tracked_unstaged],
+                        include_patch=True,
                         separate_patch=any(item.get("conflict") for item in changes),
                     )
                 )
@@ -895,9 +894,10 @@ class GitService:
         argv: list[str],
         *,
         check: bool = True,
+        include_patch: bool = False,
         separate_patch: bool = False,
     ) -> list[dict[str, Any]]:
-        """Read a diff once, retaining best-effort commit reads.
+        """Read file statistics, adding patch text only for commit suggestions.
 
         Unmerged working trees need a separate patch read: adding --patch
         makes Git emit combined raw records and suppress numstat for conflicts.
@@ -909,7 +909,7 @@ class GitService:
         ]
         patch_format = ["--patch", f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}"]
         formats = ["--raw", "--numstat", "-z"]
-        if not separate_patch:
+        if include_patch and not separate_patch:
             formats.extend(patch_format)
         command = [*argv[:2], *options, *formats, *argv[2:]]
         exit_code, output = await self._git_exec(
@@ -923,7 +923,7 @@ class GitService:
                     exit_code=exit_code, stderr=output,
                 )
             return []
-        if separate_patch:
+        if include_patch and separate_patch:
             exit_code, patch = await self._git_exec(
                 runtime, instance_id,
                 [*argv[:2], *options, *patch_format, *argv[2:]],
@@ -954,55 +954,22 @@ class GitService:
                 ["git", "diff", "--no-index", "--no-color", "--no-ext-diff",
                  "--src-prefix=a/", "--dst-prefix=b/",
                  f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                 "--patch", "--", "/dev/null", rel_validated],
+                 "--raw", "--numstat", "--patch", "-z",
+                 "--", "/dev/null", rel_validated],
                 workdir=repo_root, env=env, timeout=timeout,
             )
         # --no-index exits 1 when a diff exists; that is the happy path.
-        if exit_code not in {0, 1}:
-            # Fall back to a capped direct read when diff fails (e.g. the
-            # path is a directory or unreadable).
-            return await self._git_untracked_fallback(
-                runtime, instance_id, repo_root, env, rel_validated
-            )
-        patches = git_ops.split_patch_per_file(output)
-        # --no-index labels paths oddly; take the single patch if present.
-        patch_text = next(iter(patches.values()), "")
-        hunks, has_textual = git_ops.parse_patch_hunks(patch_text[: git_ops.GIT_MAX_DIFF_BYTES + 64])
-        truncated = len(patch_text.encode("utf-8", "ignore")) > git_ops.GIT_MAX_DIFF_BYTES
-        binary = bool(patch_text) and not has_textual and "Binary files " in patch_text
+        entries = git_ops.parse_diff_z(output) if exit_code in {0, 1} else []
+        if entries:
+            return {**entries[0], "old_path": rel_validated, "new_path": rel_validated}
+        # Keep the file in the summary even when its patch is unreadable.
         return {
             "old_path": rel_validated,
             "new_path": rel_validated,
             "status": "A",
-            "additions": sum(
-                1 for hunk in hunks for line in hunk["lines"] if line["type"] == "add"
-            ),
-            "deletions": 0,
-            "binary": binary,
-            "truncated": truncated,
-            "has_textual_diff": has_textual and not binary,
-            "diff": hunks,
-        }
-
-    async def _git_untracked_fallback(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        repo_root: str,
-        env: dict[str, str],
-        rel: str,
-    ) -> dict[str, Any]:
-        """Render an unreadable/odd untracked path without patch text."""
-        return {
-            "old_path": rel,
-            "new_path": rel,
-            "status": "A",
             "additions": 0,
             "deletions": 0,
             "binary": False,
-            "truncated": False,
-            "has_textual_diff": False,
-            "diff": [],
         }
 
     async def _git_commit_details(
@@ -1013,7 +980,7 @@ class GitService:
         env: dict[str, str],
         commit_hash: str,
     ) -> dict[str, Any]:
-        """Build commit details with file changes, numstat and hunks."""
+        """Build commit metadata and file statistics for the app."""
         timeout = git_ops.GIT_READ_TIMEOUT_S
         full_hash = git_ops.validate_commit_hash(commit_hash)
         us = "\x1f"
@@ -1052,7 +1019,6 @@ class GitService:
 
         is_root = len(parents) == 0
         if is_root:
-            # show retains textconv for root patches, unlike diff-tree's default.
             diff_argv = ["git", "show", "--pretty=format:", "-M", full, "--"]
         else:
             diff_argv = ["git", "diff", "-M", parents[0], full, "--"]

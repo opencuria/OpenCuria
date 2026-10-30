@@ -21,7 +21,6 @@ STYLE_SUBJECTS = 10
 #: Hard cap for the returned subject line.
 MAX_SUBJECT_CHARS = 100
 
-_LINE_PREFIX = {"add": "+", "del": "-"}
 _LABEL_PREFIX = re.compile(r"^(commit message|commit subject|subject)\s*:\s*", re.I)
 _WRAPPERS = (('"', '"'), ("'", "'"), ("“", "”"), ("„", "“"), ("`", "`"))
 
@@ -52,20 +51,6 @@ def _file_header(item: dict[str, Any]) -> str:
     additions = int(item.get("additions") or 0)
     deletions = int(item.get("deletions") or 0)
     return f"{header} (+{additions} -{deletions})"
-
-
-def _file_patch(item: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for hunk in item.get("diff") or []:
-        if not isinstance(hunk, dict):
-            continue
-        lines.append(str(hunk.get("header") or "@@"))
-        for line in hunk.get("lines") or []:
-            if not isinstance(line, dict):
-                continue
-            prefix = _LINE_PREFIX.get(str(line.get("type")), " ")
-            lines.append(f"{prefix}{line.get('content', '')}")
-    return "\n".join(lines)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -100,7 +85,7 @@ def build_commit_message_prompt(
     budget = MAX_DIFF_CHARS
     patches: list[str] = []
     for item in listed:
-        patch = _file_patch(item)
+        patch = str(item.get("patch") or "")
         if not patch:
             continue
         if budget <= 0:

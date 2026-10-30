@@ -26,6 +26,10 @@ REPO = "/workspace/repo"
 
 
 def _file(path: str, *lines: tuple[str, str], status: str = "M") -> dict:
+    patch = "\n".join(
+        {"context": " ", "add": "+", "del": "-"}[kind] + text
+        for kind, text in lines
+    )
     return {
         "old_path": path,
         "new_path": path,
@@ -33,18 +37,7 @@ def _file(path: str, *lines: tuple[str, str], status: str = "M") -> dict:
         "additions": sum(1 for kind, _ in lines if kind == "add"),
         "deletions": sum(1 for kind, _ in lines if kind == "del"),
         "binary": False,
-        "truncated": False,
-        "has_textual_diff": bool(lines),
-        "diff": [
-            {
-                "header": "@@ -1,2 +1,2 @@",
-                "old_start": 1,
-                "new_start": 1,
-                "lines": [{"type": kind, "content": text} for kind, text in lines],
-            }
-        ]
-        if lines
-        else [],
+        "patch": "@@ -1,2 +1,2 @@\n" + patch if lines else "",
     }
 
 

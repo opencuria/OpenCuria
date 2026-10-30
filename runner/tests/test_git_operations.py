@@ -857,16 +857,6 @@ class GitHelperUnitTests(unittest.TestCase):
             conflicted = next(c for c in changes2 if c["path"] == "README.md")
             self.assertEqual(conflicted["conflict"], "UU")
 
-    def test_parse_patch_hunks_binary(self) -> None:
-        hunks, has_text = git_ops.parse_patch_hunks(
-            "diff --git a/b b/b\nBinary files a/b and b/b differ\n"
-        )
-        self.assertEqual(hunks, [])
-        self.assertFalse(has_text)
-        hunks2, has_text2 = git_ops.parse_patch_hunks("@@ -1 +1 @@\n-foo\n+bar\n")
-        self.assertTrue(has_text2)
-        self.assertEqual(hunks2[0]["lines"][0], {"type": "del", "content": "foo"})
-
     # --- diff parser fix: numstat -z exact format ---------------------------
 
     def test_numstat_two_empty_files_no_swallow(self) -> None:
@@ -1139,12 +1129,7 @@ class GitHelperUnitTests(unittest.TestCase):
             ).stdout
             patches = git_ops.split_patch_per_file(out)
             self.assertEqual(list(patches), ["my file with spaces.txt"])
-            hunks, has_text = git_ops.parse_patch_hunks(
-                patches["my file with spaces.txt"]
-            )
-            self.assertTrue(has_text)
-            flat = [ln["content"] for h in hunks for ln in h["lines"]]
-            self.assertIn("world", flat)
+            self.assertIn("+world", patches["my file with spaces.txt"])
 
     def test_split_patch_rename_token_mismatch_with_hunk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1227,7 +1212,7 @@ class GitHelperUnitTests(unittest.TestCase):
             entry = changes[0]
             self.assertEqual(entry["new_path"], "new name with many words.txt")
             self.assertEqual(entry["old_path"], "old.txt")
-            self.assertTrue(entry["diff"])
+            self.assertIn("+more", entry["patch"])
 
     def test_split_patch_deleted_space_path_real_git(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1564,7 +1549,6 @@ class GitHelperUnitTests(unittest.TestCase):
             )
             self.assertEqual(len(changes), 1)
             self.assertTrue(changes[0]["binary"])
-            self.assertFalse(changes[0]["has_textual_diff"])
 
     def test_split_patch_multi_file_no_cross_attribution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1647,7 +1631,7 @@ class GitHelperUnitTests(unittest.TestCase):
         )
         self.assertEqual(len(changes), 1)
         self.assertEqual(changes[0]["new_path"], "real.txt")
-        self.assertEqual(changes[0]["diff"], [])
+        self.assertNotIn("patch", changes[0])
 
     def test_build_file_changes_union_status_old_path(self) -> None:
         raw = {
@@ -1683,11 +1667,11 @@ class GitHelperUnitTests(unittest.TestCase):
         self.assertEqual(renamed["old_path"], "old.txt")
         self.assertEqual(renamed["additions"], 2)
         self.assertEqual(renamed["deletions"], 1)
-        self.assertTrue(renamed["diff"])
+        self.assertIn("+more", renamed["patch"])
         deleted = by_path["gone.txt"]
         self.assertEqual(deleted["status"], "D")
         self.assertEqual(deleted["old_path"], "gone.txt")
-        self.assertEqual(deleted["diff"], [])
+        self.assertNotIn("patch", deleted)
 
     def test_operation_whitelist(self) -> None:
         for op in ("list_repos", "repo_snapshot", "repo_history", "checkout_remote_branch", "stage", "merge_abort", "sync", "commit_details"):
@@ -2772,8 +2756,8 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("staged.txt", staged)
             self.assertIn("README.md", unstaged)
             self.assertNotIn("README.md", staged)
-            self.assertTrue(staged["staged.txt"]["has_textual_diff"])
-            self.assertTrue(unstaged["README.md"]["diff"])
+            self.assertIn("+one", staged["staged.txt"]["patch"])
+            self.assertIn("+# changed", unstaged["README.md"]["patch"])
 
     async def test_working_diff_untracked_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2788,8 +2772,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("notes.txt", unstaged)
             entry = unstaged["notes.txt"]
             self.assertEqual(entry["status"], "A")
-            flat = [line["content"] for hunk in entry["diff"] for line in hunk["lines"]]
-            self.assertIn("hello", flat)
+            self.assertIn("+hello\n+world", entry["patch"])
 
     async def test_working_diff_binary_marked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2803,7 +2786,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["ok"])
             staged = {f["new_path"]: f for f in result["diff"]["staged"]}
             self.assertIn("blob.bin", staged)
-            self.assertFalse(staged["blob.bin"]["has_textual_diff"])
+            self.assertTrue(staged["blob.bin"]["binary"])
 
     async def test_commit_details_root_and_regular(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

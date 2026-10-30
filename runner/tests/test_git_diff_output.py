@@ -1,4 +1,4 @@
-"""Single-traversal Git diffs preserve the existing file-change contract."""
+"""Git reads return metadata to the app and bounded patches to commit suggestions."""
 
 from __future__ import annotations
 
@@ -32,28 +32,6 @@ def _git(repo: Path, *args: str) -> str:
     code, output = _run_git(["git", *args], str(repo))
     assert code == 0, output
     return output
-
-
-def _separate_changes(repo: Path, args: list[str]) -> list[dict]:
-    """Characterize the previous three-command implementation with real Git."""
-    options = ["--no-color", "--no-ext-diff", *args]
-    return git_ops.build_file_changes(
-        raw=git_ops.parse_raw_z(_git(repo, "diff", "--raw", "-z", *options)),
-        numstat=git_ops.parse_numstat_z(
-            _git(repo, "diff", "--numstat", "-z", *options)
-        ),
-        patches=git_ops.split_patch_per_file(
-            _git(
-                repo,
-                "diff",
-                "--patch",
-                "--src-prefix=a/",
-                "--dst-prefix=b/",
-                f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                *options,
-            )
-        ),
-    )
 
 
 @pytest.fixture
@@ -102,7 +80,12 @@ def test_combined_diff_preserves_paths_and_metadata(service, cached: bool) -> No
 
     actual = git_ops.parse_diff_z(output)
 
-    assert actual == _separate_changes(repo, args)
+    by_path = {row["new_path"]: row for row in actual}
+    assert by_path["delete.txt"]["status"] == "D"
+    assert by_path["delete.txt"]["deletions"] == 20
+    for name in names[3:]:
+        assert by_path[name]["additions"] == 1
+        assert "+after" in by_path[name]["patch"]
     assert {row["new_path"] for row in actual} >= set(names[3:])
     if cached:
         renamed = next(row for row in actual if row["status"] == "R")
@@ -122,10 +105,11 @@ def test_combined_diff_preserves_limits(service) -> None:
 
     actual = git_ops.parse_diff_z(output)
 
-    assert actual == _separate_changes(repo, ["--cached"])
-    assert actual[0]["truncated"]
-    assert actual[-1]["truncated"]
-    assert not actual[-1]["diff"]
+    assert actual[0]["patch"].endswith("…[truncated]")
+    assert len(actual[0]["patch"].encode()) < git_ops.GIT_MAX_DIFF_BYTES + 32
+    assert sum("patch" in row for row in actual) == git_ops.GIT_MAX_DIFF_FILES_WITH_PATCH
+    assert "patch" not in actual[-1]
+    assert actual[-1]["additions"] == 1
 
 
 def test_empty_combined_diff() -> None:
@@ -148,10 +132,15 @@ async def test_working_diff_guest_exec_budget(service, files: int) -> None:
     )
 
     assert result["ok"], result
-    assert result["diff"] == {
-        "staged": _separate_changes(repo, ["--cached"]),
-        "unstaged": _separate_changes(repo, []),
-    }
+    for side in ("staged", "unstaged"):
+        rows = result["diff"][side]
+        assert len(rows) == files
+        assert all(row["additions"] == 1 for row in rows)
+        assert all(row["deletions"] == (side == "unstaged") for row in rows)
+        assert sum("patch" in row for row in rows) == min(
+            files, git_ops.GIT_MAX_DIFF_FILES_WITH_PATCH
+        )
+        assert all(f"+{side}" in row["patch"] for row in rows if "patch" in row)
     diffs = [
         _inner_argv(call)
         for call in runtime.calls
@@ -183,43 +172,26 @@ async def test_commit_details_use_one_diff(service, kind: str) -> None:
     )
 
     assert result["ok"], result
-    if kind == "root":
-        raw = _git(
-            repo,
-            "diff-tree",
-            "--root",
-            "--no-commit-id",
-            "-r",
-            "-M",
-            "--raw",
-            "-z",
-            head,
-        )
-        stats = _git(
-            repo,
-            "diff-tree",
-            "--root",
-            "--no-commit-id",
-            "-r",
-            "-M",
-            "--numstat",
-            "-z",
-            head,
-        )
-        patch = _git(repo, "show", "--pretty=format:", "--patch", "-M", head)
-        expected = git_ops.build_file_changes(
-            raw=git_ops.parse_raw_z(raw),
-            numstat=git_ops.parse_numstat_z(stats),
-            patches=git_ops.split_patch_per_file(patch),
-        )
-    else:
-        expected = _separate_changes(repo, ["-M", "HEAD^", "HEAD"])
-    assert result["details"]["file_changes"] == expected
+    expected_path = {
+        "root": "README.md", "regular": "second.txt", "merge": "feature.txt"
+    }[kind]
+    rows = result["details"]["file_changes"]
+    assert rows == [
+        {
+            "old_path": expected_path,
+            "new_path": expected_path,
+            "status": "A",
+            "additions": 1,
+            "deletions": 0,
+            "binary": False,
+        }
+    ]
     assert len([call for call in runtime.calls if "--raw" in _inner_argv(call)]) == 1
+    assert all("--patch" not in _inner_argv(call) for call in runtime.calls)
 
 
-async def test_combined_diff_conflict_matches_separate_reads(service) -> None:
-    """Unmerged paths keep their existing status and patch representation."""
+async def test_working_diff_preserves_conflicts(service) -> None:
+    """Unmerged metadata stays available alongside ordinary file patches."""
     repo, git, _, workspace_id = service
     (repo / "regular.txt").write_text("before\n")
     _git(repo, "add", ".")
@@ -241,66 +213,13 @@ async def test_combined_diff_conflict_matches_separate_reads(service) -> None:
     )
 
     assert result["ok"], result
-    assert result["diff"]["staged"] == _separate_changes(repo, ["--cached"])
-    assert result["diff"]["unstaged"] == _separate_changes(repo, [])
-
-
-@pytest.mark.parametrize("root", [True, False])
-async def test_commit_details_preserve_text_conversion(service, root: bool) -> None:
-    """Root patch textconv stays enabled while statistics retain binary counts."""
-    repo, git, _, workspace_id = service
-    _git(repo, "checkout", "--orphan", "converted")
-    _git(repo, "rm", "-rf", ".")
-    _git(repo, "config", "diff.demo.textconv", "od -An -tx1")
-    (repo / ".gitattributes").write_text("*.bin diff=demo\n")
-    (repo / "blob.bin").write_bytes(b"\x00before\n")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "converted root")
-    if not root:
-        (repo / "blob.bin").write_bytes(b"\x00after\n")
-        _git(repo, "commit", "-am", "converted change")
-    head = _git(repo, "rev-parse", "HEAD").strip()
-    if root:
-        revisions = ["--root", head]
-        patch = _git(repo, "show", "--pretty=format:", "--patch", "-M", head)
-    else:
-        revisions = ["HEAD^", "HEAD"]
-        patch = _git(repo, "diff", "--patch", "-M", *revisions)
-    expected = git_ops.build_file_changes(
-        raw=git_ops.parse_raw_z(
-            _git(
-                repo,
-                "diff-tree",
-                "--no-commit-id",
-                "-r",
-                "-M",
-                "--raw",
-                "-z",
-                *revisions,
-            )
-        ),
-        numstat=git_ops.parse_numstat_z(
-            _git(
-                repo,
-                "diff-tree",
-                "--no-commit-id",
-                "-r",
-                "-M",
-                "--numstat",
-                "-z",
-                *revisions,
-            )
-        ),
-        patches=git_ops.split_patch_per_file(patch),
-    )
-
-    result = await git.execute_git_operation(
-        workspace_id, "commit_details", "/workspace/repo", {"commit": head}
-    )
-
-    assert result["ok"], result
-    assert result["details"]["file_changes"] == expected
-    assert next(row for row in expected if row["new_path"] == "blob.bin")["diff"]
+    staged = result["diff"]["staged"]
+    assert [
+        (row["new_path"], row["additions"], row["deletions"]) for row in staged
+    ] == [("README.md", 0, 0), ("regular.txt", 1, 1)]
+    unstaged = {row["new_path"]: row for row in result["diff"]["unstaged"]}
+    assert unstaged["README.md"]["status"] == "M"
+    assert "+unstaged" in unstaged["regular.txt"]["patch"]
 
 
 async def test_combined_diff_failure_contract(service, monkeypatch) -> None:

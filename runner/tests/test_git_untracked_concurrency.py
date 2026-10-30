@@ -120,9 +120,9 @@ async def test_parallel_reads_preserve_sorted_text_binary_and_fallback(
     assert runtime.finished.index("01.txt") < runtime.finished.index("00 slow.txt")
     assert runtime.active == 0 and runtime.peak == 4
     assert rows[0]["additions"] == 2
-    assert rows[0]["diff"][0]["lines"][0]["content"] == "file 0"
-    assert rows[7]["binary"] and not rows[7]["has_textual_diff"]
-    assert rows[8]["diff"] == [] and rows[8]["additions"] == 0
+    assert "+file 0" in rows[0]["patch"]
+    assert rows[7]["binary"]
+    assert "patch" not in rows[8] and rows[8]["additions"] == 0
 
 
 async def test_failure_drains_batch_and_reports_first_path_error(
