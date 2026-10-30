@@ -97,10 +97,9 @@ class HarnessSteerOut(Schema):
 
 
 class HarnessForkIn(Schema):
-    """Request schema for forking a harness session."""
+    """Copy a session through an answer, or all messages when omitted."""
 
     message_id: uuid.UUID | None = None
-    include_message: bool = False
 
 
 class HarnessMessageEditIn(Schema):

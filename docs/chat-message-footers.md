@@ -43,9 +43,8 @@ includes the selected answer and all preceding messages/parts, opens with an
 empty composer, and never automatically sends a prompt. The source conversation
 is unchanged. This copies chat history only, not workspace files or snapshots.
 
-The REST fork contract supports `include_message: true` with `message_id`.
-The default remains an exclusive cutoff for existing clients; no message ID
-still copies the entire session. Legacy user cutoffs retain prompt prefill.
+The REST fork contract includes the assistant answer selected by `message_id`.
+Omitting the ID copies the entire session. User-message cutoffs are rejected.
 
 ## OpenWebUI reference
 

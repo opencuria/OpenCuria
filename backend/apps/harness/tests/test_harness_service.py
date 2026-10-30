@@ -2806,12 +2806,6 @@ def test_message_positions_sequential_with_tied_timestamps(harness_workspace) ->
     ordered = HarnessMessageRepository.list_for_session(session.id)
     assert [m.id for m in ordered] == [first.id, second.id, third.id]
     assert [m.position for m in ordered] == [0, 1, 2]
-    message_ids = HarnessMessageRepository.list_ids_for_session(session.id)
-    assert [str(v) for v in message_ids] == [
-        str(first.id),
-        str(second.id),
-        str(third.id),
-    ]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3197,7 +3191,7 @@ def test_copy_prefix_preserves_positions_in_order(harness_workspace) -> None:
         mode="build",
         model="fake-model",
     )
-    id_map = HarnessMessageRepository.copy_prefix(session.id, forked.id, second_user.id)
+    id_map = HarnessMessageRepository.copy_prefix(session.id, forked.id, first_asst.id)
     assert set(id_map) == {first_user.id, first_asst.id}
     copied = HarnessMessageRepository.list_for_session(forked.id)
     assert [m.content for m in copied] == ["one", "two"]

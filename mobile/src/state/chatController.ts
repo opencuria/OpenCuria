@@ -1100,7 +1100,7 @@ export class ChatController {
     }
   }
 
-  /** Fork from after a selected message. Assistant cutoffs include the answer. */
+  /** Copy through an assistant answer, or the full session, without starting a run. */
   async fork(
     afterMessageId?: string,
     sessionId = this.activeSessionId,
@@ -1108,29 +1108,11 @@ export class ChatController {
     if (!sessionId) return null;
     const context = this.captureSelection();
     if (!context) return null;
-    const sourceMessage = this.messagesBySession
-      .get(sessionId)
-      ?.find((message) => message.id === afterMessageId);
-    if (afterMessageId && !sourceMessage) {
-      await this.fetchTimeline(sessionId, context, true);
-    }
-    const refreshedMessage = afterMessageId
-      ? this.messagesBySession
-          .get(sessionId)
-          ?.find((message) => message.id === afterMessageId)
-      : undefined;
-    if (afterMessageId && !refreshedMessage)
-      throw new Error("Selected fork message is no longer available");
-    const input = afterMessageId
-      ? {
-          message_id: afterMessageId,
-          ...(refreshedMessage?.role === "assistant"
-            ? { include_message: true }
-            : {}),
-        }
-      : {};
     try {
-      const forked = await this.client.harness.fork(sessionId, input);
+      const forked = await this.client.harness.fork(
+        sessionId,
+        afterMessageId ? { message_id: afterMessageId } : {},
+      );
       if (
         this.disposed ||
         this.workspaceGeneration !== context.workspaceGeneration ||

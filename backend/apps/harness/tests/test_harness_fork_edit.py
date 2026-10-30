@@ -139,32 +139,6 @@ def test_forked_title_increments() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_fork_copies_prefix_exclusive_with_new_ids(harness_workspace) -> None:
-    """Fork at a user message excludes the cutoff and later turns."""
-    service, _, _ = _service()
-    session = await _db_create_session(harness_workspace)
-    org_id = harness_workspace.runner.organization_id
-    await _run_two_turns(service, session, org_id, harness_workspace.id)
-
-    stored = HarnessMessageRepository.list_for_session(session.id)
-    assert [m.role for m in stored] == ["user", "assistant", "user", "assistant"]
-    cutoff = next(m for m in stored if m.content == "second")
-
-    forked = await ConversationService().fork_session(session.id, cutoff.id)
-
-    assert forked.id != session.id
-    assert forked.parent_id is None
-    assert forked.title == "svc (fork #1)"
-    forked_msgs = HarnessMessageRepository.list_for_session(forked.id)
-    assert [m.role for m in forked_msgs] == ["user", "assistant"]
-    assert [m.content for m in forked_msgs] == ["first", "hello"]
-    # New UUIDs, no shared rows with the source session.
-    assert {m.id for m in forked_msgs}.isdisjoint({m.id for m in stored})
-    # The source session still has the full history.
-    assert len(HarnessMessageRepository.list_for_session(session.id)) == 4
-
-
-@pytest.mark.django_db(transaction=True)
 async def test_fork_copies_parts_and_clears_child_session_id(
     harness_workspace,
 ) -> None:
@@ -191,11 +165,7 @@ async def test_fork_copies_parts_and_clears_child_session_id(
         meta={"subtask_id": "sub-1", "child_session_id": str(child_id)},
     )
 
-    # Anchor cutoff: a fresh user message after the first turn.
-    anchor = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="user", content="anchor"
-    )
-    forked = await ConversationService().fork_session(session.id, anchor.id)
+    forked = await ConversationService().fork_session(session.id, assistant.id)
     forked_parts = parts_for_session(forked.id)
     assert any(p.type == "text" for p in forked_parts)
     subtask = [p for p in forked_parts if p.type == "subtask"]
@@ -247,9 +217,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
         (part.id, part.message_id, part.output, part.position) for part in source_parts
     ]
 
-    early_fork = await ConversationService().fork_session(
-        session.id, first_answer.id, include_message=True
-    )
+    early_fork = await ConversationService().fork_session(session.id, first_answer.id)
     early_messages = HarnessMessageRepository.list_for_session(early_fork.id)
     early_parts = parts_for_session(early_fork.id)
     assert [message.content for message in early_messages] == ["first", "answer one"]
@@ -258,9 +226,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
     assert early_parts[0].message_id == early_messages[-1].id
     assert early_parts[0].id != first_part.id
 
-    last_fork = await ConversationService().fork_session(
-        session.id, last_answer.id, include_message=True
-    )
+    last_fork = await ConversationService().fork_session(session.id, last_answer.id)
     last_messages = HarnessMessageRepository.list_for_session(last_fork.id)
     last_parts = parts_for_session(last_fork.id)
     assert [message.content for message in last_messages] == [
@@ -289,11 +255,14 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_fork_include_message_requires_message_id(harness_workspace) -> None:
-    """Inclusive fork mode requires a cutoff message ID."""
+async def test_fork_rejects_user_message(harness_workspace) -> None:
+    """Forks select assistant answers, not editable user prompts."""
     session = await _db_create_session(harness_workspace)
-    with pytest.raises(ValueError, match="message_id is required"):
-        await ConversationService().fork_session(session.id, include_message=True)
+    message = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="prompt"
+    )
+    with pytest.raises(ValueError, match="assistant answer"):
+        await ConversationService().fork_session(session.id, message.id)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -399,11 +368,7 @@ async def test_fork_remaps_compaction_tail_start_id(harness_workspace) -> None:
         output="summary",
         meta={"tail_start_id": str(tail_msg.id)},
     )
-    anchor = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="user", content="anchor"
-    )
-
-    forked = await ConversationService().fork_session(session.id, anchor.id)
+    forked = await ConversationService().fork_session(session.id, assistant.id)
     forked_parts = [
         p
         for p in parts_for_session(forked.id)
@@ -433,7 +398,6 @@ async def test_fork_drops_compaction_tail_start_id_outside_prefix(
     )
     await service._tasks[str(session.id)]
     stored = HarnessMessageRepository.list_for_session(session.id)
-    anchor = stored[0]
     assistant = stored[1]
     # Point the checkpoint at a message that will NOT be copied.
     outside = await sync_to_async(HarnessMessageRepository.create)(
@@ -447,10 +411,11 @@ async def test_fork_drops_compaction_tail_start_id_outside_prefix(
         meta={"tail_start_id": str(outside.id)},
     )
 
-    forked = await ConversationService().fork_session(session.id, anchor.id)
-    # Prefix before the very first message is empty.
-    assert HarnessMessageRepository.list_for_session(forked.id) == []
-    assert parts_for_session(forked.id) == []
+    forked = await ConversationService().fork_session(session.id, assistant.id)
+    checkpoint = next(
+        part for part in parts_for_session(forked.id) if part.type == "compaction"
+    )
+    assert "tail_start_id" not in checkpoint.meta
 
     full = await ConversationService().fork_session(session.id)
     compactions = [
@@ -1183,39 +1148,6 @@ async def test_edit_does_not_regenerate_title_for_first_prompt(
     # FakeProvider runs never spawn the title agent (no small_model config),
     # but the edit path must actively restore the title either way.
     assert session.title == "svc"
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_repository_copy_prefix_returns_id_map(harness_workspace) -> None:
-    """copy_prefix maps every source id to a fresh destination id."""
-    session = await _db_create_session(harness_workspace)
-    org_id = harness_workspace.runner.organization_id
-    other = HarnessSessionRepository.create(
-        workspace_id=harness_workspace.id,
-        organization_id=org_id,
-        title="dst",
-        agent_name="build",
-        mode="build",
-        model="fake-model",
-    )
-    first = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="user", content="one"
-    )
-    second = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="user", content="two"
-    )
-    id_map = HarnessMessageRepository.copy_prefix(session.id, other.id, second.id)
-    assert set(id_map) == {first.id}
-    assert id_map[first.id] != first.id
-    dst_msgs = HarnessMessageRepository.list_for_session(other.id)
-    assert [m.id for m in dst_msgs] == [id_map[first.id]]
-
-    full_map = HarnessMessageRepository.copy_prefix(session.id, other.id, None)
-    assert set(full_map) == {first.id, second.id}
-    with pytest.raises(ValueError, match="cutoff_message_id is required"):
-        HarnessMessageRepository.copy_prefix(
-            session.id, other.id, None, include_message=True
-        )
 
 
 @pytest.mark.django_db(transaction=True)

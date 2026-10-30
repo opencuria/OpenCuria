@@ -215,36 +215,6 @@ def test_fork_never_resolves_live_execution(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_fork_returns_201_and_prefix_only(fork_edit_setup, fake_fork_service):
-    """POST fork copies messages before the cutoff (201, no run started)."""
-    session = _seed_two_turns(fake_fork_service, fork_edit_setup)
-    client = _client(
-        user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
-    )
-    response = client.post(
-        f"/api/v1/harness/sessions/{session.id}/fork",
-        data=json.dumps({"message_id": str(session.second_user.id)}),
-        content_type="application/json",
-    )
-    assert response.status_code == 201, response.content[:500]
-    body = response.json()
-    assert body["title"] == f"{session.title} (fork #1)"
-    assert body["parent_id"] is None
-
-    read_client = _client(
-        user=fork_edit_setup["owner"],
-        org=fork_edit_setup["org"],
-        permissions=READ,
-    )
-    timeline = read_client.get(f"/api/v1/harness/sessions/{body['id']}/timeline")
-    assert timeline.status_code == 200, timeline.content[:500]
-    contents = [m["content"] for m in timeline.json()["messages"]]
-    assert contents == ["first", "answer one"]
-    roles = [m["role"] for m in timeline.json()["messages"]]
-    assert roles == ["user", "assistant"]
-
-
-@pytest.mark.django_db(transaction=True)
 def test_fork_title_increments(fork_edit_setup, fake_fork_service):
     """Forking a fork bumps the ``(fork #N)`` suffix."""
     session = _seed_one_turn(fake_fork_service, fork_edit_setup)
@@ -300,9 +270,7 @@ def test_fork_includes_last_assistant_and_parts(
     )
     response = client.post(
         f"/api/v1/harness/sessions/{session.id}/fork",
-        data=json.dumps(
-            {"message_id": str(source_assistants[-1].id), "include_message": True}
-        ),
+        data=json.dumps({"message_id": str(source_assistants[-1].id)}),
         content_type="application/json",
     )
     assert response.status_code == 201, response.content[:500]
@@ -338,19 +306,19 @@ def test_fork_includes_last_assistant_and_parts(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_fork_include_message_without_id_is_400(fork_edit_setup, fake_fork_service):
-    """REST inclusive mode requires a message ID."""
+def test_fork_user_message_is_400(fork_edit_setup, fake_fork_service):
+    """REST forks reject user-message cutoffs."""
     session = _seed_one_turn(fake_fork_service, fork_edit_setup)
     client = _client(
         user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
     )
     response = client.post(
         f"/api/v1/harness/sessions/{session.id}/fork",
-        data=json.dumps({"include_message": True}),
+        data=json.dumps({"message_id": str(session.only_user.id)}),
         content_type="application/json",
     )
     assert response.status_code == 400
-    assert "message_id is required" in response.json()["detail"]
+    assert "assistant answer" in response.json()["detail"]
 
 
 @pytest.mark.django_db(transaction=True)

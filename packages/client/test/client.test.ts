@@ -470,13 +470,12 @@ describe("shared harness actions", () => {
     );
     await client.harness.fork("session/id", {
       message_id: "answer",
-      include_message: true,
     });
     expect(fetch).toHaveBeenLastCalledWith(
       "https://api.example/api/v1/harness/sessions/session%2Fid/fork",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ message_id: "answer", include_message: true }),
+        body: JSON.stringify({ message_id: "answer" }),
       }),
     );
     await expect(

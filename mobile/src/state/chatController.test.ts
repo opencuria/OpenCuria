@@ -593,7 +593,6 @@ describe("ChatController", () => {
     await controller.fork("a1");
     expect(client.harness.fork).toHaveBeenCalledWith("root", {
       message_id: "a1",
-      include_message: true,
     });
     expect(controller.getSnapshot().activeSessionId).toBe("root-fork");
     controller.dispose();

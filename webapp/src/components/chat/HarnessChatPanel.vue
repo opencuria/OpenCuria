@@ -752,15 +752,12 @@ async function handleEditMessage(
   })
 }
 
-/**
- * Fork after an answer and open the new chat with an empty composer.
- * Legacy user cutoffs still return their prompt as prefill. Never auto-sends.
- */
+/** Fork after an answer and open the new chat with an empty composer. */
 async function handleForkMessage(messageId: string): Promise<void> {
   if (!props.canPrompt || !harness.activeSessionId || isSubagentSession.value) return
   const result = await harness.forkSession(harness.activeSessionId, messageId)
   if (!result) return
-  chatInputRef.value?.setPrompt(result.prefill)
+  chatInputRef.value?.setPrompt('')
 }
 </script>
 

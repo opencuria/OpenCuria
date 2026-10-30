@@ -1010,15 +1010,6 @@ class HarnessMessageRepository:
         )
 
     @staticmethod
-    def list_ids_for_session(session_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return message IDs of a session in timeline order."""
-        return list(
-            HarnessMessage.objects.filter(session_id=session_id)
-            .order_by("position", "created_at", "id")
-            .values_list("id", flat=True)
-        )
-
-    @staticmethod
     def delete_from(
         session_id: uuid.UUID, from_message_id: uuid.UUID
     ) -> list[uuid.UUID]:
@@ -1068,14 +1059,11 @@ class HarnessMessageRepository:
         src_session_id: uuid.UUID,
         dst_session_id: uuid.UUID,
         cutoff_message_id: uuid.UUID | None,
-        *,
-        include_message: bool = False,
     ) -> dict[uuid.UUID, uuid.UUID]:
         """Copy a message prefix to *dst_session_id*.
 
-        The cutoff is exclusive by default; set *include_message* to include
-        it. In exclusive mode, a missing or unknown cutoff copies the full
-        history for backward compatibility. Inclusive mode requires a cutoff.
+        Include the cutoff message; omit it to copy the full history.
+        Unknown or foreign cutoffs are rejected.
         New UUIDs are generated; parts are copied in bounded batches with
         ``meta.tail_start_id`` remapped via the id map (dropped when outside
         the prefix) and subtask ``child_session_id`` cleared. Positions are
@@ -1083,10 +1071,6 @@ class HarnessMessageRepository:
         writes are atomic and concurrent copies serialize on its session row.
         Returns the message ID map.
         """
-        if include_message and cutoff_message_id is None:
-            raise ValueError(
-                "cutoff_message_id is required when include_message is true"
-            )
         ordered = list(
             HarnessMessage.objects.filter(session_id=src_session_id).order_by(
                 "position", "created_at", "id"
@@ -1097,8 +1081,9 @@ class HarnessMessageRepository:
                 (pos for pos, row in enumerate(ordered) if row.id == cutoff_message_id),
                 None,
             )
-            if index is not None:
-                ordered = ordered[: index + int(include_message)]
+            if index is None:
+                raise ValueError(f"Message '{cutoff_message_id}' not in session")
+            ordered = ordered[: index + 1]
         if not ordered:
             return {}
         id_map = {src.id: uuid.uuid4() for src in ordered}

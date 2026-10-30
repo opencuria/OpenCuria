@@ -1128,33 +1128,23 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
-  /**
-   * Fork after an assistant answer, before a user prompt, or the full session.
-   * Only user cutoffs return a composer prefill; forking never starts a run.
-   */
+  /** Copy through an assistant answer, or the full session, without starting a run. */
   async function forkSession(
     sessionId: string,
     messageId?: string,
-  ): Promise<{ session: HarnessSession; prefill: string } | null> {
+  ): Promise<HarnessSession | null> {
     if (sessionTransitioning(sessionId)) return null
     const notifications = useNotificationStore()
     try {
-      const message = messagesBySession.value[sessionId]?.find((item) => item.id === messageId)
-      const prefill = message?.role === 'user' ? message.content : ''
       const session = await forkHarnessSession(
         sessionId,
-        messageId
-          ? {
-              message_id: messageId,
-              ...(message?.role === 'assistant' ? { include_message: true } : {}),
-            }
-          : {},
+        messageId ? { message_id: messageId } : {},
       )
       upsertSession(session)
       setActiveSession(session.id)
       await fetchParts(session.id)
       void useHarnessConversationStore().fetchConversations()
-      return { session, prefill }
+      return session
     } catch (e: unknown) {
       notifications.error('Fork failed', e instanceof Error ? e.message : 'Unknown error')
       return null

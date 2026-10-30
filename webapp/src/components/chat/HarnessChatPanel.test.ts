@@ -1213,39 +1213,36 @@ describe('HarnessChatPanel', () => {
     expect(edit).not.toHaveBeenCalled()
   })
 
-  it.each(['original', ''])(
-    'forks without auto-send and sets the composer to %j',
-    async (prefill) => {
-      const wrapper = mount(HarnessChatPanel, {
-        props: {
-          workspaceId: 'ws-1',
-          canPrompt: true,
-        },
-        global: {
-          plugins: [router],
-          stubs,
-        },
-      })
-      await flushPromises()
+  it('forks after an answer and clears the composer without auto-send', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
 
-      const store = useHarnessStore()
-      store.sessions = [makeSession({ status: 'idle' })]
-      store.setActiveSession('session-root')
-      await flushPromises()
-      const forked = makeSession({ id: 'session-fork', title: 'root (fork #1)' })
-      const spy = vi.spyOn(store, 'forkSession').mockResolvedValue({ session: forked, prefill })
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle' })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    const forked = makeSession({ id: 'session-fork', title: 'root (fork #1)' })
+    const spy = vi.spyOn(store, 'forkSession').mockResolvedValue(forked)
+    const sendSpy = vi.spyOn(store, 'sendMessage')
 
-      wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('fork', 'user-1')
-      await flushPromises()
+    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('fork', 'answer-1')
+    await flushPromises()
 
-      expect(spy).toHaveBeenCalledWith('session-root', 'user-1')
-      // Panel must not send a follow-up prompt after forking (no auto-send).
-      const sendSpy = vi.spyOn(store, 'sendMessage')
-      expect(sendSpy).not.toHaveBeenCalled()
-      const input = wrapper.findComponent(HarnessChatInputStub)
-      expect(input.emitted('prefill')).toEqual([[prefill]])
-    },
-  )
+    expect(spy).toHaveBeenCalledWith('session-root', 'answer-1')
+    // Panel must not send a follow-up prompt after forking (no auto-send).
+    expect(sendSpy).not.toHaveBeenCalled()
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.emitted('prefill')).toEqual([['']])
+  })
 
   it('ignores edit/fork events from subagent sessions', async () => {
     const wrapper = mount(HarnessChatPanel, {

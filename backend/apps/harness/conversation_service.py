@@ -108,17 +108,8 @@ class ConversationService:
         self,
         session_id: uuid.UUID,
         message_id: uuid.UUID | None = None,
-        *,
-        include_message: bool = False,
     ) -> HarnessSession:
-        """Fork a root session, copying messages before *message_id*.
-
-        By default, *message_id* is excluded; set *include_message* to copy it
-        too. Including a message requires a message ID. No file rollback or
-        snapshot is performed here.
-        """
-        if include_message and message_id is None:
-            raise ValueError("message_id is required when include_message is true")
+        """Copy a root session through an answer, or its entire history."""
         session = await sync_to_async(self.get_session)(session_id)
         await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
@@ -127,9 +118,11 @@ class ConversationService:
         # Fork is read-only (no assertNotBusy, like OpenCode): it must
         # also work while the source session has an active run.
         if message_id is not None:
-            ids = await sync_to_async(self.messages.list_ids_for_session)(session.id)
-            if message_id not in ids:
+            message = await sync_to_async(self.messages.get_by_id)(message_id)
+            if message is None or message.session_id != session.id:
                 raise ValueError(f"Message '{message_id}' not in session")
+            if message.role != "assistant":
+                raise ValueError("Fork message must be an assistant answer")
         title = _forked_title(session.title or "")
         fork_kwargs: dict[str, Any] = {
             "workspace_id": session.workspace_id,
@@ -153,12 +146,7 @@ class ConversationService:
                 ),
             )
         forked = await sync_to_async(self.sessions.create_fork)(**fork_kwargs)
-        await sync_to_async(self.messages.copy_prefix)(
-            session.id,
-            forked.id,
-            message_id,
-            include_message=include_message,
-        )
+        await sync_to_async(self.messages.copy_prefix)(session.id, forked.id, message_id)
         log.info(
             "harness_session_forked",
             session_id=str(session.id),

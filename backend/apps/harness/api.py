@@ -413,7 +413,7 @@ async def withdraw_harness_steer(
 async def fork_harness_session(
     request: HttpRequest, session_id: uuid.UUID, payload: HarnessForkIn
 ):
-    """Fork a session, excluding the cutoff message unless requested."""
+    """Fork a session through the selected assistant answer."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
@@ -425,11 +425,7 @@ async def fork_harness_session(
         service = ConversationService()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        forked = await service.fork_session(
-            session.id,
-            payload.message_id,
-            include_message=payload.include_message,
-        )
+        forked = await service.fork_session(session.id, payload.message_id)
         out = await sync_to_async(session_to_out_with_unread)(service, forked)
         return 201, out
     except NotFoundError as exc:

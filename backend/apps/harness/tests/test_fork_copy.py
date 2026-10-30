@@ -107,23 +107,14 @@ def test_copy_preserves_message_fields_and_appends_after_existing_positions(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "cutoff, inclusive, expected",
-    [
-        (None, False, 3),
-        (0, False, 0),
-        (1, False, 1),
-        (1, True, 2),
-        ("unknown", False, 3),
-        ("unknown", True, 3),
-    ],
+    "cutoff, expected", [(None, 3), (0, 1), (1, 2), ("unknown", 0)]
 )
-def test_copy_cutoff_compatibility(
+def test_copy_through_cutoff(
     harness_workspace: Any,
     cutoff: int | str | None,
-    inclusive: bool,
     expected: int,
 ) -> None:
-    """Repository cutoff behavior remains distinct from service validation."""
+    """Copy through the selected message; invalid cutoffs never copy history."""
     source, destination = (_session(harness_workspace) for _ in range(2))
     messages = HarnessMessage.objects.bulk_create(
         [
@@ -141,12 +132,13 @@ def test_copy_cutoff_compatibility(
         else None
     )
 
-    mapping = HarnessMessageRepository.copy_prefix(
-        source.id,
-        destination.id,
-        cutoff_id,
-        include_message=inclusive,
-    )
+    if cutoff == "unknown":
+        with pytest.raises(ValueError, match="not in session"):
+            HarnessMessageRepository.copy_prefix(source.id, destination.id, cutoff_id)
+        assert not HarnessMessage.objects.filter(session=destination).exists()
+        return
+
+    mapping = HarnessMessageRepository.copy_prefix(source.id, destination.id, cutoff_id)
 
     assert list(mapping) == [row.id for row in messages[:expected]]
     assert list(

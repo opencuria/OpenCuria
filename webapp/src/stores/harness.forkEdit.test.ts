@@ -76,25 +76,7 @@ describe('harness store fork/edit', () => {
     partsMock.mockResolvedValue({ session: makeSession(), messages: [] })
   })
 
-  it('forkSession adds the session, activates it, and returns the prefill', async () => {
-    const store = useHarnessStore()
-    store.sessions = [makeSession()]
-    store.messagesBySession['session-1'] = [makeMessage()]
-    const forked = makeSession({ id: 'session-fork', title: 'Chat (fork #1)' })
-    forkMock.mockResolvedValueOnce(forked)
-
-    const result = await store.forkSession('session-1', 'msg-1')
-
-    expect(forkMock).toHaveBeenCalledWith('session-1', { message_id: 'msg-1' })
-    expect(result).toEqual({ session: forked, prefill: 'original prompt' })
-    expect(store.sessions.map((row) => row.id)).toContain('session-fork')
-    expect(store.activeSessionId).toBe('session-fork')
-    expect(partsMock).toHaveBeenCalledWith('session-fork')
-    // No auto-send: sendMessage path is untouched.
-    expect(partsMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('forks after an assistant answer inclusively without prefilling its text', async () => {
+  it('forks through an assistant answer and activates the copied session', async () => {
     const store = useHarnessStore()
     store.sessions = [makeSession()]
     store.messagesBySession['session-1'] = [
@@ -108,9 +90,9 @@ describe('harness store fork/edit', () => {
 
     expect(forkMock).toHaveBeenCalledWith('session-1', {
       message_id: 'answer-1',
-      include_message: true,
     })
-    expect(result).toEqual({ session: forked, prefill: '' })
+    expect(result).toEqual(forked)
+    expect(store.sessions.map((row) => row.id)).toContain('session-fork')
     expect(store.activeSessionId).toBe('session-fork')
     expect(partsMock).toHaveBeenCalledWith('session-fork')
   })
@@ -124,7 +106,7 @@ describe('harness store fork/edit', () => {
     const result = await store.forkSession('session-1')
 
     expect(forkMock).toHaveBeenCalledWith('session-1', {})
-    expect(result?.prefill).toBe('')
+    expect(result).toEqual(forked)
     expect(store.activeSessionId).toBe('session-fork')
   })
 
