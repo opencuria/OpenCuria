@@ -42,7 +42,7 @@ The composer keeps its native text input mounted while it grows for drafts, skil
 - Pulling the composer down closes the keyboard: on Android 11+ the keyboard follows the finger, on iOS a short, quick pull hands over to the system close animation. Holds (caret, selection), side swipes and scrolling drafts keep their native text gestures.
 - On iOS 26 the composer is interactive liquid glass (`GlassView isInteractive`), unclipped so it can react to touches; “Scroll to latest” is a glass button floating above the composer.
 
-The transcript retains unboxed assistant text, quiet user bubbles, native Markdown, media previews, task details and copy/fork controls. User-message context menus are removed during editing to preserve native selection gestures. Question choices use native selection controls; unresolved question/permission gates remain non-dismissible.
+The transcript retains unboxed assistant text, quiet user bubbles, native Markdown, media previews and small, uncolored copy/fork controls aligned with the text. It has no accent colors. Contiguous agent work collapses into one quiet activity line (“Explored 9 files, 2 searches”, “Thought”) between text, and the session to-dos render as an inline card where the agent last updated them. A lost live connection shows no banner; the app reconnects and refreshes on its own. User-message context menus are removed during editing to preserve native selection gestures. Question choices use native selection controls; unresolved question/permission gates remain non-dismissible.
 
 ## Sidebar
 

@@ -23,15 +23,15 @@ import type {
 import { Image } from "expo-image";
 import {
   ArrowDown,
-  Copy,
-  ChevronDown,
+  ArrowRight,
+  Check,
   ChevronRight,
-  Clock3,
-  Code2,
+  CircleDashed,
+  CircleX,
+  Copy,
   FileCode2,
   EllipsisVertical,
   GitBranch,
-  Hammer,
   LoaderCircle,
   MessageSquareText,
   Sparkles,
@@ -43,11 +43,13 @@ import type {
   HarnessTodo,
 } from "@opencuria/chat-core/harness";
 import {
-  buildMessageBlocks,
-  type MessageRenderBlock,
-  type RenderBlock,
-} from "@opencuria/chat-core/harnessBlocks";
+  buildActivityBlocks,
+  findTodoAnchor,
+  summarizeActivity,
+  type ActivityTimelineBlock,
+} from "@opencuria/chat-core/harnessActivity";
 import { getMessageCopyText } from "@opencuria/chat-core/harnessMessageCopy";
+import { HARNESS_PAGE_SIZE } from "@opencuria/chat-core/harnessPagination";
 import { sortHarnessMessages } from "@opencuria/chat-core/harnessReducer";
 import { toolAttachments } from "@opencuria/chat-core/harnessAttachments";
 import { resolveChildSessionId } from "@opencuria/chat-core/harnessSubtaskActivity";
@@ -56,6 +58,10 @@ import {
   formatMessageUsage,
   resolveMessageUsage,
 } from "@opencuria/chat-core/harnessUsage";
+import {
+  parseToolArguments,
+  toolDisplayLabel,
+} from "@opencuria/chat-core/toolDisplay";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import { useChromeTopInset } from "../ui/chromeInset";
 import { useChatLayout } from "./ChatLayout";
@@ -101,6 +107,9 @@ export interface ChatMessagesProps {
 }
 
 const VIEWABILITY = { itemVisiblePercentThreshold: 1 };
+/** Message actions keep native touch targets; their glyphs align with the text. */
+const ACTION_SIZE = Platform.OS === "ios" ? 44 : 36;
+const ACTION_ICON = 17;
 /** Stay pinned to the newest output while it streams in and grows. */
 const FOLLOW_END = {
   animated: false,
@@ -166,9 +175,18 @@ export function ChatMessages({
     },
     [],
   );
-  const [todosOpen, setTodosOpen] = useState(false);
   // Live replies have no server position yet; the shared rule keeps them last.
   const ordered = useMemo(() => sortHarnessMessages(messages), [messages]);
+  // `todos` is a fresh clone per snapshot; its content decides the to-do card.
+  const todosKey = JSON.stringify(todos);
+  const liveTodos = useMemo(() => todos, [todosKey]);
+  // The latest to-do call shows the session list in place of that call.
+  const todoAnchor = useMemo(
+    () => (liveTodos.length ? findTodoAnchor(ordered) : null),
+    [liveTodos.length, ordered],
+  );
+  const todoMessageId = todoAnchor?.messageId ?? null;
+  const todoPartId = todoAnchor?.partId ?? null;
   // Hosts often pass inline handlers. Stable ones keep `renderItem` unchanged
   // while a reply streams, so only the growing message renders again.
   const handleEdit = useLatestHandler(onEdit);
@@ -194,6 +212,8 @@ export function ChatMessages({
             : item.completed_at == null)
         }
         resolveMedia={resolveMedia}
+        todos={item.id === todoMessageId ? liveTodos : undefined}
+        todoPartId={item.id === todoMessageId ? todoPartId : undefined}
         onEdit={handleEdit}
         onFork={handleFork}
         onCopy={handleCopy}
@@ -215,8 +235,11 @@ export function ChatMessages({
       handleOpenFile,
       handleOpenSubtask,
       handleRequestPartDetail,
+      liveTodos,
       resolveMedia,
       streamingMessageId,
+      todoMessageId,
+      todoPartId,
       visibleMessageIdsState,
       mediaScopeKey,
     ],
@@ -226,28 +249,20 @@ export function ChatMessages({
   const runLabel = activeRun
     ? `OpenCuria is working${activeRun.agent_name ? ` · ${activeRun.agent_name}` : ""}`
     : null;
-  const todosKey = JSON.stringify(todos);
   const header = useMemo(
-    () => (
-      <>
-        {runLabel ? (
-          <View
-            style={[styles.runHeader, { backgroundColor: theme.surfaceMuted }]}
-          >
-            <View style={[styles.runDot, { backgroundColor: theme.primary }]} />
-            <Text style={[styles.runText, { color: theme.mutedText }]}>
-              {runLabel}
-            </Text>
-            <LoaderCircle size={16} color={theme.primary} />
-          </View>
-        ) : null}
-        {todos.length ? (
-          <TodoStrip todos={todos} onPress={() => setTodosOpen(true)} />
-        ) : null}
-      </>
-    ),
-    // `todos` is a fresh clone per snapshot; its content decides the header.
-    [runLabel, theme, todosKey],
+    () =>
+      runLabel ? (
+        <View
+          style={[styles.runHeader, { backgroundColor: theme.surfaceMuted }]}
+        >
+          <View style={[styles.runDot, { backgroundColor: theme.mutedText }]} />
+          <Text style={[styles.runText, { color: theme.mutedText }]}>
+            {runLabel}
+          </Text>
+          <LoaderCircle size={16} color={theme.subtleText} />
+        </View>
+      ) : null,
+    [runLabel, theme],
   );
   // "Scroll to latest" follows the list's own end tracking, which includes the
   // keyboard and composer insets and also reacts to content growing below.
@@ -305,62 +320,6 @@ export function ChatMessages({
         style={{ backgroundColor: theme.background }}
       />
       <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
-      <NativeModal
-        visible={todosOpen}
-        onClose={() => setTodosOpen(false)}
-        title="Tasks"
-        testID="chat-todos-sheet"
-      >
-        {!todos.length ? (
-          <Text style={{ color: theme.mutedText, fontSize: 14 }}>
-            No tasks yet.
-          </Text>
-        ) : (
-          todos.map((todo, index) => {
-            const done =
-              todo.status === "completed" || todo.status === "cancelled";
-            return (
-              <View
-                key={todo.id}
-                style={[styles.todoRow, { borderBottomColor: theme.border }]}
-              >
-                <View
-                  style={[
-                    styles.todoMarker,
-                    {
-                      backgroundColor:
-                        todo.status === "in_progress"
-                          ? theme.primary
-                          : done
-                            ? theme.success
-                            : theme.border,
-                    },
-                  ]}
-                />
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={{ color: theme.text, fontSize: 14, lineHeight: 20 }}
-                  >
-                    {todo.content}
-                  </Text>
-                  <Text
-                    style={{
-                      color: theme.subtleText,
-                      fontSize: 12,
-                      marginTop: 2,
-                    }}
-                  >
-                    {todo.status.replace("_", " ")} · {todo.priority}
-                  </Text>
-                </View>
-                <Text style={{ color: theme.subtleText, fontSize: 12 }}>
-                  {index + 1}
-                </Text>
-              </View>
-            );
-          })
-        )}
-      </NativeModal>
     </View>
   );
 }
@@ -487,6 +446,10 @@ interface MessageRowProps extends Omit<
   streaming: boolean;
   mediaVisible: boolean;
   mediaScopeKey?: string | number;
+  /** Session to-dos, passed only to the message that hosts the to-do card. */
+  todos?: HarnessTodo[];
+  /** The hosting `todowrite` part; null appends the card after the message. */
+  todoPartId?: string | null;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -494,6 +457,8 @@ const MessageRow = memo(function MessageRow({
   streaming,
   disabled,
   resolveMedia,
+  todos,
+  todoPartId,
   onEdit,
   onFork,
   onCopy,
@@ -510,15 +475,16 @@ const MessageRow = memo(function MessageRow({
   const [actionsOpen, setActionsOpen] = useState(false);
   const [editText, setEditText] = useState(message.content);
   const isUser = message.role === "user";
+  const showTodos = Boolean(todos?.length);
   const blocks = useMemo(
     () =>
-      buildMessageBlocks(
+      buildActivityBlocks(
         [...(message.parts ?? [])].sort(
           (left, right) => (left.position ?? 0) - (right.position ?? 0),
         ),
-        { finished: !streaming },
+        { todoPartId: showTodos ? todoPartId : null },
       ),
-    [message.parts, streaming],
+    [message.parts, showTodos, todoPartId],
   );
   const safeContent = useMemo(() => {
     if (isUser) return message.content;
@@ -672,7 +638,7 @@ const MessageRow = memo(function MessageRow({
         <View style={styles.assistantBody}>
           {message.error && !message.notice_dismissed_at ? (
             <Banner
-              tone="error"
+              tone="neutral"
               title="Run failed"
               message={message.error}
               onDismiss={
@@ -693,6 +659,7 @@ const MessageRow = memo(function MessageRow({
                 key={blockKey(block, index)}
                 block={block}
                 streaming={streaming}
+                todos={todos}
                 mediaVisible={mediaVisible}
                 mediaScopeKey={mediaScopeKey}
                 resolveMedia={resolveMedia}
@@ -712,6 +679,9 @@ const MessageRow = memo(function MessageRow({
               onOpenFile={onOpenFile}
             />
           ) : null}
+          {todos?.length && todoPartId === null ? (
+            <TodoCard todos={todos} />
+          ) : null}
           {message.finish === "aborted" &&
           !streaming &&
           !message.notice_dismissed_at &&
@@ -726,7 +696,7 @@ const MessageRow = memo(function MessageRow({
               style={styles.streamingCursor}
             >
               <View
-                style={[styles.cursorBar, { backgroundColor: theme.primary }]}
+                style={[styles.cursorBar, { backgroundColor: theme.mutedText }]}
               />
               <Text style={{ color: theme.mutedText, fontSize: 13 }}>
                 Thinking
@@ -738,26 +708,35 @@ const MessageRow = memo(function MessageRow({
       {!isUser && !streaming ? (
         <View style={styles.messageActions}>
           <IconButton
-            icon={<Copy size={19} strokeWidth={1.7} color={theme.mutedText} />}
+            icon={
+              <Copy
+                size={ACTION_ICON}
+                strokeWidth={1.8}
+                color={theme.mutedText}
+              />
+            }
             symbol="doc.on.doc"
+            tone="quiet"
+            size={ACTION_SIZE}
             label="Copy message"
             onPress={() => {
               void doCopy();
             }}
             disabled={!copyText}
-            size={40}
             testID={`chat-copy-${message.id}`}
           />
           {!disabled && onFork ? (
             <IconButton
               icon={
                 <GitBranch
-                  size={19}
-                  strokeWidth={1.7}
+                  size={ACTION_ICON}
+                  strokeWidth={1.8}
                   color={theme.mutedText}
                 />
               }
               symbol="arrow.triangle.branch"
+              tone="quiet"
+              size={ACTION_SIZE}
               label="Fork conversation from this answer"
               onPress={() => {
                 void forkMessage(message.id);
@@ -768,12 +747,14 @@ const MessageRow = memo(function MessageRow({
           <IconButton
             icon={
               <EllipsisVertical
-                size={20}
-                strokeWidth={1.7}
+                size={ACTION_ICON}
+                strokeWidth={1.8}
                 color={theme.mutedText}
               />
             }
             symbol="info.circle"
+            tone="quiet"
+            size={ACTION_SIZE}
             label="Message details"
             onPress={() => setActionsOpen(true)}
             testID={`chat-message-menu-${message.id}`}
@@ -882,7 +863,7 @@ export function UserMessageContent({
             key={`agent:${segment.start}`}
             style={[styles.mentionChip, { backgroundColor: theme.surface }]}
           >
-            <Sparkles size={13} color={theme.primary} />
+            <Sparkles size={13} color={theme.mutedText} />
             <Text style={{ color: theme.text, fontSize: 13 }}>
               {segment.name}
             </Text>
@@ -904,7 +885,7 @@ export function UserMessageContent({
             onPress={() => onOpenFile?.(segment.path)}
             style={[styles.mentionChip, { backgroundColor: theme.surface }]}
           >
-            <FileCode2 size={13} color={theme.primary} />
+            <FileCode2 size={13} color={theme.mutedText} />
             <Text numberOfLines={1} style={{ color: theme.text, fontSize: 13 }}>
               {segment.name}
             </Text>
@@ -946,15 +927,17 @@ interface BlockProps extends Pick<
   | "onRequestPartDetail"
   | "onOpenAttachment"
 > {
-  block: MessageRenderBlock;
+  block: ActivityTimelineBlock;
   streaming: boolean;
   mediaVisible: boolean;
   mediaScopeKey?: string | number;
+  todos?: HarnessTodo[];
 }
 
 function BlockView({
   block,
   streaming,
+  todos,
   resolveMedia,
   onOpenFile,
   onOpenSubtask,
@@ -962,7 +945,7 @@ function BlockView({
   onOpenAttachment,
   mediaVisible,
   mediaScopeKey,
-}: BlockProps): React.JSX.Element {
+}: BlockProps): React.JSX.Element | null {
   const { theme } = useTheme();
   if (block.kind === "steer")
     return (
@@ -997,590 +980,301 @@ function BlockView({
         />
       </View>
     );
-  if (block.kind === "workedFor")
-    return (
-      <WorkedForBlock
-        block={block}
-        streaming={streaming}
-        mediaVisible={mediaVisible}
-        mediaScopeKey={mediaScopeKey}
-        resolveMedia={resolveMedia}
-        onOpenFile={onOpenFile}
-        onOpenSubtask={onOpenSubtask}
-        onRequestPartDetail={onRequestPartDetail}
-        onOpenAttachment={onOpenAttachment}
-      />
-    );
-  if (block.kind === "group")
-    return (
-      <WorkedGroup
-        parts={block.parts}
-        onRequestPartDetail={onRequestPartDetail}
-        resolveMedia={resolveMedia}
-        onOpenFile={onOpenFile}
-        onOpenAttachment={onOpenAttachment}
-      />
-    );
-  if (block.kind === "single")
-    return (
-      <WorkRow
-        part={block.part}
-        onRequestPartDetail={onRequestPartDetail}
-        resolveMedia={resolveMedia}
-        onOpenFile={onOpenFile}
-        onOpenAttachment={onOpenAttachment}
-      />
-    );
-  if (block.kind === "compaction")
-    return (
-      <ProcessRow
-        part={block.part}
-        label={block.part.title || "Context compacted"}
-        icon={<Clock3 size={16} color={theme.subtleText} />}
-        onRequestPartDetail={onRequestPartDetail}
-      />
-    );
-  if (block.kind === "card") {
-    if (block.part.type === "subtask")
-      return (
-        <SubtaskCard
-          part={block.part}
-          onOpenSubtask={onOpenSubtask}
-        />
-      );
-    if (block.part.type === "patch")
-      return (
-        <PatchCard
-          part={block.part}
-          onRequestPartDetail={onRequestPartDetail}
-        />
-      );
-    if (block.part.type === "tool") return <QuestionCard part={block.part} />;
-    return (
-      <ProcessRow
-        part={block.part}
-        label={block.part.title || block.part.type}
-        icon={<MessageSquareText size={16} color={theme.mutedText} />}
-        onRequestPartDetail={onRequestPartDetail}
-      />
-    );
-  }
-  return <View />;
-}
-
-interface WorkedForProps extends Pick<
-  ChatMessagesProps,
-  | "resolveMedia"
-  | "onOpenFile"
-  | "onOpenSubtask"
-  | "onRequestPartDetail"
-  | "onOpenAttachment"
-> {
-  block: Extract<MessageRenderBlock, { kind: "workedFor" }>;
-  streaming: boolean;
-  mediaVisible: boolean;
-  mediaScopeKey?: string | number;
-}
-
-function WorkedForBlock(props: WorkedForProps): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const { theme } = useTheme();
-  const workCount = props.block.blocks.reduce(
-    (count, item) =>
-      count +
-      (item.kind === "group"
-        ? item.parts.length
-        : item.kind === "text"
-          ? 0
-          : 1),
-    0,
-  );
+  if (block.kind === "question") return <QuestionCard part={block.part} />;
+  if (block.kind === "todos")
+    return todos?.length ? <TodoCard todos={todos} /> : null;
   return (
-    <View style={styles.workedFor} testID="chat-worked-for">
-      <NativeAction
-        accessibilityRole="button"
-        accessibilityLabel={`${open ? "Collapse" : "Expand"} work details, ${workCount} items`}
-        accessibilityState={{ expanded: open }}
-        onPress={() => setOpen(!open)}
-        style={styles.workedForHeader}
-      >
-        {open ? (
-          <ChevronDown size={16} color={theme.mutedText} />
-        ) : (
-          <ChevronRight size={16} color={theme.mutedText} />
-        )}
-        <Hammer size={15} color={theme.primary} />
-        <Text style={[styles.workedForTitle, { color: theme.text }]}>
-          Worked
-        </Text>
-        <Text style={[styles.workedForCount, { color: theme.subtleText }]}>
-          {workCount} {workCount === 1 ? "step" : "steps"}
-        </Text>
-      </NativeAction>
-      {open ? (
-        <View
-          style={[styles.workedForContent, { borderLeftColor: theme.border }]}
-        >
-          {props.block.blocks.map((inner, index) => (
-            <BlockView
-              key={blockKey(inner, index)}
-              block={inner}
-              streaming={props.streaming}
-              resolveMedia={props.resolveMedia}
-              onOpenFile={props.onOpenFile}
-              onOpenSubtask={props.onOpenSubtask}
-              onRequestPartDetail={props.onRequestPartDetail}
-              onOpenAttachment={props.onOpenAttachment}
-              mediaVisible={props.mediaVisible}
-              mediaScopeKey={props.mediaScopeKey}
-            />
-          ))}
-        </View>
-      ) : null}
-    </View>
+    <ActivityGroup
+      parts={block.parts}
+      onOpenSubtask={onOpenSubtask}
+      onRequestPartDetail={onRequestPartDetail}
+      resolveMedia={resolveMedia}
+      onOpenFile={onOpenFile}
+      onOpenAttachment={onOpenAttachment}
+      mediaVisible={mediaVisible}
+      mediaScopeKey={mediaScopeKey}
+    />
   );
 }
 
-type WorkDetailProps = Pick<
+type PartDetailProps = Pick<
   ChatMessagesProps,
   "onRequestPartDetail" | "resolveMedia" | "onOpenFile" | "onOpenAttachment"
 > & { mediaVisible?: boolean; mediaScopeKey?: string | number };
-function WorkedGroup({
+
+interface PartDetailState {
+  current: HarnessPart;
+  loading: boolean;
+  error: boolean;
+  load: () => Promise<void>;
+  /** Fetch omitted heavy fields the first time the part is expanded. */
+  ensure: () => void;
+}
+
+function usePartDetail(
+  part: HarnessPart,
+  onRequestPartDetail?: ChatMessagesProps["onRequestPartDetail"],
+): PartDetailState {
+  const [detail, setDetail] = useState<HarnessPart | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
+  const load = async () => {
+    if (!onRequestPartDetail || loading) return;
+    setLoading(true);
+    setError(false);
+    try {
+      const loaded = await onRequestPartDetail(part.session_id, part.id);
+      if (loaded) setDetail(loaded);
+    } catch {
+      setError(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+  return {
+    current: detail ?? part,
+    loading,
+    error,
+    load,
+    ensure: () => {
+      if (part.detail_loaded === false && !detail) void load();
+    },
+  };
+}
+
+/**
+ * One quiet line such as "Explored 9 files, 2 searches" for a run of agent
+ * work. It expands to the individual steps, one page at a time; a lone thought
+ * or compaction expands straight to its text.
+ */
+function ActivityGroup({
   parts,
-  onRequestPartDetail,
-  resolveMedia,
-  onOpenFile,
-  onOpenAttachment,
-  mediaVisible = true,
-  mediaScopeKey,
-}: { parts: HarnessPart[] } & WorkDetailProps): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const { theme } = useTheme();
-  const active = parts.find(
-    (part) => part.state === "running" || part.state === "pending",
-  );
-  return (
-    <View style={styles.workGroup} testID="chat-worked-group">
-      <NativeAction
-        accessibilityRole="button"
-        accessibilityLabel={`${open ? "Collapse" : "Expand"} ${parts.length} tool steps`}
-        accessibilityState={{ expanded: open }}
-        onPress={() => setOpen(!open)}
-        style={styles.workedForHeader}
-      >
-        {open ? (
-          <ChevronDown size={15} color={theme.mutedText} />
-        ) : (
-          <ChevronRight size={15} color={theme.mutedText} />
-        )}
-        <Text style={[styles.workedForTitle, { color: theme.mutedText }]}>
-          Worked
-        </Text>
-        <Text style={[styles.workedForCount, { color: theme.subtleText }]}>
-          {parts.length}
-        </Text>
-        {active ? (
-          <>
-            <Text
-              numberOfLines={1}
-              style={[styles.liveLabel, { color: theme.mutedText }]}
-            >
-              {partLabel(active)}
-            </Text>
-            <LoaderCircle size={14} color={theme.primary} />
-          </>
-        ) : null}
-      </NativeAction>
-      {open ? (
-        <View style={styles.groupContent}>
-          {parts.map((part) => (
-            <WorkRow
-              key={part.id}
-              part={part}
-              grouped
-              onRequestPartDetail={onRequestPartDetail}
-              resolveMedia={resolveMedia}
-              onOpenFile={onOpenFile}
-              onOpenAttachment={onOpenAttachment}
-              mediaVisible={mediaVisible}
-              mediaScopeKey={mediaScopeKey}
-            />
-          ))}
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function WorkRow({
-  part,
-  grouped = false,
-  onRequestPartDetail,
-  resolveMedia,
-  onOpenFile,
-  onOpenAttachment,
-  mediaVisible = true,
-  mediaScopeKey,
+  onOpenSubtask,
+  ...detailProps
 }: {
-  part: HarnessPart;
-  grouped?: boolean;
-} & WorkDetailProps): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const [detail, setDetail] = useState<HarnessPart | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
+  parts: HarnessPart[];
+  onOpenSubtask?: ChatMessagesProps["onOpenSubtask"];
+} & PartDetailProps): React.JSX.Element {
   const { theme } = useTheme();
-  const current = detail ?? part;
-  const attachments = toolAttachments(current);
-  const preview =
-    current.type === "reasoning"
-      ? (current.display?.summary ?? current.output)
-      : (current.display?.summary ?? "");
-  const loadDetail = async () => {
-    if (!onRequestPartDetail || loading) return;
-    setLoading(true);
-    setError(false);
-    try {
-      const loaded = await onRequestPartDetail(part.session_id, part.id);
-      if (loaded) setDetail(loaded);
-    } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
-  };
-  const toggle = () => {
-    const next = !open;
-    setOpen(next);
-    if (next && part.detail_loaded === false && !detail) void loadDetail();
-  };
-  const icon =
-    current.type === "reasoning" ? (
-      <Sparkles size={15} color={theme.mutedText} />
-    ) : current.type === "tool" ? (
-      <Code2
-        size={15}
-        color={current.state === "error" ? theme.danger : theme.mutedText}
-      />
-    ) : (
-      <MessageSquareText size={15} color={theme.mutedText} />
-    );
-  const title = current.type === "reasoning" ? "Reasoning" : partLabel(current);
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(HARNESS_PAGE_SIZE);
+  const summary = summarizeActivity(parts);
+  const hidden = parts.length - shown;
+  const first = parts[0]!;
+  const lone =
+    parts.length === 1 &&
+    (first.type === "reasoning" || first.type === "compaction");
+  const detail = usePartDetail(first, detailProps.onRequestPartDetail);
   return (
-    <View
-      style={grouped ? styles.groupRow : styles.standaloneRow}
-      testID={`chat-work-row-${part.id}`}
-    >
+    <View testID={`chat-activity-${first.id}`} style={styles.activity}>
       <NativeAction
         accessibilityRole="button"
-        accessibilityLabel={`${open ? "Collapse" : "Expand"} ${title}`}
-        accessibilityState={{ expanded: open }}
-        onPress={toggle}
-        style={styles.workedForHeader}
+        accessibilityLabel={[summary.title, summary.detail]
+          .filter(Boolean)
+          .join(" ")}
+        accessibilityState={{ expanded: open, busy: summary.running }}
+        onPress={() => {
+          setOpen(!open);
+          if (!open && lone) detail.ensure();
+        }}
+        style={styles.activityHeader}
       >
-        {open ? (
-          <ChevronDown size={15} color={theme.mutedText} />
-        ) : (
-          <ChevronRight size={15} color={theme.mutedText} />
-        )}
-        {icon}
-        <Text
-          numberOfLines={1}
-          style={[
-            styles.workRowTitle,
-            {
-              color: current.state === "error" ? theme.danger : theme.mutedText,
-            },
-          ]}
-        >
-          {title}
-        </Text>
-        {!open && preview ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.workPreview, { color: theme.subtleText }]}
-          >
-            {preview}
-          </Text>
-        ) : null}
-        {current.state === "running" || current.state === "pending" ? (
-          <LoaderCircle size={14} color={theme.primary} />
-        ) : null}
-      </NativeAction>
-      {open ? (
-        <View style={[styles.workDetail, { borderLeftColor: theme.border }]}>
-          {loading ? (
-            <Text
-              style={{
-                color: theme.mutedText,
-                fontSize: 13,
-                paddingVertical: 8,
-              }}
-            >
-              Loading full details…
+        <Text style={[styles.activityTitle, { color: theme.mutedText }]}>
+          {summary.title}
+          {summary.detail ? (
+            <Text style={{ color: theme.subtleText }}>
+              {`\u2002${summary.detail}`}
             </Text>
           ) : null}
-          {error ? (
-            <Banner
-              tone="error"
-              message="Could not load this detail."
-              actionLabel="Retry"
-              onAction={() => {
-                void loadDetail();
-              }}
-            />
-          ) : null}
-          {!loading && !error ? (
-            <>
-              {current.type === "reasoning" && current.output ? (
-                <ChatMarkdown
-                  markdown={current.output}
-                  mediaVisible={mediaVisible}
-                  mediaScopeKey={mediaScopeKey}
-                  resolveMedia={resolveMedia}
-                  onOpenFile={onOpenFile}
-                />
-              ) : null}
-              {current.title && current.type === "tool" ? (
-                <Text style={[styles.detailTitle, { color: theme.text }]}>
-                  {current.title}
-                </Text>
-              ) : null}
-              {current.input && Object.keys(current.input).length ? (
-                <CodePanel title="Input" value={formatData(current.input)} />
-              ) : null}
-              {current.type !== "reasoning" && current.output ? (
-                <ChatMarkdown
-                  markdown={current.output}
-                  mediaVisible={mediaVisible}
-                  mediaScopeKey={mediaScopeKey}
-                  resolveMedia={resolveMedia}
-                  onOpenFile={onOpenFile}
-                />
-              ) : null}
-              {attachments.map((attachment, index) => (
-                <ToolAttachmentCard
-                  key={`${attachment.filename}-${index}`}
-                  attachment={attachment}
-                  onOpenAttachment={onOpenAttachment}
-                />
-              ))}
-            </>
-          ) : null}
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function ProcessRow({
-  part,
-  label,
-  icon,
-  onRequestPartDetail,
-  mediaVisible = true,
-  mediaScopeKey,
-}: {
-  part: HarnessPart;
-  label: string;
-  icon: React.ReactNode;
-  onRequestPartDetail?: ChatMessagesProps["onRequestPartDetail"];
-  mediaVisible?: boolean;
-  mediaScopeKey?: string | number;
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const [detail, setDetail] = useState<HarnessPart | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  const { theme } = useTheme();
-  const current = detail ?? part;
-  const loadDetail = async () => {
-    if (!onRequestPartDetail || loading) return;
-    setLoading(true);
-    setError(false);
-    try {
-      const loaded = await onRequestPartDetail(part.session_id, part.id);
-      if (loaded) setDetail(loaded);
-    } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
-  };
-  const toggle = () => {
-    const next = !open;
-    setOpen(next);
-    if (next && part.detail_loaded === false && !detail) void loadDetail();
-  };
-  return (
-    <View testID={`chat-process-${part.id}`} style={styles.processRow}>
-      <NativeAction
-        accessibilityRole="button"
-        accessibilityLabel={`${open ? "Collapse" : "Expand"} ${label}`}
-        accessibilityState={{ expanded: open }}
-        onPress={toggle}
-        style={styles.workedForHeader}
-      >
-        {open ? (
-          <ChevronDown size={15} color={theme.mutedText} />
-        ) : (
-          <ChevronRight size={15} color={theme.mutedText} />
-        )}
-        {icon}
-        <Text style={[styles.workRowTitle, { color: theme.mutedText }]}>
-          {label}
         </Text>
-        {part.state === "running" ? (
-          <LoaderCircle size={14} color={theme.primary} />
-        ) : null}
       </NativeAction>
       {open ? (
-        <View style={[styles.workDetail, { borderLeftColor: theme.border }]}>
-          {loading ? (
-            <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-              Loading details…
-            </Text>
-          ) : error ? (
-            <Banner
-              tone="error"
-              message="Could not load this detail."
-              actionLabel="Retry"
-              onAction={() => {
-                void loadDetail();
-              }}
-            />
-          ) : current.output ? (
-            <ChatMarkdown
-              markdown={current.output}
-              mediaVisible={mediaVisible}
-              mediaScopeKey={mediaScopeKey}
-            />
-          ) : current.input ? (
-            <CodePanel title="Details" value={formatData(current.input)} />
+        <View style={[styles.activitySteps, { borderLeftColor: theme.border }]}>
+          {lone ? (
+            <PartDetail state={detail} {...detailProps} />
           ) : (
-            <Text style={{ color: theme.subtleText, fontSize: 13 }}>
-              No additional details.
-            </Text>
+            parts
+              .slice(0, shown)
+              .map((part) =>
+                part.type === "subtask" ? (
+                  <SubtaskStep
+                    key={part.id}
+                    part={part}
+                    onOpenSubtask={onOpenSubtask}
+                  />
+                ) : (
+                  <ActivityStep key={part.id} part={part} {...detailProps} />
+                ),
+              )
           )}
+          {!lone && hidden > 0 ? (
+            <NativeAction
+              accessibilityRole="button"
+              onPress={() => setShown(shown + HARNESS_PAGE_SIZE)}
+              style={styles.stepRow}
+            >
+              <Text style={[styles.stepText, { color: theme.subtleText }]}>
+                {`Show ${Math.min(hidden, HARNESS_PAGE_SIZE)} more`}
+              </Text>
+            </NativeAction>
+          ) : null}
         </View>
       ) : null}
     </View>
   );
 }
 
-function PatchCard({
+function ActivityStep({
   part,
-  onRequestPartDetail,
-}: {
-  part: HarnessPart;
-  onRequestPartDetail?: ChatMessagesProps["onRequestPartDetail"];
-  mediaVisible?: boolean;
-  mediaScopeKey?: string | number;
-}): React.JSX.Element {
-  const [open, setOpen] = useState(false);
-  const [detail, setDetail] = useState<HarnessPart | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
+  ...detailProps
+}: { part: HarnessPart } & PartDetailProps): React.JSX.Element {
   const { theme } = useTheme();
-  const current = detail ?? part;
-  const path = String(
-    current.display?.path ??
-      current.meta?.path ??
-      current.title ??
-      "Changed file",
-  );
-  const additions = Number(current.display?.additions ?? 0);
-  const deletions = Number(current.display?.deletions ?? 0);
-  const loadDetail = async () => {
-    if (!onRequestPartDetail || loading) return;
-    setLoading(true);
-    setError(false);
-    try {
-      const loaded = await onRequestPartDetail(part.session_id, part.id);
-      if (loaded) setDetail(loaded);
-    } catch {
-      setError(true);
-    } finally {
-      setLoading(false);
-    }
-  };
-  const toggle = () => {
-    const next = !open;
-    setOpen(next);
-    if (next && part.detail_loaded === false && !detail) void loadDetail();
-  };
+  const [open, setOpen] = useState(false);
+  const detail = usePartDetail(part, detailProps.onRequestPartDetail);
+  const { label, note } = stepLabel(detail.current);
   return (
-    <View
-      testID={`chat-patch-${part.id}`}
-      style={[
-        styles.patchCard,
-        { backgroundColor: theme.surface, borderColor: theme.border },
-      ]}
-    >
+    <View testID={`chat-work-row-${part.id}`}>
       <NativeAction
         accessibilityRole="button"
-        accessibilityLabel={`${open ? "Collapse" : "Expand"} changes to ${path}`}
+        accessibilityLabel={note ? `${label}, ${note}` : label}
         accessibilityState={{ expanded: open }}
-        onPress={toggle}
-        style={styles.patchHeader}
+        onPress={() => {
+          setOpen(!open);
+          if (!open) detail.ensure();
+        }}
+        style={styles.stepRow}
       >
-        {open ? (
-          <ChevronDown size={15} color={theme.mutedText} />
-        ) : (
-          <ChevronRight size={15} color={theme.mutedText} />
-        )}
-        <FileCode2 size={15} color={theme.primary} />
+        <Text
+          numberOfLines={open ? undefined : 1}
+          style={[styles.stepText, { color: theme.mutedText }]}
+        >
+          {label}
+          {note ? (
+            <Text style={{ color: theme.subtleText }}>{`\u2002${note}`}</Text>
+          ) : null}
+        </Text>
+      </NativeAction>
+      {open ? <PartDetail state={detail} {...detailProps} /> : null}
+    </View>
+  );
+}
+
+function SubtaskStep({
+  part,
+  onOpenSubtask,
+}: {
+  part: HarnessPart;
+  onOpenSubtask?: ChatMessagesProps["onOpenSubtask"];
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const child = resolveChildSessionId(part) ?? "";
+  const agent = String(part.meta?.agent ?? part.display?.agent ?? "Agent");
+  const status =
+    part.state === "running"
+      ? "Working"
+      : part.state === "error"
+        ? "Failed"
+        : "Completed";
+  return (
+    <NativeAction
+      accessibilityRole="button"
+      accessibilityLabel={`${part.title || "Subtask"}, ${agent}, ${status}${child ? ", open subtask conversation" : ""}`}
+      disabled={!child}
+      onPress={() => onOpenSubtask?.(child)}
+      testID={`chat-subtask-${part.id}`}
+      style={styles.stepRow}
+    >
+      <View style={styles.subtaskStep}>
         <Text
           numberOfLines={1}
-          style={[styles.patchPath, { color: theme.text }]}
+          style={[styles.stepText, { flex: 1, color: theme.mutedText }]}
         >
-          {path}
+          {part.title || "Subtask"}
+          <Text style={{ color: theme.subtleText }}>
+            {`\u2002${agent} · ${status}`}
+          </Text>
         </Text>
-        {additions ? (
-          <Text style={{ color: theme.success, fontSize: 12 }}>
-            +{additions}
-          </Text>
-        ) : null}
-        {deletions ? (
-          <Text style={{ color: theme.danger, fontSize: 12 }}>
-            −{deletions}
-          </Text>
-        ) : null}
-      </NativeAction>
-      {open ? (
-        <View style={[styles.diff, { backgroundColor: theme.codeBackground }]}>
-          {loading ? (
-            <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-              Loading full diff…
-            </Text>
-          ) : null}
-          {error ? (
-            <Banner
-              tone="error"
-              message="Could not load the full diff."
-              actionLabel="Retry"
-              onAction={() => {
-                void loadDetail();
-              }}
-            />
-          ) : null}
-          {!loading && !error ? (
-            <Text
-              selectable
-              style={[styles.diffText, { color: theme.mutedText }]}
-            >
-              {current.output ||
-                (current.display?.preview ?? [])
-                  .map(
-                    (line) =>
-                      `${line.type === "add" ? "+" : line.type === "del" ? "−" : " "}${line.content}`,
-                  )
-                  .join("\n") ||
-                "No diff preview available."}
-            </Text>
-          ) : null}
-        </View>
+        {child ? <ChevronRight size={15} color={theme.subtleText} /> : null}
+      </View>
+    </NativeAction>
+  );
+}
+
+function PartDetail({
+  state,
+  resolveMedia,
+  onOpenFile,
+  onOpenAttachment,
+  mediaVisible = true,
+  mediaScopeKey,
+}: { state: PartDetailState } & PartDetailProps): React.JSX.Element {
+  const { theme } = useTheme();
+  const { current, loading, error, load } = state;
+  if (loading)
+    return (
+      <Text style={[styles.detailNote, { color: theme.subtleText }]}>
+        Loading details…
+      </Text>
+    );
+  if (error)
+    return (
+      <Banner
+        tone="neutral"
+        message="Could not load this detail."
+        actionLabel="Retry"
+        onAction={() => {
+          void load();
+        }}
+      />
+    );
+  if (current.type === "patch")
+    return (
+      <View style={[styles.diff, { backgroundColor: theme.codeBackground }]}>
+        <Text selectable style={[styles.diffText, { color: theme.mutedText }]}>
+          {current.output.trimEnd() ||
+            (current.display?.preview ?? [])
+              .map(
+                (line) =>
+                  `${line.type === "add" ? "+" : line.type === "del" ? "−" : " "}${line.content}`,
+              )
+              .join("\n") ||
+            "No diff preview available."}
+        </Text>
+      </View>
+    );
+  const input = current.type === "tool" ? toolInput(current) : "";
+  const output =
+    current.output ||
+    (current.type === "compaction"
+      ? String(current.display?.summary ?? "")
+      : "");
+  const attachments = toolAttachments(current);
+  if (!input && !output && !attachments.length)
+    return (
+      <Text style={[styles.detailNote, { color: theme.subtleText }]}>
+        No additional details.
+      </Text>
+    );
+  return (
+    <View style={styles.partDetail}>
+      {input ? <CodePanel title="Input" value={input} /> : null}
+      {output ? (
+        <ChatMarkdown
+          markdown={output}
+          variant="quiet"
+          mediaVisible={mediaVisible}
+          mediaScopeKey={mediaScopeKey}
+          resolveMedia={resolveMedia}
+          onOpenFile={onOpenFile}
+        />
       ) : null}
+      {attachments.map((attachment, index) => (
+        <ToolAttachmentCard
+          key={`${attachment.filename}-${index}`}
+          attachment={attachment}
+          onOpenAttachment={onOpenAttachment}
+        />
+      ))}
     </View>
   );
 }
@@ -1640,7 +1334,7 @@ function ToolAttachmentCard({
       }
       style={[styles.pdfCard, { backgroundColor: theme.surfaceMuted }]}
     >
-      <FileCode2 size={18} color={theme.primary} />
+      <FileCode2 size={18} color={theme.mutedText} />
       <View style={{ flex: 1 }}>
         <Text numberOfLines={1} style={{ color: theme.text, fontSize: 14 }}>
           {filename}
@@ -1650,60 +1344,6 @@ function ToolAttachmentCard({
         </Text>
       </View>
       <ChevronRight size={17} color={theme.mutedText} />
-    </NativeAction>
-  );
-}
-
-function SubtaskCard({
-  part,
-  onOpenSubtask,
-}: {
-  part: HarnessPart;
-  onOpenSubtask?: ChatMessagesProps["onOpenSubtask"];
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  const child = resolveChildSessionId(part) ?? "";
-  const agent = String(part.meta?.agent ?? part.display?.agent ?? "Agent");
-  return (
-    <NativeAction
-      accessibilityRole="button"
-      accessibilityLabel={`${part.title || "Subtask"}, ${agent}${child ? ", open subtask conversation" : ""}`}
-      disabled={!child}
-      onPress={() => onOpenSubtask?.(child)}
-      testID={`chat-subtask-${part.id}`}
-      style={[styles.subtaskCard, { backgroundColor: theme.surfaceMuted }]}
-    >
-      <View style={[styles.subtaskMark, { backgroundColor: theme.surface }]}>
-        <Sparkles
-          size={16}
-          color={part.state === "running" ? theme.primary : theme.mutedText}
-        />
-      </View>
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.subtaskTitle, { color: theme.text }]}>
-          {part.title || "Subtask"}
-        </Text>
-        <Text style={[styles.subtaskMeta, { color: theme.mutedText }]}>
-          {agent} ·{" "}
-          {part.state === "running"
-            ? "Working"
-            : part.state === "error"
-              ? "Failed"
-              : "Completed"}
-        </Text>
-        {part.output ? (
-          <Text
-            numberOfLines={2}
-            style={[
-              styles.subtaskMeta,
-              { color: theme.mutedText, marginTop: 4 },
-            ]}
-          >
-            {part.output}
-          </Text>
-        ) : null}
-      </View>
-      {child ? <ChevronRight size={17} color={theme.mutedText} /> : null}
     </NativeAction>
   );
 }
@@ -1722,7 +1362,7 @@ function QuestionCard({ part }: { part: HarnessPart }): React.JSX.Element {
       ]}
     >
       <View style={styles.questionHeader}>
-        <MessageSquareText size={16} color={theme.primary} />
+        <MessageSquareText size={16} color={theme.mutedText} />
         <Text style={[styles.detailTitle, { color: theme.text }]}>
           Question
         </Text>
@@ -1771,46 +1411,119 @@ function CodePanel({
   );
 }
 
-function TodoStrip({
-  todos,
-  onPress,
+/** The session's to-do list, shown where the agent last updated it. */
+function TodoCard({ todos }: { todos: HarnessTodo[] }): React.JSX.Element {
+  const { theme } = useTheme();
+  const sorted = useMemo(
+    () => [...todos].sort((left, right) => left.order - right.order),
+    [todos],
+  );
+  const done = todos.filter((todo) => todo.status === "completed").length;
+  const settled = todos.every(
+    (todo) => todo.status === "completed" || todo.status === "cancelled",
+  );
+  // A finished list folds to its header until the reader opens it.
+  const [override, setOverride] = useState<boolean | null>(null);
+  const open = override ?? !settled;
+  return (
+    <View
+      testID="chat-todos"
+      style={[styles.todoCard, { borderColor: theme.border }]}
+    >
+      <NativeAction
+        accessibilityRole="button"
+        accessibilityLabel={`To-dos, ${done} of ${todos.length} done`}
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOverride(!open)}
+        style={styles.todoHeader}
+      >
+        <Text style={[styles.todoText, { color: theme.text }]}>
+          To-dos
+          <Text style={{ color: theme.subtleText }}>
+            {`\u2002${done}/${todos.length}`}
+          </Text>
+        </Text>
+      </NativeAction>
+      {open ? (
+        <>
+          <View
+            style={[styles.todoDivider, { backgroundColor: theme.border }]}
+          />
+          {sorted.map((todo, index) => {
+            const finished =
+              todo.status === "completed" || todo.status === "cancelled";
+            return (
+              <View
+                key={todo.id}
+                accessible
+                accessibilityLabel={`${todo.content}, ${todo.status.replace("_", " ")}`}
+                testID={`chat-todo-${todo.id}`}
+                style={styles.todoRow}
+              >
+                <View style={styles.todoIcon}>
+                  <TodoStatusIcon status={todo.status} />
+                </View>
+                <View
+                  style={[
+                    styles.todoTextBox,
+                    index > 0 && {
+                      borderTopWidth: StyleSheet.hairlineWidth,
+                      borderTopColor: theme.border,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.todoText,
+                      {
+                        color:
+                          todo.status === "in_progress"
+                            ? theme.text
+                            : finished
+                              ? theme.subtleText
+                              : theme.mutedText,
+                        textDecorationLine: finished ? "line-through" : "none",
+                      },
+                    ]}
+                  >
+                    {todo.content}
+                  </Text>
+                </View>
+              </View>
+            );
+          })}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function TodoStatusIcon({
+  status,
 }: {
-  todos: HarnessTodo[];
-  onPress: () => void;
+  status: HarnessTodo["status"];
 }): React.JSX.Element {
   const { theme } = useTheme();
-  const active = todos
-    .filter(
-      (todo) => todo.status !== "completed" && todo.status !== "cancelled",
-    )
-    .sort((left, right) => left.order - right.order);
-  const label = active.length
-    ? `${active[0]?.status === "in_progress" ? "In progress · " : ""}${active[0]?.content}${active.length > 1 ? ` · +${active.length - 1}` : ""}`
-    : "All tasks complete";
+  if (status === "pending")
+    return (
+      <CircleDashed size={20} strokeWidth={1.6} color={theme.subtleText} />
+    );
+  if (status === "cancelled")
+    return <CircleX size={20} strokeWidth={1.6} color={theme.subtleText} />;
+  const active = status === "in_progress";
   return (
-    <NativeAction
-      accessibilityRole="button"
-      accessibilityLabel={`Show tasks. ${active.length} open of ${todos.length}`}
-      onPress={onPress}
-      style={[styles.todoSummary, { backgroundColor: theme.surfaceMuted }]}
+    <View
+      style={[
+        styles.todoBadge,
+        { backgroundColor: active ? theme.text : theme.subtleText },
+      ]}
     >
-      <Text
-        numberOfLines={2}
-        style={{
-          flex: 1,
-          color: active.length ? theme.mutedText : theme.success,
-          fontSize: 13,
-          lineHeight: 18,
-        }}
-      >
-        {label}
-      </Text>
-      <Text style={{ color: theme.subtleText, fontSize: 12 }}>
-        {todos.filter((todo) => todo.status === "completed").length}/
-        {todos.length}
-      </Text>
-      <ChevronRight size={15} color={theme.mutedText} />
-    </NativeAction>
+      {active ? (
+        <ArrowRight size={13} strokeWidth={2.6} color={theme.background} />
+      ) : (
+        <Check size={12} strokeWidth={3} color={theme.background} />
+      )}
+    </View>
   );
 }
 
@@ -1821,12 +1534,51 @@ function formatData(value: Record<string, unknown>): string {
     return String(value);
   }
 }
-function partLabel(part: HarnessPart): string {
-  const tool = String(
-    part.input?.tool ?? part.tool ?? part.display?.tool ?? part.type,
+/** Tool arguments for the detail panel, without the redundant tool id. */
+function toolInput(part: HarnessPart): string {
+  const args = parseToolArguments(part);
+  const rest = Object.fromEntries(
+    Object.entries(part.input ?? {}).filter(([key]) => key !== "tool"),
   );
-  if (part.type === "reasoning") return "Reasoning";
-  return part.title || tool.replace(/[_-]+/g, " ");
+  const shown = Object.keys(args).length ? args : rest;
+  return Object.keys(shown).length ? formatData(shown) : "";
+}
+/** One-line label and quiet note for a step inside an activity run. */
+function stepLabel(part: HarnessPart): { label: string; note: string } {
+  const failed = part.state === "error" ? "failed" : "";
+  if (part.type === "patch") {
+    const path = String(
+      part.display?.path || part.meta?.path || part.title || "",
+    );
+    const additions = Number(part.display?.additions ?? 0);
+    const deletions = Number(part.display?.deletions ?? 0);
+    return {
+      label: path ? `Edited ${basename(path)}` : "Edited file",
+      note: [
+        additions ? `+${additions}` : "",
+        deletions ? `−${deletions}` : "",
+        failed,
+      ]
+        .filter(Boolean)
+        .join(" "),
+    };
+  }
+  if (part.type === "reasoning")
+    return { label: "Thought", note: String(part.display?.summary ?? "") };
+  if (part.type === "compaction")
+    return { label: part.title || "Context compacted", note: "" };
+  if (part.type === "tool") {
+    // Detail-less timeline parts may name their tool only in the projection.
+    const named =
+      part.tool || !part.display?.tool
+        ? part
+        : { ...part, tool: String(part.display.tool) };
+    return { label: toolDisplayLabel(named), note: failed };
+  }
+  return { label: part.title || part.type, note: failed };
+}
+function basename(path: string): string {
+  return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 function formatTime(value: string): string {
   const date = new Date(value);
@@ -1836,15 +1588,9 @@ function formatTime(value: string): string {
     minute: "2-digit",
   }).format(date);
 }
-function blockKey(
-  block: MessageRenderBlock | RenderBlock,
-  index: number,
-): string {
-  if (block.kind === "workedFor") {
-    const first = block.blocks[0];
-    return `worked:${first?.kind === "group" ? (first.parts[0]?.id ?? index) : first?.kind === "text" ? first.part.id : first?.kind === "compaction" ? first.part.id : (first?.part.id ?? index)}`;
-  }
-  if (block.kind === "group") return `group:${block.parts[0]?.id ?? index}`;
+function blockKey(block: ActivityTimelineBlock, index: number): string {
+  if (block.kind === "activity")
+    return `activity:${block.parts[0]?.id ?? index}`;
   return `${block.kind}:${block.part.id}`;
 }
 
@@ -1879,22 +1625,6 @@ const styles = StyleSheet.create({
   },
   runDot: { width: 7, height: 7, borderRadius: 4 },
   runText: { fontSize: 13, lineHeight: 18 },
-  todoSummary: {
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
-  },
-  todoRow: {
-    flexDirection: "row",
-    gap: 11,
-    alignItems: "center",
-    minHeight: 56,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  todoMarker: { width: 8, height: 8, borderRadius: 5 },
   messageFrame: { maxWidth: 820, width: "100%", gap: 4, paddingBottom: 24 },
   userFrame: { alignSelf: "flex-end", alignItems: "flex-end" },
   assistantFrame: { alignSelf: "flex-start", alignItems: "flex-start" },
@@ -1920,15 +1650,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 5,
   },
-  assistantBody: { width: "100%", gap: 10 },
+  assistantBody: { width: "100%", gap: 6 },
   steerRow: { alignSelf: "flex-end", alignItems: "flex-end", maxWidth: "94%" },
   steerCaption: { fontSize: 11, lineHeight: 16, marginTop: 3 },
   textBlock: { width: "100%" },
+  // Glyphs, not their touch targets, line up with the text above.
   messageActions: {
-    minHeight: 36,
     flexDirection: "row",
     alignItems: "center",
-    gap: 0,
+    marginLeft: -(ACTION_SIZE - ACTION_ICON) / 2,
   },
   inlineActions: {
     flexDirection: "row",
@@ -1953,36 +1683,20 @@ const styles = StyleSheet.create({
     height: 24,
   },
   cursorBar: { width: 2, height: 16, borderRadius: 2 },
-  workedFor: { width: "100%", paddingVertical: 8 },
-  workedForHeader: {
-    minHeight: 40,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  workedForTitle: { fontSize: 14, fontWeight: "600" },
-  workedForCount: { fontSize: 12 },
-  workedForContent: {
-    borderLeftWidth: 1,
-    marginLeft: 7,
+  activity: { width: "100%" },
+  activityHeader: { paddingVertical: 5 },
+  activityTitle: { fontSize: 17, lineHeight: 22 },
+  activitySteps: {
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    marginLeft: 2,
+    marginBottom: 4,
     paddingLeft: 12,
-    paddingVertical: 4,
-    gap: 10,
   },
-  workGroup: { gap: 3 },
-  groupContent: { paddingLeft: 21, gap: 2 },
-  liveLabel: { flex: 1, fontSize: 13 },
-  standaloneRow: { width: "100%", gap: 5 },
-  groupRow: { width: "100%", gap: 3 },
-  workRowTitle: { maxWidth: "45%", fontSize: 13 },
-  workPreview: { flex: 1, fontSize: 12 },
-  workDetail: {
-    borderLeftWidth: 1,
-    marginLeft: 7,
-    paddingLeft: 12,
-    paddingVertical: 8,
-    gap: 8,
-  },
+  stepRow: { paddingVertical: 5 },
+  stepText: { fontSize: 15, lineHeight: 20 },
+  subtaskStep: { flexDirection: "row", alignItems: "center", gap: 6 },
+  partDetail: { gap: 8, paddingBottom: 8 },
+  detailNote: { fontSize: 13, lineHeight: 18, paddingBottom: 8 },
   detailTitle: { fontSize: 14, lineHeight: 20, fontWeight: "600" },
   codePanel: { padding: 12, borderRadius: 12, gap: 6 },
   codeTitle: {
@@ -1992,6 +1706,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
   },
   codeText: { fontSize: 12, lineHeight: 18, fontFamily: "monospace" },
+  diff: { maxHeight: 320, padding: 12, borderRadius: 12, marginBottom: 8 },
+  diffText: { fontFamily: "monospace", fontSize: 12, lineHeight: 18 },
   attachmentImage: { width: "100%", height: 220, borderRadius: 12 },
   toolAttachmentImage: {
     width: "100%",
@@ -2007,40 +1723,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
-  processRow: { width: "100%", gap: 4, paddingVertical: 3 },
-  patchCard: {
-    width: "100%",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    overflow: "hidden",
-  },
-  patchHeader: {
-    minHeight: 48,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 12,
-  },
-  patchPath: { flex: 1, fontSize: 13, fontWeight: "500" },
-  diff: { maxHeight: 320, padding: 12 },
-  diffText: { fontFamily: "monospace", fontSize: 12, lineHeight: 18 },
-  subtaskCard: {
-    width: "100%",
-    borderRadius: 16,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 11,
-  },
-  subtaskMark: {
-    width: 30,
-    height: 30,
-    borderRadius: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  subtaskTitle: { fontSize: 14, lineHeight: 20, fontWeight: "600" },
-  subtaskMeta: { fontSize: 12, lineHeight: 17 },
   questionCard: {
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 15,
@@ -2048,4 +1730,30 @@ const styles = StyleSheet.create({
     gap: 9,
   },
   questionHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  todoCard: {
+    width: "100%",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    overflow: "hidden",
+  },
+  todoHeader: { paddingHorizontal: 12, paddingVertical: 10 },
+  todoDivider: { height: StyleSheet.hairlineWidth },
+  todoRow: { flexDirection: "row", alignItems: "flex-start", paddingLeft: 12 },
+  todoIcon: {
+    width: 20,
+    height: 21,
+    marginTop: 10,
+    marginRight: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  todoBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  todoTextBox: { flex: 1, marginRight: 12, paddingVertical: 10 },
+  todoText: { fontSize: 17, lineHeight: 21 },
 });

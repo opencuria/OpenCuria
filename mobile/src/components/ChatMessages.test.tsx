@@ -263,16 +263,103 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
 
-    fireEvent.press(
-      screen.getByRole("button", { name: /Expand work details/ }),
-    );
-    fireEvent.press(screen.getByRole("button", { name: /Expand read/ }));
+    // Finished turns stay flat: text around the work remains visible.
+    expect(screen.getByText("Before")).toBeTruthy();
+    expect(screen.getByText("After")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
+    expect(onRequestPartDetail).not.toHaveBeenCalled();
+    fireEvent.press(screen.getByRole("button", { name: "read" }));
 
     await waitFor(() =>
       expect(onRequestPartDetail).toHaveBeenCalledWith("s1", "tool-1"),
     );
     expect(screen.getByText("Full output")).toBeTruthy();
     expect(onRequestPartDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("groups all contiguous work, including edits and failures, between text", () => {
+    const transcript = message([
+      part("think", "reasoning", "Plan", 0),
+      { ...part("read", "tool", "", 1), tool: "read", title: "Read a.ts" },
+      { ...part("edit", "tool", "", 2), tool: "edit", call_id: "c1" },
+      {
+        ...part("patch", "patch", "", 3),
+        call_id: "c1",
+        display: { path: "/workspace/a.ts", additions: 2, deletions: 1 },
+      },
+      { ...part("bash", "tool", "", 4), tool: "bash", state: "error" },
+      part("text", "text", "Done", 5),
+      { ...part("grep", "tool", "", 6), tool: "grep" },
+    ]);
+    transcript.completed_at = "2026-10-29T12:00:00Z";
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[transcript]} />
+      </ThemeProvider>,
+    );
+
+    const labels = screen
+      .getAllByTestId(/^chat-(activity|part)-/)
+      .map((row) => row.props.testID);
+    expect(labels).toEqual([
+      "chat-activity-think",
+      "chat-part-text",
+      "chat-activity-grep",
+    ]);
+    fireEvent.press(
+      screen.getByRole("button", {
+        name: "Explored 1 file, edited 1 file, ran 1 command, 1 failed",
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Edited a.ts, +2 −1" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "bash, failed" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Explored 1 search" }),
+    ).toBeTruthy();
+  });
+
+  it("mounts large expanded groups one page at a time", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message(
+              Array.from({ length: 85 }, (_, index) => ({
+                ...part(`read-${index}`, "tool", "", index),
+                tool: "read",
+              })),
+            ),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(screen.getByRole("button", { name: "Explored 85 files" }));
+    expect(screen.getAllByTestId(/^chat-work-row-/)).toHaveLength(80);
+    fireEvent.press(screen.getByRole("button", { name: "Show 5 more" }));
+    expect(screen.getAllByTestId(/^chat-work-row-/)).toHaveLength(85);
+    expect(
+      screen.queryByRole("button", { name: /^Show \d+ more$/ }),
+    ).toBeNull();
+  });
+
+  it("expands a lone thought straight to its text", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message([
+              part("think", "reasoning", "Check the renderer first", 0),
+              part("text", "text", "Answer", 1),
+            ]),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByText("Check the renderer first")).toBeNull();
+    fireEvent.press(screen.getByRole("button", { name: "Thought" }));
+    expect(screen.getByText("Check the renderer first")).toBeTruthy();
   });
 
   it.each(["child", undefined])(
@@ -309,7 +396,7 @@ describe("ChatMessages", () => {
           />
         </ThemeProvider>,
       );
-      fireEvent.press(screen.getByRole("button", { name: /Expand work details/ }));
+      fireEvent.press(screen.getByRole("button", { name: "Delegated 1 task" }));
       const row = screen.getByTestId("chat-subtask-subtask");
       if (childId) {
         fireEvent.press(row);
@@ -344,36 +431,84 @@ describe("ChatMessages", () => {
     expect(screen.getByText("Sent while working")).toBeTruthy();
   });
 
-  it("shows all todos in an explicit task sheet", () => {
-    const todos: HarnessTodo[] = [
-      {
-        id: "one",
-        content: "First task",
-        status: "in_progress",
-        priority: "high",
-        order: 0,
-      },
-      {
-        id: "two",
-        content: "Second task",
-        status: "pending",
-        priority: "normal",
-        order: 1,
-      },
-    ];
+  const todo = (
+    id: string,
+    status: HarnessTodo["status"],
+    order: number,
+  ): HarnessTodo => ({
+    id,
+    content: `${id} task`,
+    status,
+    priority: "medium",
+    order,
+  });
+
+  it("shows the to-do list in place of the latest to-do call", () => {
+    const todoCall = (id: string, position: number): HarnessPart => ({
+      ...part(id, "tool", "", position),
+      tool: "todowrite",
+      title: "Update todos (2)",
+    });
     render(
       <ThemeProvider>
         <ChatMessages
-          messages={[message([part("text-1", "text", "Answer", 0)])]}
-          todos={todos}
+          messages={[
+            message([
+              todoCall("todo-1", 0),
+              { ...part("read", "tool", "", 1), tool: "read" },
+              todoCall("todo-2", 2),
+              { ...part("grep", "tool", "", 3), tool: "grep" },
+              part("text", "text", "Answer", 4),
+            ]),
+          ]}
+          todos={[
+            todo("second", "pending", 1),
+            todo("first", "in_progress", 0),
+          ]}
         />
       </ThemeProvider>,
     );
 
-    fireEvent.press(screen.getByRole("button", { name: /Show tasks/ }));
+    const order = screen
+      .getAllByTestId(/^chat-(activity|part)-|^chat-todos$/)
+      .map((row) => row.props.testID);
+    expect(order).toEqual([
+      "chat-activity-todo-1",
+      "chat-todos",
+      "chat-activity-grep",
+      "chat-part-text",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "Explored 1 file, updated to-dos" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "To-dos, 0 of 2 done" }),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId(/^chat-todo-/)
+        .map((row) => row.props.accessibilityLabel),
+    ).toEqual(["first task, in progress", "second task, pending"]);
+  });
 
-    expect(screen.getByText("First task")).toBeTruthy();
-    expect(screen.getByText("Second task")).toBeTruthy();
+  it("appends plan updates without a to-do call and folds finished lists", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[message([part("text", "text", "Answer", 0)])]}
+          todos={[
+            todo("first", "completed", 0),
+            todo("second", "cancelled", 1),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+
+    const header = screen.getByRole("button", { name: "To-dos, 1 of 2 done" });
+    expect(screen.queryByText("first task")).toBeNull();
+    fireEvent.press(header);
+    expect(screen.getByText("first task")).toBeTruthy();
+    expect(screen.getByText("second task")).toBeTruthy();
   });
 });
 

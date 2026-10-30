@@ -14,7 +14,8 @@ export type { ButtonProps, IconButtonProps } from "./controls.types";
 export type { NativeModalProps } from "./NativeModal";
 export { NativeModal } from "./NativeModal";
 
-export type BannerTone = "info" | "success" | "warning" | "error";
+/** `neutral` carries no status color, e.g. for notices inside the transcript. */
+export type BannerTone = "info" | "success" | "warning" | "error" | "neutral";
 export interface BannerProps {
   tone?: BannerTone;
   title?: string;
@@ -45,7 +46,9 @@ export function Banner({
         ? theme.warning
         : tone === "success"
           ? theme.success
-          : theme.info;
+          : tone === "neutral"
+            ? theme.text
+            : theme.info;
   return (
     <View
       accessibilityRole="alert"
@@ -85,6 +88,7 @@ export function Banner({
           symbol="xmark"
           icon={<X size={17} color={theme.mutedText} />}
           label="Dismiss message"
+          tone="quiet"
           onPress={onDismiss}
         />
       ) : null}

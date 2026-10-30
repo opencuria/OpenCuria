@@ -9,6 +9,7 @@ export * from "./fileChunks";
 export * from "./chatUploads";
 export * from "./harnessModels";
 export * from "./harnessBlocks";
+export * from "./harnessActivity";
 export * from "./harnessSubtaskActivity";
 export * from "./harnessMessageCopy";
 export * from "./harnessQuestion";

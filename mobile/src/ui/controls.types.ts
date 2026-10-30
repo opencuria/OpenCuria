@@ -35,6 +35,9 @@ export interface IconButtonProps extends Omit<
   label: string;
   onPress?: () => void;
   size?: number;
-  /** `floating` sits above scrolling content: liquid glass on iOS 26, tonal on Android. */
-  tone?: "neutral" | "primary" | "danger" | "floating";
+  /**
+   * `floating` sits above scrolling content: liquid glass on iOS 26, a neutral surface on Android.
+   * `quiet` is a small, uncolored inline action such as transcript copy.
+   */
+  tone?: "neutral" | "primary" | "danger" | "floating" | "quiet";
 }

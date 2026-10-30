@@ -113,14 +113,30 @@ function isPatchedFileTool(
 }
 
 /**
+ * Drop parts that never render a timeline row: step markers, empty text,
+ * edit/write calls already shown by their patch, task calls duplicated by a
+ * subtask part and still-open questions (the composer sheet owns those).
+ */
+export function visibleTimelineParts(parts: HarnessPart[]): HarnessPart[] {
+  const hasSubtask = parts.some((part) => part.type === "subtask");
+  const patchedCalls = patchCallIds(parts);
+  return parts.filter(
+    (part) =>
+      !SKIP_TYPES.has(part.type) &&
+      !isEmptyText(part) &&
+      !isPatchedFileTool(part, patchedCalls) &&
+      !(hasSubtask && isTaskToolPart(part)) &&
+      !isPendingQuestionPart(part),
+  );
+}
+
+/**
  * Collapse consecutive successful/running tool parts into a group when two
  * or more appear in a row. Reasoning, errors, text, and cards flush the run.
  */
 export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
   const blocks: RenderBlock[] = [];
   let run: HarnessPart[] = [];
-  const hasSubtask = parts.some((part) => part.type === "subtask");
-  const patchedCalls = patchCallIds(parts);
 
   function flushRun(): void {
     if (run.length === 0) return;
@@ -132,21 +148,7 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
     run = [];
   }
 
-  for (const part of parts) {
-    if (
-      SKIP_TYPES.has(part.type) ||
-      isEmptyText(part) ||
-      isPatchedFileTool(part, patchedCalls)
-    ) {
-      continue;
-    }
-    if (hasSubtask && isTaskToolPart(part)) {
-      continue;
-    }
-    if (isPendingQuestionPart(part)) {
-      // Still open: the composer sheet owns the interaction, no chat row.
-      continue;
-    }
+  for (const part of visibleTimelineParts(parts)) {
     if (isQuestionToolPart(part)) {
       // Answered/skipped/failed: compact Q/A card on patch level.
       flushRun();

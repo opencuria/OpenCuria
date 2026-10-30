@@ -22,7 +22,8 @@ export type ResolvedChatMedia = string | { uri: string; release: () => void };
 export interface ChatMarkdownProps {
   markdown: string;
   streaming?: boolean;
-  variant?: "body" | "prompt";
+  /** `quiet` is smaller, muted text for expanded tool and reasoning details. */
+  variant?: "body" | "prompt" | "quiet";
   resolveMedia?: (workspacePath: string) => Promise<ResolvedChatMedia>;
   /** Changes with the host media-cache scope (workspace/account/server). */
   mediaScopeKey?: string | number;
@@ -218,14 +219,17 @@ export function ChatMarkdown({
     () => buildSegments(source, references, media, scope),
     [media, references, scope, source],
   );
-  const markdownStyle = useMemo(
-    () => ({
+  const markdownStyle = useMemo(() => {
+    const quiet = variant === "quiet";
+    // The transcript stays uncolored: links and quotes only differ in shape.
+    const ink = quiet ? theme.mutedText : theme.text;
+    return {
       paragraph: {
-        color: theme.text,
-        fontSize: 17,
-        lineHeight: 26,
+        color: ink,
+        fontSize: quiet ? 15 : 17,
+        lineHeight: quiet ? 22 : 26,
         marginTop: 0,
-        marginBottom: variant === "prompt" ? 0 : 14,
+        marginBottom: variant === "prompt" ? 0 : quiet ? 10 : 14,
       },
       h1: {
         color: theme.text,
@@ -259,21 +263,21 @@ export function ChatMarkdown({
       },
       h5: { color: theme.text, fontSize: 16, fontWeight: "600" as const },
       h6: { color: theme.text, fontSize: 15, fontWeight: "600" as const },
-      strong: { color: theme.text },
-      em: { color: theme.text },
-      strikethrough: { color: theme.text },
-      underline: { color: theme.text },
-      link: { color: theme.primary, underline: true },
+      strong: { color: ink },
+      em: { color: ink },
+      strikethrough: { color: ink },
+      underline: { color: ink },
+      link: { color: ink, underline: true },
       code: {
-        color: theme.text,
+        color: ink,
         backgroundColor: theme.codeBackground,
         borderColor: theme.border,
       },
       inlineImage: { size: 20 },
       taskList: {
-        checkedColor: theme.primary,
+        checkedColor: theme.mutedText,
         borderColor: theme.border,
-        checkmarkColor: theme.primaryForeground,
+        checkmarkColor: theme.background,
       },
       codeBlock: {
         color: theme.text,
@@ -287,7 +291,7 @@ export function ChatMarkdown({
       },
       blockquote: {
         color: theme.mutedText,
-        borderColor: theme.primary,
+        borderColor: theme.border,
         backgroundColor: theme.background,
         borderWidth: 2,
         borderRadius: 12,
@@ -295,12 +299,12 @@ export function ChatMarkdown({
         marginBottom: 10,
       },
       list: {
-        color: theme.text,
-        bulletColor: theme.text,
-        markerColor: theme.text,
+        color: ink,
+        bulletColor: ink,
+        markerColor: ink,
         gapWidth: 8,
         marginLeft: 18,
-        itemSpacing: 8,
+        itemSpacing: quiet ? 4 : 8,
       },
       table: {
         color: theme.text,
@@ -331,10 +335,9 @@ export function ChatMarkdown({
         backgroundColor: theme.codeBackground,
         fontSize: 16,
       },
-      inlineMath: { color: theme.text },
-    }),
-    [theme, variant],
-  );
+      inlineMath: { color: ink },
+    };
+  }, [theme, variant]);
   const onLinkPress = ({ url }: { url: string }) => {
     const path = resolveWorkspaceLinkPath(url);
     if (path) {
@@ -480,7 +483,14 @@ export function WorkspaceFileLabel({
       onPress={() => onPress?.(path)}
       style={styles.fileLabel}
     >
-      <Text numberOfLines={1} style={{ color: theme.primary, fontSize: 14 }}>
+      <Text
+        numberOfLines={1}
+        style={{
+          color: theme.text,
+          fontSize: 14,
+          textDecorationLine: "underline",
+        }}
+      >
         {path}
       </Text>
     </NativeAction>

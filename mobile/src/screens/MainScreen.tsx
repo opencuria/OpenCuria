@@ -1191,15 +1191,6 @@ export function MainScreen(): React.JSX.Element {
                     />
                   </View>
                 ) : null}
-                {workspace && ready && !chat.connected ? (
-                  <View style={styles.notice}>
-                    <Banner
-                      tone="warning"
-                      message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
-                      testID="realtime-status"
-                    />
-                  </View>
-                ) : null}
                 {workspace &&
                 workspace.status === "running" &&
                 !workspace.runner_online ? (
@@ -1284,7 +1275,7 @@ export function MainScreen(): React.JSX.Element {
                           paddingHorizontal: 6,
                         }}
                       >
-                        <Text style={{ color: theme.primary, fontSize: 13 }}>
+                        <Text style={{ color: theme.mutedText, fontSize: 13 }}>
                           {index ? "› " : "‹ "}
                           {ancestor.title || ancestor.agent_name}
                         </Text>

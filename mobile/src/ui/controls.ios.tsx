@@ -10,6 +10,7 @@ import {
   buttonBorderShape,
   controlSize,
   disabled,
+  font,
   frame,
   labelStyle,
   tint,
@@ -108,6 +109,8 @@ export function IconButton({
           buttonBorderShape("circle"),
           labelStyle("iconOnly"),
           controlSize("large"),
+          // Quiet symbols follow the subheadline size instead of the large control.
+          ...(tone === "quiet" ? [font({ textStyle: "subheadline" })] : []),
           frame({ minWidth: 44, minHeight: 44 }),
           disabled(Boolean(inactive)),
           tint(
@@ -115,7 +118,9 @@ export function IconButton({
               ? theme.danger
               : tone === "floating"
                 ? theme.text
-                : theme.primary,
+                : tone === "quiet"
+                  ? theme.mutedText
+                  : theme.primary,
           ),
           accessibilityLabel(label),
           ...(hint ? [accessibilityHint(hint)] : []),
