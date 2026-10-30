@@ -21,11 +21,7 @@ from apps.harness.providers.base import (
     ProviderTimeoutError,
     ToolSchema,
 )
-from apps.harness.providers.openrouter import (
-    OpenRouterAdapter,
-    httpx_stream_timeout,
-    positive_timeout,
-)
+from apps.harness.providers.openrouter import OpenRouterAdapter
 
 
 def _sse_payload(chunks: list[dict]) -> bytes:
@@ -119,22 +115,6 @@ def test_chat_options_timeout_defaults_match_opencode() -> None:
     assert opts.header_timeout_seconds == DEFAULT_HEADER_TIMEOUT_SECONDS == 300.0
     assert opts.chunk_timeout_seconds == DEFAULT_CHUNK_TIMEOUT_SECONDS == 300.0
     assert opts.timeout_seconds is None
-
-
-def test_httpx_stream_timeout_disables_read() -> None:
-    """httpx must not apply a read timeout between SSE tokens."""
-    timeout = httpx_stream_timeout(ChatOptions())
-    assert timeout.read is None
-    assert timeout.connect == 300.0
-    assert timeout.write == 300.0
-
-
-def test_positive_timeout_treats_zero_as_disabled() -> None:
-    """Zero and negative timeouts disable that phase, like OpenCode false."""
-    assert positive_timeout(None) is None
-    assert positive_timeout(0) is None
-    assert positive_timeout(-1) is None
-    assert positive_timeout(1.5) == 1.5
 
 
 async def test_chat_stream_happy_path_text_toolcall_reasoning() -> None:

@@ -16,6 +16,9 @@ from .base import (
     ProviderTimeoutError,
 )
 
+#: Cap for the enriched ``response_body`` stored on provider errors.
+RESPONSE_BODY_MAX_CHARS = 2000
+
 #: OS-level drops Bedrock (and similar SDKs) surface instead of httpx.
 _OS_TRANSPORT_ERRORS = (ConnectionError, BrokenPipeError, ConnectionResetError)
 

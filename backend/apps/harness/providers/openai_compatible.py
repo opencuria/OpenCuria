@@ -19,27 +19,19 @@ from typing import Any
 import httpx
 import structlog
 
+from . import _streaming, _transport
 from ._lowering import project_openai_tool_schema
-from ._transport import map_httpx_error
 from .base import (
     ChatOptions,
     Delta,
     LLMMessage,
     ProviderAdapter,
     ProviderAuthError,
-    ProviderHeaderTimeoutError,
     ProviderRateLimitError,
     ProviderResponseError,
     ProviderTimeoutError,
     ToolSchema,
     Usage,
-)
-from .openrouter import (
-    RESPONSE_BODY_MAX_CHARS,
-    effective_timeout,
-    httpx_stream_timeout,
-    positive_timeout,
-    stream_deadline,
 )
 
 log = structlog.get_logger(__name__)
@@ -203,9 +195,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         url = f"{self._base_url}{CHAT_COMPLETIONS_PATH}"
-        timeout = httpx_stream_timeout(options)
+        timeout = _streaming.httpx_stream_timeout(options)
         logger = log.bind(provider=self.name, model=model)
-        deadline = stream_deadline(options)
+        deadline = _streaming.stream_deadline(options)
 
         async def _run(client: httpx.AsyncClient) -> AsyncIterator[Delta]:
             import asyncio
@@ -213,8 +205,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
             # Non-streaming total deadline: wait at most
             # min(header, remaining total) for headers, like the streaming
-            # adapters combine phase + deadline (see effective_timeout).
-            effective = effective_timeout(
+            # adapters combine phase + deadline (see _streaming.effective_timeout).
+            effective = _streaming.effective_timeout(
                 options.header_timeout_seconds, deadline
             )
             try:
@@ -232,14 +224,20 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         timeout=effective,
                     )
             except TimeoutError as exc:
-                raise self._header_or_total_timeout(options, deadline) from exc
+                raise _streaming.header_or_total_timeout(
+                    provider=self.name,
+                    label="OpenAI-compatible",
+                    deadline=deadline,
+                    total_timeout=options.timeout_seconds,
+                    waited=_streaming.positive_timeout(options.header_timeout_seconds),
+                ) from exc
             except httpx.TimeoutException as exc:
                 raise ProviderTimeoutError(
                     "OpenAI-compatible request timed out",
                     provider=self.name,
                 ) from exc
             except httpx.HTTPError as exc:
-                raise map_httpx_error(
+                raise _transport.map_httpx_error(
                     exc, provider=self.name, label="OpenAI-compatible"
                 ) from exc
             if response.status_code in (401, 403):
@@ -249,7 +247,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     provider=self.name,
                     status_code=response.status_code,
                     response_headers=self._headers(response),
-                    response_body=response.text[:RESPONSE_BODY_MAX_CHARS],
+                    response_body=response.text[:_transport.RESPONSE_BODY_MAX_CHARS],
                 )
             if response.status_code == 429:
                 raise ProviderRateLimitError(
@@ -258,7 +256,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     provider=self.name,
                     status_code=response.status_code,
                     response_headers=self._headers(response),
-                    response_body=response.text[:RESPONSE_BODY_MAX_CHARS],
+                    response_body=response.text[:_transport.RESPONSE_BODY_MAX_CHARS],
                 )
             if response.status_code >= 400:
                 raise ProviderResponseError(
@@ -267,10 +265,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     provider=self.name,
                     status_code=response.status_code,
                     response_headers=self._headers(response),
-                    response_body=response.text[:RESPONSE_BODY_MAX_CHARS],
+                    response_body=response.text[:_transport.RESPONSE_BODY_MAX_CHARS],
                 )
             if deadline is not None and (deadline - time.monotonic()) <= 0:
-                total = positive_timeout(options.timeout_seconds) or 0.0
+                total = _streaming.positive_timeout(options.timeout_seconds) or 0.0
                 raise ProviderTimeoutError(
                     "OpenAI-compatible request timed out after "
                     f"{int(total * 1000)}ms",
@@ -299,7 +297,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             logger.warning("provider_response_error")
             raise
         except httpx.HTTPError as exc:
-            mapped = map_httpx_error(
+            mapped = _transport.map_httpx_error(
                 exc, provider=self.name, label="OpenAI-compatible"
             )
             if isinstance(mapped, ProviderTimeoutError):
@@ -307,25 +305,6 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             else:
                 logger.warning("provider_http_error")
             raise mapped from exc
-
-    def _header_or_total_timeout(
-        self, options: ChatOptions, deadline: float | None
-    ) -> ProviderTimeoutError:
-        """Choose header vs total timeout after a wait_for expiry."""
-        import time
-
-        if deadline is not None and (deadline - time.monotonic()) <= 0:
-            total = positive_timeout(options.timeout_seconds) or 0.0
-            return ProviderTimeoutError(
-                "OpenAI-compatible request timed out after "
-                f"{int(total * 1000)}ms",
-                provider=self.name,
-            )
-        seconds = positive_timeout(options.header_timeout_seconds) or 0.0
-        return ProviderHeaderTimeoutError(
-            provider=self.name,
-            timeout_seconds=seconds,
-        )
 
     @staticmethod
     def _headers(response: httpx.Response) -> dict[str, str]:
@@ -361,7 +340,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 f"OpenAI-compatible error: {message}",
                 provider=self.name,
                 status_code=response.status_code,
-                response_body=message[:RESPONSE_BODY_MAX_CHARS],
+                response_body=message[:_transport.RESPONSE_BODY_MAX_CHARS],
             )
         choices = body.get("choices", [])
         text = ""

@@ -17,6 +17,7 @@ from botocore import UNSIGNED
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from . import _streaming
 from ._lowering import (
     bedrock_media_block,
     is_tool_error_text,
@@ -37,7 +38,6 @@ from .base import (
     Usage,
 )
 from .context_errors import is_context_overflow_error
-from .openrouter import effective_timeout, positive_timeout, stream_deadline
 
 log = structlog.get_logger(__name__)
 
@@ -379,14 +379,14 @@ class BedrockAdapter(ProviderAdapter):
         options = opts or ChatOptions()
         body = self._build_converse_body(model, messages, tools, options)
         logger = log.bind(provider=self.name, model=body["modelId"])
-        deadline = stream_deadline(options)
+        deadline = _streaming.stream_deadline(options)
         session = self._session or aioboto3.Session()
 
         try:
             async with session.client(**self._client_kwargs()) as client:
                 if self._bearer_token:
                     self._register_bearer_auth(client, self._bearer_token)
-                header_timeout = effective_timeout(
+                header_timeout = _streaming.effective_timeout(
                     options.header_timeout_seconds, deadline
                 )
                 try:
@@ -680,7 +680,7 @@ class BedrockAdapter(ProviderAdapter):
         iterator = aiter(stream)
 
         while True:
-            timeout = effective_timeout(chunk_timeout, deadline)
+            timeout = _streaming.effective_timeout(chunk_timeout, deadline)
             try:
                 if timeout is None:
                     event = await anext(iterator)
@@ -703,7 +703,7 @@ class BedrockAdapter(ProviderAdapter):
                 return
             except TimeoutError as exc:
                 if deadline is not None and (deadline - time.monotonic()) <= 0:
-                    total = positive_timeout(total_timeout) or 0.0
+                    total = _streaming.positive_timeout(total_timeout) or 0.0
                     raise ProviderTimeoutError(
                         f"Bedrock request timed out after {int(total * 1000)}ms",
                         provider=self.name,

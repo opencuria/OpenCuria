@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from typing import Any
@@ -14,31 +13,22 @@ from typing import Any
 import httpx
 import structlog
 
+from . import _streaming, _transport
 from ._lowering import project_openai_tool_schema
-from ._transport import map_httpx_error
 from .base import (
     ChatOptions,
     Delta,
     LLMMessage,
     ProviderAdapter,
     ProviderAuthError,
-    ProviderHeaderTimeoutError,
     ProviderRateLimitError,
     ProviderResponseError,
-    ProviderStreamTimeoutError,
     ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
 from .chatgpt_oauth import CODEX_API_ENDPOINT
 from .context_errors import is_context_overflow_error
-from .openrouter import (
-    RESPONSE_BODY_MAX_CHARS,
-    effective_timeout,
-    httpx_stream_timeout,
-    positive_timeout,
-    stream_deadline,
-)
 
 log = structlog.get_logger(__name__)
 
@@ -101,9 +91,9 @@ class ChatGPTAdapter(ProviderAdapter):
         self._credentials = dict(await self._fresh_credentials())
         payload = self._build_payload(model, messages, tools, options)
         headers = self._build_headers()
-        timeout = httpx_stream_timeout(options)
+        timeout = _streaming.httpx_stream_timeout(options)
         logger = log.bind(provider=self.name, model=model)
-        deadline = stream_deadline(options)
+        deadline = _streaming.stream_deadline(options)
 
         try:
             if self._client is not None:
@@ -140,7 +130,9 @@ class ChatGPTAdapter(ProviderAdapter):
             logger.warning("provider_response_error")
             raise
         except httpx.HTTPError as exc:
-            mapped = map_httpx_error(exc, provider=self.name, label="ChatGPT")
+            mapped = _transport.map_httpx_error(
+                exc, provider=self.name, label="ChatGPT"
+            )
             if isinstance(mapped, ProviderTimeoutError):
                 logger.warning("provider_timeout")
             else:
@@ -512,7 +504,7 @@ class ChatGPTAdapter(ProviderAdapter):
         )
         closed = False
         try:
-            header_timeout = effective_timeout(
+            header_timeout = _streaming.effective_timeout(
                 options.header_timeout_seconds, deadline
             )
             try:
@@ -523,8 +515,12 @@ class ChatGPTAdapter(ProviderAdapter):
                         stream_cm.__aenter__(), timeout=header_timeout
                     )
             except TimeoutError as exc:
-                raise self._header_or_total_timeout(
-                    options, deadline, header_timeout
+                raise _streaming.header_or_total_timeout(
+                    provider=self.name,
+                    label="ChatGPT",
+                    deadline=deadline,
+                    total_timeout=options.timeout_seconds,
+                    waited=header_timeout,
                 ) from exc
             if response.status_code == 401 and _auth_retry:
                 # Close the rejected response before awaiting the coordinator.
@@ -559,25 +555,6 @@ class ChatGPTAdapter(ProviderAdapter):
                 with suppress(Exception):
                     await stream_cm.__aexit__(None, None, None)
 
-    def _header_or_total_timeout(
-        self,
-        options: ChatOptions,
-        deadline: float | None,
-        waited: float | None,
-    ) -> ProviderTimeoutError:
-        """Choose header vs total timeout after a wait_for expiry."""
-        if deadline is not None and (deadline - time.monotonic()) <= 0:
-            total = positive_timeout(options.timeout_seconds) or 0.0
-            return ProviderTimeoutError(
-                f"ChatGPT request timed out after {int(total * 1000)}ms",
-                provider=self.name,
-            )
-        seconds = waited if waited is not None else 0.0
-        return ProviderHeaderTimeoutError(
-            provider=self.name,
-            timeout_seconds=seconds,
-        )
-
     async def _parse_stream(
         self,
         response: httpx.Response,
@@ -588,7 +565,7 @@ class ChatGPTAdapter(ProviderAdapter):
     ) -> AsyncIterator[Delta]:
         """Validate HTTP status and parse Responses SSE events."""
         if response.status_code == 401:
-            body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            body = await self._read_body(response, _transport.RESPONSE_BODY_MAX_CHARS)
             headers = self._response_headers(response)
             raise ProviderAuthError(
                 RECONNECT_MESSAGE,
@@ -601,7 +578,9 @@ class ChatGPTAdapter(ProviderAdapter):
         if response.status_code == 403:
             body = await self._read_body_snippet(response)
             headers = self._response_headers(response)
-            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            full_body = await self._read_body(
+                response, _transport.RESPONSE_BODY_MAX_CHARS
+            )
             raise ProviderAuthError(
                 f"ChatGPT auth failed ({response.status_code}): {body}",
                 provider=self.name,
@@ -612,7 +591,9 @@ class ChatGPTAdapter(ProviderAdapter):
         if response.status_code == 429:
             body = await self._read_body_snippet(response)
             headers = self._response_headers(response)
-            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            full_body = await self._read_body(
+                response, _transport.RESPONSE_BODY_MAX_CHARS
+            )
             raise ProviderRateLimitError(
                 f"ChatGPT rate limit ({response.status_code}): {body}",
                 provider=self.name,
@@ -624,7 +605,9 @@ class ChatGPTAdapter(ProviderAdapter):
         if response.status_code >= 400:
             body = await self._read_body_snippet(response)
             headers = self._response_headers(response)
-            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            full_body = await self._read_body(
+                response, _transport.RESPONSE_BODY_MAX_CHARS
+            )
             raise ProviderResponseError(
                 f"ChatGPT error ({response.status_code}): {body}",
                 provider=self.name,
@@ -634,62 +617,17 @@ class ChatGPTAdapter(ProviderAdapter):
             )
 
         stream_state: dict[str, Any] = {}
-        async for line in self._aiter_lines(
+        async for data in _streaming.iter_sse_data(
             response,
+            provider=self.name,
+            label="ChatGPT",
             chunk_timeout=chunk_timeout,
             deadline=deadline,
             total_timeout=total_timeout,
         ):
-            stripped = line.strip()
-            if not stripped or stripped.startswith(":"):
-                continue
-            if not stripped.startswith("data:"):
-                continue
-            data = stripped[len("data:") :].strip()
-            if not data or data == "[DONE]":
-                continue
             delta = self._parse_event(data, stream_state)
             if delta is not None:
                 yield delta
-
-    async def _aiter_lines(
-        self,
-        response: httpx.Response,
-        *,
-        chunk_timeout: float | None,
-        deadline: float | None,
-        total_timeout: float | None,
-    ) -> AsyncIterator[str]:
-        """Yield SSE lines, aborting after chunk idle or total deadline."""
-        iterator = response.aiter_lines()
-        while True:
-            timeout = effective_timeout(chunk_timeout, deadline)
-            try:
-                if timeout is None:
-                    line = await anext(iterator)
-                else:
-                    line = await asyncio.wait_for(anext(iterator), timeout=timeout)
-            except StopAsyncIteration:
-                return
-            except TimeoutError as exc:
-                raise self._chunk_or_total_timeout(
-                    deadline, total_timeout
-                ) from exc
-            yield line
-
-    def _chunk_or_total_timeout(
-        self,
-        deadline: float | None,
-        total_timeout: float | None,
-    ) -> ProviderTimeoutError:
-        """Choose stream vs total timeout after a wait_for expiry."""
-        if deadline is not None and (deadline - time.monotonic()) <= 0:
-            total = positive_timeout(total_timeout) or 0.0
-            return ProviderTimeoutError(
-                f"ChatGPT request timed out after {int(total * 1000)}ms",
-                provider=self.name,
-            )
-        return ProviderStreamTimeoutError(provider=self.name)
 
     @staticmethod
     def _stream_key(
@@ -953,13 +891,13 @@ class ChatGPTAdapter(ProviderAdapter):
             raise ProviderResponseError(
                 text,
                 provider=self.name,
-                response_body=text[:RESPONSE_BODY_MAX_CHARS],
+                response_body=text[:_transport.RESPONSE_BODY_MAX_CHARS],
                 is_retryable=False,
             )
         raise ProviderResponseError(
             text,
             provider=self.name,
-            response_body=text[:RESPONSE_BODY_MAX_CHARS],
+            response_body=text[:_transport.RESPONSE_BODY_MAX_CHARS],
         )
 
     @staticmethod

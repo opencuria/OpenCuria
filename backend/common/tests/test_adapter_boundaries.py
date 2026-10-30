@@ -38,6 +38,8 @@ Harness persistence never imports tool adapters; todo records and their storage
 port live in ``apps.harness.todos.domain`` and tools call its todo service.
 Provider wire adapters share context-error classification within ``providers``;
 neither they nor their dependencies import orchestration or persistence.
+Shared deadlines and SSE transport live below concrete provider adapters;
+wire adapters never import their peers, even through shared dependencies.
 Provider catalog parsing and static capabilities obey the same boundary;
 account authorization, credential resolution and caching live in
 ``apps.harness.model_catalog_service``.
@@ -841,6 +843,35 @@ def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
         "import orchestration, workspace access or persistence. Put shared "
         "provider error classification in the provider layer:\n"
         + "\n".join(sorted(violations))
+    )
+
+
+def test_provider_wire_adapters_never_import_each_other() -> None:
+    """Transport reuse must not couple a provider to another wire protocol."""
+    package = "apps.harness.providers"
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    adapters = {
+        f"{package}.{name}"
+        for name in ("bedrock", "chatgpt", "openai_compatible", "openrouter")
+    }
+    violations = set()
+    for adapter in adapters:
+        pending = {adapter}
+        checked: set[str] = set()
+        while pending:
+            module = pending.pop()
+            checked.add(module)
+            path = modules[module]
+            for imported in _imported_modules(path, trees[path]):
+                if imported in adapters - {adapter}:
+                    violations.add(f"{adapter}: {module} -> {imported}")
+                elif imported in modules and imported not in checked:
+                    pending.add(imported)
+    assert violations == set(), (
+        "Provider adapters must depend on shared transport and contracts, never "
+        "on another concrete provider, including through function-local or "
+        "transitive imports:\n" + "\n".join(sorted(violations))
     )
 
 
