@@ -35,8 +35,6 @@ from .models import (
     HarnessMessage,
     HarnessMessageRole,
     HarnessPart,
-    HarnessRun,
-    HarnessRunStatus,
     HarnessSession,
     HarnessSessionStatus,
     ProviderConfig,
@@ -656,119 +654,6 @@ class HarnessSessionRepository:
         session.skill_ids = list(skill_ids or [])
         session.save(update_fields=["skill_ids", "updated_at"])
         return session
-
-    @staticmethod
-    def finalize_owned_turn(
-        run_id: uuid.UUID,
-        owner_token: uuid.UUID,
-        *,
-        status: str,
-        finish: str,
-        error: str = "",
-        assistant_content: str | None = None,
-        engine_meta: dict | None = None,
-        session_usage: dict | None = None,
-        session_cost: float = 0.0,
-        tail_remainder: str = "",
-        now=None,
-    ) -> bool:
-        """Atomically settle the attempt, assistant shell and busy session.
-
-        Finalizers retain the owner's token after entering ``closing``. A
-        recovery worker rotates that token before takeover, so stale workers
-        cannot publish completion even when their CLI has returned late.
-        """
-        if status not in {
-            HarnessRunStatus.COMPLETED,
-            HarnessRunStatus.INTERRUPTED,
-            HarnessRunStatus.ERROR,
-        }:
-            raise ValueError("status must be terminal")
-        moment = now or timezone.now()
-        with transaction.atomic():
-            attempt = (
-                HarnessRun.objects.select_for_update()
-                .filter(
-                    id=run_id,
-                    owner_token=owner_token,
-                    status__in=(
-                        HarnessRunStatus.STARTING,
-                        HarnessRunStatus.RUNNING,
-                        HarnessRunStatus.CLOSING,
-                    ),
-                )
-                .first()
-            )
-            if attempt is None:
-                return False
-            changed = HarnessRun.objects.filter(
-                id=attempt.id,
-                owner_token=owner_token,
-                status__in=(
-                    HarnessRunStatus.STARTING,
-                    HarnessRunStatus.RUNNING,
-                    HarnessRunStatus.CLOSING,
-                ),
-            ).update(
-                status=status,
-                error="Engine run failed." if error else "",
-                heartbeat_at=moment,
-                completed_at=moment,
-            )
-            if not changed:
-                return False
-            message_updates = {
-                "finish": finish,
-                "error": error,
-                "completed_at": moment,
-            }
-            if assistant_content is not None:
-                message_updates["content"] = assistant_content
-            if engine_meta is not None:
-                message_updates["engine_meta"] = dict(engine_meta)
-            HarnessMessage.objects.filter(id=attempt.assistant_message_id).update(
-                **message_updates
-            )
-            session_updates = {
-                "status": HarnessSessionStatus.IDLE,
-                "last_message_at": moment,
-                "updated_at": moment,
-            }
-            if session_usage is not None:
-                session = attempt.session
-                prior_usage = dict(session.tokens or {})
-                prior_usage["prompt"] = int(prior_usage.get("prompt", 0)) + int(
-                    session_usage.get("prompt", 0)
-                )
-                prior_usage["completion"] = int(prior_usage.get("completion", 0)) + int(
-                    session_usage.get("completion", 0)
-                )
-                prior_usage["total"] = int(prior_usage.get("total", 0)) + int(
-                    session_usage.get("total", 0)
-                )
-                session_updates["tokens"] = prior_usage
-                session_updates["cost"] = float(session.cost or 0.0) + float(
-                    session_cost or 0.0
-                )
-            HarnessSession.objects.filter(id=attempt.session_id).update(
-                **session_updates
-            )
-            if tail_remainder:
-                HarnessPartRepository.create(
-                    message_id=attempt.assistant_message_id,
-                    type="text",
-                    state="completed",
-                    output=tail_remainder,
-                    meta={"step": None, "tail": True},
-                )
-            HarnessPart.objects.filter(
-                message_id=attempt.assistant_message_id,
-                state__in=("pending", "running"),
-            ).update(
-                state="completed" if status == HarnessRunStatus.COMPLETED else "error",
-                updated_at=moment,
-            )
-            return True
 
     @staticmethod
     def commit_message_edit(
