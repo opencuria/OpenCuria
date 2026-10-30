@@ -30,6 +30,7 @@ from ..service import WorkspaceService
 from ..services.system_metrics import SystemMetricsCollector
 from .base import Interface
 from .desktop_proxy import DesktopProxy
+from .file_transfers import UploadTarget, UploadTransfers, emit_chunked_result
 
 logger = structlog.get_logger(__name__)
 
@@ -100,10 +101,7 @@ class WebSocketInterface(Interface):
             events=self._sio,
             capture_fence=getattr(service, "capture_fence", None),
         )
-        # Bounded reassembly for chunked frontend→runner uploads.
-        # Keyed by request_id; entries expire and are dropped on disconnect
-        # so partial uploads can never grow without bounds.
-        self._upload_transfers: dict[str, dict] = {}
+        self._uploads = UploadTransfers()
         self._setup_handlers()
         from ..journal import Journal, OperationExecutor
 
@@ -569,92 +567,13 @@ class WebSocketInterface(Interface):
                 self._metrics_task.cancel()
             self._metrics_task = None
             await self._desktop_proxy.close_all()
-            # Partial chunked uploads are keyed by request_id only; the
-            # backend waiter is gone after a reconnect, so drop them to
-            # bound memory and avoid reassembling stale data.
-            self._upload_transfers.clear()
+            # Backend waiters are gone after reconnect; partial uploads expire
+            # with this connection rather than being reused by new requests.
+            self._uploads.clear()
 
         @sio.event
         async def connect_error(data: object) -> None:
             logger.error("websocket_connect_error", data=data)
-
-        # -- helper: chunked file transport --------------------------------------
-        # Payloads above CHUNK_B64_SIZE use ordered 256 KiB base64 chunks
-        # plus a small metadata-only final result
-        # (``chunked=True``, ``total_chunks=N``, empty content).
-        #
-        # Upload reassembly uses bounded per-transfer dict state (keyed by a
-        # namespaced ``kind:request_id`` so a browser request_id can never
-        # collide with a harness request_id). Harness writes and browser
-        # uploads share the 10 MiB write cap (max 64 chunks); entries
-        # expire after 120 s and are dropped on disconnect so partial
-        # uploads can never grow without bounds. Read/download emission
-        # needs no reassembly here.
-        async def _emit_chunked_result(
-            *,
-            chunk_event: str,
-            result_event: str,
-            base: dict,
-            content: str,
-            extra: dict | None = None,
-        ) -> None:
-            from ..chunking import (
-                normalize_base64,
-                should_chunk,
-                split_base64_chunks,
-            )
-
-            clean = normalize_base64(content or "")
-            meta = dict(extra or {})
-            if not should_chunk(clean):
-                await sio.emit(
-                    result_event,
-                    {**base, "content": clean, **meta},
-                )
-                return
-            chunks = split_base64_chunks(clean)
-            total = len(chunks)
-            for index, piece in enumerate(chunks):
-                await sio.emit(
-                    chunk_event,
-                    {
-                        **base,
-                        "index": index,
-                        "total_chunks": total,
-                        "content": piece,
-                    },
-                )
-            await sio.emit(
-                result_event,
-                {
-                    **base,
-                    "content": "",
-                    "chunked": True,
-                    "total_chunks": total,
-                    **meta,
-                },
-            )
-
-        def _prune_upload_transfers(now: float | None = None) -> None:
-            """Drop upload reassembly state idle for >120 s.
-
-            Lazy expiry only; callers must still enforce entry and size
-            caps and fail closed (drop + error result) on violations.
-            """
-            import time as _time
-
-            current = _time.monotonic() if now is None else now
-            expired = [
-                key
-                for key, entry in self._upload_transfers.items()
-                if current - entry.get("created_at", current) > 120.0
-            ]
-            for key in expired:
-                self._upload_transfers.pop(key, None)
-
-        def _upload_key(kind: str, request_id: str) -> str:
-            """Return the namespaced reassembly key for a transfer."""
-            return f"{kind}:{request_id}"
 
         async def _fail_upload(
             *,
@@ -663,9 +582,8 @@ class WebSocketInterface(Interface):
             path: str,
             error: str,
             log_msg: str,
-            key: str | None = None,
         ) -> None:
-            self._upload_transfers.pop(key or request_id, None)
+            self._uploads.discard("browser-upload", request_id)
             await sio.emit(
                 "files:upload_result",
                 {
@@ -677,91 +595,6 @@ class WebSocketInterface(Interface):
                 },
             )
             logger.error(log_msg, error=error, request_id=request_id)
-
-        def _parse_total_chunks(raw: object, *, cap: int) -> int:
-            """Parse and bound a ``total_chunks`` announcement."""
-            try:
-                total = int(raw)  # type: ignore[arg-type]
-            except (TypeError, ValueError) as exc:
-                raise ValueError("invalid total_chunks for transfer") from exc
-            if total < 0 or total > cap:
-                raise ValueError("invalid total_chunks for transfer")
-            return total
-
-        def _validate_upload_start_fields(
-            *, request_id: str, workspace_id: str, path: str
-        ) -> tuple[str, str]:
-            """Validate request/workspace/path for an upload start chunk."""
-            from ..services.workspace_helpers import sanitize_path as _sanitize_path
-
-            if not request_id or not isinstance(request_id, str):
-                raise ValueError("request_id must not be empty")
-            _sanitize_path(path)
-            uuid.UUID(workspace_id)
-            return request_id, path
-
-        def _store_upload_chunk(
-            *,
-            key: str,
-            workspace_id: str,
-            path: str,
-            index: object,
-            total_chunks: object,
-            content: object,
-        ) -> None:
-            """Validate and buffer one upload chunk (fail-closed)."""
-            from ..chunking import CHUNK_B64_SIZE, normalize_base64
-
-            entry = self._upload_transfers.get(key)
-            if entry is None:
-                raise ValueError("unknown upload transfer")
-            if entry.get("workspace_id") != workspace_id:
-                raise ValueError("workspace mismatch for upload")
-            if entry.get("path") != path:
-                raise ValueError("path mismatch for upload")
-            try:
-                index_n = int(index)  # type: ignore[arg-type]
-                total_n = int(total_chunks)  # type: ignore[arg-type]
-            except (TypeError, ValueError) as exc:
-                raise ValueError("invalid chunk index/total") from exc
-            if total_n != entry["total_chunks"]:
-                raise ValueError("total_chunks mismatch for upload")
-            if index_n < 0 or index_n >= total_n:
-                raise ValueError("chunk index out of range")
-            if index_n in entry["chunks"]:
-                raise ValueError(f"duplicate chunk {index_n}")
-            clean = normalize_base64(str(content or ""))
-            if not clean:
-                raise ValueError(f"empty chunk {index_n}")
-            if len(clean) > CHUNK_B64_SIZE:
-                raise ValueError(f"chunk {index_n} too large")
-            if entry["buffered_chars"] + len(clean) > entry["max_chars"]:
-                self._upload_transfers.pop(key, None)
-                from ..services.files import FILE_UPLOAD_MAX_SIZE as _UP_MAX
-
-                raise ValueError(f"Upload exceeds maximum size of {_UP_MAX} bytes")
-            entry["chunks"][index_n] = clean
-            entry["buffered_chars"] += len(clean)
-
-        def _finish_upload_transfer(
-            *, key: str, workspace_id: str, path: str
-        ) -> tuple[dict, str]:
-            """Pop a complete transfer and join chunks in order."""
-            entry = self._upload_transfers.pop(key, None)
-            if entry is None:
-                raise ValueError("unknown upload transfer")
-            if entry.get("workspace_id") != workspace_id:
-                raise ValueError("workspace mismatch for upload")
-            if entry.get("path") != path:
-                raise ValueError("path mismatch for upload")
-            total = int(entry["total_chunks"])
-            missing = [i for i in range(total) if i not in entry["chunks"]]
-            if missing:
-                raise ValueError(
-                    f"incomplete upload: missing {len(missing)} of {total} chunks"
-                )
-            content = "".join(entry["chunks"][i] for i in range(total))
-            return entry, content
 
         def _file_request_echo(
             data: object, *, default_path: str = "/workspace"
@@ -1889,7 +1722,8 @@ class WebSocketInterface(Interface):
                     max_size=data.get("max_size"),
                     allow_external=True,
                 )
-                await _emit_chunked_result(
+                await emit_chunked_result(
+                    sio.emit,
                     chunk_event="harness:read_file_chunk",
                     result_event="harness:read_file_result",
                     base={
@@ -1919,16 +1753,9 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                from ..chunking import (
-                    MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-                    max_b64_chars_for_raw_bytes,
-                )
                 from ..services.files import FILE_UPLOAD_MAX_SIZE, FileManager
 
-                total = _parse_total_chunks(
-                    data.get("total_chunks", -1),
-                    cap=MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-                )
+                total = self._uploads.parse_total_chunks(data.get("total_chunks", -1))
                 if not request_id:
                     raise ValueError("request_id must not be empty")
                 FileManager._file_path(path, allow_external=True)
@@ -1940,26 +1767,16 @@ class WebSocketInterface(Interface):
                     ) from exc
                 if mode < 0 or mode > 0o777:
                     raise ValueError(f"Invalid file mode: {mode!r}")
-                key = _upload_key("harness-write", request_id)
-                _prune_upload_transfers()
-                if key in self._upload_transfers:
-                    raise ValueError("write already in progress")
-                if len(self._upload_transfers) >= 16:
-                    raise ValueError("too many concurrent uploads")
-                import time as _time
-
-                self._upload_transfers[key] = {
-                    "workspace_id": str(workspace_id),
-                    "path": path,
-                    "filename": "",
-                    "kind": "harness-write",
-                    "mode": mode,
-                    "total_chunks": total,
-                    "chunks": {},
-                    "buffered_chars": 0,
-                    "max_chars": max_b64_chars_for_raw_bytes(FILE_UPLOAD_MAX_SIZE),
-                    "created_at": _time.monotonic(),
-                }
+                self._uploads.prune()
+                self._uploads.start(
+                    "harness-write",
+                    request_id,
+                    target=UploadTarget(
+                        workspace_id=str(workspace_id), path=path, mode=mode
+                    ),
+                    total_chunks=total,
+                    max_size=FILE_UPLOAD_MAX_SIZE,
+                )
             except Exception as exc:
                 await _harness_result(
                     "harness:write_file_result",
@@ -1978,12 +1795,12 @@ class WebSocketInterface(Interface):
             if not isinstance(request_id, str) or not request_id:
                 logger.warning("harness_write_file_chunk_missing_request_id")
                 return
-            key = _upload_key("harness-write", request_id)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                _prune_upload_transfers()
-                _store_upload_chunk(
-                    key=key,
+                self._uploads.prune()
+                self._uploads.append(
+                    "harness-write",
+                    request_id,
                     workspace_id=str(workspace_id),
                     path=path,
                     index=data.get("index", -1),
@@ -1991,7 +1808,7 @@ class WebSocketInterface(Interface):
                     content=data.get("content", ""),
                 )
             except Exception as exc:
-                self._upload_transfers.pop(key, None)
+                self._uploads.discard("harness-write", request_id)
                 await _harness_result(
                     "harness:write_file_result",
                     {
@@ -2009,32 +1826,20 @@ class WebSocketInterface(Interface):
             if not isinstance(request_id, str) or not request_id:
                 logger.warning("harness_write_file_finish_missing_request_id")
                 return
-            key = _upload_key("harness-write", request_id)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                entry = self._upload_transfers.get(key)
-                if entry is None:
-                    raise ValueError("unknown write transfer")
-                if entry.get("workspace_id") != str(workspace_id):
-                    raise ValueError("workspace mismatch for write")
-                if entry.get("path") != path:
-                    raise ValueError("path mismatch for write")
-                total = int(entry["total_chunks"])
-                announced = data.get("total_chunks", total)
-                try:
-                    announced_n = int(announced)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("invalid total_chunks for write") from exc
-                if announced_n != total:
-                    raise ValueError("total_chunks mismatch for write")
-                _entry, content = _finish_upload_transfer(
-                    key=key, workspace_id=str(workspace_id), path=path
+                target, content = self._uploads.finish(
+                    "harness-write",
+                    request_id,
+                    workspace_id=str(workspace_id),
+                    path=path,
+                    announcement=data,
                 )
                 await self._service.files.write_file_content(
                     workspace_id,
                     path,
                     content,
-                    mode=int(entry.get("mode", 0o644)),
+                    mode=target.mode,
                     allow_external=True,
                 )
                 await _harness_result(
@@ -2047,7 +1852,7 @@ class WebSocketInterface(Interface):
                     },
                 )
             except Exception as exc:
-                self._upload_transfers.pop(key, None)
+                self._uploads.discard("harness-write", request_id)
                 await _harness_result(
                     "harness:write_file_result",
                     {
@@ -2350,10 +2155,7 @@ class WebSocketInterface(Interface):
             if not isinstance(request_id, str) or not request_id.strip():
                 logger.warning("harness_cancel_missing_request_id")
                 return
-            key = _upload_key("harness-write", request_id)
-            transfer = self._upload_transfers.get(key)
-            if transfer and transfer["workspace_id"] == data.get("workspace_id"):
-                self._upload_transfers.pop(key, None)
+            self._uploads.cancel("harness-write", request_id, data.get("workspace_id"))
             task = self._running_tasks.pop(f"harness:{request_id}", None)
             if task is not None and not task.done():
                 task.cancel()
@@ -2719,7 +2521,8 @@ class WebSocketInterface(Interface):
                     path,
                     max_size=max_size,
                 )
-                await _emit_chunked_result(
+                await emit_chunked_result(
+                    sio.emit,
                     chunk_event="files:content_chunk",
                     result_event="files:content_result",
                     base={
@@ -2754,22 +2557,15 @@ class WebSocketInterface(Interface):
             ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                from ..chunking import (
-                    MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-                    max_b64_chars_for_raw_bytes,
-                )
                 from ..services.files import FILE_UPLOAD_MAX_SIZE
 
-                _prune_upload_transfers()
-                total = _parse_total_chunks(
-                    data.get("total_chunks", -1),
-                    cap=MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-                )
-                _validate_upload_start_fields(
-                    request_id=request_id,
-                    workspace_id=str(workspace_id),
-                    path=path,
-                )
+                self._uploads.prune()
+                total = self._uploads.parse_total_chunks(data.get("total_chunks", -1))
+                from ..services.workspace_helpers import sanitize_path
+
+                if not request_id:
+                    raise ValueError("request_id must not be empty")
+                sanitize_path(path)
                 try:
                     filename = str(data.get("filename", ""))
                     is_directory = bool(data.get("is_directory", False))
@@ -2780,25 +2576,18 @@ class WebSocketInterface(Interface):
                 )
 
                 _sanitize_filename(filename)
-                key = _upload_key("browser-upload", request_id)
-                if key in self._upload_transfers:
-                    raise ValueError("upload already in progress")
-                if len(self._upload_transfers) >= 16:
-                    raise ValueError("too many concurrent uploads")
-                import time as _time
-
-                self._upload_transfers[key] = {
-                    "workspace_id": str(workspace_id),
-                    "path": path,
-                    "filename": filename,
-                    "is_directory": is_directory,
-                    "kind": "browser-upload",
-                    "total_chunks": total,
-                    "chunks": {},
-                    "buffered_chars": 0,
-                    "max_chars": max_b64_chars_for_raw_bytes(FILE_UPLOAD_MAX_SIZE),
-                    "created_at": _time.monotonic(),
-                }
+                self._uploads.start(
+                    "browser-upload",
+                    request_id,
+                    target=UploadTarget(
+                        workspace_id=str(workspace_id),
+                        path=path,
+                        filename=filename,
+                        is_directory=is_directory,
+                    ),
+                    total_chunks=total,
+                    max_size=FILE_UPLOAD_MAX_SIZE,
+                )
             except Exception as exc:
                 await sio.emit(
                     "files:upload_result",
@@ -2818,12 +2607,12 @@ class WebSocketInterface(Interface):
             if not isinstance(request_id, str) or not request_id:
                 logger.warning("files_upload_chunk_missing_request_id")
                 return
-            key = _upload_key("browser-upload", request_id)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                _prune_upload_transfers()
-                _store_upload_chunk(
-                    key=key,
+                self._uploads.prune()
+                self._uploads.append(
+                    "browser-upload",
+                    request_id,
                     workspace_id=str(workspace_id),
                     path=path,
                     index=data.get("index", -1),
@@ -2837,7 +2626,6 @@ class WebSocketInterface(Interface):
                     path=path,
                     error=str(exc),
                     log_msg="files_upload_chunk_failed",
-                    key=key,
                 )
 
         @sio.on("files:upload_finish")
@@ -2846,28 +2634,21 @@ class WebSocketInterface(Interface):
             if not isinstance(request_id, str) or not request_id:
                 logger.warning("files_upload_finish_missing_request_id")
                 return
-            key = _upload_key("browser-upload", request_id)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                entry = self._upload_transfers.get(key)
-                if entry is None:
-                    raise ValueError("unknown upload transfer")
-                announced = data.get("total_chunks", entry["total_chunks"])
-                try:
-                    announced_n = int(announced)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("invalid total_chunks for upload") from exc
-                if announced_n != int(entry["total_chunks"]):
-                    raise ValueError("total_chunks mismatch for upload")
-                entry, content_b64 = _finish_upload_transfer(
-                    key=key, workspace_id=str(workspace_id), path=path
+                target, content_b64 = self._uploads.finish(
+                    "browser-upload",
+                    request_id,
+                    workspace_id=str(workspace_id),
+                    path=path,
+                    announcement=data,
                 )
                 await self._service.files.upload_file(
                     workspace_id,
                     path=path,
-                    filename=entry["filename"],
+                    filename=target.filename,
                     content_b64=content_b64,
-                    is_directory=entry["is_directory"],
+                    is_directory=target.is_directory,
                 )
                 await sio.emit(
                     "files:upload_result",
@@ -2885,7 +2666,6 @@ class WebSocketInterface(Interface):
                     path=path,
                     error=str(exc),
                     log_msg="files_upload_finish_failed",
-                    key=key,
                 )
 
         @sio.on("files:download")
@@ -2915,7 +2695,8 @@ class WebSocketInterface(Interface):
             try:
                 workspace_id = uuid.UUID(ws_echo)
                 result = await self._service.files.download_file(workspace_id, path)
-                await _emit_chunked_result(
+                await emit_chunked_result(
+                    sio.emit,
                     chunk_event="files:download_chunk",
                     result_event="files:download_result",
                     base={

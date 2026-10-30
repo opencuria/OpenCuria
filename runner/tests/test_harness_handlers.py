@@ -419,7 +419,12 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(service.file_access_calls, [("write", path, True)])
-        self.assertEqual(interface._upload_transfers, {})
+        await handlers["harness:write_file_finish"](
+            _payload(workspace_id, "w-chunked-external", path=path)
+        )
+        self.assertEqual(
+            interface._sio.emit.await_args.args[1]["error"], "unknown write transfer"
+        )
 
     async def test_file_explorer_rejects_external_paths_by_default(self) -> None:
         service = _FakeService()

@@ -6,7 +6,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
@@ -926,10 +926,10 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         interface._desktop_proxy.close_all = AsyncMock()
-        interface._upload_transfers["partial"] = {"chunks": []}
+        interface._uploads.clear = Mock()
         await interface._sio.handlers["/"]["disconnect"]()
         interface._desktop_proxy.close_all.assert_awaited_once_with()
-        self.assertEqual(interface._upload_transfers, {})
+        interface._uploads.clear.assert_called_once_with()
 
 
 @pytest.mark.asyncio

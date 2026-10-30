@@ -340,7 +340,12 @@ async def test_harness_write_out_of_order_happy(content: str) -> None:
     assert service.write_calls[0]["content_b64"] == content
     results = _emits_of(interface, "harness:write_file_result")
     assert results and results[-1].get("ok") is True
-    assert interface._upload_transfers == {}
+    await handlers["harness:write_file_finish"](
+        _payload(workspace_id, request_id, path=path)
+    )
+    assert _emits_of(interface, "harness:write_file_result")[-1]["error"] == (
+        "unknown write transfer"
+    )
 
 
 @pytest.mark.asyncio
@@ -363,16 +368,22 @@ async def test_harness_write_cancel_is_scoped_to_workspace_and_transfer_kind() -
     workspace_id = uuid.uuid4()
     handlers = interface._sio.handlers["/"]
     payload = _payload(workspace_id, "cancel", path="/workspace/a.txt")
-    await handlers["harness:write_file_start"]({**payload, "total_chunks": 1})
-    key = "harness-write:cancel"
-    interface._upload_transfers["browser-upload:cancel"] = dict(
-        interface._upload_transfers[key]
+    await handlers["harness:write_file_start"]({**payload, "total_chunks": 0})
+    await handlers["files:upload_start"](
+        {**payload, "filename": "a.txt", "total_chunks": 0}
     )
     await handlers["harness:cancel"]({**payload, "workspace_id": str(uuid.uuid4())})
-    assert key in interface._upload_transfers
+    await handlers["harness:write_file_finish"](payload)
+    assert _emits_of(interface, "harness:write_file_result")[-1]["ok"] is True
+    await handlers["harness:write_file_start"]({**payload, "total_chunks": 0})
     await handlers["harness:cancel"](payload)
-    assert set(interface._upload_transfers) == {"browser-upload:cancel"}
-    assert service.write_calls == []
+    await handlers["harness:write_file_finish"](payload)
+    assert _emits_of(interface, "harness:write_file_result")[-1]["error"] == (
+        "unknown write transfer"
+    )
+    await handlers["files:upload_finish"](payload)
+    assert _emits_of(interface, "files:upload_result")[-1]["status"] == "success"
+    assert len(service.write_calls) == len(service.upload_calls) == 1
 
 
 # ---------------------------------------------------------------------------
