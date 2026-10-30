@@ -98,7 +98,7 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
     class="flex min-h-0 min-w-0 flex-1 flex-col bg-background"
     data-testid="workspace-editor"
   >
-    <div v-if="tab.loading" class="space-y-2 p-4" data-testid="editor-loading">
+    <div v-if="tab.loading && !tab.loaded" class="space-y-2 p-4" data-testid="editor-loading">
       <Skeleton
         v-for="i in 12"
         :key="i"
@@ -107,7 +107,7 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
       />
     </div>
     <div
-      v-else-if="tab.error && !tab.dirty"
+      v-else-if="tab.error && !tab.dirty && !tab.loaded"
       class="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center"
       data-testid="editor-error"
     >
@@ -167,9 +167,9 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
         :original="tab.originalContent"
         :diff="tab.kind !== 'file'"
         :staged="tab.staged"
-        :read-only="tab.readOnly"
+        :read-only="tab.readOnly || tab.loading"
         :git-actions-enabled="tab.kind === 'diff' && !tab.dirty"
-        :busy="tab.busy || tab.saving"
+        :busy="tab.busy || tab.saving || tab.loading"
         class="min-h-0 flex-1"
         @update:model-value="store.updateContent(tab!.id, $event)"
         @save="save"

@@ -7,6 +7,7 @@ import WorkspaceEditor from './WorkspaceEditor.vue'
 import { useEditorStore } from '@/stores/editor'
 import { ApiRequestError } from '@/services/api'
 import { readEditorFile, readGitFileContent, saveEditorFile } from '@/services/editor.api'
+import { runGitOperation } from '@/services/git.api'
 import { readWorkspaceFile } from '@/services/socket'
 
 enableAutoUnmount(afterEach)
@@ -85,6 +86,12 @@ const frame = defineComponent({
 
 function buttons(wrapper: ReturnType<typeof mount>, label: string) {
   return wrapper.findAll('button').find((button) => button.text() === label)!
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
 }
 
 beforeEach(() => {
@@ -249,7 +256,7 @@ describe('workspace editor content states and commands', () => {
     expect(store.activeTab?.content).toBe('before\n')
   })
 
-  it('renders a loading state and supports retry after a read failure', async () => {
+  it('renders an initial loading state and keeps the editor when a reload fails', async () => {
     let finish!: (value: { path: string; content: string; revision: string }) => void
     vi.mocked(readEditorFile).mockReturnValueOnce(
       new Promise((resolve) => {
@@ -264,15 +271,111 @@ describe('workspace editor content states and commands', () => {
     await pending
     await flushPromises()
     expect(wrapper.find('[data-testid="editor-loading"]').exists()).toBe(false)
-    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('modelValue')).toBe('loaded\n')
+    const monaco = wrapper.findComponent({ name: 'MonacoEditor' })
+    expect(monaco.props('modelValue')).toBe('loaded\n')
     vi.mocked(readEditorFile).mockRejectedValueOnce(new Error('Runner disconnected'))
     await store.reloadTab(store.activeTab!.id)
     await nextTick()
+    expect(wrapper.find('[data-testid="editor-save-error"]').text()).toContain('Runner disconnected')
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).vm).toBe(monaco.vm)
+    expect(monaco.props('modelValue')).toBe('loaded\n')
+    await buttons(wrapper, 'Reload').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="editor-save-error"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).vm).toBe(monaco.vm)
+    expect(monaco.props('modelValue')).toBe('before\n')
+  })
+
+  it('supports retry after the initial read fails', async () => {
+    vi.mocked(readEditorFile).mockRejectedValueOnce(new Error('Runner disconnected'))
+    const store = useEditorStore()
+    await store.openFile(WS, FILE)
+    const wrapper = mount(WorkspaceEditor)
     expect(wrapper.find('[data-testid="editor-error"]').text()).toContain('Runner disconnected')
+    expect(wrapper.find('[data-testid="monaco-stub"]').exists()).toBe(false)
     await buttons(wrapper, 'Retry').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="editor-error"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="monaco-stub"]').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('modelValue')).toBe('before\n')
+  })
+
+  it.each([
+    ['staging', 'stage', false, 'stage_patch'],
+    ['reverting', 'discard', false, 'discard_patch'],
+    ['unstaging', 'stage', true, 'unstage_patch'],
+  ] as const)('keeps the same editor throughout %s a selected line', async (_label, event, staged, operation) => {
+    const before = 'before\nsecond before\n'
+    const after = 'after\nsecond after\n'
+    vi.mocked(readGitFileContent).mockImplementation(async (_ws, _repo, _path, revision) => ({
+      ok: true,
+      content: revision === 'head' || (revision === 'index' && !staged) ? before : after,
+      revision: `${revision}-revision`,
+      exists: true,
+    }))
+    const store = useEditorStore()
+    await store.openDiff(WS, '/workspace/repo', 'a.ts', staged)
+    const wrapper = mount(WorkspaceEditor)
+    await flushPromises()
+    const monaco = wrapper.findComponent({ name: 'MonacoEditor' })
+    const documentRead = deferred<Awaited<ReturnType<typeof readEditorFile>>>()
+    const diffReads = deferred<void>()
+    const nextIndex = staged ? 'before\nsecond after\n' : event === 'stage' ? 'after\nsecond before\n' : before
+    const nextWorktree = event === 'discard' ? 'before\nsecond after\n' : after
+    if (!staged) vi.mocked(readEditorFile).mockReturnValueOnce(documentRead.promise)
+    vi.mocked(readGitFileContent).mockImplementation(async (_ws, _repo, _path, revision) => {
+      await diffReads.promise
+      return {
+        ok: true,
+        content: revision === 'head' ? before : revision === 'index' ? nextIndex : nextWorktree,
+        revision: `${revision}-updated`,
+        exists: true,
+      }
+    })
+
+    monaco.vm.$emit(event, {
+      originalStart: 1, originalEnd: 3, modifiedStart: 1, modifiedEnd: 3,
+      selection: { side: 'modified', startLine: 1, endLine: 2 },
+    })
+    await flushPromises()
+    expect(runGitOperation).toHaveBeenCalledWith(WS, expect.objectContaining({ operation }))
+    expect(store.activeTab?.loading).toBe(true)
+    expect(wrapper.find('[data-testid="editor-loading"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).vm).toBe(monaco.vm)
+    expect(monaco.props()).toMatchObject({ modelValue: after, readOnly: true, busy: true })
+
+    if (!staged) {
+      documentRead.resolve({ path: FILE, content: nextWorktree, revision: 'worktree-updated' })
+      await flushPromises()
+      expect(store.activeTab?.loading).toBe(true)
+      expect(wrapper.find('[data-testid="editor-loading"]').exists()).toBe(false)
+      expect(wrapper.findComponent({ name: 'MonacoEditor' }).vm).toBe(monaco.vm)
+      expect(monaco.props('busy')).toBe(true)
+    }
+    diffReads.resolve()
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).vm).toBe(monaco.vm)
+    expect(monaco.props()).toMatchObject({
+      modelValue: staged ? nextIndex : nextWorktree,
+      original: staged ? before : nextIndex,
+      readOnly: staged,
+      busy: false,
+    })
+  })
+
+  it('keeps the loaded diff visible when a partial operation is stale', async () => {
+    const store = useEditorStore()
+    await store.openDiff(WS, '/workspace/repo', 'a.ts')
+    const wrapper = mount(WorkspaceEditor)
+    await flushPromises()
+    const monaco = wrapper.findComponent({ name: 'MonacoEditor' })
+    vi.mocked(runGitOperation).mockRejectedValueOnce(
+      new ApiRequestError(409, 'Changed', 'stale_document'),
+    )
+    monaco.vm.$emit('stage', { originalStart: 1, originalEnd: 2, modifiedStart: 1, modifiedEnd: 2 })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="editor-save-error"]').text()).toContain('Reload the diff')
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).vm).toBe(monaco.vm)
+    expect(monaco.props('modelValue')).toBe('after\n')
   })
 
   it('routes buffer edits, save shortcuts and diff actions to the shared store', async () => {
