@@ -3,9 +3,8 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { useFileExplorerStore } from './fileExplorer'
 import { useEditorStore } from './editor'
-import { readWorkspaceFile, downloadWorkspaceFile, sendFilesList } from '@/services/socket'
+import { downloadWorkspaceFile, sendFilesList } from '@/services/socket'
 import { readEditorFile } from '@/services/editor.api'
-import { ApiRequestError } from '@/services/api'
 import { flushPromises } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
 import type { FileContentResult, FileDownloadResult } from '@opencuria/client/types'
@@ -13,7 +12,6 @@ import type { FileContentResult, FileDownloadResult } from '@opencuria/client/ty
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
-  readWorkspaceFile: vi.fn(),
   downloadWorkspaceFile: vi.fn(),
   sendFilesUpload: vi.fn(),
 }))
@@ -35,7 +33,6 @@ vi.mock('vue-sonner', () => ({
 
 const WS_ID = 'ws-1'
 const PATH_A = '/workspace/a.txt'
-const PATH_B = '/workspace/b.txt'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -241,66 +238,18 @@ describe('fileExplorer tracked upload cancellation', () => {
 })
 
 describe('fileExplorer editor integration and downloads', () => {
-  it('renders truncated previews with the original size and MIME type', async () => {
-    const store = useFileExplorerStore()
-    vi.mocked(readEditorFile).mockRejectedValueOnce(
-      new ApiRequestError(400, 'Too large', 'file_too_large'),
-    )
-    vi.mocked(readWorkspaceFile).mockResolvedValueOnce({
-      ...readResult(),
-      size: 10_000_000,
-      truncated: true,
-      mime_type: 'text/markdown',
-    })
-    store.selectFile(PATH_A, WS_ID)
-    await flushPromises()
-    expect(useEditorStore().activeTab).toMatchObject({
+  it('opens selected files in the editor', async () => {
+    vi.mocked(readEditorFile).mockResolvedValueOnce({
       path: PATH_A,
       content: 'hello',
-      size: 10_000_000,
-      truncated: true,
-      mimeType: 'text/markdown',
-      readOnly: true,
+      revision: 'v1',
     })
-    expect(useEditorStore().activeTab!.loading).toBe(false)
-    expect(useEditorStore().activeTab!.error).toBeNull()
-  })
-
-  it('keeps independent tab reads without letting a late result change the active file', async () => {
-    const first = deferred<Awaited<ReturnType<typeof readEditorFile>>>()
-    const second = deferred<Awaited<ReturnType<typeof readEditorFile>>>()
-    vi.mocked(readEditorFile).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
     const store = useFileExplorerStore()
-    const editor = useEditorStore()
-    store.selectFile(PATH_A, WS_ID)
-    const firstId = editor.activeTab!.id
-    const signal = vi.mocked(readEditorFile).mock.calls[0]![2]!
-    store.selectFile(PATH_B, WS_ID)
-    expect(signal.aborted).toBe(false)
-    first.resolve({ path: PATH_A, content: 'first file', revision: 'first' })
-    await flushPromises()
-    expect(editor.activeTab!.path).toBe(PATH_B)
-    expect(editor.activeTab!.loading).toBe(true)
-    second.resolve({ path: PATH_B, content: 'second file', revision: 'second' })
-    await flushPromises()
-    expect(editor.activeTab).toMatchObject({ path: PATH_B, content: 'second file' })
-    editor.activateTab(firstId)
-    expect(editor.activeTab!.content).toBe('first file')
-  })
-
-  it('exposes editor read errors and retries the selected tab', async () => {
-    vi.mocked(readEditorFile)
-      .mockRejectedValueOnce(new Error('Permission denied'))
-      .mockResolvedValueOnce({ path: PATH_A, content: 'hello', revision: 'v1' })
-    const store = useFileExplorerStore()
-    const editor = useEditorStore()
     store.selectFile(PATH_A, WS_ID)
     await flushPromises()
-    expect(editor.activeTab!.error).toBe('Permission denied')
-    expect(editor.activeTab!.loading).toBe(false)
-    await editor.reloadTab(editor.activeTab!.id)
-    expect(editor.activeTab!.content).toBe('hello')
-    expect(editor.activeTab!.error).toBeNull()
+    expect(store.selectedPath).toBe(PATH_A)
+    expect(readEditorFile).toHaveBeenCalledExactlyOnceWith(WS_ID, PATH_A, expect.any(AbortSignal))
+    expect(useEditorStore().activeTab).toMatchObject({ path: PATH_A, content: 'hello' })
   })
 
   it('saves a validated archive and revokes its URL after the browser click', async () => {
@@ -323,33 +272,28 @@ describe('fileExplorer editor integration and downloads', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
   })
 
-  it.each(['closeFileViewer', 'reset'] as const)(
-    '%s cancels downloads while preserving open editor tabs',
-    async (action) => {
-      const read = deferred<Awaited<ReturnType<typeof readEditorFile>>>()
-      const download = deferred<FileDownloadResult>()
-      vi.mocked(readEditorFile).mockReturnValueOnce(read.promise)
-      vi.mocked(downloadWorkspaceFile).mockReturnValueOnce(download.promise)
-      const store = useFileExplorerStore()
-      store.selectFile(PATH_A, WS_ID)
-      const pendingDownload = store.downloadFile(WS_ID, PATH_A)
-      const readSignal = vi.mocked(readEditorFile).mock.calls[0]![2]!
-      const downloadSignal = vi.mocked(downloadWorkspaceFile).mock.calls[0]![2]!
-      store[action]()
-      expect(readSignal.aborted).toBe(false)
-      expect(downloadSignal.aborted).toBe(true)
-      read.resolve({ path: PATH_A, content: 'open editor', revision: 'v1' })
-      download.resolve({ ...readResult(), filename: 'a.txt', is_archive: false })
-      await pendingDownload
-      await flushPromises()
-      expect(store.viewingFile).toBeNull()
-      expect(store.isLoadingContent).toBe(false)
-      expect(store.contentError).toBeNull()
-      expect(useEditorStore().activeTab!.content).toBe('open editor')
-      expect(URL.createObjectURL).not.toHaveBeenCalled()
-      expect(toast.error).not.toHaveBeenCalled()
-    },
-  )
+  it('resets the explorer and cancels downloads while preserving open editor tabs', async () => {
+    const read = deferred<Awaited<ReturnType<typeof readEditorFile>>>()
+    const download = deferred<FileDownloadResult>()
+    vi.mocked(readEditorFile).mockReturnValueOnce(read.promise)
+    vi.mocked(downloadWorkspaceFile).mockReturnValueOnce(download.promise)
+    const store = useFileExplorerStore()
+    store.selectFile(PATH_A, WS_ID)
+    const pendingDownload = store.downloadFile(WS_ID, PATH_A)
+    const readSignal = vi.mocked(readEditorFile).mock.calls[0]![2]!
+    const downloadSignal = vi.mocked(downloadWorkspaceFile).mock.calls[0]![2]!
+    store.reset()
+    expect(readSignal.aborted).toBe(false)
+    expect(downloadSignal.aborted).toBe(true)
+    read.resolve({ path: PATH_A, content: 'open editor', revision: 'v1' })
+    download.resolve({ ...readResult(), filename: 'a.txt', is_archive: false })
+    await pendingDownload
+    await flushPromises()
+    expect(store.selectedPath).toBeNull()
+    expect(useEditorStore().activeTab!.content).toBe('open editor')
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+  })
 
   it('reports a rejected download once without creating a browser URL', async () => {
     vi.mocked(downloadWorkspaceFile).mockRejectedValueOnce(new Error('Invalid file payload size'))

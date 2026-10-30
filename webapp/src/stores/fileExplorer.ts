@@ -1,17 +1,12 @@
 /**
  * File explorer store — manages the file explorer panel state,
- * tree structure, and file viewing.
+ * tree structure, uploads, and downloads. Files open in the editor store.
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import type { FileNode, FileEntryRaw } from '@/types'
-import {
-  sendFilesList,
-  sendFilesFind,
-  readWorkspaceFile,
-  downloadWorkspaceFile,
-} from '@/services/socket'
+import { sendFilesList, sendFilesFind, downloadWorkspaceFile } from '@/services/socket'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
 import { useSidePanelStore } from '@/stores/sidePanel'
@@ -49,20 +44,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   const selectedPath = ref<string | null>(null)
   const loadingPaths = ref<Set<string>>(new Set())
 
-  const viewingFile = ref<{
-    path: string
-    content: string
-    rawBase64: string
-    size: number
-    truncated: boolean
-    previewBytes: number
-    isBinary: boolean
-    mediaType: 'text' | 'image' | 'pdf' | 'binary'
-    mimeType: string
-  } | null>(null)
-  const isLoadingContent = ref(false)
-  const contentError = ref<string | null>(null)
-
   // Pending request callbacks: request_id → resolver
   const pendingRequests = ref<Map<string, (data: unknown) => void>>(new Map())
   const pendingDirectoryRequests = new Map<
@@ -81,7 +62,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   const terminalUploadRequestIds = new Map<string, ReturnType<typeof setTimeout>>()
   const pendingFindRequests = ref<Map<string, (paths: string[]) => void>>(new Map())
 
-  let contentController: AbortController | null = null
   const downloadControllers = new Set<AbortController>()
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -101,10 +81,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }, ms)
     pendingTimers.set(requestId, timer)
   }
-
-  // -- getters --------------------------------------------------------------
-
-  const isViewingFile = computed(() => viewingFile.value !== null)
 
   // -- actions --------------------------------------------------------------
 
@@ -197,8 +173,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     if (targetNode?.type === 'directory') {
       expandedPaths.value.add(path)
       selectedPath.value = path
-      viewingFile.value = null
-      isLoadingContent.value = false
       await ensureDirectoryLoaded(workspaceId, path)
       return
     }
@@ -221,121 +195,10 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     void useEditorStore().openFile(workspaceId, path)
   }
 
-  const IMAGE_EXTENSIONS: Record<string, string> = {
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    gif: 'image/gif',
-    webp: 'image/webp',
-    svg: 'image/svg+xml',
-    bmp: 'image/bmp',
-    ico: 'image/x-icon',
-    tiff: 'image/tiff',
-    tif: 'image/tiff',
-    avif: 'image/avif',
-  }
-
-  function getFileExtension(path: string): string {
-    const name = path.split('/').pop() ?? ''
-    const dotIndex = name.lastIndexOf('.')
-    return dotIndex >= 0 ? name.slice(dotIndex + 1).toLowerCase() : ''
-  }
-
-  function setFileContent(
-    path: string,
-    content: string,
-    size: number,
-    truncated: boolean,
-    mimeType?: string,
-  ): void {
-    const ext = getFileExtension(path)
-    const imageMime = IMAGE_EXTENSIONS[ext]
-    const clean = (content ?? '').replace(/\s+/g, '')
-    // Decoded bytes actually received (base64 estimate, no padding error).
-    const previewBytes = Math.floor((clean.length * 3) / 4)
-
-    // Determine media type from file extension first
-    if (imageMime) {
-      viewingFile.value = {
-        path,
-        content: '',
-        rawBase64: content,
-        size,
-        truncated: false,
-        previewBytes,
-        isBinary: true,
-        mediaType: 'image',
-        mimeType: imageMime,
-      }
-      isLoadingContent.value = false
-      return
-    }
-
-    if (ext === 'pdf') {
-      viewingFile.value = {
-        path,
-        content: '',
-        rawBase64: content,
-        size,
-        truncated: false,
-        previewBytes,
-        isBinary: true,
-        mediaType: 'pdf',
-        mimeType: 'application/pdf',
-      }
-      isLoadingContent.value = false
-      return
-    }
-
-    // Try to detect binary content and properly decode UTF-8
-    let decoded: string
-    let isBinary = false
-    try {
-      const bytes = Uint8Array.from(atob(content), (c) => c.charCodeAt(0))
-      // Check for null bytes — a simple binary heuristic
-      if (bytes.includes(0)) {
-        isBinary = true
-        decoded = ''
-      } else {
-        decoded = new TextDecoder('utf-8').decode(bytes)
-      }
-    } catch {
-      isBinary = true
-      decoded = ''
-    }
-
-    viewingFile.value = {
-      path,
-      content: decoded,
-      rawBase64: content,
-      size,
-      truncated,
-      previewBytes,
-      isBinary,
-      mediaType: isBinary ? 'binary' : 'text',
-      mimeType: mimeType ?? 'text/plain',
-    }
-    isLoadingContent.value = false
-    contentError.value = null
-  }
-
-  function cancelContentTransfer(): void {
-    contentController?.abort()
-    contentController = null
-  }
-
-  function closeFileViewer(): void {
-    cancelContentTransfer()
+  function reset(): void {
     for (const controller of downloadControllers) controller.abort()
     downloadControllers.clear()
-    viewingFile.value = null
     selectedPath.value = null
-    isLoadingContent.value = false
-    contentError.value = null
-  }
-
-  function reset(): void {
-    closeFileViewer()
     tree.value = []
     expandedPaths.value = new Set()
     loadingPaths.value = new Set()
@@ -442,30 +305,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
         resolve([])
       }
     })
-  }
-
-  async function fetchFileContent(workspaceId: string, path: string): Promise<void> {
-    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-    cancelContentTransfer()
-    const controller = new AbortController()
-    contentController = controller
-    isLoadingContent.value = true
-    contentError.value = null
-    try {
-      const result = await readWorkspaceFile(workspaceId, path, undefined, controller.signal)
-      if (controller.signal.aborted) return
-      setFileContent(path, result.content, result.size, result.truncated, result.mime_type)
-    } catch (error) {
-      if (controller.signal.aborted) return
-      const message = error instanceof Error ? error.message : 'File read failed. Please retry.'
-      contentError.value = message
-      useNotificationStore().error('File read failed', message)
-    } finally {
-      if (contentController === controller) {
-        contentController = null
-        isLoadingContent.value = false
-      }
-    }
   }
 
   async function downloadFile(workspaceId: string, path: string): Promise<void> {
@@ -732,31 +571,17 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }
   }
 
-  /** Retry the currently viewed file after a visible read error. */
-  function retryViewingFile(workspaceId: string): void {
-    const path = selectedPath.value
-    if (!path) return
-    fetchFileContent(workspaceId, path)
-  }
-
   return {
     // state
     tree,
     expandedPaths,
     selectedPath,
-    viewingFile,
-    isLoadingContent,
-    contentError,
     loadingPaths,
-    // getters
-    isViewingFile,
     // actions
     setTree,
     toggleExpand,
     selectFile,
     openPath,
-    setFileContent,
-    closeFileViewer,
     reset,
     fetchDirectory,
     fetchDirectoryEntries,
@@ -766,7 +591,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     trackAndUpload,
     cancelUpload,
     failUpload,
-    retryViewingFile,
     formatBytes,
     // event handlers
     handleListResult,
