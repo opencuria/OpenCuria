@@ -264,7 +264,12 @@ async def test_child_start_keeps_identity_separate_from_task_instructions(
     assert child.workspace_id == session.workspace_id
     assert child.harness_id == "codex"
     assert child.reasoning_effort == "xhigh"
-    timeline = timeline_to_out(service, child, conversations=ConversationService())
+    timeline = timeline_to_out(
+        ConversationService(),
+        child,
+        interactions=service.interactions,
+        pending_steers=service.list_pending_steers,
+    )
     assert timeline["messages"][0]["content"] == child_user.content
     part = HarnessPart.objects.get(message=assistant, type="subtask")
     assert part.meta["child_session_id"] == str(child.id)

@@ -77,7 +77,7 @@ def _owned_chat(ctx: ToolContext, chat_id: str) -> tuple[Any, Any]:
         )
     not_found = ToolError(f"Chat {session_id} not found. Find chats with chat_list.")
     try:
-        session = get_harness_service().get_session(session_id)
+        session = ConversationService().get_session(session_id)
         workspace = get_runner_service().get_workspace_for_user(
             session.workspace_id, user=ctx.user, organization_id=ctx.organization_id
         )
@@ -301,8 +301,12 @@ def _message(index: int, message: dict[str, Any], detail: str) -> dict[str, Any]
 
 
 def _timeline(session: Any) -> dict[str, Any]:
+    service = get_harness_service()
     return timeline_to_out(
-        get_harness_service(), session, conversations=ConversationService()
+        ConversationService(),
+        session,
+        interactions=service.interactions,
+        pending_steers=service.list_pending_steers,
     )
 
 
@@ -343,7 +347,7 @@ def reply_since(
     ctx: ToolContext, session_id: uuid.UUID, first_index: int
 ) -> dict[str, Any]:
     """Current state plus assistant messages created at or after *first_index*."""
-    session = get_harness_service().get_session(session_id)
+    session = ConversationService().get_session(session_id)
     messages = _timeline(session)["messages"]
     pending = _pending_inputs(session)
     replies = [
@@ -380,7 +384,10 @@ async def _discard_empty_chat(session_id: uuid.UUID) -> None:
     """Remove a just-created chat whose first run never started."""
     service = get_harness_service()
     try:
-        if not await sync_to_async(service.list_timeline_messages)(session_id):
+        messages = await sync_to_async(ConversationService().list_timeline_messages)(
+            session_id
+        )
+        if not messages:
             await service.delete_session(session_id)
     except Exception:
         log.warning("mcp_empty_chat_cleanup_failed", session_id=str(session_id))
@@ -392,7 +399,7 @@ async def wait_for_chat(ctx: ToolContext, session_id: uuid.UUID, seconds: int) -
         return
 
     def busy() -> bool:
-        session = get_harness_service().get_session(session_id)
+        session = ConversationService().get_session(session_id)
         return _state(session, _pending_inputs(session)) == "running"
 
     deadline = time.monotonic() + seconds
@@ -492,7 +499,7 @@ def _part_detail(session: Any, part_id: str) -> dict[str, Any]:
     if wanted is None:
         raise ToolError("part_id must be a UUID from chat_read with detail='full'.")
     try:
-        part = part_to_out(get_harness_service().get_part(session.id, wanted))
+        part = part_to_out(ConversationService().get_part(session.id, wanted))
     except NotFoundError:
         raise ToolError(
             f"Step {wanted} does not belong to chat {session.id}. Use the part_id "
@@ -661,7 +668,7 @@ async def chat_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     await wait_for_chat(ctx, session.id, args.get("wait_seconds", 0))
 
     def result() -> dict[str, Any]:
-        fresh = service.get_session(session.id)
+        fresh = ConversationService().get_session(session.id)
         data = {"chat": _header(ctx, fresh, workspace)}
         if args.get("wait_seconds"):
             data.update(reply_since(ctx, session.id, 0))
@@ -733,7 +740,7 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
                 "connection."
             ) from None
         skill_ids = resolve.skill_ids(ctx, args["skills"]) if "skills" in args else None
-        count = len(service.list_timeline_messages(session.id))
+        count = len(ConversationService().list_timeline_messages(session.id))
         return session, workspace, count, skill_ids
 
     session, workspace, before_count, skill_ids = await sync_to_async(prepare)()
@@ -783,7 +790,7 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         if args.get("wait_seconds"):
             data.update(reply_since(ctx, session.id, before_count))
         else:
-            fresh = service.get_session(session.id)
+            fresh = ConversationService().get_session(session.id)
             data["state"] = _state(fresh, _pending_inputs(fresh))
             data["next_step"] = (
                 "Call chat_read with wait_seconds to get the agent's reply."
@@ -856,11 +863,11 @@ async def chat_respond(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
                 "ended; call chat_read to see the current state."
             )
         target = (
-            service.get_session(uuid.UUID(request["subagent_chat_id"]))
+            ConversationService().get_session(uuid.UUID(request["subagent_chat_id"]))
             if request.get("subagent_chat_id")
             else session
         )
-        count = len(service.list_timeline_messages(session.id))
+        count = len(ConversationService().list_timeline_messages(session.id))
         return session, request, target, count
 
     session, request, target, before_count = await sync_to_async(locate)()
@@ -894,7 +901,7 @@ async def chat_respond(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         if args.get("wait_seconds"):
             data.update(reply_since(ctx, session.id, before_count))
         else:
-            fresh = service.get_session(session.id)
+            fresh = ConversationService().get_session(session.id)
             data["state"] = _state(fresh, _pending_inputs(fresh))
         return data
 

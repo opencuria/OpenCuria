@@ -90,7 +90,7 @@ def test_saved_history_and_navigation_allowed_during_capture(harness_workspace):
     Workspace.objects.filter(id=harness_workspace.id).update(
         active_operation="capturing_image"
     )
-    service = HarnessService()
+    service = ConversationService()
     assert service.get_session(session.id).id == session.id
     assert service.list_timeline_messages(session.id)[0].timeline_content == "saved"
     assert service.list_sessions(harness_workspace.id)

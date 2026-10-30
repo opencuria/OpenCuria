@@ -4,7 +4,7 @@ Harness session lifecycle service (M6, additive).
 ``HarnessService`` owns the persistent side of agent runs while
 ``HarnessRunner`` (M4/M5) owns the streaming loop. The service:
 
-- creates/gets/lists ``HarnessSession`` rows per workspace,
+- creates ``HarnessSession`` rows and reads saved state via ``ConversationService``,
 - persists a user message + assistant message shell on run start,
 - delegates persisted provider-history replay to ``ProviderHistoryService``,
 - starts ``HarnessRunner.run`` as an ``asyncio.Task`` tracked per
@@ -42,11 +42,11 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
 from .conversation_events import ConversationEvents
+from .conversation_service import ConversationService
 from .engines.base import RunOptions
 from .interaction_service import InteractionService
 from .models import (
     HarnessMessage,
-    HarnessPart,
     HarnessRunStatus,
     HarnessSession,
     HarnessSessionStatus,
@@ -133,6 +133,14 @@ class HarnessService:
         self.plugin_runtime = plugin_runtime or WorkspacePluginRuntimeService()
         self._emit = emit
         self.conversation_events = ConversationEvents(emit=self._emit_frontend)
+        self.conversations = ConversationService(
+            sessions=self.sessions,
+            messages=self.messages,
+            parts=self.parts,
+            todos=self.todos,
+            events=self.conversation_events,
+            workspace_admission=self.workspace_admission,
+        )
         self.session_settings = SessionSettingsService(
             sessions=self.sessions,
             skills=self.skills,
@@ -451,7 +459,7 @@ class HarnessService:
         """Create a session row (prompt persisted on run start)."""
         self.workspace_admission.ensure_interactions_available(workspace_id)
         if parent_id is not None:
-            parent_session = self.get_session(parent_id)
+            parent_session = self.conversations.get_session(parent_id)
             harness_id = getattr(parent_session, "harness_id", "native") or "native"
             if (
                 parent_session.workspace_id != workspace_id
@@ -614,24 +622,6 @@ class HarnessService:
             self.conversation_events.emit_sync(session.workspace_id)
         return session
 
-    def get_session(self, session_id: uuid.UUID) -> HarnessSession:
-        """Return a session or raise NotFoundError."""
-        session = self.sessions.get_by_id(session_id)
-        if session is None:
-            raise NotFoundError("HarnessSession", str(session_id))
-        return session
-
-    def get_session_for_workspace(
-        self,
-        session_id: uuid.UUID,
-        workspace_id: uuid.UUID,
-    ) -> HarnessSession:
-        """Return a workspace-scoped session or raise NotFoundError."""
-        session = self.sessions.get_for_workspace(session_id, workspace_id)
-        if session is None:
-            raise NotFoundError("HarnessSession", str(session_id))
-        return session
-
     @staticmethod
     def _codex_provider_for_session(session) -> str:
         """Read the immutable non-secret provider binding."""
@@ -660,7 +650,7 @@ class HarnessService:
 
     async def delete_session(self, session_id: uuid.UUID) -> None:
         """Delete a session only after external process ownership is settled."""
-        session = await sync_to_async(self.get_session)(session_id)
+        session = await sync_to_async(self.conversations.get_session)(session_id)
         await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
@@ -725,7 +715,7 @@ class HarnessService:
         """Edit a user message, drop the suffix, and rerun with *prompt*."""
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
-        session = await sync_to_async(self.get_session)(session_id)
+        session = await sync_to_async(self.conversations.get_session)(session_id)
         await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
@@ -1000,43 +990,6 @@ class HarnessService:
             )
             session.reasoning_effort = normalize_reasoning_effort(agent_effort)
         return model
-
-    def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
-        """Return all sessions of a workspace."""
-        return self.sessions.list_for_workspace(workspace_id)
-
-    def list_timeline_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return lightweight timeline parts without loading large detail fields."""
-        self.get_session(session_id)
-        return self.parts.list_timeline_for_session(session_id)
-
-    def get_part(self, session_id: uuid.UUID, part_id: uuid.UUID) -> HarnessPart:
-        """Return a full part only when it belongs to the supplied session."""
-        self.get_session(session_id)
-        part = self.parts.get_for_session(session_id, part_id)
-        if part is None:
-            raise NotFoundError("HarnessPart", str(part_id))
-        return part
-
-    def list_timeline_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
-        """Return message headers without duplicate assistant text bodies."""
-        self.get_session(session_id)
-        return self.messages.list_timeline_for_session(session_id)
-
-    def list_todos(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
-        """Return persisted todos of a session as plain dicts."""
-        session = self.get_session(session_id)
-        rows = self.todos.list_for_session(session.id)
-        return [
-            {
-                "id": str(row.id),
-                "content": row.content,
-                "status": row.status,
-                "priority": row.priority,
-                "order": row.order,
-            }
-            for row in rows
-        ]
 
     # -- run orchestration --------------------------------------------------
 
@@ -1617,7 +1570,7 @@ class HarnessService:
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run tree, reject pending user gates, and mark aborted."""
-        session = await sync_to_async(self.get_session)(session_id)
+        session = await sync_to_async(self.conversations.get_session)(session_id)
         await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
@@ -1626,7 +1579,7 @@ class HarnessService:
         engine_id = getattr(session, "harness_id", "native") or "native"
         if engine_id != "native" and not self.is_running(session.id):
             await self._ensure_external_attempt_reconciled(session, force=True)
-            session = await sync_to_async(self.get_session)(session.id)
+            session = await sync_to_async(self.conversations.get_session)(session.id)
         if session.parent_id is not None:
             child_context = self._runs.get(str(session.id), {})
             if child_context.get("external_projection"):
@@ -1772,7 +1725,7 @@ class HarnessService:
     ) -> None:
         """Start a normal run with steers that arrived too late to flow in."""
         try:
-            fresh = await sync_to_async(self.get_session)(session.id)
+            fresh = await sync_to_async(self.conversations.get_session)(session.id)
             await self.start_run(
                 fresh,
                 "\n\n".join(entry.content for entry in entries),
@@ -1993,7 +1946,7 @@ class HarnessService:
             ):
                 # Retry detached cleanup; recovery still fences fresh owners
                 # and requires the runner to confirm process termination.
-                detached_session = await sync_to_async(self.get_session)(
+                detached_session = await sync_to_async(self.conversations.get_session)(
                     attempt.session_id
                 )
                 await self._ensure_external_attempt_reconciled(

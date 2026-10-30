@@ -168,9 +168,8 @@ def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
     OrganizationService().require_membership(request.user, org_id)
     try:
         _owned_workspace(request, org_id, workspace_id)
-        service = _resolve_harness_service()
-        sessions = service.list_sessions(workspace_id)
         conversations = ConversationService()
+        sessions = conversations.list_sessions(workspace_id)
         unread_map = conversations.unread_for_sessions(sessions)
         attention_map = conversations.attention_for_sessions(sessions)
         return 200, [
@@ -237,7 +236,7 @@ async def create_harness_session(
             user_id=request.user.id,
             skill_ids=payload.skill_ids or [],
         )
-        fresh = await sync_to_async(service.get_session)(session.id)
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
         return 201, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), fresh
         )
@@ -277,7 +276,7 @@ async def send_harness_message(
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
             SessionAccessService.require_external_owner(
@@ -310,7 +309,7 @@ async def send_harness_message(
             user_id=request.user.id,
             skill_ids=payload.skill_ids if payload.skill_ids else None,
         )
-        fresh = await sync_to_async(service.get_session)(session.id)
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
         return 202, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), fresh
         )
@@ -353,7 +352,7 @@ async def steer_harness_session(
     await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         SessionAccessService.require_external_owner(
             engine_id=getattr(session, "harness_id", "native"),
@@ -391,7 +390,7 @@ async def withdraw_harness_steer(
     await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         SessionAccessService.require_external_owner(
             engine_id=getattr(session, "harness_id", "native"),
@@ -467,7 +466,7 @@ async def edit_harness_message(
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
             SessionAccessService.require_external_owner(
@@ -489,7 +488,7 @@ async def edit_harness_message(
             workspace_id=str(session.workspace_id),
             user_id=request.user.id,
         )
-        fresh = await sync_to_async(service.get_session)(session.id)
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
         return 202, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), fresh
         )
@@ -552,7 +551,7 @@ async def delete_harness_session(request: HttpRequest, session_id: uuid.UUID):
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         await service.delete_session(session.id)
         return 204, None
@@ -690,7 +689,7 @@ async def set_harness_session_mode(
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         if service.is_running(session.id):
             raise ConflictError(
@@ -726,7 +725,7 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         aborted = await service.abort_run(session.id)
         return 200, await sync_to_async(session_to_out_with_unread)(
@@ -750,11 +749,15 @@ def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
     org_id = _get_org_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
-        session = service.get_session(session_id)
+        conversations = ConversationService()
+        session = conversations.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
+        service = _resolve_harness_service()
         return 200, timeline_to_out(
-            service, session, conversations=ConversationService()
+            conversations,
+            session,
+            interactions=service.interactions,
+            pending_steers=service.list_pending_steers,
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
@@ -772,7 +775,7 @@ def get_harness_part(request: HttpRequest, session_id: uuid.UUID, part_id: uuid.
     org_id = _get_org_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         part = service.get_part(session.id, part_id)
@@ -793,7 +796,7 @@ def list_harness_todos(request: HttpRequest, session_id: uuid.UUID):
     org_id = _get_org_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         rows = service.list_todos(session.id)
@@ -832,7 +835,7 @@ async def resolve_harness_permission(
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
             SessionAccessService.require_external_owner(
@@ -881,7 +884,7 @@ async def resolve_harness_question(
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
             SessionAccessService.require_external_owner(

@@ -197,7 +197,7 @@ def test_timeline_returns_per_message_skill_ids(paket3_setup, fake_harness_servi
     )
     assert response.status_code == 201, response.content[:500]
     session_id = response.json()["id"]
-    session = fake_harness_service.get_session(session_id)
+    session = ConversationService().get_session(session_id)
     messages = HarnessMessageRepository.list_for_session(session.id)
     assert [row.role for row in messages] == ["user", "assistant"]
     assert list(messages[0].skill_ids or []) == [org_skill_id]

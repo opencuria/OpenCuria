@@ -1,4 +1,4 @@
-"""Saved conversation feeds, forking, unread state, attention and notice dismissal.
+"""Saved conversation history, feeds, forking, unread state and notice dismissal.
 
 REST and MCP share these operations without constructing a live agent harness.
 Repositories own persistence; conversation events publish feed invalidations.
@@ -21,14 +21,16 @@ from common.exceptions import NotFoundError
 
 from .conversation_events import ConversationEvents
 from .engines.codex.catalog import codex_provider
-from .models import HarnessMessage, HarnessSession, HarnessSessionStatus
+from .models import HarnessMessage, HarnessPart, HarnessSession, HarnessSessionStatus
 from .permissions.repositories import PermissionRequestRepository
 from .repositories import (
     HarnessMessageRepository,
+    HarnessPartRepository,
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
 from .session_access_service import SessionAccessService
+from .todos.repositories import TodoRepository
 
 log = structlog.get_logger(__name__)
 
@@ -41,6 +43,8 @@ class ConversationService:
         *,
         sessions: type[HarnessSessionRepository] | None = None,
         messages: type[HarnessMessageRepository] | None = None,
+        parts: type[HarnessPartRepository] | None = None,
+        todos: type[TodoRepository] | None = None,
         permission_requests: type[PermissionRequestRepository] | None = None,
         questions: type[QuestionRequestRepository] | None = None,
         events: ConversationEvents | None = None,
@@ -49,6 +53,8 @@ class ConversationService:
         """Inject persistence and notifications without depending on execution."""
         self.sessions = sessions or HarnessSessionRepository
         self.messages = messages or HarnessMessageRepository
+        self.parts = parts or HarnessPartRepository
+        self.todos = todos or TodoRepository
         self.permission_requests = permission_requests or PermissionRequestRepository
         self.questions = questions or QuestionRequestRepository
         self.events = events or ConversationEvents()
@@ -60,6 +66,43 @@ class ConversationService:
         if session is None:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
+
+    def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
+        """Return all sessions of a workspace."""
+        return self.sessions.list_for_workspace(workspace_id)
+
+    def list_timeline_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
+        """Return lightweight timeline parts without loading large detail fields."""
+        self.get_session(session_id)
+        return self.parts.list_timeline_for_session(session_id)
+
+    def get_part(self, session_id: uuid.UUID, part_id: uuid.UUID) -> HarnessPart:
+        """Return a full part only when it belongs to the supplied session."""
+        self.get_session(session_id)
+        part = self.parts.get_for_session(session_id, part_id)
+        if part is None:
+            raise NotFoundError("HarnessPart", str(part_id))
+        return part
+
+    def list_timeline_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
+        """Return message headers without duplicate assistant text bodies."""
+        self.get_session(session_id)
+        return self.messages.list_timeline_for_session(session_id)
+
+    def list_todos(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Return persisted todos of a session as plain dicts."""
+        session = self.get_session(session_id)
+        rows = self.todos.list_for_session(session.id)
+        return [
+            {
+                "id": str(row.id),
+                "content": row.content,
+                "status": row.status,
+                "priority": row.priority,
+                "order": row.order,
+            }
+            for row in rows
+        ]
 
     async def fork_session(
         self,

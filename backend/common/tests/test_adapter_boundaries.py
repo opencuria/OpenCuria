@@ -57,7 +57,7 @@ supplies persistence ports to ``ProviderHistoryService``.
 Permission and question interactions own pending requests and live waiters in
 ``InteractionService``. It uses event and run-status ports, never imports run
 orchestration or tool adapters, and leaves no forwarding API in HarnessService.
-Saved conversation feeds, unread/attention state and notice dismissal belong to
+Saved conversation history, feeds, unread/attention and notice dismissal belong to
 ``ConversationService``. It and the shared conversation event publisher never
 import live run orchestration, even through their dependencies.
 OAuth endpoint, registration and grant integrity rules live in
@@ -675,6 +675,7 @@ def test_saved_session_state_is_independent_of_run_orchestration() -> None:
         "apps.harness.conversation_service",
         "apps.harness.conversation_events",
         "apps.harness.session_settings_service",
+        "apps.harness.schemas",
     }
     execution = {
         lifecycle,
@@ -699,12 +700,19 @@ def test_saved_session_state_is_independent_of_run_orchestration() -> None:
             elif imported in modules and imported not in checked:
                 pending.add(imported)
     assert violations == set(), (
-        "ConversationService, ConversationEvents and SessionSettingsService "
+        "Saved-state services, conversation events and presenters "
         "must work independently "
         "of live run orchestration:\n" + "\n".join(sorted(violations))
     )
 
     moved_operations = {
+        "get_session",
+        "get_session_for_workspace",
+        "list_sessions",
+        "list_timeline_messages",
+        "list_timeline_parts",
+        "get_part",
+        "list_todos",
         "fork_session",
         "_forked_title",
         "list_conversations",

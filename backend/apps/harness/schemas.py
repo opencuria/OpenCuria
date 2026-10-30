@@ -7,6 +7,7 @@ Pure mapping for REST responses: no business rules, no ORM queries.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -22,8 +23,9 @@ from .timeline import (
 
 if TYPE_CHECKING:
     from .conversation_service import ConversationService
-    from .harness_service import HarnessService
+    from .interaction_service import InteractionService
     from .models import HarnessPart, HarnessSession
+    from .steering import SteerEntry
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -441,14 +443,15 @@ def session_to_out_with_unread(
 
 
 def timeline_to_out(
-    service: HarnessService,
+    conversations: ConversationService,
     session: HarnessSession,
     *,
-    conversations: ConversationService,
+    interactions: InteractionService,
+    pending_steers: Callable[[uuid.UUID], list[SteerEntry]],
 ) -> dict[str, Any]:
-    """Build the lightweight REST timeline from service reads."""
-    messages = service.list_timeline_messages(session.id)
-    parts = service.list_timeline_parts(session.id)
+    """Present saved history with explicit interaction and live steering ports."""
+    messages = conversations.list_timeline_messages(session.id)
+    parts = conversations.list_timeline_parts(session.id)
     message_positions = {
         str(message.id): int(getattr(message, "position", 0) or 0)
         for message in messages
@@ -463,7 +466,7 @@ def timeline_to_out(
             else None,
         )
         parts_by_message.setdefault(str(part.message_id), []).append(payload)
-    pending_questions = service.interactions.list_pending_questions(
+    pending_questions = interactions.list_pending_questions(
         session.id, include_descendants=True
     )
     pending_questions = [
@@ -504,12 +507,12 @@ def timeline_to_out(
             }
             for message in messages
         ],
-        "permissions": service.interactions.list_pending_permissions(
+        "permissions": interactions.list_pending_permissions(
             session.id, include_descendants=True
         ),
         "questions": pending_questions,
         "steers": [
-            entry.to_payload() for entry in service.list_pending_steers(session.id)
+            entry.to_payload() for entry in pending_steers(session.id)
         ],
     }
 

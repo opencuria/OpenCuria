@@ -17,6 +17,7 @@ from apps.harness.models import (
     QuestionRequest,
 )
 from apps.harness.provider_accounts import ProviderAccountService
+from apps.mcp_app.tools import chats
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.enums import WorkspaceStatus
 
@@ -472,3 +473,28 @@ async def test_chat_send_to_subagent_preserves_parent_hint(world) -> None:
     assert not await sync_to_async(
         HarnessMessage.objects.filter(session=child).exists
     )()
+
+
+async def test_saved_part_detail_does_not_resolve_live_harness(
+    world, monkeypatch
+) -> None:
+    """MCP expands saved details without execution and still scopes parts to chats."""
+    session = await sync_to_async(_chat)(world)
+    other = await sync_to_async(_chat)(world)
+    part = await sync_to_async(HarnessPart.objects.get)(
+        message__session=session, type="tool"
+    )
+
+    def unexpected_execution() -> None:
+        pytest.fail("Saved part detail must not resolve live run orchestration")
+
+    monkeypatch.setattr(chats, "get_harness_service", unexpected_execution)
+    detail = await ok(
+        world.ctx(), "chat_read", chat_id=str(session.id), part_id=str(part.id)
+    )
+    assert detail["part"]["part_id"] == str(part.id)
+    assert detail["part"]["output"] == "42 passed"
+    error = await fails(
+        world.ctx(), "chat_read", chat_id=str(other.id), part_id=str(part.id)
+    )
+    assert f"Step {part.id} does not belong to chat {other.id}" in error

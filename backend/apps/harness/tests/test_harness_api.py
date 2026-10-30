@@ -12,7 +12,7 @@ from django.test import Client
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessSession
+from apps.harness.models import HarnessSession, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.repositories import PermissionRequestRepository
 from apps.harness.permissions.service import PermissionService
@@ -1297,3 +1297,51 @@ def test_external_session_actions_preserve_owner_denial_contract(
         "code": code,
     }
     assert HarnessMessageRepository.list_for_session(session.id) == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("endpoint", ["sessions", "part", "todos"])
+@pytest.mark.parametrize("access", ["owner", "foreign", "missing", "no_read"])
+def test_saved_history_endpoints_work_without_live_harness(
+    harness_setup, monkeypatch, endpoint: str, access: str
+) -> None:
+    """Saved reads keep permission/scope failures without constructing execution."""
+    session = HarnessSession.objects.create(
+        workspace=harness_setup["owned"], organization_id=harness_setup["org"].id
+    )
+    message = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="Saved answer"
+    )
+    part = HarnessPartRepository.create(
+        message_id=message.id, type="tool", output="Saved detail"
+    )
+    todo = Todo.objects.create(session=session, content="Saved todo")
+
+    def unexpected_execution() -> None:
+        pytest.fail("Saved history must not resolve live run orchestration")
+
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_execution)
+    client = _client(
+        user=harness_setup["stranger" if access == "foreign" else "owner"],
+        org=harness_setup["org"],
+        permissions=[] if access == "no_read" else READ,
+    )
+    session_id = uuid.uuid4() if access == "missing" else session.id
+    workspace_id = uuid.uuid4() if access == "missing" else session.workspace_id
+    paths = {
+        "sessions": f"/api/v1/workspaces/{workspace_id}/harness/sessions/",
+        "part": f"/api/v1/harness/sessions/{session_id}/parts/{part.id}",
+        "todos": f"/api/v1/harness/sessions/{session_id}/todos",
+    }
+    response = client.get(paths[endpoint])
+    assert response.status_code == {
+        "owner": 200, "foreign": 404, "missing": 404, "no_read": 403
+    }[access]
+    if access == "owner":
+        body = response.json()
+        if endpoint == "part":
+            assert body["id"] == str(part.id)
+            assert body["output"] == "Saved detail"
+        else:
+            expected_id = session.id if endpoint == "sessions" else todo.id
+            assert [row["id"] for row in body] == [str(expected_id)]
