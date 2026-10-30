@@ -19,7 +19,7 @@ from asgiref.sync import sync_to_async
 from common.exceptions import NotFoundError
 
 from .engines.base import RunOptions
-from .models import HarnessMessage, HarnessPart
+from .models import HarnessPart
 from .provider_turns import ProviderTurnService
 from .providers.base import ProviderAdapter
 from .repositories import HarnessMessageRepository, HarnessSessionRepository
@@ -65,19 +65,12 @@ class SessionMetadataService:
 
     def summary_material(self, session_id: uuid.UUID, assistant_id: uuid.UUID) -> str:
         """Collect user requests and closing replies through the settled turn."""
-        message = self.messages.get_by_id(assistant_id)
-        if (
-            message is None
-            or message.session_id != session_id
-            or message.role != "assistant"
-        ):
-            return ""
         sections: list[str] = []
         has_request = False
-        for row in self.messages.list_for_summary(session_id, message.position):
+        for row in self.messages.list_for_summary(session_id, assistant_id):
             if row.role == "user":
-                if row.content.strip():
-                    sections.append(f"User:\n{row.content.strip()}")
+                if row.summary_content.strip():
+                    sections.append(f"User:\n{row.summary_content.strip()}")
                     has_request = True
                 continue
             parts = row.summary_parts
@@ -85,7 +78,7 @@ class SessionMetadataService:
                 if part.type == "steer" and part.summary_text.strip():
                     sections.append(f"User:\n{part.summary_text.strip()}")
                     has_request = True
-            answer = _assistant_summary_content(row, parts)
+            answer = _assistant_summary_content(row.summary_content, parts)
             if answer:
                 sections.append(f"Agent's final reply:\n{answer}")
         return "\n\n".join(sections) if has_request else ""
@@ -252,9 +245,7 @@ def _normalize_generated_summary(text: str) -> str:
     return summary
 
 
-def _assistant_summary_content(
-    message: HarnessMessage, parts: list[HarnessPart]
-) -> str:
+def _assistant_summary_content(fallback_content: str, parts: list[HarnessPart]) -> str:
     """Select closing prose outside Worked, like chat-core's message-copy rule.
 
     Summary rows project only text/steer output into ``summary_text``. Walk
@@ -262,7 +253,7 @@ def _assistant_summary_content(
     final answer. Never fall back to aggregate content when parts exist.
     """
     if not parts:
-        return (message.content or "").strip()
+        return (fallback_content or "").strip()
     has_subtask = any(part.type == "subtask" for part in parts)
     patched_calls = {
         part.call_id for part in parts if part.type == "patch" and part.call_id

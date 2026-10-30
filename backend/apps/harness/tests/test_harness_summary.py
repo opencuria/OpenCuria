@@ -12,7 +12,13 @@ from asgiref.sync import sync_to_async
 
 from apps.harness.agents.definitions import get_agent
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessMessageRole, HarnessSession, HarnessSessionStatus
+from apps.harness.models import (
+    HarnessMessage,
+    HarnessMessageRole,
+    HarnessPart,
+    HarnessSession,
+    HarnessSessionStatus,
+)
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.provider_turns import ProviderTurnService
@@ -229,7 +235,7 @@ def test_summary_material_carries_all_requests_and_closing_replies(
     )
     _session_with_answer(harness_workspace, content="Other session answer")
 
-    with django_assert_num_queries(3):
+    with django_assert_num_queries(2):
         material = _metadata_service(RoleProvider()).summary_material(
             session.id, second.id
         )
@@ -241,6 +247,97 @@ def test_summary_material_carries_all_requests_and_closing_replies(
         "User:\nOnly regression tests, please.\n\n"
         "Agent's final reply:\nTests cover both cases."
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("turns", [1, 10, 50])
+def test_summary_reads_only_required_payloads_in_two_queries(
+    harness_workspace, django_assert_num_queries, turns: int
+) -> None:
+    """Growing histories never reload aggregate content or provider metadata."""
+    session = HarnessSession.objects.create(
+        workspace=harness_workspace,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    messages = HarnessMessage.objects.bulk_create(
+        [
+            HarnessMessage(
+                session=session,
+                position=index,
+                role="user" if index % 2 == 0 else "assistant",
+                content="Request" if index % 2 == 0 else "unused" * 22000,
+                engine_meta={"unused": "x" * 65536},
+                tokens={"unused": "x" * 4096},
+                error="unused" * 1000,
+            )
+            for index in range(turns * 2)
+        ]
+    )
+    HarnessPart.objects.bulk_create(
+        [
+            HarnessPart(
+                message=message,
+                position=position,
+                type=kind,
+                output=output,
+                input={"unused": "x" * 65536},
+                meta={"unused": "x" * 65536},
+            )
+            for message in messages[1::2]
+            for position, (kind, output) in enumerate(
+                [("tool", "unused" * 22000), ("text", "Answer")]
+            )
+        ]
+    )
+
+    with django_assert_num_queries(2):
+        rows = HarnessMessageRepository.list_for_summary(session.id, messages[-1].id)
+
+    for row in rows:
+        assert {
+            "content",
+            "engine_meta",
+            "tokens",
+            "error",
+        } <= row.get_deferred_fields()
+        assert row.summary_content == ("Request" if row.role == "user" else "")
+        for part in row.summary_parts:
+            assert {"output", "input", "meta"} <= part.get_deferred_fields()
+            assert part.summary_text == ("Answer" if part.type == "text" else "")
+    with django_assert_num_queries(2):
+        material = _metadata_service(RoleProvider()).summary_material(
+            session.id, messages[-1].id
+        )
+    assert material == "\n\n".join(
+        ["User:\nRequest", "Agent's final reply:\nAnswer"] * turns
+    )
+
+
+@pytest.mark.django_db
+def test_summary_legacy_content_and_parts_are_read_fresh(
+    harness_workspace, django_assert_num_queries
+) -> None:
+    """A new part changes fallback selection immediately, without cached state."""
+    session, assistant = _session_with_answer(
+        harness_workspace, content="Legacy answer"
+    )
+    service = _metadata_service(RoleProvider())
+    with django_assert_num_queries(2):
+        assert service.summary_material(session.id, assistant.id) == (
+            "User:\nFix the login\n\nAgent's final reply:\nLegacy answer"
+        )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id, type="reasoning", output="Private thoughts"
+    )
+    with django_assert_num_queries(2):
+        assert (
+            service.summary_material(session.id, assistant.id) == "User:\nFix the login"
+        )
+    part.delete()
+    with django_assert_num_queries(2):
+        assert service.summary_material(session.id, assistant.id) == (
+            "User:\nFix the login\n\nAgent's final reply:\nLegacy answer"
+        )
 
 
 @pytest.mark.django_db
@@ -339,15 +436,21 @@ def test_summary_material_does_not_clip_user_requests(harness_workspace):
 
 
 @pytest.mark.django_db
-def test_summary_material_rejects_foreign_missing_or_user_message(harness_workspace):
+def test_summary_material_rejects_foreign_missing_or_user_message(
+    harness_workspace, django_assert_num_queries
+):
     """Only an assistant in the requested session can anchor the recap."""
     session, assistant = _session_with_answer(harness_workspace)
     other, _ = _session_with_answer(harness_workspace)
     service = _metadata_service(RoleProvider())
-    assert service.summary_material(other.id, assistant.id) == ""
-    assert service.summary_material(session.id, uuid.uuid4()) == ""
     user = HarnessMessageRepository.list_for_session(session.id)[0]
-    assert service.summary_material(session.id, user.id) == ""
+    for session_id, anchor_id in (
+        (other.id, assistant.id),
+        (session.id, uuid.uuid4()),
+        (session.id, user.id),
+    ):
+        with django_assert_num_queries(1):
+            assert service.summary_material(session_id, anchor_id) == ""
 
 
 @pytest.mark.django_db

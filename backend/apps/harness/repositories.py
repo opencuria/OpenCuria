@@ -958,9 +958,23 @@ class HarnessMessageRepository:
 
     @staticmethod
     def list_for_summary(
-        session_id: uuid.UUID, through_position: int
+        session_id: uuid.UUID, assistant_id: uuid.UUID
     ) -> list[HarnessMessage]:
-        """Load a conversation prefix with text/steer output, not work payloads."""
+        """Load summary fields through a session-scoped assistant anchor.
+
+        Missing, foreign or user anchors yield no rows. Aggregate assistant
+        content is only needed for legacy messages without any parts.
+        """
+        anchor = (
+            HarnessMessage.objects.filter(
+                id=assistant_id,
+                session_id=session_id,
+                role=HarnessMessageRole.ASSISTANT,
+            )
+            .order_by()
+            .values("position")[:1]
+        )
+        has_parts = Exists(HarnessPart.objects.filter(message_id=OuterRef("pk")))
         parts = (
             HarnessPart.objects.annotate(
                 summary_text=Case(
@@ -976,8 +990,19 @@ class HarnessMessageRepository:
         )
         return list(
             HarnessMessage.objects.filter(
-                session_id=session_id, position__lte=through_position
+                session_id=session_id, position__lte=Subquery(anchor)
             )
+            .annotate(
+                summary_content=Case(
+                    When(
+                        Q(role=HarnessMessageRole.ASSISTANT) & has_parts,
+                        then=Value(""),
+                    ),
+                    default=F("content"),
+                    output_field=TextField(),
+                )
+            )
+            .only("id", "role")
             .prefetch_related(
                 Prefetch("parts", queryset=parts, to_attr="summary_parts")
             )
