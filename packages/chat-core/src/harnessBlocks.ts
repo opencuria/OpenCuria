@@ -66,7 +66,8 @@ export type GroupRenderBlock = { kind: "group"; parts: HarnessPart[] };
 export type CardRenderBlock = { kind: "card"; part: HarnessPart };
 export type CompactionRenderBlock = { kind: "compaction"; part: HarnessPart };
 export type SteerRenderBlock = { kind: "steer"; part: HarnessPart };
-export type WorkedForRenderBlock = { kind: "workedFor"; blocks: RenderBlock[] };
+export type WorkedForBlock<Block> = { kind: "workedFor"; blocks: Block[] };
+export type WorkedForRenderBlock = WorkedForBlock<RenderBlock>;
 
 export type RenderBlock =
   | TextRenderBlock
@@ -190,11 +191,11 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
 }
 
 /** Blocks that always stay visible outside "Worked for" and split its slices. */
-function isTimelineAnchor(block: RenderBlock): boolean {
+function isTimelineAnchor(block: { kind: string }): boolean {
   return block.kind === "steer";
 }
 
-function isOuterWorkBlock(block: RenderBlock): boolean {
+function isOuterWorkBlock(block: { kind: string }): boolean {
   return (
     block.kind !== "text" &&
     block.kind !== "compaction" &&
@@ -218,7 +219,10 @@ function isOuterWorkBlock(block: RenderBlock): boolean {
  *   trailing blocks after the last work
  *   (typically the final answer text) stay outside after the card.
  */
-export function wrapFinishedWork(blocks: RenderBlock[]): MessageRenderBlock[] {
+export function wrapFinishedWork<Block extends { kind: string }>(
+  blocks: Block[],
+  isWorkBlock: (block: Block) => boolean = isOuterWorkBlock,
+): (Block | WorkedForBlock<Block>)[] {
   // Delivered steers (user messages) stay visible outside the collapsed
   // card. Split the flat timeline at each and wrap every response slice (first
   // response .. last work) separately so tools never hoist above
@@ -227,13 +231,13 @@ export function wrapFinishedWork(blocks: RenderBlock[]): MessageRenderBlock[] {
   // move inside to honor chronology; a leading divider before any response
   // text/work stays outside.
   if (!blocks.some(isTimelineAnchor)) {
-    return wrapWorkSlice(blocks);
+    return wrapWorkSlice(blocks, isWorkBlock);
   }
-  const top: MessageRenderBlock[] = [];
-  let slice: RenderBlock[] = [];
+  const top: (Block | WorkedForBlock<Block>)[] = [];
+  let slice: Block[] = [];
   function flushSlice(): void {
     if (slice.length === 0) return;
-    const wrapped = wrapWorkSlice(slice);
+    const wrapped = wrapWorkSlice(slice, isWorkBlock);
     top.push(...wrapped);
     slice = [];
   }
@@ -250,16 +254,19 @@ export function wrapFinishedWork(blocks: RenderBlock[]): MessageRenderBlock[] {
 }
 
 /** Wrap one anchor-free slice from its first response through its last work. */
-function wrapWorkSlice(blocks: RenderBlock[]): MessageRenderBlock[] {
+function wrapWorkSlice<Block extends { kind: string }>(
+  blocks: Block[],
+  isWorkBlock: (block: Block) => boolean,
+): (Block | WorkedForBlock<Block>)[] {
   let lastWork = -1;
   for (let index = 0; index < blocks.length; index += 1) {
-    if (isOuterWorkBlock(blocks[index]!)) lastWork = index;
+    if (isWorkBlock(blocks[index]!)) lastWork = index;
   }
   if (lastWork === -1) return blocks;
   let start = -1;
   for (let index = 0; index <= lastWork; index += 1) {
     const block = blocks[index]!;
-    if (block.kind === "text" || isOuterWorkBlock(block)) {
+    if (block.kind === "text" || isWorkBlock(block)) {
       start = index;
       break;
     }
@@ -269,7 +276,7 @@ function wrapWorkSlice(blocks: RenderBlock[]): MessageRenderBlock[] {
   if (start === -1) start = lastWork;
   const inner = blocks.slice(start, lastWork + 1);
   if (inner.length === 0) return blocks;
-  const shell: WorkedForRenderBlock = { kind: "workedFor", blocks: inner };
+  const shell: WorkedForBlock<Block> = { kind: "workedFor", blocks: inner };
   return [...blocks.slice(0, start), shell, ...blocks.slice(lastWork + 1)];
 }
 

@@ -101,7 +101,12 @@ export const nativeNotifications: NativeNotifications = {
   },
   onResponse(listener) {
     let active = true;
-    const response = (value: Notifications.NotificationResponse | null) => {
+    let liveResponseReceived = false;
+    const delivered = new Set<string>();
+    const response = (
+      value: Notifications.NotificationResponse | null,
+      fromLiveEvent = false,
+    ) => {
       if (
         !active ||
         !value ||
@@ -112,25 +117,39 @@ export const nativeNotifications: NativeNotifications = {
         value.notification.request.content.data,
       );
       if (target) {
+        if (fromLiveEvent) liveResponseReceived = true;
+        const identifier = value.notification.request.identifier;
+        if (identifier && delivered.has(identifier)) return;
+        if (identifier) delivered.add(identifier);
         listener(target);
         void Notifications.clearLastNotificationResponseAsync().catch(
           () => undefined,
         );
       }
     };
-    const link = (url: string) => {
+    const link = (url: string, fromLiveEvent = false) => {
       const target = targetFromLink(url);
-      if (active && target) listener(target);
+      if (active && target) {
+        if (fromLiveEvent) liveResponseReceived = true;
+        listener(target);
+      }
     };
-    const notifications =
-      Notifications.addNotificationResponseReceivedListener(response);
-    const links = Linking.addEventListener("url", ({ url }) => link(url));
+    const notifications = Notifications.addNotificationResponseReceivedListener(
+      (value) => {
+        response(value, true);
+      },
+    );
+    const links = Linking.addEventListener("url", ({ url }) => {
+      link(url, true);
+    });
     void Notifications.getLastNotificationResponseAsync()
-      .then(response)
+      .then((value) => {
+        if (!liveResponseReceived) response(value);
+      })
       .catch(() => undefined);
     void Linking.getInitialURL()
       .then((url) => {
-        if (url) link(url);
+        if (url && !liveResponseReceived) link(url);
       })
       .catch(() => undefined);
     return () => {

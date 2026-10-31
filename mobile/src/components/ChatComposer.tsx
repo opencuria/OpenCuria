@@ -81,8 +81,6 @@ export interface ChatComposerProps {
   busy?: boolean;
   disabled?: boolean;
   placeholder?: string;
-  /** Selected workspace shown above the editor when composing a new chat. */
-  workspaceName?: string;
   /** Summary shown on the model control; pressing it calls `onSettings`. */
   settings?: ComposerSettingsSummary;
   onSettings?: () => void;
@@ -130,7 +128,6 @@ export function ChatComposer({
   busy = false,
   disabled = false,
   placeholder = "Ask OpenCuria",
-  workspaceName,
   settings,
   onSettings,
   skills = [],
@@ -537,14 +534,14 @@ export function ChatComposer({
         );
       }}
     >
-      <View
-        pointerEvents="none"
-        style={styles.actionTarget}
-      >
+      <View pointerEvents="none" style={styles.actionTarget}>
         <View
           style={[
             styles.actionCircle,
-            { backgroundColor: theme.controlFill, opacity: disabled ? 0.38 : 1 },
+            {
+              backgroundColor: theme.controlFill,
+              opacity: disabled ? 0.38 : 1,
+            },
           ]}
         >
           <Plus size={21} color={theme.mutedText} />
@@ -611,11 +608,7 @@ export function ChatComposer({
         ]}
       >
         {busy ? (
-          <Square
-            size={14}
-            color={actionForeground}
-            fill={actionForeground}
-          />
+          <Square size={14} color={actionForeground} fill={actionForeground} />
         ) : (
           <ArrowUp size={22} strokeWidth={2.25} color={actionForeground} />
         )}
@@ -703,16 +696,6 @@ export function ChatComposer({
           style={styles.core}
         >
           <ComposerSurface>
-            {workspaceName ? (
-              <Text
-                numberOfLines={1}
-                accessibilityLabel={`Workspace: ${workspaceName}`}
-                testID="chat-composer-workspace"
-                style={[styles.workspaceName, { color: theme.mutedText }]}
-              >
-                {workspaceName}
-              </Text>
-            ) : null}
             {activeSkills.length ? (
               <ScrollView
                 horizontal
@@ -824,11 +807,7 @@ export function ChatComposer({
               returnKeyType="default"
               blurOnSubmit={false}
               textAlignVertical="top"
-              style={[
-                styles.input,
-                workspaceName ? styles.newChatInput : null,
-                { color: theme.text },
-              ]}
+              style={[styles.input, { color: theme.text }]}
             />
             <View style={styles.toolbar}>
               {attachmentButton}
@@ -836,11 +815,6 @@ export function ChatComposer({
               {sendButton}
             </View>
           </ComposerSurface>
-          {disabled && !busy ? (
-            <Text style={[styles.disabledHint, { color: theme.subtleText }]}>
-              Chat is not available right now.
-            </Text>
-          ) : null}
         </View>
       </ComposerDismissArea>
     </View>
@@ -880,14 +854,6 @@ const INPUT_MAX_HEIGHT = 170;
 const styles = StyleSheet.create({
   root: { paddingHorizontal: 12 },
   core: { paddingTop: 6 },
-  workspaceName: {
-    marginHorizontal: 12,
-    paddingTop: 8,
-    paddingBottom: 2,
-    fontSize: 14,
-    lineHeight: 20,
-    fontWeight: "500",
-  },
   input: {
     minWidth: 0,
     minHeight: 36,
@@ -899,7 +865,6 @@ const styles = StyleSheet.create({
     fontSize: 17,
     lineHeight: 24,
   },
-  newChatInput: { minHeight: 76 },
   toolbar: {
     minHeight: 44,
     flexDirection: "row",
@@ -990,5 +955,4 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingHorizontal: 14,
   },
-  disabledHint: { fontSize: 12, textAlign: "center", paddingTop: 6 },
 });

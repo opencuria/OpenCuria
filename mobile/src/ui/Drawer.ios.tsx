@@ -71,8 +71,12 @@ function ChatStack(props: DrawerProps): React.JSX.Element {
       type: "menu",
       label: "More",
       icon: { type: "sfSymbol", name: "ellipsis" },
+      changesSelectionAsPrimaryAction: false,
       menu: {
         title: props.title,
+        // Native-stack otherwise makes this a single-selection menu, so UIKit
+        // checks the last command the user ran.
+        multiselectable: true,
         items: props.menuActions.map((action) => ({
           type: "action" as const,
           label: action.title,

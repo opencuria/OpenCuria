@@ -15,8 +15,8 @@ Wrap the chat root in `<ThemeProvider initialMode="system" | "light" | "dark">`;
 ```tsx
 <ChatMessages
   messages={messages}
-  sessions={sessions}
   todos={todos}
+  loading={loadingHistory}
   busy={session.status === "busy"}
   streamingMessageId={streamingMessageId}
   resolveMedia={(path) => nativeMediaCache.resolvePinned(path)}
@@ -29,7 +29,7 @@ Wrap the chat root in `<ThemeProvider initialMode="system" | "light" | "dark">`;
 />
 ```
 
-`messages: HarnessMessage[]` are ordered by persisted position, and each message's parts by their per-message position. `sessions` feed the live-run label. Busy and optional `streamingMessageId` anchor live state. User prompts use a subdued bubble; assistant text stays unboxed and the transcript carries no accent colors (links are underlined, actions are quiet). The shared `harnessActivity` builder controls chronology and grouping: every contiguous run of work (tools including edits and failures, patches, reasoning, subtasks) is one quiet line such as “Explored 9 files, 2 searches”, split only by text, steers, answered questions and the to-do card. Unlike the webapp, finished turns are not folded into a “Worked for” card. `todos` render as a To-dos card in place of the latest `todowrite` call, or after the latest reply for engines that publish plans without one; finished lists fold to their header. Expanded groups mount one `HARNESS_PAGE_SIZE` page at a time. Heavy detail fetches only on expansion when `detail_loaded === false`; the callback may return `HarnessPart | void`.
+`messages: HarnessMessage[]` are ordered by persisted position, and each message's parts by their per-message position. `loading` shows a centered spinner while the target history loads, hiding any previous chat content; otherwise the transcript shows its empty prompt or messages. The composer stays mounted through all three states. No workspace, runner, availability or live-run badges appear in the chat. Busy and optional `streamingMessageId` anchor live state. User prompts use a subdued bubble; assistant text stays unboxed and the transcript carries no accent colors (links are underlined, actions are quiet). The shared `harnessActivity` builder controls chronology and grouping: every contiguous run of work (tools including edits and failures, patches, reasoning, subtasks) is one quiet line such as “Explored 9 files, 2 searches”, split only by text, steers, answered questions and the to-do card. Finished turns fold from the first response through the last work into a “Worked for” disclosure, using the shared web/mobile chronology and elapsed-time formatter. Final answer text remains visible; delivered steers stay outside and split the work into chronological slices. The disclosure uses the same header, typography, colors and expanded rail as exploration, command and summary lines. `todos` render as a To-dos card in place of the latest `todowrite` call, or after the latest reply for engines that publish plans without one; finished lists fold to their header. Expanded groups mount one `HARNESS_PAGE_SIZE` page at a time. Heavy detail fetches only on expansion when `detail_loaded === false`; the callback may return `HarnessPart | void`.
 
 `resolveMedia` accepts a workspace path and returns a host-resolved local native URI or `{ uri, release }` lease. Workspace images and `@file:` image mentions use `expo-image` and a native full-screen sheet. Tool image/PDF attachments have a visible card; `onOpenAttachment` delegates data-URL viewing to the host. Never attach auth headers to external fetches. Markdown is rendered with native `react-native-enriched-markdown` in GFM mode; Marked's lexer identifies image tokens without mistaking fenced/code spans. Only credential-free `http:` / `https:` external links open; workspace links call `onOpenFile`. No WebView or Streamdown.
 
@@ -38,7 +38,7 @@ User message `@file:`/`@agent:` context tokens are parsed by the shared `compose
 ## Keyboard layout
 
 ```tsx
-<ChatLayout composer={<ChatComposer … />} overlay={<StatusBanners />}>
+<ChatLayout composer={<ChatComposer … />} overlay={<ActionErrors />}>
   <ChatMessages … />
 </ChatLayout>
 ```
@@ -50,7 +50,6 @@ User message `@file:`/`@agent:` context tokens are parsed by the shared `compose
 ```tsx
 <ChatComposer
   draft={draft}
-  workspaceName={isNewChat ? workspace.name : undefined}
   onDraftChange={(text, selection) => setDraft(text, selection)}
   onSend={({ text, skillIds, attachments }) =>
     controller.send({ text, skillIds, attachments })
@@ -80,7 +79,7 @@ User message `@file:`/`@agent:` context tokens are parsed by the shared `compose
 
 Draft is controlled. Native editing does not apply a stale controlled cursor; `onDraftChange` receives a cursor estimate which the next `onSelectionChange` corrects. Only `@` / `/` proposal insertion explicitly moves the caret. Parent prefill/reset clears proposals. `contextKey` invalidates outstanding picker/search/send results when the owning workspace/session changes. Mention search is debounced (150ms) and generation-guarded; late picker results are discarded. Async send, stop, and picker failures render an inline error; failed sends preserve the draft.
 
-`onSend` receives `{ text, skillIds, attachments }`; the composer clears the draft as soon as it sends and restores it when `onSend` rejects. Uploaded-file token conversion and attachment reset remain parent responsibilities. Busy always means stop, including with empty draft. Unknown selected skill IDs remain visible rather than silently disappearing. The model and effort label opens a host-owned picker and exposes its summary to accessibility services. The optional `workspaceName` labels new chats above the editor. Send/stop uses a 36-point contrasting circle within a 44-point native touch target. Attachments open an anchored system menu. `ComposerSurface` uses interactive native iOS liquid glass where available and a Material surface on Android. `ComposerEditor` uses the OS `UITextView` / `EditText` through React Native’s multiline input, matching t3code’s underlying editor primitives. The editor sits above one toolbar row and grows with the draft up to about seven lines before it scrolls; its `nativeID` links it to the keyboard's interactive-dismiss area. Pulling the composer down closes the keyboard (`ComposerDismissArea`). Core `MentionCandidate[]` drive optional suggestions: file selection inserts `@file:/workspace/...`, agent inserts `@agent:name`, skill adds an ID without sending.
+`onSend` receives `{ text, skillIds, attachments }`; the composer clears the draft as soon as it sends and restores it when `onSend` rejects. Uploaded-file token conversion and attachment reset remain parent responsibilities. Busy always means stop, including with empty draft. Unknown selected skill IDs remain visible rather than silently disappearing. The model and effort label opens a host-owned picker and exposes its summary to accessibility services. The composer uses the same editor height and “Ask OpenCuria” placeholder for loading, new and existing chats. Disabled controls do not add an availability hint or change its geometry. Model catalog diagnostics live in the settings sheet; genuine action errors remain visible. Send/stop uses a 36-point contrasting circle within a 44-point native touch target. Attachments open an anchored system menu. `ComposerSurface` uses interactive native iOS liquid glass where available and a Material surface on Android. `ComposerEditor` uses the OS `UITextView` / `EditText` through React Native’s multiline input, matching t3code’s underlying editor primitives. The editor sits above one toolbar row and grows with the draft up to about seven lines before it scrolls; its `nativeID` links it to the keyboard's interactive-dismiss area. Pulling the composer down closes the keyboard (`ComposerDismissArea`). Core `MentionCandidate[]` drive optional suggestions: file selection inserts `@file:/workspace/...`, agent inserts `@agent:name`, skill adds an ID without sending.
 
 Attachment adapters own permissions, Expo ImagePicker / DocumentPicker, conversion/upload, and any failure feedback. Undefined callbacks hide unavailable actions. Image attachments show local thumbnails. For attachment-only sends the parent defines the harness upload/reference behavior.
 

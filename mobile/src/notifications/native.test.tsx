@@ -136,6 +136,129 @@ it("consumes a cold-start response once and clears the native saved response", a
   dispose();
 });
 
+it("keeps a live tap when an older startup response resolves afterward", async () => {
+  let resolveSaved!: (value: Notifications.NotificationResponse) => void;
+  jest.mocked(Notifications.getLastNotificationResponseAsync).mockReturnValue(
+    new Promise((resolve) => {
+      resolveSaved = resolve;
+    }),
+  );
+  let resolveLink!: (value: string | null) => void;
+  jest.mocked(Linking.getInitialURL).mockReturnValue(
+    new Promise((resolve) => {
+      resolveLink = resolve;
+    }),
+  );
+  const listener = jest.fn();
+  const dispose = nativeNotifications.onResponse(listener);
+  const live = jest.mocked(
+    Notifications.addNotificationResponseReceivedListener,
+  ).mock.calls[0]![0];
+  const latest = {
+    ...target,
+    sessionId: "55555555-5555-4555-8555-555555555555",
+  };
+  live({
+    actionIdentifier: "default",
+    notification: {
+      request: { identifier: "latest", content: { data: latest } },
+    },
+  } as never);
+  resolveSaved({
+    actionIdentifier: "default",
+    notification: { request: { identifier: "old", content: { data: target } } },
+  } as never);
+  resolveLink(`opencuria:///?${new URLSearchParams(target).toString()}`);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(listener).toHaveBeenCalledTimes(1);
+  expect(listener).toHaveBeenLastCalledWith(latest);
+  dispose();
+});
+
+it("does not replay a cold-start response when the live listener reports the same alert", async () => {
+  const value = {
+    actionIdentifier: "default",
+    notification: {
+      request: { identifier: "same", content: { data: target } },
+    },
+  } as never;
+  jest
+    .mocked(Notifications.getLastNotificationResponseAsync)
+    .mockResolvedValue(value);
+  const listener = jest.fn();
+  const dispose = nativeNotifications.onResponse(listener);
+  await Promise.resolve();
+  const live = jest.mocked(
+    Notifications.addNotificationResponseReceivedListener,
+  ).mock.calls[0]![0];
+  live(value);
+  expect(listener).toHaveBeenCalledTimes(1);
+  dispose();
+});
+
+it.each(["unrelated link", "nondefault action", "invalid payload"])(
+  "keeps a saved notification tap after a live %s",
+  async (event) => {
+    let resolveSaved!: (value: Notifications.NotificationResponse) => void;
+    jest.mocked(Notifications.getLastNotificationResponseAsync).mockReturnValue(
+      new Promise((resolve) => {
+        resolveSaved = resolve;
+      }),
+    );
+    const linkSubscription = jest.spyOn(Linking, "addEventListener");
+    const listener = jest.fn();
+    const dispose = nativeNotifications.onResponse(listener);
+    if (event === "unrelated link") {
+      linkSubscription.mock.calls[0]![1]({ url: "opencuria://oauth/callback" });
+    } else {
+      const live = jest.mocked(
+        Notifications.addNotificationResponseReceivedListener,
+      ).mock.calls[0]![0];
+      live({
+        actionIdentifier: event === "nondefault action" ? "dismiss" : "default",
+        notification: {
+          request: {
+            identifier: "ignored",
+            content: { data: event === "invalid payload" ? {} : target },
+          },
+        },
+      } as never);
+    }
+    expect(listener).not.toHaveBeenCalled();
+    resolveSaved({
+      actionIdentifier: "default",
+      notification: {
+        request: { identifier: "saved", content: { data: target } },
+      },
+    } as never);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(target);
+    dispose();
+  },
+);
+
+it("ignores callbacks after the notification scope is disposed", async () => {
+  let resolveSaved!: (value: Notifications.NotificationResponse) => void;
+  jest.mocked(Notifications.getLastNotificationResponseAsync).mockReturnValue(
+    new Promise((resolve) => {
+      resolveSaved = resolve;
+    }),
+  );
+  const listener = jest.fn();
+  const dispose = nativeNotifications.onResponse(listener);
+  dispose();
+  resolveSaved({
+    actionIdentifier: "default",
+    notification: { request: { identifier: "old", content: { data: target } } },
+  } as never);
+  await Promise.resolve();
+  expect(listener).not.toHaveBeenCalled();
+});
+
 it("clears delivered alerts and invalidates the native token on sign-out", async () => {
   await nativeNotifications.reset();
   expect(Notifications.dismissAllNotificationsAsync).toHaveBeenCalledTimes(1);

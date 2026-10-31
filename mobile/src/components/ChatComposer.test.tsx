@@ -71,31 +71,24 @@ function renderComposer(
 }
 
 describe("ChatComposer", () => {
-  it("shows the selected workspace above a new draft and updates it with the context", () => {
-    const { rerenderComposer } = renderComposer({
-      workspaceName: "EventAlertExpo",
-      contextKey: "workspace-one:new",
-    });
+  it("keeps the same editor and layout through loading, unavailable and running states", () => {
+    const { rerenderComposer } = renderComposer({ contextKey: "new" });
+    const input = screen.getByTestId("chat-composer-input");
+    const inputStyle = input.props.style;
 
-    expect(screen.getByLabelText("Workspace: EventAlertExpo")).toHaveTextContent(
-      "EventAlertExpo",
-    );
-    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Test");
-    expect(screen.getByTestId("chat-composer-workspace")).toHaveTextContent(
-      "EventAlertExpo",
-    );
+    rerenderComposer({ disabled: true, contextKey: "loading" });
+    expect(screen.getByTestId("chat-composer-input")).toBe(input);
+    expect(input.props.style).toEqual(inputStyle);
+    expect(screen.queryByText(/not available right now/i)).toBeNull();
 
-    rerenderComposer({
-      workspaceName: "Another workspace",
-      contextKey: "workspace-two:new",
-    });
-    expect(screen.getByTestId("chat-composer-workspace")).toHaveTextContent(
-      "Another workspace",
-    );
-    expect(screen.queryByLabelText("Workspace: EventAlertExpo")).toBeNull();
+    rerenderComposer({ busy: true, contextKey: "existing-chat" });
+    expect(screen.getByTestId("chat-composer-input")).toBe(input);
+    expect(input.props.style).toEqual(inputStyle);
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
 
-    rerenderComposer({ contextKey: "workspace-two:existing-chat" });
-    expect(screen.queryByTestId("chat-composer-workspace")).toBeNull();
+    rerenderComposer({ contextKey: "existing-chat" });
+    expect(screen.getByTestId("chat-composer-input")).toBe(input);
+    expect(input.props.style).toEqual(inputStyle);
   });
 
   it("shows the model and effort on one control below the input", () => {

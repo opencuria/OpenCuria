@@ -178,7 +178,9 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().activeSessionId).toBeNull();
     expect(controller.getSnapshot().busy).toBe(false);
 
-    const created = await controller.send("another task", { model: "model-v2" });
+    const created = await controller.send("another task", {
+      model: "model-v2",
+    });
     expect(client.harness.createSession).toHaveBeenCalledWith(
       "workspace-a",
       expect.objectContaining({ prompt: "another task", model: "model-v2" }),
@@ -277,6 +279,151 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().sessions.map((row) => row.id)).toEqual([
       "b",
     ]);
+    controller.dispose();
+  });
+
+  it("keeps a notification session selected when initial new-chat hydration finishes", async () => {
+    const pending = deferred<HarnessSession[]>();
+    const root = session("notified-session");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.listSessions).mockReturnValue(pending.promise);
+    const controller = new ChatController(client);
+
+    const initial = controller.newChat("workspace-a");
+    const notification = controller.openWorkspace("workspace-a", root.id);
+    pending.resolve([root]);
+    await Promise.all([initial, notification]);
+
+    expect(controller.getSnapshot().activeSessionId).toBe(root.id);
+    expect(client.harness.timeline).toHaveBeenCalledWith(root.id);
+    controller.dispose();
+  });
+
+  it("retries a failed notification workspace load without a foreground refresh", async () => {
+    const pending = deferred<HarnessSession[]>();
+    const root = session("notified-session");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.listSessions)
+      .mockRejectedValueOnce(new Error("Offline"))
+      .mockImplementationOnce(() => pending.promise);
+    const controller = new ChatController(client);
+
+    await expect(
+      controller.openWorkspace("workspace-a", root.id),
+    ).rejects.toThrow("Offline");
+    expect(controller.getSnapshot().loading).toBe(false);
+    expect(controller.getSnapshot().error).toBe("Offline");
+
+    const retry = controller.openWorkspace("workspace-a", root.id);
+    expect(client.harness.listSessions).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().loading).toBe(true);
+    expect(controller.getSnapshot().error).toBeNull();
+    pending.resolve([root]);
+    await retry;
+
+    expect(controller.getSnapshot().activeSessionId).toBe(root.id);
+    expect(controller.getSnapshot().loading).toBe(false);
+    expect(controller.getSnapshot().error).toBeNull();
+    expect(client.harness.timeline).toHaveBeenCalledWith(root.id);
+    controller.dispose();
+  });
+
+  it("opens a newly notified session in an already loaded workspace", async () => {
+    const old = session("old");
+    const target = session("new-session");
+    const { client, rows } = makeClient([old]);
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a", old.id);
+    rows.set(target.id, target);
+
+    await controller.openWorkspace("workspace-a", target.id);
+
+    expect(client.harness.listSessions).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().activeSessionId).toBe(target.id);
+    expect(client.harness.timeline).toHaveBeenCalledWith(target.id);
+    controller.dispose();
+  });
+
+  it.each(["missing-session", "foreign-session"])(
+    "rejects a notified %s after refreshing cached sessions",
+    async (targetId) => {
+      const old = session("old");
+      const foreign = session("foreign-session", {
+        workspace_id: "workspace-b",
+      });
+      const { client } = makeClient([old, foreign]);
+      const controller = new ChatController(client);
+      await controller.openWorkspace("workspace-a", old.id);
+
+      await expect(
+        controller.openWorkspace("workspace-a", targetId),
+      ).rejects.toThrow("Session does not belong to the active workspace");
+
+      expect(client.harness.listSessions).toHaveBeenCalledTimes(2);
+      expect(controller.getSnapshot().workspaceId).toBe("workspace-a");
+      expect(controller.getSnapshot().activeSessionId).toBe(old.id);
+      expect(client.harness.timeline).not.toHaveBeenCalledWith(targetId);
+      controller.dispose();
+    },
+  );
+
+  it("does not select a notification after a newer selection supersedes its session refresh", async () => {
+    const old = session("old");
+    const target = session("new-session");
+    const pending = deferred<HarnessSession[]>();
+    const { client } = makeClient([old]);
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a", old.id);
+    vi.mocked(client.harness.listSessions).mockReturnValueOnce(pending.promise);
+
+    const notification = controller.openWorkspace("workspace-a", target.id);
+    await vi.waitFor(() =>
+      expect(client.harness.listSessions).toHaveBeenCalledTimes(2),
+    );
+    await controller.newChat("workspace-a");
+    pending.resolve([old, target]);
+    await notification;
+
+    expect(controller.getSnapshot().activeSessionId).toBeNull();
+    expect(client.harness.timeline).not.toHaveBeenCalledWith(target.id);
+    controller.dispose();
+  });
+
+  it("lets a newer empty-chat selection supersede a pending notification", async () => {
+    const pending = deferred<HarnessSession[]>();
+    const root = session("notified-session");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.listSessions).mockReturnValue(pending.promise);
+    const controller = new ChatController(client);
+
+    const notification = controller.openWorkspace("workspace-a", root.id);
+    await controller.newChat("workspace-a");
+    pending.resolve([root]);
+    await notification;
+
+    expect(controller.getSnapshot().activeSessionId).toBeNull();
+    expect(client.harness.timeline).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not open a stale session in a different workspace", async () => {
+    const pending = deferred<HarnessSession[]>();
+    const root = session("notified-session");
+    const other = session("other", { workspace_id: "workspace-b" });
+    const { client } = makeClient([root, other]);
+    vi.mocked(client.harness.listSessions).mockImplementation(async (id) =>
+      id === "workspace-a" ? pending.promise : [other],
+    );
+    const controller = new ChatController(client);
+
+    const stale = controller.openWorkspace("workspace-a", root.id);
+    await controller.openWorkspace("workspace-b", other.id);
+    pending.resolve([root]);
+    await stale;
+
+    expect(controller.getSnapshot().workspaceId).toBe("workspace-b");
+    expect(controller.getSnapshot().activeSessionId).toBe(other.id);
+    expect(client.harness.timeline).not.toHaveBeenCalledWith(root.id);
     controller.dispose();
   });
 

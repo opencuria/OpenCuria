@@ -269,6 +269,7 @@ export class ChatController {
   private connected: boolean;
   private workspaceGeneration = 0;
   private selectionGeneration = 0;
+  private navigationGeneration = 0;
   private activeWorkspaceSessionsLoaded = false;
   private sessionListGeneration = 0;
   private sessionsFlight: {
@@ -622,6 +623,16 @@ export class ChatController {
 
   /** Load workspace session summaries and optionally open one session. */
   async openWorkspace(workspaceId: string, sessionId?: string): Promise<void> {
+    const navigation = ++this.navigationGeneration;
+    await this.loadWorkspace(workspaceId);
+    if (this.disposed || navigation !== this.navigationGeneration) return;
+    if (sessionId) await this.openSession(sessionId);
+  }
+
+  private async loadWorkspace(
+    workspaceId: string,
+    refreshSessions = false,
+  ): Promise<void> {
     this.assertLive();
     if (!workspaceId) throw new Error("A workspace id is required");
     if (this.workspaceId !== workspaceId) {
@@ -668,7 +679,7 @@ export class ChatController {
     }
 
     const workspaceGeneration = this.workspaceGeneration;
-    if (!this.activeWorkspaceSessionsLoaded) {
+    if (!this.activeWorkspaceSessionsLoaded || refreshSessions) {
       let flight = this.sessionsFlight;
       if (
         !flight ||
@@ -677,6 +688,11 @@ export class ChatController {
       ) {
         const revisions = new Map(this.sessionRevisions);
         const listGeneration = ++this.sessionListGeneration;
+        if (!this.loading || this.error !== null) {
+          this.loading = true;
+          this.error = null;
+          this.publish();
+        }
         const request = (async () => {
           try {
             const rows = await this.client.harness.listSessions(workspaceId);
@@ -712,18 +728,20 @@ export class ChatController {
         flight = { workspaceId, workspaceGeneration, promise: request };
         this.sessionsFlight = flight;
       }
-      await flight.promise;
-    }
-
-    if (sessionId) {
-      await this.openSession(sessionId);
+      try {
+        await flight.promise;
+      } finally {
+        if (this.sessionsFlight === flight) this.sessionsFlight = null;
+      }
     }
   }
 
   /** Select a new empty composer state without creating a server session. */
   async newChat(workspaceId: string): Promise<void> {
     this.assertLive();
-    if (this.workspaceId !== workspaceId) await this.openWorkspace(workspaceId);
+    const navigation = ++this.navigationGeneration;
+    if (this.workspaceId !== workspaceId) await this.loadWorkspace(workspaceId);
+    if (this.disposed || navigation !== this.navigationGeneration) return;
     if (this.activeSessionId !== null) {
       if (this.messagesBySession.has(this.activeSessionId))
         this.touchTranscript(this.activeSessionId);
@@ -738,11 +756,31 @@ export class ChatController {
   /** Open a session transcript, todos, descendant timelines, and pending gates. */
   async openSession(sessionId: string): Promise<void> {
     this.assertLive();
+    const navigation = ++this.navigationGeneration;
     if (!this.workspaceId)
       throw new Error("Open a workspace before opening a session");
+    const workspaceId = this.workspaceId;
+    const hadLoadedSessions = this.activeWorkspaceSessionsLoaded;
     if (!this.activeWorkspaceSessionsLoaded)
-      await this.openWorkspace(this.workspaceId);
-    if (this.disposed || !this.workspaceId) return;
+      await this.loadWorkspace(workspaceId);
+    if (
+      this.disposed ||
+      this.workspaceId !== workspaceId ||
+      navigation !== this.navigationGeneration
+    )
+      return;
+    if (
+      hadLoadedSessions &&
+      !this.sessions.some((item) => item.id === sessionId)
+    ) {
+      await this.loadWorkspace(workspaceId, true);
+      if (
+        this.disposed ||
+        this.workspaceId !== workspaceId ||
+        navigation !== this.navigationGeneration
+      )
+        return;
+    }
     const session = this.sessions.find((item) => item.id === sessionId);
     if (!session || session.workspace_id !== this.workspaceId) {
       throw new Error("Session does not belong to the active workspace");
@@ -1071,7 +1109,7 @@ export class ChatController {
     if (!prompt.trim()) throw new Error("Prompt cannot be empty");
     const context = this.captureSelection();
     if (!context) throw new Error("Open a workspace before editing a message");
-    const session = this.sessions.find(row => row.id === sessionId);
+    const session = this.sessions.find((row) => row.id === sessionId);
     if (session) assertHarnessSessionSelection(session, options);
     const details = this.editOptions(options);
     this.invalidatePartDetails(sessionId);

@@ -163,7 +163,8 @@ export class NotificationController {
     });
   }
 
-  consumeTarget(): void {
+  consumeTarget(target?: NotificationTarget): void {
+    if (target && this.state.target !== target) return;
     this.patch({ target: null });
   }
 

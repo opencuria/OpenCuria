@@ -5,12 +5,17 @@
  * calls (failed ones included), patches, reasoning and subtasks — becomes one
  * activity block summarized as e.g. "Explored 9 files, 2 searches". Only
  * content meant for the reader splits a run: assistant text, delivered
- * steers, answered questions and the to-do card. Nothing is wrapped once the
- * turn finishes, so the layout stays the same while and after it streams.
+ * steers, answered questions and the to-do card. Finished turns use the same
+ * chronological "Worked for" folding as the web client.
  */
 
 import type { HarnessMessage, HarnessPart } from "./harness";
-import { isQuestionToolPart, visibleTimelineParts } from "./harnessBlocks";
+import {
+  isQuestionToolPart,
+  visibleTimelineParts,
+  wrapFinishedWork,
+  type WorkedForBlock,
+} from "./harnessBlocks";
 import { isTaskToolPart } from "./harnessSubtaskActivity";
 import { resolveToolName } from "./toolDisplay";
 
@@ -20,6 +25,10 @@ export type ActivityTimelineBlock =
   | { kind: "question"; part: HarnessPart }
   | { kind: "todos"; part: HarnessPart }
   | { kind: "activity"; parts: HarnessPart[] };
+
+export type ActivityMessageBlock =
+  | ActivityTimelineBlock
+  | WorkedForBlock<ActivityTimelineBlock>;
 
 /** Lower-case tool id, including the projection of detail-less parts. */
 function toolKey(part: HarnessPart): string {
@@ -69,6 +78,20 @@ export function buildActivityBlocks(
   }
   flushRun();
   return blocks;
+}
+
+/** Fold completed work while retaining final answers and delivered steers. */
+export function buildActivityMessageBlocks(
+  parts: HarnessPart[],
+  options: { todoPartId?: string | null; finished?: boolean } = {},
+): ActivityMessageBlock[] {
+  const blocks = buildActivityBlocks(parts, options);
+  if (!options.finished) return blocks;
+  return wrapFinishedWork(blocks, (block) =>
+    block.kind === "activity"
+      ? block.parts.some((part) => part.type !== "compaction")
+      : block.kind === "question" || block.kind === "todos",
+  );
 }
 
 /** Where the session to-do card renders inside an ordered transcript. */

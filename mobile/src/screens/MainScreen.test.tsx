@@ -28,15 +28,17 @@ const mockNotificationState: NotificationState = {
   error: null,
   target: null,
 };
-const mockConsumeTarget = jest.fn(() => {
+const mockConsumeTarget = jest.fn((target?: NotificationState["target"]) => {
+  if (target && mockNotificationState.target !== target) return;
   mockNotificationState.target = null;
 });
+const mockNotificationController = {
+  consumeTarget: mockConsumeTarget,
+  live: { available: false },
+};
 jest.mock("../notifications/NotificationContext", () => ({
   useNotifications: () => ({
-    controller: {
-      consumeTarget: mockConsumeTarget,
-      live: { available: false },
-    },
+    controller: mockNotificationController,
     state: mockNotificationState,
   }),
 }));
@@ -185,10 +187,22 @@ jest.mock("../components", () => {
         composer,
         overlay,
       ),
-    ChatMessages: (props: { onPullUpAtEnd?: () => void }) =>
+    ChatMessages: (props: {
+      loading?: boolean;
+      messages: Array<{ content: string }>;
+      onPullUpAtEnd?: () => void;
+    }) =>
       ReactRuntime.createElement(
         View,
         null,
+        ReactRuntime.createElement(
+          Text,
+          { testID: "transcript-state" },
+          props.loading
+            ? "Loading chat"
+            : props.messages.map((item) => item.content).join("\n") ||
+                "Empty chat",
+        ),
         props.onPullUpAtEnd
           ? ReactRuntime.createElement(Pressable, {
               testID: "test-pull-up",
@@ -202,7 +216,10 @@ jest.mock("../tools/WorkspaceToolsSheet", () => {
   const ReactRuntime = require("react") as typeof React;
   const { Text } = require("react-native") as typeof import("react-native");
   return {
-    WorkspaceToolsSheet: (props: { visible: boolean; workspaceName: string }) =>
+    WorkspaceToolsSheet: (props: {
+      visible: boolean;
+      workspaceName: string;
+    }) =>
       props.visible
         ? ReactRuntime.createElement(
             Text,
@@ -375,9 +392,7 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
   await waitFor(() =>
     expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
   );
-  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
-    runningWorkspace.name,
-  );
+  expect(screen.queryByTestId("composer-workspace")).toBeNull();
   expect(client.harness.listEngineModels).toHaveBeenCalledWith("claude");
   expect(client.harness.listEngineModels).toHaveBeenCalledWith("native");
   expect(client.harness.listAgentConfigs).toHaveBeenCalled();
@@ -485,7 +500,9 @@ it.each(["header", "sidebar", "workspace"])(
       expect(button).toBeEnabled();
       fireEvent.press(button);
     }
-    await waitFor(() => expect(mockController.newChat).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockController.newChat).toHaveBeenCalledTimes(1),
+    );
     expect(snapshot.activeSessionId).toBeNull();
     expect(snapshot.sessions).toEqual([busySession]);
     expect(screen.queryByTestId("drawer-new-chat")).toBeNull();
@@ -554,10 +571,15 @@ it.each([
     listeners.forEach((listener) => listener());
   });
   expect(mockController.newChat).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("workspace-status")).toBeNull();
+  expect(screen.queryByTestId("runner-offline")).toBeNull();
+  expect(screen.queryByTestId("subtask-readonly")).toBeNull();
   expect(screen.getByTestId("new-chat")).toBeDisabled();
   expect(screen.getByTestId("composer-state")).toHaveTextContent(/\|disabled$/);
   expect(
-    screen.queryByText(/wait for the run to finish before starting another chat/i),
+    screen.queryByText(
+      /wait for the run to finish before starting another chat/i,
+    ),
   ).toBeNull();
   fireEvent.press(screen.getByTestId("main-menu"));
   expect(screen.getByTestId("drawer-new-chat")).toBeDisabled();
@@ -569,37 +591,46 @@ it.each([
   tree.unmount();
 });
 
-it("shows the workspace in new chats and removes it when a session opens", async () => {
+it("keeps the composer mounted through initial loading, empty and existing chats", async () => {
   const client = mockClient();
+  let finishOverview!: (value: Workspace[]) => void;
+  client.workspaces.list.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishOverview = resolve;
+      }),
+  );
   mockUseSession.mockReturnValue(sessionValue(client) as never);
   const tree = render(
     <ThemeProvider>
       <MainScreen />
     </ThemeProvider>,
   );
-  await waitFor(() =>
-    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
-  );
-  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
-    runningWorkspace.name,
+  const composer = screen.getByTestId("test-settings");
+  expect(screen.getByTestId("composer-state")).toHaveTextContent(
+    "Ask OpenCuria|disabled",
   );
 
+  await act(async () => finishOverview([runningWorkspace]));
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    ),
+  );
+  expect(screen.getByTestId("test-settings")).toBe(composer);
   act(() => {
     snapshot = { ...snapshot, activeSessionId: "existing-chat" };
     listeners.forEach((listener) => listener());
   });
+  expect(screen.getByTestId("test-settings")).toBe(composer);
   expect(screen.queryByTestId("composer-workspace")).toBeNull();
-
   fireEvent.press(screen.getByTestId("new-chat"));
-  await waitFor(() =>
-    expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
-      runningWorkspace.name,
-    ),
-  );
+  await waitFor(() => expect(snapshot.activeSessionId).toBeNull());
+  expect(screen.getByTestId("test-settings")).toBe(composer);
   tree.unmount();
 });
 
-it("updates the new-chat workspace label when switching workspaces", async () => {
+it("keeps the composer mounted when switching workspaces", async () => {
   const client = mockClient();
   client.workspaces.list.mockResolvedValue([
     runningWorkspace,
@@ -612,17 +643,14 @@ it("updates the new-chat workspace label when switching workspaces", async () =>
     </ThemeProvider>,
   );
   await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
-
+  const composer = screen.getByTestId("test-settings");
   fireEvent.press(screen.getByTestId("chat-menu"));
   fireEvent.press(screen.getByRole("button", { name: "Switch workspace" }));
   fireEvent.press(screen.getByRole("button", { name: /^Other workspace,/ }));
-
   await waitFor(() =>
     expect(mockController.newChat).toHaveBeenLastCalledWith("workspace-b"),
   );
-  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
-    "Other workspace",
-  );
+  expect(screen.getByTestId("test-settings")).toBe(composer);
   tree.unmount();
 });
 
@@ -630,45 +658,48 @@ it.each([
   ["the current workspace", "workspace-a", false],
   ["another workspace", "workspace-b", false],
   ["the inbox", "workspace-b", true],
-])("opens an existing chat from %s and closes the sidebar", async (_, workspaceId, unread) => {
-  const client = mockClient();
-  client.workspaces.list.mockResolvedValue([
-    runningWorkspace,
-    { ...runningWorkspace, id: "workspace-b", name: "Other workspace" },
-  ]);
-  client.conversations.list.mockResolvedValue([
-    {
-      session_id: "existing-chat",
-      workspace_id: workspaceId,
-      workspace_name: "Workspace",
-      title: "Existing chat",
-      status: "idle",
-      unread,
-      needs_attention: false,
-      updated_at: "2026-01-01T00:00:00Z",
-      last_message_at: "2026-01-01T00:00:00Z",
-    } as HarnessConversation,
-  ]);
-  mockUseSession.mockReturnValue(sessionValue(client) as never);
-  const tree = render(
-    <ThemeProvider>
-      <MainScreen />
-    </ThemeProvider>,
-  );
-  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
-  fireEvent.press(screen.getByTestId("main-menu"));
-  fireEvent.press(
-    screen.getByTestId(`${unread ? "inbox-" : ""}existing-chat`),
-  );
-  await waitFor(() =>
-    expect(mockController.openWorkspace).toHaveBeenCalledWith(
-      workspaceId,
-      "existing-chat",
-    ),
-  );
-  expect(screen.queryByTestId("existing-chat")).toBeNull();
-  tree.unmount();
-});
+])(
+  "opens an existing chat from %s and closes the sidebar",
+  async (_, workspaceId, unread) => {
+    const client = mockClient();
+    client.workspaces.list.mockResolvedValue([
+      runningWorkspace,
+      { ...runningWorkspace, id: "workspace-b", name: "Other workspace" },
+    ]);
+    client.conversations.list.mockResolvedValue([
+      {
+        session_id: "existing-chat",
+        workspace_id: workspaceId,
+        workspace_name: "Workspace",
+        title: "Existing chat",
+        status: "idle",
+        unread,
+        needs_attention: false,
+        updated_at: "2026-01-01T00:00:00Z",
+        last_message_at: "2026-01-01T00:00:00Z",
+      } as HarnessConversation,
+    ]);
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+    fireEvent.press(screen.getByTestId("main-menu"));
+    fireEvent.press(
+      screen.getByTestId(`${unread ? "inbox-" : ""}existing-chat`),
+    );
+    await waitFor(() =>
+      expect(mockController.openWorkspace).toHaveBeenCalledWith(
+        workspaceId,
+        "existing-chat",
+      ),
+    );
+    expect(screen.queryByTestId("existing-chat")).toBeNull();
+    tree.unmount();
+  },
+);
 
 it("opens a cold-start notification after checking workspace and session access", async () => {
   const client = mockClient();
@@ -748,6 +779,147 @@ it("keeps an offline notification target available for a foreground retry", asyn
   tree.unmount();
 });
 
+it("opens a warm notification and consumes it only after transcript hydration", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  fireEvent.press(screen.getByTestId("main-menu"));
+  let finish!: () => void;
+  mockController.openWorkspace.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const target = {
+    deviceId: "device",
+    organizationId: "org-a",
+    workspaceId: runningWorkspace.id,
+    sessionId: "notified-session",
+  };
+  mockNotificationState.target = target;
+  tree.rerender(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+
+  await waitFor(() =>
+    expect(mockController.openWorkspace).toHaveBeenCalledWith(
+      runningWorkspace.id,
+      target.sessionId,
+    ),
+  );
+  expect(screen.queryByTestId("workspace-sidebar")).toBeNull();
+  expect(mockConsumeTarget).not.toHaveBeenCalled();
+  await act(async () => {
+    finish();
+  });
+  await waitFor(() => expect(mockConsumeTarget).toHaveBeenCalledWith(target));
+  tree.unmount();
+});
+
+it("retries a notification on foreground after opening its transcript failed", async () => {
+  const client = mockClient();
+  const value = sessionValue(client);
+  mockController.openWorkspace.mockRejectedValueOnce(new Error("Offline"));
+  mockUseSession.mockReturnValue(value as never);
+  const target = {
+    deviceId: "device",
+    organizationId: "org-a",
+    workspaceId: runningWorkspace.id,
+    sessionId: "notified-session",
+  };
+  mockNotificationState.target = target;
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.openWorkspace).toHaveBeenCalledTimes(1),
+  );
+  await waitFor(() => expect(screen.getByText("Offline")).toBeTruthy());
+  expect(mockConsumeTarget).not.toHaveBeenCalled();
+  const foreground = value.registerForegroundRefresh.mock.calls[0]?.[0] as
+    | (() => Promise<void>)
+    | undefined;
+  await act(async () => {
+    await foreground?.();
+  });
+  await waitFor(() =>
+    expect(mockController.openWorkspace).toHaveBeenCalledTimes(2),
+  );
+  await waitFor(() => expect(mockConsumeTarget).toHaveBeenCalledWith(target));
+  tree.unmount();
+});
+
+it("ignores notification targets outside the selected organization", async () => {
+  const client = mockClient();
+  mockNotificationState.target = {
+    deviceId: "device",
+    organizationId: "other-org",
+    workspaceId: runningWorkspace.id,
+    sessionId: "notified-session",
+  };
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  expect(client.workspaces.get).not.toHaveBeenCalled();
+  expect(mockController.openWorkspace).not.toHaveBeenCalled();
+  expect(mockConsumeTarget).not.toHaveBeenCalled();
+  tree.unmount();
+});
+
+it.each(["retry", "foreground"])(
+  "retries failed initial chat navigation through %s",
+  async (trigger) => {
+    const client = mockClient();
+    const value = sessionValue(client);
+    mockController.newChat.mockRejectedValueOnce(new Error("Opening failed"));
+    mockUseSession.mockReturnValue(value as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Opening failed")).toBeTruthy(),
+    );
+
+    if (trigger === "retry") {
+      fireEvent.press(screen.getByText("Retry"));
+    } else {
+      const calls = value.registerForegroundRefresh.mock.calls;
+      const foreground = calls[calls.length - 1]?.[0] as
+        | (() => Promise<void>)
+        | undefined;
+      await act(async () => {
+        await foreground?.();
+      });
+    }
+    await waitFor(() =>
+      expect(mockController.newChat).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-state")).toHaveTextContent(
+        "Ask OpenCuria|ready",
+      ),
+    );
+    expect(screen.queryByText("Opening failed")).toBeNull();
+    tree.unmount();
+  },
+);
+
 it("keeps a ready workspace and sendable chat if the engine catalog fails", async () => {
   const client = mockClient();
   client.harness.listEngines.mockRejectedValue(new Error("Forbidden"));
@@ -762,7 +934,7 @@ it("keeps a ready workspace and sendable chat if the engine catalog fails", asyn
     expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
   );
   expect(screen.getByTestId("new-chat")).toBeEnabled();
-  expect(screen.getByTestId("catalog-warning")).toBeTruthy();
+  expect(screen.queryByTestId("catalog-warning")).toBeNull();
   fireEvent.press(screen.getByTestId("test-send"));
   await waitFor(() => expect(mockController.send).toHaveBeenCalled());
   tree.unmount();
@@ -994,13 +1166,94 @@ it("opens Git, Terminal and Files by pulling up at the end or from the header me
   expect(screen.getByTestId("workspace-tools-sheet")).toBeTruthy();
 
   tree.unmount();
-  render(
+  const reopened = render(
     <ThemeProvider>
       <MainScreen />
     </ThemeProvider>,
   );
-  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    ),
+  );
   fireEvent.press(screen.getByTestId("chat-menu"));
-  fireEvent.press(screen.getByRole("button", { name: "Git, Terminal & Files" }));
+  fireEvent.press(
+    screen.getByRole("button", { name: "Git, Terminal & Files" }),
+  );
   expect(screen.getByTestId("workspace-tools-sheet")).toBeTruthy();
+  reopened.unmount();
+});
+
+it("hides the previous chat during navigation and preserves the new transcript while it loads", async () => {
+  const client = mockClient();
+  client.conversations.list.mockResolvedValue([
+    {
+      session_id: "next-chat",
+      workspace_id: runningWorkspace.id,
+      workspace_name: runningWorkspace.name,
+      title: "Next chat",
+      status: "idle",
+      unread: false,
+      needs_attention: false,
+      updated_at: "2026-01-01T00:00:00Z",
+      last_message_at: "2026-01-01T00:00:00Z",
+    } as HarnessConversation,
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    ),
+  );
+  act(() => {
+    snapshot = {
+      ...snapshot,
+      activeSessionId: "old-chat",
+      messages: [{ content: "Previous reply" }] as never[],
+    };
+    listeners.forEach((listener) => listener());
+  });
+  expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+    "Previous reply",
+  );
+
+  let finishNavigation!: () => void;
+  mockController.openWorkspace.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        finishNavigation = resolve;
+      }),
+  );
+  fireEvent.press(screen.getByTestId("main-menu"));
+  fireEvent.press(screen.getByTestId("next-chat"));
+  const transcript = screen.getByTestId("transcript-state");
+  expect(transcript).toHaveTextContent("Loading chat");
+  expect(screen.queryByText("Previous reply")).toBeNull();
+  act(() => {
+    snapshot = {
+      ...snapshot,
+      activeSessionId: "next-chat",
+      messages: [],
+      loading: true,
+    };
+    listeners.forEach((listener) => listener());
+  });
+  expect(screen.getByTestId("transcript-state")).toBe(transcript);
+  await act(async () => {
+    snapshot = {
+      ...snapshot,
+      messages: [{ content: "Next reply" }] as never[],
+      loading: false,
+    };
+    listeners.forEach((listener) => listener());
+    finishNavigation();
+  });
+  expect(screen.getByTestId("transcript-state")).toBe(transcript);
+  expect(transcript).toHaveTextContent("Next reply");
+  tree.unmount();
 });

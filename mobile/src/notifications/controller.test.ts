@@ -252,6 +252,25 @@ describe("native notification lifecycle", () => {
     test.controller.dispose();
   });
 
+  it("does not consume a newer tap when an earlier conversation finishes loading", async () => {
+    const test = setup();
+    await test.controller.start();
+    const previous: NotificationTarget = {
+      deviceId,
+      organizationId,
+      workspaceId: row.workspaceId,
+      sessionId: row.sessionId,
+    };
+    const latest = { ...previous, sessionId: "new-session" };
+    test.listeners["response"]!(previous);
+    test.listeners["response"]!(latest);
+    test.controller.consumeTarget(previous);
+    expect(test.controller.getSnapshot().target).toBe(latest);
+    test.controller.consumeTarget(latest);
+    expect(test.controller.getSnapshot().target).toBeNull();
+    test.controller.dispose();
+  });
+
   it("recovers an offline startup and removes stale or duplicate Live Activities", async () => {
     const test = setup({
       deviceId,

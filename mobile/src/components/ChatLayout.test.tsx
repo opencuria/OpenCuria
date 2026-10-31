@@ -64,6 +64,7 @@ beforeEach(() => {
 describe("ChatLayout", () => {
   it("keeps the transcript clear of the docked composer and its safe area", () => {
     renderLayout();
+    expect(screen.getByTestId("dock-offset")).toHaveTextContent("138");
     fireEvent(screen.getByTestId("composer-core"), "layout", {
       nativeEvent: { layout: { x: 0, y: 0, width: 360, height: 140 } },
     });

@@ -37,8 +37,8 @@ export const COMPOSER_INPUT_NATIVE_ID = "chat-composer-input";
 
 /** Space between the docked composer and the top of an open keyboard. */
 const KEYBOARD_GAP = 8;
-/** Composer height before its first layout, so the transcript opens clear of it. */
-const ESTIMATED_COMPOSER_HEIGHT = 112;
+/** Empty editor, toolbar and surface padding before the first native layout. */
+const ESTIMATED_COMPOSER_HEIGHT = 104;
 /** Downward pull on the composer that hands the keyboard its close animation. */
 const COMPOSER_PULL = 12;
 const IS_IOS = Platform.OS === "ios";

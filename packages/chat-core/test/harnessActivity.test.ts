@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildActivityBlocks,
+  buildActivityMessageBlocks,
   findTodoAnchor,
   summarizeActivity,
 } from "@opencuria/chat-core/harnessActivity";
@@ -19,6 +20,96 @@ const part = (
   title: "",
   output: "",
   ...extra,
+});
+
+describe("buildActivityMessageBlocks", () => {
+  it("leaves streaming work flat and folds only through the last finished work", () => {
+    const parts = [
+      text("intro"),
+      tool("read", "read"),
+      text("update"),
+      part("thought", "reasoning", { output: "Checking" }),
+      text("answer"),
+    ];
+    expect(
+      buildActivityMessageBlocks(parts).map((block) => block.kind),
+    ).toEqual(["text", "activity", "text", "activity", "text"]);
+    const blocks = buildActivityMessageBlocks(parts, { finished: true });
+    expect(blocks.map((block) => block.kind)).toEqual(["workedFor", "text"]);
+    expect(blocks[0]).toMatchObject({
+      kind: "workedFor",
+      blocks: [
+        { kind: "text", part: { id: "intro" } },
+        { kind: "activity", parts: [{ id: "read" }] },
+        { kind: "text", part: { id: "update" } },
+        { kind: "activity", parts: [{ id: "thought" }] },
+      ],
+    });
+  });
+
+  it("keeps steers visible and compaction in chronological order", () => {
+    const blocks = buildActivityMessageBlocks(
+      [
+        part("leading", "compaction"),
+        text("intro"),
+        tool("read", "read"),
+        part("steer", "steer", { output: "Use pnpm" }),
+        text("update"),
+        part("middle", "compaction"),
+        tool("grep", "grep"),
+        text("answer"),
+      ],
+      { finished: true },
+    );
+    expect(blocks.map((block) => block.kind)).toEqual([
+      "activity",
+      "workedFor",
+      "steer",
+      "workedFor",
+      "text",
+    ]);
+    expect(blocks[3]).toMatchObject({
+      kind: "workedFor",
+      blocks: [
+        { kind: "text", part: { id: "update" } },
+        { kind: "activity", parts: [{ id: "middle" }] },
+        { kind: "activity", parts: [{ id: "grep" }] },
+      ],
+    });
+  });
+
+  it("folds answered questions and anchored todos but keeps pending questions hidden", () => {
+    const blocks = buildActivityMessageBlocks(
+      [
+        text("intro"),
+        tool("open", "question", { state: "running" }),
+        tool("answered", "question"),
+        tool("todo", "todowrite"),
+        text("answer"),
+      ],
+      { finished: true, todoPartId: "todo" },
+    );
+    expect(blocks[0]).toMatchObject({
+      kind: "workedFor",
+      blocks: [
+        { kind: "text", part: { id: "intro" } },
+        { kind: "question", part: { id: "answered" } },
+        { kind: "todos", part: { id: "todo" } },
+      ],
+    });
+    expect(blocks[1]).toMatchObject({ kind: "text", part: { id: "answer" } });
+  });
+
+  it("does not invent work for text-only or compaction-only turns", () => {
+    expect(
+      buildActivityMessageBlocks([text("answer")], { finished: true }),
+    ).toEqual([{ kind: "text", part: text("answer") }]);
+    expect(
+      buildActivityMessageBlocks([part("compact", "compaction")], {
+        finished: true,
+      }),
+    ).toEqual([{ kind: "activity", parts: [part("compact", "compaction")] }]);
+  });
 });
 const tool = (
   id: string,

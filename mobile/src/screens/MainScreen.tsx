@@ -19,7 +19,7 @@ import {
 import { KeyboardController } from "react-native-keyboard-controller";
 
 import { useVideoPlayer, VideoView } from "expo-video";
-import { CircleAlert, Settings2 } from "lucide-react-native";
+import { Settings2 } from "lucide-react-native";
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
 import {
   filterMentionCandidates,
@@ -82,6 +82,7 @@ import { useSession } from "./SessionContext";
 import { useNotifications } from "../notifications/NotificationContext";
 import { NotificationSettings } from "../notifications/NotificationSettings";
 import { setViewedNotificationSession } from "../notifications/native";
+import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
 import { releaseGitControllers } from "../tools/git";
 import { releaseTerminalSessions } from "../tools/terminal";
@@ -119,6 +120,7 @@ type NavigationRequest = {
   workspaceId: string;
   sessionId?: string;
   newChat?: boolean;
+  notificationTarget?: NotificationTarget;
 };
 
 export function MainScreen(): React.JSX.Element {
@@ -157,6 +159,9 @@ export function MainScreen(): React.JSX.Element {
   >([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [navigation, setNavigation] = useState<NavigationRequest | null>(null);
+  const [completedNavigationRevision, setCompletedNavigationRevision] =
+    useState(0);
+  const [notificationRetry, setNotificationRetry] = useState(0);
   const navigationRevision = useRef(0);
   const [actionBusy, setActionBusy] = useState(false);
   const sendingRef = useRef(false);
@@ -173,7 +178,6 @@ export function MainScreen(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -218,6 +222,7 @@ export function MainScreen(): React.JSX.Element {
     workspaceId &&
     navigation?.workspaceId === workspaceId &&
     navigation.revision === navigationRevision.current &&
+    navigation.revision === completedNavigationRevision &&
     chat.workspaceId === workspaceId &&
     !chat.loading,
   );
@@ -464,6 +469,19 @@ export function MainScreen(): React.JSX.Element {
     };
   }, [client, loadOverview, loadCatalogs]);
 
+  const retryPendingNavigation = useCallback(() => {
+    if (
+      navigation &&
+      navigation.revision === navigationRevision.current &&
+      navigation.revision !== completedNavigationRevision &&
+      !notifications.state.target
+    ) {
+      const revision = ++navigationRevision.current;
+      setNavigation({ ...navigation, revision });
+    }
+    setNotificationRetry((revision) => revision + 1);
+  }, [navigation, completedNavigationRevision, notifications.state.target]);
+
   useEffect(
     () =>
       registerForegroundRefresh(async () => {
@@ -473,8 +491,16 @@ export function MainScreen(): React.JSX.Element {
           controller.refresh(),
           loadCatalogs(),
         ]);
+        retryPendingNavigation();
       }),
-    [client, controller, loadOverview, loadCatalogs, registerForegroundRefresh],
+    [
+      client,
+      controller,
+      loadOverview,
+      loadCatalogs,
+      registerForegroundRefresh,
+      retryPendingNavigation,
+    ],
   );
 
   const workspaceScopeKey = workspaces
@@ -531,8 +557,12 @@ export function MainScreen(): React.JSX.Element {
       : controller.openWorkspace(request.workspaceId, request.sessionId);
     void run
       .then(() => {
-        if (alive && request.revision === navigationRevision.current)
+        if (alive && request.revision === navigationRevision.current) {
+          setCompletedNavigationRevision(request.revision);
           setError(null);
+          if (request.notificationTarget)
+            notifications.controller?.consumeTarget(request.notificationTarget);
+        }
       })
       .catch((cause: unknown) => {
         if (alive && request.revision === navigationRevision.current)
@@ -591,10 +621,9 @@ export function MainScreen(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     if (!client) return;
-    setRefreshing(true);
     await Promise.allSettled([loadOverview(true), controller?.refresh()]);
-    setRefreshing(false);
-  }, [client, controller, loadOverview]);
+    retryPendingNavigation();
+  }, [client, controller, loadOverview, retryPendingNavigation]);
 
   const selectMode = (next: HarnessSessionMode) => {
     setMode(next);
@@ -760,8 +789,13 @@ export function MainScreen(): React.JSX.Element {
 
   const requestNavigation = (
     workspaceId: string,
-    options: { sessionId?: string; newChat?: boolean } = {},
+    options: {
+      sessionId?: string;
+      newChat?: boolean;
+      notificationTarget?: NotificationTarget;
+    } = {},
   ) => {
+    if (!options.notificationTarget) notifications.controller?.consumeTarget();
     const revision = ++navigationRevision.current;
     generation.current += 1;
     selectedWorkspaceRef.current = workspaceId;
@@ -784,6 +818,7 @@ export function MainScreen(): React.JSX.Element {
     )
       return;
     let active = true;
+    const revision = navigationRevision.current;
     // Resolve through authenticated REST first. A push cannot grant access to
     // another account's workspace or make us silently open a different session.
     void Promise.all([
@@ -791,7 +826,7 @@ export function MainScreen(): React.JSX.Element {
       client.harness.listSessions(target.workspaceId),
     ])
       .then(([owner, sessions]) => {
-        if (!active) return;
+        if (!active || revision !== navigationRevision.current) return;
         if (!sessions.some((item) => item.id === target.sessionId))
           throw Object.assign(
             new Error("This conversation is no longer available."),
@@ -803,11 +838,13 @@ export function MainScreen(): React.JSX.Element {
         setSheet(null);
         setDraft("");
         setAttachments([]);
-        requestNavigation(owner.id, { sessionId: target.sessionId });
-        notifications.controller?.consumeTarget();
+        requestNavigation(owner.id, {
+          sessionId: target.sessionId,
+          notificationTarget: target,
+        });
       })
       .catch((cause: unknown) => {
-        if (active) {
+        if (active && revision === navigationRevision.current) {
           const status =
             cause && typeof cause === "object" && "status" in cause
               ? cause.status
@@ -816,7 +853,7 @@ export function MainScreen(): React.JSX.Element {
             setError(
               "This notification's conversation is no longer available.",
             );
-            notifications.controller?.consumeTarget();
+            notifications.controller?.consumeTarget(target);
           } else {
             setError(
               "Could not open this conversation. Check your connection and retry.",
@@ -832,7 +869,7 @@ export function MainScreen(): React.JSX.Element {
     notifications.controller,
     client,
     loading,
-    workspaces,
+    notificationRetry,
     session?.organizationId,
   ]);
 
@@ -1162,75 +1199,42 @@ export function MainScreen(): React.JSX.Element {
       >
         <ChatLayout
           composer={
-            workspace ? (
-              <ChatComposer
-                draft={draft}
-                workspaceName={
-                  !chat.activeSessionId ? workspace.name : undefined
-                }
-                onDraftChange={(value) => setDraft(value)}
-                onSend={send}
-                onStop={async () => {
-                  await controller?.abort();
-                }}
-                busy={chat.busy}
-                disabled={chatUnavailable}
-                placeholder={
-                  !navigationReady
-                    ? "Loading workspace conversations…"
-                    : chatUnavailable
-                      ? "Choose an available, running workspace…"
-                      : chat.messages.length > 0
-                        ? "Reply to OpenCuria"
-                        : "Ask OpenCuria"
-                }
-                settings={{
-                  harness: harnessEngineLabel(harness, engines),
-                  mode,
-                  model: selectedModel?.name ?? model,
-                  effort: effort ? formatEffort(effort) : "",
-                }}
-                onSettings={() => openSheet("settings")}
-                skills={skills.map((item) => ({
-                  id: item.id,
-                  name: item.name,
-                }))}
-                selectedSkillIds={skillIds}
-                onSelectedSkillIdsChange={setSkillIds}
-                attachments={attachments}
-                onAttachmentsChange={setAttachments}
-                onSearchMentions={searchMentions}
-                onTakePhoto={async () => pickPhoto("camera")}
-                onChoosePhotos={async () => pickPhoto("library")}
-                onChooseFiles={async () => pickDocuments()}
-                contextKey={contextKey}
-                testID="chat-composer"
-              />
-            ) : null
+            <ChatComposer
+              draft={draft}
+              onDraftChange={(value) => setDraft(value)}
+              onSend={send}
+              onStop={async () => {
+                await controller?.abort();
+              }}
+              busy={navigationReady && chat.busy}
+              disabled={chatUnavailable}
+              placeholder="Ask OpenCuria"
+              settings={{
+                harness: harnessEngineLabel(harness, engines),
+                mode,
+                model: selectedModel?.name ?? model,
+                effort: effort ? formatEffort(effort) : "",
+              }}
+              onSettings={() => openSheet("settings")}
+              skills={skills.map((item) => ({
+                id: item.id,
+                name: item.name,
+              }))}
+              selectedSkillIds={skillIds}
+              onSelectedSkillIdsChange={setSkillIds}
+              attachments={attachments}
+              onAttachmentsChange={setAttachments}
+              onSearchMentions={searchMentions}
+              onTakePhoto={async () => pickPhoto("camera")}
+              onChoosePhotos={async () => pickPhoto("library")}
+              onChooseFiles={async () => pickDocuments()}
+              contextKey={contextKey}
+              testID="chat-composer"
+            />
           }
           overlay={
             <>
               <ChromeOverlay onHeightChange={setNoticeInset}>
-                {workspace && !ready ? (
-                  <View style={styles.notice}>
-                    <Banner
-                      tone={workspace.has_active_session ? "warning" : "info"}
-                      message={readinessMessage(workspace, isTransitioning)}
-                      testID="workspace-status"
-                    />
-                  </View>
-                ) : null}
-                {workspace &&
-                workspace.status === "running" &&
-                !workspace.runner_online ? (
-                  <View style={styles.notice}>
-                    <Banner
-                      tone="warning"
-                      message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
-                      testID="runner-offline"
-                    />
-                  </View>
-                ) : null}
                 {error || chat.error ? (
                   <View style={styles.notice}>
                     <Banner
@@ -1245,39 +1249,7 @@ export function MainScreen(): React.JSX.Element {
                     />
                   </View>
                 ) : null}
-                {catalogError ? (
-                  <View style={styles.notice}>
-                    <Banner
-                      tone="warning"
-                      message={catalogError}
-                      actionLabel="Retry"
-                      onAction={() => {
-                        void loadCatalogs();
-                      }}
-                      onDismiss={() => setCatalogError(null)}
-                      testID="catalog-warning"
-                    />
-                  </View>
-                ) : null}
-                {loading && !workspaces.length ? (
-                  <View style={styles.loading}>
-                    <ActivityIndicator color={theme.primary} />
-                    <Text style={{ color: theme.mutedText }}>
-                      Loading workspaces…
-                    </Text>
-                  </View>
-                ) : null}
-                {activeIsSubtask ? (
-                  <View style={styles.notice}>
-                    <Banner
-                      tone="info"
-                      message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
-                      testID="subtask-readonly"
-                    />
-                  </View>
-                ) : null}
-
-                {chat.activeSessionLineage.length > 1 ? (
+                {navigationReady && chat.activeSessionLineage.length > 1 ? (
                   <View
                     style={{
                       flexDirection: "row",
@@ -1313,43 +1285,23 @@ export function MainScreen(): React.JSX.Element {
                   </View>
                 ) : null}
               </ChromeOverlay>
-              {!visibleWorkspaces.length && !loading ? (
-                <View style={styles.noWorkspace}>
-                  <View
-                    style={[
-                      styles.emptyMark,
-                      { backgroundColor: theme.surfaceMuted },
-                    ]}
-                  >
-                    <CircleAlert size={24} color={theme.primary} />
-                  </View>
-                  <Text style={[styles.emptyTitle, { color: theme.text }]}>
-                    No workspaces yet
-                  </Text>
-                  <Text style={[styles.emptyText, { color: theme.mutedText }]}>
-                    Create a workspace in OpenCuria on the web, then return here
-                    to chat.
-                  </Text>
-                  <Button
-                    title="Refresh"
-                    variant="outline"
-                    onPress={() => {
-                      void refresh();
-                    }}
-                    busy={refreshing}
-                  />
-                </View>
-              ) : null}
             </>
           }
         >
           <ChatMessages
-            key={contextKey}
+            key={`${client.api.baseUrl}:${session?.organizationId ?? ""}:${navigation?.revision ?? 0}`}
+            loading={
+              loading ||
+              (workspaceId !== null &&
+                !navigationReady &&
+                !error &&
+                !chat.error)
+            }
             onDismissNotice={(id) => controller!.dismissNotice(id)}
-            messages={chat.messages}
+            messages={navigationReady ? chat.messages : EMPTY.messages}
             sessions={chat.sessions}
             todos={chat.todos}
-            busy={chat.busy}
+            busy={navigationReady && chat.busy}
             disabled={!ready}
             resolveMedia={resolveMedia}
             mediaScopeKey={`${contextKey}:${chat.connected}`}
@@ -1391,8 +1343,8 @@ export function MainScreen(): React.JSX.Element {
         </ChatLayout>
       </Drawer>
       <ChatGates
-        permissions={chat.permissions}
-        questions={chat.questions}
+        permissions={navigationReady ? chat.permissions : EMPTY.permissions}
+        questions={navigationReady ? chat.questions : EMPTY.questions}
         resolving={chat.permissions.some((item) =>
           resolving.has(item.request_id),
         )}
@@ -1567,7 +1519,10 @@ export function MainScreen(): React.JSX.Element {
         agents={agentOptions}
         engine={harness}
         mode={mode}
-        unavailableMessage={`${harnessEngineLabel(harness, engines)} models unavailable. Check the provider account in Settings.`}
+        unavailableMessage={
+          catalogError ??
+          `${harnessEngineLabel(harness, engines)} models unavailable. Check the provider account in Settings.`
+        }
         onModelChange={selectModel}
         onEffortChange={(value) => {
           selectionDirty.current = true;
@@ -1625,17 +1580,6 @@ function workspaceLabel(
   if (item.status === "running")
     return item.runner_online ? "Running" : "Runner offline";
   return item.status.replaceAll("_", " ");
-}
-function readinessMessage(item: Workspace, transitioning: boolean): string {
-  if (item.intervention_required)
-    return "This workspace needs attention before it can accept messages.";
-  if (transitioning)
-    return `Workspace is ${item.active_operation?.replaceAll("_", " ") || "updating"}. Chat is disabled until it is ready.`;
-  if (item.status !== "running")
-    return `Workspace is ${item.status.replaceAll("_", " ")}. Select a running workspace to send messages.`;
-  if (!item.runner_online)
-    return "Workspace runner is offline. Conversation history remains available.";
-  return "Workspace is not ready for chat.";
 }
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -1795,34 +1739,6 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   notice: { paddingHorizontal: 12, paddingTop: 7 },
   overlay: { position: "absolute", left: 0, right: 0, zIndex: 3 },
-  loading: {
-    marginTop: 8,
-    alignSelf: "center",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    padding: 9,
-    borderRadius: 14,
-    backgroundColor: "#77777720",
-  },
-  noWorkspace: {
-    position: "absolute",
-    zIndex: 2,
-    top: "25%",
-    alignSelf: "center",
-    alignItems: "center",
-    paddingHorizontal: 30,
-    gap: 10,
-  },
-  emptyMark: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  emptyTitle: { fontSize: 20, fontWeight: "600" },
-  emptyText: { fontSize: 14, lineHeight: 21, textAlign: "center" },
   section: {
     fontSize: 13,
     fontWeight: "500",

@@ -7,6 +7,7 @@ import React, {
   useState,
 } from "react";
 import {
+  ActivityIndicator,
   Animated,
   Platform,
   ScrollView,
@@ -43,11 +44,12 @@ import type {
   HarnessTodo,
 } from "@opencuria/chat-core/harness";
 import {
-  buildActivityBlocks,
+  buildActivityMessageBlocks,
   findTodoAnchor,
   summarizeActivity,
-  type ActivityTimelineBlock,
+  type ActivityMessageBlock,
 } from "@opencuria/chat-core/harnessActivity";
+import { elapsedMs, formatElapsed } from "@opencuria/chat-core/formatElapsed";
 import { getMessageCopyText } from "@opencuria/chat-core/harnessMessageCopy";
 import { HARNESS_PAGE_SIZE } from "@opencuria/chat-core/harnessPagination";
 import { sortHarnessMessages } from "@opencuria/chat-core/harnessReducer";
@@ -88,6 +90,7 @@ export interface ChatMessagesProps {
   sessions?: HarnessSession[];
   todos?: HarnessTodo[];
   busy?: boolean;
+  loading?: boolean;
   streamingMessageId?: string | null;
   disabled?: boolean;
   resolveMedia?: (path: string) => Promise<ResolvedChatMedia>;
@@ -138,9 +141,9 @@ const FOLLOW_END = {
  */
 export function ChatMessages({
   messages,
-  sessions = [],
   todos = [],
   busy = false,
+  loading = false,
   streamingMessageId,
   disabled = false,
   resolveMedia,
@@ -161,7 +164,7 @@ export function ChatMessages({
   const { theme } = useTheme();
   const layout = useChatLayout();
   const pullState = useEndPullState();
-  const pull = useEndPull(pullState, onPullUpAtEnd);
+  const pull = useEndPull(pullState, loading ? undefined : onPullUpAtEnd);
   // Messages scroll beneath translucent navigation chrome and host overlays.
   const topInset = useChromeTopInset() + contentInsetTop;
   const listRef = useRef<LegendListRef>(null);
@@ -264,31 +267,13 @@ export function ChatMessages({
     ],
   );
   const keyExtractor = useCallback((message: HarnessMessage) => message.id, []);
-  const activeRun = sessions.find((session) => session.status === "busy");
-  const runLabel = activeRun
-    ? `OpenCuria is working${activeRun.agent_name ? ` · ${activeRun.agent_name}` : ""}`
-    : null;
-  const header = useMemo(
-    () =>
-      runLabel ? (
-        <View
-          style={[styles.runHeader, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <View style={[styles.runDot, { backgroundColor: theme.mutedText }]} />
-          <Text style={[styles.runText, { color: theme.mutedText }]}>
-            {runLabel}
-          </Text>
-          <LoaderCircle size={16} color={theme.subtleText} />
-        </View>
-      ) : null,
-    [runLabel, theme],
-  );
   // "Scroll to latest" follows the list's own end tracking, which includes the
   // keyboard and composer insets and also reacts to content growing below.
-  const hasMessages = ordered.length > 0;
+  const hasMessages = !loading && ordered.length > 0;
   useEffect(() => {
     const state = hasMessages ? listRef.current?.getState() : undefined;
     if (!state) {
+      setShowJumpToLatest(false);
       pullState.atEnd.value = true;
       return;
     }
@@ -308,25 +293,27 @@ export function ChatMessages({
   const onScroll = useCallback(() => {
     pullState.lastScrollAt.value = Date.now();
   }, [pullState]);
-  const pullHint = onPullUpAtEnd ? (
-    <EndPullHint
-      progress={pull.progress}
-      ready={pull.ready}
-      label={pullUpLabel}
-      bottom={layout.dockOffset + 12}
-    />
-  ) : null;
+  const pullHint =
+    !loading && onPullUpAtEnd ? (
+      <EndPullHint
+        progress={pull.progress}
+        ready={pull.ready}
+        label={pullUpLabel}
+        bottom={layout.dockOffset + 12}
+      />
+    ) : null;
   const jumpToLatest = useCallback(() => {
     setShowJumpToLatest(false);
     void listRef.current?.scrollToEnd({ animated: true });
   }, []);
 
-  if (ordered.length === 0) {
+  if (!hasMessages) {
     return (
       <View style={styles.listRoot}>
         <EndPullArea gesture={pull.gesture}>
           <View style={styles.listRoot} collapsable={false}>
             <EmptyTranscript
+              loading={loading}
               topInset={topInset}
               testID={testID}
               pullState={pullState}
@@ -348,7 +335,6 @@ export function ChatMessages({
             data={ordered}
             renderItem={renderItem}
             keyExtractor={keyExtractor}
-            ListHeaderComponent={header}
             estimatedItemSize={220}
             drawDistance={600}
             onViewableItemsChanged={onViewableItemsChanged}
@@ -446,10 +432,12 @@ function JumpToLatest({
  * and keyboard. It still scrolls, so the keyboard can be dragged away here too.
  */
 function EmptyTranscript({
+  loading,
   topInset,
   testID,
   pullState,
 }: {
+  loading: boolean;
   topInset: number;
   testID: string;
   pullState: EndPullState;
@@ -484,9 +472,17 @@ function EmptyTranscript({
       }}
     >
       <Animated.View style={centered}>
-        <Text style={[styles.emptyTitle, { color: theme.text }]}>
-          What can I help with?
-        </Text>
+        {loading ? (
+          <ActivityIndicator
+            testID="chat-loading"
+            accessibilityLabel="Loading chat"
+            color={theme.mutedText}
+          />
+        ) : (
+          <Text style={[styles.emptyTitle, { color: theme.text }]}>
+            What can I help with?
+          </Text>
+        )}
       </Animated.View>
     </ScrollView>
   );
@@ -507,7 +503,13 @@ function useLatestHandler<Handler extends (...args: never[]) => unknown>(
 
 interface MessageRowProps extends Omit<
   ChatMessagesProps,
-  "messages" | "sessions" | "todos" | "busy" | "streamingMessageId" | "testID"
+  | "messages"
+  | "sessions"
+  | "todos"
+  | "busy"
+  | "loading"
+  | "streamingMessageId"
+  | "testID"
 > {
   message: HarnessMessage;
   streaming: boolean;
@@ -545,14 +547,16 @@ const MessageRow = memo(function MessageRow({
   const showTodos = Boolean(todos?.length);
   const blocks = useMemo(
     () =>
-      buildActivityBlocks(
+      buildActivityMessageBlocks(
         [...message.parts].sort(
           (left, right) => (left.position ?? 0) - (right.position ?? 0),
         ),
-        { todoPartId: showTodos ? todoPartId : null },
+        { todoPartId: showTodos ? todoPartId : null, finished: !streaming },
       ),
-    [message.parts, showTodos, todoPartId],
+    [message.parts, showTodos, todoPartId, streaming],
   );
+  const duration = elapsedMs(message.created_at, message.completed_at);
+  const elapsedLabel = duration === null ? "" : formatElapsed(duration);
   const copyText = getMessageCopyText(message, streaming);
   const editUserMessage = useCallback(
     async (messageId: string, text: string) => {
@@ -716,6 +720,7 @@ const MessageRow = memo(function MessageRow({
             <BlockView
               key={blockKey(block, index)}
               block={block}
+              elapsedLabel={elapsedLabel}
               streaming={streaming}
               todos={todos}
               mediaVisible={mediaVisible}
@@ -975,7 +980,8 @@ interface BlockProps extends Pick<
   | "onRequestPartDetail"
   | "onOpenAttachment"
 > {
-  block: ActivityTimelineBlock;
+  block: ActivityMessageBlock;
+  elapsedLabel: string;
   streaming: boolean;
   mediaVisible: boolean;
   mediaScopeKey?: string | number;
@@ -984,6 +990,7 @@ interface BlockProps extends Pick<
 
 function BlockView({
   block,
+  elapsedLabel,
   streaming,
   todos,
   resolveMedia,
@@ -995,6 +1002,22 @@ function BlockView({
   mediaScopeKey,
 }: BlockProps): React.JSX.Element | null {
   const { theme } = useTheme();
+  if (block.kind === "workedFor")
+    return (
+      <WorkedForBlock
+        blocks={block.blocks}
+        elapsedLabel={elapsedLabel}
+        streaming={streaming}
+        todos={todos}
+        resolveMedia={resolveMedia}
+        onOpenFile={onOpenFile}
+        onOpenSubtask={onOpenSubtask}
+        onRequestPartDetail={onRequestPartDetail}
+        onOpenAttachment={onOpenAttachment}
+        mediaVisible={mediaVisible}
+        mediaScopeKey={mediaScopeKey}
+      />
+    );
   if (block.kind === "steer")
     return (
       <View testID={`chat-steer-${block.part.id}`} style={styles.steerRow}>
@@ -1042,6 +1065,61 @@ function BlockView({
       mediaVisible={mediaVisible}
       mediaScopeKey={mediaScopeKey}
     />
+  );
+}
+
+/** Finished work uses the same quiet disclosure as exploration and commands. */
+function WorkedForBlock({
+  blocks,
+  ...props
+}: Omit<BlockProps, "block"> & {
+  blocks: Extract<ActivityMessageBlock, { kind: "workedFor" }>["blocks"];
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState(HARNESS_PAGE_SIZE);
+  const label = props.elapsedLabel
+    ? `Worked for ${props.elapsedLabel}`
+    : "Worked";
+  const hidden = blocks.length - shown;
+  return (
+    <View testID="chat-worked-for" style={styles.activity}>
+      <NativeAction
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen(!open)}
+        style={styles.activityHeader}
+      >
+        <Text style={[styles.activityTitle, { color: theme.mutedText }]}>
+          {label}
+        </Text>
+      </NativeAction>
+      {open ? (
+        <View
+          style={[
+            styles.activitySteps,
+            styles.workedForContent,
+            { borderLeftColor: theme.border },
+          ]}
+        >
+          {blocks.slice(0, shown).map((block, index) => (
+            <BlockView key={blockKey(block, index)} block={block} {...props} />
+          ))}
+          {hidden > 0 ? (
+            <NativeAction
+              accessibilityRole="button"
+              onPress={() => setShown(shown + HARNESS_PAGE_SIZE)}
+              style={styles.stepRow}
+            >
+              <Text style={[styles.stepText, { color: theme.subtleText }]}>
+                {`Show ${Math.min(hidden, HARNESS_PAGE_SIZE)} more`}
+              </Text>
+            </NativeAction>
+          ) : null}
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -1636,7 +1714,9 @@ function formatTime(value: string): string {
     minute: "2-digit",
   }).format(date);
 }
-function blockKey(block: ActivityTimelineBlock, index: number): string {
+function blockKey(block: ActivityMessageBlock, index: number): string {
+  if (block.kind === "workedFor")
+    return `workedFor:${blockKey(block.blocks[0]!, index)}`;
   if (block.kind === "activity")
     return `activity:${block.parts[0]?.id ?? index}`;
   return `${block.kind}:${block.part.id}`;
@@ -1662,17 +1742,6 @@ const styles = StyleSheet.create({
     paddingBottom: 4,
   },
   jumpButton: { position: "absolute", alignSelf: "center", bottom: 0 },
-  runHeader: {
-    alignSelf: "center",
-    minHeight: 38,
-    borderRadius: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 14,
-  },
-  runDot: { width: 7, height: 7, borderRadius: 4 },
-  runText: { fontSize: 13, lineHeight: 18 },
   messageFrame: { maxWidth: 820, width: "100%", gap: 4, paddingBottom: 24 },
   userFrame: { alignSelf: "flex-end", alignItems: "flex-end" },
   assistantFrame: { alignSelf: "flex-start", alignItems: "flex-start" },
@@ -1734,6 +1803,7 @@ const styles = StyleSheet.create({
   activity: { width: "100%" },
   activityHeader: { paddingVertical: 5 },
   activityTitle: { fontSize: 17, lineHeight: 22 },
+  workedForContent: { gap: 6 },
   activitySteps: {
     borderLeftWidth: StyleSheet.hairlineWidth,
     marginLeft: 2,

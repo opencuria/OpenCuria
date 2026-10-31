@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react-native";
 import { ChatMessages, UserMessageContent } from "./ChatMessages";
+import { Animated } from "react-native";
 import { ThemeProvider } from "../ui/theme";
 import type {
   HarnessMessage,
@@ -112,12 +113,110 @@ const part = (
 });
 
 beforeEach(() => {
+  // Native animations cannot attach to React test renderer's host instances.
+  jest.spyOn(Animated, "spring").mockReturnValue({
+    start: jest.fn(),
+    stop: jest.fn(),
+    reset: jest.fn(),
+  });
   mockScrollToEnd.mockClear();
   mockNearEnd.current = true;
   mockNearEndListeners.clear();
 });
 
 describe("ChatMessages", () => {
+  it("shows loading, empty and loaded content without status badges", () => {
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          loading
+          messages={[message([part("stale", "text", "Previous chat", 0)])]}
+          onPullUpAtEnd={jest.fn()}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("chat-loading")).toBeTruthy();
+    expect(screen.queryByText("Previous chat")).toBeNull();
+    expect(screen.queryByText("What can I help with?")).toBeNull();
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages messages={[]} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("chat-loading")).toBeNull();
+    expect(screen.getByText("What can I help with?")).toBeTruthy();
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[message([part("reply", "text", "Answer", 0)])]}
+          sessions={[
+            {
+              id: "s1",
+              workspace_id: "w1",
+              title: "Chat",
+              mode: "build",
+              agent_name: "build",
+              model: "m",
+              status: "busy",
+              cost: 0,
+              tokens: {},
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText("Answer")).toBeTruthy();
+    expect(screen.queryByText(/is working/)).toBeNull();
+    expect(screen.queryByTestId("chat-loading")).toBeNull();
+  });
+
+  it("folds finished work with its elapsed time and leaves the final answer visible", () => {
+    const transcript = {
+      ...message([
+        part("intro", "text", "Checking the renderer", 0),
+        { ...part("read", "tool", "", 1), tool: "read" },
+        part("answer", "text", "Fixed the layout", 2),
+      ]),
+      created_at: "2026-10-30T10:00:00Z",
+    };
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages busy messages={[transcript]} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("chat-worked-for")).toBeNull();
+    expect(screen.getByText("Checking the renderer")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Explored 1 file" }),
+    ).toBeTruthy();
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              ...transcript,
+              completed_at: "2026-10-30T10:05:11Z",
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    const disclosure = screen.getByRole("button", {
+      name: "Worked for 5m 11s",
+    });
+    expect(disclosure.props.accessibilityState.expanded).toBe(false);
+    expect(screen.queryByText("Checking the renderer")).toBeNull();
+    expect(screen.getByText("Fixed the layout")).toBeTruthy();
+    fireEvent.press(disclosure);
+    expect(disclosure.props.accessibilityState.expanded).toBe(true);
+    expect(screen.getByText("Checking the renderer")).toBeTruthy();
+    const activity = screen.getByRole("button", { name: "Explored 1 file" });
+    expect(disclosure.props.style).toEqual(activity.props.style);
+    fireEvent.press(disclosure);
+    expect(screen.queryByText("Checking the renderer")).toBeNull();
+    expect(screen.getByText("Fixed the layout")).toBeTruthy();
+  });
+
   it("does not render or allow copying assistant aggregate content", () => {
     render(
       <ThemeProvider>
@@ -275,7 +374,10 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
 
-    // Finished turns stay flat: text around the work remains visible.
+    // Finished turns hide the leading response and work until expanded.
+    expect(screen.queryByText("Before")).toBeNull();
+    expect(screen.getByText("After")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     expect(screen.getByText("Before")).toBeTruthy();
     expect(screen.getByText("After")).toBeTruthy();
     fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
@@ -310,6 +412,7 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
 
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     const labels = screen
       .getAllByTestId(/^chat-(activity|part)-/)
       .map((row) => row.props.testID);
@@ -347,6 +450,7 @@ describe("ChatMessages", () => {
         />
       </ThemeProvider>,
     );
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     fireEvent.press(screen.getByRole("button", { name: "Explored 85 files" }));
     expect(screen.getAllByTestId(/^chat-work-row-/)).toHaveLength(80);
     fireEvent.press(screen.getByRole("button", { name: "Show 5 more" }));
@@ -370,6 +474,7 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
     expect(screen.queryByText("Check the renderer first")).toBeNull();
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     fireEvent.press(screen.getByRole("button", { name: "Thought" }));
     expect(screen.getByText("Check the renderer first")).toBeTruthy();
   });
@@ -408,6 +513,7 @@ describe("ChatMessages", () => {
           />
         </ThemeProvider>,
       );
+      fireEvent.press(screen.getByRole("button", { name: "Worked" }));
       fireEvent.press(screen.getByRole("button", { name: "Delegated 1 task" }));
       const row = screen.getByTestId("chat-subtask-subtask");
       if (childId) {
@@ -481,6 +587,7 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
 
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
     const order = screen
       .getAllByTestId(/^chat-(activity|part)-|^chat-todos$/)
       .map((row) => row.props.testID);
