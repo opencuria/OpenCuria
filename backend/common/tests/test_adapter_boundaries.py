@@ -303,6 +303,52 @@ def test_process_lookup_and_persistence_are_independent_of_runner_workflows(
     assert not violations, "\n".join(sorted(violations))
 
 
+def test_process_routes_delegate_user_policy_to_process_controls(trees) -> None:
+    """REST maps process schemas; services own visibility and allowed controls."""
+    routes = [
+        node
+        for node in trees[APPS_ROOT / "runners" / "api.py"].body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and any(
+            isinstance(decorator, ast.Call)
+            and decorator.args
+            and isinstance(decorator.args[0], ast.Constant)
+            and "/processes/" in str(decorator.args[0].value)
+            for decorator in node.decorator_list
+        )
+    ]
+    assert {route.name for route in routes} == {
+        "list_processes", "stop_process", "restart_process", "delete_process"
+    }
+    forbidden = {
+        "get_process", "get_workspace_for_user", "kind", "status", "session_id"
+    }
+    violations = []
+    for route in routes:
+        nodes = list(ast.walk(route))
+        assert any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ProcessControlService"
+            for node in nodes
+        ), f"{route.name} must use ProcessControlService"
+        for node in nodes:
+            if (
+                isinstance(node, ast.Attribute) and node.attr in forbidden
+                or isinstance(node, ast.Name)
+                and node.id in {"getattr", "_get_owned_workspace_async"}
+            ):
+                violations.append(f"{route.name}:{node.lineno}")
+    assert not violations, "\n".join(violations)
+
+    service = APPS_ROOT / "runners" / "services" / "process_controls.py"
+    assert not [
+        node.attr
+        for node in ast.walk(trees[service])
+        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
+    ], "Process controls must delegate persistence to the execution service"
+
+
 def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
     """Lazy imports and aliases must not conceal the reverse dependency."""
     path = APPS_ROOT / "runners" / "services" / "domains" / "git_operations.py"

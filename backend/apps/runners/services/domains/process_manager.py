@@ -238,7 +238,7 @@ class ProcessManagerMixin:
         is unique per ``(workspace, name, session_id)`` and requires
         ``session_id``. Temp rows are stopped by the harness cleanup
         hook when the owning run finishes and are never started,
-        restarted, or deleted by users (REST rejects those actions).
+        restarted, or deleted by users (ProcessControlService rejects them).
 
         Raises:
             WorkspaceNotFoundError: Unknown workspace.
@@ -812,10 +812,8 @@ class ProcessManagerMixin:
         stopped first; old logs are kept (new ``_r<run>`` log path).
 
         Temp rows only restart from within their owning session
-        (``session_id`` must match); user-driven restarts are rejected
-        without a session scope (see :meth:`_assert_not_temp` usage in
-        the API layer — a plain restart without ``session_id`` never
-        touches temp rows).
+        (``session_id`` must match). ProcessControlService rejects user-driven
+        restarts; a plain restart without ``session_id`` never touches temp rows.
         """
         parsed_session = self._coerce_session_id(session_id)
         stored = await self._resolve_process(
@@ -985,9 +983,9 @@ class ProcessManagerMixin:
 
         ``session_id`` scopes temp rows to one agent session (the agent
         only sees its own temps); persistent rows are always included.
-        ``kinds``/``running_only`` further restrict the result — the
-        user list passes ``running_only=True`` so finished temps vanish
-        from the UI while their DB rows are kept.
+        ``kinds``/``running_only`` further restrict the result.
+        ProcessControlService applies user visibility separately, keeping all
+        persistent rows but hiding finished temps without deleting their history.
         """
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:

@@ -91,6 +91,10 @@ from .schemas import (
 )
 from .services import get_runner_service
 from .services.image_definitions import ImageDefinitionService
+from .services.process_controls import (
+    ProcessControlService,
+    TemporaryProcessControlError,
+)
 from .services.workspace_reads import WorkspaceReadService
 from .storage_schemas import RunnerStorageOut
 
@@ -880,22 +884,6 @@ def _process_to_out(process) -> ProcessOut:
     )
 
 
-def _user_visible_processes(processes) -> list:
-    """Filter rows for the user list: all persistent + running temps.
-
-    Finished temp rows stay in the DB (agent history) but vanish from
-    the user list as soon as they stop — a stopped temp needs no user
-    action, and temps can never be started/restarted/deleted by users.
-    """
-    visible = []
-    for process in processes:
-        if str(getattr(process, "kind", "") or "") != "temp":
-            visible.append(process)
-        elif str(getattr(process, "status", "") or "") == "running":
-            visible.append(process)
-    return visible
-
-
 @workspace_router.get(
     "/{workspace_id}/processes/",
     response={200: list[ProcessOut], 403: ErrorOut, 404: ErrorOut},
@@ -919,12 +907,12 @@ async def list_processes(
     org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
-    service = _get_service()
+    service = ProcessControlService(_get_service())
     try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        processes = await service.list_processes(workspace_id, live=live)
-        visible = _user_visible_processes(processes)
-        return 200, [_process_to_out(process) for process in visible]
+        processes = await service.list_processes(
+            workspace_id, user=request.user, organization_id=org_id, live=live
+        )
+        return 200, [_process_to_out(process) for process in processes]
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -950,12 +938,13 @@ async def stop_process(
     org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
-    service = _get_service()
+    service = ProcessControlService(_get_service())
     try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
         process = await service.stop_process(
             workspace_id,
             process_id,
+            user=request.user,
+            organization_id=org_id,
         )
         return 200, _process_to_out(process)
     except NotFoundError as e:
@@ -992,24 +981,17 @@ async def restart_process(
     org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
-    service = _get_service()
+    service = ProcessControlService(_get_service())
     try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        existing = await service.get_process(workspace_id, process_id)
-        if str(getattr(existing, "kind", "") or "") == "temp":
-            return 400, ErrorOut(
-                detail=(
-                    "Temporary processes cannot be restarted by users; "
-                    "they live only for their agent session."
-                ),
-                code="validation_error",
-            )
         process = await service.restart_process(
             workspace_id,
             process_id,
             user=request.user,
+            organization_id=org_id,
         )
         return 200, _process_to_out(process)
+    except TemporaryProcessControlError as e:
+        return 400, ErrorOut(detail=e.message, code=e.code)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
@@ -1040,19 +1022,14 @@ async def delete_process(
     org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
-    service = _get_service()
+    service = ProcessControlService(_get_service())
     try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        existing = await service.get_process(workspace_id, process_id)
-        if str(getattr(existing, "kind", "") or "") == "temp":
-            return 400, ErrorOut(
-                detail=(
-                    "Temporary processes cannot be deleted by users; stop them instead."
-                ),
-                code="validation_error",
-            )
-        await service.delete_process(workspace_id, process_id)
+        await service.delete_process(
+            workspace_id, process_id, user=request.user, organization_id=org_id
+        )
         return 204, None
+    except TemporaryProcessControlError as e:
+        return 400, ErrorOut(detail=e.message, code=e.code)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from django.contrib.auth import get_user_model
-from django.test import Client
+from django.test import Client, RequestFactory
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole
@@ -206,6 +206,75 @@ def test_restart_reports_runner_failure(client, service, workspace, process):
     assert response.status_code == 409
     process.refresh_from_db()
     assert process.status == ProcessStatus.FAILED
+
+
+@pytest.mark.parametrize("action", ["restart", "delete"])
+@pytest.mark.parametrize("status", list(ProcessStatus))
+@pytest.mark.django_db(transaction=True)
+async def test_temp_controls_reject_without_mutating_history(
+    api_key, organization, user, service, workspace, action, status
+):
+    """User controls reject temps after the existing live lookup, keeping history.
+
+    Exercise the adapter directly: DELETE's existing response declaration omits
+    400 even though the handler returns it. Keep that separate schema defect out
+    of this behavior-preserving refactor.
+    """
+    process = WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name="agent-worker",
+        command="sleep 60",
+        kind="temp",
+        session_id=uuid.uuid4(),
+        status=status,
+        pid=4242,
+    )
+    request = RequestFactory().generic(
+        "POST" if action == "restart" else "DELETE",
+        _url(workspace, "{process_id}/", process.id),
+        HTTP_X_ORGANIZATION_ID=str(organization.id),
+    )
+    request.user = user
+    request.api_key = api_key[0]
+    handler = getattr(runners_api, f"{action}_process")
+    response_status, error = await handler(request, workspace.id, str(process.id))
+    assert response_status == 400
+    assert error.code == "validation_error"
+    assert error.detail == (
+        "Temporary processes cannot be restarted by users; "
+        "they live only for their agent session."
+        if action == "restart"
+        else "Temporary processes cannot be deleted by users; stop them instead."
+    )
+    process.refresh_from_db()
+    assert process.status == status
+    assert process.run_count == 0
+    events = [
+        call.kwargs["event"] for call in service._await_process_result.await_args_list
+    ]
+    assert events == (
+        ["harness:process_get"] if status == ProcessStatus.RUNNING else []
+    )
+
+
+def test_users_can_stop_running_temp_by_id(client, service, workspace):
+    """Owners may stop an agent temp without deleting its history row."""
+    process = WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name="agent-worker",
+        command="sleep 60",
+        kind="temp",
+        session_id=uuid.uuid4(),
+        status=ProcessStatus.RUNNING,
+        pid=4242,
+    )
+    response = client.post(_url(workspace, "{process_id}/stop/", process.id))
+    assert response.status_code == 200
+    assert response.json()["status"] == ProcessStatus.KILLED
+    assert response.json()["kind"] == "temp"
+    process.refresh_from_db()
+    assert process.status == ProcessStatus.KILLED
+    assert client.get(_url(workspace)).json() == []
 
 
 @pytest.mark.parametrize("method,suffix", [("post", ""), ("get", "{process_id}/")])
