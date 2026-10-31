@@ -693,6 +693,64 @@ describe('HarnessChatInput', () => {
     expect(typeof sends[0]![4]).toBe('string')
   })
 
+  describe('draft persistence', () => {
+    beforeEach(() => sessionStorage.clear())
+
+    it.each([
+      { sessionId: null, stoppable: false },
+      { sessionId: 'session-1', stoppable: false },
+      { sessionId: 'session-1', stoppable: true },
+    ])('preserves unsent text but clears sent text across remounts (%j)', async (props) => {
+      const wrapper = mountInput(props)
+      await setEditorText(wrapper, 'Send this once')
+      wrapper.unmount()
+
+      const restored = mountInput(props)
+      await flushPromises()
+      expect(editorText(restored)).toBe('Send this once')
+      await restored.get('[data-testid="composer-send"]').trigger('click')
+      expect(restored.emitted('send')?.[0]?.[0]).toBe('Send this once')
+      expect(sessionStorage.getItem(`chat-input-ws-1-${props.sessionId ?? 'default'}`)).toBeNull()
+      restored.unmount()
+
+      const remounted = mountInput(props)
+      await flushPromises()
+      expect(editorText(remounted)).toBe('')
+      remounted.unmount()
+    })
+
+    it.each([
+      ['native', 'codex'],
+      ['codex', 'claude'],
+      ['claude', 'native'],
+    ] as const)('does not resurrect sent text after switching from %s to %s', async (from, to) => {
+      enableCodex()
+      sessionStorage.setItem('chat-input-ws-2-default', 'Unrelated draft')
+      const wrapper = mountInput({ harnessId: from })
+      await flushPromises()
+      await setEditorText(wrapper, 'Initial draft')
+      await wrapper.get(`[data-testid="composer-mode-${to}-build"]`).trigger('click')
+      expect(editorText(wrapper)).toBe('Initial draft')
+      wrapper.unmount()
+
+      const restored = mountInput({ harnessId: to })
+      await flushPromises()
+      expect(editorText(restored)).toBe('Initial draft')
+      await setEditorText(restored, 'Initial draft, edited')
+      await restored.get('[data-testid="composer-send"]').trigger('click')
+      expect(restored.emitted('send')?.[0]?.[0]).toBe('Initial draft, edited')
+      restored.unmount()
+
+      for (const harnessId of [from, to]) {
+        const remounted = mountInput({ harnessId })
+        await flushPromises()
+        expect(editorText(remounted)).toBe('')
+        remounted.unmount()
+      }
+      expect(sessionStorage.getItem('chat-input-ws-2-default')).toBe('Unrelated draft')
+    })
+  })
+
   it('uses controlled scheduled-task state without chat cache/default side effects or send controls', async () => {
     const harness = useHarnessStore()
     harness.agentConfigs = [

@@ -703,8 +703,12 @@ function setHarnessMode(harnessId: HarnessId, mode: HarnessSessionMode): void {
     return
   }
   const harnessChanged = harnessId !== localHarnessId.value
+  // The visible draft follows a manual engine change. Move its cache entry
+  // too, otherwise sending only clears the new key and leaves stale text behind.
+  if (harnessChanged && !isScheduledTask.value) clearCache()
   localHarnessId.value = harnessId
   if (harnessChanged) {
+    if (!isScheduledTask.value) saveToCache(prompt.value)
     emit('update:harnessId', harnessId)
 
     const defaults = harnessEngineDefaults(harnessId, engines.value)
