@@ -31,7 +31,10 @@ def presentation(item: dict[str, Any]) -> tuple[str, str, dict[str, Any], str]:
         args = {"command": item.get("command", ""), "cwd": item.get("cwd", "")}
         output = item.get("aggregatedOutput") or ""
         actions = item.get("commandActions") or []
-        if any(x in args["command"] for x in ("/memories/", "$CODEX_HOME/memories")):
+        if any(
+            x in args["command"]
+            for x in ("/memories/", "/memories_v2/", "$CODEX_HOME/memories")
+        ):
             tool, title = "memory", "Memory"
             args["operation"] = "Read/update native memory"
         elif len(actions) == 1:
@@ -50,7 +53,11 @@ def presentation(item: dict[str, Any]) -> tuple[str, str, dict[str, Any], str]:
         tool, title = "edit", "Edit files"
         args = {"changes": item.get("changes", [])}
         output = args["changes"]
-        if any("/memories/" in str(x.get("path", "")) for x in args["changes"]):
+        if any(
+            root in str(change.get("path", ""))
+            for change in args["changes"]
+            for root in ("/memories/", "/memories_v2/")
+        ):
             tool, title = "memory", "Update memory"
             args["operation"] = "Update"
     elif kind == "webSearch":

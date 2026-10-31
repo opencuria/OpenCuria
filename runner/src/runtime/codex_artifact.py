@@ -18,13 +18,14 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-VERSION = "0.163.0"
+VERSION = "0.166.0"
 MAX_ARCHIVE_SIZE = 150 * 1024 * 1024
 MAX_PACKAGE_SIZE = 400 * 1024 * 1024
 FILES = frozenset(
     {
         "bin/codex-app-server",
         "bin/codex-code-mode-host",
+        "bin/codex-exec-server",
         "codex-package.json",
         "codex-path/rg",
         "codex-resources/bwrap",
@@ -33,15 +34,15 @@ FILES = frozenset(
 DIRECTORIES = frozenset({"bin", "codex-path", "codex-resources"})
 PINS = {
     "x86_64-unknown-linux-musl": (
-        "cce5802264a44d082da894ff2f2ba695a6ade722bc62a1ad0902153667063401",
-        116958460,
+        "e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
+        155332411,
     ),
     "aarch64-unknown-linux-musl": (
-        "9749a312a24db3c8a24683785595b5e556916694a648259fc3742a118f46a28c",
-        109259793,
+        "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
+        145150661,
     ),
 }
-RELEASE_URL = "https://github.com/openai/codex/releases/download/rust-v0.163.0/"
+RELEASE_URL = "https://github.com/openai/codex/releases/download/rust-v0.166.0/"
 
 
 def target_for_platform(platform: str) -> str:
@@ -145,6 +146,7 @@ def inspect_package(path: Path, target: str) -> dict[str, str]:
                 "target": target,
                 "variant": "codex-app-server",
                 "entrypoint": "bin/codex-app-server",
+                "execServer": "bin/codex-exec-server",
                 "resourcesDir": "codex-resources",
                 "pathDir": "codex-path",
             }:
@@ -287,7 +289,7 @@ def guest_main() -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=20,
             )
-        if output.strip() != b"codex-app-server 0.163.0":
+        if output.strip() != f"codex-app-server {VERSION}".encode():
             raise ValueError("Invalid Codex executable version")
         sys.stdout.write(VERSION + "\n")
     finally:

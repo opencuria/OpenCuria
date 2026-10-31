@@ -36,9 +36,9 @@ ARTIFACT_GUEST_ROOT = "/opt/opencuria/runtimes"
 CLAUDE_RELEASE_MANIFEST_SHA256 = (
     "ac9d8bb6a65febbccf9e65bde2e3e4298b8d6974e96f559fbf1d740891a747db"
 )
-# Canonical manifest hash after repinning Claude; the Codex entry is unchanged.
+# Canonical combined manifest hash; upstream Claude release pins are unchanged.
 CLAUDE_ARTIFACT_SPEC_SHA256 = (
-    "1e04703a2427031fd9731e9f3180d0bed655dc0d6778024373aefb25f59ed322"
+    "dec9788b857718ec2d65904c8db139da70f8a0b04468b96474e8462c256535d3"
 )
 CLAUDE_PLATFORM_PINS = {
     "linux-x64": (
@@ -707,7 +707,7 @@ class RuntimeArtifactManager:
             raise ArtifactRequestError("Unapproved runtime artifact or version")
         if (artifact_id, version) not in {
             ("claude-agent", "2.1.316"),
-            ("codex-agent", "0.163.0"),
+            ("codex-agent", "0.166.0"),
         }:
             raise ArtifactRequestError("Unapproved runtime artifact or version")
         platforms = entry.get("platforms")

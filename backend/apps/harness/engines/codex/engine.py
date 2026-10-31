@@ -114,6 +114,7 @@ class CodexEngine:
         self.evaluator, self.effort = evaluator, effort
         self._owner_released = False
         self._running = False
+        self._stopping = False
         self.turn_id = ""
         self.status: str | None = None
         self.thread_id = self.external_session_id
@@ -148,11 +149,18 @@ class CodexEngine:
         """Redact events and route projected children or the managed tool scope."""
         safe = redact_value(event, self.secret_values)
         child = parent or self._child_scope.get()
-        if child and self.on_child_event:
-            await self.on_child_event(child, safe)
-        elif not parent and self.emit:
-            # Only an implicit managed scope may fall back to the root sink.
-            await self.emit(safe)
+        try:
+            if child and self.on_child_event:
+                await self.on_child_event(child, safe)
+            elif not parent and self.emit:
+                # Only an implicit managed scope may fall back to the root sink.
+                await self.emit(safe)
+        except asyncio.CancelledError:
+            # The timeline rejects late events after Stop. Its cancellation
+            # must not prevent shielded cleanup from observing turn/completed.
+            task = asyncio.current_task()
+            if not self._stopping or (task is not None and task.cancelling()):
+                raise
 
     async def _bind(self, **state: Any) -> None:
         """Publish checkpoint metadata through the execution owner fence."""
@@ -205,6 +213,7 @@ class CodexEngine:
         if (
             (params.get("threadId") != self.thread_id and child is None)
             or not self.turn_id
+            or self._stopping
             or self.terminal.is_set()
             or (child is None and params.get("turnId") != self.turn_id)
             or (
@@ -350,6 +359,7 @@ class CodexEngine:
         self.turn_ready = asyncio.Event()
         self.turn_id = ""
         self.status = None
+        self._stopping = False
         self._owner_released = False
         self.invoker.seen.clear()
         schemas = self.invoker.schemas(self.agent, mode, opts)
@@ -615,6 +625,7 @@ class CodexEngine:
             )
         except BaseException as exc:
             error = exc
+            self._stopping = isinstance(exc, asyncio.CancelledError)
             if (
                 isinstance(exc, asyncio.CancelledError)
                 and rpc

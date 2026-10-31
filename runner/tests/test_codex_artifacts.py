@@ -36,11 +36,12 @@ def package_bytes(*, target=TARGET, extra=None, omit=None):
         "target": target,
         "variant": "codex-app-server",
         "entrypoint": "bin/codex-app-server",
+        "execServer": "bin/codex-exec-server",
         "resourcesDir": "codex-resources",
         "pathDir": "codex-path",
     }
     files = {
-        name: b"#!/bin/sh\nprintf 'codex-app-server 0.163.0\\n'\n"
+        name: b"#!/bin/sh\nprintf 'codex-app-server 0.166.0\\n'\n"
         for name in codex.FILES
     }
     files["codex-package.json"] = json.dumps(metadata).encode()
@@ -139,17 +140,17 @@ def setup_codex(tmp_path, monkeypatch):
 async def test_codex_package_install_cache_verify_and_poison_rejection(setup_codex):
     manager, runtime, _ = setup_codex
     workspace = uuid.uuid4()
-    result = await manager.ensure_runtime_artifact(workspace, "codex-agent", "0.163.0")
+    result = await manager.ensure_runtime_artifact(workspace, "codex-agent", "0.166.0")
     assert result == {
         "ok": True,
-        "path": f"{manager._guest_runtime_root}/codex-agent/0.163.0/bin/codex-app-server",
-        "version": "0.163.0",
+        "path": f"{manager._guest_runtime_root}/codex-agent/0.166.0/bin/codex-app-server",
+        "version": "0.166.0",
         "platform": "linux-x64",
     }
     installed = Path(result["path"]).parent.parent
     assert all(not source.exists() for source in runtime.uploads)
     assert (
-        await manager.ensure_runtime_artifact(workspace, "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(workspace, "codex-agent", "0.166.0")
         == result
     )
     manager._download.assert_awaited_once()
@@ -163,7 +164,7 @@ async def test_codex_package_install_cache_verify_and_poison_rejection(setup_cod
     helper.write_text("poisoned executable")
     helper.chmod(0o555)
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(workspace, "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(workspace, "codex-agent", "0.166.0")
     assert helper.read_text() == "poisoned executable"  # Never silently replace.
 
 
@@ -172,15 +173,15 @@ async def test_codex_corrupt_cache_redownloaded_and_symlink_not_followed(
     setup_codex, tmp_path
 ):
     manager, _, _ = setup_codex
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     cached = next(manager._cache_root.rglob("package.tar.gz"))
     cached.write_bytes(b"corrupt")
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     target = tmp_path / "untouched"
     target.write_bytes(b"keep")
     cached.unlink()
     cached.symlink_to(target)
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     assert not cached.is_symlink()
     assert target.read_bytes() == b"keep"
     assert manager._download.await_count == 3
@@ -197,18 +198,18 @@ async def test_codex_guest_config_path_and_artifact_symlinks_rejected(
     elsewhere.mkdir()
     guest.symlink_to(elsewhere, target_is_directory=True)
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     assert not list(elsewhere.iterdir())
     guest.unlink()
     result = await manager.ensure_runtime_artifact(
-        uuid.uuid4(), "codex-agent", "0.163.0"
+        uuid.uuid4(), "codex-agent", "0.166.0"
     )
     helper = Path(result["path"]).parent.parent / "codex-path/rg"
     helper.parent.chmod(0o755)
     helper.unlink()
     helper.symlink_to("/bin/sh")
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
 
 
 @pytest.mark.asyncio
@@ -217,7 +218,7 @@ async def test_codex_cache_directory_symlink_rejected(setup_codex, tmp_path):
     manager._state_dir.mkdir()
     manager._cache_root.symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises(ArtifactProvisionError, match="unsafe"):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     manager._download.assert_not_awaited()
 
 
@@ -236,7 +237,7 @@ async def test_codex_rejects_mutable_version_and_recreated_guest(setup_codex):
 
     runtime.exec_command_wait = changed
     with pytest.raises(ArtifactProvisionError, match="Workspace changed"):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
 
 
 @pytest.mark.asyncio
@@ -244,7 +245,7 @@ async def test_codex_cancelled_upload_settles_and_cleans(setup_codex):
     manager, runtime, _ = setup_codex
     runtime.upload_gate = asyncio.Event()
     task = asyncio.create_task(
-        manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     )
     await asyncio.wait_for(runtime.upload_entered.wait(), 2)
     task.cancel()
@@ -284,7 +285,7 @@ def test_codex_manifest_poison_rejected(tmp_path, key):
 def test_codex_official_platform_pins(platform, target):
     entry = codex.manifest_entry()["platforms"][platform]
     assert entry["url"].endswith(
-        f"rust-v0.163.0/codex-app-server-package-{target}.tar.gz"
+        f"rust-v0.166.0/codex-app-server-package-{target}.tar.gz"
     )
     assert (entry["sha256"], entry["size"]) == codex.PINS[target]
     assert entry["size"] < codex.MAX_ARCHIVE_SIZE
@@ -318,11 +319,15 @@ def test_codex_rejects_hostile_archive_entries(tmp_path, name, kind):
     assert not (tmp_path / "escape").exists()
 
 
-@pytest.mark.parametrize("change", ["target", "missing", "size", "metadata"])
+@pytest.mark.parametrize(
+    "change", ["target", "missing", "missing_executor", "size", "metadata"]
+)
 def test_codex_rejects_wrong_layout_target_and_bombs(tmp_path, monkeypatch, change):
     kwargs = {"target": "aarch64-unknown-linux-musl"} if change == "target" else {}
     if change == "missing":
         kwargs["omit"] = "codex-resources/bwrap"
+    if change == "missing_executor":
+        kwargs["omit"] = "bin/codex-exec-server"
     if change == "size":
         monkeypatch.setattr(codex, "MAX_PACKAGE_SIZE", 10)
     payload = package_bytes(**kwargs)
@@ -359,7 +364,7 @@ async def test_real_codex_package_local_installer_contract(tmp_path):
 
     manager._download = AsyncMock(side_effect=download)
     result = await manager.ensure_runtime_artifact(
-        uuid.uuid4(), "codex-agent", "0.163.0"
+        uuid.uuid4(), "codex-agent", "0.166.0"
     )
     assert Path(result["path"]).is_file()
     installed = Path(result["path"]).parent.parent
@@ -424,14 +429,14 @@ async def test_real_codex_package_local_installer_contract(tmp_path):
             await process.wait()
     assert not home.exists()
     # Non-entrypoint bytes are part of the immutable artifact, too.
-    helper = installed / "bin/codex-code-mode-host"
+    helper = installed / "bin/codex-exec-server"
     helper.chmod(0o755)
     with helper.open("r+b") as output:
         output.seek(-1, os.SEEK_END)
         output.write(b"\x01")
     helper.chmod(0o555)
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     assert all(not source.exists() for source in runtime.uploads)
 
 
@@ -551,7 +556,7 @@ async def test_cancelled_guest_operation_is_settled_without_orphan_task(setup_co
     async def operation():
         entered.set()
         await finish.wait()
-        return 0, "0.163.0"
+        return 0, "0.166.0"
 
     task = asyncio.create_task(manager._complete_guest_operation(operation(), 2))
     await entered.wait()
@@ -612,7 +617,7 @@ async def test_codex_rejects_extra_installed_entries_and_hardlinks(
 ):
     manager, _, _ = setup_codex
     result = await manager.ensure_runtime_artifact(
-        uuid.uuid4(), "codex-agent", "0.163.0"
+        uuid.uuid4(), "codex-agent", "0.166.0"
     )
     installed = Path(result["path"]).parent.parent
     installed.chmod(0o755)
@@ -620,10 +625,10 @@ async def test_codex_rejects_extra_installed_entries_and_hardlinks(
     extra.write_text("unexpected")
     installed.chmod(0o555)
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")
     installed.chmod(0o755)
     extra.unlink()
     installed.chmod(0o555)
     os.link(installed / "codex-path/rg", tmp_path / "unexpected-hardlink")
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.163.0")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "codex-agent", "0.166.0")

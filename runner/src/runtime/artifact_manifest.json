@@ -6,7 +6,7 @@
       "manifest_url": "https://downloads.claude.ai/claude-code-releases/2.1.316/manifest.json",
       "signature_url": "https://downloads.claude.ai/claude-code-releases/2.1.316/manifest.json.sig",
       "signature_sha256": "863fe4c0bb7e3e5fb547241bee0b267ee2ff890cbd75911a0748d199afbc8af2",
-      "manifest_sha256": "1e04703a2427031fd9731e9f3180d0bed655dc0d6778024373aefb25f59ed322",
+      "manifest_sha256": "dec9788b857718ec2d65904c8db139da70f8a0b04468b96474e8462c256535d3",
       "release_manifest_sha256": "ac9d8bb6a65febbccf9e65bde2e3e4298b8d6974e96f559fbf1d740891a747db",
       "signing_fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
       "platforms": {
@@ -33,27 +33,27 @@
       }
     },
     "codex-agent": {
-      "version": "0.163.0",
+      "version": "0.166.0",
       "platforms": {
         "linux-x64": {
-          "url": "https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-app-server-package-x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "cce5802264a44d082da894ff2f2ba695a6ade722bc62a1ad0902153667063401",
-          "size": 116958460
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
+          "size": 155332411
         },
         "linux-x64-musl": {
-          "url": "https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-app-server-package-x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "cce5802264a44d082da894ff2f2ba695a6ade722bc62a1ad0902153667063401",
-          "size": 116958460
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
+          "size": 155332411
         },
         "linux-arm64": {
-          "url": "https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
-          "sha256": "9749a312a24db3c8a24683785595b5e556916694a648259fc3742a118f46a28c",
-          "size": 109259793
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
+          "size": 145150661
         },
         "linux-arm64-musl": {
-          "url": "https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
-          "sha256": "9749a312a24db3c8a24683785595b5e556916694a648259fc3742a118f46a28c",
-          "size": 109259793
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
+          "size": 145150661
         }
       }
     }

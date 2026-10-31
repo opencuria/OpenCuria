@@ -163,7 +163,7 @@ class LocalAccessor:
         )
 
     async def ensure_runtime_artifact(self, name, version):
-        assert (name, version) == ("codex-agent", "0.163.0")
+        assert (name, version) == ("codex-agent", "0.166.0")
         return str(PINNED)
 
     async def open_process(self, argv, cwd, env, **kwargs):

@@ -1,10 +1,32 @@
 # Codex
 
-OpenCuria runs the official **Codex 0.163.0 standalone app-server package**
+OpenCuria runs the official **Codex 0.166.0 standalone app-server package**
 inside a Linux workspace. OpenCuria owns accounts, permission boundaries and
 run lifecycle; Codex retains its native prompt, tools and multi-agent loop.
 There is no protocol translation gateway. The integration uses a pinned, experimental **internal
 app-server API**, not a stable public SDK contract.
+
+## Upgrade review: 0.163.0 → 0.166.0
+
+Reviewed the [official changelog][changelog], releases
+[0.164.0][release-164], [0.165.0][release-165] and [0.166.0][release],
+their protocol/configuration changes, and the actual bundled model catalog.
+
+| Change | OpenCuria handling |
+| --- | --- |
+| Standalone executor added to the release package | Pin and verify `bin/codex-exec-server` alongside the other helpers, including its metadata and immutable installed bytes. Update both architecture pins and the managed ripgrep PATH. |
+| GPT-6.1 Terra | Include the runtime's model name and supported efforts, including `ultra`, in account-scoped discovery and validation. The default stays GPT-6.1 Sol with OpenCuria's high effort. |
+| Fresh memory profiles default to v2 | Checkpoint and restore both `memories/` and `memories_v2/` markdown and their SQLite databases, including `memories_v2_1.sqlite`, retaining size, path and symlink restrictions. Both versions use the existing memory timeline display. Existing v1 profiles retain upstream's version selection. |
+| Reasoning changes during conversations; resume, interrupt, compaction and shutdown fixes | Retain per-turn effort and explicit permission overrides. Drain late events after Stop even when the timeline rejects them with cancellation, so the terminal event still permits a fenced checkpoint. Exercise continuation, steering, child cleanup and usage against the new runtime. |
+| Item lifecycle timestamps and generated-image identifiers | Items remain flat on the wire. Local app-server uses inline image storage; existing inline/saved-path previews remain compatible, including authorization checks. Remote `fileId` resolution would need a separate attachment-store integration if that storage mode is introduced. |
+| Attached native forks and Vertex AI provider | Optional future integration work. OpenCuria forks keep their current copied-history semantics; adding Vertex requires the shared provider/account system. Neither is enabled implicitly. |
+| CLI presets, inline model/permission commands, transcript selection, image previews and `doctor --network-only` | Terminal UI/diagnostic features do not require web/mobile adapters. OpenCuria retains its model picker, permissions and timelines. |
+| Enterprise MCP sign-in, coordinated token refresh and remote credential masking | Native MCP behavior stays upstream-owned; managed plugin tools retain OpenCuria's credential and permission boundaries. Native interactive sign-in is separate from OpenCuria provider-account login. |
+
+External-agent memory import remains an upstream opt-in. No automatic import or
+new provider login flow is added. Future UI work could expose native memory
+summaries, attached forks, speed tiers or safety-block follow-up choices through
+the existing services if those capabilities are needed.
 
 ## Connect and start
 
@@ -67,6 +89,8 @@ not a compatibility guarantee. See [OpenRouter's Codex guide][openrouter].
   remains model/account-dependent. Memory may issue its own background model
   requests; root-turn token totals do not necessarily include these requests.
   Memory markdown and databases are included in bounded encrypted checkpoints.
+  Both legacy `memories/` and current `memories_v2/` are retained; fresh profiles
+  use upstream's v2 default, while existing v1 memory roots remain compatible.
 - Tool display names are harness-independent: `task`, `websearch`, `memory`,
   `image_generation`, and `tool_call` for unmapped native/MCP calls. Image results
   use bounded attachments; workspace previews require authorized no-follow reads.
@@ -85,9 +109,9 @@ also supports same-thread continuation after terminal interruption, process-tree
 cleanup and successful checkpoint persistence. An uncertain failure remains
 **dirty**: fork or start a new chat instead of silently restoring stale history.
 Changes to registered dynamic tool schemas also require a fork/new chat.
-Existing Codex chats using the previous full OpenCuria tool registry therefore
-need a fork/new chat after this update; native tool signatures are never rewritten
-inside an existing upstream thread.
+Older Codex chats still bound to the former full OpenCuria tool registry need a
+fork/new chat; native tool signatures are never rewritten inside an existing
+upstream thread. The 0.166.0 runtime upgrade keeps the managed tool signatures.
 Mode changes keep stable signatures and re-evaluate the current role and policy.
 
 Forking or editing starts a **fresh upstream thread** from the copied OpenCuria
@@ -127,7 +151,8 @@ migrations before serving traffic. Do not substitute a system CLI, run CLI
 self-update, or request `latest`. The runner downloads the exact official
 [release][release] on demand and verifies size, SHA-256, layout and every installed
 file before execution. The complete package includes app-server, code-mode host,
-ripgrep and bubblewrap; it is not a lone binary bundled in this repository.
+exec-server, ripgrep and bubblewrap; it is not a lone binary bundled in this
+repository.
 Linux x86_64 and aarch64 static musl packages are pinned for glibc/musl guests.
 Guests need Python 3.10+ (`python3`), `sh`, `bash`, `setsid` and the kernel/libc
 sandbox/publication support described in the [runner guide](../runner/README.md#pinned-external-runtimes).
@@ -148,12 +173,12 @@ From the repository root on Linux x86_64:
 
 ```bash
 python3 scripts/fetch-codex-test-runtime.py
-(cd backend && .venv/bin/pytest -q apps/harness/tests/test_codex_core*.py)
+(cd backend && .venv/bin/pytest -q apps/harness/tests/test_codex*.py)
 (cd runner && .venv/bin/pytest -q tests/test_codex_artifacts.py)
 ```
 
 The standalone stdlib setup script needs no Django configuration or provider
-credentials. It downloads about **117 MB** on x86_64 (109 MB on aarch64), verifies
+credentials. It downloads about **155 MB** on x86_64 (145 MB on aarch64), verifies
 approved release size/SHA-256 and safe layout, and installs to the ignored
 `.opencuria/codex-test-runtime/`. Repeating it verifies the archive and every
 installed file, including helpers, before checking the exact version. Changed
@@ -179,5 +204,8 @@ real-package testing remains opt-in. Internal contracts are mapped in the
 Licenses and redistribution obligations are in
 [Third-Party Notices](../THIRD_PARTY_NOTICES.md#openai-codex).
 
-[release]: https://github.com/openai/codex/releases/tag/rust-v0.163.0
+[release]: https://github.com/openai/codex/releases/tag/rust-v0.166.0
+[release-164]: https://github.com/openai/codex/releases/tag/rust-v0.164.0
+[release-165]: https://github.com/openai/codex/releases/tag/rust-v0.165.0
+[changelog]: https://learn.chatgpt.com/docs/changelog
 [openrouter]: https://openrouter.ai/docs/guides/guides/codex-cli

@@ -925,6 +925,13 @@ async def test_parent_stop_cancels_real_child_and_releases_both_owners(runtime):
     session = new_session(data)
     assistant, task = await start(data, session)
     await asyncio.wait_for(data.provider.blocked.wait(), 20)
+    # Child inference may start before its queued notification reaches the host.
+    async with asyncio.timeout(10):
+        while not HarnessSession.objects.filter(parent=session).exists():
+            if task.done():
+                await task
+                pytest.fail("Native child ended before its timeline was created")
+            await asyncio.sleep(0.02)
     child = HarnessSession.objects.get(parent=session)
     child_assistant = HarnessMessage.objects.get(session=child, role="assistant")
     await asyncio.wait_for(data.service.abort_run(session.id), 25)

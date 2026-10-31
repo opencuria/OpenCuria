@@ -14,7 +14,7 @@ root=pathlib.Path(sys.argv[2])
 pattern=r'/workspace/\.opencuria/harness/codex/[0-9a-f-]{36}/config'
 assert re.fullmatch(pattern,str(root))
 MAX=24*1024*1024
-DB=re.compile(r'(?:state|thread_history|queue|goals|memories)_\d+\.sqlite')
+DB=re.compile(r'(?:state|thread_history|queue|goals|memories(?:_v2)?)_\d+\.sqlite')
 def dirs(p):
     cur=pathlib.Path('/')
     for part in p.parts[1:]:
@@ -28,7 +28,7 @@ def regular(p,limit=MAX):
     return s
 def valid(name):
     if DB.fullmatch(name): return True
-    memory=r'memories/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.md'
+    memory=r'(?:memories|memories_v2)/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.md'
     if re.fullmatch(memory,name): return True
     pattern=(r'(?:sessions|archived_sessions)/\d{4}/\d{2}/\d{2}/'
              r'rollout-[A-Za-z0-9T_.:-]+\.jsonl')
@@ -100,7 +100,7 @@ elif action=='fresh':
 elif action=='snapshot':
     dirs(root);files=[];total=0
     paths=list(root.iterdir())
-    for subtree in ('sessions','archived_sessions','memories'):
+    for subtree in ('sessions','archived_sessions','memories','memories_v2'):
         base=root/subtree
         if base.exists():
             dirs(base)

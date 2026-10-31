@@ -258,13 +258,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ## OpenAI Codex
 
-OpenCuria integrates the unmodified official **Codex 0.163.0** standalone
+OpenCuria integrates the unmodified official **Codex 0.166.0** standalone
 app-server package, released by **OpenAI**, **Copyright 2025 OpenAI**, under the
 **Apache License, Version 2.0**. Source and release:
-https://github.com/openai/codex/releases/tag/rust-v0.163.0.
+https://github.com/openai/codex/releases/tag/rust-v0.166.0.
 
-- Full upstream license: [codex-0.163.0-LICENSE.txt](docs/licenses/codex-0.163.0-LICENSE.txt).
-- Upstream attribution notice: [codex-0.163.0-NOTICE.txt](docs/licenses/codex-0.163.0-NOTICE.txt).
+- Full upstream license: [codex-0.166.0-LICENSE.txt](docs/licenses/codex-0.166.0-LICENSE.txt).
+- Upstream attribution notice: [codex-0.166.0-NOTICE.txt](docs/licenses/codex-0.166.0-NOTICE.txt).
 - The notice identifies code derived from **Ratatui** (MIT): Copyright (c)
   2016–2022 Florian Dehau; Copyright (c) 2023–2025 The Ratatui Developers.
 
@@ -278,7 +278,8 @@ bytes are downloaded on demand, not bundled in the repository.
 Redistributors of the downloaded package or images containing it must retain the
 applicable license texts and notices, including upstream NOTICE, Ratatui's MIT
 notice/license and all separate helper/dependency licensing. The package includes
-`codex-app-server`, `codex-code-mode-host`, `codex-path/rg` (ripgrep) and
+`codex-app-server`, `codex-code-mode-host`, `codex-exec-server`,
+`codex-path/rg` (ripgrep) and
 `codex-resources/bwrap` (bubblewrap); Codex's Apache license alone is not a license
 for every dependency/helper. Consult and preserve the release and corresponding
 source dependency notices/licenses (including ripgrep's MIT/Unlicense and
