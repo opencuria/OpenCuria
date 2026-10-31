@@ -23,7 +23,11 @@ from asgiref.sync import sync_to_async
 from common.exceptions import ConflictError
 
 from .services import get_runner_service
-from .services.infra.desktop_tunnels import push_runner_ws_closed, push_runner_ws_frame
+from .services.infra.desktop_tunnels import (
+    close_runner_ws_tunnels,
+    push_runner_ws_closed,
+    push_runner_ws_frame,
+)
 from .services.infra.realtime import (
     drop_frontend,
     get_sio_server,
@@ -201,6 +205,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     @sio.event
     async def disconnect(sid: str):
         """Handle runner disconnection."""
+        await close_runner_ws_tunnels(sid)
         service = get_runner_service()
         await sync_to_async(service.unregister_runner)(sid)
         logger.info("Runner disconnected (sid=%s)", sid)

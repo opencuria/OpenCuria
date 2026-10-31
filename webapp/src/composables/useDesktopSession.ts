@@ -71,8 +71,15 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
           state.status.holder_count ?? 0,
         )
         if (state.status.active && state.status.proxy_url) {
-          if (state.connecting) desktopStore.setConnecting(id)
-          else desktopStore.setConnected(id, state.status.proxy_url)
+          if (state.connecting) {
+            const observedRevision = state.status.revision ?? state.status.intent_revision
+            if (observedRevision !== undefined && observedRevision !== state.revision) {
+              // The old route does not authorize the replacement intent yet.
+              // Withdraw its viewer until the new lease is confirmed.
+              desktopStore.setDisconnected()
+            }
+            desktopStore.setConnecting(id)
+          } else desktopStore.setConnected(id, state.status.proxy_url)
         } else if (desktopStore.workspaceId === id) {
           // A stale route/status must not preserve an old connected store flag.
           desktopStore.setDisconnected()

@@ -454,7 +454,10 @@ async def _proxy_websocket(
         p.decode() if isinstance(p, bytes) else p for p in scope.get("subprotocols", [])
     ]
     tunnel_id = uuid.uuid4().hex
-    queue = register_ws_tunnel(tunnel_id, workspace_id, runner_id)
+    queue = register_ws_tunnel(
+        tunnel_id, workspace_id, runner_id, runner_sid=runner_sid
+    )
+    loop_owns_cleanup = False
 
     try:
         from .services.infra.realtime import get_sio_server
@@ -471,11 +474,16 @@ async def _proxy_websocket(
             timeout=15,
         )
 
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            await send({"type": "websocket.close", "code": 1011})
+            return
+
         accept_msg = {"type": "websocket.accept"}
         chosen_protocol = response.get("subprotocol")
         if chosen_protocol:
             accept_msg["subprotocol"] = chosen_protocol
         await send(accept_msg)
+        loop_owns_cleanup = True
         await _ws_proxy_loop(
             receive,
             send,
@@ -502,6 +510,27 @@ async def _proxy_websocket(
             pass
     finally:
         unregister_ws_tunnel(tunnel_id)
+        if not loop_owns_cleanup:
+            # A timed-out open may still complete on the runner. Retire its ID
+            # even if no ACK arrived or the browser vanished before accept.
+            cleanup_task = asyncio.create_task(
+                _close_runner_tunnel(runner_sid, tunnel_id)
+            )
+            await asyncio.shield(cleanup_task)
+
+
+async def _close_runner_tunnel(runner_sid: str, tunnel_id: str) -> None:
+    """Retire a runner tunnel without exposing upstream request details."""
+    from .services.infra.realtime import get_sio_server
+
+    try:
+        await get_sio_server().emit(
+            "desktop:proxy_ws_close",
+            {"tunnel_id": tunnel_id},
+            to=runner_sid,
+        )
+    except Exception:
+        logger.error("Desktop WebSocket runner tunnel close failed")
 
 
 def _sanitize_websocket_close_code(value) -> int:
@@ -533,21 +562,12 @@ async def _ws_proxy_loop(
     runner_close_task: asyncio.Task | None = None
     unavailable_close_sent = False
 
-    async def emit_runner_tunnel_close():
-        try:
-            await get_sio_server().emit(
-                "desktop:proxy_ws_close",
-                {"tunnel_id": tunnel_id},
-                to=runner_sid,
-            )
-        except Exception:
-            # Avoid logging exception details, which may include session data.
-            logger.error("Desktop WebSocket runner tunnel close failed")
-
     async def close_runner_tunnel():
         nonlocal runner_close_task
         if runner_close_task is None:
-            runner_close_task = asyncio.create_task(emit_runner_tunnel_close())
+            runner_close_task = asyncio.create_task(
+                _close_runner_tunnel(runner_sid, tunnel_id)
+            )
         # Shield the close emit from cancellation of either forwarding task.
         await asyncio.shield(runner_close_task)
 
@@ -645,9 +665,9 @@ async def _ws_proxy_loop(
             return
         service = get_runner_service()
         try:
-            user, organization_id = await sync_to_async(
-                service.resolve_desktop_viewer
-            )(user_id, workspace_id)
+            user, organization_id = await sync_to_async(service.resolve_desktop_viewer)(
+                user_id, workspace_id
+            )
             while True:
                 await service.renew_desktop(
                     uuid.UUID(workspace_id),

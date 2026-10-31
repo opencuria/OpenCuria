@@ -332,6 +332,35 @@ async def test_runner_frames_are_forwarded_to_registered_websocket_tunnel():
 
 
 @pytest.mark.asyncio
+async def test_runner_disconnect_closes_only_its_desktop_transport(monkeypatch):
+    """A vanished runner transport must not leave a seemingly connected viewer."""
+    import socketio
+
+    from apps.runners import sio_server
+
+    server = socketio.AsyncServer(async_mode="asgi")
+    sio_server._register_event_handlers(server)
+    service = Mock()
+    monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
+    old_id, new_id = uuid.uuid4().hex, uuid.uuid4().hex
+    old_queue = register_ws_tunnel(
+        old_id, "workspace", "runner-1", runner_sid="old-sid"
+    )
+    new_queue = register_ws_tunnel(
+        new_id, "workspace", "runner-1", runner_sid="replacement-sid"
+    )
+    try:
+        await server.handlers["/"]["disconnect"]("old-sid")
+
+        assert old_queue.get_nowait() == {"type": "close", "code": 1011}
+        assert new_queue.empty()
+        service.unregister_runner.assert_called_once_with("old-sid")
+    finally:
+        unregister_ws_tunnel(old_id)
+        unregister_ws_tunnel(new_id)
+
+
+@pytest.mark.asyncio
 async def test_runner_frames_from_wrong_runner_are_ignored():
     tunnel_id = uuid.uuid4().hex
     queue = register_ws_tunnel(
@@ -478,7 +507,7 @@ async def test_client_disconnect_closes_runner_tunnel(monkeypatch):
 @pytest.mark.asyncio
 async def test_proxy_websocket_unregisters_tunnel_after_loop(monkeypatch):
     sio = AsyncMock()
-    sio.call = AsyncMock(return_value={})
+    sio.call = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
         "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
     )
@@ -504,6 +533,82 @@ async def test_proxy_websocket_unregisters_tunnel_after_loop(monkeypatch):
 
     assert sent == [{"type": "websocket.accept"}]
     assert set(_WS_TUNNELS) == registered_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [{"ok": False}, None, {}, {"ok": "true"}])
+async def test_runner_rejected_handshake_never_accepts_browser(monkeypatch, response):
+    """An upstream failure ACK must be handled immediately, without a fake accept."""
+    sio = AsyncMock()
+    sio.call.return_value = response
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
+    send = AsyncMock()
+    await _proxy_websocket(
+        {"subprotocols": []},
+        AsyncMock(),
+        send,
+        workspace_id=str(uuid.uuid4()),
+        runner_sid="runner-sid",
+        runner_id="runner-id",
+        query_string="",
+    )
+    send.assert_awaited_once_with({"type": "websocket.close", "code": 1011})
+    assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "error", "cancel", "accept"])
+async def test_incomplete_websocket_handshake_closes_runner_tunnel(
+    monkeypatch, failure, caplog
+):
+    """A missing ACK or browser must not leave an invisible VNC client alive."""
+    from socketio.exceptions import TimeoutError as SocketIOTimeoutError
+
+    exceptions = {
+        "timeout": SocketIOTimeoutError(),
+        "error": RuntimeError("https://desktop.example/?token=secret-token"),
+        "cancel": asyncio.CancelledError(),
+    }
+    sio = AsyncMock()
+    if failure in exceptions:
+        sio.call.side_effect = exceptions[failure]
+    else:
+        sio.call.return_value = {"ok": True}
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
+    sent = []
+    registered_before = set(_WS_TUNNELS)
+
+    async def send(message):
+        if failure == "accept" and message["type"] == "websocket.accept":
+            raise OSError("browser disconnected")
+        sent.append(message)
+
+    pending = _proxy_websocket(
+        {"subprotocols": []},
+        AsyncMock(),
+        send,
+        workspace_id=str(uuid.uuid4()),
+        runner_sid="runner-sid",
+        runner_id="runner-id",
+        query_string="token=secret-token",
+    )
+    if failure == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    else:
+        await pending
+
+    tunnel_id = sio.call.await_args.args[1]["tunnel_id"]
+    sio.emit.assert_awaited_once_with(
+        "desktop:proxy_ws_close", {"tunnel_id": tunnel_id}, to="runner-sid"
+    )
+    assert set(_WS_TUNNELS) == registered_before
+    assert "secret-token" not in caplog.text
+    assert "desktop.example" not in caplog.text
 
 
 def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():

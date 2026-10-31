@@ -294,6 +294,31 @@ describe('per-tab desktop viewer intents', () => {
     expect(api.renewDesktop).not.toHaveBeenCalled()
   })
 
+  it('withdraws the old viewer while a replacement intent is still starting', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    await session.startDesktop()
+    let finishStart!: (value: { task_id: string }) => void
+    vi.mocked(api.startDesktop).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishStart = resolve
+      }),
+    )
+    vi.mocked(api.getDesktopStatus).mockResolvedValueOnce(status(id, 'expired'))
+
+    const recovery = refreshDesktopViewer(id)
+    await flushPromises()
+
+    expect(desktopViewerSession(id).revision).toBe(2)
+    expect(useDesktopStore().isConnecting).toBe(true)
+    expect(useDesktopStore().isConnected).toBe(false)
+
+    finishStart({ task_id: 'replacement' })
+    await recovery
+    expect(useDesktopStore().isConnected).toBe(true)
+    expect(useDesktopStore().viewerOwned).toBe(true)
+  })
+
   it('does not renew reserved or globally held leases, retries observation on outage', async () => {
     const id = `viewer-${++count}`
     vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id, 'reserved'))

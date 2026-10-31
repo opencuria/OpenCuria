@@ -49,6 +49,16 @@ class _Tunnel:
     desktop_generation: int | None = None
 
 
+@dataclass
+class _OpeningTunnel:
+    """Handshake resources that must also obey desktop/transport teardown."""
+
+    workspace_id: uuid.UUID
+    desktop_generation: int | None
+    session: aiohttp.ClientSession | None = None
+    invalidated: bool = False
+
+
 class DesktopProxy:
     """Forward desktop traffic and own all upstream connection resources."""
 
@@ -65,6 +75,7 @@ class DesktopProxy:
         self._events = events
         self._capture_fence = capture_fence
         self._tunnels: dict[str, _Tunnel] = {}
+        self._opening: dict[str, _OpeningTunnel] = {}
 
     def _interaction(
         self, workspace_id: uuid.UUID | None
@@ -92,11 +103,20 @@ class DesktopProxy:
             ):
                 headers: list[list[str]] = []
                 for key, value in resp.headers.items():
-                    if key.lower() in ("transfer-encoding", "connection", "keep-alive"):
+                    # aiohttp decompresses the payload before resp.read(). The
+                    # browser must receive headers describing those bytes.
+                    if key.lower() in (
+                        "transfer-encoding",
+                        "connection",
+                        "keep-alive",
+                        "content-encoding",
+                        "content-length",
+                    ):
                         continue
                     headers.append([key, value])
 
                 body = await resp.read()
+                headers.append(["Content-Length", str(len(body))])
                 return {
                     "status": resp.status,
                     "headers": headers,
@@ -156,36 +176,58 @@ class DesktopProxy:
         subprotocols: list[str] | None = None,
     ) -> dict[str, object]:
         """Open a runner-local WebSocket tunnel to the desktop session."""
-        async with self._interaction(workspace_id):
-            guest_ip = self._get_guest_ip(workspace_id)
-            upstream_url = f"ws://{guest_ip}:6901/websockify"
-            upstream_origin = f"http://{guest_ip}:6901"
-            chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
+        if tunnel_id in self._tunnels or tunnel_id in self._opening:
+            raise ValueError("Desktop proxy tunnel already exists")
+        desktop_session = self._get_session(workspace_id)
+        generation = desktop_session.generation if desktop_session else None
+        # Register before admission's first await: a timeout/transport close
+        # must also fence requests queued behind the workspace lifecycle lock.
+        opening = _OpeningTunnel(workspace_id, generation)
+        self._opening[tunnel_id] = opening
+        try:
+            async with self._interaction(workspace_id):
+                current = self._get_session(workspace_id)
+                current_generation = current.generation if current else None
+                if opening.invalidated or current_generation != generation:
+                    raise RuntimeError("Desktop changed while opening proxy tunnel")
+                guest_ip = self._get_guest_ip(workspace_id)
+                upstream_url = f"ws://{guest_ip}:6901/websockify"
+                upstream_origin = f"http://{guest_ip}:6901"
+                chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
 
-            session = aiohttp.ClientSession()
-            try:
+                session = aiohttp.ClientSession()
+                opening.session = session
                 websocket = await session.ws_connect(
                     upstream_url,
                     protocols=["binary"] if chosen_protocol else None,
                     max_msg_size=16 * 1024 * 1024,
                     headers={"Origin": upstream_origin},
                 )
-            except Exception:
-                await session.close()
-                raise
+                current = self._get_session(workspace_id)
+                current_generation = current.generation if current else None
+                if opening.invalidated or current_generation != generation:
+                    await websocket.close()
+                    raise RuntimeError("Desktop changed while opening proxy tunnel")
 
-            reader_task = asyncio.create_task(self._read(tunnel_id, websocket))
-            desktop_session = self._get_session(workspace_id)
-            self._tunnels[tunnel_id] = _Tunnel(
-                session=session,
-                websocket=websocket,
-                reader_task=reader_task,
-                workspace_id=workspace_id,
-                desktop_generation=(
-                    desktop_session.generation if desktop_session is not None else None
-                ),
-            )
-            return {"ok": True, "subprotocol": chosen_protocol}
+                reader_task = asyncio.create_task(self._read(tunnel_id, websocket))
+                self._tunnels[tunnel_id] = _Tunnel(
+                    session=session,
+                    websocket=websocket,
+                    reader_task=reader_task,
+                    workspace_id=workspace_id,
+                    desktop_generation=generation,
+                )
+                return {"ok": True, "subprotocol": chosen_protocol}
+        except BaseException:
+            # Cancellation is not an Exception on supported Python versions.
+            if tunnel_id in self._tunnels:
+                await self._finalize(tunnel_id)
+            elif opening.session is not None:
+                await opening.session.close()
+            raise
+        finally:
+            if self._opening.get(tunnel_id) is opening:
+                self._opening.pop(tunnel_id)
 
     async def close_workspace(
         self,
@@ -203,7 +245,7 @@ class DesktopProxy:
         """
         tunnel_ids = [
             tunnel_id
-            for tunnel_id, tunnel in self._tunnels.items()
+            for tunnel_id, tunnel in {**self._tunnels, **self._opening}.items()
             if tunnel.workspace_id == workspace_id
             and (
                 generation is None
@@ -218,6 +260,7 @@ class DesktopProxy:
         ]
         for tunnel_id in tunnel_ids:
             with contextlib.suppress(Exception):
+                await self._close_opening(tunnel_id)
                 await self._finalize(tunnel_id)
 
     async def send(
@@ -250,10 +293,19 @@ class DesktopProxy:
 
     async def close_tunnel(self, tunnel_id: str) -> None:
         """Close an active desktop WebSocket tunnel."""
+        await self._close_opening(tunnel_id)
         tunnel = self._tunnels.get(tunnel_id)
         if tunnel is None:
             return
         await tunnel.websocket.close()
+
+    async def _close_opening(self, tunnel_id: str) -> None:
+        """Fence a pending handshake before closing its HTTP connection."""
+        opening = self._opening.get(tunnel_id)
+        if opening is not None:
+            opening.invalidated = True
+            if opening.session is not None:
+                await opening.session.close()
 
     async def _finalize(
         self,
@@ -289,6 +341,6 @@ class DesktopProxy:
 
     async def close_all(self) -> None:
         """Request closure of every tunnel when the control connection drops."""
-        for tunnel_id in list(self._tunnels):
+        for tunnel_id in [*self._opening, *self._tunnels]:
             with contextlib.suppress(Exception):
                 await self.close_tunnel(tunnel_id)

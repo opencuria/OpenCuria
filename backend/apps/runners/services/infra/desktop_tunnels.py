@@ -19,6 +19,7 @@ class _RunnerWebSocketTunnel:
 
     workspace_id: str
     runner_id: str
+    runner_sid: str
     queue: asyncio.Queue[dict]
 
 
@@ -29,12 +30,15 @@ def register_ws_tunnel(
     tunnel_id: str,
     workspace_id: str,
     runner_id: str,
+    *,
+    runner_sid: str = "",
 ) -> asyncio.Queue[dict]:
     """Register a backend-side queue for a live desktop WebSocket tunnel."""
     queue: asyncio.Queue[dict] = asyncio.Queue()
     _WS_TUNNELS[tunnel_id] = _RunnerWebSocketTunnel(
         workspace_id=workspace_id,
         runner_id=runner_id,
+        runner_sid=runner_sid,
         queue=queue,
     )
     return queue
@@ -43,6 +47,13 @@ def register_ws_tunnel(
 def unregister_ws_tunnel(tunnel_id: str) -> None:
     """Drop backend-side state for a desktop WebSocket tunnel."""
     _WS_TUNNELS.pop(tunnel_id, None)
+
+
+async def close_runner_ws_tunnels(runner_sid: str) -> None:
+    """Fail viewers attached to a lost runner transport, including replaced SIDs."""
+    for tunnel in list(_WS_TUNNELS.values()):
+        if tunnel.runner_sid == runner_sid:
+            await tunnel.queue.put({"type": "close", "code": 1011})
 
 
 async def push_runner_ws_frame(

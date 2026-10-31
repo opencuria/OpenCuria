@@ -105,21 +105,27 @@ const scaledIframeStyle = computed<CSSProperties>(() => ({
   height: `${desktopSize.value.height}px`,
 }))
 
-const desktopIframeSrc = computed(() => {
-  if (!desktopStore.proxyUrl) return ''
+const desktopViewer = computed(() => {
+  // Resolve credentials together with the remount key: REST reconciliation
+  // may rotate the token without changing the proxy URL or viewer intent.
+  const key = `${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`
+  if (!desktopStore.proxyUrl) return { key, src: '' }
   const token = localStorage.getItem('kern_access_token') || ''
   const config = getConfig()
-  return buildDesktopIframeSrc(
-    config.wsBaseUrl || '',
-    desktopStore.proxyUrl,
-    token,
-    desktopStore.intentRevision !== null
-      ? {
-          viewer_client_id: desktopStore.viewerClientId,
-          intent_revision: desktopStore.intentRevision,
-        }
-      : undefined,
-  )
+  return {
+    key,
+    src: buildDesktopIframeSrc(
+      config.wsBaseUrl || '',
+      desktopStore.proxyUrl,
+      token,
+      desktopStore.intentRevision !== null
+        ? {
+            viewer_client_id: desktopStore.viewerClientId,
+            intent_revision: desktopStore.intentRevision,
+          }
+        : undefined,
+    ),
+  }
 })
 
 // --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
@@ -136,7 +142,9 @@ function bindDesktopIframeListeners(): void {
   clearIframeListeners()
   const iframe = desktopIframeRef.value
   const win = iframe?.contentWindow
-  if (!iframe || !win) return
+  // Cross-origin viewers report state through postMessage, but do not expose
+  // their document or Window event listeners to the parent.
+  if (!iframe || !win || !iframe.contentDocument) return
   iframeKeydownCleanup = bindDesktopClipboard(iframe, {
     enabled: () =>
       desktopStore.isConnected &&
@@ -285,9 +293,10 @@ function observeIframeConnection(): void {
     if (!iframe || !root) return
     const observer = new MutationObserver(() => {
       if (disposed || desktopIframeRef.value !== iframe) return
-      if (readIframeConnection()) {
+      const connected = readIframeConnection()
+      if (connected === true) {
         if (viewerStatus.value !== 'connected') markViewerConnected()
-      } else if (viewerStatus.value === 'connected') markViewerDisconnected()
+      } else if (connected === false && viewerStatus.value === 'connected') markViewerDisconnected()
     })
     observer.observe(root, { attributes: true, attributeFilter: ['class'] })
     iframeConnectionCleanup = () => observer.disconnect()
@@ -314,15 +323,13 @@ function markViewerDisconnected(): void {
   if (document.visibilityState !== 'visible') reconnectBackoff.pause()
 }
 
-function readIframeConnection(): boolean {
+function readIframeConnection(): boolean | null {
   try {
-    return Boolean(
-      desktopIframeRef.value?.contentDocument?.documentElement.classList.contains(
-        'noVNC_connected',
-      ),
-    )
+    const root = desktopIframeRef.value?.contentDocument?.documentElement
+    return root ? root.classList.contains('noVNC_connected') : null
   } catch {
-    return false
+    // An inaccessible document says nothing about the WebSocket's health.
+    return null
   }
 }
 
@@ -330,7 +337,8 @@ function handleIframeLoad(event: Event): void {
   if (event.currentTarget !== desktopIframeRef.value) return
   bindDesktopIframeListeners()
   observeIframeConnection()
-  if (readIframeConnection()) {
+  const connected = readIframeConnection()
+  if (connected === true || (connected === null && viewerStatus.value === 'connected')) {
     markViewerConnected()
     return
   }
@@ -363,14 +371,15 @@ function onVisibilityChange(): void {
     return
   }
 
-  if (readIframeConnection()) {
+  const connected = readIframeConnection()
+  if (connected === true) {
     // A healthy frame survives backgrounding; do not reload it.
     markViewerConnected()
     return
   }
   connectionTimeout.resume()
   reconnectBackoff.resume()
-  if (viewerStatus.value === 'connected') markViewerDisconnected()
+  if (connected === false && viewerStatus.value === 'connected') markViewerDisconnected()
 }
 
 function retryViewer(): void {
@@ -459,9 +468,9 @@ watch(desktopIframeRef, () => {
         :style="scaledFrameStyle"
       >
         <iframe
-          :key="`${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`"
+          :key="desktopViewer.key"
           ref="desktopIframeRef"
-          :src="desktopIframeSrc"
+          :src="desktopViewer.src"
           title="Desktop"
           class="block border-0 transition-opacity duration-200"
           :class="{ 'opacity-0': !iframeLoaded }"

@@ -1164,11 +1164,21 @@ class WebSocketInterface(Interface):
         async def on_desktop_proxy_ws_open(data: dict) -> dict:
             workspace_id = uuid.UUID(data["workspace_id"])
             tunnel_id = data["tunnel_id"]
-            return await self._desktop_proxy.open_tunnel(
-                workspace_id,
-                tunnel_id,
-                list(data.get("subprotocols") or []),
-            )
+            try:
+                return await self._desktop_proxy.open_tunnel(
+                    workspace_id,
+                    tunnel_id,
+                    list(data.get("subprotocols") or []),
+                )
+            except (aiohttp.ClientError, OSError, RuntimeError, ValueError):
+                # Always ACK a failed handshake so the browser can recover
+                # immediately instead of waiting for the control RPC timeout.
+                logger.warning(
+                    "desktop_proxy_ws_open_failed",
+                    workspace_id=str(workspace_id),
+                    tunnel_id=tunnel_id,
+                )
+                return {"ok": False, "error": "Desktop connection unavailable"}
 
         @sio.on("desktop:proxy_ws_send")
         async def on_desktop_proxy_ws_send(data: dict) -> None:

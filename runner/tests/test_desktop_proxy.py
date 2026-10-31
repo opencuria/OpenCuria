@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -77,9 +79,16 @@ async def upstream(
                 await response.send_bytes(message.data)
         return response
 
+    async def compressed(request: web.Request) -> web.Response:
+        return web.Response(
+            body=gzip.compress(b"<html><head></head><body>desktop</body></html>"),
+            headers={"Content-Encoding": "gzip", "Content-Type": "text/html"},
+        )
+
     app = web.Application()
     app.router.add_get("/vnc.html", http)
     app.router.add_get("/websockify", websocket)
+    app.router.add_get("/compressed.html", compressed)
     runner = web.AppRunner(app)
     await runner.setup()
     server = await asyncio.get_running_loop().create_server(
@@ -124,6 +133,19 @@ async def test_http_preserves_status_binary_body_and_end_to_end_headers(
     headers = {key.lower(): value for key, value in result["headers"]}
     assert headers["content-type"] == "application/octet-stream"
     assert not {"transfer-encoding", "connection", "keep-alive"} & headers.keys()
+
+
+async def test_http_headers_describe_decompressed_payload(
+    proxy: ProxyFixture, upstream: UpstreamRequests
+) -> None:
+    """The browser must not decode aiohttp's already expanded bytes twice."""
+    client, _ = proxy
+    response = await client.fetch_http(uuid.uuid4(), "/compressed.html")
+    body = base64.b64decode(response["body"])
+    headers = {key.lower(): value for key, value in response["headers"]}
+    assert body == b"<html><head></head><body>desktop</body></html>"
+    assert "content-encoding" not in headers
+    assert int(headers["content-length"]) == len(body)
 
 
 @pytest.mark.parametrize("subprotocols", [["binary", "other"], [], None])
@@ -195,6 +217,104 @@ async def test_failed_handshake_closes_the_http_session(
         await client.open_tunnel(uuid.uuid4(), "tunnel")
     session.close.assert_awaited_once()
     assert client._tunnels == {}
+
+
+@pytest.mark.parametrize("operation", ["tunnel", "workspace", "all", "generation"])
+async def test_pending_handshake_cannot_outlive_teardown_or_desktop_generation(
+    proxy: ProxyFixture, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Late handshakes cannot resurrect tunnels closed before the open ACK."""
+    client, _ = proxy
+    workspace_id = uuid.uuid4()
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    websocket = SimpleNamespace(close=AsyncMock())
+
+    async def connect(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await finish.wait()
+        return websocket
+
+    session = SimpleNamespace(ws_connect=connect, close=AsyncMock())
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+    task = asyncio.create_task(client.open_tunnel(workspace_id, "pending"))
+    await asyncio.wait_for(entered.wait(), 2)
+    if operation == "tunnel":
+        await client.close_tunnel("pending")
+    elif operation == "workspace":
+        await client.close_workspace(workspace_id, generation=8, keep_generation=8)
+    elif operation == "all":
+        await client.close_all()
+    else:
+        client._get_session = lambda _: SimpleNamespace(generation=8)
+    finish.set()
+    with pytest.raises(RuntimeError, match="Desktop changed"):
+        await asyncio.wait_for(task, 2)
+    assert not client._tunnels and not client._opening
+    websocket.close.assert_awaited_once()
+    assert session.close.await_count >= 1
+
+
+async def test_cancelled_handshake_closes_session(
+    proxy: ProxyFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = proxy
+    entered = asyncio.Event()
+
+    async def connect(*args: Any, **kwargs: Any) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    session = SimpleNamespace(ws_connect=connect, close=AsyncMock())
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda: session)
+    task = asyncio.create_task(client.open_tunnel(uuid.uuid4(), "pending"))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    session.close.assert_awaited_once()
+    assert not client._tunnels and not client._opening
+
+
+@pytest.mark.parametrize(
+    "operation", ["tunnel", "workspace", "all", "cancel", "generation"]
+)
+async def test_queued_admission_is_owned_before_first_await(
+    proxy: ProxyFixture, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A closed request queued for lifecycle admission must never dial later."""
+    client, _ = proxy
+    workspace_id = uuid.uuid4()
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+
+    @asynccontextmanager
+    async def admission(_: uuid.UUID) -> AsyncIterator[None]:
+        entered.set()
+        await finish.wait()
+        yield
+
+    client._interaction = admission
+    create_session = AsyncMock()
+    monkeypatch.setattr(aiohttp, "ClientSession", create_session)
+    task = asyncio.create_task(client.open_tunnel(workspace_id, "queued"))
+    await asyncio.wait_for(entered.wait(), 2)
+    if operation == "tunnel":
+        await client.close_tunnel("queued")
+    elif operation == "workspace":
+        await client.close_workspace(workspace_id, generation=8, keep_generation=8)
+    elif operation == "all":
+        await client.close_all()
+    elif operation == "generation":
+        client._get_session = lambda _: SimpleNamespace(generation=8)
+    else:
+        task.cancel()
+    finish.set()
+    expected = asyncio.CancelledError if operation == "cancel" else RuntimeError
+    with pytest.raises(expected):
+        await asyncio.wait_for(task, 2)
+    create_session.assert_not_called()
+    assert not client._tunnels and not client._opening
 
 
 @pytest.mark.parametrize("connected", [True, False])

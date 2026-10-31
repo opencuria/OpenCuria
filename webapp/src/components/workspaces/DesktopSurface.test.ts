@@ -432,6 +432,39 @@ describe('DesktopSurface', () => {
     expect(document.querySelector('iframe')).toBe(iframe)
   })
 
+  it('keeps a cross-origin viewer connected across load and visibility changes', async () => {
+    vi.useFakeTimers()
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    // The configured backend may have another origin. Its DOM is then
+    // unavailable, while authenticated connection messages still arrive.
+    vi.spyOn(iframe, 'contentDocument', 'get').mockReturnValue(null)
+    connectionMessage(iframe.contentWindow, 'connected')
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+
+    for (const visibility of ['hidden', 'visible']) {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => visibility,
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+    await vi.advanceTimersByTimeAsync(16_000)
+
+    expect(store.viewerGeneration).toBe(0)
+    expect(document.querySelector('iframe')).toBe(iframe)
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+
+    connectionMessage(iframe.contentWindow, 'disconnected')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(store.viewerGeneration).toBe(1)
+  })
+
   it('pauses recovery while hidden and does not reload on hidden transitions', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
@@ -535,5 +568,30 @@ describe('DesktopSurface', () => {
     expect(nextIframe).not.toBe(iframe)
     expect(nextIframe?.classList.contains('opacity-0')).toBe(true)
     expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+  })
+
+  it('uses refreshed credentials for both viewer and websocket on reconnect', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    store.setViewerIntent(1, 'held', 'epoch-1')
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    expect(new URL(iframe.src).searchParams.get('token')).toBe('tok')
+
+    // REST reconciliation can refresh the access token without changing the
+    // proxy URL or the held intent. The next viewer must use that new token.
+    localStorage.setItem('kern_access_token', 'refreshed-token')
+    store.bumpViewer()
+    await nextTick()
+
+    const replacement = document.querySelector('iframe')!
+    expect(replacement).not.toBe(iframe)
+    const params = new URL(replacement.src).searchParams
+    expect(params.get('token')).toBe('refreshed-token')
+    const socketUrl = new URL(params.get('path')!, window.location.origin)
+    expect(socketUrl.searchParams.get('token')).toBe('refreshed-token')
+    expect(socketUrl.searchParams.get('intent_revision')).toBe('1')
   })
 })

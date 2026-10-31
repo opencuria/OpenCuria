@@ -892,6 +892,22 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result, {"ok": True, "subprotocol": "binary"})
 
+    async def test_desktop_proxy_ws_open_failure_returns_sanitized_ack(self) -> None:
+        service = DummyService()
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._desktop_proxy.open_tunnel = AsyncMock(
+            side_effect=OSError("private upstream details")
+        )
+        handler = interface._sio.handlers["/"]["desktop:proxy_ws_open"]
+        result = await handler(
+            {"workspace_id": str(uuid.uuid4()), "tunnel_id": "failed-open"}
+        )
+        self.assertEqual(
+            result, {"ok": False, "error": "Desktop connection unavailable"}
+        )
+
     async def test_desktop_proxy_ws_send_forwards_payload(self) -> None:
         service = DummyService()
         interface = WebSocketInterface(
