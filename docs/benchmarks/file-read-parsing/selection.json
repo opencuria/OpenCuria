@@ -1,0 +1,47 @@
+{
+  "method": "secrets.choice(top_three); one draw, no rerolls",
+  "top_three": [
+    {
+      "rank": 1,
+      "id": "question_lookup_index",
+      "component": "backend",
+      "evidence": "60,000 retained questions: pending lookup p50 11.771 ms, full table scan and temporary sort; experimental index p50 0.454 ms",
+      "impact": "Every timeline/feed pending-question read; grows with all retained history",
+      "risk": "Low: additive compound database index; no behavior change"
+    },
+    {
+      "rank": 2,
+      "id": "file_read_response_parsing",
+      "component": "runner",
+      "evidence": "20 MiB base64 response parser: p50 63.226 ms and 76.3 MB traced peak; bounded header split p50 7.425 ms and 55.9 MB peak",
+      "impact": "Large file/media reads block the executor event loop; illustrative parser-only measurement",
+      "risk": "Low to medium: preserve line-ending normalization and malformed response behavior"
+    },
+    {
+      "rank": 3,
+      "id": "attention_gate_projection",
+      "component": "backend",
+      "evidence": "50 pending 4 KiB questions with supporting index: full model p50 1.708 ms / 522 KB traced peak; ID projection 0.630 ms / 31 KB",
+      "impact": "Conversation sidebar/attention refresh; saves JSON decoding when gates are open",
+      "risk": "Low: repository ID projection and service caller changes; existing full-detail methods still needed"
+    }
+  ],
+  "selected": "file_read_response_parsing",
+  "additional_survey": [
+    {
+      "component": "shared packages/mobile",
+      "candidate": "Repeated scans of all parts and messages per stream delta",
+      "finding": "Confirmed linear scans, but recent structural sharing and bounded history already reduce cost; lower-confidence incremental gain"
+    },
+    {
+      "component": "webapp",
+      "candidate": "Full-document markdown parsing during streaming",
+      "finding": "Already coalesces rendering into 50 ms windows; safe incremental parsing would be higher risk"
+    },
+    {
+      "component": "runner",
+      "candidate": "File autocomplete traverses and sorts all matching paths before returning 50",
+      "finding": "Full traversal confirmed; broad path ordering/pruning semantics make a complete replacement less self-contained"
+    }
+  ]
+}

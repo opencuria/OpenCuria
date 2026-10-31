@@ -497,13 +497,15 @@ class FileManager:
         if exit_code != 0:
             raise RuntimeError(f"Failed to read file: {output}")
 
-        # Parse output: first line is size, second line MIME type, remainder base64.
-        lines = output.splitlines()
-        if len(lines) < 2:
+        # The guest emits LF-delimited size/MIME headers and wrapped base64.
+        # Split only the headers: splitting/joining every base64 line allocates
+        # hundreds of thousands of strings for large reads on the event loop.
+        lines = output.split("\n", 2)
+        if len(lines) < 2 or (len(lines) == 2 and not lines[1]):
             raise RuntimeError("Invalid file read response format")
         file_size = int(lines[0].strip())
         mime_type = lines[1].strip() or "application/octet-stream"
-        content_output = "\n".join(lines[2:]) if len(lines) > 2 else ""
+        content_output = lines[2] if len(lines) > 2 else ""
         truncated = file_size > read_limit
 
         return {
