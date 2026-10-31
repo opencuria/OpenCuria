@@ -994,7 +994,7 @@ class ClaudeEngine:
     async def _send_todos(self, parent_tool_use_id: str | None = None) -> None:
         try:
             sid = self._options.session_id if self._options else ""
-            todos_service = TodoService.for_session(sid)
+            todos_service = TodoService()
             stored = await sync_to_async(todos_service.list)(sid)
             todos = [
                 {

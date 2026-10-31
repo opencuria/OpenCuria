@@ -34,8 +34,8 @@ consumers resolve catalog entries and workspace attachments through credential
 services and check organizations and active memberships through
 ``OrganizationService``. Adapters select credentials by ID and never resolve
 (decrypt) them; the service that applies a selection resolves it.
-Harness persistence never imports tool adapters; todo records and their storage
-port live in ``apps.harness.todos.domain`` and tools call its todo service.
+Harness persistence never imports tool adapters; todo records live in
+``apps.harness.todos.domain`` and tools call its todo service.
 Provider wire adapters share context-error classification within ``providers``;
 neither they nor their dependencies import orchestration or persistence.
 Shared deadlines and SSE transport live below concrete provider adapters;
@@ -1048,7 +1048,6 @@ def test_todo_tools_and_engines_use_the_service_boundary() -> None:
     ]
     stores = {
         "apps.harness.todos.repositories",
-        "apps.harness.todos.memory_repository",
     }
     violations = sorted(
         f"{_module_name(path)} -> {module}"

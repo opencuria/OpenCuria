@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 
 from ..models import Todo
-from .domain import TodoItem, TodoList, TodoStore
+from .domain import TodoItem, TodoList
 
 
-class TodoRepository(TodoStore):
+class TodoRepository:
     """Persist replacements and expose ordered todo records for presentation."""
 
     model = Todo
@@ -22,10 +22,7 @@ class TodoRepository(TodoStore):
 
     def list(self, session_id: str) -> TodoList:
         """Return the todo list for *session_id* (empty if none)."""
-        try:
-            session_uuid = uuid.UUID(str(session_id))
-        except (TypeError, ValueError):
-            return TodoList(session_id=str(session_id))
+        session_uuid = uuid.UUID(str(session_id))
         return TodoList(
             session_id=str(session_id),
             items=[
@@ -41,12 +38,7 @@ class TodoRepository(TodoStore):
 
     def save(self, session_id: str, items: list[TodoItem]) -> TodoList:
         """Replace the todo list for *session_id* and return it."""
-        try:
-            session_uuid = uuid.UUID(str(session_id))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Todo save needs a real session UUID, got {session_id!r}"
-            ) from exc
+        session_uuid = uuid.UUID(str(session_id))
         Todo.objects.filter(session_id=session_uuid).delete()
         for order, item in enumerate(items):
             Todo.objects.create(

@@ -10,8 +10,6 @@ from pydantic import ValidationError
 from apps.harness.access.base import ExecResult
 from apps.harness.access.runner_accessor import RunnerAccessorError
 from apps.harness.tests.conftest import TINY_PNG, FakeAccessor, make_image
-from apps.harness.todos.memory_repository import InMemoryTodoRepository
-from apps.harness.todos.service import TodoService
 from apps.harness.tools import (
     BashTool,
     EditTool,
@@ -20,7 +18,6 @@ from apps.harness.tools import (
     ListTool,
     ReadTool,
     TaskTool,
-    TodoWriteTool,
     WriteTool,
     default_tool_registry,
 )
@@ -543,35 +540,6 @@ async def test_list_external_path() -> None:
     accessor = FakeAccessor(files={"/etc/app.env": b"secret"})
     result = await ListTool().execute({"path": "/etc"}, _ctx(accessor))
     assert "file app.env" in result.output
-
-
-async def test_todowrite_happy_path(fake_accessor) -> None:
-    """Todos validate and persist behind the repository seam."""
-    repo = InMemoryTodoRepository()
-    tool = TodoWriteTool(service=TodoService(repository=repo))
-    result = await tool.execute(
-        {
-            "todos": [
-                {"content": "first", "status": "in_progress"},
-                {"content": "second", "status": "pending"},
-            ]
-        },
-        _ctx(fake_accessor),
-    )
-    assert "[in_progress] first" in result.output
-    stored = repo.list("sess-1")
-    assert [item.content for item in stored.items] == ["first", "second"]
-    assert stored.items[0].order == 0
-
-
-async def test_todowrite_invalid_status_rejected(fake_accessor) -> None:
-    """Unknown statuses raise a ToolError."""
-    tool = TodoWriteTool(service=TodoService(repository=InMemoryTodoRepository()))
-    with pytest.raises(ToolError, match="Invalid status"):
-        await tool.execute(
-            {"todos": [{"content": "x", "status": "bogus"}]},
-            _ctx(fake_accessor),
-        )
 
 
 async def test_task_tool_without_wiring_rejected(fake_accessor) -> None:

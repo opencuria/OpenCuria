@@ -52,6 +52,7 @@ async def execute_external_run(
 ) -> None:
     """Run an external engine under durable ownership and common persistence."""
     from ..providers.base import Usage
+    from ..tools import default_tool_registry
     from .external_runtime import prepare_external_runtime
 
     label = "Codex" if engine_id == "codex" else "Claude"
@@ -99,7 +100,7 @@ async def execute_external_run(
         mcp_snapshot = await sync_to_async(service.plugin_runtime.prepare)(
             session.workspace_id, organization_id
         )
-        tools = service._tools_for_session(key, session.agent_name or session.mode)
+        tools = default_tool_registry()
         from ..services import ComputerUseConfigService
 
         computer_options = await sync_to_async(

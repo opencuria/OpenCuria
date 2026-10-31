@@ -15,7 +15,6 @@ from apps.harness.tests.test_claude_engine import (
     _run_local_cli_fixture,
     require_pinned_cli,
 )
-from apps.harness.todos.memory_repository import InMemoryTodoRepository
 from apps.harness.todos.service import TodoService
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolRegistry
@@ -223,15 +222,15 @@ async def test_real_cli_native_edit_completes_file_change(
 
 
 @pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_real_cli_mcp_todowrite_updates_open_curia_session_state(
-    tmp_path: Path,
+    tmp_path: Path, harness_session,
 ) -> None:
     """The real CLI can dispatch the managed todo tool through its MCP bridge."""
     require_pinned_cli()
-    repository = InMemoryTodoRepository()
     registry = ToolRegistry()
-    registry.register(TodoWriteTool(service=TodoService(repository=repository)))
-    session_id = "claude-upgrade-todo-contract"
+    registry.register(TodoWriteTool())
+    session_id = str(harness_session.id)
     (
         result,
         events,
@@ -263,7 +262,7 @@ async def test_real_cli_mcp_todowrite_updates_open_curia_session_state(
     assert any(
         str(schema.get("name") or "").endswith("__todowrite") for schema in schemas
     )
-    todos = repository.list(session_id).items
+    todos = TodoService().list(session_id).items
     assert [(item.content, item.status, item.priority) for item in todos] == [
         ("Verify upgraded CLI contract", "in_progress", "high")
     ]

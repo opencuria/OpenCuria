@@ -24,9 +24,7 @@ from apps.harness.providers.base import (
 from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
-from apps.harness.todos.memory_repository import InMemoryTodoRepository
-from apps.harness.todos.service import TodoService
-from apps.harness.tools import TaskTool, TodoWriteTool, default_tool_registry
+from apps.harness.tools import TaskTool, default_tool_registry
 from apps.harness.tools.base import ToolContext, ToolError, ToolResult
 from apps.harness.tools.subagents import (
     TASK_OUTPUT_MAX_CHARS,
@@ -299,11 +297,10 @@ async def test_task_envelope_carries_resumable_task_id(fake_accessor) -> None:
     assert "hello" in result.output
 
 
-async def test_todo_updated_event_after_todowrite(fake_accessor) -> None:
+@pytest.mark.django_db(transaction=True)
+async def test_todo_updated_event_after_todowrite(fake_accessor, harness_session) -> None:
     """todowrite completion emits todo_updated with the stored list."""
-    repo = InMemoryTodoRepository()
     registry = default_tool_registry()
-    registry._tools["todowrite"] = TodoWriteTool(service=TodoService(repository=repo))
     provider = FakeProvider(
         [
             _tool_step(
@@ -326,7 +323,7 @@ async def test_todo_updated_event_after_todowrite(fake_accessor) -> None:
         emit=_emit,
     )
     result = await runner.run(
-        "track", "build", "m", "build", RunOptions(session_id="sess-todo")
+        "track", "build", "m", "build", RunOptions(session_id=str(harness_session.id))
     )
     assert result.output == "noted"
     updated = [e for e in events if e["type"] == "todo_updated"]

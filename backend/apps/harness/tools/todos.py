@@ -36,9 +36,6 @@ class TodoWriteTool(Tool):
     args_schema: type[BaseModel] = TodoWriteArgs
     permission_key = "todowrite"
 
-    def __init__(self, service: TodoService | None = None) -> None:
-        self.todos = service or TodoService()
-
     def title(self, args: BaseModel) -> str:
         """Return a short title for a todowrite invocation."""
         assert isinstance(args, TodoWriteArgs)
@@ -57,7 +54,7 @@ class TodoWriteTool(Tool):
             for entry in validated.todos
         ]
         try:
-            stored = await sync_to_async(self.todos.replace)(ctx.session_id, entries)
+            stored = await sync_to_async(TodoService().replace)(ctx.session_id, entries)
         except TodoValidationError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         lines = [f"[{item.status}] {item.content}" for item in stored.items]

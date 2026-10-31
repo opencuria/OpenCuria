@@ -79,9 +79,7 @@ from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .session_settings_service import SessionSettingsService
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
-from .todos.service import TodoService
 from .tools.subagents import TaskArgs, validate_subagent_delegation
-from .tools.todos import TodoWriteTool
 
 log = structlog.get_logger(__name__)
 
@@ -2088,19 +2086,6 @@ class HarnessService:
         async with ThreadSensitiveContext():
             await coro
 
-    def _tools_for_session(self, session_id: str, agent_name: str = "build"):  # type: ignore[no-untyped-def]
-        """Build the tool registry for a session agent."""
-        from .tools import default_tool_registry
-
-        registry = default_tool_registry()
-        try:
-            registry._tools["todowrite"] = TodoWriteTool(
-                service=TodoService.for_session(session_id)
-            )
-        except KeyError:  # pragma: no cover - registry always has todowrite
-            pass
-        return registry
-
     async def _execute_run(
         self,
         *,
@@ -2115,6 +2100,7 @@ class HarnessService:
         """Run the loop, persist events, and finalize the assistant message."""
         from .providers.resolver import StaticModelResolver
         from .services import ProviderConfigService
+        from .tools import default_tool_registry
 
         key = str(session.id)
         run_context = self._runs.get(key, {})
@@ -2223,7 +2209,7 @@ class HarnessService:
             accessor = None
             if self._accessor_factory is not None:
                 accessor = await self._accessor_factory(str(session.workspace_id))
-            tools = self._tools_for_session(key, session.agent_name or "build")
+            tools = default_tool_registry()
             from .services import ComputerUseConfigService
 
             computer_options = await sync_to_async(
