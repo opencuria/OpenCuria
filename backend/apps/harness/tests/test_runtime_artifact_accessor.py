@@ -51,14 +51,14 @@ async def test_ensure_runtime_artifact_emits_correlated_runner_request(
             {
                 **payload,
                 "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-                "version": "2.1.310",
+                "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
+                "version": "2.1.316",
                 "platform": "linux-x64",
             }
         )
 
     transport.on_emit = reply
-    result = await accessor.ensure_runtime_artifact("claude-agent", "2.1.310")
+    result = await accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
 
     event, payload = transport.emitted[0]
     assert event == "workspace:artifact_ensure"
@@ -66,13 +66,13 @@ async def test_ensure_runtime_artifact_emits_correlated_runner_request(
         "workspace_id": "workspace-owned",
         "request_id": payload["request_id"],
         "artifact_id": "claude-agent",
-        "version": "2.1.310",
+        "version": "2.1.316",
     }
     assert re.fullmatch(r"[0-9a-f]{32}", payload["request_id"])
     assert waits == [("workspace:artifact_ensure", 600.0)]
     assert result["ok"] is True
-    assert result["version"] == "2.1.310"
-    assert result["path"] == ("/opt/opencuria/runtimes/claude-agent/2.1.310/claude")
+    assert result["version"] == "2.1.316"
+    assert result["path"] == ("/opt/opencuria/runtimes/claude-agent/2.1.316/claude")
     assert payload["request_id"] not in accessor._pending
     assert payload["request_id"] not in _ACCESSORS_BY_REQUEST
 
@@ -82,9 +82,9 @@ async def test_ensure_runtime_artifact_emits_correlated_runner_request(
     ("reply", "message"),
     [
         ({"ok": False, "error": "runtime denied"}, "runtime denied"),
-        ({"ok": False, "version": "2.1.310"}, "not confirmed"),
+        ({"ok": False, "version": "2.1.316"}, "not confirmed"),
         ({"ok": True, "version": "wrong-version"}, "not confirmed"),
-        ({"version": "2.1.310"}, "not confirmed"),
+        ({"version": "2.1.316"}, "not confirmed"),
     ],
 )
 async def test_ensure_runtime_artifact_rejects_unconfirmed_reply(
@@ -98,7 +98,7 @@ async def test_ensure_runtime_artifact_rejects_unconfirmed_reply(
 
     transport.on_emit = answer
     with pytest.raises(RunnerAccessorError, match=message):
-        await accessor.ensure_runtime_artifact("claude-agent", "2.1.310")
+        await accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
 
     request_id = transport.emitted[0][1]["request_id"]
     assert request_id not in accessor._pending
@@ -109,11 +109,11 @@ async def test_ensure_runtime_artifact_rejects_unconfirmed_reply(
 @pytest.mark.parametrize(
     ("artifact_id", "version"),
     [
-        ("", "2.1.310"),
+        ("", "2.1.316"),
         ("claude-agent", ""),
-        ("a" * 65, "2.1.310"),
+        ("a" * 65, "2.1.316"),
         ("claude-agent", "v" * 65),
-        (None, "2.1.310"),
+        (None, "2.1.316"),
     ],
 )
 async def test_ensure_runtime_artifact_rejects_invalid_identity(
@@ -132,7 +132,7 @@ async def test_cancelling_artifact_request_emits_cancel_and_unregisters() -> Non
     transport = _ArtifactTransport()
     accessor = RunnerWorkspaceAccessor("workspace-owned", emit=transport)
     task = asyncio.create_task(
-        accessor.ensure_runtime_artifact("claude-agent", "2.1.310")
+        accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
     )
 
     await transport.emitted_event.wait()

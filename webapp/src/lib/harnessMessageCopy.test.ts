@@ -85,17 +85,11 @@ describe('getMessageCopyText', () => {
     expect(getMessageCopyText(message)).toBe('Incomplete answer')
   })
 
-  it('uses legacy content only when there are no text parts', () => {
-    expect(getMessageCopyText(makeMessage([], 'legacy answer'))).toBe('legacy answer')
+  it('does not copy aggregate content without visible text parts', () => {
+    expect(getMessageCopyText(makeMessage([]))).toBeNull()
     expect(
-      getMessageCopyText({ ...makeMessage([]), parts: undefined as unknown as HarnessPart[] }),
-    ).toBe('stale message content')
-    expect(
-      getMessageCopyText(
-        makeMessage([makePart('compact', 'compaction', 'private summary')], 'legacy answer'),
-      ),
+      getMessageCopyText(makeMessage([makePart('compact', 'compaction', 'private summary')])),
     ).toBeNull()
-    expect(getMessageCopyText(makeMessage([], '   '))).toBeNull()
   })
 
   it('keeps trailing text after compaction and excludes compaction content', () => {

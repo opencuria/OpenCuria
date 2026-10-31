@@ -18,13 +18,13 @@ ISOLATED_AGENT_PATH = "/usr/local/bin:/usr/bin:/bin"
 ISOLATED_AGENT_CONFIG_ROOT = "/workspace/.opencuria/harness/claude"
 ISOLATED_CODEX_CONFIG_ROOT = "/workspace/.opencuria/harness/codex"
 ISOLATED_CODEX_PATH = (
-    "/opt/opencuria/runtimes/codex-agent/0.163.0/codex-path:" + ISOLATED_AGENT_PATH
+    "/opt/opencuria/runtimes/codex-agent/0.166.0/codex-path:" + ISOLATED_AGENT_PATH
 )
 ISOLATED_AGENT_ENV_MAX_SIZE = 256 * 1024
 _AGENT_AUTH_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 _AGENT_FIXED_ENV = {
     "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-    "CLAUDE_AGENT_SDK_VERSION": "0.2.174",
+    "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
     "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
     "DISABLE_UPDATES": "1",
     "DISABLE_TELEMETRY": "1",
@@ -351,7 +351,7 @@ if action == 'start':
             if profile == 'claude':
                 fixed = {
                     'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
-                    'CLAUDE_AGENT_SDK_VERSION': '0.2.174',
+                    'CLAUDE_AGENT_SDK_VERSION': '0.2.176',
                     'CLAUDE_CODE_SDK_READS_SESSION_STATE': '1',
                     'DISABLE_UPDATES': '1', 'DISABLE_TELEMETRY': '1',
                     'DISABLE_ERROR_REPORTING': '1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1',
@@ -376,7 +376,7 @@ if action == 'start':
                 if os.path.islink(current) or not os.path.isdir(current): sys.exit(125)
         expected_path = '/usr/local/bin:/usr/bin:/bin'
         if profile == 'codex':
-            expected_path = '/opt/opencuria/runtimes/codex-agent/0.163.0/codex-path:' + expected_path
+            expected_path = '/opt/opencuria/runtimes/codex-agent/0.166.0/codex-path:' + expected_path
         if isolated.get('path') != expected_path: sys.exit(125)
         try: os.mkdir(home, 0o700)
         except FileExistsError: pass

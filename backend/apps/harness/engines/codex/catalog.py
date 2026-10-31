@@ -1,7 +1,7 @@
 """Pinned Codex capabilities, separate from the native ChatGPT adapter catalog.
 
 models.json records unauthenticated model/list capabilities from the official
-0.163.0 bundled runtime, not the account's live subscription entitlements. No
+0.166.0 bundled runtime, not the account's live subscription entitlements. No
 native-provider defaults are used: Codex's default and effort support differ.
 OpenCuria starts ChatGPT Codex models at high effort when supported.
 Upstream OpenAI Codex (Apache-2.0); see THIRD_PARTY_NOTICES.md.
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from apps.harness.providers.models_catalog import ProviderModel
 
-CODEX_VERSION = "0.163.0"
+CODEX_VERSION = "0.166.0"
 CODEX_PROVIDERS = ("chatgpt", "openrouter")
 CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 _SPECS = json.loads(Path(__file__).with_name("models.json").read_text())["models"]

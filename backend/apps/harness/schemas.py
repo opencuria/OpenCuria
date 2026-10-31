@@ -485,9 +485,7 @@ def timeline_to_out(
                     id=message.id,
                     harness_id=getattr(message, "harness_id", "native"),
                     role=message.role,
-                    # Timeline text comes from ordered text parts; only
-                    # legacy assistant rows with no text parts need the
-                    # message-level fallback. This prevents sending both.
+                    # Assistant text comes exclusively from ordered text parts.
                     content=getattr(message, "timeline_content", "") or "",
                     model=message.model or "",
                     reasoning_effort=message.reasoning_effort or "",

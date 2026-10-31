@@ -18,8 +18,8 @@ class DummyService:
             ensure_runtime_artifact=AsyncMock(
                 return_value={
                     "ok": True,
-                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-                    "version": "2.1.310",
+                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
+                    "version": "2.1.316",
                     "platform": "linux-x64",
                 }
             )
@@ -41,7 +41,7 @@ class ArtifactEnsureHandlerTests(unittest.IsolatedAsyncioTestCase):
             "workspace_id": self.workspace_id,
             "request_id": "agent-1",
             "artifact_id": "claude-agent",
-            "version": "2.1.310",
+            "version": "2.1.316",
         }
 
         result = await self.handler(request)
@@ -64,7 +64,7 @@ class ArtifactEnsureHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "workspace_id": self.workspace_id,
                 "request_id": "agent-failed",
                 "artifact_id": "claude-agent",
-                "version": "2.1.310",
+                "version": "2.1.316",
             }
         )
 

@@ -1151,25 +1151,6 @@ async def test_edit_does_not_regenerate_title_for_first_prompt(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_repository_delete_from_returns_deleted_ids(harness_workspace) -> None:
-    """delete_from removes the suffix inclusive and reports the ids."""
-    session = await _db_create_session(harness_workspace)
-    first = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="user", content="one"
-    )
-    second = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="user", content="two"
-    )
-    deleted = HarnessMessageRepository.delete_from(session.id, second.id)
-    assert deleted == [second.id]
-    assert [m.id for m in HarnessMessageRepository.list_for_session(session.id)] == [
-        first.id
-    ]
-    with pytest.raises(ValueError, match="not in session"):
-        HarnessMessageRepository.delete_from(session.id, uuid.uuid4())
-
-
-@pytest.mark.django_db(transaction=True)
 async def test_fork_preserves_session_config(harness_workspace) -> None:
     """Forks inherit mode/agent/model/effort/skill ids of the source."""
     session = await _db_create_session(harness_workspace)

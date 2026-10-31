@@ -44,8 +44,8 @@ def validate_snapshot(record: dict[str, Any], home: str) -> None:
         if (
             not isinstance(name, str)
             or not re.fullmatch(
-                r"(?:(?:state|thread_history|queue|goals|memories)_\d+\.sqlite|"
-                r"memories/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.md|"
+                r"(?:(?:state|thread_history|queue|goals|memories(?:_v2)?)_\d+\.sqlite|"
+                r"(?:memories|memories_v2)/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.md|"
                 r"(?:sessions|archived_sessions)/\d{4}/\d{2}/\d{2}/rollout-[A-Za-z0-9T_.:-]+\.jsonl)",
                 name,
             )

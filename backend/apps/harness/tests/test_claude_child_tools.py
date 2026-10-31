@@ -84,10 +84,12 @@ def _child_read_message(file_path: str) -> bytes:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subagent_type", ["general", "explore"])
 @pytest.mark.parametrize("mode", ["build", "plan"])
+@pytest.mark.parametrize("effort", ["low", "xhigh"])
 async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
     tmp_path: Path,
     subagent_type: str,
     mode: str,
+    effort: str,
 ) -> None:
     require_pinned_cli()
 
@@ -184,12 +186,13 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
         emit=emit,
         on_child_event=on_child,
         auth_env={"ANTHROPIC_API_KEY": "sk-ant-local-child-fixture"},
+        effort=effort,
         session_store=FixtureSessionStore(),
         runtime_artifact_ensurer=lambda *_args: asyncio.sleep(
             0,
             result={
                 "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+                "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
             },
         ),
     )
@@ -230,3 +233,9 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
     assert starts[0].get("subtask_id")
     assert starts[0].get("agent") == subagent_type
     assert len(requests) >= 3
+    model_requests = [request for request in requests if request.get("tools")]
+    assert len(model_requests) >= 3
+    assert all(
+        request.get("output_config", {}).get("effort") == effort
+        for request in model_requests
+    ), "Root and scoped child requests must retain the selected reasoning effort"

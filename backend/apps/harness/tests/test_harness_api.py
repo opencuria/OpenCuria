@@ -413,8 +413,7 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
     assistant_view = next(
         item for item in envelope["messages"] if item["id"] == str(assistant.id)
     )
-    # Timeline clients reconstruct assistant text from ordered text parts;
-    # content remains a compatibility fallback only when a legacy row has no parts.
+    # Timeline clients reconstruct assistant text exclusively from ordered parts.
     assert assistant_view["content"] == ""
     assert (
         next(
@@ -422,21 +421,22 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
         )["output"]
         == "answer"
     )
-    legacy_assistant = HarnessMessageRepository.create(
+    empty_assistant = HarnessMessageRepository.create(
         session_id=session.id,
         role="assistant",
-        content="legacy assistant body",
+        content="aggregate assistant content must not leak",
         harness_id=harness_id,
     )
-    fallback_timeline = client.get(
+    empty_timeline = client.get(
         f"/api/v1/harness/sessions/{session.id}/timeline"
     ).json()
-    legacy_view = next(
+    empty_view = next(
         item
-        for item in fallback_timeline["messages"]
-        if item["id"] == str(legacy_assistant.id)
+        for item in empty_timeline["messages"]
+        if item["id"] == str(empty_assistant.id)
     )
-    assert legacy_view["content"] == "legacy assistant body"
+    assert empty_view["content"] == ""
+    assert empty_view["parts"] == []
     parts = assistant_view["parts"]
     tool_view = next(item for item in parts if item["id"] == str(tool.id))
     assert tool_view["detail_loaded"] is False

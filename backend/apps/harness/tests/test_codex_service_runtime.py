@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 
+from apps.harness import tools as harness_tools
 from apps.harness.engines.codex.session_store import CodexSessionStore, home_for
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.harness_service import HarnessService
@@ -263,14 +264,14 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
         for key, ctx in service._runs.items()
     }
     service.conversation_events.emit_sync = lambda *_: None
-    original_tools = HarnessService._tools_for_session
+    original_tools = harness_tools.default_tool_registry
 
-    def registered_mcp_tools(self, *args, **kwargs):
-        registry = original_tools(self, *args, **kwargs)
+    def registered_mcp_tools():
+        registry = original_tools()
         registry.register(McpWriteTool())
         return registry
 
-    monkeypatch.setattr(HarnessService, "_tools_for_session", registered_mcp_tools)
+    monkeypatch.setattr(harness_tools, "default_tool_registry", registered_mcp_tools)
     # Empty, already-resolved plugin snapshot; real McpRuntime still executes.
     service.plugin_runtime.prepare = lambda *_: PreparedPluginRuntime(
         snapshot=WorkspacePluginSnapshot(
@@ -924,6 +925,13 @@ async def test_parent_stop_cancels_real_child_and_releases_both_owners(runtime):
     session = new_session(data)
     assistant, task = await start(data, session)
     await asyncio.wait_for(data.provider.blocked.wait(), 20)
+    # Child inference may start before its queued notification reaches the host.
+    async with asyncio.timeout(10):
+        while not HarnessSession.objects.filter(parent=session).exists():
+            if task.done():
+                await task
+                pytest.fail("Native child ended before its timeline was created")
+            await asyncio.sleep(0.02)
     child = HarnessSession.objects.get(parent=session)
     child_assistant = HarnessMessage.objects.get(session=child, role="assistant")
     await asyncio.wait_for(data.service.abort_run(session.id), 25)
@@ -1199,7 +1207,7 @@ async def test_chatgpt_runtime_preflight_refresh_exact_account_and_protocol_priv
     )
     engine = data.service._engine_registry_for_run().create(
         "codex",
-        tools=data.service._tools_for_session(str(session.id), "build"),
+        tools=harness_tools.default_tool_registry(),
         accessor=data.accessor,
         **runtime.engine_options,
     )

@@ -383,9 +383,12 @@ def _new_session_sync(service, harness_workspace):
 class FakeClaudeEngine:
     """Small async engine that exercises runtime callbacks, never Claude SDK."""
 
-    def __init__(self, *, behavior: str, kwargs: dict[str, Any]) -> None:
+    def __init__(
+        self, *, behavior: str, kwargs: dict[str, Any], ready: asyncio.Event
+    ) -> None:
         self.behavior = behavior
         self.kwargs = kwargs
+        self.ready = ready
 
     async def _run_shell_task(self, agent, model, mode, opts) -> None:  # type: ignore[no-untyped-def]
         """Exercise the real SDK message projector and Bash permission hooks."""
@@ -523,12 +526,13 @@ class FakeClaudeEngine:
                 external_id,
                 {
                     "harness_id": "claude",
-                    "cli_version": "2.1.310",
-                    "sdk_version": "0.2.174",
+                    "cli_version": "2.1.316",
+                    "sdk_version": "0.2.176",
                     "model": model,
                     "mode": mode,
                 },
             )
+            self.ready.set()
             if self.behavior == "shell_task":
                 await self._run_shell_task(agent, model, mode, opts)
             else:
@@ -594,8 +598,8 @@ class FakeClaudeEngine:
                 metadata={
                     "harness_id": "claude",
                     "external_session_id": external_id,
-                    "cli_version": "2.1.310",
-                    "sdk_version": "0.2.174",
+                    "cli_version": "2.1.316",
+                    "sdk_version": "0.2.176",
                     "model": model,
                     "reasoning_effort": "high",
                 },
@@ -609,10 +613,13 @@ class FakeEngineRegistry:
     def __init__(self, behavior: str = "success") -> None:
         self.behavior = behavior
         self.created: list[tuple[str, dict[str, Any]]] = []
+        self.ready = asyncio.Event()
 
     def create(self, harness_id: str, **kwargs: Any) -> FakeClaudeEngine:
         self.created.append((harness_id, kwargs))
-        return FakeClaudeEngine(behavior=self.behavior, kwargs=kwargs)
+        return FakeClaudeEngine(
+            behavior=self.behavior, kwargs=kwargs, ready=self.ready
+        )
 
 
 def _service(
@@ -1362,10 +1369,8 @@ async def test_account_revocation_stops_claude_owner_and_releases_attempt(
         session, "wait", user_id=harness_workspace.created_by_id
     )
     owner = service._tasks[str(session.id)]
-    for _ in range(100):
-        if registry.created:
-            break
-        await asyncio.sleep(0.02)
+    # Account revocation must target a live, bound owner, not engine construction.
+    await asyncio.wait_for(registry.ready.wait(), timeout=10)
     assert registry.created
     turn = ProviderTurn.objects.get(assistant_message_id=assistant.id)
     account_id = turn.account_ids["claude-agent"]

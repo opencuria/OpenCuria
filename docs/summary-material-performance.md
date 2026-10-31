@@ -1,5 +1,9 @@
 # Session summary material reads
 
+The measurements below describe the original optimization. The current message
+contract reads assistant text exclusively from parts; the legacy content fallback
+and its benchmark scenario have since been removed.
+
 Baseline: `535185f`, fetched from `origin/dev` on 2026-10-30. Both AGENTS files
 were read, all branches checked, and the requested untracked-inclusive stash
 found a clean worktree before switching to the latest `origin/dev`. Existing

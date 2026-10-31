@@ -315,7 +315,7 @@ class LocalSseWorkspaceAccessor:
                 remote_config_dir="",
                 local_config_dir="",
             )
-        assert argv[0] == "/opt/opencuria/runtimes/claude-agent/2.1.310/claude"
+        assert argv[0] == "/opt/opencuria/runtimes/claude-agent/2.1.316/claude"
         argv[0] = str(BUNDLED_CLAUDE)
         argv = [
             str(self.guest_path(item))
@@ -455,7 +455,7 @@ def test_cli_argv_is_explicit_bounded_and_resume_is_uuid() -> None:
     engine = ClaudeEngine(tools=default_tool_registry(), accessor=object())
     sid = str(uuid.uuid4())
     argv = engine._runtime_state.build_command(
-        binary="/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+        binary="/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
         prompt_path="/workspace/.opencuria/harness/claude/abc/prompt.md",
         model="claude-sonnet-4-5",
         effort="high",
@@ -487,7 +487,7 @@ def test_cli_argv_fresh_run_mirrors_session_without_forcing_resume() -> None:
     engine = ClaudeEngine(tools=ToolRegistry(), accessor=object())
     session_id = str(uuid.uuid4())
     argv = engine._runtime_state.build_command(
-        binary="/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+        binary="/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
         prompt_path="/workspace/.opencuria/harness/claude/abc/system-prompt.md",
         model="sonnet",
         effort="high",
@@ -788,7 +788,7 @@ async def _run_local_cli_fixture(
             0,
             result={
                 "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+                "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
             },
         ),
     )

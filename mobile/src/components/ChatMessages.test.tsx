@@ -118,6 +118,18 @@ beforeEach(() => {
 });
 
 describe("ChatMessages", () => {
+  it("does not render or allow copying assistant aggregate content", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[{ ...message([]), content: "Unused aggregate" }]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByText("Unused aggregate")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeDisabled();
+  });
+
   it("keeps a live reply without a server position after the persisted turns", () => {
     const persisted = (
       id: string,

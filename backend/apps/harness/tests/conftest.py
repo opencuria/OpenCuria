@@ -14,7 +14,8 @@ from PIL import Image
 from apps.harness.access.base import ExecResult, WorkspaceAccessor
 from apps.harness.access.file_types import DirEntry, FileContent
 from apps.harness.access.runner_accessor import RunnerAccessorError
-from apps.harness.models import ProviderConnection
+from apps.harness.models import HarnessSession, ProviderConnection
+from apps.harness.repositories import HarnessSessionRepository
 from apps.organizations.models import Organization
 
 # Allow sync ORM calls from async test functions (Django safety check).
@@ -455,4 +456,14 @@ def harness_workspace(db, organization):
         name="Harness Workspace",
         status=WorkspaceStatus.RUNNING,
         created_by=user,
+    )
+
+
+@pytest.fixture
+def harness_session(harness_workspace) -> HarnessSession:
+    """A persisted session for tools that read or write session state."""
+    return HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="Harness Session",
     )

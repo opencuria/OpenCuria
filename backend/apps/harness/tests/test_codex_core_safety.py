@@ -108,6 +108,51 @@ async def test_refresh_and_stale_tool_requests_deny_without_callback():
         await engine._server_request(
             "item/tool/call", {"threadId": "thread-old", "turnId": "turn-current"}
         )
+    engine._stopping = True
+    with pytest.raises(RuntimeError, match="Stale"):
+        await engine._server_request(
+            "item/tool/call", {"threadId": "thread-current", "turnId": "turn-current"}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopping", [False, True])
+@pytest.mark.parametrize("child", [False, True])
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, RuntimeError])
+async def test_stop_drain_only_tolerates_timeline_cancellation(
+    stopping, child, failure
+):
+    async def reject(*args):
+        raise failure()
+
+    engine = CodexEngine(
+        tools=ToolRegistry(), accessor=None, auth=auth(), emit=reject,
+        on_child_event=reject,
+    )
+    engine._stopping = stopping
+    parent = "native-child" if child else None
+    if stopping and failure is asyncio.CancelledError:
+        await engine._send({"type": "step_finish"}, parent)
+    else:
+        with pytest.raises(failure):
+            await engine._send({"type": "step_finish"}, parent)
+
+
+@pytest.mark.asyncio
+async def test_stop_drain_still_propagates_its_own_task_cancellation():
+    entered = asyncio.Event()
+
+    async def emit(event):
+        entered.set()
+        await asyncio.Event().wait()
+
+    engine = CodexEngine(tools=ToolRegistry(), accessor=None, auth=auth(), emit=emit)
+    engine._stopping = True
+    task = asyncio.create_task(engine._send({"type": "step_finish"}))
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
@@ -244,6 +289,10 @@ async def test_snapshot_authoritative_text_ignores_stale_and_duplicate_completio
         "config.toml",
         "logs_2.sqlite",
         "auth.json",
+        "memories_v2/../../auth.json",
+        "memories_v2/.git/config",
+        "memories_v2/auth.json",
+        "memories_v2_1.sqlite-wal",
     ],
 )
 def test_checkpoint_rejects_traversal_and_unrelated_artifacts(path):

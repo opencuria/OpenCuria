@@ -1,6 +1,6 @@
 # Codex engine internals
 
-The pinned **0.163.0** standalone app-server runs inside the workspace over private
+The pinned **0.166.0** standalone app-server runs inside the workspace over private
 stdio. This package adapts its experimental internal API to OpenCuria's existing
 harness contracts; it is not a stable public SDK integration. User setup,
 operations, limitations and reproducible tests: [Codex guide](../../../../../docs/codex.md).
@@ -89,7 +89,7 @@ No duplicate OpenCuria file/shell tools are advertised.
 Images use shared authorized no-follow reads. Mandatory `pypdf==6.21.1` extracts
 text only in an isolated parser (256 MiB, 5-second soft CPU, 10-second wall,
 100 pages, 512 KiB text); there is no OCR or PDF image support.
-Checkpoints allow 256 files, 24 MiB raw/34 MiB encoded, including native memory
+Checkpoints allow 256 files, 24 MiB raw/34 MiB encoded, including v1/v2 native memory
 markdown/databases and child rollouts, but excluding auth/config/logs/caches.
 The absolute workspace and `CODEX_HOME` must match; 4 MiB restore pieces respect
 10 MiB writes. Confirmed Stop plus cleanup/checkpoint allows continuation;

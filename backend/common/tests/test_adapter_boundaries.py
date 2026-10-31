@@ -1,96 +1,6 @@
-"""Architecture guard: REST router and Socket.IO modules are leaf adapters.
+"""Enforce service, persistence and adapter boundaries, including local imports.
 
-REST routers (``api.py``) and the MCP server (``apps.mcp_app``) are sibling
-adapters over the same services. Shared request/response shapes live in ``schemas`` /
-presenter modules, so no application module may import a REST router
-module; only the URL composition root (``config/urls.py``) mounts them.
-Likewise the realtime adapters (the Socket.IO handler module and the desktop
-proxy) are mounted only by ``config/asgi.py``; services and adapters resolve
-the runner service, frontend fan-out and desktop tunnels from
-``apps.runners.services``. The runner service itself never imports the
-harness; the harness plugs in through the ``HarnessGateway`` port. The
-harness in turn never imports the apps built on it; they subscribe to its
-run events (``apps.harness.run_events``). Likewise the foundational contexts
-(organizations, credentials, skills, plugins) only import the contexts below
-them; apps built on them subscribe to ``apps.organizations.events`` and
-``apps.credentials.deletion_guards`` and share ``common.schemas``.
-Account identity never imports another app; organizations compose it with
-memberships and own the member profile adapter mounted at ``/auth/me/``. Skill
-selection (ID normalization, visibility, body rendering and merging) is owned
-by the skills context; the harness and scheduled tasks call ``SkillService``
-and never import skill repositories or models. Workspaces
-compose plugins, so workspace-scoped plugin endpoints and guards live in
-``apps.runners``. REST, MCP and realtime adapters never query the ORM
-themselves and never import repositories; REST and MCP authenticate API keys
-through ``apps.accounts.services.APIKeyService``, and
-the realtime adapters reach models and repositories only through services.
-Below the adapters, services, tools and engines of the repository-only apps
-never query the ORM either: model managers and instance reloads appear only
-in ``models`` and ``repositories`` modules. Password/JWT authentication and
-SSO provisioning share the accounts user repository; profile writes and
-password checks (which can save upgraded hashes) stay there as well.
-Credential and organization repositories are private to their contexts;
-consumers resolve catalog entries and workspace attachments through credential
-services and check organizations and active memberships through
-``OrganizationService``. Adapters select credentials by ID and never resolve
-(decrypt) them; the service that applies a selection resolves it.
-Harness persistence never imports tool adapters; todo records and their storage
-port live in ``apps.harness.todos.domain`` and tools call its todo service.
-Provider wire adapters share context-error classification within ``providers``;
-neither they nor their dependencies import orchestration or persistence.
-Shared deadlines and SSE transport live below concrete provider adapters;
-wire adapters never import their peers, even through shared dependencies.
-Provider catalog parsing and static capabilities obey the same boundary;
-account authorization, credential resolution and caching live in
-``apps.harness.model_catalog_service``.
-Stateless commit suggestions and shared small-model composition are independent
-of chat session orchestration; their adapter calls ``CommitMessageService``.
-Session metadata generation is independent as well; the lifecycle service only
-schedules it and supplies change notifications to ``SessionMetadataService``.
-Provider account management never imports its orchestration consumers; account
-validation stays with accounts and revocation wakeups use a leaf event module.
-Account transactions, admission fencing and commit hooks belong to the account
-repository, including OAuth completion; services choose policy and effects
-without importing Django DB.
-Provider-turn snapshot admission follows the same boundary: its service checks
-membership through OrganizationService and validates account scope; turn
-persistence never imports organization policy or application services.
-Provider-history reconstruction is independent of run orchestration; its caller
-supplies persistence ports to ``ProviderHistoryService``.
-Permission and question interactions own pending requests and live waiters in
-``InteractionService``. It uses event and run-status ports, never imports run
-orchestration or tool adapters, and leaves no forwarding API in HarnessService.
-Saved conversation history, feeds, unread/attention and notice dismissal belong to
-``ConversationService``. It and the shared conversation event publisher never
-import live run orchestration, even through their dependencies.
-OAuth endpoint, registration and grant integrity rules live in
-``apps.credentials.oauth_metadata``; persistence and protocol workflows never
-import their service consumers, even through function-local imports.
-OAuth grant authorization belongs to OAuthGrantService; repositories never
-call application services, and the grant service delegates transactions and
-model writes to its repository.
-Engine execution contracts live in ``apps.harness.engines.base``; external
-engines and shared tool dispatch never import the native inference loop,
-even through their dependencies.
-Inventory persistence never imports storage inspection, activity, retention or
-deletion workflows. InventoryInspectionService composes their read models and
-queries only through repositories, including fully loaded inventory records.
-Runner service domains and infrastructure never import their composition facade;
-shared RPC correlation records belong to the infrastructure that consumes them.
-Workspace reservation reads and task admission never import capture/recreate
-coordinators. Their shared read boundary is WorkspaceOperationRepository.
-Lifecycle outbox persistence never imports task allocation or workflow coordinators.
-RecoveryService supplies domain delivery approval, checked under the existing
-runner locks before command expiry and lease allocation.
-Scheduled-task restart recovery coordinates ledger outcomes through services;
-harness turn, descendant and input cleanup belongs to RunRecoveryService, which
-never imports live orchestration or its scheduling consumers. Scheduled tasks
-persist only their own ledger: workspace launch state, ownership, activity and
-the single auto-stop policy come from the runner service, and unstarted chats
-are rolled back through ConversationService.
-Notification workers schedule service operations without reaching repositories
-or harness activity directly. Notification eligibility uses OrganizationService;
-repositories receive freshness/retention cutoffs and never own membership rules.
+Parse the application once per module and share dependency traversal across rules.
 """
 
 from __future__ import annotations
@@ -99,8 +9,11 @@ import ast
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterable
 from graphlib import TopologicalSorter
 from pathlib import Path
+
+import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 APPS_ROOT = BACKEND_ROOT / "apps"
@@ -219,34 +132,89 @@ def _imported_modules(path: Path, tree: ast.Module) -> set[str]:
     return imported
 
 
-def test_notifications_reach_harness_only_through_activity_service_and_events() -> None:
+@pytest.fixture(scope="module")
+def trees() -> dict[Path, ast.Module]:
+    """Read and parse one consistent application snapshot for all rules."""
+    return {path: ast.parse(path.read_text()) for path in _source_files()}
+
+
+@pytest.fixture(scope="module")
+def modules(trees: dict[Path, ast.Module]) -> dict[str, Path]:
+    """Index the source snapshot by its importable module names."""
+    return {_module_name(path): path for path in trees}
+
+
+@pytest.fixture(scope="module")
+def dependencies(trees: dict[Path, ast.Module]) -> dict[str, set[str]]:
+    """Resolve imports, including aliases and function-local relative imports."""
+    return {
+        _module_name(path): _imported_modules(path, tree)
+        for path, tree in trees.items()
+    }
+
+
+def _within(module: str, namespaces: Iterable[str]) -> bool:
+    """Match a namespace itself and its dotted descendants, not similar names."""
+    return any(module == name or module.startswith(f"{name}.") for name in namespaces)
+
+
+def _dependency_violations(
+    dependencies: dict[str, set[str]],
+    roots: Iterable[str],
+    forbidden: Callable[[str], bool],
+) -> set[str]:
+    """Report forbidden edges reachable from roots without traversing them."""
+    pending = set(roots)
+    checked: set[str] = set()
+    violations: set[str] = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        for imported in dependencies[module]:
+            if forbidden(imported):
+                violations.add(f"{module} -> {imported}")
+            elif imported in dependencies and imported not in checked:
+                pending.add(imported)
+    return violations
+
+
+def test_dependency_guard_reports_direct_and_transitive_edges_through_cycles() -> None:
+    """Follow dependency cycles and distinguish similarly named namespaces."""
+    graph = {
+        "root": {"helper", "blocked.Direct", "blocked_helper", "stdlib"},
+        "helper": {"root", "blocked.Indirect"},
+        "blocked.Direct": {"blocked.BeyondBoundary"},
+        "blocked_helper": set(),
+    }
+    assert _dependency_violations(
+        graph, {"root"}, lambda name: _within(name, {"blocked"})
+    ) == {"root -> blocked.Direct", "helper -> blocked.Indirect"}
+
+
+def test_notifications_reach_harness_only_through_activity_service_and_events(
+    trees, dependencies
+) -> None:
     """Notification storage must not own harness queries or activity rules."""
     public_modules = {
         "apps.harness.conversation_activity_service",
         "apps.harness.run_events",
     }
     violations = []
-    for path in _source_files():
+    for path in trees:
         if path.relative_to(APPS_ROOT).parts[0] != "notifications":
             continue
-        for imported in _imported_modules(path, ast.parse(path.read_text())):
+        for imported in dependencies[_module_name(path)]:
             if imported != "apps.harness" and not imported.startswith("apps.harness."):
                 continue
-            if not _is_persistence_module(path) and any(
-                imported == module or imported.startswith(f"{module}.")
-                for module in public_modules
-            ):
+            if not _is_persistence_module(path) and _within(imported, public_modules):
                 continue
             violations.append(f"{_module_name(path)} -> {imported}")
-    assert violations == [], (
-        "Notifications must consume immutable activity from the harness service "
-        "and its lifecycle events; notification repositories must not import "
-        "the harness, even through function-local imports:\n"
-        + "\n".join(sorted(violations))
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_notification_worker_and_persistence_leave_policy_to_services() -> None:
+def test_notification_worker_and_persistence_leave_policy_to_services(
+    trees, dependencies
+) -> None:
     """Workers schedule; notification services own eligibility and retention."""
     package = APPS_ROOT / "notifications"
     worker = package / "worker.py"
@@ -257,23 +225,21 @@ def test_notification_worker_and_persistence_leave_policy_to_services() -> None:
     }
     violations = [
         f"worker -> {module}"
-        for module in _imported_modules(worker, ast.parse(worker.read_text()))
-        if any(
-            module == target or module.startswith(f"{target}.") for target in forbidden
-        )
+        for module in dependencies[_module_name(worker)]
+        if _within(module, forbidden)
     ]
     violations.extend(
         f"worker:{node.lineno} -> {node.attr}"
-        for node in ast.walk(ast.parse(worker.read_text()))
+        for node in ast.walk(trees[worker])
         if isinstance(node, ast.Attribute) and node.attr in {"repo", "activity"}
     )
     for path in package.rglob("*.py"):
         if "tests" in path.parts or not _is_persistence_module(path):
             continue
-        tree = ast.parse(path.read_text())
+        tree = trees[path]
         violations.extend(
             f"{_module_name(path)} -> {module}"
-            for module in _imported_modules(path, tree)
+            for module in dependencies[_module_name(path)]
             if module == "apps.notifications.services"
             or module.startswith("apps.")
             and not module.startswith("apps.notifications.")
@@ -292,15 +258,12 @@ def test_notification_worker_and_persistence_leave_policy_to_services() -> None:
             and node.arg is not None
             and node.arg.startswith("user__")
         )
-    assert violations == [], (
-        "Route notification workflows through NotificationService and account/"
-        "membership checks through OrganizationService; notification persistence "
-        "must not query identity policy or import its consumers:\n"
-        + "\n".join(sorted(violations))
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_runner_domains_and_infrastructure_never_import_composition_facade() -> None:
+def test_runner_domains_and_infrastructure_never_import_composition_facade(
+    dependencies,
+) -> None:
     """Domain and infrastructure dependencies must point away from the facade."""
     services = APPS_ROOT / "runners" / "services"
     facade = "apps.runners.services"
@@ -308,13 +271,36 @@ def test_runner_domains_and_infrastructure_never_import_composition_facade() -> 
         f"{_module_name(path)} -> {facade}"
         for package in (services / "domains", services / "infra")
         for path in package.rglob("*.py")
-        if facade in _imported_modules(path, ast.parse(path.read_text()))
+        if facade in dependencies[_module_name(path)]
     )
-    assert violations == [], (
-        "RunnerService composes domains and infrastructure; they must not "
-        "import it, including through function-local imports. Put shared "
-        "contracts in the module that owns them:\n" + "\n".join(violations)
+    assert not violations, "\n".join(sorted(violations))
+
+
+def test_process_lookup_and_persistence_are_independent_of_runner_workflows(
+    trees, dependencies
+) -> None:
+    """Process reads must not load unrelated persistence or live execution."""
+    forbidden = {
+        "apps.harness",
+        "apps.runners.repositories",
+        "apps.runners.services",
+    }
+    pending = {
+        "apps.runners.process_repository",
+        "apps.runners.services.process_lookup",
+    }
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, forbidden),
     )
+    lookup = APPS_ROOT / "runners" / "services" / "process_lookup.py"
+    violations.update(
+        f"{_module_name(lookup)}:{node.lineno} -> {node.attr}"
+        for node in ast.walk(trees[lookup])
+        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
+    )
+    assert not violations, "\n".join(sorted(violations))
 
 
 def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
@@ -333,10 +319,8 @@ def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
     )
 
 
-def test_lifecycle_outbox_never_imports_its_consumers() -> None:
+def test_lifecycle_outbox_never_imports_its_consumers(dependencies) -> None:
     """Command claiming must not import the workflows that allocate commands."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     consumers = {
         "apps.runners.repositories",
         "apps.runners.deletion_repository",
@@ -345,33 +329,21 @@ def test_lifecycle_outbox_never_imports_its_consumers() -> None:
         "apps.runners.services",
     }
     pending = {"apps.runners.operations"}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in consumers
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "RecoveryService must supply domain delivery approval to the lifecycle "
-        "outbox; persistence and its dependencies must not import task allocation "
-        "or workflow coordination, even through local imports:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, consumers),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_scheduled_restart_recovery_reaches_harness_only_through_its_service() -> None:
+def test_scheduled_restart_recovery_reaches_harness_only_through_its_service(
+    dependencies,
+) -> None:
     """The schedule workflow must not read or mutate harness storage directly."""
     path = APPS_ROOT / "scheduled_tasks" / "recovery.py"
     service = "apps.harness.run_recovery_service"
-    imported = _imported_modules(path, ast.parse(path.read_text()))
+    imported = dependencies[_module_name(path)]
     assert service in imported
     violations = sorted(
         module
@@ -380,15 +352,11 @@ def test_scheduled_restart_recovery_reaches_harness_only_through_its_service() -
         and module != service
         and not module.startswith(f"{service}.")
     )
-    assert violations == [], (
-        "Restart recovery must call RunRecoveryService instead of importing "
-        "harness models, repositories or live execution:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_scheduled_tasks_persist_only_their_ledger() -> None:
+def test_scheduled_tasks_persist_only_their_ledger(trees, dependencies) -> None:
     """Schedules reach workspaces, chats and members through their services."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     package = APPS_ROOT / "scheduled_tasks"
     foreign = {
         module
@@ -401,22 +369,16 @@ def test_scheduled_tasks_persist_only_their_ledger() -> None:
         f"{_module_name(path)} -> {module}"
         for path, tree in trees.items()
         if path.is_relative_to(package) and path not in adapters
-        for module in _imported_modules(path, tree)
+        for module in dependencies[_module_name(path)]
         if module in foreign
     )
-    assert violations == [], (
-        "Scheduled tasks persist only their schedule ledger. Read workspace "
-        "state, activity and auto-stop through apps.runners.services, members "
-        "through OrganizationService and roll back unstarted chats through "
-        "ConversationService instead of importing their models, repositories "
-        "or locks, even function-locally:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_harness_restart_recovery_is_independent_of_live_orchestration() -> None:
+def test_harness_restart_recovery_is_independent_of_live_orchestration(
+    dependencies,
+) -> None:
     """Restart cleanup must stay independent even through local imports."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     pending = {"apps.harness.run_recovery_service"}
     forbidden = (
         "apps.harness.harness_service",
@@ -424,30 +386,16 @@ def test_harness_restart_recovery_is_independent_of_live_orchestration() -> None
         "apps.harness.tools",
         "apps.scheduled_tasks",
     )
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in forbidden
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Harness restart recovery and its dependencies must not import live "
-        "orchestration, tools or scheduling consumers:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, forbidden),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_no_application_module_imports_a_rest_router_module():
+def test_no_application_module_imports_a_rest_router_module(trees, dependencies):
     """Adapters never import REST routers; shared code lives in schemas/services."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     router_modules = {
         _module_name(path)
         for path, tree in trees.items()
@@ -459,14 +407,10 @@ def test_no_application_module_imports_a_rest_router_module():
     violations = sorted(
         f"{_module_name(path)} -> {module}"
         for path, tree in trees.items()
-        for module in _imported_modules(path, tree) & router_modules
+        for module in dependencies[_module_name(path)] & router_modules
         if module != _module_name(path)
     )
-    assert violations == [], (
-        "REST router modules must only be imported by config/urls.py; move "
-        "shared schemas/mappers to a schemas or presenter module:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
 def _repository_modules(trees: dict[Path, ast.Module]) -> set[str]:
@@ -502,10 +446,10 @@ def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
     }
 
 
-def test_commit_suggestions_are_independent_of_session_orchestration() -> None:
+def test_commit_suggestions_are_independent_of_session_orchestration(
+    modules, dependencies
+) -> None:
     """Commit generation must not depend on chat lifecycle, even transitively."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     workflow = {
         "apps.harness.commit_message_api",
         "apps.harness.commit_message_service",
@@ -515,36 +459,23 @@ def test_commit_suggestions_are_independent_of_session_orchestration() -> None:
     lifecycle = "apps.harness.harness_service"
     assert workflow <= modules.keys()
     pending = set(workflow)
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if imported == lifecycle or imported.startswith(f"{lifecycle}."):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: imported == lifecycle or imported.startswith(f"{lifecycle}."),
+    )
     violations.update(
         f"{lifecycle} -> {imported}"
-        for imported in _imported_modules(modules[lifecycle], trees[modules[lifecycle]])
-        if any(
-            imported == owner or imported.startswith(f"{owner}.")
-            for owner in workflow - {"apps.harness.small_model_service"}
-        )
+        for imported in dependencies[lifecycle]
+        if _within(imported, workflow - {"apps.harness.small_model_service"})
     )
-    assert violations == set(), (
-        "Keep commit suggestions in CommitMessageService and share small-model "
-        "composition without coupling it to HarnessService:\n"
-        + "\n".join(sorted(violations))
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_user_interactions_are_independent_of_run_orchestration() -> None:
+def test_user_interactions_are_independent_of_run_orchestration(
+    trees, modules, dependencies
+) -> None:
     """All engines and adapters share interactions without a reverse dependency."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     interactions = "apps.harness.interaction_service"
     lifecycle = "apps.harness.harness_service"
     forbidden = {
@@ -555,29 +486,14 @@ def test_user_interactions_are_independent_of_run_orchestration() -> None:
         "apps.harness.tools",
     }
     assert interactions in modules
-    assert interactions in _imported_modules(
-        modules[lifecycle], trees[modules[lifecycle]]
-    )
+    assert interactions in dependencies[lifecycle]
     pending = {interactions}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in forbidden
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "InteractionService must own user gates independently of run orchestration "
-        "and tool adapters, including through local imports:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, forbidden),
     )
+    assert not violations, "\n".join(sorted(violations))
 
     moved_operations = {
         "list_pending_permissions",
@@ -607,36 +523,27 @@ def test_user_interactions_are_independent_of_run_orchestration() -> None:
     } & {"_pending_permissions", "_pending_questions"}
 
 
-def test_session_metadata_is_independent_of_run_orchestration() -> None:
+def test_session_metadata_is_independent_of_run_orchestration(
+    modules, dependencies
+) -> None:
     """Metadata generation must work without importing the run lifecycle."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     lifecycle = "apps.harness.harness_service"
     metadata = "apps.harness.session_metadata_service"
     assert metadata in modules
-    assert metadata in _imported_modules(modules[lifecycle], trees[modules[lifecycle]])
+    assert metadata in dependencies[lifecycle]
     pending = {metadata}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if imported == lifecycle or imported.startswith(f"{lifecycle}."):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Keep title/summary generation in SessionMetadataService; it and its "
-        "dependencies must not import HarnessService:\n" + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: imported == lifecycle or imported.startswith(f"{lifecycle}."),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_history_is_independent_of_run_orchestration() -> None:
+def test_provider_history_is_independent_of_run_orchestration(
+    modules, dependencies
+) -> None:
     """Transcript reconstruction must not import live execution, even indirectly."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     history = "apps.harness.provider_history_service"
     lifecycle = "apps.harness.harness_service"
     execution = {
@@ -646,33 +553,20 @@ def test_provider_history_is_independent_of_run_orchestration() -> None:
         "apps.harness.engines.service_runtime",
     }
     assert history in modules
-    assert history in _imported_modules(modules[lifecycle], trees[modules[lifecycle]])
+    assert history in dependencies[lifecycle]
     pending = {history}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in execution
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Keep provider-history reconstruction in ProviderHistoryService; it and "
-        "its dependencies must not import run orchestration:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, execution),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_saved_session_state_is_independent_of_run_orchestration() -> None:
+def test_saved_session_state_is_independent_of_run_orchestration(
+    trees, modules, dependencies
+) -> None:
     """Saved-state queries, forks and settings must not load agent execution."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     lifecycle = "apps.harness.harness_service"
     owners = {
         "apps.harness.conversation_service",
@@ -688,25 +582,12 @@ def test_saved_session_state_is_independent_of_run_orchestration() -> None:
     }
     assert owners <= modules.keys()
     pending = set(owners)
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in execution
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Saved-state services, conversation events and presenters "
-        "must work independently "
-        "of live run orchestration:\n" + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, execution),
     )
+    assert not violations, "\n".join(sorted(violations))
 
     moved_operations = {
         "get_session",
@@ -735,17 +616,20 @@ def test_saved_session_state_is_independent_of_run_orchestration() -> None:
         "update_skill_ids",
         "_validate_codex_session_config",
     }
-    assert not {
-        node.name
-        for node in ast.walk(trees[modules[lifecycle]])
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    } & moved_operations, "Keep saved conversations and settings out of HarnessService"
+    assert (
+        not {
+            node.name
+            for node in ast.walk(trees[modules[lifecycle]])
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        & moved_operations
+    ), "Keep saved conversations and settings out of HarnessService"
 
 
-def test_provider_accounts_never_import_their_orchestration_consumers() -> None:
+def test_provider_accounts_never_import_their_orchestration_consumers(
+    dependencies,
+) -> None:
     """Accounts stay below model discovery, turn orchestration and configuration."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     consumers = {
         "apps.harness.services",
         "apps.harness.provider_turns",
@@ -755,37 +639,25 @@ def test_provider_accounts_never_import_their_orchestration_consumers() -> None:
         "apps.harness.providers.resolver",
     }
     pending = {"apps.harness.provider_accounts"}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == consumer or imported.startswith(f"{consumer}.")
-                for consumer in consumers
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Keep account validation in provider_accounts and publish revocation "
-        "wakeups through provider_account_events; account management must not "
-        "import its consumers, even transitively or inside functions:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, consumers),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_account_service_delegates_transactions_and_locks() -> None:
+def test_provider_account_service_delegates_transactions_and_locks(
+    trees, dependencies
+) -> None:
     """Account and OAuth policy use the repository-owned admission fence."""
     violations = []
     for name in ("provider_accounts.py", "provider_oauth.py", "provider_turns.py"):
         path = APPS_ROOT / "harness" / name
-        tree = ast.parse(path.read_text())
+        tree = trees[path]
         violations.extend(
             f"{name}: {module}"
-            for module in sorted(_imported_modules(path, tree))
+            for module in sorted(dependencies[_module_name(path)])
             if module == "django.db" or module.startswith("django.db.")
         )
         violations.extend(
@@ -794,42 +666,38 @@ def test_provider_account_service_delegates_transactions_and_locks() -> None:
             if isinstance(node, ast.Attribute)
             and node.attr in {"save", "asave", "delete", "adelete", "lock_mutex"}
         )
-    assert violations == [], (
-        "Keep provider account transactions, admission locking and commit hooks "
-        "in account/turn repositories:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_turn_persistence_never_imports_other_contexts_or_services() -> None:
+def test_provider_turn_persistence_never_imports_other_contexts_or_services(
+    dependencies,
+) -> None:
     """Snapshot persistence leaves membership and admission policy to services."""
     path = APPS_ROOT / "harness" / "provider_turn_repository.py"
     violations = [
         module
-        for module in _imported_modules(path, ast.parse(path.read_text()))
+        for module in dependencies[_module_name(path)]
         if module.startswith("apps.")
         and not module.startswith("apps.harness.")
-        or {"services", "provider_turns", "provider_accounts"}
-        & set(module.split("."))
+        or {"services", "provider_turns", "provider_accounts"} & set(module.split("."))
     ]
-    assert violations == [], (
-        "Keep provider snapshot authorization in ProviderTurnService and use "
-        "OrganizationService for membership policy; persistence must not import "
-        "other contexts or services:\n" + "\n".join(sorted(violations))
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_account_events_remain_independent_of_application_code() -> None:
+def test_provider_account_events_remain_independent_of_application_code(
+    dependencies,
+) -> None:
     """Account publishers and run subscribers share a leaf notification module."""
     path = APPS_ROOT / "harness" / "provider_account_events.py"
-    imports = _imported_modules(path, ast.parse(path.read_text()))
+    imports = dependencies[_module_name(path)]
     assert {module.split(".")[0] for module in imports} <= sys.stdlib_module_names
 
 
-def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
+def test_provider_wire_adapters_never_import_harness_orchestration(
+    trees, modules, dependencies
+) -> None:
     """Provider streams and catalog protocols stay below the control plane."""
     package = "apps.harness.providers"
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     # AccountBoundAdapter in resolver.py is service composition, not a wire adapter.
     pending = {
         module
@@ -852,34 +720,21 @@ def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
         f"{package}.openrouter",
     } <= pending
     pending.add(f"{package}.models_catalog")
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if imported.startswith("apps.") and not (
-                imported == package or imported.startswith(f"{package}.")
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported == "django" or imported.startswith("django."):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Provider wire adapters, catalog protocols and their dependencies must not "
-        "import orchestration, workspace access or persistence. Put shared "
-        "provider error classification in the provider layer:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: (
+            imported.startswith("apps.")
+            and (not (imported == package or imported.startswith(f"{package}.")))
+            or (imported == "django" or imported.startswith("django."))
+        ),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_wire_adapters_never_import_each_other() -> None:
+def test_provider_wire_adapters_never_import_each_other(dependencies) -> None:
     """Transport reuse must not couple a provider to another wire protocol."""
     package = "apps.harness.providers"
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     adapters = {
         f"{package}.{name}"
         for name in ("bedrock", "chatgpt", "openai_compatible", "openrouter")
@@ -887,31 +742,19 @@ def test_provider_wire_adapters_never_import_each_other() -> None:
     violations = set()
     for adapter in adapters:
         pending = {adapter}
-        checked: set[str] = set()
-        while pending:
-            module = pending.pop()
-            checked.add(module)
-            path = modules[module]
-            for imported in _imported_modules(path, trees[path]):
-                if imported in adapters - {adapter}:
-                    violations.add(f"{adapter}: {module} -> {imported}")
-                elif imported in modules and imported not in checked:
-                    pending.add(imported)
-    assert violations == set(), (
-        "Provider adapters must depend on shared transport and contracts, never "
-        "on another concrete provider, including through function-local or "
-        "transitive imports:\n" + "\n".join(sorted(violations))
-    )
+        violations.update(
+            f"{adapter}: {edge}"
+            for edge in _dependency_violations(
+                dependencies, pending, lambda imported: imported in adapters - {adapter}
+            )
+        )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_wire_adapters_import_without_django_setup() -> None:
-    """Provider streams and catalog parsing can load without Django or app setup."""
-    env = os.environ.copy()
-    env.pop("DJANGO_SETTINGS_MODULE", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
             "from apps.harness.providers.bedrock import BedrockAdapter\n"
             "from apps.harness.providers.chatgpt import ChatGPTAdapter\n"
             "from apps.harness.providers.openai_compatible "
@@ -921,7 +764,36 @@ def test_provider_wire_adapters_import_without_django_setup() -> None:
             "import normalize_reasoning_effort, normalize_openrouter_catalog\n"
             "import sys\n"
             "assert 'django' not in sys.modules\n",
-        ],
+            id="provider_wire_adapters_import_without_django_setup",
+        ),
+        pytest.param(
+            "import sys\n"
+            "from typing import get_type_hints\n"
+            "from apps.harness.engines.base "
+            "import HarnessEngine, RunOptions, RunResult\n"
+            "hints = get_type_hints(HarnessEngine.run)\n"
+            "assert hints['opts'] is RunOptions\n"
+            "assert hints['return'] is RunResult\n"
+            "assert not {'apps.harness.runner', 'apps.harness.harness_service', "
+            "'django'} & sys.modules.keys()\n",
+            id="engine_contracts_import_without_application_setup",
+        ),
+        pytest.param(
+            "import sys\n"
+            "from apps.harness.media import attachments, formats, references\n"
+            "from apps.harness import redaction\n"
+            "assert not {'django', 'apps.harness.engines', 'apps.harness.tools'} "
+            "& sys.modules.keys()\n",
+            id="media_formats_and_references_load_without_application_setup",
+        ),
+    ],
+)
+def test_contracts_import_without_application_setup(source: str) -> None:
+    """Check each contract in a fresh interpreter without Django settings."""
+    env = os.environ.copy()
+    env.pop("DJANGO_SETTINGS_MODULE", None)
+    result = subprocess.run(
+        [sys.executable, "-c", source],
         cwd=BACKEND_ROOT,
         env=env,
         capture_output=True,
@@ -932,10 +804,8 @@ def test_provider_wire_adapters_import_without_django_setup() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_external_engines_never_import_the_native_loop() -> None:
+def test_external_engines_never_import_the_native_loop(modules, dependencies) -> None:
     """Sibling engines and shared contracts must not depend on native execution."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     native = "apps.harness.runner"
     roots = {
         "apps.harness.engines.base",
@@ -952,55 +822,16 @@ def test_external_engines_never_import_the_native_loop() -> None:
         "apps.harness.engines.codex.engine",
     } <= roots
     pending = set(roots)
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if imported == native or imported.startswith(f"{native}."):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Keep RunOptions/RunResult in engines.base; external engines and "
-        "shared tool dispatch must not import the native loop, including "
-        "transitively and inside functions:\n" + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: imported == native or imported.startswith(f"{native}."),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_engine_contracts_import_without_application_setup() -> None:
-    """The engine protocol's annotations resolve without loading application code."""
-    env = os.environ.copy()
-    env.pop("DJANGO_SETTINGS_MODULE", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys\n"
-            "from typing import get_type_hints\n"
-            "from apps.harness.engines.base "
-            "import HarnessEngine, RunOptions, RunResult\n"
-            "hints = get_type_hints(HarnessEngine.run)\n"
-            "assert hints['opts'] is RunOptions\n"
-            "assert hints['return'] is RunResult\n"
-            "assert not {'apps.harness.runner', 'apps.harness.harness_service', "
-            "'django'} & sys.modules.keys()\n",
-        ],
-        cwd=BACKEND_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_harness_persistence_never_imports_tools() -> None:
+def test_harness_persistence_never_imports_tools(trees, dependencies) -> None:
     """Repositories depend on domain records instead of their tool consumers."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     persistence = _persistence_modules(trees)
     assert "apps.harness.todos.repositories" in persistence
     assert "apps.harness.repositories" in persistence
@@ -1009,17 +840,13 @@ def test_harness_persistence_never_imports_tools() -> None:
         for path, tree in trees.items()
         if _module_name(path).startswith("apps.harness.")
         and _module_name(path) in persistence
-        for module in _imported_modules(path, tree)
+        for module in dependencies[_module_name(path)]
         if module == "apps.harness.tools" or module.startswith("apps.harness.tools.")
     )
-    assert violations == [], (
-        "Move shared records and storage ports out of tool adapters; harness "
-        "repositories must never import tools (including function-local "
-        "imports):\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_todo_domain_never_imports_its_consumers() -> None:
+def test_todo_domain_never_imports_its_consumers(dependencies) -> None:
     """Todo policy and storage cannot depend on tools or engine orchestration."""
     package = APPS_ROOT / "harness" / "todos"
     consumers = {
@@ -1030,16 +857,13 @@ def test_todo_domain_never_imports_its_consumers() -> None:
     violations = sorted(
         f"{_module_name(path)} -> {module}"
         for path in package.rglob("*.py")
-        for module in _imported_modules(path, ast.parse(path.read_text()))
-        if any(module == name or module.startswith(f"{name}.") for name in consumers)
+        for module in dependencies[_module_name(path)]
+        if _within(module, consumers)
     )
-    assert violations == [], (
-        "Tools and engines consume the todo service; dependencies must not "
-        "point back to those consumers:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_todo_tools_and_engines_use_the_service_boundary() -> None:
+def test_todo_tools_and_engines_use_the_service_boundary(dependencies) -> None:
     """Tool adapters and engines must not select or access todo stores directly."""
     harness = APPS_ROOT / "harness"
     consumers = [
@@ -1048,43 +872,31 @@ def test_todo_tools_and_engines_use_the_service_boundary() -> None:
     ]
     stores = {
         "apps.harness.todos.repositories",
-        "apps.harness.todos.memory_repository",
     }
     violations = sorted(
         f"{_module_name(path)} -> {module}"
         for path in consumers
-        for module in _imported_modules(path, ast.parse(path.read_text()))
-        if any(module == store or module.startswith(f"{store}.") for store in stores)
+        for module in dependencies[_module_name(path)]
+        if _within(module, stores)
     )
-    assert violations == [], (
-        "Read and replace todos through apps.harness.todos.service.TodoService "
-        "instead of importing its stores from a tool or engine:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_no_application_module_imports_a_realtime_adapter():
+def test_no_application_module_imports_a_realtime_adapter(trees, dependencies):
     """Only the ASGI entry point mounts the Socket.IO and desktop proxy adapters."""
     violations = sorted(
         f"{_module_name(path)} -> {adapter}"
-        for path in _source_files()
-        for module in _imported_modules(path, ast.parse(path.read_text()))
+        for path in trees
+        for module in dependencies[_module_name(path)]
         for adapter in REALTIME_ADAPTERS
         if _module_name(path) != adapter
         and (module == adapter or module.startswith(f"{adapter}."))
     )
-    assert violations == [], (
-        "Import get_runner_service from apps.runners.services, "
-        "emit_to_frontend/get_sio_server from "
-        "apps.runners.services.infra.realtime and desktop tunnels from "
-        "apps.runners.services.infra.desktop_tunnels instead of a realtime "
-        "adapter:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_realtime_adapters_reach_persistence_only_through_services():
+def test_realtime_adapters_reach_persistence_only_through_services(trees, dependencies):
     """Access rules, presence and telemetry live in services, not in adapters."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     persistence = _persistence_modules(trees)
     assert {"apps.runners.models", "apps.runners.operations"} <= persistence
 
@@ -1092,21 +904,14 @@ def test_realtime_adapters_reach_persistence_only_through_services():
         f"{_module_name(path)} -> {module}"
         for path, tree in trees.items()
         if _module_name(path) in REALTIME_ADAPTERS
-        for module in _imported_modules(path, tree)
-        if any(
-            module == owner or module.startswith(f"{owner}.") for owner in persistence
-        )
+        for module in dependencies[_module_name(path)]
+        if _within(module, persistence)
     )
-    assert violations == [], (
-        "Realtime adapters must call apps.runners.services (RunnerService, "
-        "StorageService) instead of importing models or repositories:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_adapters_reach_image_recipes_only_through_their_service():
+def test_adapters_reach_image_recipes_only_through_their_service(trees, dependencies):
     """REST and MCP share ``ImageDefinitionService`` for recipes and builds."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = {
         path
         for path, tree in trees.items()
@@ -1121,18 +926,13 @@ def test_adapters_reach_image_recipes_only_through_their_service():
     violations = sorted(
         f"{_module_name(path)} -> {name}"
         for path in adapters
-        for name in _imported_modules(path, trees[path]) & persistence
+        for name in dependencies[_module_name(path)] & persistence
     )
-    assert violations == [], (
-        "Use apps.runners.services.image_definitions.ImageDefinitionService "
-        "instead of image recipe models/repositories in adapters:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_adapters_never_query_the_orm():
+def test_adapters_never_query_the_orm(trees):
     """REST, MCP and realtime adapters call services; only repositories query."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = _adapter_modules(trees)
     assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
     assert APPS_ROOT / "runners" / "desktop_proxy.py" in adapters
@@ -1141,18 +941,13 @@ def test_adapters_never_query_the_orm():
         f"{_module_name(path)}:{node.lineno}"
         for path in adapters
         for node in ast.walk(trees[path])
-        if isinstance(node, ast.Attribute)
-        and node.attr in ADAPTER_QUERY_ATTRIBUTES
+        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
     )
-    assert violations == [], (
-        "Move ORM access into the app's repositories and call it through its "
-        "service from adapters:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_adapters_never_resolve_credential_secrets():
+def test_adapters_never_resolve_credential_secrets(trees):
     """REST and MCP select credentials by ID; services resolve the secrets."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = _adapter_modules(trees)
     assert APPS_ROOT / "runners" / "api.py" in adapters  # discovery sanity check
     assert APPS_ROOT / "mcp_app" / "tools" / "workspaces.py" in adapters
@@ -1163,11 +958,7 @@ def test_adapters_never_resolve_credential_secrets():
         for node in ast.walk(trees[path])
         if isinstance(node, ast.Attribute) and node.attr in CREDENTIAL_RESOLUTION_CALLS
     )
-    assert violations == [], (
-        "Adapters must pass credential IDs to the service that uses them "
-        "(e.g. RunnerService.create_workspace(credential_ids=...)) instead of "
-        "resolving decrypted credentials themselves:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
 def _is_persistence_module(path: Path) -> bool:
@@ -1177,11 +968,11 @@ def _is_persistence_module(path: Path) -> bool:
     )
 
 
-def test_services_query_the_orm_only_through_repositories():
+def test_services_query_the_orm_only_through_repositories(trees):
     """Services, tools and engines call repositories; only those query."""
     checked = [
         path
-        for path in _source_files()
+        for path in trees
         if ".".join(_module_name(path).split(".")[:2]) in REPOSITORY_ONLY_APPS
         and not _is_persistence_module(path)
     ]
@@ -1193,20 +984,14 @@ def test_services_query_the_orm_only_through_repositories():
     violations = sorted(
         f"{_module_name(path)}:{node.lineno}"
         for path in checked
-        for node in ast.walk(ast.parse(path.read_text()))
+        for node in ast.walk(trees[path])
         if isinstance(node, ast.Attribute) and node.attr in ORM_QUERY_ATTRIBUTES
     )
-    assert violations == [], (
-        "Query the ORM in the owning app's repositories module and call it "
-        "from the service (e.g. HarnessPartRepository, not "
-        "self.parts.model.objects):\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_inventory_persistence_never_imports_inspection_workflows() -> None:
+def test_inventory_persistence_never_imports_inspection_workflows(dependencies) -> None:
     """Storage read composition must not pull workflows into scan persistence."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     forbidden = {
         "apps.runners.services",
         "apps.runners.activity_repository",
@@ -1214,55 +999,27 @@ def test_inventory_persistence_never_imports_inspection_workflows() -> None:
         "apps.runners.deletion_repository",
     }
     pending = {"apps.runners.inventory_repository"}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in forbidden
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Keep storage inspection composition in InventoryInspectionService; "
-        "inventory persistence must not import its consumers, even transitively "
-        "or inside functions:\n" + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, forbidden),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_retention_persistence_never_imports_workflows() -> None:
+def test_retention_persistence_never_imports_workflows(dependencies) -> None:
     """Retention inputs stay independent of scheduling and deletion consumers."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     forbidden = {"apps.runners.services", "apps.runners.deletion_repository"}
     pending = {"apps.runners.retention_repository", "apps.runners.image_lines"}
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in forbidden
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Keep retention decisions and recovery in ImageRetentionService; "
-        "input repositories must not import their consumers, even transitively "
-        "or inside functions:\n" + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, forbidden),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_storage_inspection_queries_only_through_repositories() -> None:
+def test_storage_inspection_queries_only_through_repositories(trees) -> None:
     """Storage services may read loaded records but never issue ORM queries."""
     services = ("storage", "inventory_inspection")
     query_attributes = ORM_QUERY_ATTRIBUTES | {
@@ -1274,21 +1031,16 @@ def test_storage_inspection_queries_only_through_repositories() -> None:
     violations = sorted(
         f"{name}:{node.lineno}: {node.attr}"
         for name in services
-        for node in ast.walk(
-            ast.parse((APPS_ROOT / "runners" / "services" / f"{name}.py").read_text())
-        )
+        for node in ast.walk(trees[APPS_ROOT / "runners" / "services" / f"{name}.py"])
         if isinstance(node, ast.Attribute) and node.attr in query_attributes
     )
-    assert violations == [], (
-        "Materialize storage inspection inputs in repositories, then compose "
-        "their user-visible state in services:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_workspace_operation_reads_never_import_phase_coordinators() -> None:
+def test_workspace_operation_reads_never_import_phase_coordinators(
+    modules, dependencies
+) -> None:
     """Reading reservations and admitting tasks must not load phase progression."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     roots = {
         "apps.runners.workspace_operation_repository",
         "apps.runners.repositories",
@@ -1301,36 +1053,22 @@ def test_workspace_operation_reads_never_import_phase_coordinators() -> None:
     }
     assert roots <= modules.keys()
     pending = set(roots)
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        path = modules[module]
-        for imported in _imported_modules(path, trees[path]):
-            if any(
-                imported == owner or imported.startswith(f"{owner}.")
-                for owner in coordinators
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Read durable reservations through WorkspaceOperationRepository; "
-        "task admission and status projection must not import capture/recreate "
-        "phase progression, even transitively or inside functions:\n"
-        + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, coordinators),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_account_services_persist_changes_only_through_repositories():
+def test_account_services_persist_changes_only_through_repositories(trees):
     """Account policy selects changes; repositories handle explicit/implicit saves."""
     violations = sorted(
         f"{_module_name(path)}:{node.lineno}"
-        for path in _source_files()
+        for path in trees
         if path.is_relative_to(APPS_ROOT / "accounts")
         and not _is_persistence_module(path)
-        for node in ast.walk(ast.parse(path.read_text()))
+        for node in ast.walk(trees[path])
         if isinstance(node, ast.Attribute)
         and node.attr
         in {
@@ -1341,16 +1079,11 @@ def test_account_services_persist_changes_only_through_repositories():
             "acheck_password",
         }
     )
-    assert violations == [], (
-        "Persist user changes (including password hash upgrades) through "
-        "apps.accounts.repositories.UserRepository instead of saving models "
-        "from account services:\n" + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_adapters_reach_repositories_only_through_services():
+def test_adapters_reach_repositories_only_through_services(trees, dependencies):
     """Adapters call the owning service instead of importing a repository."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = _adapter_modules(trees)
     repositories = _repository_modules(trees)
     assert APPS_ROOT / "accounts" / "api_auth.py" in adapters
@@ -1363,85 +1096,62 @@ def test_adapters_reach_repositories_only_through_services():
     violations = sorted(
         f"{_module_name(path)} -> {module}"
         for path in adapters
-        for module in _imported_modules(path, trees[path])
-        if any(
-            module == repository or module.startswith(f"{repository}.")
-            for repository in repositories
-        )
+        for module in dependencies[_module_name(path)]
+        if _within(module, repositories)
     )
-    assert violations == [], (
-        "Call the owning app's service instead of its repository:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_runner_service_never_imports_the_harness():
+def test_runner_service_never_imports_the_harness(dependencies):
     """Harness depends on the runner service, never the other way round."""
     package = APPS_ROOT / "runners" / "services"
     violations = sorted(
         f"{_module_name(path)} -> {module}"
         for path in package.rglob("*.py")
-        for module in _imported_modules(path, ast.parse(path.read_text()))
+        for module in dependencies[_module_name(path)]
         if module == "apps.harness" or module.startswith("apps.harness.")
     )
-    assert violations == [], (
-        "Reach the harness through the HarnessGateway port "
-        "(apps.runners.services.ports) instead of importing it:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_harness_never_imports_the_apps_built_on_it():
+def test_harness_never_imports_the_apps_built_on_it(trees, dependencies):
     """Consumers subscribe to harness run events; the harness never calls them."""
     consumers = ("apps.scheduled_tasks", "apps.mcp_app")
     package = APPS_ROOT / "harness"
     violations = sorted(
         f"{_module_name(path)} -> {module}"
-        for path in _source_files()
+        for path in trees
         if path.is_relative_to(package)
-        for module in _imported_modules(path, ast.parse(path.read_text()))
-        if any(module == app or module.startswith(f"{app}.") for app in consumers)
+        for module in dependencies[_module_name(path)]
+        if _within(module, consumers)
     )
-    assert violations == [], (
-        "Connect a receiver to apps.harness.run_events from the consuming "
-        "app's AppConfig.ready() instead of importing it from the harness:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_foundational_apps_never_import_the_apps_built_on_them():
+def test_foundational_apps_never_import_the_apps_built_on_them(trees, dependencies):
     """Dependencies point from feature apps down to the foundation only."""
     violations = []
-    for path in _source_files():
+    for path in trees:
         app = ".".join(_module_name(path).split(".")[:2])
         allowed = FOUNDATION_DEPENDENCIES.get(app)
         if allowed is None:
             continue
         violations.extend(
             f"{_module_name(path)} -> {module}"
-            for module in _imported_modules(path, ast.parse(path.read_text()))
+            for module in dependencies[_module_name(path)]
             if module.startswith("apps.")
             and ".".join(module.split(".")[:2]) not in {app, *allowed}
         )
-    assert violations == [], (
-        "Foundational apps must not import the apps built on them; publish an "
-        "event or guard signal they subscribe to, and put shared schemas in "
-        "common.schemas:\n" + "\n".join(sorted(violations))
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_service_only_contexts_are_reached_through_their_services():
+def test_service_only_contexts_are_reached_through_their_services(dependencies):
     """Consumers call e.g. ``SkillService``; its repositories stay private."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    imports = {
-        _module_name(path): _imported_modules(path, tree)
-        for path, tree in trees.items()
-    }
-    assert "apps.skills.services" in imports["apps.harness.harness_service"]
+    assert "apps.skills.services" in dependencies["apps.harness.harness_service"]
 
     violations = sorted(
         f"{module} -> {imported}"
-        for module, imported_modules in imports.items()
+        for module, imported_modules in dependencies.items()
         for context in SERVICE_ONLY_CONTEXTS
         if module != context and not module.startswith(f"{context}.")
         for imported in imported_modules
@@ -1449,16 +1159,11 @@ def test_service_only_contexts_are_reached_through_their_services():
         and imported != f"{context}.services"
         and not imported.startswith(f"{context}.services.")
     )
-    assert violations == [], (
-        "Call the context's service (e.g. apps.skills.services.SkillService) "
-        "instead of importing its repositories, models or helpers:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_context_repositories_are_private_to_their_context() -> None:
+def test_context_repositories_are_private_to_their_context(trees, dependencies) -> None:
     """Consumers use the owning context's service, never its repositories."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     repository_modules = _repository_modules(trees)
     violations = []
     for context, boundary in PRIVATE_REPOSITORY_CONTEXTS.items():
@@ -1471,21 +1176,16 @@ def test_context_repositories_are_private_to_their_context() -> None:
             f"{_module_name(path)} -> {module}: {boundary}"
             for path, tree in trees.items()
             if not path.is_relative_to(owner)
-            for module in _imported_modules(path, tree)
-            if any(
-                module == repo or module.startswith(f"{repo}.") for repo in repositories
-            )
+            for module in dependencies[_module_name(path)]
+            if _within(module, repositories)
         )
-    assert violations == [], (
-        "Repositories are private to their bounded context; call its service "
-        "instead:\n" + "\n".join(sorted(violations))
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_oauth_persistence_and_protocol_never_import_their_consumers() -> None:
+def test_oauth_persistence_and_protocol_never_import_their_consumers(
+    modules, dependencies
+) -> None:
     """OAuth dependencies point toward shared integrity rules and persistence."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     services = "apps.credentials.services"
     workflow = "apps.credentials.mcp_oauth"
     grants = "apps.credentials.oauth_grant_service"
@@ -1509,34 +1209,26 @@ def test_oauth_persistence_and_protocol_never_import_their_consumers() -> None:
     violations = set()
     for owner, forbidden in boundaries.items():
         pending = {owner}
-        checked: set[str] = set()
-        while pending:
-            module = pending.pop()
-            checked.add(module)
-            path = modules[module]
-            for imported in _imported_modules(path, trees[path]):
-                if any(
-                    imported == target or imported.startswith(f"{target}.")
-                    for target in forbidden
-                ):
-                    violations.add(f"{owner}: {module} -> {imported}")
-                elif imported in modules and imported not in checked:
-                    pending.add(imported)
-    assert violations == set(), (
-        "Share OAuth validation through apps.credentials.oauth_metadata; "
-        "keep grant authorization in OAuthGrantService and keep persistence "
-        "independent of application services and protocol workflows:\n"
-        + "\n".join(sorted(violations))
-    )
+        violations.update(
+            f"{owner}: {edge}"
+            for edge in _dependency_violations(
+                dependencies,
+                pending,
+                lambda imported: _within(imported, forbidden),
+            )
+        )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_oauth_grant_service_delegates_transactions_and_model_writes() -> None:
+def test_oauth_grant_service_delegates_transactions_and_model_writes(
+    trees, dependencies
+) -> None:
     """Authorization policy cannot bypass its transaction-scoped repository."""
     path = APPS_ROOT / "credentials" / "oauth_grant_service.py"
-    tree = ast.parse(path.read_text())
+    tree = trees[path]
     violations = sorted(
         module
-        for module in _imported_modules(path, tree)
+        for module in dependencies[_module_name(path)]
         if module == "django.db" or module.startswith("django.db.")
     )
     violations.extend(
@@ -1545,13 +1237,12 @@ def test_oauth_grant_service_delegates_transactions_and_model_writes() -> None:
         if isinstance(node, ast.Attribute)
         and node.attr in {"save", "asave", "delete", "adelete"}
     )
-    assert violations == [], (
-        "Keep grant transactions and model writes in McpOAuthRepository:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_credentials_and_plugins_delegate_queryset_operations_to_repositories() -> None:
+def test_credentials_and_plugins_delegate_queryset_operations_to_repositories(
+    trees,
+) -> None:
     """Related managers must not bypass the repository-only ORM rule."""
     queryset_operations = {
         "filter",
@@ -1569,23 +1260,19 @@ def test_credentials_and_plugins_delegate_queryset_operations_to_repositories() 
     }
     violations = sorted(
         f"{_module_name(path)}:{node.lineno} accesses {node.attr}"
-        for path in _source_files()
+        for path in trees
         if path.relative_to(APPS_ROOT).parts[0] in {"credentials", "plugins"}
         and not _is_persistence_module(path)
-        for node in ast.walk(ast.parse(path.read_text()))
+        for node in ast.walk(trees[path])
         if isinstance(node, ast.Attribute) and node.attr in queryset_operations
     )
-    assert violations == [], (
-        "Move related-manager queries and queryset operations into repositories; "
-        "credential and plugin services consume their results:\n"
-        + "\n".join(violations)
-    )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_shared_media_never_imports_its_engine_or_tool_consumers() -> None:
+def test_shared_media_never_imports_its_engine_or_tool_consumers(
+    modules, dependencies
+) -> None:
     """Media formats, hydration and redaction belong below all harness engines."""
-    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    modules = {_module_name(path): path for path in trees}
     roots = {
         module
         for module in modules
@@ -1594,10 +1281,6 @@ def test_shared_media_never_imports_its_engine_or_tool_consumers() -> None:
         or module == "apps.harness.redaction"
     }
     assert "apps.harness.media.context" in roots
-    dependencies = {
-        module: _imported_modules(modules[module], trees[modules[module]])
-        for module in modules
-    }
     # The shared package must also remain internally acyclic.
     tuple(TopologicalSorter({m: dependencies[m] & roots for m in roots}).static_order())
     consumers = {
@@ -1607,57 +1290,20 @@ def test_shared_media_never_imports_its_engine_or_tool_consumers() -> None:
         "apps.harness.harness_service",
     }
     pending = set(roots)
-    checked: set[str] = set()
-    violations = set()
-    while pending:
-        module = pending.pop()
-        checked.add(module)
-        for imported in dependencies[module]:
-            if any(
-                imported == name or imported.startswith(f"{name}.")
-                for name in consumers
-            ):
-                violations.add(f"{module} -> {imported}")
-            elif imported in modules and imported not in checked:
-                pending.add(imported)
-    assert violations == set(), (
-        "Engines and tools consume shared media policy, formats and redaction; "
-        "the shared implementation must not import them, even transitively "
-        "or through function-local imports:\n" + "\n".join(sorted(violations))
+    violations = _dependency_violations(
+        dependencies,
+        pending,
+        lambda imported: _within(imported, consumers),
     )
+    assert not violations, "\n".join(sorted(violations))
 
 
-def test_media_formats_and_references_load_without_application_setup() -> None:
-    """Shared attachment records and parsers never load tool or engine adapters."""
-    env = os.environ.copy()
-    env.pop("DJANGO_SETTINGS_MODULE", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys\n"
-            "from apps.harness.media import attachments, formats, references\n"
-            "from apps.harness import redaction\n"
-            "assert not {'django', 'apps.harness.engines', 'apps.harness.tools'} "
-            "& sys.modules.keys()\n",
-        ],
-        cwd=BACKEND_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_engines_never_source_media_policy_from_the_read_tool() -> None:
+def test_engines_never_source_media_policy_from_the_read_tool(dependencies) -> None:
     """MIME detection and ingestion limits have one shared, tool-free owner."""
     engine_root = APPS_ROOT / "harness" / "engines"
     violations = sorted(
         str(path.relative_to(BACKEND_ROOT))
         for path in engine_root.rglob("*.py")
-        if "apps.harness.tools.files"
-        in _imported_modules(path, ast.parse(path.read_text()))
+        if "apps.harness.tools.files" in dependencies[_module_name(path)]
     )
-    assert violations == [], "Import media formats/limits directly: " + str(violations)
+    assert not violations, "\n".join(sorted(violations))

@@ -1,0 +1,25 @@
+{
+  "edit_discovery": {
+    "samples": 21,
+    "p50_ms": 56.31709800218232,
+    "p95_ms": 62.43797202478163,
+    "peak_python_bytes": 55462970,
+    "queries": 2,
+    "messages": 200,
+    "content_bytes_read": 52430000
+  },
+  "patch_projection": {
+    "samples": 21,
+    "p50_ms": 241.21616300544702,
+    "p95_ms": 256.7232240107842,
+    "peak_python_bytes": 10714699,
+    "input_bytes": 2677844,
+    "changed_lines": 100000
+  },
+  "media_read": {
+    "input_bytes": 1048576,
+    "accessor_reads": 2,
+    "bytes_read": 2097152,
+    "latency": "Not measured: in-memory accessor; no invented network delay"
+  }
+}

@@ -314,37 +314,10 @@ def test_summary_reads_only_required_payloads_in_two_queries(
 
 
 @pytest.mark.django_db
-def test_summary_legacy_content_and_parts_are_read_fresh(
-    harness_workspace, django_assert_num_queries
-) -> None:
-    """A new part changes fallback selection immediately, without cached state."""
-    session, assistant = _session_with_answer(
-        harness_workspace, content="Legacy answer"
-    )
-    service = _metadata_service(RoleProvider())
-    with django_assert_num_queries(2):
-        assert service.summary_material(session.id, assistant.id) == (
-            "User:\nFix the login\n\nAgent's final reply:\nLegacy answer"
-        )
-    part = HarnessPartRepository.create(
-        message_id=assistant.id, type="reasoning", output="Private thoughts"
-    )
-    with django_assert_num_queries(2):
-        assert (
-            service.summary_material(session.id, assistant.id) == "User:\nFix the login"
-        )
-    part.delete()
-    with django_assert_num_queries(2):
-        assert service.summary_material(session.id, assistant.id) == (
-            "User:\nFix the login\n\nAgent's final reply:\nLegacy answer"
-        )
-
-
-@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("parts", "expected"),
     [
-        ([], "legacy answer"),
+        ([], ""),
         ([("text", "Final "), ("text", "answer")], "Final answer"),
         ([("text", "Working"), ("tool", "private result")], ""),
         ([("text", "Working"), ("tool", "private"), ("text", "")], ""),
@@ -372,7 +345,7 @@ def test_summary_legacy_content_and_parts_are_read_fresh(
 def test_summary_material_only_uses_final_prose(harness_workspace, parts, expected):
     """Mirror the final-answer selection used by the chat's copy action."""
     session, assistant = _session_with_answer(
-        harness_workspace, content="legacy answer"
+        harness_workspace, content="aggregate content must not leak"
     )
     for part_type, output in parts:
         HarnessPartRepository.create(
@@ -426,7 +399,10 @@ def test_summary_can_describe_request_without_answer(harness_workspace, finish):
 @pytest.mark.django_db
 def test_summary_material_does_not_clip_user_requests(harness_workspace):
     """Keep clarifications at the end of long prompts, not only their prefix."""
-    session, _ = _session_with_answer(harness_workspace)
+    session, assistant = _session_with_answer(harness_workspace)
+    HarnessPartRepository.create(
+        message_id=assistant.id, type="text", output=assistant.content
+    )
     prompt = "Details " * 500 + "Keep the existing login API unchanged."
     HarnessMessageRepository.create(session_id=session.id, role="user", content=prompt)
     last = HarnessMessageRepository.create(session_id=session.id, role="assistant")

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from ..process_repository import WorkspaceProcessRepository
 from ..repositories import (
     ImageBuildJobRepository,
     ImageDefinitionRepository,
@@ -38,7 +39,6 @@ from ..repositories import (
     RunnerRepository,
     RunnerSystemMetricsRepository,
     TaskRepository,
-    WorkspaceProcessRepository,
     WorkspaceRepository,
 )
 from .domains.credential_sync import (

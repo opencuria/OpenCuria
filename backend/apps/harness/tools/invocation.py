@@ -113,16 +113,7 @@ def _with_args(message: str, call: _PendingToolCall) -> str:
 async def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
     """Best-effort todo list for the ``todo_updated`` event."""
     try:
-        todos = None
-        if ctx.registry is not None:
-            try:
-                tool = ctx.registry.get("todowrite")
-            except KeyError:
-                tool = None
-            todos = getattr(tool, "todos", None)
-        if todos is None:
-            todos = TodoService.for_session(ctx.session_id)
-        stored = await sync_to_async(todos.list)(ctx.session_id)
+        stored = await sync_to_async(TodoService().list)(ctx.session_id)
         return [
             {
                 "content": item.content,

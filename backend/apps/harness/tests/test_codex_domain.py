@@ -81,6 +81,8 @@ def test_pinned_default_and_per_model_ultra_allowlist():
     assert normalize_codex_effort("ultra", specs[DEFAULT_CODEX_MODEL]) == "ultra"
     assert normalize_codex_effort("", specs[DEFAULT_CODEX_MODEL]) == "high"
     assert normalize_codex_effort("low", specs[DEFAULT_CODEX_MODEL]) == "low"
+    assert normalize_codex_model("chatgpt/gpt-6.1-terra") == "chatgpt/gpt-6.1-terra"
+    assert normalize_codex_effort("ultra", specs["chatgpt/gpt-6.1-terra"]) == "ultra"
     assert all(model.default_effort == "high" for model in specs.values())
     for model in ("chatgpt/gpt-6-luna", "chatgpt/gpt-5.6-luna", "chatgpt/gpt-5.5"):
         with pytest.raises(ValueError, match="Invalid Codex reasoning effort"):

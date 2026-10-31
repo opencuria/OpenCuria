@@ -1,0 +1,40 @@
+{
+  "question_read_unindexed": {
+    "p50_ms": 11.771,
+    "p95_ms": 12.152,
+    "peak_python_bytes": 29447,
+    "rows": 1
+  },
+  "question_plan_before": "3 0 0 SCAN harness_question_request\n23 0 0 USE TEMP B-TREE FOR ORDER BY",
+  "question_read_indexed": {
+    "p50_ms": 0.454,
+    "p95_ms": 0.489,
+    "peak_python_bytes": 29531,
+    "rows": 1
+  },
+  "question_plan_after": "4 0 0 SEARCH harness_question_request USING INDEX probe_question_session_state (session_id=? AND status=?)",
+  "attention_full_rows": {
+    "p50_ms": 1.708,
+    "p95_ms": 1.747,
+    "peak_python_bytes": 521912,
+    "rows": 50
+  },
+  "attention_id_projection": {
+    "p50_ms": 0.63,
+    "p95_ms": 0.709,
+    "peak_python_bytes": 31451,
+    "rows": 50
+  },
+  "runner_read_20MiB_current_parse": {
+    "p50_ms": 63.226,
+    "p95_ms": 65.133,
+    "peak_python_bytes": 76281872,
+    "rows": 27962010
+  },
+  "runner_read_20MiB_bounded_parse": {
+    "p50_ms": 7.425,
+    "p95_ms": 24.328,
+    "peak_python_bytes": 55924273,
+    "rows": 27962010
+  }
+}

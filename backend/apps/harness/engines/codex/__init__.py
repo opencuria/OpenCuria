@@ -1,1 +1,1 @@
-"""Codex harness integration (runtime pinned to 0.163.0)."""
+"""Codex harness integration (runtime pinned to 0.166.0)."""

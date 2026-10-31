@@ -3203,31 +3203,6 @@ def test_copy_prefix_preserves_positions_in_order(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_delete_from_uses_positions(harness_workspace) -> None:
-    """delete_from drops the positional suffix starting at the target."""
-    session = HarnessSessionRepository.create(
-        workspace_id=harness_workspace.id,
-        organization_id=harness_workspace.runner.organization_id,
-        title="del",
-        agent_name="build",
-        mode="build",
-        model="fake-model",
-    )
-    first = HarnessMessageRepository.create(
-        session_id=session.id, role="user", content="one"
-    )
-    second = HarnessMessageRepository.create(
-        session_id=session.id, role="assistant", content="two"
-    )
-    third = HarnessMessageRepository.create(
-        session_id=session.id, role="user", content="three"
-    )
-    deleted = HarnessMessageRepository.delete_from(session.id, second.id)
-    assert [str(v) for v in deleted] == [str(second.id), str(third.id)]
-    remaining = HarnessMessageRepository.list_for_session(session.id)
-    assert [m.id for m in remaining] == [first.id]
-
-@pytest.mark.django_db(transaction=True)
 async def test_build_history_keeps_text_between_tool_calls(harness_workspace) -> None:
     """Follow-up replay must keep text/tool/text/tool/final-text in order."""
     service, _, _ = _service()

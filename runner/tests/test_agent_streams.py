@@ -58,7 +58,7 @@ async def test_managed_stream_accepts_mcp_and_agent_leases(tmp_path, kind):
     session = await manager.stream_start_process(
         workspace,
         "agent-stream",
-        ["/opt/opencuria/runtimes/claude-agent/2.1.310/claude", "--version"],
+        ["/opt/opencuria/runtimes/claude-agent/2.1.316/claude", "--version"],
         owner={"lease_id": "lease", "epoch": "epoch"},
     )
 

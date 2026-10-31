@@ -479,21 +479,13 @@ const MessageRow = memo(function MessageRow({
   const blocks = useMemo(
     () =>
       buildActivityBlocks(
-        [...(message.parts ?? [])].sort(
+        [...message.parts].sort(
           (left, right) => (left.position ?? 0) - (right.position ?? 0),
         ),
         { todoPartId: showTodos ? todoPartId : null },
       ),
     [message.parts, showTodos, todoPartId],
   );
-  const safeContent = useMemo(() => {
-    if (isUser) return message.content;
-    if ((message.parts ?? []).length === 0) return message.content;
-    return blocks
-      .filter((block) => block.kind === "text")
-      .map((block) => block.part.output)
-      .join("");
-  }, [blocks, isUser, message.content, message.parts]);
   const copyText = getMessageCopyText(message, streaming);
   const editUserMessage = useCallback(
     async (messageId: string, text: string) => {
@@ -653,32 +645,21 @@ const MessageRow = memo(function MessageRow({
               testID={`chat-message-error-${message.id}`}
             />
           ) : null}
-          {blocks.length ? (
-            blocks.map((block, index) => (
-              <BlockView
-                key={blockKey(block, index)}
-                block={block}
-                streaming={streaming}
-                todos={todos}
-                mediaVisible={mediaVisible}
-                mediaScopeKey={mediaScopeKey}
-                resolveMedia={resolveMedia}
-                onOpenFile={onOpenFile}
-                onOpenSubtask={onOpenSubtask}
-                onRequestPartDetail={onRequestPartDetail}
-                onOpenAttachment={onOpenAttachment}
-              />
-            ))
-          ) : safeContent ? (
-            <ChatMarkdown
-              markdown={safeContent}
+          {blocks.map((block, index) => (
+            <BlockView
+              key={blockKey(block, index)}
+              block={block}
               streaming={streaming}
-              mediaScopeKey={mediaScopeKey}
+              todos={todos}
               mediaVisible={mediaVisible}
+              mediaScopeKey={mediaScopeKey}
               resolveMedia={resolveMedia}
               onOpenFile={onOpenFile}
+              onOpenSubtask={onOpenSubtask}
+              onRequestPartDetail={onRequestPartDetail}
+              onOpenAttachment={onOpenAttachment}
             />
-          ) : null}
+          ))}
           {todos?.length && todoPartId === null ? (
             <TodoCard todos={todos} />
           ) : null}

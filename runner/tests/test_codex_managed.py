@@ -301,7 +301,7 @@ async def test_qemu_selects_profile_and_transmits_only_private_preamble(process_
         env["OPENCURIA_CODEX_API_KEY"] = "private-codex-key"
     await runtime.spawn_process(
         "guest",
-        ["/opt/opencuria/runtimes/codex-agent/0.163.0/bin/codex-app-server"],
+        ["/opt/opencuria/runtimes/codex-agent/0.166.0/bin/codex-app-server"],
         workdir="/workspace",
         env=env,
         control_path="/tmp/control",
@@ -354,7 +354,7 @@ def test_actual_backend_codex_argv_passes_production_stream_boundary(
         auth, f"{provider}/test-model", readonly=readonly
     )
     settings["projects"] = {"/workspace": {"trust_level": "untrusted"}}
-    binary = "/opt/opencuria/runtimes/codex-agent/0.163.0/bin/codex-app-server"
+    binary = "/opt/opencuria/runtimes/codex-agent/0.166.0/bin/codex-app-server"
     argv = configuration["runtime_argv"](binary, settings)
     assert len(argv) <= 64
     assert StreamManager._sanitize_stream_command(argv) == argv

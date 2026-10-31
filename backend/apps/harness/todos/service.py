@@ -1,13 +1,9 @@
-"""Todo validation and storage selection shared by harness tool adapters."""
+"""Todo validation and persistence shared by harness tool adapters."""
 
 from __future__ import annotations
 
-import uuid
-
-from .domain import VALID_STATUSES, TodoItem, TodoList, TodoStore
-from .memory_repository import InMemoryTodoRepository
-
-_default_repository = InMemoryTodoRepository()
+from .domain import VALID_STATUSES, TodoItem, TodoList
+from .repositories import TodoRepository
 
 
 class TodoValidationError(ValueError):
@@ -15,23 +11,10 @@ class TodoValidationError(ValueError):
 
 
 class TodoService:
-    """Validate whole-list replacements before writing to the selected store."""
+    """Validate whole-list replacements before persisting session todos."""
 
-    def __init__(self, repository: TodoStore | None = None) -> None:
-        self._repository = repository or _default_repository
-
-    @classmethod
-    def for_session(cls, session_id: str) -> TodoService:
-        """Use Django for UUID sessions and shared memory for ephemeral sessions."""
-        try:
-            uuid.UUID(str(session_id))
-        except (TypeError, ValueError):
-            return cls()
-        # Ephemeral todo services do not need Django. Load ORM-backed storage
-        # only for persistent sessions; repositories never import consumers.
-        from .repositories import TodoRepository
-
-        return cls(repository=TodoRepository())
+    def __init__(self) -> None:
+        self._repository = TodoRepository()
 
     def list(self, session_id: str) -> TodoList:
         """Return the ordered todo list of a session."""

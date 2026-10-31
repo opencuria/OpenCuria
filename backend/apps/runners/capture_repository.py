@@ -25,7 +25,8 @@ from .models import (
 )
 from .operations import OperationRepository
 from .phase_children import fence_unknown_child
-from .repositories import TaskRepository, WorkspaceProcessRepository
+from .process_repository import WorkspaceProcessRepository
+from .repositories import TaskRepository
 
 
 class CaptureRepository:

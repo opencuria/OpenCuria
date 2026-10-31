@@ -228,19 +228,13 @@ async def test_composer_uses_max_context_byte_cap() -> None:
 
 async def test_plan_general_prompt_follows_its_own_agent_permissions() -> None:
     """Delegated general agents do not acquire the root Plan edit restriction."""
-    from apps.harness.engines.claude.runtime_state import ClaudeRuntimeState
-
     for native_tool_contracts in (False, True):
         composed = await compose_system_prompt(
             agent=get_agent("general"),
             mode="plan",
             native_tool_contracts=native_tool_contracts,
         )
-        system = (
-            ClaudeRuntimeState.claude_system_prompt(composed.system, "plan")
-            if native_tool_contracts
-            else composed.system
-        )
+        system = composed.system
         assert "follow the configured agent permissions" in system
         assert "Ask before deliberate source" not in system
         assert "before user approval" not in system

@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+import sqlite3
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -235,28 +237,53 @@ async def test_image_generation_enriches_prompt_and_uses_authorized_no_follow_me
 
 
 @pytest.mark.asyncio
-async def test_memory_files_and_selected_skills_survive_cold_restore(tmp_path):
+@pytest.mark.parametrize("memory_root", ["memories", "memories_v2"])
+async def test_memory_files_and_selected_skills_survive_cold_restore(
+    tmp_path, memory_root
+):
     accessor = LocalAccessor(tmp_path / "workspace")
     home = home_for(str(uuid.uuid4()))
     await state_action(accessor, "fresh", home)
     await accessor.write_file(home + "/sessions/2026/10/22/rollout-test.jsonl", b"{}\n")
-    await accessor.write_file(home + "/memories/MEMORY.md", b"Project decisions")
+    await accessor.write_file(home + f"/{memory_root}/MEMORY.md", b"Project decisions")
     await accessor.write_file(
-        home + "/memories/skills/testing/SKILL.md", b"Testing notes"
+        home + f"/{memory_root}/skills/testing/SKILL.md", b"Testing notes"
     )
+    await accessor.write_file(home + f"/{memory_root}/.git/config", b"excluded")
     await accessor.write_file(home + "/auth.json", b"excluded")
     await materialize_skills(accessor, home, ["A selected skill"])
     assert (
         "A selected skill"
         in accessor.path(home + "/skills/opencuria-skill-001/SKILL.md").read_text()
     )
-    record = await capture(accessor, home)
-    assert "auth.json" not in {x["path"] for x in record["files"]}
+    database = accessor.path(home + f"/{memory_root}_1.sqlite")
+    # Committed WAL data must be included by SQLite backup, not just file copies.
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("CREATE TABLE memory (content TEXT)")
+        connection.execute("INSERT INTO memory VALUES ('Remembered decision')")
+        connection.commit()
+        assert database.with_suffix(".sqlite-wal").exists()
+        record = await capture(accessor, home)
+    paths = {x["path"] for x in record["files"]}
+    assert "auth.json" not in paths
+    assert f"{memory_root}/.git/config" not in paths
+    assert f"{memory_root}/skills/testing/SKILL.md" in paths
+    assert f"{memory_root}_1.sqlite" in paths
     shutil.rmtree(accessor.path(home))
     await restore_snapshot(accessor, home, record)
     assert (
-        accessor.path(home + "/memories/MEMORY.md").read_text() == "Project decisions"
+        accessor.path(home + f"/{memory_root}/MEMORY.md").read_text()
+        == "Project decisions"
     )
+    assert (
+        accessor.path(home + f"/{memory_root}/skills/testing/SKILL.md").read_text()
+        == "Testing notes"
+    )
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT content FROM memory").fetchone() == (
+            "Remembered decision",
+        )
     await materialize_skills(accessor, home, [])
     assert not accessor.path(home + "/skills/opencuria-skill-001").exists()
     with pytest.raises(ValueError, match="skill"):
@@ -365,7 +392,8 @@ async def test_inline_generated_image_is_bounded_and_not_a_remote_url():
 
 
 @pytest.mark.asyncio
-async def test_memory_checkpoint_rejects_symlinked_subtrees(tmp_path):
+@pytest.mark.parametrize("memory_root", ["memories", "memories_v2"])
+async def test_memory_checkpoint_rejects_symlinked_subtrees(tmp_path, memory_root):
     accessor = LocalAccessor(tmp_path / "workspace")
     home = home_for(str(uuid.uuid4()))
     await state_action(accessor, "fresh", home)
@@ -373,7 +401,9 @@ async def test_memory_checkpoint_rejects_symlinked_subtrees(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "MEMORY.md").write_text("private")
-    accessor.path(home + "/memories").symlink_to(outside, target_is_directory=True)
+    accessor.path(home + f"/{memory_root}").symlink_to(
+        outside, target_is_directory=True
+    )
     with pytest.raises(AssertionError):
         await capture(accessor, home)
 
@@ -464,3 +494,17 @@ def test_dedicated_native_memory_output_uses_memory_display():
     )
     assert result[0] == "memory"
     assert result[-1] == "remembered"
+
+
+@pytest.mark.parametrize("memory_root", ["memories", "memories_v2"])
+@pytest.mark.parametrize("kind", ["commandExecution", "fileChange"])
+def test_native_memory_versions_share_the_memory_display(memory_root, kind):
+    from apps.harness.engines.codex.events import presentation
+
+    path = f"/workspace/.opencuria/harness/codex/session/config/{memory_root}/MEMORY.md"
+    item = (
+        {"command": f"cat {path}", "commandActions": [{"type": "read", "path": path}]}
+        if kind == "commandExecution"
+        else {"changes": [{"path": path, "diff": "+remembered"}]}
+    )
+    assert presentation({"type": kind, **item})[0] == "memory"

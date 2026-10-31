@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useMediaQuery } from '@vueuse/core'
 import type { editor, IDisposable } from 'monaco-editor/editor.js'
 import { Plus, Minus, Undo2, ChevronUp, ChevronDown } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
@@ -49,6 +50,12 @@ const emit = defineEmits<{
 
 const host = ref<HTMLDivElement>()
 const surface = ref<HTMLDivElement>()
+const isMobile = useMediaQuery('(max-width: 767px)')
+const gutterOptions = computed(() => ({
+  // Diff actions use the modified editor's glyph margin.
+  glyphMargin: props.diff || !isMobile.value,
+  lineNumbersMinChars: isMobile.value ? 2 : 5,
+}))
 const loading = ref(true)
 const error = ref<string | null>(null)
 const changes = ref<MonacoChangeRange[]>([])
@@ -142,7 +149,7 @@ function configureEditor(): void {
   currentDiff = props.diff
   synchronizing = true
   const model = getMonacoModel(monaco, currentKey, props.path, props.modelValue)
-  const options = { ...monacoEditorOptions, readOnly: props.readOnly, ariaLabel: props.path }
+  const options = { ...monacoEditorOptions, ...gutterOptions.value, readOnly: props.readOnly, ariaLabel: props.path }
   if (props.diff) {
     diffEditor = monaco.editor.createDiffEditor(surface.value, {
       ...options,
@@ -150,6 +157,7 @@ function configureEditor(): void {
       renderSideBySide: true,
       useInlineViewWhenSpaceIsLimited: true,
       renderIndicators: true,
+      renderGutterMenu: false,
       renderMarginRevertIcon: false,
       enableSplitViewResizing: true,
       ignoreTrimWhitespace: false,
@@ -233,6 +241,10 @@ watch(() => props.original, (value) => {
 watch(() => props.readOnly, (readOnly) => {
   textEditor?.updateOptions({ readOnly })
   diffEditor?.updateOptions({ readOnly })
+})
+watch(gutterOptions, (options) => {
+  textEditor?.updateOptions(options)
+  diffEditor?.updateOptions(options)
 })
 onBeforeUnmount(() => {
   disposed = true

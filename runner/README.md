@@ -174,12 +174,12 @@ cannot migrate existing SSH streams. No guest/image changes are required.
 
 ## Pinned external runtimes
 
-`ensure_runtime_artifact("codex-agent", "0.163.0")` provisions the official
-`rust-v0.163.0` **standalone app-server package**, not the single-binary release.
+`ensure_runtime_artifact("codex-agent", "0.166.0")` provisions the official
+`rust-v0.166.0` **standalone app-server package**, not the single-binary release.
 The returned executable is
-`/opt/opencuria/runtimes/codex-agent/0.163.0/bin/codex-app-server`; the package
-also retains `bin/codex-code-mode-host`, `codex-resources/bwrap`, and
-`codex-path/rg`. Official x86_64 and aarch64 musl package SHA-256/size pins are
+`/opt/opencuria/runtimes/codex-agent/0.166.0/bin/codex-app-server`; the package
+also retains `bin/codex-code-mode-host`, `bin/codex-exec-server`,
+`codex-resources/bwrap`, and `codex-path/rg`. Official x86_64 and aarch64 musl package SHA-256/size pins are
 in `src/runtime/codex_artifact.py` and `artifact_manifest.json`; the static musl
 packages serve both glibc and musl workspaces. Provisioning requires Linux
 Python 3.10+ and libc `renameat2` for atomic no-replace directory publication.

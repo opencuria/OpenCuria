@@ -1,0 +1,77 @@
+{
+  "baseline_ref": "55739586fdc3c19672067af571fcdfe69eadbcff",
+  "method": "secrets.choice(top_three), OS randomness",
+  "top_three": [
+    {
+      "rank": 1,
+      "id": "media-read",
+      "component": "backend",
+      "bottleneck": "ReadTool rereads complete media files",
+      "evidence": {
+        "input_bytes": 1048576,
+        "accessor_reads": 2,
+        "bytes_read": 2097152,
+        "latency": "Not measured: in-memory accessor; no invented network delay"
+      },
+      "impact": "One avoidable runner read and duplicate transfer for every image/PDF within the text fetch budget.",
+      "risk": "Low-medium: preserve sniffing, ingestion caps, truncated reads and image preparation; no cache."
+    },
+    {
+      "rank": 2,
+      "id": "patch-projection",
+      "component": "backend",
+      "bottleneck": "Patch display parses the entire diff repeatedly for a four-line preview",
+      "evidence": {
+        "samples": 21,
+        "p50_ms": 241.21616300544702,
+        "p95_ms": 256.7232240107842,
+        "peak_python_bytes": 10714699,
+        "input_bytes": 2677844,
+        "changed_lines": 100000
+      },
+      "impact": "Every persisted patch; large generated-file patches occupy the ORM thread and delay events for hundreds of milliseconds.",
+      "risk": "Low-medium: pure bounded projection, exact line-number/count/window parity required."
+    },
+    {
+      "rank": 3,
+      "id": "edit-discovery",
+      "component": "backend",
+      "bottleneck": "Message edits load full history twice to discover a target and suffix IDs",
+      "evidence": {
+        "samples": 21,
+        "p50_ms": 56.31709800218232,
+        "p95_ms": 62.43797202478163,
+        "peak_python_bytes": 55462970,
+        "queries": 2,
+        "messages": 200,
+        "content_bytes_read": 52430000
+      },
+      "impact": "Interactive edits become slower and allocate whole-history content despite needing only IDs/role/order.",
+      "risk": "Medium: preserve admission fences, rejection behavior, suffix boundary and race handling."
+    }
+  ],
+  "selected": "patch-projection",
+  "redraws": 0,
+  "other_opportunities": [
+    {
+      "component": "webapp",
+      "candidate": "Growing Markdown full-document parse/sanitize/DOM projection on streamed updates",
+      "status": "Code evidence only; updates already coalesced; reference links, media and sanitization raise risk."
+    },
+    {
+      "component": "mobile",
+      "candidate": "Session cloning/ancestry/gate derivation in every ChatController snapshot",
+      "status": "Code evidence only; immutable part sharing and virtualization already implemented; needs device profiling."
+    },
+    {
+      "component": "shared packages",
+      "candidate": "Repeated linear part lookup and stream-closing scans per reducer event",
+      "status": "Code evidence plus earlier benchmark evidence in tool-truncation/selection.json; index ownership/invalidation increases risk."
+    },
+    {
+      "component": "runner",
+      "candidate": "Separate realpath and find guest commands on directory listing",
+      "status": "Confirmed two sequential guest calls; batching must preserve path-security policy and errors; real latency not measured this run."
+    }
+  ]
+}

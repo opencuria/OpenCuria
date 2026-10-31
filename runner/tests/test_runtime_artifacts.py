@@ -28,7 +28,7 @@ class FakeArtifactRuntime:
         self.exec_command_wait = AsyncMock(side_effect=self._exec)
         self.put_archive = AsyncMock()
         self.install_rc = 0
-        self.output = "2.1.310\n"
+        self.output = "2.1.316\n"
 
     async def _exec(self, instance_id, command, workdir=None, env=None):
         if command[0] == "sh" and command[1] == "-c":
@@ -91,16 +91,16 @@ async def test_ensure_downloads_once_caches_hash_and_returns_pinned_path(setup_m
     workspace_id = uuid.uuid4()
 
     first = await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.310"
+        workspace_id, "claude-agent", "2.1.316"
     )
     second = await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.310"
+        workspace_id, "claude-agent", "2.1.316"
     )
 
     assert first == {
         "ok": True,
-        "path": f"{manager._guest_runtime_root}/claude-agent/2.1.310/claude",
-        "version": "2.1.310",
+        "path": f"{manager._guest_runtime_root}/claude-agent/2.1.316/claude",
+        "version": "2.1.316",
         "platform": "linux-x64",
     }
     assert second == first
@@ -115,11 +115,11 @@ async def test_ensure_downloads_once_caches_hash_and_returns_pinned_path(setup_m
 @pytest.mark.asyncio
 async def test_cache_hash_mismatch_triggers_a_verified_redownload(setup_manager):
     manager, _runtime, _info, _payload, digest = setup_manager
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.316")
     cache = next(manager._cache_root.rglob("claude"))
     cache.write_bytes(b"corrupt")
 
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.316")
 
     assert manager._download.await_count == 2
     assert manager._hash_file(cache) == digest
@@ -130,10 +130,80 @@ async def test_rejects_unsupported_guest_platform_and_unapproved_artifact(setup_
     manager, runtime, _info, _payload, _digest = setup_manager
     runtime.platform = "linux-riscv64"
     with pytest.raises(ValueError, match="Unsupported workspace platform"):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.316")
     with pytest.raises(ValueError, match="Unapproved"):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "anything", "2.1.310")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "anything", "2.1.316")
     manager._download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejects_stale_claude_version_before_provisioning(setup_manager):
+    manager, runtime, _info, _payload, _digest = setup_manager
+
+    with pytest.raises(ValueError, match="Unapproved runtime artifact or version"):
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
+
+    runtime.exec_command_wait.assert_not_awaited()
+    manager._download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", tuple(artifacts.CLAUDE_PLATFORM_PINS))
+async def test_all_pinned_linux_sizes_fit_and_are_accepted_by_provisioning(
+    tmp_path, platform, monkeypatch
+):
+    """Provision each official platform pin through a pre-populated local cache."""
+    digest, size = artifacts.CLAUDE_PLATFORM_PINS[platform]
+    assert size <= artifacts.ARTIFACT_MAX_DOWNLOAD_SIZE
+
+    runtime = FakeArtifactRuntime(platform=platform)
+    info = SimpleNamespace(instance_id="container-1")
+    manager = RuntimeArtifactManager(
+        runtime,
+        lambda _: info,
+        lambda _: runtime,
+        tmp_path / "runner-state",
+        guest_runtime_root=str(tmp_path / "guest" / "runtimes"),
+    )
+    cache = manager._safe_cache_dirs(platform, digest) / "claude"
+    with cache.open("wb") as cached_binary:
+        cached_binary.truncate(size)
+    monkeypatch.setattr(manager, "_hash_file", lambda _path: digest)
+    monkeypatch.setattr(manager, "_make_archive", lambda *_args: b"local archive")
+    manager._download = AsyncMock(side_effect=AssertionError("unexpected download"))
+
+    result = await manager.ensure_runtime_artifact(
+        uuid.uuid4(), "claude-agent", "2.1.316"
+    )
+
+    assert result["ok"] is True
+    assert result["platform"] == platform
+    assert result["version"] == "2.1.316"
+    manager._download.assert_not_awaited()
+    assert runtime.put_archive.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_download_is_rejected_before_network(tmp_path, monkeypatch):
+    manager = RuntimeArtifactManager(
+        FakeArtifactRuntime(),
+        lambda _: SimpleNamespace(instance_id="container-1"),
+        lambda _: None,
+        tmp_path / "runner-state",
+    )
+    monkeypatch.setattr(
+        artifacts.aiohttp,
+        "ClientSession",
+        lambda **_kwargs: pytest.fail("oversized request reached the network"),
+    )
+
+    with pytest.raises(ArtifactProvisionError, match="size is outside the allowed limit"):
+        await manager._download(
+            "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-x64/claude",
+            artifacts.ARTIFACT_MAX_DOWNLOAD_SIZE + 1,
+            "0" * 64,
+            tmp_path / "uncreated" / "download",
+        )
 
 
 @pytest.mark.asyncio
@@ -142,7 +212,7 @@ async def test_provision_failure_is_sanitized(setup_manager):
     runtime.put_archive.side_effect = RuntimeError("secret stdout or env")
 
     with pytest.raises(ArtifactProvisionError, match="Runtime artifact provisioning failed") as exc:
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.316")
 
     assert "secret" not in str(exc.value)
 
@@ -175,7 +245,7 @@ async def test_cancelled_archive_upload_is_settled_then_temp_is_removed(setup_ma
 
     runtime.exec_command_wait.side_effect = platform_exec
     request = asyncio.create_task(
-        manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
+        manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.316")
     )
     await asyncio.wait_for(entered.wait(), 2)
     request.cancel()
@@ -254,7 +324,7 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
             return None
 
         def get(self, url, *, allow_redirects):
-            assert url == "https://downloads.claude.ai/claude-code-releases/2.1.310/linux-x64/claude"
+            assert url == "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-x64/claude"
             assert allow_redirects is False
             return FakeResponse()
 
@@ -304,7 +374,7 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
     runtime.exec_command_wait = AsyncMock(side_effect=guest_exec)
     workspace_id = uuid.uuid4()
     result = await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.310"
+        workspace_id, "claude-agent", "2.1.316"
     )
     installed = root / result["path"].lstrip("/")
     cached_binary = next(manager._cache_root.rglob("claude"))
@@ -317,12 +387,12 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
         str(installed), "--version", stdout=asyncio.subprocess.PIPE
     )
     output, _ = await version.communicate()
-    assert version.returncode == 0 and output.decode().startswith("2.1.310 ")
+    assert version.returncode == 0 and output.decode().startswith("2.1.316 ")
     inode = installed.stat().st_ino
 
     # Idempotent ensure keeps the same pinned executable inode.
     assert await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.310"
+        workspace_id, "claude-agent", "2.1.316"
     ) == result
     assert installed.stat().st_ino == inode
 
@@ -333,5 +403,5 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
     )
     with pytest.raises(ArtifactProvisionError):
         await manager.ensure_runtime_artifact(
-            workspace_id, "claude-agent", "2.1.310"
+            workspace_id, "claude-agent", "2.1.316"
         )
