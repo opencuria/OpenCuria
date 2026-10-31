@@ -91,6 +91,8 @@ are rolled back through ConversationService.
 Notification workers schedule service operations without reaching repositories
 or harness activity directly. Notification eligibility uses OrganizationService;
 repositories receive freshness/retention cutoffs and never own membership rules.
+Process UUID/name precedence and session visibility belong to ProcessLookupService;
+process persistence and lookup never import the runner facade or live workflows.
 """
 
 from __future__ import annotations
@@ -314,6 +316,47 @@ def test_runner_domains_and_infrastructure_never_import_composition_facade() -> 
         "RunnerService composes domains and infrastructure; they must not "
         "import it, including through function-local imports. Put shared "
         "contracts in the module that owns them:\n" + "\n".join(violations)
+    )
+
+
+def test_process_lookup_and_persistence_are_independent_of_runner_workflows() -> None:
+    """Process reads must not load unrelated persistence or live execution."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    forbidden = {
+        "apps.harness",
+        "apps.runners.repositories",
+        "apps.runners.services",
+    }
+    pending = {
+        "apps.runners.process_repository",
+        "apps.runners.services.process_lookup",
+    }
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in forbidden
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    lookup = APPS_ROOT / "runners" / "services" / "process_lookup.py"
+    violations.update(
+        f"{_module_name(lookup)}:{node.lineno} -> {node.attr}"
+        for node in ast.walk(trees[lookup])
+        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
+    )
+    assert violations == set(), (
+        "ProcessLookupService owns identity precedence and session visibility; "
+        "only process_repository queries the ORM. Neither may import general "
+        "runner persistence, live workflows or the service facade, including "
+        "through local imports or dependencies:\n" + "\n".join(sorted(violations))
     )
 
 

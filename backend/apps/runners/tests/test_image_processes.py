@@ -18,7 +18,8 @@ from apps.runners.models import (
     Workspace,
     WorkspaceProcess,
 )
-from apps.runners.repositories import TaskRepository, WorkspaceProcessRepository
+from apps.runners.process_repository import WorkspaceProcessRepository
+from apps.runners.repositories import TaskRepository
 from apps.runners.services import RunnerService
 from apps.runners.services.capture import CaptureService
 from apps.runners.services.workspace_configuration import WorkspaceConfigurationService

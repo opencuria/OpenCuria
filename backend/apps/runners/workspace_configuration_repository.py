@@ -15,10 +15,10 @@ from common.exceptions import NotFoundError
 from .enums import TaskType
 from .locking import lock_runner
 from .models import ImageInstance, Runner, Task, Workspace
+from .process_repository import WorkspaceProcessRepository
 from .repositories import (
     ImageGenerationRepository,
     TaskRepository,
-    WorkspaceProcessRepository,
     WorkspaceRepository,
 )
 

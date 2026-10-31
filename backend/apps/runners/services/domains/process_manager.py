@@ -30,6 +30,7 @@ from common.utils import generate_uuid
 
 from ...enums import ProcessStatus, WorkspaceStatus
 from ...exceptions import RunnerOfflineError, WorkspaceNotFoundError
+from ..process_lookup import ProcessLookupService
 
 logger = logging.getLogger(__name__)
 
@@ -167,13 +168,14 @@ class ProcessManagerMixin:
     ) -> "WorkspaceProcess":
         """Resolve a process by id or exact name, scoped to a workspace.
 
-        ``kind="temp"`` requires ``session_id``: temp rows are
-        session-scoped, so a UUID/name only resolves within the owning
-        session. ``kind=None`` keeps the agent semantics (own temp rows
-        first, then persistent rows).
+        Temp names require a session; user controls can address temp rows by
+        UUID without one. A supplied session excludes other sessions' temps.
+        ``kind=None`` prefers own temp names, then persistent names.
         """
         parsed_session = self._coerce_session_id(session_id)
-        resolved = await sync_to_async(self.processes.resolve_for_workspace)(
+        resolved = await sync_to_async(
+            ProcessLookupService(repository=self.processes).resolve
+        )(
             workspace_id, id_or_name, kind=kind, session_id=parsed_session
         )
         if resolved is None:
