@@ -301,8 +301,6 @@ class OperationRepository:
     @staticmethod
     def fail_unissued(task: Task, reason: str) -> None:
         """Close local preparation failures only before the durable issue boundary."""
-        from .repositories import TaskRepository
-
         with transaction.atomic():
             lock_runner(task.runner_id)
             command = LifecycleCommand.objects.select_for_update().get(task=task)
@@ -332,7 +330,7 @@ class OperationRepository:
                     delete_last_error=reason,
                     updated_at=timezone.now(),
                 )
-            TaskRepository.release_workspace(task)
+            WorkspaceOperationRepository.release_workspace(task)
 
     @staticmethod
     def intervene(task: Task, reason: str) -> None:

@@ -987,14 +987,7 @@ class TaskRepository:
     @staticmethod
     def release_workspace(task: Task) -> None:
         """Release a child identity, never its enclosing capture/recreate request."""
-        operation = (
-            WorkspaceOperationRepository.project(task.workspace_id, None)
-            if task.workspace_id
-            else None
-        )
-        Workspace.objects.filter(current_task=task).update(
-            current_task=None, active_operation=operation
-        )
+        WorkspaceOperationRepository.release_workspace(task)
 
     @staticmethod
     def complete(task: Task) -> Task:

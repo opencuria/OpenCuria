@@ -1,4 +1,4 @@
-"""Read durable workspace reservations without importing their coordinators.
+"""Read and release workspace reservations without importing their coordinators.
 
 Task admission, persisted operation updates and frontend projections share this
 read boundary. The capture and recreate services own phase progression
@@ -28,6 +28,18 @@ OPERATION_BY_REASON = {
 
 class WorkspaceOperationRepository:
     """Read reservation ownership and the committed blocking operation."""
+
+    @staticmethod
+    def release_workspace(task: Task) -> None:
+        """Release only this child, preserving its enclosing durable workflow."""
+        operation = (
+            WorkspaceOperationRepository.project(task.workspace_id, None)
+            if task.workspace_id
+            else None
+        )
+        Workspace.objects.filter(current_task=task).update(
+            current_task=None, active_operation=operation
+        )
 
     @staticmethod
     def forced_deletion_approvals(organization_id: uuid.UUID) -> list[dict]:
