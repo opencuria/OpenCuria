@@ -29,9 +29,9 @@ https://github.com/nodejs/node/blob/v22.23.2/LICENSE.
 ## Claude Agent SDK for Python
 
 The backend depends on the unmodified `claude-agent-sdk` Python distribution,
-pinned to **0.2.174** in `backend/requirements.txt`. The SDK is authored and
+pinned to **0.2.176** in `backend/requirements.txt`. The SDK is authored and
 copyrighted by Anthropic, PBC and is distributed under the **MIT License**.
-Its installed distribution contains `claude_agent_sdk-0.2.174.dist-info/licenses/LICENSE`;
+Its installed distribution contains `claude_agent_sdk-0.2.176.dist-info/licenses/LICENSE`;
 the upstream source and license are available at
 [anthropics/claude-agent-sdk-python](https://github.com/anthropics/claude-agent-sdk-python).
 The SDK package bundles the separate Claude Code CLI binary; that binary is

@@ -28,8 +28,8 @@ class _WorkspaceService:
             ensure_runtime_artifact=AsyncMock(
                 return_value={
                     "ok": True,
-                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-                    "version": "2.1.310",
+                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
+                    "version": "2.1.316",
                     "platform": "linux-x64",
                 }
             )
@@ -136,13 +136,13 @@ async def test_runner_handler_reply_routes_through_owned_backend_to_accessor(
     backend["service"].sio = AsyncMock()
     backend["service"].sio.emit = AsyncMock(side_effect=backend_emit)
     accessor = await create_harness_accessor(backend["service"], str(workspace.id))
-    result = await accessor.ensure_runtime_artifact("claude-agent", "2.1.310")
+    result = await accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
 
     assert result["ok"] is True
     assert result["workspace_id"] == str(workspace.id)
     assert result["request_id"]
-    assert result["version"] == "2.1.310"
-    assert result["path"] == ("/opt/opencuria/runtimes/claude-agent/2.1.310/claude")
+    assert result["version"] == "2.1.316"
+    assert result["path"] == ("/opt/opencuria/runtimes/claude-agent/2.1.316/claude")
     request_id = result["request_id"]
     assert request_id not in accessor._pending
     assert request_id not in _ACCESSORS_BY_REQUEST
@@ -165,7 +165,7 @@ async def test_artifact_reply_from_foreign_runner_is_dropped(
     # Ensure a genuine live request is registered, then send the exact reply
     # as if a different (authenticated) runner had emitted it.
     task = asyncio.create_task(
-        accessor.ensure_runtime_artifact("claude-agent", "2.1.310")
+        accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
     )
     await asyncio.sleep(0)
     request_id = transport_events[0][1]["request_id"]
@@ -176,7 +176,7 @@ async def test_artifact_reply_from_foreign_runner_is_dropped(
             "request_id": request_id,
             "workspace_id": workspace_id,
             "ok": True,
-            "version": "2.1.310",
+            "version": "2.1.316",
         },
         runner_id=str(uuid.uuid4()),
     )
@@ -190,8 +190,8 @@ async def test_artifact_reply_from_foreign_runner_is_dropped(
             "request_id": request_id,
             "workspace_id": workspace_id,
             "ok": True,
-            "version": "2.1.310",
-            "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+            "version": "2.1.316",
+            "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
         },
         runner_id=str(backend["runner"].id),
     )
@@ -221,14 +221,14 @@ async def test_artifact_reply_with_malformed_request_id_cannot_resolve_waiter(
                     "workspace_id": workspace_id,
                     "request_id": "malformed-request-id",
                     "ok": True,
-                    "version": "2.1.310",
-                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+                    "version": "2.1.316",
+                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
                 },
             )
 
     accessor = RunnerWorkspaceAccessor(workspace_id, emit=emit)
     task = asyncio.create_task(
-        accessor.ensure_runtime_artifact("claude-agent", "2.1.310")
+        accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
     )
     await asyncio.sleep(0)
     request_id = emitted[0][1]["request_id"]
@@ -263,7 +263,7 @@ async def test_backend_never_forwards_artifact_reply_to_frontend(
             "request_id": "no-frontend",
             "workspace_id": str(backend["workspace"].id),
             "ok": True,
-            "version": "2.1.310",
+            "version": "2.1.316",
         },
     )
 

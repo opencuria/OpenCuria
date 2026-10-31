@@ -27,8 +27,8 @@ def test_claude_catalog_is_separate_and_constrained() -> None:
     assert all(model.supports_tools for model in models)
     assert all(model.context_length == 1_000_000 for model in models)
     assert all(model.max_output_tokens == 128_000 for model in models)
-    assert CLAUDE_AGENT_SDK_VERSION == "0.2.174"
-    assert CLAUDE_CODE_CLI_VERSION == "2.1.310"
+    assert CLAUDE_AGENT_SDK_VERSION == "0.2.176"
+    assert CLAUDE_CODE_CLI_VERSION == "2.1.316"
     assert normalize_claude_model(" Opus ") == "opus"
     assert resolve_claude_sdk_model("sonnet") == "sonnet"
     assert resolve_claude_sdk_model("claude-haiku-5-5") == "claude-haiku-5-5"

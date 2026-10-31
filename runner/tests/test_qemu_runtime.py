@@ -424,7 +424,7 @@ class QemuRuntimeAgentStdinTests(unittest.IsolatedAsyncioTestCase):
             "ANTHROPIC_API_KEY": "test-secret",
             "CLAUDE_CONFIG_DIR": "/workspace/.opencuria/harness/claude/12345678-1234-1234-1234-123456789abc/config",
             "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-            "CLAUDE_AGENT_SDK_VERSION": "0.2.174",
+            "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
             "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
             "DISABLE_UPDATES": "1",
             "DISABLE_TELEMETRY": "1",

@@ -24,7 +24,7 @@ ISOLATED_AGENT_ENV_MAX_SIZE = 256 * 1024
 _AGENT_AUTH_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 _AGENT_FIXED_ENV = {
     "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-    "CLAUDE_AGENT_SDK_VERSION": "0.2.174",
+    "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
     "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
     "DISABLE_UPDATES": "1",
     "DISABLE_TELEMETRY": "1",
@@ -351,7 +351,7 @@ if action == 'start':
             if profile == 'claude':
                 fixed = {
                     'CLAUDE_CODE_ENTRYPOINT': 'sdk-py',
-                    'CLAUDE_AGENT_SDK_VERSION': '0.2.174',
+                    'CLAUDE_AGENT_SDK_VERSION': '0.2.176',
                     'CLAUDE_CODE_SDK_READS_SESSION_STATE': '1',
                     'DISABLE_UPDATES': '1', 'DISABLE_TELEMETRY': '1',
                     'DISABLE_ERROR_REPORTING': '1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1',

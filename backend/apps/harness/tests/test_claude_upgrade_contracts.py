@@ -11,6 +11,7 @@ import pytest
 
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.tests.test_claude_engine import (
+    FixtureSessionStore,
     LocalSseWorkspaceAccessor,
     _run_local_cli_fixture,
     require_pinned_cli,
@@ -362,7 +363,9 @@ async def test_real_cli_cancellation_cleans_up_pending_question_and_process(
 
         assert question_stopped.is_set(), "Pending question callback was not cancelled"
         await asyncio.wait_for(process.wait(), timeout=5)
-        assert process.returncode is not None, "The real CLI child survived cancellation"
+        assert process.returncode is not None, (
+            "The real CLI child survived cancellation"
+        )
         assert any(
             event.get("type") == "aborted" and event.get("reason") == "cancelled"
             for event in emitted
@@ -378,3 +381,103 @@ async def test_real_cli_cancellation_cleans_up_pending_question_and_process(
             if stream.process.returncode is None:
                 stream.process.kill()
                 await stream.process.wait()
+
+
+@pytest.mark.asyncio
+async def test_real_cli_ignores_repository_settings_and_hooks(
+    tmp_path: Path,
+) -> None:
+    """Excluded project/local sources cannot alter managed tools or execute hooks."""
+    require_pinned_cli()
+    marker = tmp_path / "workspace" / "unmanaged-hook-ran"
+    unmanaged_settings = json.dumps(
+        {
+            "permissions": {"deny": ["Bash"]},
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{"type": "command", "command": f"touch {marker}"}],
+                    }
+                ]
+            },
+            "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"},
+        }
+    ).encode()
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Bash",
+        tool_arguments={"command": "printf managed-settings-only"},
+        tools=default_tool_registry(),
+        fixture_files={
+            ".claude/settings.json": unmanaged_settings,
+            ".claude/settings.local.json": unmanaged_settings,
+        },
+    )
+
+    assert result.output == "fixture answer"
+    assert permissions == []
+    assert not marker.exists(), "Excluded repository hooks must never run"
+    assert "--setting-sources=" in accessor.opened[0]["argv"]
+    assert accessor.opened[0]["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert any(
+        event.get("type") == "tool_completed"
+        and event.get("tool") == "bash"
+        and "managed-settings-only" in event.get("output", "")
+        for event in events
+    ), "The excluded repository deny rule must not block managed Bash"
+
+
+@pytest.mark.asyncio
+async def test_real_cli_preserves_every_turn_across_consecutive_resumes(
+    tmp_path: Path,
+) -> None:
+    """Eager transcript mirroring keeps earlier prompts/results on repeated resume."""
+    require_pinned_cli()
+    store = FixtureSessionStore()
+    session_id = "claude-upgrade-repeated-resume"
+    external_id = ""
+    markers = ["FIRST_UPGRADE_TURN", "SECOND_UPGRADE_TURN", "THIRD_UPGRADE_TURN"]
+    for index, marker in enumerate(markers):
+        (
+            result,
+            _events,
+            _questions,
+            requests,
+            _permissions,
+            _store,
+            accessor,
+        ) = await _run_local_cli_fixture(
+            tmp_path,
+            tool_name="",
+            tool_arguments={},
+            tools=default_tool_registry(),
+            prompt=f"Remember this turn: {marker}",
+            session_id=session_id,
+            external_session_id=external_id,
+            store=store,
+        )
+        assert result.output == "fixture answer"
+        returned_id = str(result.metadata["external_session_id"])
+        if external_id:
+            assert returned_id == external_id
+            assert f"--resume={external_id}" in accessor.opened[0]["argv"]
+        external_id = returned_id
+        model_requests = [request for request in requests if request.get("tools")]
+        assert model_requests
+        history = json.dumps(model_requests[-1]["messages"])
+        for prior_marker in markers[: index + 1]:
+            assert prior_marker in history
+        assert history.count("fixture answer") == index
+
+    assert store.load_calls == [("-workspace", external_id, "")] * 2
+    mirrored = json.dumps(list(store.entries.values()))
+    assert all(marker in mirrored for marker in markers)

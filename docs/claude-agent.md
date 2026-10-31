@@ -78,11 +78,13 @@ message starts a follow-up run automatically; **Stop** discards the queue.
 
 Deploy matching OpenCuria backend and runner versions; apply migrations
 `0028_claude_harness`, `0029_harnessrun`, and `0006_scheduledtask_harness_id`.
-The backend pins `claude-agent-sdk==0.2.174`; the runner provisions Claude Code
-CLI `2.1.310` at:
+Upgrade or roll back both components together: mixed versions reject each
+other's Claude runtime pin, so Claude Agent cannot start until they match.
+The backend pins `claude-agent-sdk==0.2.176`; the runner provisions Claude Code
+CLI `2.1.316` at:
 
 ```text
-/opt/opencuria/runtimes/claude-agent/2.1.310/claude
+/opt/opencuria/runtimes/claude-agent/2.1.316/claude
 ```
 
 The checked-in [artifact manifest](../runner/src/runtime/artifact_manifest.json)
@@ -100,25 +102,35 @@ The runner provisions the pinned CLI on demand and reuses the verified workspace
 artifact; it does not look up `latest` or allow CLI self-updates. A version change requires a reviewed OpenCuria manifest/code
 update and coordinated backend/runner deployment. Keep `$RUNNER_STATE_DIR`
 persistent across restarts; the artifact cache is under
-`artifacts/claude-agent/2.1.310/` in the runner state volume.
+`artifacts/claude-agent/2.1.316/` in the runner state volume.
 
-### Upgrade review: CLI 2.1.292 → 2.1.310 / SDK 0.2.164 → 0.2.174
+### Upgrade review: CLI 2.1.310 → 2.1.316 / SDK 0.2.174 → 0.2.176
 
 Reviewed against the official [CLI changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)
 and [Python SDK changelog](https://github.com/anthropics/claude-agent-sdk-python/blob/main/CHANGELOG.md)
-on 2026-10-24:
+on 2026-10-31. SDK 0.2.175/0.2.176 only update the bundled CLI; no SDK API
+migration is required. The release manifest's detached signature was verified
+with Anthropic's published key and the fingerprint above before repinning.
 
 | Change | OpenCuria handling |
 | --- | --- |
-| Plan hook approvals now keep CLI write checks (2.1.299) | Native Plan actions explicitly route to the existing host permission callback. Root edit approval, child scopes, explicit denies and MCP approval correlation remain enforced. No bypass/auto permission mode is enabled. |
-| Fork subagents default on in SDK/headless sessions (2.1.302) | Disabled with the required fixed `CLAUDE_CODE_FORK_SUBAGENT=0` on both backend and runner/guest. Task/Agent hooks reject unsupported child types before launch, rather than inheriting the parent's tools. Scoped General/Explore delegation remains available. Native forks need explicit identity, permissions, depth and lifecycle support before being enabled. |
-| Monitor and plugin monitors work with telemetry disabled (2.1.310) | Not exposed by the explicit native tool allowlist. Unknown tools fail closed; recognized native tools are also checked against the current agent's allowlist at the hook boundary. Use OpenCuria's managed process tools. Monitor support would need permission mapping, event projection and cleanup/lease integration first. |
-| Haiku 5.5 becomes the first-party `haiku` alias (2.1.293) | Aliases still pass through; the catalog's outdated 200K/64K metadata is updated to the current 1M/128K first-party defaults. Alias targets and Anthropic pricing can change. |
-| `Read.allow_large` (2.1.296), typed hook/init payloads (SDK 0.2.166) | Native schemas remain CLI-owned; no duplicated schemas or new UI required. Existing hook/event normalization remains compatible. |
-| Tool allowlist enforcement, MCP reconnect/retry and compaction/resume fixes (2.1.295–2.1.310) | Adopted through the pinned update. Real-CLI contracts cover schemas, permissions, resume, child identity, media, steering, skills and todos. Encrypted eager transcript mirroring remains authoritative. SDK 0.2.170 also fixes parallel branches in its session-message helpers; OpenCuria restores raw mirrored entries. |
-| Idle compaction (2.1.299) | Runs remain turn-scoped; native compaction and resume stay CLI-owned. No independent idle Claude process or OpenCuria scheduler is added. |
-| Unanswered headless MCP elicitation (2.1.310) | The bridge has no generic MCP elicitation-to-UI handler. Use the existing OpenCuria question tool; interactive MCP elicitation needs a separate validated, cancellable user-input bridge before being offered. |
-| Mods/plugin monitors, auto-mode setup, workflows, telemetry events, Remote Control/cloud/terminal UI changes | No automatic opt-in or duplicate OpenCuria UI. Selected skill bodies are trusted native plugin content and can contain executable frontmatter; review them like code. Supporting untrusted executable skill hooks/mods needs a separate policy review. Repository/user setting sources remain disabled. |
+| Larger Linux release binaries (up to 328,459,544 bytes) | Raised the runner's bounded artifact download limit from 300 to 320 MiB. Exact size/hash/URL pins, guest version checks, and Codex's separate archive limit remain enforced. Tests cover all four Linux pins, oversized downloads and stale version rejection. |
+| Excluded setting sources could still supply rules/consents (2.1.314) | Adopted the upstream fix. Both SDK and CLI still disable filesystem setting sources. A real-CLI regression proves repository/local deny rules and executable hooks cannot override the managed configuration. |
+| `permissions.blockWritesOutsideWorkingDirectories` (2.1.314) | Optional hardening, not enabled implicitly: a nested working directory must not prevent an OpenCuria-authorized edit elsewhere in the workspace. This setting only covers native Write/Edit/NotebookEdit, not Bash; it is not a shell sandbox. Offering it needs an explicit workspace-wide policy and UI decision. |
+| `CLAUDE_CODE_SUBAGENT_EFFORT` (2.1.316) | This optional default applies when configured. OpenCuria does not forward it, so scoped General/Explore children continue inheriting the selected root effort. Real-CLI contracts verify both low and xhigh in Build and Plan; no extra setting or duplicated effort control is needed. |
+| `CLAUDE_CODE_DISABLE_ULTRATHINK` and interactive ultrathink changes (2.1.311/2.1.316) | No additional UI or ambient environment forwarding. OpenCuria uses SDK/stream-json and the existing explicit effort picker; the changelog's keyword behavior is for the interactive terminal/VS Code. |
+| Transcript ordering, consecutive resume and duplicate SubagentStop fixes (2.1.311/2.1.312) | Adopted through the update. Encrypted eager transcript mirroring remains authoritative; added a three-turn real-CLI contract proving both resumes retain every prior prompt/result. Existing child identity and terminal-event deduplication remain unchanged. |
+| JSON escaping of DEL, C1 and Unicode format characters (2.1.311) | The transport parses JSON rather than handling raw escape strings. A chunked-wire regression confirms decoded values are unchanged. |
+| Startup failures now exit nonzero; MCP interruption, tool search fallback, effort caps, shell cleanup and TLS fixes (2.1.311–2.1.316) | Adopted upstream. Existing error/cancellation, MCP, permission and process-lease cleanup contracts remain in place. New custom-CA switches are not forwarded from ambient runner state. |
+| Cloud MCP form cards, gateway budgets/policy/guardrails, Remote Control, self-hosted runner, Slack and IDE changes | These are Anthropic-hosted products or separate gateway/runner protocols, not OpenCuria's local SDK transport. No automatic opt-in or duplicate UI. Generic MCP elicitation still needs a validated, cancellable OpenCuria input bridge; use the existing question tool meanwhile. |
+
+Earlier integration boundaries remain enforced: unscoped native forks stay off
+with `CLAUDE_CODE_FORK_SUBAGENT=0` on backend and runner/guest. Unknown or
+unavailable tools fail closed; Monitor, native teams/tasks and workflows are not
+exposed. Continue using OpenCuria's managed process, todo and delegation tools.
+Native Monitor support would need permission mapping, event projection and
+lease/cleanup integration. Selected skills remain trusted executable plugin
+content, not a mechanism for enabling arbitrary repository hooks.
 
 ## Workspace and data
 
@@ -207,5 +219,6 @@ compares the bundled binary's size/hash with the runner manifest. These tests ru
 the real pinned CLI against scripted responses and cover native schemas, prompt
 preservation on resume, child context/tool scopes, direct image/PDF input,
 permission allow/ask/deny paths, MCP correlation, steering, selected skills,
-native edits, todos and turn-limit completion without real provider calls.
+native edits, todos, selected effort inheritance, excluded repository settings,
+consecutive resumes and turn-limit completion without real provider calls.
 They do not verify Anthropic token validity, billing or live model inference.

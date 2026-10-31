@@ -101,3 +101,20 @@ def test_transport_rejects_non_object_json() -> None:
 
 def test_transport_parses_crlf_json_line() -> None:
     assert ClaudeWorkspaceTransport._parse_line('{"type":"x"}\r') == {"type": "x"}
+
+
+@pytest.mark.asyncio
+async def test_transport_preserves_cli_escaped_control_and_format_characters() -> None:
+    """CLI 2.1.311+ JSON escaping changes wire bytes, not decoded string values."""
+    wire = b'{"type":"assistant","text":"a\\u007fb\\u0085c\\u200dd"}\n'
+    stream = FakeStream([wire[:19], wire[19:40], wire[40:]])
+    transport = ClaudeWorkspaceTransport(
+        FakeAccessor(stream), ["/claude"], cwd="/workspace", env={}
+    )
+    await transport.connect()
+    try:
+        assert [message async for message in transport.read_messages()] == [
+            {"type": "assistant", "text": "a\x7fb\x85c\u200dd"}
+        ]
+    finally:
+        await transport.close()

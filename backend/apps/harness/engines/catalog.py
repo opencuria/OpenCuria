@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from apps.harness.providers.models_catalog import ProviderModel
 
 ENGINE_IDS = ("native", "claude", "codex")
-CLAUDE_AGENT_SDK_VERSION = "0.2.174"
-CLAUDE_CODE_CLI_VERSION = "2.1.310"
+CLAUDE_AGENT_SDK_VERSION = "0.2.176"
+CLAUDE_CODE_CLI_VERSION = "2.1.316"
 DEFAULT_CLAUDE_MODEL = "sonnet"
 DEFAULT_CLAUDE_EFFORT = "high"
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
