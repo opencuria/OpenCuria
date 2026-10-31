@@ -120,7 +120,7 @@ function isLoading(path: string): boolean {
 const pinnedPaths = new Set<string>()
 let pinnedMediaGeneration = imageStore.mediaGeneration
 let pinnedWorkspaceId = props.workspaceId
-const lightbox = ref<{ src: string; alt: string } | null>(null)
+const lightbox = ref<{ src: string; alt: string; path: string } | null>(null)
 let lightboxPath: string | null = null
 let lightboxMediaGeneration = imageStore.mediaGeneration
 
@@ -212,7 +212,7 @@ function openLightbox(path: string): void {
     lightboxPath = path
     lightboxMediaGeneration = imageStore.mediaGeneration
   }
-  lightbox.value = { src: url, alt: displayName(path) }
+  lightbox.value = { src: url, alt: displayName(path), path }
 }
 
 function closeLightbox(): void {
@@ -295,5 +295,5 @@ function requestRemove(token: MentionFileToken): void {
       </button>
     </div>
   </div>
-  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" @close="closeLightbox" />
+  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" :path="lightbox.path" :workspace-id="workspaceId" @close="closeLightbox" />
 </template>

@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 
 import type { HarnessPart } from '@/types/harness'
 import { isImageAttachment, toolAttachments } from '@/lib/harnessAttachments'
 import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
 import ImageLightbox from '../ImageLightbox.vue'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
+import { resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
 
 const props = defineProps<{
   part: HarnessPart
 }>()
+const workspaceId = inject(harnessWorkspaceIdKey, ref(''))
 
 const args = computed(() => parseToolArguments(props.part))
 const prompt = computed(() => stringArg(args.value, 'prompt'))
@@ -27,6 +30,12 @@ const savedPath = computed(() => {
   const value = result.value?.savedPath ?? result.value?.saved_path
   return typeof value === 'string' ? value : ''
 })
+const pointingPath = computed(() =>
+  savedPath.value.startsWith('/workspace/') &&
+  resolveWorkspaceMediaPath(savedPath.value) === savedPath.value
+    ? savedPath.value
+    : undefined,
+)
 const status = computed(() => {
   const value = result.value?.status
   return typeof value === 'string' ? value : ''
@@ -74,6 +83,8 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
         <img
           :src="attachment.url"
           :alt="`Generated image ${index + 1}`"
+          :data-voice-image-path="pointingPath"
+          :data-voice-workspace="pointingPath ? workspaceId : undefined"
           data-testid="tool-detail-image-generation-image"
           class="max-h-32 max-w-full cursor-zoom-in object-contain"
         />
@@ -93,6 +104,8 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
       v-if="lightbox"
       :src="lightbox.src"
       :alt="lightbox.alt"
+      :path="pointingPath"
+      :workspace-id="pointingPath ? workspaceId : undefined"
       @close="lightbox = null"
     />
   </div>

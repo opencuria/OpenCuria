@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
@@ -13,10 +13,13 @@ import {
   type ToolAttachment,
 } from '@/lib/harnessAttachments'
 import ImageLightbox from '../ImageLightbox.vue'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
+import { resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
 
 const props = defineProps<{
   part: HarnessPart
 }>()
+const workspaceId = inject(harnessWorkspaceIdKey, ref(''))
 
 function safeBasename(value: unknown): string {
   if (typeof value !== 'string' || !value) return ''
@@ -52,6 +55,11 @@ const argsPath = computed(() => {
 })
 
 const path = computed(() => metaPath.value || argsPath.value)
+const pointingPath = computed(() =>
+  path.value.startsWith('/workspace/') && resolveWorkspaceMediaPath(path.value) === path.value
+    ? path.value
+    : undefined,
+)
 
 const preview = computed(() => {
   try {
@@ -147,6 +155,8 @@ function closeLightbox(): void {
         <img
           :src="attachment.url"
           :alt="imageAlt(attachment, index)"
+          :data-voice-image-path="pointingPath"
+          :data-voice-workspace="pointingPath ? workspaceId : undefined"
           data-testid="tool-detail-read-image"
           class="max-h-32 max-w-full cursor-zoom-in object-contain"
         />
@@ -176,6 +186,8 @@ function closeLightbox(): void {
       v-if="lightbox"
       :src="lightbox.src"
       :alt="lightbox.alt"
+      :path="pointingPath"
+      :workspace-id="pointingPath ? workspaceId : undefined"
       @close="closeLightbox"
     />
   </div>

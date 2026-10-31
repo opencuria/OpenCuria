@@ -29,6 +29,7 @@ import {
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { MousePointerClick } from '@lucide/vue'
+import { activePointingWorkspace, registerPointingDesktop } from '@/lib/voicePointing'
 
 const props = defineProps<{ workspaceId: string }>()
 
@@ -50,6 +51,7 @@ const {
 
 const surfaceRef = ref<HTMLElement | null>(null)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
+const unregisterPointingDesktop = registerPointingDesktop(props.workspaceId, () => desktopIframeRef.value)
 const viewportWidth = ref(0)
 const viewportHeight = ref(0)
 const iframeLoaded = ref(false)
@@ -404,6 +406,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  unregisterPointingDesktop()
   disposed = true
   clearIframeConnectionObserver()
   void stopDesktopIfActive(props.workspaceId)
@@ -464,7 +467,7 @@ watch(desktopIframeRef, () => {
       :class="{ 'p-2': !desktopStore.isOpen }"
     >
       <div
-        class="shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
+        class="relative shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
         :style="scaledFrameStyle"
       >
         <iframe
@@ -479,6 +482,19 @@ watch(desktopIframeRef, () => {
           allow="clipboard-read; clipboard-write"
           data-testid="desktop-surface-iframe"
           @load="handleIframeLoad"
+        />
+        <div
+          v-if="activePointingWorkspace === workspaceId && iframeLoaded && viewerStatus === 'connected'"
+          class="absolute inset-0 cursor-crosshair"
+          data-voice-desktop
+          :data-voice-workspace="workspaceId"
+          :data-voice-width="desktopSize.width"
+          :data-voice-height="desktopSize.height"
+          aria-label="Point at the desktop while speaking"
+          title="Pointing mode · desktop input is paused"
+          @pointerdown.prevent
+          @click.prevent.stop
+          @contextmenu.prevent
         />
       </div>
     </div>

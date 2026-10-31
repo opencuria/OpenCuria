@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { ref } from 'vue'
 
 import type { HarnessPart } from '@/types/harness'
 import ImageLightbox from '../ImageLightbox.vue'
@@ -12,6 +13,7 @@ import ToolDetailWebfetch from './ToolDetailWebfetch.vue'
 import ToolDetailComputerUse from './ToolDetailComputerUse.vue'
 import ToolDetailImageGeneration from './ToolDetailImageGeneration.vue'
 import ToolDetailMemory from './ToolDetailMemory.vue'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -101,11 +103,14 @@ describe('tool detail components', () => {
       },
       global: {
         stubs: { teleport: true },
+        provide: { [harnessWorkspaceIdKey as symbol]: ref('workspace-a') },
       },
     })
 
     const img = wrapper.get('[data-testid="tool-detail-read-image"]')
     expect(img.attributes('src')).toBe(url)
+    expect(img.attributes('data-voice-image-path')).toBe('/workspace/cat.png')
+    expect(img.attributes('data-voice-workspace')).toBe('workspace-a')
     // Text preview from the backend is kept alongside the thumbnail.
     expect(wrapper.text()).toContain('Image read successfully')
 
@@ -113,7 +118,37 @@ describe('tool detail components', () => {
     const lightbox = wrapper.findComponent(ImageLightbox)
     expect(lightbox.exists()).toBe(true)
     expect(lightbox.props('src')).toBe(url)
+    expect(lightbox.props('path')).toBe('/workspace/cat.png')
+    expect(lightbox.props('workspaceId')).toBe('workspace-a')
   })
+
+  it.each(['/tmp/cat.png', '/workspace/../cat.png', '/workspace//cat.png'])(
+    'does not link a read attachment to a noncanonical workspace path: %s',
+    async (path) => {
+      const wrapper = mount(ToolDetailRead, {
+        props: {
+          part: makePart({
+            tool: 'read',
+            meta: {
+              path,
+              attachments: [{ type: 'file', mime: 'image/png', url: 'data:image/png;base64,YQ==' }],
+            },
+          }),
+        },
+        global: {
+          stubs: { teleport: true },
+          provide: { [harnessWorkspaceIdKey as symbol]: ref('workspace-a') },
+        },
+      })
+      expect(
+        wrapper.get('img[data-testid="tool-detail-read-image"]').attributes('data-voice-image-path'),
+      ).toBeUndefined()
+      await wrapper.get('button').trigger('click')
+      expect(wrapper.getComponent(ImageLightbox).props('path')).toBeUndefined()
+      expect(wrapper.getComponent(ImageLightbox).props('workspaceId')).toBeUndefined()
+      wrapper.unmount()
+    },
+  )
 
   it('renders PDF attachments as a download link with the file name', () => {
     const url = 'data:application/pdf;base64,JVBERi0='
@@ -350,13 +385,21 @@ describe('tool detail components', () => {
           },
         }),
       },
-      global: { stubs: { teleport: true } },
+      global: {
+        stubs: { teleport: true },
+        provide: { [harnessWorkspaceIdKey as symbol]: ref('workspace-a') },
+      },
     })
     expect(wrapper.text()).toContain('a blue bird')
     expect(wrapper.text()).toContain('/workspace/bird.png')
     expect(wrapper.findAll('[data-testid="tool-detail-image-generation-image"]')).toHaveLength(1)
+    const image = wrapper.get('[data-testid="tool-detail-image-generation-image"]')
+    expect(image.attributes('data-voice-image-path')).toBe('/workspace/bird.png')
+    expect(image.attributes('data-voice-workspace')).toBe('workspace-a')
     await wrapper.get('button').trigger('click')
     expect(wrapper.findComponent(ImageLightbox).props('src')).toBe(url)
+    expect(wrapper.findComponent(ImageLightbox).props('path')).toBe('/workspace/bird.png')
+    expect(wrapper.findComponent(ImageLightbox).props('workspaceId')).toBe('workspace-a')
   })
 
   it('falls back to the default tool name and output', () => {

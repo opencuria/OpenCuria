@@ -3,6 +3,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
 import ImageLightbox from './ImageLightbox.vue'
+import { activePointingWorkspace } from '@/lib/voicePointing'
 
 let wrapper: VueWrapper
 const disconnect = vi.fn()
@@ -39,6 +40,7 @@ describe('ImageLightbox', () => {
   })
 
   afterEach(() => {
+    activePointingWorkspace.value = null
     wrapper?.unmount()
     document.body.innerHTML = ''
     vi.unstubAllGlobals()
@@ -57,6 +59,21 @@ describe('ImageLightbox', () => {
     expect(button('Zoom out').disabled).toBe(true)
     expect(button('Zoom in').disabled).toBe(false)
     expect(button('Close image preview')).not.toBeNull()
+  })
+
+  it('exposes the workspace image reference independently of its temporary browser URL', async () => {
+    const dialog = await mountLightbox()
+    await wrapper.setProps({ path: '/workspace/design.png', workspaceId: 'workspace-a' })
+    expect(dialog.querySelector('img')?.getAttribute('data-voice-image-path')).toBe('/workspace/design.png')
+    expect(dialog.querySelector('img')?.getAttribute('data-voice-workspace')).toBe('workspace-a')
+  })
+
+  it('explains when an active pointing recording cannot be linked to this image', async () => {
+    activePointingWorkspace.value = 'workspace-a'
+    const dialog = await mountLightbox()
+    expect(dialog.textContent).toContain('This image has no workspace path. Pointing cannot be linked to it.')
+    await wrapper.setProps({ path: '/workspace/design.png', workspaceId: 'workspace-a' })
+    expect(dialog.textContent).not.toContain('This image has no workspace path.')
   })
 
   it('zooms with controls and keyboard, respects limits, and resets', async () => {

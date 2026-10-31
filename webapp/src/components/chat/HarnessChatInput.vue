@@ -10,6 +10,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import VoiceInputControl from '@/components/chat/VoiceInputControl.vue'
+import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
 import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
 import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
@@ -174,6 +176,13 @@ const emit = defineEmits<{
 
 const isScheduledTask = computed(() => props.variant === 'scheduled-task')
 const prompt = ref(props.prompt ?? '')
+const voiceBusy = ref(false)
+function insertDictation(text: string, path?: string): void {
+  const addition = path ? `${text}\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:${path}` : text
+  prompt.value = [prompt.value.trimEnd(), addition].filter(Boolean).join('\n')
+  saveToCache(prompt.value)
+  void nextTick(() => { resizeTextarea(); focusTextarea() })
+}
 const textareaRef = ref<InstanceType<typeof ComposerRichEditor> | null>(null)
 const imageTokens = computed(() => imageMentionTokens(prompt.value))
 function removeImageToken(start: number, end: number): void {
@@ -243,7 +252,7 @@ const selectedSkills = computed(() =>
 
 const hasText = computed(() => prompt.value.trim().length > 0)
 const canSend = computed(
-  () => hasText.value && !props.disabled && !props.sending && !props.stopping,
+  () => hasText.value && !voiceBusy.value && !props.disabled && !props.sending && !props.stopping,
 )
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending && !props.stopping)
 const stopTitle = computed(() => (props.stopping ? 'Stopping…' : 'Stop current run'))
@@ -1383,6 +1392,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             {{ localHarnessId === 'native' ? 'Connect a provider in Settings' : `${harnessLabel} unavailable — check accounts in Provider settings` }}
           </button>
 
+          <VoiceCaptureBar v-if="voiceBusy" class="mx-4 mt-3" />
           <HarnessMentionImages
             v-if="imageTokens.length"
             :tokens="imageTokens"
@@ -1592,6 +1602,14 @@ function onComposerKeydown(e: KeyboardEvent): void {
                   @change="handleFileInput"
                 />
               </div>
+              <VoiceInputControl
+                v-if="workspaceId && !isScheduledTask"
+                :workspace-id="workspaceId"
+                :context-key="`${sessionId ?? ''}:${resetKey ?? ''}:${localHarnessId}`"
+                :disabled="disabled || sending"
+                @result="insertDictation"
+                @busy="voiceBusy = $event"
+              />
               <Button
                 v-if="steering && hasText"
                 type="button"

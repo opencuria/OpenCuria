@@ -408,6 +408,8 @@ describe('HarnessMarkdown', () => {
     expect(wrapper.getComponent(ImageLightbox).props()).toEqual({
       src: 'data:image/png;base64,abc',
       alt: 'Photo',
+      path: '/workspace/photo.png',
+      workspaceId: 'ws-1',
     })
     wrapper.getComponent(ImageLightbox).vm.$emit('close')
     await wrapper.vm.$nextTick()

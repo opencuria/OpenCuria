@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import shutil
+import subprocess
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -672,6 +675,47 @@ def test_viewer_disables_public_stun_transport_before_loading_kasm():
         b'<script src="dist/main.bundle.js"'
     )
     assert b"window.webkitRTCPeerConnection=undefined;" in patched
+
+
+def test_voice_frame_bridge_accepts_only_embedding_parent_and_its_origin():
+    """Execute the injected bridge to check its cross-origin security boundary."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to execute the browser bridge")
+    html = inject_kasm_idle_guard(b"<html><head></head></html>").decode()
+    script = html.split("<script data-opencuria-kasm-idle-guard>", 1)[1].split(
+        "</script>", 1
+    )[0]
+    check = r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+let message;
+let captures = 0;
+const replies = [];
+const parent = { postMessage: (...args) => replies.push(args) };
+const window = { parent, setInterval() {},
+  addEventListener: (type, handler) => { if (type === 'message') message = handler; } };
+const document = { referrer: 'https://app.example/chat', querySelector: () => ({
+  width: 1920, height: 1080, toBlob: (reply) => { captures++; reply('jpeg'); }
+}) };
+vm.runInNewContext(SCRIPT, { window, document, URL });
+const data = { type: 'opencuria:voice-frame', requestId: 'request-1' };
+message({ source: {}, origin: 'https://app.example', data });
+message({ source: parent, origin: 'https://evil.example', data });
+message({ source: parent, origin: 'https://app.example', data: { ...data, requestId: {} } });
+assert.equal(captures, 0);
+message({ source: parent, origin: 'https://app.example', data });
+assert.equal(captures, 1);
+assert.equal(replies[0][0].requestId, 'request-1');
+assert.equal(replies[0][0].blob, 'jpeg');
+assert.equal(replies[0][1], 'https://app.example');
+"""
+    subprocess.run(
+        [node, "-e", "const SCRIPT=" + json.dumps(script) + ";" + check],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
 
 
 def test_inject_kasm_idle_guard_inserts_after_doctype_without_head():

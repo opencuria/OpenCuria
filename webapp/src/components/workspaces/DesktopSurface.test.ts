@@ -11,6 +11,7 @@ import {
 } from '@/composables/useDesktopSessionCoordinator'
 import { useDesktopStore } from '@/stores/desktop'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
+import { activePointingWorkspace } from '@/lib/voicePointing'
 import * as workspacesApi from '@/services/workspaces.api'
 import { copyToClipboard } from '@/lib/clipboard'
 
@@ -159,6 +160,7 @@ describe('DesktopSurface', () => {
   })
 
   afterEach(async () => {
+    activePointingWorkspace.value = null
     while (wrappers.length) wrappers.pop()?.unmount()
     // The viewer session is module state shared across tests.
     await closeDesktopViewer('ws-1')
@@ -208,6 +210,31 @@ describe('DesktopSurface', () => {
     await nextTick()
     expect(document.querySelector('[data-testid="desktop-surface"] iframe')).toBe(iframe)
     expect(surface.style.left).toBe('10px')
+  })
+
+  it('covers the desktop with a pointing surface only during a matching recording', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    iframe.dispatchEvent(new Event('load'))
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    expect(document.querySelector('[data-voice-desktop]')).toBeNull()
+    activePointingWorkspace.value = 'different-workspace'
+    await nextTick()
+    expect(document.querySelector('[data-voice-desktop]')).toBeNull()
+    activePointingWorkspace.value = 'ws-1'
+    await nextTick()
+    const overlay = document.querySelector<HTMLElement>('[data-voice-desktop]')!
+    expect(overlay.dataset.voiceWorkspace).toBe('ws-1')
+    expect(overlay.dataset.voiceWidth).toBe('1920')
+    expect(overlay.dataset.voiceHeight).toBe('1080')
+    activePointingWorkspace.value = null
+    await nextTick()
+    expect(document.querySelector('[data-voice-desktop]')).toBeNull()
+    expect(document.querySelector('iframe')).toBe(iframe)
   })
 
   it('keeps the iframe mounted but hides it when no visible host exists', async () => {

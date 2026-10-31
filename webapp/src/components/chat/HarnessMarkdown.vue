@@ -191,6 +191,8 @@ const WorkspaceMediaNode = defineComponent({
         return h('img', {
           src: url.value,
           alt: label,
+          'data-voice-image-path': mediaProps.path,
+          'data-voice-workspace': workspaceId.value,
           class: 'my-2 max-h-96 max-w-full object-contain',
         })
       }
@@ -211,6 +213,8 @@ const WorkspaceMediaNode = defineComponent({
             h('img', {
               src: url.value,
               alt: label,
+              'data-voice-image-path': mediaProps.path,
+              'data-voice-workspace': workspaceId.value,
               class: 'm-0 max-h-96 max-w-full object-contain',
             }),
           ],
@@ -391,7 +395,7 @@ watch(
 const pinnedMediaPaths = new Set<string>()
 let pinnedMediaGeneration = imageStore.mediaGeneration
 let pinnedWorkspaceId = workspaceId.value
-const lightbox = ref<{ src: string; alt: string } | null>(null)
+const lightbox = ref<{ src: string; alt: string; path?: string } | null>(null)
 let lightboxMediaPath: string | null = null
 let lightboxMediaGeneration = imageStore.mediaGeneration
 
@@ -470,7 +474,7 @@ function openImage(segment: ImageSegment): void {
     lightboxMediaPath = segment.path
     lightboxMediaGeneration = imageStore.mediaGeneration
   }
-  lightbox.value = { src, alt: segment.label || segment.path }
+  lightbox.value = { src, alt: segment.label || segment.path, path: segment.path }
 }
 
 function closeLightbox(): void {
@@ -777,5 +781,5 @@ export type { HarnessPart }
       <div v-else data-md-html v-html="segment.html" />
     </template>
   </div>
-  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" @close="closeLightbox" />
+  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" :path="lightbox.path" :workspace-id="workspaceId ?? undefined" @close="closeLightbox" />
 </template>

@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessChatInput from './HarnessChatInput.vue'
 import ComposerRichEditor from './ComposerRichEditor.vue'
+import VoiceInputControl from './VoiceInputControl.vue'
 import HarnessMentionSheet from './HarnessMentionSheet.vue'
 import type { VueWrapper } from '@vue/test-utils'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
@@ -545,6 +546,61 @@ describe('HarnessChatInput', () => {
     expect(
       wrapper.find('[data-testid="composer-textarea"]').attributes('data-placeholder'),
     ).toContain('/ for skills')
+  })
+
+  it('appends cleaned dictation to an existing draft for review before sending', async () => {
+    const wrapper = mountInput({ sessionId: 'voice-append' })
+    await flushPromises()
+    await setEditorText(wrapper, 'Existing instruction.')
+    wrapper.findComponent(VoiceInputControl).vm.$emit('result', 'Please adjust this button.')
+    await flushPromises()
+    expect(editorText(wrapper)).toBe('Existing instruction.\nPlease adjust this button.')
+    expect(wrapper.emitted('send')).toBeUndefined()
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Existing instruction.\nPlease adjust this button.')
+    wrapper.unmount()
+  })
+
+  it('persists the pointing manifest reference with the dictated draft', async () => {
+    const props = { sessionId: 'voice-pointing' }
+    const wrapper = mountInput(props)
+    await flushPromises()
+    const path = '/workspace/.opencuria/recordings/id/manifest.json'
+    wrapper.findComponent(VoiceInputControl).vm.$emit('result', 'Change the item here.', path)
+    await flushPromises()
+    expect(editorText(wrapper)).toContain('Change the item here.')
+    expect(editorText(wrapper)).toContain(`@file:${path}`)
+    expect(wrapper.emitted('send')).toBeUndefined()
+    wrapper.unmount()
+    const restored = mountInput(props)
+    await flushPromises()
+    expect(editorText(restored)).toContain(`@file:${path}`)
+    restored.unmount()
+  })
+
+  it('prevents sending by keyboard or button while dictation is being captured or processed', async () => {
+    const wrapper = mountInput({ sessionId: 'voice-busy' })
+    await flushPromises()
+    await setEditorText(wrapper, 'Wait for dictation.')
+    const control = wrapper.findComponent(VoiceInputControl)
+    control.vm.$emit('busy', true)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('send')).toBeUndefined()
+    control.vm.$emit('busy', false)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Wait for dictation.')
+    wrapper.unmount()
+  })
+
+  it('does not offer voice capture in the scheduled-task prompt editor', async () => {
+    const wrapper = mountInput({ variant: 'scheduled-task' })
+    await flushPromises()
+    expect(wrapper.findComponent(VoiceInputControl).exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('keeps all composer controls inside a responsive wrapping toolbar', () => {

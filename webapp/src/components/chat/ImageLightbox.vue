@@ -3,10 +3,15 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { X, ZoomIn, ZoomOut, RotateCcw, Move, Maximize2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
+import { activePointingWorkspace } from '@/lib/voicePointing'
 
 const props = defineProps<{
   src: string
   alt?: string
+  /** Workspace path, rather than the temporary browser URL, for voice pointing. */
+  path?: string
+  workspaceId?: string
 }>()
 
 const emit = defineEmits<{
@@ -228,6 +233,16 @@ onUnmounted(() => resizeObserver?.disconnect())
     >
       <DialogTitle class="sr-only">Image Viewer</DialogTitle>
       <DialogDescription class="sr-only">Full-screen preview with zoom and pan.</DialogDescription>
+      <div class="absolute inset-x-4 bottom-14 z-20 mx-auto w-fit max-w-[calc(100vw-2rem)]">
+        <p
+          v-if="activePointingWorkspace && (!props.path || !props.workspaceId)"
+          role="status"
+          class="mb-2 rounded-md border bg-card px-3 py-2 text-xs text-muted-foreground"
+        >
+          This image has no workspace path. Pointing cannot be linked to it.
+        </p>
+        <VoiceCaptureBar />
+      </div>
       <div
         class="absolute inset-x-0 top-0 z-10 flex items-start justify-end gap-4 px-4 py-4 sm:justify-between sm:px-6"
       >
@@ -308,6 +323,8 @@ onUnmounted(() => resizeObserver?.disconnect())
             v-else
             :src="props.src"
             :alt="props.alt ?? 'Image'"
+            :data-voice-image-path="props.path"
+            :data-voice-workspace="props.workspaceId"
             :style="{
               width: `${fittedWidth}px`,
               height: `${fittedHeight}px`,

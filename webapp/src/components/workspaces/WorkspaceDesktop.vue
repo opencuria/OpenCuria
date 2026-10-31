@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
 import { Monitor, RefreshCw, Square, Copy, ClipboardPaste, X } from '@lucide/vue'
 
 const props = defineProps<{
@@ -154,6 +155,8 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
           </Button>
         </div>
       </div>
+
+      <VoiceCaptureBar />
 
       <!-- Viewport, aspect-ratio matched to the desktop resolution -->
       <div

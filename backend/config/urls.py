@@ -22,6 +22,7 @@ from apps.credentials.oauth_api import credential_oauth_router, service_oauth_ro
 from apps.harness.api import harness_router
 from apps.harness.commit_message_api import commit_message_router
 from apps.harness.engines.api import engines_router
+from apps.harness.voice_api import voice_router
 from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
 from apps.organizations.member_profile_api import member_profile_router
@@ -66,6 +67,7 @@ api.add_router("/workspaces/", workspace_router)
 api.add_router("/workspaces/", workspace_image_artifact_router)
 api.add_router("/workspaces/", git_router)
 api.add_router("/workspaces/", commit_message_router)
+api.add_router("/workspaces/", voice_router)
 api.add_router("/image-artifacts/", image_artifact_router)
 api.add_router("/captured-images/", captured_image_router)
 api.add_router("/credential-services/", credential_service_router)
