@@ -1,12 +1,4 @@
-"""Frontend event bus fan-out (Phase 2 infra mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces``. Fan-out
-goes through ``realtime.emit_to_frontend``; this module has no top-level
-harness/credential imports. Phase 4: only ``_forward_to_frontend`` honours
-an injected ``frontend_bus`` port.
-"""
+"""Publish runner and workspace events through the frontend Socket.IO transport."""
 
 from __future__ import annotations
 
@@ -41,11 +33,6 @@ class FrontendBusMixin:
 
         Since service methods are called synchronously (via sync_to_async),
         this schedules the async emit on the running event loop.
-
-        Phase 4: when the facade was constructed with ``frontend_bus=...``,
-        the injected bus is used (async callable ``(event, data,
-        workspace_id)`` or object with an ``emit`` method, sync or async).
-        Otherwise ``realtime.emit_to_frontend`` is used.
         """
         try:
             asyncio.get_running_loop()
@@ -58,21 +45,6 @@ class FrontendBusMixin:
 
     def _emit_frontend_event(self, event: str, data: dict, workspace_id: str) -> None:
         """Deliver an event only after its originating transaction committed."""
-        injected = getattr(self, "_frontend_bus", None)
-        if injected is not None:
-            try:
-                self._emit_via_injected_frontend_bus(
-                    injected, event, data, workspace_id
-                )
-            except Exception:
-                logger.exception(
-                    "Failed forwarding event to frontend",
-                    extra={
-                        "event": event,
-                        "workspace_id": workspace_id,
-                    },
-                )
-            return
         try:
             try:
                 loop = asyncio.get_running_loop()
@@ -88,41 +60,6 @@ class FrontendBusMixin:
                     "workspace_id": workspace_id,
                 },
             )
-
-    def _emit_via_injected_frontend_bus(
-        self,
-        bus,
-        event: str,
-        data: dict,
-        workspace_id: str,
-    ) -> None:
-        """Deliver a frontend event through an injected Phase-4 bus.
-
-        Accepts an async callable ``(event, data, workspace_id)`` or an
-        object exposing ``emit`` (sync or async, same signature). Async
-        targets are scheduled on the running loop (or driven via
-        ``async_to_sync`` outside a loop); sync targets run inline. Never
-        swallows: failures propagate to the caller for logging.
-        """
-        target = getattr(bus, "emit", None)
-        if target is None:
-            target = bus
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if asyncio.iscoroutinefunction(target):
-            if loop is not None:
-                loop.create_task(target(event, data, workspace_id))
-            else:
-                async_to_sync(target)(event, data, workspace_id)
-            return
-        result = target(event, data, workspace_id)
-        if asyncio.iscoroutine(result):
-            if loop is not None:
-                loop.create_task(result)
-            else:
-                async_to_sync(lambda: result)()
 
     def _forward_runner_status_to_frontend(
         self,

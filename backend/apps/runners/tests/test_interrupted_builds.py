@@ -2,7 +2,6 @@
 
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 from django.apps import apps
@@ -84,7 +83,7 @@ def test_exact_late_result_resolves_intervention_without_overwriting_newer_build
         data["image_path"] = image.runner_ref
     else:
         data["error"] = "provisioning failed"
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     assert apply_result(
         service,
         str(runner.id),
@@ -115,7 +114,7 @@ def test_wrong_runner_cannot_fail_build_or_close_interruption(
     command = LifecycleCommand.objects.get(task=task)
     data = OperationRepository.envelope(command, command.payload)
     assert not apply_result(
-        RunnerService(frontend_bus=Mock()),
+        RunnerService(),
         str(offline_runner.id),
         "image:build_failed",
         {**data, "outcome_known": False},

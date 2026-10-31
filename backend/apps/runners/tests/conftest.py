@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,6 +27,16 @@ os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 def has_busy_agent(workspace_id: uuid.UUID) -> bool:
     """Busy check the runner service passes to lifecycle admissions."""
     return get_harness_gateway().has_busy_session(workspace_id)
+
+
+@pytest.fixture
+def frontend(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Observe the production frontend transport without sending Socket.IO events."""
+    emit = AsyncMock()
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.emit_to_frontend", emit
+    )
+    return emit
 
 
 @pytest.fixture

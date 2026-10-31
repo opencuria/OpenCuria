@@ -21,7 +21,6 @@ Wiring status (what ``RunnerService`` consumes):
   Repositories never resolve the gateway themselves: lifecycle admissions
   receive ``has_busy_session`` from the service as a predicate evaluated
   under their row lock.
-- ``FrontendBus``: used by ``infra/frontend_bus._forward_to_frontend``.
 
 Everything else in ``workspace_lifecycle`` / ``interactive_sessions`` /
 ``file_transfer`` keeps its lazy ``emit_to_frontend`` import (documented
@@ -51,32 +50,6 @@ class RunnerTransport(Protocol):
         timeout: int = 15,
     ) -> dict:
         """Send a request/response call to *runner* and return the reply."""
-        ...
-
-
-class FrontendBus(Protocol):
-    """Outbound bus towards subscribed frontend clients.
-
-    Phase-4 wiring: ``RunnerService`` accepts either an async callable
-    ``(event, data, workspace_id)`` or an object with an ``emit`` method
-    (sync or async, same ``(event, data, workspace_id)`` signature). When
-    set, ``FrontendBusMixin._forward_to_frontend`` uses it (see
-    ``infra/frontend_bus._emit_via_injected_frontend_bus``); otherwise the
-    lazy ``emit_to_frontend`` import is kept so existing
-    ``monkeypatch``-based tests keep working.
-
-    The protocol surface reflects the injected forms: either the object
-    itself is callable, or it exposes ``emit``. The legacy
-    ``forward_to_frontend(event, payload)`` name is NOT what the mixin
-    calls — do not implement only that name for new fakes.
-    """
-
-    def __call__(self, event: str, data: dict, workspace_id: str) -> Any:
-        """Deliver *data* as *event* for *workspace_id* (async or sync)."""
-        ...
-
-    def emit(self, event: str, data: dict, workspace_id: str) -> Any:
-        """Deliver *data* as *event* for *workspace_id* (sync or async)."""
         ...
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import Mock
 
 import pytest
 
@@ -61,10 +60,9 @@ def test_parse_keeps_only_complete_plausible_guest_counters() -> None:
 
 @pytest.mark.django_db
 def test_metrics_persist_disk_usage_and_notify_open_workspace(
-    runner, workspace, django_capture_on_commit_callbacks
+    runner, workspace, frontend, django_capture_on_commit_callbacks
 ):
-    frontend = Mock()
-    service = RunnerService(frontend_bus=frontend)
+    service = RunnerService()
 
     with django_capture_on_commit_callbacks(execute=True):
         service.record_runner_system_metrics(
@@ -76,8 +74,8 @@ def test_metrics_persist_disk_usage_and_notify_open_workspace(
     assert workspace.disk_free_bytes == GIB
     assert workspace.disk_total_bytes == 10 * GIB
     assert workspace.disk_usage_observed_at is not None
-    frontend.emit.assert_called_once()
-    event, payload, room = frontend.emit.call_args.args
+    frontend.assert_awaited_once()
+    event, payload, room = frontend.await_args.args
     assert event == "workspace:disk_usage_changed"
     assert room == str(workspace.id)
     assert payload["workspace_id"] == str(workspace.id)
@@ -90,7 +88,7 @@ def test_metrics_persist_disk_usage_and_notify_open_workspace(
 
 @pytest.mark.django_db
 def test_metrics_ignore_workspaces_of_other_runners(
-    runner, organization, user, django_capture_on_commit_callbacks
+    runner, organization, user, frontend, django_capture_on_commit_callbacks
 ):
     other_runner = Runner.objects.create(
         name="other-runner",
@@ -98,33 +96,31 @@ def test_metrics_ignore_workspaces_of_other_runners(
         organization=organization,
     )
     foreign = Workspace.objects.create(runner=other_runner, created_by=user)
-    frontend = Mock()
 
     with django_capture_on_commit_callbacks(execute=True):
-        RunnerService(frontend_bus=frontend).record_runner_system_metrics(
+        RunnerService().record_runner_system_metrics(
             runner, _metrics({str(foreign.id): _guest(1, 2, 3)})
         )
 
     foreign.refresh_from_db()
     assert foreign.disk_usage_observed_at is None
-    frontend.emit.assert_not_called()
+    frontend.assert_not_called()
 
 
 @pytest.mark.django_db
 def test_metrics_keep_last_observation_when_guest_does_not_answer(
-    runner, workspace, django_capture_on_commit_callbacks
+    runner, workspace, frontend, django_capture_on_commit_callbacks
 ):
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.record_runner_system_metrics(
         runner, _metrics({str(workspace.id): _guest(1, 2, 3)})
     )
-    frontend = Mock()
 
     with django_capture_on_commit_callbacks(execute=True):
-        RunnerService(frontend_bus=frontend).record_runner_system_metrics(
+        RunnerService().record_runner_system_metrics(
             runner, _metrics({str(workspace.id): {"disk_used_bytes": 5}})
         )
 
     workspace.refresh_from_db()
     assert (workspace.disk_used_bytes, workspace.disk_free_bytes) == (1, 2)
-    frontend.emit.assert_not_called()
+    frontend.assert_not_called()

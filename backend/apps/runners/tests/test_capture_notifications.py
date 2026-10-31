@@ -1,7 +1,7 @@
 """Capture notifications use the real bus and committed lifecycle projection."""
 
 import asyncio
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 from asgiref.sync import async_to_sync
@@ -22,14 +22,6 @@ from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
 
 pytestmark = pytest.mark.django_db(transaction=True)
-
-
-@pytest.fixture
-def frontend(service):
-    """Inject a sync bus, retaining both scheduling and actual event delivery."""
-    bus = Mock()
-    service._frontend_bus = bus
-    return bus.emit
 
 
 def operation_payload(workspace, diagnostic="", intervention=False):
@@ -65,13 +57,13 @@ def test_unknown_result_notifies_only_after_commit(
         workspace.refresh_from_db()
         assert workspace.intervention_required
         assert workspace.current_task_id == child.id
-    assert frontend.call_count == 2
-    frontend.assert_any_call(
+    assert frontend.await_count == 2
+    frontend.assert_any_await(
         "workspace:operation_changed",
         operation_payload(workspace, diagnostic, True),
         str(workspace.id),
     )
-    frontend.assert_any_call(
+    frontend.assert_any_await(
         "workspace:error",
         {
             "workspace_id": str(workspace.id),
@@ -191,12 +183,12 @@ def test_deadline_intervention_tick_and_recovery_flags(
     )
     async_to_sync(RecoveryService().tick)(sio_mock)
     assert CaptureService.tick() == []
-    frontend.assert_any_call(
+    frontend.assert_any_await(
         "workspace:operation_changed",
         operation_payload(workspace, diagnostic, True),
         str(workspace.id),
     )
-    frontend.assert_any_call(
+    frontend.assert_any_await(
         "workspace:error",
         {"workspace_id": str(workspace.id), "error": notification["diagnostic"]},
         str(workspace.id),
@@ -239,7 +231,7 @@ def test_completed_duplicate_ticks_notify_exactly_once(
     workspace.refresh_from_db()
     assert recreate.phase == "completed" and workspace.status == "stopped"
     operations = [
-        c for c in frontend.call_args_list if c.args[0] == "workspace:operation_changed"
+        c for c in frontend.await_args_list if c.args[0] == "workspace:operation_changed"
     ]
     assert [c.args[1] for c in operations] == [operation_payload(workspace)]
     frontend.reset_mock()
@@ -263,7 +255,7 @@ async def test_async_operation_projection_without_unsafe_orm(
     # Await the scheduled projection rather than permitting ORM access on the loop.
     pending = asyncio.all_tasks() - {asyncio.current_task()}
     await asyncio.gather(*pending)
-    frontend.assert_called_once_with(
+    frontend.assert_awaited_once_with(
         "workspace:operation_changed",
         {
             "workspace_id": str(workspace.id),
@@ -276,9 +268,8 @@ async def test_async_operation_projection_without_unsafe_orm(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("injected", [False, True])
 async def test_async_operation_delivery_stays_on_original_loop(
-    service, workspace, monkeypatch, injected
+    service, workspace, monkeypatch
 ):
     """Delivery can re-enter the sync executor without a cross-loop bounce."""
     from asgiref.sync import sync_to_async
@@ -296,7 +287,7 @@ async def test_async_operation_delivery_stays_on_original_loop(
     async def emit(event, payload, workspace_id):
         try:
             assert asyncio.get_running_loop() is loop
-            # A frontend bus may itself need synchronous repository access.
+            # Frontend delivery may itself need synchronous repository access.
             projected_workspace = await sync_to_async(service.workspaces.get_by_id)(
                 workspace_id
             )
@@ -307,12 +298,9 @@ async def test_async_operation_delivery_stays_on_original_loop(
         except Exception as exc:
             delivered.set_exception(exc)
 
-    if injected:
-        service._frontend_bus = emit
-    else:
-        monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
-        )
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.emit_to_frontend", emit
+    )
 
     # Capture only this projection task, not unrelated tasks on pytest's loop.
     tasks = []

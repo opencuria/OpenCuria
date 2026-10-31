@@ -60,7 +60,7 @@ def client(api_key, organization) -> Client:
 @pytest.fixture
 def service(monkeypatch) -> RunnerService:
     """Exercise the real service and repositories, replacing only runner I/O."""
-    service = RunnerService(frontend_bus=lambda *args: None)
+    service = RunnerService()
     service._await_process_result = AsyncMock(return_value={"pid": 4242})
     monkeypatch.setattr(runners_api, "_get_service", lambda: service)
     return service

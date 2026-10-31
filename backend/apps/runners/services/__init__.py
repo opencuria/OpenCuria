@@ -16,14 +16,10 @@ resolution in ``infra/rpc_registry.py``; domains and infrastructure never
 import this composition facade. ``get_runner_service()`` is the process-wide
 singleton every adapter (REST, Socket.IO) and other app resolves.
 
-Phase 4: the constructor additionally accepts optional injected ports
-(``credential_resolver``, ``harness_gateway``, ``frontend_bus`` — all
-keyword-only, default ``None``). An unset ``harness_gateway`` resolves to
-the gateway the harness app registered at startup, an unset
-``credential_resolver`` to ``CredentialSvc``; ``frontend_bus`` keeps its
-lazy-import behaviour when unset. The
-pending RPC registries are plain per-instance dictionaries; terminal/desktop
-maps remain shared class attributes.
+Optional credential resolvers and harness gateways can be injected; otherwise
+services resolve their registered application adapters. Frontend events always
+use ``infra.realtime.emit_to_frontend``. Pending RPC registries are plain
+per-instance dictionaries; terminal/desktop maps remain shared class attributes.
 """
 
 from __future__ import annotations
@@ -100,7 +96,6 @@ class RunnerService(
         *,
         credential_resolver=None,
         harness_gateway: HarnessGateway | None = None,
-        frontend_bus=None,
     ):
         """
         Initialize the service.
@@ -116,17 +111,11 @@ class RunnerService(
             harness_gateway: Optional ``HarnessGateway``. When unset,
                         the gateway registered by the harness app is
                         used (see :meth:`_harness`).
-            frontend_bus: Optional async callable
-                        ``(event, data, workspace_id)`` or object with an
-                        ``emit`` method. When set,
-                        ``_forward_to_frontend`` uses it; otherwise
-                        ``infra.realtime.emit_to_frontend`` is used.
         """
         self.sio = sio_server
         # Injected ports (all optional; see the constructor docstring).
         self._credential_resolver = credential_resolver
         self._harness_gateway = harness_gateway
-        self._frontend_bus = frontend_bus
         self.runners = RunnerRepository
         self.runner_metrics = RunnerSystemMetricsRepository
         self.workspaces = WorkspaceRepository

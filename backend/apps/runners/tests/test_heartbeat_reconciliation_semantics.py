@@ -275,7 +275,7 @@ def test_heartbeat_cannot_change_lifecycle_owned_workspace(
     task = TaskRepository.create(
         task_id=uuid.uuid4(), runner=runner, workspace=workspace, task_type=task_type
     )
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     service.handle_heartbeat(
         runner, [{"workspace_id": str(workspace.id), "status": "stopped"}]
@@ -292,7 +292,7 @@ def test_stale_heartbeat_snapshot_cannot_overwrite_newer_lifecycle_state(
 ):
     from apps.runners.models import Workspace
 
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     stale = service.workspaces.get_by_id(workspace.id)
     Workspace.objects.filter(pk=workspace.id).update(
@@ -312,7 +312,7 @@ def test_heartbeat_snapshot_cannot_overwrite_newly_admitted_operation(
 ):
     from apps.runners.repositories import TaskRepository
 
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     stale = service.workspaces.get_by_id(workspace.id)
     task = TaskRepository.create(
@@ -334,7 +334,7 @@ def test_heartbeat_snapshot_cannot_overwrite_newly_admitted_operation(
 def test_replaced_runner_session_cannot_change_workspace_status(runner, workspace):
     from apps.runners.models import Runner
 
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     Runner.objects.filter(pk=runner.id).update(sid="replacement-session")
     service.handle_heartbeat(
@@ -358,7 +358,7 @@ def test_unusable_runtime_observation_is_failed_and_keeps_resources(
 
     workspace.credentials_present = True
     workspace.save()
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     service._cleanup_desktop_state = Mock()
     assert (
@@ -380,7 +380,7 @@ def test_unusable_runtime_observation_is_failed_and_keeps_resources(
 
 @pytest.mark.django_db(transaction=True)
 def test_blocked_runtime_observation_remains_running(runner, workspace):
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     service._cleanup_desktop_state = Mock()
     service.handle_heartbeat(
@@ -405,7 +405,7 @@ def test_missing_or_owned_runtime_observation_does_not_override_state(
             workspace=workspace,
             task_type="stop_workspace",
         )
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
     payload = (
         [{"workspace_id": str(workspace.id), "status": "paused"}]

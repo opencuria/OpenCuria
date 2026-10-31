@@ -138,14 +138,13 @@ def test_unknown_create_outcome_keeps_capacity_until_resolved(runner, user):
     with pytest.raises(ConflictError, match="vCPU limit exceeded"):
         create(runner, user)
     assert Workspace.objects.count() == 1
-    from unittest.mock import Mock
 
     from apps.runners.services import RunnerService
     from apps.runners.services.disposition import DispositionService
     from apps.runners.tests.test_automatic_recovery_matrix import evidence
 
     assert DispositionService.recover_inspection(
-        RunnerService(frontend_bus=Mock()),
+        RunnerService(),
         str(runner.id),
         runner.sid,
         evidence(LifecycleCommand.objects.get(task=task), "absent"),
@@ -277,8 +276,6 @@ def test_create_uses_current_runner_resource_limits_under_lock(runner, user, dim
 @pytest.mark.parametrize("dimension", ["vcpus", "memory_mb", "disk_size_gb"])
 def test_failed_guest_resource_reservation(runner, user, observed, dimension):
     """Workflow failure does not imply that its preserved VM bytes disappeared."""
-    from unittest.mock import Mock
-
     from apps.runners.services import RunnerService
     from apps.runners.services.disposition import DispositionService
     from apps.runners.tests.test_automatic_recovery_matrix import evidence
@@ -286,7 +283,7 @@ def test_failed_guest_resource_reservation(runner, user, observed, dimension):
     workspace, task = create(runner, user)
     command = LifecycleCommand.objects.get(task=task)
     assert DispositionService.recover_inspection(
-        RunnerService(frontend_bus=Mock()),
+        RunnerService(),
         str(runner.id),
         runner.sid,
         evidence(command, observed),
@@ -424,8 +421,6 @@ def test_new_attempt_does_not_inherit_absence_proof(runner, workspace, user):
 def test_terminal_result_records_runtime_evidence(
     runner, workspace, user, kind, event, details, expected
 ):
-    from unittest.mock import Mock
-
     from apps.runners.services import RunnerService
     from apps.runners.services.operation_results import apply_result
 
@@ -446,7 +441,7 @@ def test_terminal_result_records_runtime_evidence(
         },
     )
     assert apply_result(
-        RunnerService(frontend_bus=Mock()),
+        RunnerService(),
         str(runner.id),
         event,
         data,
@@ -610,7 +605,7 @@ def test_legacy_null_resources_keep_confirmed_sizes_on_resume(
     runner.save()
     with pytest.raises(ConflictError, match="limit exceeded"):
         create(runner, user)
-    from unittest.mock import AsyncMock, Mock
+    from unittest.mock import AsyncMock
 
     from asgiref.sync import async_to_sync
 
@@ -628,7 +623,7 @@ def test_legacy_null_resources_keep_confirmed_sizes_on_resume(
     )
     Workspace.objects.filter(pk=workspace.id).update(status="stopped")
     task = async_to_sync(
-        RunnerService(sio_server=AsyncMock(), frontend_bus=Mock()).resume_workspace
+        RunnerService(sio_server=AsyncMock()).resume_workspace
     )(workspace.id)
     workspace.refresh_from_db()
     assert getattr(workspace, f"qemu_{dimension}") == confirmed

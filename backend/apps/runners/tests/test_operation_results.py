@@ -30,12 +30,16 @@ def pending_result(runner, workspace) -> tuple[Task, dict]:
 
 
 def test_callback_failure_rolls_back_state_journal_and_notifications(
-    runner, workspace, pending_result, monkeypatch, django_capture_on_commit_callbacks
+    runner,
+    workspace,
+    pending_result,
+    frontend,
+    monkeypatch,
+    django_capture_on_commit_callbacks,
 ) -> None:
     """A failed callback cannot commit partial state or publish its queued events."""
     task, data = pending_result
-    frontend = Mock()
-    service = RunnerService(frontend_bus=frontend)
+    service = RunnerService()
     callback = service.handle_workspace_stopped
 
     def fail_after_callback(task_id: str, workspace_id: str, runner_id: str) -> None:
@@ -125,7 +129,7 @@ def test_late_failure_needs_finished_known_execution(
     """A backend timeout can be reconciled only with exact terminal runner proof."""
     task, data = pending_result
     OperationRepository.intervene(task, "Backend deadline; intervention required")
-    service = RunnerService(frontend_bus=lambda *args: None)
+    service = RunnerService()
     assert (
         apply_result(
             service,

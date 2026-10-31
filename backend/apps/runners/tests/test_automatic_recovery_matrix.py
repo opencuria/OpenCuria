@@ -95,7 +95,7 @@ def test_interrupted_operation_matrix(
         workspace.pending_base_image_instance_id,
     )
     count = Task.objects.count()
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     proof = evidence(command, observed)
     assert DispositionService.recover_inspection(
         service, str(runner.id), runner.sid, proof
@@ -355,7 +355,7 @@ def test_credential_proof_matrix(runner, workspace, user, definition, initial, p
     _, command, _, _ = operation("stop_workspace", runner, workspace, user, definition)
     packet = {**evidence(command), "credentials_present": proof}
     assert DispositionService.recover_inspection(
-        RunnerService(frontend_bus=Mock()), str(runner.id), runner.sid, packet
+        RunnerService(), str(runner.id), runner.sid, packet
     )
     workspace.refresh_from_db()
     assert workspace.credentials_present is (initial if proof is None else proof)
@@ -366,7 +366,7 @@ def test_user_diagnostic(runner, workspace, user, definition):
         "create_workspace", runner, workspace, user, definition
     )
     assert DispositionService.recover_inspection(
-        RunnerService(frontend_bus=Mock()),
+        RunnerService(),
         str(runner.id),
         runner.sid,
         evidence(command),
@@ -482,7 +482,7 @@ def test_sealed_deletion_retry(runner, user):
     command = LifecycleCommand.objects.get(task_id=first)
     OperationRepository.intervene(command.task, "Runner interrupted during deletion")
     assert DispositionService.recover_inspection(
-        RunnerService(frontend_bus=Mock()),
+        RunnerService(),
         str(runner.id),
         runner.sid,
         evidence(command),
@@ -512,7 +512,7 @@ def test_exhausted_deletion_retry(runner, user):
     base = image(runner, user)
     observe(runner, [resource(base)])
     plan = delete_request(runner, user, base)
-    service = RunnerService(frontend_bus=Mock())
+    service = RunnerService()
     for attempt in range(3):
         Repo.tick()
         parent = ImageDeletionRequest.objects.get(pk=plan["id"])

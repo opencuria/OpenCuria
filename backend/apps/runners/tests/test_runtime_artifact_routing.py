@@ -251,11 +251,9 @@ async def test_artifact_reply_with_malformed_request_id_cannot_resolve_waiter(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_backend_never_forwards_artifact_reply_to_frontend(
-    backend_sio_artifact_handler,
+    backend_sio_artifact_handler, frontend
 ) -> None:
     backend = backend_sio_artifact_handler
-    frontend = AsyncMock()
-    backend["service"]._frontend_bus = frontend
 
     await backend["handler"](
         "artifact-rpc-sid",

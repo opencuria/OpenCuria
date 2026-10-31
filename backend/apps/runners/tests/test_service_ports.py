@@ -73,10 +73,6 @@ class _FakeHarnessGateway:
         return [uuid.UUID(int=1)]
 
 
-async def _fake_emit(event, data, workspace_id):
-    return None
-
-
 def test_constructor_injects_ports():
     resolver = _FakeResolver()
     gateway = _FakeHarnessGateway()
@@ -84,12 +80,10 @@ def test_constructor_injects_ports():
         None,
         credential_resolver=resolver,
         harness_gateway=gateway,
-        frontend_bus=_fake_emit,
     )
     assert svc.sio is None
     assert svc._credential_resolver is resolver
     assert svc._harness() is gateway
-    assert svc._frontend_bus is _fake_emit
 
 
 def test_constructor_defaults_and_positional():
@@ -98,7 +92,6 @@ def test_constructor_defaults_and_positional():
     assert svc_default._credential_resolver is None
     assert svc_default._harness_gateway is None
     assert svc_default._harness() is get_harness_gateway()
-    assert svc_default._frontend_bus is None
     sentinel = object()
     svc_positional = RunnerService(sentinel)
     assert svc_positional.sio is sentinel

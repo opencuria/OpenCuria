@@ -55,7 +55,7 @@ def runner_sio(monkeypatch, runner):
     sio_server._register_event_handlers(server)
     server.emit = AsyncMock()
     server.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
-    service = RunnerService(sio_server=server, frontend_bus=lambda *args: None)
+    service = RunnerService(sio_server=server)
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
     return server
 
