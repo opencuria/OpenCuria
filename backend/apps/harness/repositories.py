@@ -998,34 +998,6 @@ class HarnessMessageRepository:
         )
 
     @staticmethod
-    def delete_from(
-        session_id: uuid.UUID, from_message_id: uuid.UUID
-    ) -> list[uuid.UUID]:
-        """Delete messages from *from_message_id* onward (inclusive).
-
-        Ordering is ``position`` (ties broken by ``created_at``, ``id``).
-        Related parts are removed via CASCADE. Returns deleted message IDs.
-        """
-        ordered = list(
-            HarnessMessage.objects.filter(session_id=session_id).order_by(
-                "position", "created_at", "id"
-            )
-        )
-        index = next(
-            (pos for pos, row in enumerate(ordered) if row.id == from_message_id),
-            None,
-        )
-        if index is None:
-            raise ValueError(f"Message '{from_message_id}' not in session")
-        suffix = ordered[index:]
-        deleted_ids = [row.id for row in suffix]
-        if deleted_ids:
-            HarnessMessage.objects.filter(
-                session_id=session_id, id__in=deleted_ids
-            ).delete()
-        return deleted_ids
-
-    @staticmethod
     def discard_edit_run(
         session_id: uuid.UUID,
         *,
