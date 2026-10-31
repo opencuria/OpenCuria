@@ -1,0 +1,3470 @@
+[
+  {
+    "id": "B001",
+    "expected": "create_workspace, sealed interrupted journal, runtime running: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_workspace-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B002",
+    "expected": "create_workspace, sealed interrupted journal, runtime stopped: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_workspace-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B003",
+    "expected": "create_workspace, sealed interrupted journal, runtime absent: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_workspace-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B004",
+    "expected": "create_workspace_from_image_artifact, sealed interrupted journal, runtime running: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_workspace_from_image_artifact-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B005",
+    "expected": "create_workspace_from_image_artifact, sealed interrupted journal, runtime stopped: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_workspace_from_image_artifact-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B006",
+    "expected": "create_workspace_from_image_artifact, sealed interrupted journal, runtime absent: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_workspace_from_image_artifact-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B007",
+    "expected": "stop_workspace, sealed interrupted journal, runtime running: release only this fence; running; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[stop_workspace-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B008",
+    "expected": "stop_workspace, sealed interrupted journal, runtime stopped: release only this fence; stopped; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[stop_workspace-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B009",
+    "expected": "stop_workspace, sealed interrupted journal, runtime absent: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[stop_workspace-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B010",
+    "expected": "resume_workspace, sealed interrupted journal, runtime running: release only this fence; running; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[resume_workspace-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B011",
+    "expected": "resume_workspace, sealed interrupted journal, runtime stopped: release only this fence; stopped; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[resume_workspace-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B012",
+    "expected": "resume_workspace, sealed interrupted journal, runtime absent: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[resume_workspace-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B013",
+    "expected": "update_workspace, sealed interrupted journal, runtime running: release only this fence; running; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[update_workspace-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B014",
+    "expected": "update_workspace, sealed interrupted journal, runtime stopped: release only this fence; stopped; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[update_workspace-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B015",
+    "expected": "update_workspace, sealed interrupted journal, runtime absent: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[update_workspace-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B016",
+    "expected": "remove_workspace, sealed interrupted journal, runtime running: release only this fence; delete_failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[remove_workspace-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B017",
+    "expected": "remove_workspace, sealed interrupted journal, runtime stopped: release only this fence; delete_failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[remove_workspace-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B018",
+    "expected": "remove_workspace, sealed interrupted journal, runtime absent: release only this fence; delete_failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[remove_workspace-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B019",
+    "expected": "build_image, sealed interrupted journal, runtime running: release only this fence; failed generation / prior current preserved; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[build_image-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B020",
+    "expected": "build_image, sealed interrupted journal, runtime stopped: release only this fence; failed generation / prior current preserved; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[build_image-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B021",
+    "expected": "build_image, sealed interrupted journal, runtime absent: release only this fence; failed generation / prior current preserved; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[build_image-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B022",
+    "expected": "create_image_artifact, sealed interrupted journal, runtime running: release only this fence; running; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_image_artifact-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B023",
+    "expected": "create_image_artifact, sealed interrupted journal, runtime stopped: release only this fence; stopped; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_image_artifact-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B024",
+    "expected": "create_image_artifact, sealed interrupted journal, runtime absent: release only this fence; failed; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[create_image_artifact-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B025",
+    "expected": "delete_image, sealed interrupted journal, runtime running: release only this fence; delete_failed / retry available; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[delete_image-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B026",
+    "expected": "delete_image, sealed interrupted journal, runtime stopped: release only this fence; delete_failed / retry available; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[delete_image-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B027",
+    "expected": "delete_image, sealed interrupted journal, runtime absent: release only this fence; delete_failed / retry available; no script replay or resource deletion.",
+    "check": "`test_automatic_recovery_matrix.py::test_interrupted_operation_matrix[delete_image-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B028",
+    "expected": "Unsafe evidence runner: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[runner]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B029",
+    "expected": "Unsafe evidence operation_id: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[operation_id]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B030",
+    "expected": "Unsafe evidence attempt: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[attempt]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B031",
+    "expected": "Unsafe evidence target: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[target]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B032",
+    "expected": "Unsafe evidence instance: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[instance]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B033",
+    "expected": "Unsafe evidence finished: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[finished]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B034",
+    "expected": "Unsafe evidence quiescent: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[quiescent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B035",
+    "expected": "Unsafe evidence running: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B036",
+    "expected": "Unsafe evidence unsealed: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[unsealed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B037",
+    "expected": "Unsafe evidence known_unfinished: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[known_unfinished]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B038",
+    "expected": "Unsafe evidence missing_outcome: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[missing_outcome]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B039",
+    "expected": "Unsafe evidence replaced_session: do not close operation; preserve task and workspace reservation.",
+    "check": "`test_automatic_recovery_matrix.py::test_unsafe_inspection_matrix[replaced_session]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B040",
+    "expected": "create_workspace, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[create_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B041",
+    "expected": "create_workspace_from_image_artifact, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[create_workspace_from_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B042",
+    "expected": "stop_workspace, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[stop_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B043",
+    "expected": "resume_workspace, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[resume_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B044",
+    "expected": "update_workspace, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[update_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B045",
+    "expected": "remove_workspace, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[remove_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B046",
+    "expected": "build_image, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[build_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B047",
+    "expected": "create_image_artifact, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[create_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B048",
+    "expected": "delete_image, known terminal success: route to exact callback; accept result once; replay cannot alter newer operation.",
+    "check": "`test_automatic_recovery_matrix.py::test_known_inspection_dispatch[delete_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B049",
+    "expected": "create_workspace, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[create_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B050",
+    "expected": "create_workspace_from_image_artifact, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[create_workspace_from_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B051",
+    "expected": "stop_workspace, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[stop_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B052",
+    "expected": "resume_workspace, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[resume_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B053",
+    "expected": "update_workspace, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[update_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B054",
+    "expected": "remove_workspace, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[remove_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B055",
+    "expected": "build_image, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[build_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B056",
+    "expected": "create_image_artifact, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[create_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B057",
+    "expected": "delete_image, intent allocated but never prepared: bounded failure releases reservation; never sends empty identity; no operator acknowledgement.",
+    "check": "`test_automatic_recovery_matrix.py::test_unprepared_intent_matrix[delete_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B058",
+    "expected": "create_workspace, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[create_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B059",
+    "expected": "create_workspace_from_image_artifact, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[create_workspace_from_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B060",
+    "expected": "stop_workspace, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[stop_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B061",
+    "expected": "resume_workspace, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[resume_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B062",
+    "expected": "update_workspace, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[update_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B063",
+    "expected": "remove_workspace, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[remove_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B064",
+    "expected": "build_image, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[build_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B065",
+    "expected": "create_image_artifact, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[create_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B066",
+    "expected": "delete_image, fresh execution/queue heartbeat after old deadline: continue waiting, no failure or duplicate delivery; renew execution deadline.",
+    "check": "`test_automatic_recovery_matrix.py::test_live_heartbeat_matrix[delete_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B067",
+    "expected": "create_workspace, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[create_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B068",
+    "expected": "create_workspace_from_image_artifact, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[create_workspace_from_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B069",
+    "expected": "stop_workspace, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[stop_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B070",
+    "expected": "resume_workspace, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[resume_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B071",
+    "expected": "update_workspace, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[update_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B072",
+    "expected": "remove_workspace, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[remove_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B073",
+    "expected": "build_image, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[build_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B074",
+    "expected": "create_image_artifact, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[create_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B075",
+    "expected": "delete_image, delivered attempt deadline expired with no heartbeat: retain ambiguous identity until fresh inspection, never replay arbitrary scripts under a new identity.",
+    "check": "`test_automatic_recovery_matrix.py::test_stale_heartbeat_matrix[delete_image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B076",
+    "expected": "stop_workspace, newer workspace task owns resource: late inspection cannot release or overwrite newer owner.",
+    "check": "`test_automatic_recovery_matrix.py::test_newer_owner_matrix[stop_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B077",
+    "expected": "resume_workspace, newer workspace task owns resource: late inspection cannot release or overwrite newer owner.",
+    "check": "`test_automatic_recovery_matrix.py::test_newer_owner_matrix[resume_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B078",
+    "expected": "update_workspace, newer workspace task owns resource: late inspection cannot release or overwrite newer owner.",
+    "check": "`test_automatic_recovery_matrix.py::test_newer_owner_matrix[update_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B079",
+    "expected": "remove_workspace, newer workspace task owns resource: late inspection cannot release or overwrite newer owner.",
+    "check": "`test_automatic_recovery_matrix.py::test_newer_owner_matrix[remove_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B080",
+    "expected": "create_workspace, newer workspace task owns resource: late inspection cannot release or overwrite newer owner.",
+    "check": "`test_automatic_recovery_matrix.py::test_newer_owner_matrix[create_workspace]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B081",
+    "expected": "create_image_artifact, newer workspace task owns resource: late inspection cannot release or overwrite newer owner.",
+    "check": "`test_automatic_recovery_matrix.py::test_newer_owner_matrix[create_image_artifact]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B082",
+    "expected": "capture-stop, interrupted child: parent closes as failed with preserved resources and source reservation released; explicit retry available.",
+    "check": "`test_automatic_recovery_matrix.py::test_parent_interruption_matrix[capture-stop]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B083",
+    "expected": "capture-image, interrupted child: parent closes as failed with preserved resources and source reservation released; explicit retry available.",
+    "check": "`test_automatic_recovery_matrix.py::test_parent_interruption_matrix[capture-image]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B084",
+    "expected": "recreate-remove, interrupted child: parent closes as failed with preserved resources and source reservation released; explicit retry available.",
+    "check": "`test_automatic_recovery_matrix.py::test_parent_interruption_matrix[recreate-remove]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B085",
+    "expected": "recreate-create, interrupted child: parent closes as failed with preserved resources and source reservation released; explicit retry available.",
+    "check": "`test_automatic_recovery_matrix.py::test_parent_interruption_matrix[recreate-create]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B086",
+    "expected": "Credential initial=False, proof=None: preserve previous presence unless exact current-runtime boolean proof exists.",
+    "check": "`test_automatic_recovery_matrix.py::test_credential_proof_matrix[False-None]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B087",
+    "expected": "Credential initial=False, proof=False: preserve previous presence unless exact current-runtime boolean proof exists.",
+    "check": "`test_automatic_recovery_matrix.py::test_credential_proof_matrix[False-False]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B088",
+    "expected": "Credential initial=False, proof=True: preserve previous presence unless exact current-runtime boolean proof exists.",
+    "check": "`test_automatic_recovery_matrix.py::test_credential_proof_matrix[False-True]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B089",
+    "expected": "Credential initial=True, proof=None: preserve previous presence unless exact current-runtime boolean proof exists.",
+    "check": "`test_automatic_recovery_matrix.py::test_credential_proof_matrix[True-None]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B090",
+    "expected": "Credential initial=True, proof=False: preserve previous presence unless exact current-runtime boolean proof exists.",
+    "check": "`test_automatic_recovery_matrix.py::test_credential_proof_matrix[True-False]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B091",
+    "expected": "Credential initial=True, proof=True: preserve previous presence unless exact current-runtime boolean proof exists.",
+    "check": "`test_automatic_recovery_matrix.py::test_credential_proof_matrix[True-True]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B092",
+    "expected": "Interrupted build while prior current image exists: failed pending generation never replaces current image; retry allocates new generation.",
+    "check": "`test_interrupted_builds.py::test_interruption_and_explicit_close_reconcile_build_assignment`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B093",
+    "expected": "Capture closure keeps ready/deleting images and marks unfinished reservation failed.",
+    "check": "`test_capture_disposition.py`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B094",
+    "expected": "Unknown outcome is not represented as execution success; diagnostic explains interruption and safe retry, not admin work.",
+    "check": "`test_automatic_recovery_matrix.py::test_user_diagnostic`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B095",
+    "expected": "Never-delivered offline prepared operation retains original identity beyond deadline and continues after reconnect.",
+    "check": "`test_automatic_recovery_matrix.py::test_never_delivered_offline_stays_queued`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B096",
+    "expected": "Unreproducible credential payload before first delivery fails locally and releases workspace fence without disclosing secrets.",
+    "check": "`test_automatic_recovery_matrix.py::test_unreproducible_input_fails_without_fence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B097",
+    "expected": "Full backend runner suite SQLite: all relevant lifecycle, auth, inventory, recipes, settings and migrations remain green.",
+    "check": "`pytest apps/runners/tests (SQLite)`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B098",
+    "expected": "Full backend runner suite PostgreSQL: real row locks, CAS races, simultaneous allocation and historical migrations remain green.",
+    "check": "`pytest apps/runners/tests (PostgreSQL)`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B099",
+    "expected": "Legacy removed workspace status migrates idempotently to deleted; bytes/credential evidence remain unchanged.",
+    "check": "`test_removed_migration_normalizes_only_terminal_label`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B100",
+    "expected": "Immediate dispatch persists delivery count and lease before emit; recovery cannot duplicate active lease.",
+    "check": "`test_direct_delivery_boundary`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B101",
+    "expected": "Immediate dispatch rejects completed task and uses current authenticated runner SID.",
+    "check": "`test_direct_delivery_uses_current_session`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B102",
+    "expected": "Sealed unknown deletion automatically retries with fresh inventory; no admin acknowledgement required.",
+    "check": "`test_sealed_deletion_retry`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B103",
+    "expected": "Repeated deletion failure ends in failed; another ordinary deletion request can retry with original approval.",
+    "check": "`test_exhausted_deletion_retry`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B104",
+    "expected": "Failure text mentioning intervention never creates implicit state/fence.",
+    "check": "`test_operation_results.py::test_failure_message_does_not_create_a_hidden_intervention_fence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B105",
+    "expected": "Interrupted create with retained running guest: failure releases workflow fence but keeps CPU, RAM and disk reservation until fresh stopped/absent evidence.",
+    "check": "`test_failed_guest_resource_reservation[*-running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B106",
+    "expected": "Interrupted create with retained stopped guest: failure keeps disk reservation while CPU/RAM become available.",
+    "check": "`test_failed_guest_resource_reservation[*-stopped]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B107",
+    "expected": "Interrupted create with unknown partial resources: ordinary delete remains available; conservative disk/compute reservation prevents oversubscription.",
+    "check": "`test_failed_guest_resource_reservation[*-unknown]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B108",
+    "expected": "Interrupted create with complete absence proof: release all capacity without admin acknowledgement.",
+    "check": "`test_failed_guest_resource_reservation[*-absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B109",
+    "expected": "Stopped workspace disk still consumes aggregate disk capacity; CPU/RAM can be reused.",
+    "check": "`test_stopped_workspace_retains_disk_capacity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B110",
+    "expected": "Fresh initial-create preparation failure proves no VM was started and frees all capacity.",
+    "check": "`test_unissued_failure_releases_all_capacity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B111",
+    "expected": "Confirmed deleted workspace consumes no capacity even with historic retained-resource evidence.",
+    "check": "`test_deleted_workspace_releases_retained_capacity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B112",
+    "expected": "Known failed deletion retains physical resources and cannot open a new aggregate-capacity slot.",
+    "check": "`test_delete_failed_retains_resource_capacity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B113",
+    "expected": "Runtime observations used only for accounting never leak into runner command fingerprints or retries.",
+    "check": "`test_resource_observation_is_backend_only`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B114",
+    "expected": "A fresh operation supersedes historic absence evidence; a later failed guest keeps its own conservative reservation.",
+    "check": "`test_new_attempt_does_not_inherit_absence_proof`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B115",
+    "expected": "Terminal runner result records stopped/absent/running evidence for accounting; failed stop with stopped evidence releases compute only.",
+    "check": "`test_terminal_result_records_runtime_evidence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B116",
+    "expected": "Interrupted capture resume: automatic recovery fails parent and preserves already-ready image, source disk and explicit retry path.",
+    "check": "`test_parent_interruption_matrix[capture-resume]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B117",
+    "expected": "Interrupted recreate final stop: automatic recovery closes parent, releases exact child and keeps successfully provisioned workspace resources.",
+    "check": "`test_parent_interruption_matrix[recreate-stop]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B118",
+    "expected": "Complete fresh inventory with invalid publication/hash metadata at the exact known artifact path: prior ready image becomes failed and is unselectable; physical graph stays available.",
+    "check": "`test_invalid_publication_disables_exact_ready_image`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B119",
+    "expected": "Partial/stale/foreign/unmanaged/ambiguous invalid-publication reports cannot change publication readiness of another image.",
+    "check": "`test_untrusted_publication_observation_cannot_mutate_image`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B120",
+    "expected": "Corrupt artifact still has its existing workspace pin and physical backing edges; no deletion authority is inferred from invalid bytes.",
+    "check": "`test_corrupt_publication_preserves_workspace_dependencies`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B121",
+    "expected": "Stopped resource settings reserve future disk allocation atomically, while saved CPU/RAM do not consume running capacity; invalid disk growth rolls back unchanged settings.",
+    "check": "`test_stopped_settings_reserve_disk_without_compute`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B122",
+    "expected": "All 9 operation kinds with unknown runtime observation or exited alias: close only proven quiescent exact identity; unknown stays failed/conservative, exited normalizes stopped, image outcomes retain their type-specific failure behavior.",
+    "check": "`test_interrupted_operation_matrix[*-unknown/exited]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B123",
+    "expected": "Never-issued stop/resume/update/remove/capture or incompatible create intent on existing running/stopped guest cannot assert resource absence; retain guest/disk reservations after local failure.",
+    "check": "`test_unissued_existing_guest_never_claims_absence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B124",
+    "expected": "Running/stopped disk shrink request fails under lifecycle locks before any settings/task mutation.",
+    "check": "`test_disk_settings_cannot_shrink_retained_volume`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B125",
+    "expected": "Historic desired disk smaller than last confirmed runtime disk: admission retains confirmed physical size and prevents over-allocation.",
+    "check": "`test_confirmed_disk_floor_survives_legacy_desired_shrink`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B126",
+    "expected": "Local never-issued removal fails to delete_failed and releases task; ordinary removal remains retryable, retained resources are charged.",
+    "check": "`test_unissued_remove_is_failed_and_retryable`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B127",
+    "expected": "Nullable legacy guest fields use last confirmed sizing before changed runner defaults; resume materializes explicit sizes before durable preparation and dispatch.",
+    "check": "`test_legacy_null_resources_keep_confirmed_sizes_on_resume`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B128",
+    "expected": "Explicit paused/suspended/stopping/unknown/crashed/invalid observation on idle running guest becomes failed, clears desktop availability and retains resources/credentials; never stays chat-ready.",
+    "check": "`test_unusable_runtime_observation_is_failed_and_keeps_resources`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B129",
+    "expected": "BLOCKED guest is still runnable; running heartbeat reconciliation remains available.",
+    "check": "`test_blocked_runtime_observation_remains_running`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B130",
+    "expected": "Missing workspace row/failed scan leaves prior state unchanged; explicit unusable observation cannot overwrite lifecycle-owned transition.",
+    "check": "`test_missing_or_owned_runtime_observation_does_not_override_state`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B131",
+    "expected": "Fresh exact invalid current build publication: image and idle active assignment become failed; current pointer, successful task history and build log stay intact; raw/annotated summaries show failed rather than active.",
+    "check": "`test_corrupt_current_publication_fails_assignment_and_summary`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B132",
+    "expected": "Corruption of an older/current publication cannot overwrite newer pending/building/current work or deletion/deactivated assignment state/pointers.",
+    "check": "`test_corrupt_publication_preserves_newer_or_inactive_assignment`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B133",
+    "expected": "Ordinary rebuild from corrupt current publication enters pending, publishes a fresh active generation, preserves old resources/pins, and rejects stale old completion/failure callbacks.",
+    "check": "`test_corrupt_current_can_rebuild_without_stale_result_promotion`",
+    "result": "PASSED"
+  },
+  {
+    "id": "B134",
+    "expected": "Corruption discovered before/during a newer build: if that build fails, assignment becomes failed with unavailable old current retained; another ordinary retry publishes successfully, with old callbacks rejected.",
+    "check": "`test_failed_rebuild_with_corrupt_current_remains_retryable`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R001",
+    "expected": "Restart after admitted create: retain failure tombstone; never replay init or persist credentials.",
+    "check": "`runner/tests/test_operation_journal.py::test_reopen_interrupted_never_reexecutes`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R002",
+    "expected": "Wrong-attempt ACK retains result; matching ACK stops replay; restart still prevents duplicate execution.",
+    "check": "`runner/tests/test_operation_journal.py::test_terminal_replay_ack_retains_tombstone`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R003",
+    "expected": "Duplicate delivery, cancelled caller and disconnected backend execute once; terminal result replays after reconnection.",
+    "check": "`runner/tests/test_operation_journal.py::test_duplicate_and_outage_dont_abort_work`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R004",
+    "expected": "Second journal owner rejected; arbitrary runtime error secrets never persisted in terminal result.",
+    "check": "`runner/tests/test_operation_journal.py::test_journal_exclusive_process_and_terminal_sanitization`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R005",
+    "expected": "Restart retains checkpoint only for identical runtime incarnation.",
+    "check": "`runner/tests/test_operation_journal.py::test_checkpoint_survives_restart_only_exact_incarnation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R006",
+    "expected": "Inspection distinguishes active operation from durable interrupted result without claiming completion early.",
+    "check": "`runner/tests/test_operation_journal.py::test_inspect_running_and_interrupted_are_distinct`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R007",
+    "expected": "Never-delivered operation is inspected without starting its recipe; only complete quiet inventory proves quiescence.",
+    "check": "`runner/tests/test_operation_journal.py::test_unrecorded_identity_can_inspect_fresh_quiescence_without_execution`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R008",
+    "expected": "Transient resume error retries at most three times; terminal result appears only after execution ends.",
+    "check": "`runner/tests/test_operation_journal.py::test_safe_transient_start_retry_is_bounded_and_terminal_only_after_finish`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R009",
+    "expected": "Capture ENOSPC after exact scrub checkpoint is a known failure with safe source retained.",
+    "check": "`runner/tests/test_operation_journal.py::test_finished_capture_enospc_with_exact_scrub_checkpoint_stays_known`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R010",
+    "expected": "Sealed operation rejects delayed execution permanently.",
+    "check": "`runner/tests/test_operation_journal.py::test_sealed_unrecorded_identity_cannot_execute_delayed_recipe`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R011",
+    "expected": "Exception after possible effect records ambiguous outcome rather than inventing success.",
+    "check": "`runner/tests/test_operation_journal.py::test_effect_then_generic_exception_is_unknown`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R012",
+    "expected": "Running readiness tolerates disk writes; stopped scrub evidence requires unchanged disk identity/stat.",
+    "check": "`runner/tests/test_operation_journal.py::test_running_readiness_allows_normal_writes_but_scrub_requires_exact_stat`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R013",
+    "expected": "Unexpected guest boot permanently revokes stopped scrub proof.",
+    "check": "`runner/tests/test_operation_journal.py::test_observed_unexpected_boot_permanently_revokes_scrub`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R014",
+    "expected": "Resume checkpoint and published terminal identity match.",
+    "check": "`runner/tests/test_operation_journal.py::test_resume_result_checkpoint_matches_terminal_envelope`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R015",
+    "expected": "Repeated cancellation during delayed fsync keeps IO ownership until actual commit completes.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_repeated_cancellation_drains_sqlite_before_releasing_io_queue`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R016",
+    "expected": "Cancellation during admission fsync neither loses execution nor duplicates it; shutdown joins admitted work.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_cancelled_delivery_during_fsync_still_executes_once_and_drains`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R017",
+    "expected": "Delayed final inspection excludes conflicting same-target work while independent workspace executes.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_terminal_inspection_keeps_target_fenced_but_allows_other_targets`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R018",
+    "expected": "One failed runtime inspection does not starve other recovery records; later tick retries it.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_recovery_retries_transient_inspection_and_continues_other_records`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R019",
+    "expected": "Live orphan disk helper retains unfinished operation and target fence until helper quiesces.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_orphan_helpers_keep_crashed_operations_unfinished_and_target_fenced`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R020",
+    "expected": "Late terminal delivery cannot replace a newer lifecycle checkpoint.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_terminal_delivery_does_not_overwrite_lifecycle_checkpoint`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R021",
+    "expected": "Actual Linux live helper blocks; actual unreaped zombie is quiescent.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_exited_unreaped_helper_is_quiescent_but_live_helper_is_not`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R022",
+    "expected": "Capture recovery requires exact operation/image/source tuple; wrong source rejected.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_capture_recovery_matches_workspace_target_and_published_image_identity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R023",
+    "expected": "Unverified orphan build guest retains fence; complete stopped observation permits interrupted result.",
+    "check": "`runner/tests/test_journal_io_boundaries.py::test_orphan_guest_script_keeps_build_unfinished_until_guest_stops`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R024",
+    "expected": "Real aiohttp/Socket.IO: unopened backend, duplicate delivery, backend shutdown during create, offline completion, reconnect and exact ACK yield one effect.",
+    "check": "`runner/tests/test_lifecycle_transport_integration.py::test_wire_outage_keeps_lifecycle_and_replays_durable_terminal_once`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R025",
+    "expected": "Started guest with failed credential injection remains ambiguous; no false ready status.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_started_guest_with_failed_injection_is_unknown`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R026",
+    "expected": "No-effect failure may report known credentials only with matching live checkpoint.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_known_no_effect_failure_uses_exact_checkpoint`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R027",
+    "expected": "Missing/replaced incarnation cannot inherit cached credential proof.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_missing_or_changed_runtime_proof_cannot_use_cache`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R028",
+    "expected": "Runtime inspection failure cannot claim known outcome.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_inspection_failure_is_unknown`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R029",
+    "expected": "Recovery preserves explicit ambiguity even when execution has ended.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_journal_recovery_preserves_explicit_unknown_outcome`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R030",
+    "expected": "Partial stop without exact scrub proof publishes unknown outcome.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_partial_stop_without_proof_emits_unknown_wrapped_result`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R031",
+    "expected": "Known stop failure uses fresh live checkpoint, not stale cache.",
+    "check": "`runner/tests/test_capture_resume_failure.py::test_known_stop_failure_uses_live_checkpoint`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R032",
+    "expected": "Inventory during create/clone/resume cannot detach registry object; immediate stop uses committed identity.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_sync_during_real_handler_and_immediate_next_stop`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R033",
+    "expected": "Snapshot begun before lifecycle cannot overwrite newer completion.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_snapshot_started_before_operation_cannot_overwrite_completion`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R034",
+    "expected": "Merge retains credential presence only for same physical instance.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_same_instance_merge_preserves_credentials_different_instance_does_not`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R035",
+    "expected": "Stop uses actual running status despite stale stopped cache.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_live_running_status_overrides_stale_stopped_cache`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R036",
+    "expected": "Failed status probe causes no credential mutation or VM stop.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_failed_live_observation_never_scrubs_or_stops`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R037",
+    "expected": "Clone initialization retains creating registry entry through inventory.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_clone_preserves_creating_entry_and_identity_during_inventory`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R038",
+    "expected": "Failed inventory/resume cannot restore stale credential certainty.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_failed_refresh_and_failed_resume_keep_unknown_credentials`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R039",
+    "expected": "Partially allocated failed create remains visible for reconciliation.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_incomplete_create_failure_is_preserved_for_recovery`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R040",
+    "expected": "Duplicate base/clone create cannot erase existing physical identity.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_duplicate_create_preserves_existing_physical_registry_identity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R041",
+    "expected": "Credential replacement updates presence and revokes older scrub proof before write.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_credential_replacement_updates_presence_and_invalidates_old_proof`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R042",
+    "expected": "Partial credential scrub cannot leave old initialized proof trusted.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_partial_scrub_revokes_running_proof_before_any_credential_write`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R043",
+    "expected": "Idempotent remove without cache succeeds only after complete exact physical absence proof.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_missing_workspace_removal_requires_complete_physical_absence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R044",
+    "expected": "Delayed running inventory cannot revoke newly committed stopped scrub checkpoint.",
+    "check": "`runner/tests/test_registry_lifecycle_race.py::test_stale_running_observation_cannot_revoke_new_stop_checkpoint`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R045",
+    "expected": "Workspace collection mutation during observation does not crash observation loop.",
+    "check": "`runner/tests/test_websocket_interface.py::test_observation_tolerates_workspace_changes_during_probe`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R046",
+    "expected": "Delete forwards concrete managed image reference.",
+    "check": "`runner/tests/test_websocket_interface.py::test_image_deletion_uses_runtime_reference`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R047",
+    "expected": "Initial backend outage is retried with bounded delay instead of process exit.",
+    "check": "`runner/tests/test_websocket_interface.py::test_start_retries_initial_backend_outage_without_leaving_runner`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R048",
+    "expected": "Runner shutdown interrupts startup reconnect backoff promptly.",
+    "check": "`runner/tests/test_websocket_interface.py::test_stop_wakes_startup_backoff_without_waiting_for_backend`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R049",
+    "expected": "Unsupported legacy lifecycle task handlers are absent.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketHandlerRegistrationTests::test_retired_task_handlers_are_not_registered`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R050",
+    "expected": "Handshake timeout is normalized to retryable transport failure.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketReconnectTests::test_reconnect_loop_survives_handshake_timeouts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R051",
+    "expected": "Configured transport accepts supported large file payload size.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketTransportSettingsTests::test_socketio_client_raises_http_buffer_size`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R052",
+    "expected": "Maintenance-observed desktop exit is reported consistently.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketDesktopTests::test_observation_announces_desktop_ended_by_maintenance`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R053",
+    "expected": "Initial connection inventory is reused rather than immediately repeating expensive scan.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketDesktopTests::test_connect_snapshot_is_reused_for_first_heartbeat`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R054",
+    "expected": "Desktop recovery precedes state reannouncement on reconnect.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketDesktopTests::test_connect_recovers_desktop_sessions_before_reannounce`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R055",
+    "expected": "Blocked disk inventory cannot prevent health heartbeat or active operation lease renewal.",
+    "check": "`runner/tests/test_websocket_interface.py::WebSocketDesktopTests::test_blocked_inventory_does_not_block_health_or_operation_lease`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R056",
+    "expected": "Capture drains admitted interactions and rejects new writes before scrub proof.",
+    "check": "`runner/tests/test_capture_fence.py::test_capture_drains_admitted_work_before_proof_and_rejects_new_work`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R057",
+    "expected": "Capture failure/cancellation releases its owned interaction fence.",
+    "check": "`runner/tests/test_capture_fence.py::test_capture_cleanup_on_runtime_failure_or_cancellation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R058",
+    "expected": "Cancellation while draining does not strand capture fence.",
+    "check": "`runner/tests/test_capture_fence.py::test_cancel_capture_while_draining_releases_fence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R059",
+    "expected": "Caller clean flag cannot bypass exact credential scrub proof.",
+    "check": "`runner/tests/test_capture_fence.py::test_client_clean_flag_does_not_replace_scrub_proof`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R060",
+    "expected": "All manager mutation surfaces participate in capture fence.",
+    "check": "`runner/tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R061",
+    "expected": "Session-only write resolves original workspace before capture fence.",
+    "check": "`runner/tests/test_capture_fence.py::test_session_id_only_writes_use_original_workspace`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R062",
+    "expected": "Capture-rejected exec preserves correlated error envelope.",
+    "check": "`runner/tests/test_capture_fence.py::test_websocket_exec_rejection_keeps_result_envelope`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R063",
+    "expected": "Desktop proxy mutation respects capture fence.",
+    "check": "`runner/tests/test_capture_fence.py::test_desktop_proxy_paths_are_guarded`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R064",
+    "expected": "Concurrent second capture is rejected without releasing first owner.",
+    "check": "`runner/tests/test_capture_fence.py::test_second_capture_is_rejected_and_does_not_release_first`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R065",
+    "expected": "Live write queued before stop is rejected after lifecycle epoch changes.",
+    "check": "`runner/tests/test_capture_fence.py::test_live_call_queued_behind_stop_is_rejected_after_epoch_change`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R066",
+    "expected": "Previously queued lifecycle cannot mutate inside newer capture boundary.",
+    "check": "`runner/tests/test_capture_fence.py::test_lifecycle_queued_before_capture_cannot_run_inside_capture`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R067",
+    "expected": "Stop closes active stream read before capture waits for drain.",
+    "check": "`runner/tests/test_capture_fence.py::test_stop_closes_active_stream_read_before_capture_drains`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R068",
+    "expected": "Desktop waiter revalidates epoch after stop.",
+    "check": "`runner/tests/test_capture_fence.py::test_admitted_desktop_waiter_is_rechecked_after_stop_epoch`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R069",
+    "expected": "Credential archive conversion rejects symlink and hardlink entries.",
+    "check": "`runner/tests/test_workspace_service_security.py::test_convert_archive_to_tar_rejects_links`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R070",
+    "expected": "Create injects credentials before repository clone and reports resulting presence.",
+    "check": "`runner/tests/test_workspace_service_security.py::test_create_workspace_clones_with_persistent_credentials`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R071",
+    "expected": "Credential files are materialized through the canonical injector.",
+    "check": "`runner/tests/test_workspace_service_security.py::test_inject_workspace_credentials_materializes_file_credentials`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R072",
+    "expected": "Empty credential set produces explicit absent presence.",
+    "check": "`runner/tests/test_workspace_service_security.py::test_inject_workspace_credentials_empty_set_returns_false`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R073",
+    "expected": "Controlled stop scrubs credentials before stopping runtime.",
+    "check": "`runner/tests/test_workspace_service_security.py::test_stop_workspace_removes_credentials_before_runtime_stop`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R074",
+    "expected": "Terminal uses canonical persistent workspace environment.",
+    "check": "`runner/tests/test_workspace_service_security.py::test_start_terminal_sources_persistent_env`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R075",
+    "expected": "Missing delivery with complete quiet observation is sealed automatically before inspection publication.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_inspect_request_seals_quiescent_missing_identity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R076",
+    "expected": "Incomplete/live-helper/live-build inventory cannot auto-seal missing identity.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_inspect_request_does_not_seal_unverified_missing_identity`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R077",
+    "expected": "Concurrent admission invalidates prior quiescence; seal cannot race fresh execution.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_inspect_request_seal_rechecks_admission_epoch`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R078",
+    "expected": "Inspection reports running/stopped/absent/unknown from complete exact inventory.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R079",
+    "expected": "Credential presence is included only for exact incarnation proof with matching observed state.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_inspection_credential_presence_requires_exact_proof`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R080",
+    "expected": "Other workspace or incomplete inventory cannot establish target state.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_inspection_never_uses_wrong_workspace_inventory`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R081",
+    "expected": "Interrupted build cleanup targets only operation-owned temporary instance; no recipe replay.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_recovery_cleans_only_exact_interrupted_build`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R082",
+    "expected": "Failed orphan cleanup keeps unfinished fence and retries next recovery tick.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_recovery_retries_failed_build_cleanup`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R083",
+    "expected": "Published image is recovered as success after orphan cleanup, not overwritten by failure.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_recovery_successful_publication_wins_after_build_cleanup`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R084",
+    "expected": "Concurrent completed lifecycle epoch invalidates quiescence even if no operation currently running.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_late_old_observation_does_not_claim_quiescence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R085",
+    "expected": "Automatically sealed missing identity has interrupted diagnostic and no manual-intervention instruction.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_sealed_missing_identity_uses_retryable_diagnostic`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R086",
+    "expected": "Recovery terminal fsync retains target fence until actual durable commit.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_unfinished_recovery_keeps_target_bound_until_commit`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R087",
+    "expected": "Recovery never cleans a currently running executor build.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_live_same_process_build_is_not_cleaned_by_recovery`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R088",
+    "expected": "Cleanup return alone is insufficient; runtime must prove temporary guest and resources absent.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_recovery_waits_for_exact_runtime_absence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R089",
+    "expected": "Exact persisted stopped scrub checkpoint restores completed stop after restart with no handler replay.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_restart_recovers_stop_checkpoint_without_rerun`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R090",
+    "expected": "Interrupted create with running guest but no init checkpoint remains failed and is never replayed.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_restart_preserves_create_ambiguity_without_init_replay`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R091",
+    "expected": "A completed interrupted workspace is inspected and automatically sealable while an unrelated tracked image build remains active; that build is never cleaned or blocked.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_other_active_build_does_not_block_finished_target_inspection`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R092",
+    "expected": "Unknown terminal workspace result is inspected only after exact preserved guest is stopped; remote initialization/credential effects cannot keep running after automatic release.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_unknown_terminal_inspection_quiesces_remote_effects`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R093",
+    "expected": "Failed interrupted guest shutdown retains unfinished operation and recovery fence; later tick retries without any recipe replay.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_quiescence_failure_retains_unknown_execution_fence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R094",
+    "expected": "Exact initialized checkpoint is recovered before quiescence; successful completed create remains running and its handler is never replayed.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_confirmed_workspace_checkpoint_prevents_recovery_shutdown`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R095",
+    "expected": "Durable create/clone admission remains usable as exact allocation ownership after terminal ACK and journal restart; wrong target, wrong workspace and non-create command never grant it.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_workspace_allocation_ownership_survives_ack_restart`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R096",
+    "expected": "Reopened admitted pre-domain create is automatically sealed as interrupted with partial disk retained, unknown workspace state and no recipe replay; ordinary remove then removes exact allocation.",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_restarted_partial_create_can_be_recovered_and_removed`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R097",
+    "expected": "Missing runtime identity without durable allocation ownership refuses partial cleanup.",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_unowned_partial_create_cannot_be_removed`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R098",
+    "expected": "Missing runtime identity with durable allocation ownership but failed quiescence observation retains partial resources.",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_owned_partial_create_removal_retries_failed_observation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R099",
+    "expected": "Durable allocation ownership with lost cache but existing exact owned guest permits ordinary removal after verified shutdown; no unnecessary failed remove or stranded stopped guest.",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_owned_guest_missing_registry_can_be_removed`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R100",
+    "expected": "A later successful removal tombstone revokes older durable create ownership; externally reallocated same canonical path cannot inherit stale deletion permission.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_removed_workspace_revokes_historic_allocation_ownership`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R101",
+    "expected": "A legitimate admitted same-ID recreate after a successful removal establishes fresh allocation lineage.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_new_create_after_removal_establishes_fresh_allocation_ownership`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R102",
+    "expected": "A known no-effect failed create cannot grant allocation ownership through a historic admission.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_known_failed_create_does_not_grant_allocation_ownership`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R103",
+    "expected": "Old create and successful removal followed by externally reallocated canonical disk cannot be removed through lost-cache recovery; disk inode/content retained.",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_stale_removed_lineage_cannot_delete_reallocated_partial_disk`",
+    "result": "PASSED"
+  },
+  {
+    "id": "R104",
+    "expected": "Explicit running/paused/suspended/stopping/failed/unknown domain observation permanently revokes older stopped scrub proof; stopped/exited observation retains it. Accurate nonusable states must not accidentally preserve proof through an unexpected boot.",
+    "check": "`runner/tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q001",
+    "expected": "Clone publication corruption: hash → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[hash]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q002",
+    "expected": "Clone publication corruption: size → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[size]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q003",
+    "expected": "Clone publication corruption: path → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[path]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q004",
+    "expected": "Clone publication corruption: bytes → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[bytes]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q005",
+    "expected": "Clone publication corruption: backing → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[backing]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q006",
+    "expected": "Removal leaves disk → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[disk]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q007",
+    "expected": "Removal leaves iso → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[iso]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q008",
+    "expected": "Removal leaves seed → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[seed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q009",
+    "expected": "Removal leaves host-key → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[host-key]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q010",
+    "expected": "Removal leaves symlink → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[symlink]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q011",
+    "expected": "Removal leaves domain → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[domain]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q012",
+    "expected": "Removal leaves network → Exact absence remains false",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[network]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q013",
+    "expected": "Absence observation unavailable: domain → Raise; never claim physical absence",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_never_hides_unavailable_observation[domain]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q014",
+    "expected": "Absence observation unavailable: network → Raise; never claim physical absence",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_never_hides_unavailable_observation[network]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q015",
+    "expected": "Absence observation unavailable: storage → Raise; never claim physical absence",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_never_hides_unavailable_observation[storage]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q016",
+    "expected": "Network allocation observation fails: enumeration → No subnet/domain definition from incomplete data",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[enumeration]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q017",
+    "expected": "Network allocation observation fails: xml → No subnet/domain definition from incomplete data",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[xml]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q018",
+    "expected": "Network allocation observation fails: host → No subnet/domain definition from incomplete data",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[host]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q019",
+    "expected": "Network allocation observation fails: malformed-host → No subnet/domain definition from incomplete data",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[malformed-host]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q020",
+    "expected": "Network allocation observation fails: unknown-prefix → No subnet/domain definition from incomplete data",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[unknown-prefix]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q021",
+    "expected": "Build setting qemu_build_vcpus=0 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_vcpus]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q022",
+    "expected": "Build setting qemu_build_vcpus=-1 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_vcpus]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q023",
+    "expected": "Build setting qemu_build_memory_mb=0 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_memory_mb]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q024",
+    "expected": "Build setting qemu_build_memory_mb=-1 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_memory_mb]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q025",
+    "expected": "Build setting qemu_build_concurrency=0 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_concurrency]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q026",
+    "expected": "Build setting qemu_build_concurrency=-1 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_concurrency]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q027",
+    "expected": "Build setting qemu_build_queue_timeout=0 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_queue_timeout]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q028",
+    "expected": "Build setting qemu_build_queue_timeout=-1 → Configuration validation rejects",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_queue_timeout]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q029",
+    "expected": "Admission pressure: configured → Temporary capacity exception before allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_memory_pressure_rejects_before_allocating_resources[configured]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q030",
+    "expected": "Admission pressure: available → Temporary capacity exception before allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_memory_pressure_rejects_before_allocating_resources[available]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q031",
+    "expected": "create memory pressure → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_memory_rejection_precedes_disk_and_network_allocation[create]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q032",
+    "expected": "create with noncanonical existing domain → Preserve old domain/disk and reject allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_existing_noncanonical_domain_blocks_fresh_allocation_without_effects[create]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q033",
+    "expected": "clone memory pressure → Reject before disk/network allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_workspace_memory_rejection_precedes_disk_and_network_allocation[clone]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q034",
+    "expected": "clone with noncanonical existing domain → Preserve old domain/disk and reject allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_existing_noncanonical_domain_blocks_fresh_allocation_without_effects[clone]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q035",
+    "expected": "Guest boot in progress plus other guest operations → Inventory/other create/start/stop proceed; same guest serializes",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_guest_readiness_allows_inventory_and_other_guest_lifecycles`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q036",
+    "expected": "Repeated create identity → Existing inode/domain unchanged",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_duplicate_create_keeps_existing_disk_and_domain`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q037",
+    "expected": "Requested disk smaller than image → Base and clone reject; equal floor succeeds",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_small_workspace_requests_reject_before_allocating_disk_or_network`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q038",
+    "expected": "Slow SSD publication plus cancellation → Event loop responsive; issued fsync drains before unlock",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_slow_publication_fsync_keeps_event_loop_responsive_and_drains_cancel`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q039",
+    "expected": "Slow filesystem inventory → Heartbeat task remains schedulable",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_slow_inventory_filesystem_probe_does_not_block_heartbeat`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q040",
+    "expected": "Child spawned under storage lock → Child must acquire its own mutation lock",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_child_task_does_not_inherit_storage_mutation_permission`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q041",
+    "expected": "Concurrent build cap exhausted → Second queues without resources, then runs",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_budget_queues_guests_and_uses_separate_cpu_ram`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q042",
+    "expected": "Stopped domains on weak host → No active RAM reservation for stopped guests",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_memory_budget_ignores_stopped_domains`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q043",
+    "expected": "Bootstrap busy / SSH restart → Read-only probes retry; init script not replayed",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_cloud_init_readonly_probe_retries_running_and_ssh_restart`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q044",
+    "expected": "Bootstrap never completes → Bounded failure, no script/publication, guest cleaned",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_cloud_init_wait_is_bounded_and_failed_build_never_runs_script`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q045",
+    "expected": "Domain state scan interrupted → Raise, never silently omit a guest",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_domain_discovery_failure_is_never_authoritative_absence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q046",
+    "expected": "Two overlay creators same path → One exclusive publication; winner inode preserved",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_overlay_publication_never_clobbers_a_racing_creator`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q047",
+    "expected": "Cloud cache publication race → Existing cache inode never replaced",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_cloud_cache_publication_preserves_concurrently_published_inode`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q048",
+    "expected": "Two simultaneous starts fit only one → One activates; other fails before overcommit",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_concurrent_starts_atomically_reserve_memory_against_other_guests`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q049",
+    "expected": "Resume paused RAM reservation → Existing active reservation counted once",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_paused_resume_does_not_reserve_existing_guest_ram_twice`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q050",
+    "expected": "Slow durable delete plus cancellation → Deletion drains; event loop stays responsive",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_slow_image_delete_fsync_is_drained_without_blocking_event_loop`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q051",
+    "expected": "Capture / legacy disk metadata → Actual virtual disk floor propagated",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_capture_and_legacy_inventory_report_actual_virtual_disk_floor`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q052",
+    "expected": "Temporary RAM shortage → Queues, reports reason, no guest until released",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_waits_for_memory_then_runs_without_allocating_while_queued`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q053",
+    "expected": "Cancel memory waiter → Cancelled waiter allocates no guest",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_queue_cancel_removes_waiter_without_guest`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q054",
+    "expected": "Cancel concurrency-slot waiter → Only active build executes",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_slot_wait_cancel_never_starts_second_guest`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q055",
+    "expected": "Memory never becomes available → Bounded known failure, no guest/disk/network",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_queue_timeout_is_known_failure_without_allocation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q056",
+    "expected": "Configured build RAM exceeds physical budget → Immediate clear failure, no endless queue",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_impossible_memory_fails_immediately`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q057",
+    "expected": "Host has fewer CPUs than configured parallel builds → Actual concurrency capped; queued jobs later run",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_cpu_budget_limits_parallelism`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q058",
+    "expected": "Build vCPUs exceeds physical logical CPUs → Immediate clear failure, no guest allocation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_impossible_cpu_fails_immediately`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q059",
+    "expected": "Memory consumed between queue probe and create → Retry only typed temporary capacity failure",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_rechecks_memory_after_capacity_race`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q060",
+    "expected": "Libvirt inspection or allocation error → Single failure, no unsafe execution replay",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_does_not_retry_unknown_libvirt_failure`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q061",
+    "expected": "Build interrupted / operation identity → Exact deterministic guest ID supports recovery",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_guest_identity_matches_operation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q062",
+    "expected": "Malformed operation identity → Reject before cache/network/disk work",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_invalid_operation_identity_has_no_effects`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q063",
+    "expected": "Progress delivery fails before admission → No guest mutation; clear failure",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_queue_progress_failure_does_not_allocate`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q064",
+    "expected": "Cancel after guest activated → Drain issued effects/cleanup before releasing slot",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_build_cancel_during_effect_drains_and_releases_slot`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q065",
+    "expected": "Remove guest state=1, persistent=True → Domain gone before disk/seed/key/network cleanup",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[1-True]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q066",
+    "expected": "Remove guest state=3, persistent=True → Domain gone before disk/seed/key/network cleanup",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[3-True]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q067",
+    "expected": "Remove guest state=3, persistent=False → Domain gone before disk/seed/key/network cleanup",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[3-False]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q068",
+    "expected": "Remove guest state=5, persistent=True → Domain gone before disk/seed/key/network cleanup",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[5-True]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q069",
+    "expected": "Remove failure: destroy → Retain recovery disk/network/seed/key",
+    "check": "`runner/tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[destroy]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q070",
+    "expected": "Remove failure: undefine → Retain recovery disk/network/seed/key",
+    "check": "`runner/tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[undefine]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q071",
+    "expected": "Remove failure: present → Retain recovery disk/network/seed/key",
+    "check": "`runner/tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[present]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q072",
+    "expected": "Remove failure: enumeration → Retain recovery disk/network/seed/key",
+    "check": "`runner/tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[enumeration]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q073",
+    "expected": "Remove state=1, blocker=foreign → Reject before destroy; preserve guest",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[1-foreign]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q074",
+    "expected": "Remove state=1, blocker=overlay → Reject before destroy; preserve guest",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[1-overlay]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q075",
+    "expected": "Remove state=1, blocker=partial → Reject before destroy; preserve guest",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[1-partial]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q076",
+    "expected": "Remove state=3, blocker=foreign → Reject before destroy; preserve guest",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[3-foreign]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q077",
+    "expected": "Remove state=3, blocker=overlay → Reject before destroy; preserve guest",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[3-overlay]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q078",
+    "expected": "Remove state=3, blocker=partial → Reject before destroy; preserve guest",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[3-partial]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q079",
+    "expected": "Capture source running / unscrubbed / ready → Only stopped scrubbed source publishes standalone exclusive artifact",
+    "check": "`runner/tests/test_storage_inventory.py::test_capture_self_contained_stopped_scrubbed_and_exclusive`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q080",
+    "expected": "Image has descendant or unreadable graph → Deletion blocked safely",
+    "check": "`runner/tests/test_storage_inventory.py::test_capture_descendant_and_unreadable_scan_block_delete`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q081",
+    "expected": "Crash / ENOSPC / invalid publication target → No false-ready marker or arbitrary path write",
+    "check": "`runner/tests/test_storage_inventory.py::test_publication_crash_marker_enospc_and_invalid_path`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q082",
+    "expected": "Physical remove error → Disk retained for retry",
+    "check": "`runner/tests/test_storage_inventory.py::test_failed_remove_retains_disk`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q083",
+    "expected": "Cancellation while threaded effect outstanding → Mutation lock retained until effect settles",
+    "check": "`runner/tests/test_storage_inventory.py::test_mutation_cancellation_drains_thread_and_holds_lock`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q084",
+    "expected": "Published artifact plus lost acknowledgement → Recover exact publication; no rebuild",
+    "check": "`runner/tests/test_storage_inventory.py::test_journal_recovers_exact_publication_without_rerun`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q085",
+    "expected": "Partial create removal → Only exact owned partial resources removed",
+    "check": "`runner/tests/test_storage_inventory.py::test_explicit_partial_create_removal_preserves_unrelated_disk`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q086",
+    "expected": "Graph changes while removing domain → Recheck dependencies before unlink",
+    "check": "`runner/tests/test_storage_inventory.py::test_workspace_delete_rechecks_after_undefine`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q087",
+    "expected": "Corrupt output versus changed source → Source proof retained only for unchanged source",
+    "check": "`runner/tests/test_storage_inventory.py::test_source_scrub_survives_corrupt_output_but_not_external_disk_write`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q088",
+    "expected": "Image conversion truncated → No usable publication; source evidence remains",
+    "check": "`runner/tests/test_storage_inventory.py::test_truncated_conversion_failure_retains_safe_source_evidence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q089",
+    "expected": "Same-size/mtime external artifact mutation → Hash cache invalidates using inode metadata",
+    "check": "`runner/tests/test_storage_inventory.py::test_publication_hash_cache_invalidates_same_size_and_mtime`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q090",
+    "expected": "Published path replaced externally → Foreign replacement not deleted",
+    "check": "`runner/tests/test_storage_inventory.py::test_cached_publication_foreign_overwrite_cannot_be_deleted`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q091",
+    "expected": "Unpublished output exists → Dependency protects parent; output not cloneable",
+    "check": "`runner/tests/test_storage_inventory.py::test_unpublished_images_keep_physical_dependencies_but_cannot_be_used`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q092",
+    "expected": "Owned and orphan cloud-init files → Inventory maps exact ownership only",
+    "check": "`runner/tests/test_storage_inventory.py::test_cloud_init_inventory_exact_ownership_and_orphans`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q093",
+    "expected": "Delete original captured source → Standalone artifact remains cloneable",
+    "check": "`runner/tests/test_storage_inventory.py::test_standalone_capture_survives_origin_disk_and_seed_removal`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q094",
+    "expected": "Two parallel physical QCOW2/ISO builds → Distinct guests/subnets, complete inventory, clean teardown",
+    "check": "`runner/tests/test_parallel_image_builds.py::test_parallel_builds_have_distinct_networks_and_inventory_stays_available`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q095",
+    "expected": "One parallel build init fails → Other succeeds; both guests cleaned",
+    "check": "`runner/tests/test_parallel_image_builds.py::test_one_failed_build_is_cleaned_without_aborting_another`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q096",
+    "expected": "Cancel running build with inventory probe → Build drains cleanup; unrelated inventory available",
+    "check": "`runner/tests/test_parallel_image_builds.py::test_caller_cancellation_drains_build_and_cleanup_without_global_lock`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q097",
+    "expected": "Running guest requests impossible RAM → Reject before shutdown; guest and definition unchanged",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[memory]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q098",
+    "expected": "Running guest requests zero CPUs → Reject before shutdown; guest and definition unchanged",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[cpu]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q099",
+    "expected": "Running guest requests disk shrink → Reject before shutdown; guest and disk unchanged",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[disk]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q100",
+    "expected": "Running guest disk inspection fails → Reject before shutdown; preserve running guest",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[disk-inspection]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q101",
+    "expected": "Resource restart gap plus queued build → Target RAM remains reserved while stopped; build waits then proceeds",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_reconfigure_reserves_ram_during_stop_start_gap`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q102",
+    "expected": "Resource change fails after admission → Release transient RAM reservation on every error",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_reconfigure_failure_releases_transient_reservation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q103",
+    "expected": "libvirt nostate + start → Reject without mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[nostate]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q104",
+    "expected": "libvirt running + start → Idempotent, no new activation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q105",
+    "expected": "libvirt blocked + start → Idempotent, no new activation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[blocked]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q106",
+    "expected": "libvirt paused + start → Resume existing guest",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[paused]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q107",
+    "expected": "libvirt shutdown + start → Reject without mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[shutdown]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q108",
+    "expected": "libvirt shutoff + start → Create existing defined guest",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[shutoff]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q109",
+    "expected": "libvirt crashed + start → Reject without mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[crashed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q110",
+    "expected": "libvirt suspended + start → Wake existing guest",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[suspended]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q111",
+    "expected": "libvirt nostate + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[nostate]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q112",
+    "expected": "libvirt running + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q113",
+    "expected": "libvirt blocked + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[blocked]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q114",
+    "expected": "libvirt paused + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[paused]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q115",
+    "expected": "libvirt shutdown + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[shutdown]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q116",
+    "expected": "libvirt shutoff + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[shutoff]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q117",
+    "expected": "libvirt crashed + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[crashed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q118",
+    "expected": "libvirt suspended + stop → Verified shutoff; no duplicate shutdown while already shutting down",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[suspended]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q119",
+    "expected": "libvirt nostate + status → unknown",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[nostate]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q120",
+    "expected": "libvirt running + status → running",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q121",
+    "expected": "libvirt blocked + status → running",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[blocked]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q122",
+    "expected": "libvirt paused + status → paused",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[paused]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q123",
+    "expected": "libvirt shutdown + status → stopping",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[shutdown]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q124",
+    "expected": "libvirt shutoff + status → stopped",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[shutoff]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q125",
+    "expected": "libvirt crashed + status → failed",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[crashed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q126",
+    "expected": "libvirt suspended + status → suspended",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[suspended]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q127",
+    "expected": "Interrupted running owned guest → Shut off exact guest; return stopped without credential-clean proof",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_stops_exact_owned_guest[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q128",
+    "expected": "Interrupted paused owned guest → Shut off exact guest; paused state not treated absent",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_stops_exact_owned_guest[paused]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q129",
+    "expected": "Interrupted guest metadata has wrong owner → No guest shutdown or disk mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_rejects_unverified_identity[metadata]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q130",
+    "expected": "Interrupted guest points at foreign disk → No guest shutdown or disk mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_rejects_unverified_identity[disk]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q131",
+    "expected": "Guest incarnation replaced during shutdown → Do not claim quiescence for replacement",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_rejects_changed_incarnation`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q132",
+    "expected": "Interrupted guest already completely absent → Exact absence proof returns absent",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_absence_requires_all_resources_gone[absent]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q133",
+    "expected": "Interrupted domain absent but disk remains → Complete unconsumed partial allocation is quiescent; retain files and do not claim absence",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_absence_requires_all_resources_gone[partial]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q134",
+    "expected": "Interrupted guest shutdown fails → Error retained, no false stopped/clean proof",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_stop_failure_is_not_quiescence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q135",
+    "expected": "Interrupted partial allocation has a foreign disk consumer → Retain all resources; do not claim quiescence",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_partial_interruption_rejects_foreign_consumer`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q136",
+    "expected": "Interrupted partial allocation cannot be fully inspected → Retain all resources; retry recovery later",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_partial_interruption_rejects_incomplete_inventory`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q137",
+    "expected": "create resource request cpu-zero → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-cpu-zero]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q138",
+    "expected": "create resource request cpu-negative → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-cpu-negative]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q139",
+    "expected": "create resource request cpu-capacity → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-cpu-capacity]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q140",
+    "expected": "create resource request memory-zero → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-memory-zero]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q141",
+    "expected": "create resource request memory-negative → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-memory-negative]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q142",
+    "expected": "create resource request disk-zero → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-disk-zero]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q143",
+    "expected": "create resource request disk-negative → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-disk-negative]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q144",
+    "expected": "clone resource request cpu-zero → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-cpu-zero]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q145",
+    "expected": "clone resource request cpu-negative → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-cpu-negative]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q146",
+    "expected": "clone resource request cpu-capacity → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-cpu-capacity]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q147",
+    "expected": "clone resource request memory-zero → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-memory-zero]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q148",
+    "expected": "clone resource request memory-negative → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-memory-negative]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q149",
+    "expected": "clone resource request disk-zero → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-disk-zero]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q150",
+    "expected": "clone resource request disk-negative → Reject before allocating disk/network/domain; explicit zero never falls back to defaults",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-disk-negative]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q151",
+    "expected": "Unrelated publication SHA mismatch → Image stays unknown; independent workspace deletion succeeds",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_does_not_block_unrelated_workspace_removal[hash]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q152",
+    "expected": "Unrelated publication malformed JSON → Image stays unknown; independent workspace deletion succeeds",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_does_not_block_unrelated_workspace_removal[json]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q153",
+    "expected": "Invalid marker on image with backing disk → Follow backing graph and retain referenced workspace storage",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_still_fences_its_backing_dependencies[hash]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q154",
+    "expected": "Malformed marker on image with backing disk → Follow backing graph and retain referenced workspace storage",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_still_fences_its_backing_dependencies[json]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q155",
+    "expected": "Published disk header unreadable → Graph remains incomplete; retain unrelated workspace until graph can be inspected",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_unreadable_published_disk_keeps_dependency_fence`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q156",
+    "expected": "Listed libvirt guest nostate → Direct/list observation agree on unknown; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[nostate]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q157",
+    "expected": "Listed libvirt guest running → Direct/list observation agree on running; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q158",
+    "expected": "Listed libvirt guest blocked → Direct/list observation agree on running; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[blocked]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q159",
+    "expected": "Listed libvirt guest paused → Direct/list observation agree on paused; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[paused]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q160",
+    "expected": "Listed libvirt guest shutdown → Direct/list observation agree on stopping; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[shutdown]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q161",
+    "expected": "Listed libvirt guest shutoff → Direct/list observation agree on stopped; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[shutoff]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q162",
+    "expected": "Listed libvirt guest crashed → Direct/list observation agree on failed; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[crashed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q163",
+    "expected": "Listed libvirt guest suspended → Direct/list observation agree on suspended; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[suspended]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q164",
+    "expected": "Listed libvirt guest unrecognized → Direct/list observation agree on unknown; no mutation",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[unrecognized]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q165",
+    "expected": "Inventory libvirt guest nostate → Observe unknown; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[nostate]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q166",
+    "expected": "Inventory libvirt guest running → Observe running; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[running]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q167",
+    "expected": "Inventory libvirt guest blocked → Observe running; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[blocked]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q168",
+    "expected": "Inventory libvirt guest paused → Observe paused; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[paused]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q169",
+    "expected": "Inventory libvirt guest shutdown → Observe stopping; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[shutdown]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q170",
+    "expected": "Inventory libvirt guest shutoff → Observe exited; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[shutoff]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q171",
+    "expected": "Inventory libvirt guest crashed → Observe failed; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[crashed]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q172",
+    "expected": "Inventory libvirt guest suspended → Observe suspended; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[suspended]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q173",
+    "expected": "Inventory libvirt guest unrecognized → Observe unknown; only running/blocked may imply usable running state",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[unrecognized]`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q174",
+    "expected": "Brand-new disk/snapshot/cache directories before any build or base resolution → Initialize all configured roots, report complete empty inventory, and require no base download or real domain",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_fresh_runtime_initializes_cache_before_first_inventory`",
+    "result": "PASSED"
+  },
+  {
+    "id": "Q175",
+    "expected": "Configured fresh image-cache directory cannot be created → Fail startup with the directory permission/fix diagnostic; never publish an apparently healthy incomplete runtime",
+    "check": "`runner/tests/test_qemu_lifecycle_hardening.py::test_fresh_runtime_cache_permission_failure_is_explicit`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F001",
+    "expected": "creating; runner online; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F002",
+    "expected": "creating; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F003",
+    "expected": "creating; runner offline; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F004",
+    "expected": "creating; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F005",
+    "expected": "running; runner online; recovery clear → stop, edit, capture, reset, remove enabled; chat ready.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F006",
+    "expected": "running; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F007",
+    "expected": "running; runner offline; recovery clear → remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F008",
+    "expected": "running; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F009",
+    "expected": "stopped; runner online; recovery clear → start, edit, capture, reset, remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F010",
+    "expected": "stopped; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F011",
+    "expected": "stopped; runner offline; recovery clear → remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F012",
+    "expected": "stopped; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F013",
+    "expected": "failed; runner online; recovery clear → edit, reset, remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F014",
+    "expected": "failed; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F015",
+    "expected": "failed; runner offline; recovery clear → remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F016",
+    "expected": "failed; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F017",
+    "expected": "pending_deletion; runner online; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F018",
+    "expected": "pending_deletion; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F019",
+    "expected": "pending_deletion; runner offline; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F020",
+    "expected": "pending_deletion; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F021",
+    "expected": "deleting; runner online; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F022",
+    "expected": "deleting; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F023",
+    "expected": "deleting; runner offline; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F024",
+    "expected": "deleting; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F025",
+    "expected": "deleted; runner online; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F026",
+    "expected": "deleted; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F027",
+    "expected": "deleted; runner offline; recovery clear → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F028",
+    "expected": "deleted; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F029",
+    "expected": "delete_failed; runner online; recovery clear → remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F030",
+    "expected": "delete_failed; runner online; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F031",
+    "expected": "delete_failed; runner offline; recovery clear → remove enabled; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F032",
+    "expected": "delete_failed; runner offline; recovery pending → all mutations blocked; chat blocked.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F033",
+    "expected": "Running workspace; creating active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F034",
+    "expected": "Running workspace; starting active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F035",
+    "expected": "Running workspace; stopping active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F036",
+    "expected": "Running workspace; restarting active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F037",
+    "expected": "Running workspace; removing active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F038",
+    "expected": "Running workspace; capturing_image active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F039",
+    "expected": "Running workspace; resetting active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F040",
+    "expected": "Running workspace; updating active → all mutations and chat blocked; operation label retained.",
+    "check": "`workspaceLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F041",
+    "expected": "Image build absent; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F042",
+    "expected": "Image build absent; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F043",
+    "expected": "Image build pending; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F044",
+    "expected": "Image build pending; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F045",
+    "expected": "Image build building; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F046",
+    "expected": "Image build building; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F047",
+    "expected": "Image build active; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F048",
+    "expected": "Image build active; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F049",
+    "expected": "Image build deactivated; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F050",
+    "expected": "Image build deactivated; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F051",
+    "expected": "Image build failed; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F052",
+    "expected": "Image build failed; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F053",
+    "expected": "Image build pending_deletion; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F054",
+    "expected": "Image build pending_deletion; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F055",
+    "expected": "Image build deleting; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F056",
+    "expected": "Image build deleting; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F057",
+    "expected": "Image build delete_failed; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F058",
+    "expected": "Image build delete_failed; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F059",
+    "expected": "Image build deleted; runner online → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F060",
+    "expected": "Image build deleted; runner offline → correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+    "check": "`imageDefinitionLifecycle.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F061",
+    "expected": "Workspace settings vCPU below minimum → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F062",
+    "expected": "Workspace settings vCPU above maximum → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F063",
+    "expected": "Workspace settings fractional vCPU → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F064",
+    "expected": "Workspace settings NaN vCPU → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F065",
+    "expected": "Workspace settings RAM below minimum → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F066",
+    "expected": "Workspace settings RAM above maximum → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F067",
+    "expected": "Workspace settings fractional RAM → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F068",
+    "expected": "Workspace settings disk below minimum → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F069",
+    "expected": "Workspace settings disk above maximum → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F070",
+    "expected": "Workspace settings fractional disk → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F071",
+    "expected": "Workspace settings odd desktop width → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F072",
+    "expected": "Workspace settings odd desktop height → no PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F073",
+    "expected": "Workspace settings resource lower bounds → one PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F074",
+    "expected": "Workspace settings resource upper bounds → one PATCH; validation precedes any restart request.",
+    "check": "`EditWorkspaceDialog.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F075",
+    "expected": "Failed workspace deletion → retry removal available to ordinary user.",
+    "check": "`WorkspaceActions.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F076",
+    "expected": "Runner offline → workspace removal remains available and queues server-side.",
+    "check": "`WorkspaceActions.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F077",
+    "expected": "Deleted workspace → no action controls or misleading Working spinner.",
+    "check": "`WorkspaceActions.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F078",
+    "expected": "Interrupted offline workspace → reconnect recovery message; no administrator required.",
+    "check": "`WorkspaceActions.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F079",
+    "expected": "Clean stopped workspace in chat header → capture enabled without requiring running chat.",
+    "check": "`WorkspaceChatHeader.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F080",
+    "expected": "Runner disconnects during operation → header and card prominently report Runner offline.",
+    "check": "`WorkspaceChatHeader.test.ts + WorkspacesView.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F081",
+    "expected": "Failed/stopped header state → no green running indicator.",
+    "check": "`WorkspaceChatHeader.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "F082",
+    "expected": "Creating/deleting state without active-operation event → store keeps actions blocked and supplies state label.",
+    "check": "`workspaces.test.ts`",
+    "result": "PASSED"
+  },
+  {
+    "id": "V001",
+    "expected": "Two distinct image builds → overlapping initialization if admitted by host RAM/CPU.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V002",
+    "expected": "Third build at concurrency limit → queued; no temporary guest allocated yet.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V003",
+    "expected": "Workspace create while builds initialize → independently completes with correct image.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V004",
+    "expected": "Workspace CPU/RAM/disk update while builds run → completes; data preserved.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V005",
+    "expected": "Workspace stop during builds → stops; builders continue.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V006",
+    "expected": "Queued build after a slot frees → automatically starts; all three build results correct.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V007",
+    "expected": "Published definition images → standalone QCOW2, valid hash/identity/minimum disk manifest.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V008",
+    "expected": "Inventory after builds → complete, published images present, temporary builders absent.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V009",
+    "expected": "Definition-backed workspace → correct recipe marker; cloud-init complete.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V010",
+    "expected": "Backend unavailable during create → VM completes; terminal result retained durably.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V011",
+    "expected": "Reconnect, result replay and ACK → same operation; no pending result after matching ACK.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V012",
+    "expected": "Duplicate durable/raw create → existing guest and disk inode/data preserved.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V013",
+    "expected": "Controlled stop after injected test credential → stopped; credential scrub proven.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V014",
+    "expected": "Capture stopped clean guest → standalone image with source identity and disk floor.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V015",
+    "expected": "Clone capture and resume source concurrently → both running; persisted marker preserved.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V016",
+    "expected": "Clone below image disk floor → rejected before domain/network/disk allocation.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V017",
+    "expected": "Delete image with live clone dependency → refused; clone data readable.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V018",
+    "expected": "Tampered publication hash → clone refused; no guest allocation.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V019",
+    "expected": "Live CPU/RAM/disk growth → XML/settings reflect request; persisted file survives.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V020",
+    "expected": "Disk shrink request → never shrinks existing disk or loses data.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V021",
+    "expected": "Impossible RAM request → clear failure before restart/storage mutation; guest remains usable.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V022",
+    "expected": "Same-guest stop/resume submitted concurrently → serialized completion; final running state.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V023",
+    "expected": "Externally paused guest stop → actual shutoff, no false scrub proof.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V024",
+    "expected": "Resume stopped guest → readable persisted data; controlled stop restores scrub proof.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V025",
+    "expected": "Delete capture origin → captured clone remains usable and independent.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V026",
+    "expected": "Recreate physically removed ID → new incarnation; no stale storage reuse.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V027",
+    "expected": "Repeated exact removal → absent domain/network/disk/seed/host-key; idempotent success.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V028",
+    "expected": "Remove last clone then image → succeeds; no physical image dependency remains.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V029",
+    "expected": "Init script exits nonzero → failed build; no published image; temporary guest cleaned.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V030",
+    "expected": "Build after failed build → queue slot released; next image publishes successfully.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V031",
+    "expected": "Runner SIGKILL during workspace initialization → restart seals failure; initialization never replayed.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V032",
+    "expected": "Recovered partial workspace → exact cleanup succeeds without admin acknowledgement.",
+    "check": "[Evidence](vm/artifacts/ubuntu22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V033",
+    "expected": "Two distinct image builds → overlapping initialization if admitted by host RAM/CPU.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V034",
+    "expected": "Third build at concurrency limit → queued; no temporary guest allocated yet.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V035",
+    "expected": "Workspace create while builds initialize → independently completes with correct image.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V036",
+    "expected": "Workspace CPU/RAM/disk update while builds run → completes; data preserved.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V037",
+    "expected": "Workspace stop during builds → stops; builders continue.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V038",
+    "expected": "Queued build after a slot frees → automatically starts; all three build results correct.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V039",
+    "expected": "Published definition images → standalone QCOW2, valid hash/identity/minimum disk manifest.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V040",
+    "expected": "Inventory after builds → complete, published images present, temporary builders absent.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V041",
+    "expected": "Definition-backed workspace → correct recipe marker; cloud-init complete.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V042",
+    "expected": "Backend unavailable during create → VM completes; terminal result retained durably.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V043",
+    "expected": "Reconnect, result replay and ACK → same operation; no pending result after matching ACK.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V044",
+    "expected": "Duplicate durable/raw create → existing guest and disk inode/data preserved.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V045",
+    "expected": "Controlled stop after injected test credential → stopped; credential scrub proven.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V046",
+    "expected": "Capture stopped clean guest → standalone image with source identity and disk floor.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V047",
+    "expected": "Clone capture and resume source concurrently → both running; persisted marker preserved.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V048",
+    "expected": "Clone below image disk floor → rejected before domain/network/disk allocation.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V049",
+    "expected": "Delete image with live clone dependency → refused; clone data readable.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V050",
+    "expected": "Tampered publication hash → clone refused; no guest allocation.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V051",
+    "expected": "Live CPU/RAM/disk growth → XML/settings reflect request; persisted file survives.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V052",
+    "expected": "Disk shrink request → never shrinks existing disk or loses data.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V053",
+    "expected": "Impossible RAM request → clear failure before restart/storage mutation; guest remains usable.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V054",
+    "expected": "Same-guest stop/resume submitted concurrently → serialized completion; final running state.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V055",
+    "expected": "Externally paused guest stop → actual shutoff, no false scrub proof.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V056",
+    "expected": "Resume stopped guest → readable persisted data; controlled stop restores scrub proof.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V057",
+    "expected": "Delete capture origin → captured clone remains usable and independent.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V058",
+    "expected": "Recreate physically removed ID → new incarnation; no stale storage reuse.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V059",
+    "expected": "Repeated exact removal → absent domain/network/disk/seed/host-key; idempotent success.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V060",
+    "expected": "Remove last clone then image → succeeds; no physical image dependency remains.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V061",
+    "expected": "Init script exits nonzero → failed build; no published image; temporary guest cleaned.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V062",
+    "expected": "Build after failed build → queue slot released; next image publishes successfully.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V063",
+    "expected": "Runner SIGKILL during workspace initialization → restart seals failure; initialization never replayed.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V064",
+    "expected": "Recovered partial workspace → exact cleanup succeeds without admin acknowledgement.",
+    "check": "[Evidence](vm/artifacts/ubuntu24-final/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V065",
+    "expected": "Inject temporary host RAM pressure with real VM build → queue without allocation; automatically build when pressure removed.",
+    "check": "[Evidence](vm/artifacts/hardware-faults/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V066",
+    "expected": "Runner SIGKILL during real image initialization → exact orphan builder stopped/removed; failed retryable operation; recipe not replayed.",
+    "check": "[Evidence](vm/artifacts/crash-recovery/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V067",
+    "expected": "Real guest disk write throttle → slow write completes; event loop and unrelated guest operation responsive.",
+    "check": "[Evidence](vm/artifacts/hardware-faults/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V068",
+    "expected": "Guest abruptly powered off → actual stopped state discovered; resume and controlled stop possible.",
+    "check": "[Evidence](vm/artifacts/hardware-faults/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V069",
+    "expected": "Real publication, result not ACKed, runner restarted → successful exact result recovered without rebuild.",
+    "check": "[Evidence](vm/artifacts/crash-recovery/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V070",
+    "expected": "Real loopback backend stopped during lifecycle → completes offline; reconnect/ACK without duplicate execution.",
+    "check": "[Evidence](runner/full-fresh-cache-final.xml)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V071",
+    "expected": "Tiny real filesystem filled → failed QCOW2 write does not replace existing publication.",
+    "check": "[Evidence](vm/artifacts/hardware-faults/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V072",
+    "expected": "Libvirt inventory unavailable → incomplete observation never proves absence or allows destructive deletion.",
+    "check": "[Evidence](vm/artifacts/hardware-faults/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V073",
+    "expected": "Runner SIGKILL after disk allocation, before domain definition → automatic quiescence preserves partial data; ordinary exact removal succeeds using durable allocation ownership.",
+    "check": "[Evidence](vm/artifacts/crash-recovery/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V074",
+    "expected": "Full Ubuntu 22.04 standard desktop recipe → real build, verified publication, native dependencies, Xfce/KasmVNC, Chrome rendering and stop/start persistence succeed.",
+    "check": "[Evidence](vm/artifacts/desktop22/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "V075",
+    "expected": "Full Ubuntu 24.04 standard desktop recipe → same checks on the other supported Ubuntu release.",
+    "check": "[Evidence](vm/artifacts/desktop24/report.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "U001",
+    "expected": "Workspace list and deletion failures → clear status, deleted entries hidden.",
+    "check": "WorkspacesView tests; [headed browser deleted-row assertion](frontend/browser-smoke.json)",
+    "result": "PASSED"
+  },
+  {
+    "id": "U002",
+    "expected": "Stop/start/capture/reset action combinations → conflict/offline/recovery reservations disable unsafe actions.",
+    "check": "WorkspaceActions tests",
+    "result": "PASSED"
+  },
+  {
+    "id": "U003",
+    "expected": "Workspace operation events → pending operations clear only on matching terminal state.",
+    "check": "workspace store tests",
+    "result": "PASSED"
+  },
+  {
+    "id": "U004",
+    "expected": "Chat workspace readiness across statuses → no launch on deleted/offline/blocked workspace.",
+    "check": "conversationGroups/readiness tests",
+    "result": "PASSED"
+  },
+  {
+    "id": "U005",
+    "expected": "Image definition states → deletion/build conflicts and retry actions clear.",
+    "check": "imageDefinitionLifecycle tests",
+    "result": "PASSED"
+  },
+  {
+    "id": "U006",
+    "expected": "Interrupted operation inspector → exact evidence and explicit permitted actions only.",
+    "check": "RunnerOperationsPanel tests",
+    "result": "PASSED"
+  },
+  {
+    "id": "U007",
+    "expected": "Workspace configuration/reset → frontend readiness/version and resource bounds validated; authoritative image disk floor enforced by backend before allocation.",
+    "check": "WorkspaceRecreateDialog + EditWorkspaceDialog; backend disk-floor tests + V016/V048",
+    "result": "PASSED"
+  },
+  {
+    "id": "U008",
+    "expected": "Frontend after removal of duplicate deleted state → type check succeeds.",
+    "check": "webapp type-check",
+    "result": "PASSED"
+  }
+]

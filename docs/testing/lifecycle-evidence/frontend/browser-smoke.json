@@ -1,0 +1,73 @@
+{
+  "started": "2026-10-31T10:46:13.068Z",
+  "finished": "2026-10-31T10:46:17.909Z",
+  "mode": "headed Chromium; isolated context; localhost production preview; mocked API",
+  "status": "PASS",
+  "assertions": [
+    {
+      "name": "Deleted entries hidden from normal workspace list",
+      "status": "PASS"
+    },
+    {
+      "name": "F080 offline and offline-recovery cards clearly report Runner offline",
+      "status": "PASS"
+    },
+    {
+      "name": "F080 sidebar prioritizes runner offline over stale recovery activity",
+      "status": "PASS"
+    },
+    {
+      "name": "F080 disconnected sidebar does not imply live activity",
+      "status": "PASS"
+    },
+    {
+      "name": "F078 unresolved offline operation blocks removal",
+      "status": "PASS"
+    },
+    {
+      "name": "F078 ordinary member recovery does not require administrator acknowledgment",
+      "status": "PASS"
+    },
+    {
+      "name": "F006 automatic online recovery blocks capture",
+      "status": "PASS"
+    },
+    {
+      "name": "F079 clean stopped workspace offers capture",
+      "status": "PASS"
+    },
+    {
+      "name": "F075 ordinary member can retry failed deletion",
+      "status": "PASS"
+    },
+    {
+      "name": "F075 retry invokes exactly local fixture deletion",
+      "status": "PASS"
+    },
+    {
+      "name": "F076 offline workspace removal remains available",
+      "status": "PASS"
+    },
+    {
+      "name": "F076 offline runner-dependent edit remains disabled",
+      "status": "PASS"
+    },
+    {
+      "name": "F076 offline removal submits once to local fixture",
+      "status": "PASS"
+    },
+    {
+      "name": "F076 pending removals are explicitly labelled queued",
+      "status": "PASS"
+    },
+    {
+      "name": "Only the page font reference was nonlocal; intercepted and blocked without network transmission",
+      "status": "PASS"
+    },
+    {
+      "name": "No browser page errors",
+      "status": "PASS"
+    }
+  ],
+  "pageErrors": []
+}

@@ -3,6 +3,10 @@
 Current implementation reference (2026-10-03). This replaces the chronological
 phase handoffs; historical “next phase” statements are not operational guidance.
 
+See [workspace lifecycle hardening and verification](workspace-lifecycle-hardening.md)
+for concurrency admission, build budgets, outage behavior and the local VM fault
+matrix.
+
 ## Architecture
 
 Recipes (`ImageDefinition`) are editable catalog identities. Immutable

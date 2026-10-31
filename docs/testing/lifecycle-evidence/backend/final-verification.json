@@ -1,0 +1,51 @@
+{
+  "full_baseline": [
+    {
+      "source": "sqlite-final-verified.xml",
+      "nodes": 1522,
+      "passed": 1501,
+      "skipped": 21,
+      "xml_seconds": 304.843
+    },
+    {
+      "source": "postgres-verified.xml",
+      "nodes": 1522,
+      "passed": 1521,
+      "skipped": 1,
+      "xml_seconds": 887.56
+    }
+  ],
+  "full_baseline_source_manifest": "full-suite-source-sha256.json",
+  "full_baseline_source_manifest_sha256": "55cc332ff2dcc4c5bcd96999dccf5fbb9f7a81af56531984baddc2e9639edc5d",
+  "focused_post_suite_delta": [
+    {
+      "source": "projection-final-sqlite.xml",
+      "nodes": 180,
+      "passed": 161,
+      "skipped": 19,
+      "xml_seconds": 69.952
+    },
+    {
+      "source": "projection-final-postgres.xml",
+      "nodes": 180,
+      "passed": 180,
+      "skipped": 0,
+      "xml_seconds": 149.594
+    }
+  ],
+  "final_source_files_verified": 50,
+  "final_source_changed_during_focused_tests": [],
+  "post_baseline_changed_files": [
+    "backend/apps/runners/image_assignment_repository.py",
+    "backend/apps/runners/inventory_repository.py",
+    "backend/apps/runners/repositories.py",
+    "backend/apps/runners/tests/test_inventory_publication_integrity.py"
+  ],
+  "final_source_manifest": "final-code-sha256.json",
+  "final_source_manifest_sha256": "bebb29dc979b112db3b0365dab5d67b959c10ac0b06bdd04f574b3137a308005",
+  "cross_database_skips_all_executed": true,
+  "node_count_method": "Actual JUnit testcase elements; no subtest inflation",
+  "scope": "Complete baseline, then bounded four-file delta with focused final suites; no claim of a new full suite on final source",
+  "catalog_case_groups": 134,
+  "original_frozen_plan_sha256": "c6b3caf6184cb188781aa12633656fbe47f5d9d8036622f1deb7130cdabb3c8b"
+}

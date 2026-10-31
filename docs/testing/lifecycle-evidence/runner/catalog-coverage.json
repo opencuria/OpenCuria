@@ -1,0 +1,905 @@
+{
+  "R001": [
+    "tests/test_operation_journal.py::test_reopen_interrupted_never_reexecutes"
+  ],
+  "R002": [
+    "tests/test_operation_journal.py::test_terminal_replay_ack_retains_tombstone"
+  ],
+  "R003": [
+    "tests/test_operation_journal.py::test_duplicate_and_outage_dont_abort_work"
+  ],
+  "R004": [
+    "tests/test_operation_journal.py::test_journal_exclusive_process_and_terminal_sanitization"
+  ],
+  "R005": [
+    "tests/test_operation_journal.py::test_checkpoint_survives_restart_only_exact_incarnation"
+  ],
+  "R006": [
+    "tests/test_operation_journal.py::test_inspect_running_and_interrupted_are_distinct"
+  ],
+  "R007": [
+    "tests/test_operation_journal.py::test_unrecorded_identity_can_inspect_fresh_quiescence_without_execution"
+  ],
+  "R008": [
+    "tests/test_operation_journal.py::test_safe_transient_start_retry_is_bounded_and_terminal_only_after_finish"
+  ],
+  "R009": [
+    "tests/test_operation_journal.py::test_finished_capture_enospc_with_exact_scrub_checkpoint_stays_known"
+  ],
+  "R010": [
+    "tests/test_operation_journal.py::test_sealed_unrecorded_identity_cannot_execute_delayed_recipe"
+  ],
+  "R011": [
+    "tests/test_operation_journal.py::test_effect_then_generic_exception_is_unknown"
+  ],
+  "R012": [
+    "tests/test_operation_journal.py::test_running_readiness_allows_normal_writes_but_scrub_requires_exact_stat"
+  ],
+  "R013": [
+    "tests/test_operation_journal.py::test_observed_unexpected_boot_permanently_revokes_scrub"
+  ],
+  "R014": [
+    "tests/test_operation_journal.py::test_resume_result_checkpoint_matches_terminal_envelope[False]",
+    "tests/test_operation_journal.py::test_resume_result_checkpoint_matches_terminal_envelope[True]",
+    "tests/test_operation_journal.py::test_resume_result_checkpoint_matches_terminal_envelope[None]"
+  ],
+  "R015": [
+    "tests/test_journal_io_boundaries.py::test_repeated_cancellation_drains_sqlite_before_releasing_io_queue"
+  ],
+  "R016": [
+    "tests/test_journal_io_boundaries.py::test_cancelled_delivery_during_fsync_still_executes_once_and_drains"
+  ],
+  "R017": [
+    "tests/test_journal_io_boundaries.py::test_terminal_inspection_keeps_target_fenced_but_allows_other_targets"
+  ],
+  "R018": [
+    "tests/test_journal_io_boundaries.py::test_recovery_retries_transient_inspection_and_continues_other_records"
+  ],
+  "R019": [
+    "tests/test_journal_io_boundaries.py::test_orphan_helpers_keep_crashed_operations_unfinished_and_target_fenced"
+  ],
+  "R020": [
+    "tests/test_journal_io_boundaries.py::test_terminal_delivery_does_not_overwrite_lifecycle_checkpoint"
+  ],
+  "R021": [
+    "tests/test_journal_io_boundaries.py::test_exited_unreaped_helper_is_quiescent_but_live_helper_is_not"
+  ],
+  "R022": [
+    "tests/test_journal_io_boundaries.py::test_capture_recovery_matches_workspace_target_and_published_image_identity[workspace]",
+    "tests/test_journal_io_boundaries.py::test_capture_recovery_matches_workspace_target_and_published_image_identity[wrong-source]"
+  ],
+  "R023": [
+    "tests/test_journal_io_boundaries.py::test_orphan_guest_script_keeps_build_unfinished_until_guest_stops[restart]",
+    "tests/test_journal_io_boundaries.py::test_orphan_guest_script_keeps_build_unfinished_until_guest_stops[failed_cleanup]"
+  ],
+  "R024": [
+    "tests/test_lifecycle_transport_integration.py::test_wire_outage_keeps_lifecycle_and_replays_durable_terminal_once"
+  ],
+  "R025": [
+    "tests/test_capture_resume_failure.py::test_started_guest_with_failed_injection_is_unknown"
+  ],
+  "R026": [
+    "tests/test_capture_resume_failure.py::test_known_no_effect_failure_uses_exact_checkpoint[running-True]",
+    "tests/test_capture_resume_failure.py::test_known_no_effect_failure_uses_exact_checkpoint[exited-False]",
+    "tests/test_capture_resume_failure.py::test_known_no_effect_failure_uses_exact_checkpoint[stopped-False]"
+  ],
+  "R027": [
+    "tests/test_capture_resume_failure.py::test_missing_or_changed_runtime_proof_cannot_use_cache[None]",
+    "tests/test_capture_resume_failure.py::test_missing_or_changed_runtime_proof_cannot_use_cache[observation1]",
+    "tests/test_capture_resume_failure.py::test_missing_or_changed_runtime_proof_cannot_use_cache[observation2]"
+  ],
+  "R028": [
+    "tests/test_capture_resume_failure.py::test_inspection_failure_is_unknown"
+  ],
+  "R029": [
+    "tests/test_capture_resume_failure.py::test_journal_recovery_preserves_explicit_unknown_outcome"
+  ],
+  "R030": [
+    "tests/test_capture_resume_failure.py::test_partial_stop_without_proof_emits_unknown_wrapped_result[False]",
+    "tests/test_capture_resume_failure.py::test_partial_stop_without_proof_emits_unknown_wrapped_result[True]"
+  ],
+  "R031": [
+    "tests/test_capture_resume_failure.py::test_known_stop_failure_uses_live_checkpoint[running-True]",
+    "tests/test_capture_resume_failure.py::test_known_stop_failure_uses_live_checkpoint[running-False]",
+    "tests/test_capture_resume_failure.py::test_known_stop_failure_uses_live_checkpoint[exited-False]"
+  ],
+  "R032": [
+    "tests/test_registry_lifecycle_race.py::test_sync_during_real_handler_and_immediate_next_stop[resume]",
+    "tests/test_registry_lifecycle_race.py::test_sync_during_real_handler_and_immediate_next_stop[stop]",
+    "tests/test_registry_lifecycle_race.py::test_sync_during_real_handler_and_immediate_next_stop[create]"
+  ],
+  "R033": [
+    "tests/test_registry_lifecycle_race.py::test_snapshot_started_before_operation_cannot_overwrite_completion[resume]",
+    "tests/test_registry_lifecycle_race.py::test_snapshot_started_before_operation_cannot_overwrite_completion[stop]",
+    "tests/test_registry_lifecycle_race.py::test_snapshot_started_before_operation_cannot_overwrite_completion[create]"
+  ],
+  "R034": [
+    "tests/test_registry_lifecycle_race.py::test_same_instance_merge_preserves_credentials_different_instance_does_not"
+  ],
+  "R035": [
+    "tests/test_registry_lifecycle_race.py::test_live_running_status_overrides_stale_stopped_cache"
+  ],
+  "R036": [
+    "tests/test_registry_lifecycle_race.py::test_failed_live_observation_never_scrubs_or_stops"
+  ],
+  "R037": [
+    "tests/test_registry_lifecycle_race.py::test_clone_preserves_creating_entry_and_identity_during_inventory"
+  ],
+  "R038": [
+    "tests/test_registry_lifecycle_race.py::test_failed_refresh_and_failed_resume_keep_unknown_credentials"
+  ],
+  "R039": [
+    "tests/test_registry_lifecycle_race.py::test_incomplete_create_failure_is_preserved_for_recovery"
+  ],
+  "R040": [
+    "tests/test_registry_lifecycle_race.py::test_duplicate_create_preserves_existing_physical_registry_identity[base]",
+    "tests/test_registry_lifecycle_race.py::test_duplicate_create_preserves_existing_physical_registry_identity[artifact]"
+  ],
+  "R041": [
+    "tests/test_registry_lifecycle_race.py::test_credential_replacement_updates_presence_and_invalidates_old_proof[False]",
+    "tests/test_registry_lifecycle_race.py::test_credential_replacement_updates_presence_and_invalidates_old_proof[True]"
+  ],
+  "R042": [
+    "tests/test_registry_lifecycle_race.py::test_partial_scrub_revokes_running_proof_before_any_credential_write"
+  ],
+  "R043": [
+    "tests/test_registry_lifecycle_race.py::test_missing_workspace_removal_requires_complete_physical_absence[False]",
+    "tests/test_registry_lifecycle_race.py::test_missing_workspace_removal_requires_complete_physical_absence[True]",
+    "tests/test_registry_lifecycle_race.py::test_missing_workspace_removal_requires_complete_physical_absence[removed2]"
+  ],
+  "R044": [
+    "tests/test_registry_lifecycle_race.py::test_stale_running_observation_cannot_revoke_new_stop_checkpoint[incarnation]",
+    "tests/test_registry_lifecycle_race.py::test_stale_running_observation_cannot_revoke_new_stop_checkpoint[inventory]"
+  ],
+  "R045": [
+    "tests/test_websocket_interface.py::test_observation_tolerates_workspace_changes_during_probe[removed]",
+    "tests/test_websocket_interface.py::test_observation_tolerates_workspace_changes_during_probe[replaced]"
+  ],
+  "R046": [
+    "tests/test_websocket_interface.py::test_image_deletion_uses_runtime_reference[deleted]",
+    "tests/test_websocket_interface.py::test_image_deletion_uses_runtime_reference[already_absent]",
+    "tests/test_websocket_interface.py::test_image_deletion_uses_runtime_reference[outcome2]"
+  ],
+  "R047": [
+    "tests/test_websocket_interface.py::test_start_retries_initial_backend_outage_without_leaving_runner"
+  ],
+  "R048": [
+    "tests/test_websocket_interface.py::test_stop_wakes_startup_backoff_without_waiting_for_backend"
+  ],
+  "R049": [
+    "tests/test_websocket_interface.py::WebSocketHandlerRegistrationTests::test_retired_task_handlers_are_not_registered"
+  ],
+  "R050": [
+    "tests/test_websocket_interface.py::WebSocketReconnectTests::test_reconnect_loop_survives_handshake_timeouts"
+  ],
+  "R051": [
+    "tests/test_websocket_interface.py::WebSocketTransportSettingsTests::test_socketio_client_raises_http_buffer_size"
+  ],
+  "R052": [
+    "tests/test_websocket_interface.py::WebSocketDesktopTests::test_observation_announces_desktop_ended_by_maintenance"
+  ],
+  "R053": [
+    "tests/test_websocket_interface.py::WebSocketDesktopTests::test_connect_snapshot_is_reused_for_first_heartbeat"
+  ],
+  "R054": [
+    "tests/test_websocket_interface.py::WebSocketDesktopTests::test_connect_recovers_desktop_sessions_before_reannounce"
+  ],
+  "R055": [
+    "tests/test_websocket_interface.py::WebSocketDesktopTests::test_blocked_inventory_does_not_block_health_or_operation_lease"
+  ],
+  "R056": [
+    "tests/test_capture_fence.py::test_capture_drains_admitted_work_before_proof_and_rejects_new_work"
+  ],
+  "R057": [
+    "tests/test_capture_fence.py::test_capture_cleanup_on_runtime_failure_or_cancellation[failure0]",
+    "tests/test_capture_fence.py::test_capture_cleanup_on_runtime_failure_or_cancellation[failure1]"
+  ],
+  "R058": [
+    "tests/test_capture_fence.py::test_cancel_capture_while_draining_releases_fence"
+  ],
+  "R059": [
+    "tests/test_capture_fence.py::test_client_clean_flag_does_not_replace_scrub_proof"
+  ],
+  "R060": [
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[files-read_file-args0]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[files-list_files-args1]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[files-find_files-args2]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[files-upload_file-args3]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[files-download_file-args4]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[files-write_file_content-args5]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[harness-exec_harness_command-args6]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[git-execute_git_operation-args7]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[terminal_manager-start_terminal-args8]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[desktop-release_workspace-args9]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[desktop-read_desktop_clipboard-args10]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[desktop-write_desktop_clipboard-args11]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[background-list_background_processes-args12]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[background-get_background_status-args13]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[background-stop_background_process-args14]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[streams-stream_start_process-args15]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[lifecycle-stop_workspace-args16]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[lifecycle-resume_workspace-args17]",
+    "tests/test_capture_fence.py::test_composed_manager_interactions_are_guarded[lifecycle-remove_workspace-args18]"
+  ],
+  "R061": [
+    "tests/test_capture_fence.py::test_session_id_only_writes_use_original_workspace"
+  ],
+  "R062": [
+    "tests/test_capture_fence.py::test_websocket_exec_rejection_keeps_result_envelope"
+  ],
+  "R063": [
+    "tests/test_capture_fence.py::test_desktop_proxy_paths_are_guarded"
+  ],
+  "R064": [
+    "tests/test_capture_fence.py::test_second_capture_is_rejected_and_does_not_release_first"
+  ],
+  "R065": [
+    "tests/test_capture_fence.py::test_live_call_queued_behind_stop_is_rejected_after_epoch_change"
+  ],
+  "R066": [
+    "tests/test_capture_fence.py::test_lifecycle_queued_before_capture_cannot_run_inside_capture"
+  ],
+  "R067": [
+    "tests/test_capture_fence.py::test_stop_closes_active_stream_read_before_capture_drains"
+  ],
+  "R068": [
+    "tests/test_capture_fence.py::test_admitted_desktop_waiter_is_rechecked_after_stop_epoch"
+  ],
+  "R069": [
+    "tests/test_workspace_service_security.py::test_convert_archive_to_tar_rejects_links[sym]",
+    "tests/test_workspace_service_security.py::test_convert_archive_to_tar_rejects_links[hard]"
+  ],
+  "R070": [
+    "tests/test_workspace_service_security.py::test_create_workspace_clones_with_persistent_credentials[0]",
+    "tests/test_workspace_service_security.py::test_create_workspace_clones_with_persistent_credentials[7]"
+  ],
+  "R071": [
+    "tests/test_workspace_service_security.py::test_inject_workspace_credentials_materializes_file_credentials"
+  ],
+  "R072": [
+    "tests/test_workspace_service_security.py::test_inject_workspace_credentials_empty_set_returns_false"
+  ],
+  "R073": [
+    "tests/test_workspace_service_security.py::test_stop_workspace_removes_credentials_before_runtime_stop"
+  ],
+  "R074": [
+    "tests/test_workspace_service_security.py::test_start_terminal_sources_persistent_env"
+  ],
+  "R075": [
+    "tests/test_automatic_operation_recovery.py::test_inspect_request_seals_quiescent_missing_identity"
+  ],
+  "R076": [
+    "tests/test_automatic_operation_recovery.py::test_inspect_request_does_not_seal_unverified_missing_identity[incomplete]",
+    "tests/test_automatic_operation_recovery.py::test_inspect_request_does_not_seal_unverified_missing_identity[helper]",
+    "tests/test_automatic_operation_recovery.py::test_inspect_request_does_not_seal_unverified_missing_identity[build]"
+  ],
+  "R077": [
+    "tests/test_automatic_operation_recovery.py::test_inspect_request_seal_rechecks_admission_epoch"
+  ],
+  "R078": [
+    "tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state[running-False-running]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state[stopped-False-stopped]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state[exited-False-stopped]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state[None-True-absent]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state[None-False-unknown]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_includes_exact_workspace_state[paused-False-unknown]"
+  ],
+  "R079": [
+    "tests/test_automatic_operation_recovery.py::test_inspection_credential_presence_requires_exact_proof[exact]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_credential_presence_requires_exact_proof[wrong_stat]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_credential_presence_requires_exact_proof[wrong_state]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_credential_presence_requires_exact_proof[none]"
+  ],
+  "R080": [
+    "tests/test_automatic_operation_recovery.py::test_inspection_never_uses_wrong_workspace_inventory[other]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_never_uses_wrong_workspace_inventory[incomplete]",
+    "tests/test_automatic_operation_recovery.py::test_inspection_never_uses_wrong_workspace_inventory[duplicate]"
+  ],
+  "R081": [
+    "tests/test_automatic_operation_recovery.py::test_recovery_cleans_only_exact_interrupted_build"
+  ],
+  "R082": [
+    "tests/test_automatic_operation_recovery.py::test_recovery_retries_failed_build_cleanup"
+  ],
+  "R083": [
+    "tests/test_automatic_operation_recovery.py::test_recovery_successful_publication_wins_after_build_cleanup"
+  ],
+  "R084": [
+    "tests/test_automatic_operation_recovery.py::test_late_old_observation_does_not_claim_quiescence"
+  ],
+  "R085": [
+    "tests/test_automatic_operation_recovery.py::test_sealed_missing_identity_uses_retryable_diagnostic"
+  ],
+  "R086": [
+    "tests/test_automatic_operation_recovery.py::test_unfinished_recovery_keeps_target_bound_until_commit"
+  ],
+  "R087": [
+    "tests/test_automatic_operation_recovery.py::test_live_same_process_build_is_not_cleaned_by_recovery"
+  ],
+  "R088": [
+    "tests/test_automatic_operation_recovery.py::test_recovery_waits_for_exact_runtime_absence"
+  ],
+  "R089": [
+    "tests/test_automatic_operation_recovery.py::test_restart_recovers_stop_checkpoint_without_rerun"
+  ],
+  "R090": [
+    "tests/test_automatic_operation_recovery.py::test_restart_preserves_create_ambiguity_without_init_replay"
+  ],
+  "R091": [
+    "tests/test_automatic_operation_recovery.py::test_other_active_build_does_not_block_finished_target_inspection"
+  ],
+  "R092": [
+    "tests/test_automatic_operation_recovery.py::test_unknown_terminal_inspection_quiesces_remote_effects"
+  ],
+  "R093": [
+    "tests/test_automatic_operation_recovery.py::test_quiescence_failure_retains_unknown_execution_fence"
+  ],
+  "R094": [
+    "tests/test_automatic_operation_recovery.py::test_confirmed_workspace_checkpoint_prevents_recovery_shutdown"
+  ],
+  "R095": [
+    "tests/test_automatic_operation_recovery.py::test_workspace_allocation_ownership_survives_ack_restart[task:create_workspace-True]",
+    "tests/test_automatic_operation_recovery.py::test_workspace_allocation_ownership_survives_ack_restart[task:create_workspace_from_image_artifact-True]",
+    "tests/test_automatic_operation_recovery.py::test_workspace_allocation_ownership_survives_ack_restart[task:stop_workspace-False]",
+    "tests/test_automatic_operation_recovery.py::test_workspace_allocation_ownership_survives_ack_restart[task:remove_workspace-False]"
+  ],
+  "R096": [
+    "tests/test_qemu_lifecycle_hardening.py::test_restarted_partial_create_can_be_recovered_and_removed"
+  ],
+  "R097": [
+    "tests/test_qemu_lifecycle_hardening.py::test_unowned_partial_create_cannot_be_removed"
+  ],
+  "R098": [
+    "tests/test_qemu_lifecycle_hardening.py::test_owned_partial_create_removal_retries_failed_observation"
+  ],
+  "R099": [
+    "tests/test_qemu_lifecycle_hardening.py::test_owned_guest_missing_registry_can_be_removed"
+  ],
+  "R100": [
+    "tests/test_automatic_operation_recovery.py::test_removed_workspace_revokes_historic_allocation_ownership"
+  ],
+  "R101": [
+    "tests/test_automatic_operation_recovery.py::test_new_create_after_removal_establishes_fresh_allocation_ownership"
+  ],
+  "R102": [
+    "tests/test_automatic_operation_recovery.py::test_known_failed_create_does_not_grant_allocation_ownership"
+  ],
+  "R103": [
+    "tests/test_qemu_lifecycle_hardening.py::test_stale_removed_lineage_cannot_delete_reallocated_partial_disk"
+  ],
+  "R104": [
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[running]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[paused]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[suspended]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[stopping]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[failed]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[unknown]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[stopped]",
+    "tests/test_automatic_operation_recovery.py::test_nonstopped_domain_observation_revokes_old_scrub_proof[exited]"
+  ],
+  "Q001": [
+    "tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[hash]"
+  ],
+  "Q002": [
+    "tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[size]"
+  ],
+  "Q003": [
+    "tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[path]"
+  ],
+  "Q004": [
+    "tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[bytes]"
+  ],
+  "Q005": [
+    "tests/test_qemu_lifecycle_hardening.py::test_clone_rejects_invalid_publication_before_allocating_guest[backing]"
+  ],
+  "Q006": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[disk]"
+  ],
+  "Q007": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[iso]"
+  ],
+  "Q008": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[seed]"
+  ],
+  "Q009": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[host-key]"
+  ],
+  "Q010": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[symlink]"
+  ],
+  "Q011": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[domain]"
+  ],
+  "Q012": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_requires_every_canonical_resource_gone[network]"
+  ],
+  "Q013": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_never_hides_unavailable_observation[domain]"
+  ],
+  "Q014": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_never_hides_unavailable_observation[network]"
+  ],
+  "Q015": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_absence_never_hides_unavailable_observation[storage]"
+  ],
+  "Q016": [
+    "tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[enumeration]"
+  ],
+  "Q017": [
+    "tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[xml]"
+  ],
+  "Q018": [
+    "tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[host]"
+  ],
+  "Q019": [
+    "tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[malformed-host]"
+  ],
+  "Q020": [
+    "tests/test_qemu_lifecycle_hardening.py::test_subnet_allocation_fails_closed_on_incomplete_network_observation[unknown-prefix]"
+  ],
+  "Q021": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_vcpus]"
+  ],
+  "Q022": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_vcpus]"
+  ],
+  "Q023": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_memory_mb]"
+  ],
+  "Q024": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_memory_mb]"
+  ],
+  "Q025": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_concurrency]"
+  ],
+  "Q026": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_concurrency]"
+  ],
+  "Q027": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[0-qemu_build_queue_timeout]"
+  ],
+  "Q028": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_rejects_non_positive_values[-1-qemu_build_queue_timeout]"
+  ],
+  "Q029": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_memory_pressure_rejects_before_allocating_resources[configured]"
+  ],
+  "Q030": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_memory_pressure_rejects_before_allocating_resources[available]"
+  ],
+  "Q031": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_memory_rejection_precedes_disk_and_network_allocation[create]"
+  ],
+  "Q032": [
+    "tests/test_qemu_lifecycle_hardening.py::test_existing_noncanonical_domain_blocks_fresh_allocation_without_effects[create]"
+  ],
+  "Q033": [
+    "tests/test_qemu_lifecycle_hardening.py::test_workspace_memory_rejection_precedes_disk_and_network_allocation[clone]"
+  ],
+  "Q034": [
+    "tests/test_qemu_lifecycle_hardening.py::test_existing_noncanonical_domain_blocks_fresh_allocation_without_effects[clone]"
+  ],
+  "Q035": [
+    "tests/test_qemu_lifecycle_hardening.py::test_guest_readiness_allows_inventory_and_other_guest_lifecycles"
+  ],
+  "Q036": [
+    "tests/test_qemu_lifecycle_hardening.py::test_duplicate_create_keeps_existing_disk_and_domain"
+  ],
+  "Q037": [
+    "tests/test_qemu_lifecycle_hardening.py::test_small_workspace_requests_reject_before_allocating_disk_or_network"
+  ],
+  "Q038": [
+    "tests/test_qemu_lifecycle_hardening.py::test_slow_publication_fsync_keeps_event_loop_responsive_and_drains_cancel"
+  ],
+  "Q039": [
+    "tests/test_qemu_lifecycle_hardening.py::test_slow_inventory_filesystem_probe_does_not_block_heartbeat"
+  ],
+  "Q040": [
+    "tests/test_qemu_lifecycle_hardening.py::test_child_task_does_not_inherit_storage_mutation_permission"
+  ],
+  "Q041": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_budget_queues_guests_and_uses_separate_cpu_ram"
+  ],
+  "Q042": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_memory_budget_ignores_stopped_domains"
+  ],
+  "Q043": [
+    "tests/test_qemu_lifecycle_hardening.py::test_cloud_init_readonly_probe_retries_running_and_ssh_restart"
+  ],
+  "Q044": [
+    "tests/test_qemu_lifecycle_hardening.py::test_cloud_init_wait_is_bounded_and_failed_build_never_runs_script"
+  ],
+  "Q045": [
+    "tests/test_qemu_lifecycle_hardening.py::test_domain_discovery_failure_is_never_authoritative_absence"
+  ],
+  "Q046": [
+    "tests/test_qemu_lifecycle_hardening.py::test_overlay_publication_never_clobbers_a_racing_creator"
+  ],
+  "Q047": [
+    "tests/test_qemu_lifecycle_hardening.py::test_cloud_cache_publication_preserves_concurrently_published_inode"
+  ],
+  "Q048": [
+    "tests/test_qemu_lifecycle_hardening.py::test_concurrent_starts_atomically_reserve_memory_against_other_guests"
+  ],
+  "Q049": [
+    "tests/test_qemu_lifecycle_hardening.py::test_paused_resume_does_not_reserve_existing_guest_ram_twice"
+  ],
+  "Q050": [
+    "tests/test_qemu_lifecycle_hardening.py::test_slow_image_delete_fsync_is_drained_without_blocking_event_loop"
+  ],
+  "Q051": [
+    "tests/test_qemu_lifecycle_hardening.py::test_capture_and_legacy_inventory_report_actual_virtual_disk_floor"
+  ],
+  "Q052": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_waits_for_memory_then_runs_without_allocating_while_queued"
+  ],
+  "Q053": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_queue_cancel_removes_waiter_without_guest"
+  ],
+  "Q054": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_slot_wait_cancel_never_starts_second_guest"
+  ],
+  "Q055": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_queue_timeout_is_known_failure_without_allocation"
+  ],
+  "Q056": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_impossible_memory_fails_immediately"
+  ],
+  "Q057": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_cpu_budget_limits_parallelism"
+  ],
+  "Q058": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_impossible_cpu_fails_immediately"
+  ],
+  "Q059": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_rechecks_memory_after_capacity_race"
+  ],
+  "Q060": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_does_not_retry_unknown_libvirt_failure"
+  ],
+  "Q061": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_guest_identity_matches_operation"
+  ],
+  "Q062": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_invalid_operation_identity_has_no_effects"
+  ],
+  "Q063": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_queue_progress_failure_does_not_allocate"
+  ],
+  "Q064": [
+    "tests/test_qemu_lifecycle_hardening.py::test_build_cancel_during_effect_drains_and_releases_slot"
+  ],
+  "Q065": [
+    "tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[1-True]"
+  ],
+  "Q066": [
+    "tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[3-True]"
+  ],
+  "Q067": [
+    "tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[3-False]"
+  ],
+  "Q068": [
+    "tests/test_storage_inventory.py::test_workspace_remove_confirms_domain_gone_before_cleanup[5-True]"
+  ],
+  "Q069": [
+    "tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[destroy]"
+  ],
+  "Q070": [
+    "tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[undefine]"
+  ],
+  "Q071": [
+    "tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[present]"
+  ],
+  "Q072": [
+    "tests/test_storage_inventory.py::test_unverified_domain_removal_retains_network_disk_seed_and_key[enumeration]"
+  ],
+  "Q073": [
+    "tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[1-foreign]"
+  ],
+  "Q074": [
+    "tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[1-overlay]"
+  ],
+  "Q075": [
+    "tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[1-partial]"
+  ],
+  "Q076": [
+    "tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[3-foreign]"
+  ],
+  "Q077": [
+    "tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[3-overlay]"
+  ],
+  "Q078": [
+    "tests/test_storage_inventory.py::test_workspace_remove_checks_graph_before_destroy[3-partial]"
+  ],
+  "Q079": [
+    "tests/test_storage_inventory.py::test_capture_self_contained_stopped_scrubbed_and_exclusive"
+  ],
+  "Q080": [
+    "tests/test_storage_inventory.py::test_capture_descendant_and_unreadable_scan_block_delete"
+  ],
+  "Q081": [
+    "tests/test_storage_inventory.py::test_publication_crash_marker_enospc_and_invalid_path"
+  ],
+  "Q082": [
+    "tests/test_storage_inventory.py::test_failed_remove_retains_disk"
+  ],
+  "Q083": [
+    "tests/test_storage_inventory.py::test_mutation_cancellation_drains_thread_and_holds_lock"
+  ],
+  "Q084": [
+    "tests/test_storage_inventory.py::test_journal_recovers_exact_publication_without_rerun"
+  ],
+  "Q085": [
+    "tests/test_storage_inventory.py::test_explicit_partial_create_removal_preserves_unrelated_disk"
+  ],
+  "Q086": [
+    "tests/test_storage_inventory.py::test_workspace_delete_rechecks_after_undefine"
+  ],
+  "Q087": [
+    "tests/test_storage_inventory.py::test_source_scrub_survives_corrupt_output_but_not_external_disk_write"
+  ],
+  "Q088": [
+    "tests/test_storage_inventory.py::test_truncated_conversion_failure_retains_safe_source_evidence"
+  ],
+  "Q089": [
+    "tests/test_storage_inventory.py::test_publication_hash_cache_invalidates_same_size_and_mtime"
+  ],
+  "Q090": [
+    "tests/test_storage_inventory.py::test_cached_publication_foreign_overwrite_cannot_be_deleted"
+  ],
+  "Q091": [
+    "tests/test_storage_inventory.py::test_unpublished_images_keep_physical_dependencies_but_cannot_be_used"
+  ],
+  "Q092": [
+    "tests/test_storage_inventory.py::test_cloud_init_inventory_exact_ownership_and_orphans"
+  ],
+  "Q093": [
+    "tests/test_storage_inventory.py::test_standalone_capture_survives_origin_disk_and_seed_removal"
+  ],
+  "Q094": [
+    "tests/test_parallel_image_builds.py::test_parallel_builds_have_distinct_networks_and_inventory_stays_available"
+  ],
+  "Q095": [
+    "tests/test_parallel_image_builds.py::test_one_failed_build_is_cleaned_without_aborting_another"
+  ],
+  "Q096": [
+    "tests/test_parallel_image_builds.py::test_caller_cancellation_drains_build_and_cleanup_without_global_lock"
+  ],
+  "Q097": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[memory]"
+  ],
+  "Q098": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[cpu]"
+  ],
+  "Q099": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[disk]"
+  ],
+  "Q100": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_reconfigure_preserves_running_guest[disk-inspection]"
+  ],
+  "Q101": [
+    "tests/test_qemu_lifecycle_hardening.py::test_reconfigure_reserves_ram_during_stop_start_gap"
+  ],
+  "Q102": [
+    "tests/test_qemu_lifecycle_hardening.py::test_reconfigure_failure_releases_transient_reservation"
+  ],
+  "Q103": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[nostate]"
+  ],
+  "Q104": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[running]"
+  ],
+  "Q105": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[blocked]"
+  ],
+  "Q106": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[paused]"
+  ],
+  "Q107": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[shutdown]"
+  ],
+  "Q108": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[shutoff]"
+  ],
+  "Q109": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[crashed]"
+  ],
+  "Q110": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_start[suspended]"
+  ],
+  "Q111": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[nostate]"
+  ],
+  "Q112": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[running]"
+  ],
+  "Q113": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[blocked]"
+  ],
+  "Q114": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[paused]"
+  ],
+  "Q115": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[shutdown]"
+  ],
+  "Q116": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[shutoff]"
+  ],
+  "Q117": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[crashed]"
+  ],
+  "Q118": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_stop[suspended]"
+  ],
+  "Q119": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[nostate]"
+  ],
+  "Q120": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[running]"
+  ],
+  "Q121": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[blocked]"
+  ],
+  "Q122": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[paused]"
+  ],
+  "Q123": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[shutdown]"
+  ],
+  "Q124": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[shutoff]"
+  ],
+  "Q125": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[crashed]"
+  ],
+  "Q126": [
+    "tests/test_qemu_lifecycle_hardening.py::test_hypervisor_state_status[suspended]"
+  ],
+  "Q127": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_stops_exact_owned_guest[running]"
+  ],
+  "Q128": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_stops_exact_owned_guest[paused]"
+  ],
+  "Q129": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_rejects_unverified_identity[metadata]"
+  ],
+  "Q130": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_rejects_unverified_identity[disk]"
+  ],
+  "Q131": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_rejects_changed_incarnation"
+  ],
+  "Q132": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_absence_requires_all_resources_gone[absent]"
+  ],
+  "Q133": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_absence_requires_all_resources_gone[partial]"
+  ],
+  "Q134": [
+    "tests/test_qemu_lifecycle_hardening.py::test_quiesce_interrupted_workspace_stop_failure_is_not_quiescence"
+  ],
+  "Q135": [
+    "tests/test_qemu_lifecycle_hardening.py::test_partial_interruption_rejects_foreign_consumer"
+  ],
+  "Q136": [
+    "tests/test_qemu_lifecycle_hardening.py::test_partial_interruption_rejects_incomplete_inventory"
+  ],
+  "Q137": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-cpu-zero]"
+  ],
+  "Q138": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-cpu-negative]"
+  ],
+  "Q139": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-cpu-capacity]"
+  ],
+  "Q140": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-memory-zero]"
+  ],
+  "Q141": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-memory-negative]"
+  ],
+  "Q142": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-disk-zero]"
+  ],
+  "Q143": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[create-disk-negative]"
+  ],
+  "Q144": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-cpu-zero]"
+  ],
+  "Q145": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-cpu-negative]"
+  ],
+  "Q146": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-cpu-capacity]"
+  ],
+  "Q147": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-memory-zero]"
+  ],
+  "Q148": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-memory-negative]"
+  ],
+  "Q149": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-disk-zero]"
+  ],
+  "Q150": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_initial_resources_have_no_effects[clone-disk-negative]"
+  ],
+  "Q151": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_does_not_block_unrelated_workspace_removal[hash]"
+  ],
+  "Q152": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_does_not_block_unrelated_workspace_removal[json]"
+  ],
+  "Q153": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_still_fences_its_backing_dependencies[hash]"
+  ],
+  "Q154": [
+    "tests/test_qemu_lifecycle_hardening.py::test_invalid_publication_still_fences_its_backing_dependencies[json]"
+  ],
+  "Q155": [
+    "tests/test_qemu_lifecycle_hardening.py::test_unreadable_published_disk_keeps_dependency_fence"
+  ],
+  "Q156": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[nostate]"
+  ],
+  "Q157": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[running]"
+  ],
+  "Q158": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[blocked]"
+  ],
+  "Q159": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[paused]"
+  ],
+  "Q160": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[shutdown]"
+  ],
+  "Q161": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[shutoff]"
+  ],
+  "Q162": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[crashed]"
+  ],
+  "Q163": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[suspended]"
+  ],
+  "Q164": [
+    "tests/test_qemu_lifecycle_hardening.py::test_listed_hypervisor_state_matches_direct_status[unrecognized]"
+  ],
+  "Q165": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[nostate]"
+  ],
+  "Q166": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[running]"
+  ],
+  "Q167": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[blocked]"
+  ],
+  "Q168": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[paused]"
+  ],
+  "Q169": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[shutdown]"
+  ],
+  "Q170": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[shutoff]"
+  ],
+  "Q171": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[crashed]"
+  ],
+  "Q172": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[suspended]"
+  ],
+  "Q173": [
+    "tests/test_qemu_lifecycle_hardening.py::test_inventory_hypervisor_state_is_not_inferred_from_activity[unrecognized]"
+  ],
+  "Q174": [
+    "tests/test_qemu_lifecycle_hardening.py::test_fresh_runtime_initializes_cache_before_first_inventory"
+  ],
+  "Q175": [
+    "tests/test_qemu_lifecycle_hardening.py::test_fresh_runtime_cache_permission_failure_is_explicit"
+  ]
+}

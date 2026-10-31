@@ -1,0 +1,122 @@
+{
+  "distro": "22.04",
+  "passed": true,
+  "faults": "real VMs; injected transport outage and runner SIGKILL",
+  "started_at": "2026-10-31T10:53:47.323155+00:00",
+  "source_sha256": {
+    "runner/src/runtime/qemu_runtime.py": "b68db8b4fa2370ec1937b8efaea130195447ed06cbc8c576185a1760aea2fe26",
+    "runner/src/journal.py": "13496970ae1204b1a73f41f761f3665033f78657e44b9b8b379912d8d8aad03d",
+    "runner/src/service.py": "f3dd3b81d7fcc14ecba522e94b2b0968002e79142e0681b3f49e36c1069aa114",
+    "runner/src/services/workspace_lifecycle.py": "6c42d76258d22620516171a63b6fcaca69b64f1707211686170b01c735522860"
+  },
+  "cleanup_errors": [],
+  "finished_at": "2026-10-31T11:09:13.438868+00:00",
+  "cases": {
+    "V001": {
+      "status": "PASS",
+      "builder_count": 2
+    },
+    "V002": {
+      "status": "PASS",
+      "third_builder_absent": true
+    },
+    "V003": {
+      "status": "PASS"
+    },
+    "V004": {
+      "status": "PASS"
+    },
+    "V005": {
+      "status": "PASS"
+    },
+    "V006": {
+      "status": "PASS"
+    },
+    "V007": {
+      "status": "PASS"
+    },
+    "V008": {
+      "status": "PASS"
+    },
+    "V009": {
+      "status": "PASS"
+    },
+    "V010": {
+      "status": "PASS"
+    },
+    "V011": {
+      "status": "PASS"
+    },
+    "V012": {
+      "status": "PASS"
+    },
+    "V013": {
+      "status": "PASS"
+    },
+    "V014": {
+      "status": "PASS"
+    },
+    "V015": {
+      "status": "PASS"
+    },
+    "V016": {
+      "status": "PASS"
+    },
+    "V017": {
+      "status": "PASS"
+    },
+    "V018": {
+      "status": "PASS"
+    },
+    "V019": {
+      "status": "PASS"
+    },
+    "V020": {
+      "status": "PASS"
+    },
+    "V021": {
+      "status": "PASS"
+    },
+    "V022": {
+      "status": "PASS"
+    },
+    "V023": {
+      "status": "PASS"
+    },
+    "V024": {
+      "status": "PASS"
+    },
+    "V025": {
+      "status": "PASS"
+    },
+    "V026": {
+      "status": "PASS"
+    },
+    "V027": {
+      "status": "PASS"
+    },
+    "V028": {
+      "status": "PASS"
+    },
+    "V029": {
+      "status": "PASS"
+    },
+    "V030": {
+      "status": "PASS"
+    },
+    "V031": {
+      "status": "PASS",
+      "evidence": {
+        "status": "terminal",
+        "execution_finished": true,
+        "outcome_known": false,
+        "quiescent": true,
+        "workspace_status": "stopped",
+        "event": "workspace:error"
+      }
+    },
+    "V032": {
+      "status": "PASS"
+    }
+  }
+}

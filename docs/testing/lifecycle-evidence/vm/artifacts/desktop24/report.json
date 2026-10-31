@@ -1,0 +1,47 @@
+{
+  "case": "V075",
+  "distro": "24.04",
+  "passed": true,
+  "cleanup_errors": [],
+  "recipe_sha256": "d97c659770ecb0f4cffb1114a81f108db8047b93ce0d1c463b5614514bbdee99",
+  "checks": [
+    {
+      "name": "full standard recipe builds",
+      "status": "PASS",
+      "seconds": 307.5162220489983,
+      "image_result": {
+        "size_bytes": "3634757632",
+        "min_disk_size_gb": 20,
+        "virtual_size_bytes": 21474836480
+      }
+    },
+    {
+      "name": "standalone publication identity, hash and disk floor",
+      "status": "PASS",
+      "manifest": {
+        "sha256": "7dd3f08bc59474b42674f2141b858657e4d7a2ac83a9eace42556e5c2b1fe6f2",
+        "version": 1,
+        "size_bytes": 3634757632,
+        "self_contained": true,
+        "virtual_size_bytes": 21474836480,
+        "min_disk_size_gb": 20
+      }
+    },
+    {
+      "name": "published image boots with native desktop dependencies",
+      "status": "PASS"
+    },
+    {
+      "name": "real KasmVNC and Xfce session",
+      "status": "PASS"
+    },
+    {
+      "name": "Chrome headless and visible GUI rendering",
+      "status": "PASS"
+    },
+    {
+      "name": "persistent disk survives stop and start",
+      "status": "PASS"
+    }
+  ]
+}

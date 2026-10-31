@@ -1,0 +1,73 @@
+{
+  "status": "PASS",
+  "historical_acceptance_cases": 578,
+  "historical_passed": 578,
+  "backend_mapped_cases": 134,
+  "runner_qemu_mapped_cases": 279,
+  "frontend_mapped_cases": 82,
+  "frontend_named_assertions": 86,
+  "xml_outcomes_identical_to_original": {
+    "backend/sqlite-final-verified.xml": {
+      "nodes": 1522,
+      "passed": 1501,
+      "skipped": 21,
+      "failed": 0
+    },
+    "backend/postgres-verified.xml": {
+      "nodes": 1522,
+      "passed": 1521,
+      "skipped": 1,
+      "failed": 0
+    },
+    "backend/projection-final-sqlite.xml": {
+      "nodes": 180,
+      "passed": 161,
+      "skipped": 19,
+      "failed": 0
+    },
+    "backend/projection-final-postgres.xml": {
+      "nodes": 180,
+      "passed": 180,
+      "skipped": 0,
+      "failed": 0
+    },
+    "runner/full-fresh-cache-final.xml": {
+      "nodes": 1372,
+      "passed": 1364,
+      "skipped": 8,
+      "failed": 0
+    },
+    "frontend/full-suite-green.xml": {
+      "nodes": 2247,
+      "passed": 2247,
+      "skipped": 0,
+      "failed": 0
+    },
+    "integration/frontend/merged-tests.xml": {
+      "nodes": 236,
+      "passed": 236,
+      "skipped": 0,
+      "failed": 0
+    },
+    "integration/runner/full-merged.xml": {
+      "nodes": 1405,
+      "passed": 1397,
+      "skipped": 8,
+      "failed": 0
+    },
+    "integration/backend/lifecycle-process-architecture.xml": {
+      "nodes": 461,
+      "passed": 461,
+      "skipped": 0,
+      "failed": 0
+    },
+    "integration/backend/runtime-contracts.xml": {
+      "nodes": 15,
+      "passed": 15,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "sanitization": "Allowlisted summaries and JUnit names/outcomes; no raw logs, commands, credentials, journals, process or auth snapshots.",
+  "local_links_checked": true
+}

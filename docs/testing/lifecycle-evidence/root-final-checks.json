@@ -1,0 +1,12 @@
+{
+  "runner_source_files_verified": 47,
+  "runner_source_changed": [],
+  "runner_source_sha256": "fdf012e45fa05d0051df573b49a954a48b1333858546441c86fe69f5ca2461fd",
+  "root_scripts_ruff": "PASS",
+  "root_scripts_py_compile": "PASS",
+  "desktop_session_bash_syntax": "PASS",
+  "rendered_recipe_bash_syntax": "PASS",
+  "git_diff_whitespace": "PASS",
+  "backend_source_files_verified": 50,
+  "backend_source_changed": []
+}

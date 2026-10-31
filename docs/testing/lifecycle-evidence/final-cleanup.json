@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "existing_user_workspace_unchanged": true,
+  "user_domain_state": "shut off",
+  "free_before_bytes": 18914537472,
+  "free_after_bytes": 20993716224,
+  "private_test_keys_and_journals_removed": true,
+  "remaining_domain_count": 1,
+  "remaining_network_count": 2,
+  "removed_disposable_path_count": 4,
+  "identifiers_and_paths_omitted": true
+}

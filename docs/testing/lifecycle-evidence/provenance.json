@@ -1,0 +1,264 @@
+{
+  "original_frozen_plan_sha256": "c6b3caf6184cb188781aa12633656fbe47f5d9d8036622f1deb7130cdabb3c8b",
+  "note": "Source paths are audit-relative labels, not filesystem links. Original artifact hashes identify the private workspace originals; portable hashes are separate.",
+  "artifacts": [
+    {
+      "source": "lifecycle-audit-20261031/plan-before-execution.md",
+      "source_sha256": "c6b3caf6184cb188781aa12633656fbe47f5d9d8036622f1deb7130cdabb3c8b",
+      "portable": "plan-before-execution.md",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/final-verification.json",
+      "source_sha256": "8a5c974f63bdd5ced2dae5f0a98811a3365d0b95d3ad302ed2269c51c990ef01",
+      "portable": "backend/final-verification.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/full-suite-verification.json",
+      "source_sha256": "c590793db3bae44415d4b98525ec775f8d06b721add588069013c4df67346303",
+      "portable": "backend/full-suite-verification.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/suite-counts.json",
+      "source_sha256": "0a294befba0f01b1be481e02cf14958c4f1c074336e8170506619ac04c108009",
+      "portable": "backend/suite-counts.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/final-code-sha256.json",
+      "source_sha256": "bebb29dc979b112db3b0365dab5d67b959c10ac0b06bdd04f574b3137a308005",
+      "portable": "backend/final-code-sha256.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/full-suite-source-sha256.json",
+      "source_sha256": "55cc332ff2dcc4c5bcd96999dccf5fbb9f7a81af56531984baddc2e9639edc5d",
+      "portable": "backend/full-suite-source-sha256.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/projection-baseline-extra-sha256.json",
+      "source_sha256": "8dd0a505ffc22152ac87f0a0f12fd7cc5a482b0da268768516d6c174e6d00d55",
+      "portable": "backend/projection-baseline-extra-sha256.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/runner/source-fingerprint.json",
+      "source_sha256": "e0aed1f63cf51c7ffff354fdcb17a86bc8fcaa120e7848fd13f4e49eedcf071d",
+      "portable": "runner/source-fingerprint.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/runner/catalog-coverage.json",
+      "source_sha256": "b5bdeb123ebaddadb1cf41d4f5160335dcf27140d26a15dc0921ff6512ed2ac2",
+      "portable": "runner/catalog-coverage.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/frontend/case-evidence-map.json",
+      "source_sha256": "6f200c9dd92f2e43bf6be49eaf4a8cf7ae07050b73f51b5729aea06d887201e1",
+      "portable": "frontend/case-evidence-map.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/root-final-checks.json",
+      "source_sha256": "7cd09b0dedaa2e193d1292dec642fe33df5aec09babef51e0cd7ae9b59491324",
+      "portable": "root-final-checks.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/resource-summary.json",
+      "source_sha256": "e4cd55e47925db67c1388fd78406699007301f00b3e684cba30f93477addb3d8",
+      "portable": "resource-summary.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/sqlite-final-verified.xml",
+      "source_sha256": "09a59039e3b030937e6c3a60f516f18117f6e474d6af5a27832ab5b18e23997d",
+      "portable": "backend/sqlite-final-verified.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/postgres-verified.xml",
+      "source_sha256": "3b800c1167a94d9c3c3f765d3b301648bd665c5945cbe31fc275713879df5335",
+      "portable": "backend/postgres-verified.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/projection-final-sqlite.xml",
+      "source_sha256": "0b315b5356af82ad2b053a739a55db0d672e8ff83cde5ec7927bf4211188af79",
+      "portable": "backend/projection-final-sqlite.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/projection-final-postgres.xml",
+      "source_sha256": "1f4c4df1762f47952a0d98603c113b3f5e4cc77a5bc8114d73601a05d8aefcad",
+      "portable": "backend/projection-final-postgres.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/runner/full-fresh-cache-final.xml",
+      "source_sha256": "2fc6b7d47ddda9f6feeb541f9910aeca8a77d249acce9914fde6010354a4c4cd",
+      "portable": "runner/full-fresh-cache-final.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/frontend/full-suite-green.xml",
+      "source_sha256": "25c00c4c5e2e780b7b3d987968f711fcfc21f6d3b3dd9be66ea3a951af8d8186",
+      "portable": "frontend/full-suite-green.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-push-integration/frontend/merged-tests.xml",
+      "source_sha256": "f21221d39d16bb23ce40a21dac09ab95eb24038682ce031e7efdd00214f54078",
+      "portable": "integration/frontend/merged-tests.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-push-integration/runner/full-merged.xml",
+      "source_sha256": "075860741fe575876bae46f372d6d42fb3a66ec47aa2deae33034a9bbdb3bdec",
+      "portable": "integration/runner/full-merged.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-push-integration/backend/lifecycle-process-architecture.xml",
+      "source_sha256": "a6bf73bbe5caa11fa193c81a8948a9ab6b8aa418ac3c05727b4cfc23c012327a",
+      "portable": "integration/backend/lifecycle-process-architecture.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-push-integration/backend/runtime-contracts.xml",
+      "source_sha256": "6cd5a88b71cbdfe862c34d8180affbc4f7a6cb2ba20e55cfec59ac94a9ee5900",
+      "portable": "integration/backend/runtime-contracts.xml",
+      "normalization": "Exact testcase names, outcomes and timings; host/output/properties and skip details omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/coverage.json",
+      "source_sha256": "545765d376f6e6aa65d3c012bcbf05159a8b13497ebc41bf7414fb4498b39531",
+      "portable": "backend/coverage.json",
+      "normalization": "Exact node IDs and statuses; repeated name and skip detail omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/cleanup.json",
+      "source_sha256": "979e7339b6274552e4b6697456f6c84ccaaf97632313f96051a8c171ef685ae6",
+      "portable": "backend/cleanup.json",
+      "normalization": "Only counts and success flags; database and role identifiers omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/backend/projection-cleanup.json",
+      "source_sha256": "979e7339b6274552e4b6697456f6c84ccaaf97632313f96051a8c171ef685ae6",
+      "portable": "backend/projection-cleanup.json",
+      "normalization": "Only counts and success flags; database and role identifiers omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/final-cleanup.json",
+      "source_sha256": "45abeac9258a581a01ce0ac4ee4fe715f12737f1d3a2350d476697544fb069ad",
+      "portable": "final-cleanup.json",
+      "normalization": "Preservation/outcome/counts; private resource identities and paths omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/frontend/browser-smoke.json",
+      "source_sha256": "e5d59979ee9df109cf70ca65d255fa0c999e1c215672c63158bb0b188ce44c1d",
+      "portable": "frontend/browser-smoke.json",
+      "normalization": "Assertions and page errors retained; fixture writes, auth snapshots and request metadata omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/frontend/offline-removal-queued.png",
+      "source_sha256": "061a4014ec2d4ac103e119e3cd22ce589a543ac2410caed47150acaa6a1eb6dc",
+      "portable": "frontend/offline-removal-queued.png",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/desktop24/desktop.png",
+      "source_sha256": "416b076673a514e7d21ea20db8e6f59817df968ca1d4d37c399e4a05bacf8582",
+      "portable": "vm/artifacts/desktop24/desktop.png",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/ubuntu22/report.json",
+      "source_sha256": "fbac96ecaf08cb66450a3139eba1551e7b7983f131b0491643196f105356b8f4",
+      "portable": "vm/artifacts/ubuntu22/report.json",
+      "normalization": "Status/assertions/timings and source digests only; process/resource identities, journals, raw output, paths and inventory snapshots omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/ubuntu24-final/report.json",
+      "source_sha256": "27232a930c733bb2f0a17f1652b76ef34710225dbd764d3fe0eaefc221e0862e",
+      "portable": "vm/artifacts/ubuntu24-final/report.json",
+      "normalization": "Status/assertions/timings and source digests only; process/resource identities, journals, raw output, paths and inventory snapshots omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/hardware-faults/report.json",
+      "source_sha256": "d9e3b7057360d425ea7791ab4d7ee6f0086166cac27bfbeaaea65b10c3810acb",
+      "portable": "vm/artifacts/hardware-faults/report.json",
+      "normalization": "Status/assertions/timings and source digests only; process/resource identities, journals, raw output, paths and inventory snapshots omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/crash-recovery/report.json",
+      "source_sha256": "3eff36500828a4c9277f0c73d18613d1a6b14a17b65d97cef95978dd74a0972f",
+      "portable": "vm/artifacts/crash-recovery/report.json",
+      "normalization": "Status/assertions/timings and source digests only; process/resource identities, journals, raw output, paths and inventory snapshots omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/desktop22/report.json",
+      "source_sha256": "aab913f845f56d658a303496810c31b989477c72d77ef66559ca597cfed43405",
+      "portable": "vm/artifacts/desktop22/report.json",
+      "normalization": "Status/assertions/timings and source digests only; process/resource identities, journals, raw output, paths and inventory snapshots omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/vm/artifacts/desktop24/report.json",
+      "source_sha256": "4d7c33156ad30dd1ab085d5ba396cc3daba6625d9307e953da45831684b54b3c",
+      "portable": "vm/artifacts/desktop24/report.json",
+      "normalization": "Status/assertions/timings and source digests only; process/resource identities, journals, raw output, paths and inventory snapshots omitted."
+    },
+    {
+      "source": "lifecycle-audit-continued/audit-summary.json",
+      "source_sha256": "964a26627a0c3fcc0899d6bfbe5252901ce9c23f55d20d2fbe6cf1c28d2ae2a7",
+      "portable": "audit-summary.json",
+      "normalization": "Historical acceptance results unchanged; artifact links made portable and audit/publication timing clarified."
+    },
+    {
+      "source": "lifecycle-audit-continued/case-results.json",
+      "source_sha256": "f6420ae784f2f66e8c7f9fc5bab4da484bfe58268054c121d32f6e19299ef132",
+      "portable": "case-results.json",
+      "normalization": "Historical acceptance results unchanged; artifact links made portable and audit/publication timing clarified."
+    },
+    {
+      "source": "lifecycle-push-integration/frontend/summary.json",
+      "source_sha256": "9ef9f6ece1f83e6a3ce411d16d93ca665d998716fa9e150bbf3397e20d4ef901",
+      "portable": "integration/frontend/summary.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-push-integration/backend/summary.json",
+      "source_sha256": "22acd8bfdb2d40e6bb5b899050821043df95b5140450cf3507a57a0155726ccd",
+      "portable": "integration/backend/summary.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-push-integration/runner/results.json",
+      "source_sha256": "108fd4f88e2edf783863841354a1f9370a78af3b356dde845c532690c9c5d755",
+      "portable": "integration/runner/summary.json",
+      "normalization": "Final counts only; source/output metadata omitted."
+    },
+    {
+      "source": "lifecycle-push-integration/runner/source-fingerprint-before.json",
+      "source_sha256": "1e00ba6bdaffce7a5d61472bac424726904579c0035a68331fc44e5361f181a7",
+      "portable": "integration/runner/source-fingerprint-before.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-push-integration/runner/source-fingerprint-after.json",
+      "source_sha256": "1e00ba6bdaffce7a5d61472bac424726904579c0035a68331fc44e5361f181a7",
+      "portable": "integration/runner/source-fingerprint-after.json",
+      "normalization": "unchanged"
+    },
+    {
+      "source": "lifecycle-push-integration/backend/source-final-tests.json",
+      "source_sha256": "ad1d6e94c7bab7ba138692d37782b535178254368f49f9f30cb3a2ad710e3d14",
+      "portable": "integration/backend/source-final-tests.json",
+      "normalization": "unchanged"
+    }
+  ]
+}

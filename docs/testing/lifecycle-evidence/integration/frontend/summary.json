@@ -1,0 +1,16 @@
+{
+  "merge_head": "06284115f1fda383b797d6f4af6fce6bf9ee3d0d",
+  "targeted_test_files": 10,
+  "passed": 236,
+  "skipped": 0,
+  "failed": 0,
+  "production_build": {
+    "command": "npm run build",
+    "includes": [
+      "vue-tsc --build",
+      "vite build"
+    ],
+    "exit_code": 0
+  },
+  "source_changes_by_root_during_tests": []
+}

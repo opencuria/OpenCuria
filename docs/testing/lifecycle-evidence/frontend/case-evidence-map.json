@@ -1,0 +1,931 @@
+{
+  "junit": "full-suite-green.xml",
+  "planned_case_count": 82,
+  "matched_named_assertions": 86,
+  "full_suite_named_tests": 2247,
+  "status": "PASS",
+  "cases": {
+    "F001": {
+      "expectation": "creating; runner online; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F001' 'creating' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F002": {
+      "expectation": "creating; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F002' 'creating' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F003": {
+      "expectation": "creating; runner offline; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F003' 'creating' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F004": {
+      "expectation": "creating; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F004' 'creating' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F005": {
+      "expectation": "running; runner online; recovery clear \u2192 stop, edit, capture, reset, remove enabled; chat ready.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F005' 'running' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F006": {
+      "expectation": "running; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F006' 'running' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F007": {
+      "expectation": "running; runner offline; recovery clear \u2192 remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F007' 'running' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F008": {
+      "expectation": "running; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F008' 'running' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F009": {
+      "expectation": "stopped; runner online; recovery clear \u2192 start, edit, capture, reset, remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F009' 'stopped' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F010": {
+      "expectation": "stopped; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F010' 'stopped' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F011": {
+      "expectation": "stopped; runner offline; recovery clear \u2192 remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F011' 'stopped' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F012": {
+      "expectation": "stopped; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F012' 'stopped' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F013": {
+      "expectation": "failed; runner online; recovery clear \u2192 edit, reset, remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F013' 'failed' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F014": {
+      "expectation": "failed; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F014' 'failed' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F015": {
+      "expectation": "failed; runner offline; recovery clear \u2192 remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F015' 'failed' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F016": {
+      "expectation": "failed; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F016' 'failed' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F017": {
+      "expectation": "pending_deletion; runner online; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F017' 'pending_deletion' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F018": {
+      "expectation": "pending_deletion; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F018' 'pending_deletion' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F019": {
+      "expectation": "pending_deletion; runner offline; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F019' 'pending_deletion' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F020": {
+      "expectation": "pending_deletion; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F020' 'pending_deletion' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F021": {
+      "expectation": "deleting; runner online; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F021' 'deleting' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F022": {
+      "expectation": "deleting; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F022' 'deleting' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F023": {
+      "expectation": "deleting; runner offline; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F023' 'deleting' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F024": {
+      "expectation": "deleting; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F024' 'deleting' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F025": {
+      "expectation": "deleted; runner online; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F025' 'deleted' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F026": {
+      "expectation": "deleted; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F026' 'deleted' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F027": {
+      "expectation": "deleted; runner offline; recovery clear \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F027' 'deleted' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F028": {
+      "expectation": "deleted; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F028' 'deleted' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F029": {
+      "expectation": "delete_failed; runner online; recovery clear \u2192 remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F029' 'delete_failed' online=true recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F030": {
+      "expectation": "delete_failed; runner online; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F030' 'delete_failed' online=true recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F031": {
+      "expectation": "delete_failed; runner offline; recovery clear \u2192 remove enabled; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F031' 'delete_failed' online=false recovery=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F032": {
+      "expectation": "delete_failed; runner offline; recovery pending \u2192 all mutations blocked; chat blocked.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > 'F032' 'delete_failed' online=false recovery=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F033": {
+      "expectation": "Running workspace; creating active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F033 active creating blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F034": {
+      "expectation": "Running workspace; starting active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F034 active starting blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F035": {
+      "expectation": "Running workspace; stopping active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F035 active stopping blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F036": {
+      "expectation": "Running workspace; restarting active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F036 active restarting blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F037": {
+      "expectation": "Running workspace; removing active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F037 active removing blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F038": {
+      "expectation": "Running workspace; capturing_image active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F038 active capturing_image blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F039": {
+      "expectation": "Running workspace; resetting active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F039 active resetting blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F040": {
+      "expectation": "Running workspace; updating active \u2192 all mutations and chat blocked; operation label retained.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/lib/workspaceLifecycle.test.ts",
+          "name": "canonical lifecycle state/action matrix > F040 active updating blocks every mutation",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F041": {
+      "expectation": "Image build absent; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F041' image undefined online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F042": {
+      "expectation": "Image build absent; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F042' image undefined online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F043": {
+      "expectation": "Image build pending; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F043' image 'pending' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F044": {
+      "expectation": "Image build pending; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F044' image 'pending' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F045": {
+      "expectation": "Image build building; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F045' image 'building' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F046": {
+      "expectation": "Image build building; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F046' image 'building' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F047": {
+      "expectation": "Image build active; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F047' image 'active' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F048": {
+      "expectation": "Image build active; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F048' image 'active' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F049": {
+      "expectation": "Image build deactivated; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F049' image 'deactivated' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F050": {
+      "expectation": "Image build deactivated; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F050' image 'deactivated' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F051": {
+      "expectation": "Image build failed; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F051' image 'failed' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F052": {
+      "expectation": "Image build failed; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F052' image 'failed' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F053": {
+      "expectation": "Image build pending_deletion; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F053' image 'pending_deletion' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F054": {
+      "expectation": "Image build pending_deletion; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F054' image 'pending_deletion' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F055": {
+      "expectation": "Image build deleting; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F055' image 'deleting' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F056": {
+      "expectation": "Image build deleting; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F056' image 'deleting' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F057": {
+      "expectation": "Image build delete_failed; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F057' image 'delete_failed' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F058": {
+      "expectation": "Image build delete_failed; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F058' image 'delete_failed' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F059": {
+      "expectation": "Image build deleted; runner online \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F059' image 'deleted' online=true",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F060": {
+      "expectation": "Image build deleted; runner offline \u2192 correct status/actions; locked definition blocks mutations; polling only for in-flight states.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/images/imageDefinitionLifecycle.test.ts",
+          "name": "'F060' image 'deleted' online=false",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F061": {
+      "expectation": "Workspace settings vCPU below minimum \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F061 rejects invalid qemuVcpus=0 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F062": {
+      "expectation": "Workspace settings vCPU above maximum \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F062 rejects invalid qemuVcpus=9 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F063": {
+      "expectation": "Workspace settings fractional vCPU \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F063 rejects invalid qemuVcpus=1.5 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F064": {
+      "expectation": "Workspace settings NaN vCPU \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F064 rejects invalid qemuVcpus=NaN before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F065": {
+      "expectation": "Workspace settings RAM below minimum \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F065 rejects invalid qemuMemoryMb=512 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F066": {
+      "expectation": "Workspace settings RAM above maximum \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F066 rejects invalid qemuMemoryMb=16385 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F067": {
+      "expectation": "Workspace settings fractional RAM \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F067 rejects invalid qemuMemoryMb=4096.5 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F068": {
+      "expectation": "Workspace settings disk below minimum \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F068 rejects invalid qemuDiskSizeGb=19 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F069": {
+      "expectation": "Workspace settings disk above maximum \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F069 rejects invalid qemuDiskSizeGb=201 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F070": {
+      "expectation": "Workspace settings fractional disk \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F070 rejects invalid qemuDiskSizeGb=50.5 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F071": {
+      "expectation": "Workspace settings odd desktop width \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F071 rejects invalid desktopWidth=1921 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F072": {
+      "expectation": "Workspace settings odd desktop height \u2192 no PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F072 rejects invalid desktopHeight=1081 before any PATCH",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F073": {
+      "expectation": "Workspace settings resource lower bounds \u2192 one PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F073 accepts valid resource limits",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F074": {
+      "expectation": "Workspace settings resource upper bounds \u2192 one PATCH; validation precedes any restart request.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/EditWorkspaceDialog.test.ts",
+          "name": "EditWorkspaceDialog single-patch workspace configuration > F074 accepts valid resource limits",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F075": {
+      "expectation": "Failed workspace deletion \u2192 retry removal available to ordinary user.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/WorkspaceActions.test.ts",
+          "name": "WorkspaceActions menu > F075 offers failed-deletion retry to ordinary users",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F076": {
+      "expectation": "Runner offline \u2192 workspace removal remains available and queues server-side.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/stores/workspaces.test.ts",
+          "name": "workspace transition state > F076 labels accepted offline removal as queued until runner reconnection",
+          "status": "PASS"
+        },
+        {
+          "file": "src/components/workspaces/WorkspaceActions.test.ts",
+          "name": "WorkspaceActions menu > F076 permits queued offline removal while blocking runner-dependent actions",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F077": {
+      "expectation": "Deleted workspace \u2192 no action controls or misleading Working spinner.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/WorkspaceActions.test.ts",
+          "name": "WorkspaceActions menu > F077 hides controls for a fully deleted workspace",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F078": {
+      "expectation": "Interrupted offline workspace \u2192 reconnect recovery message; no administrator required.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/workspaces/WorkspaceActions.test.ts",
+          "name": "WorkspaceActions menu > F078 explains offline automatic recovery without administrator acknowledgment",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F079": {
+      "expectation": "Clean stopped workspace in chat header \u2192 capture enabled without requiring running chat.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/chat/WorkspaceChatHeader.test.ts",
+          "name": "WorkspaceChatHeader > F079 captures a clean stopped workspace even though chat cannot run",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F080": {
+      "expectation": "Runner disconnects during operation \u2192 header and card prominently report Runner offline.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/views/WorkspacesView.test.ts",
+          "name": "WorkspacesView workspace storage > F080 prioritizes runner offline on cards while an operation is interrupted",
+          "status": "PASS"
+        },
+        {
+          "file": "src/components/chat/WorkspaceChatHeader.test.ts",
+          "name": "WorkspaceChatHeader > F080 prioritizes runner disconnect over an in-flight operation label",
+          "status": "PASS"
+        },
+        {
+          "file": "src/components/layout/sidebar/ConversationWorkspaceList.test.ts",
+          "name": "ConversationWorkspaceList > F080 reports offline instead of stale activity in sidebar: {\"active_operation\":\"capturing_image\"}",
+          "status": "PASS"
+        },
+        {
+          "file": "src/components/layout/sidebar/ConversationWorkspaceList.test.ts",
+          "name": "ConversationWorkspaceList > F080 reports offline instead of stale activity in sidebar: {\"intervention_required\":true}",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F081": {
+      "expectation": "Failed/stopped header state \u2192 no green running indicator.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/components/chat/WorkspaceChatHeader.test.ts",
+          "name": "WorkspaceChatHeader > F081 never shows a green running indicator for failed or stopped workspaces",
+          "status": "PASS"
+        }
+      ]
+    },
+    "F082": {
+      "expectation": "Creating/deleting state without active-operation event \u2192 store keeps actions blocked and supplies state label.",
+      "status": "PASS",
+      "assertions": [
+        {
+          "file": "src/stores/workspaces.test.ts",
+          "name": "workspace transition state > F082 fences persisted lifecycle transitions even without an operation event",
+          "status": "PASS"
+        }
+      ]
+    }
+  }
+}

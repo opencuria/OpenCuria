@@ -1,0 +1,259 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites>
+  <testsuite name="src/lib/conversationGroups.test.ts" timestamp="2026-10-31T11:46:08.926Z" tests="39" failures="0" errors="0" skipped="0" time="0.039502721">
+    <testcase classname="src/lib/conversationGroups.test.ts" name="conversationTitle &gt; returns the trimmed title or a fallback" time="0.001869026" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="formatTimeAgo &gt; uses compact labels" time="0.000576504" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractActiveConversations &gt; puts busy sessions ahead of unread and caps at 5" time="0.001016237" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractActiveConversations &gt; excludes chats that need attention" time="0.000408643" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractActionRequired &gt; returns attention chats newest first" time="0.000348206" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractInboxConversations &gt; prioritizes gates over newer unread results, newest first in each group" time="0.000867168" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractInboxConversations &gt; includes idle unread from stopped/unknown workspaces but keeps gate visibility unchanged" time="0.014445971" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractInboxConversations &gt; excludes busy unread even when manually marked, unless a gate is waiting" time="0.000259374" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="extractInboxConversations &gt; has deterministic timestamp ties and does not cap unread results" time="0.000791279" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; groups duplicate names by ID with deterministic workspace ID ties" time="0.000753615" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; sorts live first, then numeric and case-insensitive alphabetical names in both partitions" time="0.001338694" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; includes only RUNNING workspaces, even when their runner is offline" time="0.00036944" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; includes only the currently open stopped workspace until selection changes" time="0.000710343" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary creating workspace" time="0.000215936" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary failed workspace" time="0.000132728" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary pending_deletion workspace" time="0.000138326" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary deleting workspace" time="0.000118058" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary deleted workspace" time="0.000113315" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary delete_failed workspace" time="0.000113351" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not reveal an active ordinary unknown workspace" time="0.000113112" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; keeps all active stopped chats sorted without mutating raw inputs" time="0.000786916" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; ignores activity, updated timestamps, busy and unread, sorting chats by last message then session ID" time="0.000640711" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not mutate input arrays or workspace and chat objects" time="0.00071005" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; prefers current workspace names, then chat names, then a short workspace ID" time="0.000388073" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary creating workspaces with chats during non-capture operations" time="0.00052045" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary stopped workspaces with chats during non-capture operations" time="0.000386983" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary failed workspaces with chats during non-capture operations" time="0.000253467" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary pending_deletion workspaces with chats during non-capture operations" time="0.000252341" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary deleting workspaces with chats during non-capture operations" time="0.000364031" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary deleted workspaces with chats during non-capture operations" time="0.000210611" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; excludes ordinary delete_failed workspaces with chats during non-capture operations" time="0.000206641" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; retains stopped reserved history but never deletion states: {&quot;active_operation&quot;:&quot;capturing_image&quot;}" time="0.0023704" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; retains stopped reserved history but never deletion states: {&quot;intervention_required&quot;:true}" time="0.001313087" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; shows empty running workspaces, including literal running status with an offline runner" time="0.000364624" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; omits unknown history while the workspace list loads until a running workspace arrives" time="0.000489395" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; does not apply a global workspace or conversation cap" time="0.001179237" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="groupConversationsByWorkspace &gt; removes stopped groups and restores their chats on start without changing raw inputs" time="0.000819038" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="selectSidebarWorkspaces &gt; hides stopped workspaces without chats and prefers live ones" time="0.000462944" />
+    <testcase classname="src/lib/conversationGroups.test.ts" name="selectSidebarWorkspaces &gt; caps at the requested limit" time="0.000192378" />
+  </testsuite>
+  <testsuite name="src/lib/harnessMessageCopy.test.ts" timestamp="2026-10-31T11:46:08.946Z" tests="9" failures="0" errors="0" skipped="0" time="0.013288706">
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; returns the complete raw user prompt, including markdown, even during streaming" time="0.001854356" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; copies a complete text-only answer without changing markdown or whitespace" time="0.000829109" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; copies only the final answer after interleaved tools and reasoning" time="0.000326014" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; does not copy earlier prose or stale content when there is no final text" time="0.002687692" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; does not mix stale content into empty trailing text or copy empty final parts" time="0.000284134" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; does not offer assistant copy while streaming, including after cancellation state" time="0.0007604" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; does not copy aggregate content without visible text parts" time="0.001745372" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; keeps trailing text after compaction and excludes compaction content" time="0.000257699" />
+    <testcase classname="src/lib/harnessMessageCopy.test.ts" name="getMessageCopyText &gt; never copies steer text and only the closing prose after it" time="0.002923193" />
+  </testsuite>
+  <testsuite name="src/lib/workspaceLifecycle.test.ts" timestamp="2026-10-31T11:46:08.950Z" tests="40" failures="0" errors="0" skipped="0" time="0.0900174">
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F001' 'creating' online=true recovery=false" time="0.018601458" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F002' 'creating' online=true recovery=true" time="0.001346145" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F003' 'creating' online=false recovery=false" time="0.000658462" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F004' 'creating' online=false recovery=true" time="0.000769982" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F005' 'running' online=true recovery=false" time="0.009972725" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F006' 'running' online=true recovery=true" time="0.001133895" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F007' 'running' online=false recovery=false" time="0.000970828" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F008' 'running' online=false recovery=true" time="0.000779505" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F009' 'stopped' online=true recovery=false" time="0.003068383" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F010' 'stopped' online=true recovery=true" time="0.00200443" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F011' 'stopped' online=false recovery=false" time="0.000521279" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F012' 'stopped' online=false recovery=true" time="0.004001839" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F013' 'failed' online=true recovery=false" time="0.000749234" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F014' 'failed' online=true recovery=true" time="0.000730361" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F015' 'failed' online=false recovery=false" time="0.000610611" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F016' 'failed' online=false recovery=true" time="0.001474955" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F017' 'pending_deletion' online=true recovery=false" time="0.000482699" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F018' 'pending_deletion' online=true recovery=true" time="0.000582553" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F019' 'pending_deletion' online=false recovery=false" time="0.005459052" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F020' 'pending_deletion' online=false recovery=true" time="0.000843907" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F021' 'deleting' online=true recovery=false" time="0.000612935" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F022' 'deleting' online=true recovery=true" time="0.004809551" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F023' 'deleting' online=false recovery=false" time="0.00093123" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F024' 'deleting' online=false recovery=true" time="0.000660276" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F025' 'deleted' online=true recovery=false" time="0.000595878" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F026' 'deleted' online=true recovery=true" time="0.006278056" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F027' 'deleted' online=false recovery=false" time="0.000727789" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F028' 'deleted' online=false recovery=true" time="0.000646485" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F029' 'delete_failed' online=true recovery=false" time="0.000562004" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F030' 'delete_failed' online=true recovery=true" time="0.002191563" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F031' 'delete_failed' online=false recovery=false" time="0.000869674" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; 'F032' 'delete_failed' online=false recovery=true" time="0.00313286" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F033 active creating blocks every mutation" time="0.001647472" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F034 active starting blocks every mutation" time="0.00056962" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F035 active stopping blocks every mutation" time="0.000503447" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F036 active restarting blocks every mutation" time="0.000723725" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F037 active removing blocks every mutation" time="0.00195922" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F038 active capturing_image blocks every mutation" time="0.000836013" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F039 active resetting blocks every mutation" time="0.00197579" />
+    <testcase classname="src/lib/workspaceLifecycle.test.ts" name="canonical lifecycle state/action matrix &gt; F040 active updating blocks every mutation" time="0.002115529" />
+  </testsuite>
+  <testsuite name="src/stores/workspaces.test.ts" timestamp="2026-10-31T11:46:08.962Z" tests="24" failures="0" errors="0" skipped="0" time="0.128006514">
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace transition state &gt; F076 labels accepted offline removal as queued until runner reconnection" time="0.025647387" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace transition state &gt; F082 fences persisted lifecycle transitions even without an operation event" time="0.005107822" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace transition state &gt; coalesces workspace detail requests and ignores an older route response" time="0.001245619" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace transition state &gt; derives transition labels from backend active_operation" time="0.011102587" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace transition state &gt; clears optimistic pending state when the backend operation resets" time="0.00406457" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace transition state &gt; treats deleted workspaces as completed removals" time="0.0060154" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace credential updates &gt; applies credentials_present from PATCH and toasts a live apply on running workspaces" time="0.007721259" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace credential updates &gt; sends plugin IDs in one workspace patch and warns when runner synchronization is pending" time="0.008331117" />
+    <testcase classname="src/stores/workspaces.test.ts" name="workspace credential updates &gt; toasts a deferred apply when credentials change on a stopped workspace" time="0.001167542" />
+    <testcase classname="src/stores/workspaces.test.ts" name="automatic capture fence &gt; keeps Capturing through stop/resume from running until authoritative completion" time="0.008177451" />
+    <testcase classname="src/stores/workspaces.test.ts" name="automatic capture fence &gt; keeps Capturing through stop/resume from stopped until authoritative completion" time="0.001112881" />
+    <testcase classname="src/stores/workspaces.test.ts" name="automatic capture fence &gt; rolls back failed requests and prevents duplicate capture and workspace mutations" time="0.008631718" />
+    <testcase classname="src/stores/workspaces.test.ts" name="automatic capture fence &gt; ignores a pre-request REST null and reconciles a fresh REST completion after acceptance" time="0.000941349" />
+    <testcase classname="src/stores/workspaces.test.ts" name="preserves newer operation events during deferred list responses" time="0.010736974" />
+    <testcase classname="src/stores/workspaces.test.ts" name="preserves newer operation events during deferred detail responses" time="0.000821481" />
+    <testcase classname="src/stores/workspaces.test.ts" name="reconciles missed completion via a fresh fetch after acceptance, without joining older detail loads" time="0.000718591" />
+    <testcase classname="src/stores/workspaces.test.ts" name="resets completed on a newer capture while acceptance is pending" time="0.00089622" />
+    <testcase classname="src/stores/workspaces.test.ts" name="releases Capturing on unknown completion but preserves intervention until explicitly cleared" time="0.004721247" />
+    <testcase classname="src/stores/workspaces.test.ts" name="restores persisted intervention and preserves newer intervention flags during deferred REST" time="0.001052549" />
+    <testcase classname="src/stores/workspaces.test.ts" name="keeps an observed capture reserved after a child error until authoritative completion" time="0.003194505" />
+    <testcase classname="src/stores/workspaces.test.ts" name="preserves pre-acceptance capture on error but clears the optimistic lock on API rejection" time="0.002201789" />
+    <testcase classname="src/stores/workspaces.test.ts" name="preserves legacy noncapture error cleanup" time="0.003852998" />
+    <testcase classname="src/stores/workspaces.test.ts" name="recreateWorkspace &gt; requests the explicit version and shows the update label while running" time="0.001207341" />
+    <testcase classname="src/stores/workspaces.test.ts" name="recreateWorkspace &gt; reports conflicts and does nothing while another action runs" time="0.00075881" />
+  </testsuite>
+  <testsuite name="src/views/WorkspacesView.test.ts" timestamp="2026-10-31T11:46:08.967Z" tests="8" failures="0" errors="0" skipped="0" time="0.636512146">
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; F080 prioritizes runner offline on cards while an operation is interrupted" time="0.237355387" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; shows free space inside each workspace and hides unmeasured storage" time="0.12112798" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; highlights an almost full disk and dates a stopped workspace's last measurement" time="0.070212718" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; flags high CPU or memory but not a full host overlay as high usage" time="0.093277075" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; still opens the selected workspace" time="0.048838539" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; combines active session activity into the running status" time="0.01352502" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; keeps a blocked operation visible without opening its actions menu" time="0.022120606" />
+    <testcase classname="src/views/WorkspacesView.test.ts" name="WorkspacesView workspace storage &gt; uses readable labels for compound workspace statuses" time="0.028064378" />
+  </testsuite>
+  <testsuite name="src/components/chat/WorkspaceChatHeader.test.ts" timestamp="2026-10-31T11:46:08.969Z" tests="25" failures="0" errors="0" skipped="0" time="1.460106726">
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; renders the chat name large and the workspace name as a subtle subline" time="0.242185435" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; falls back to New chat when no session title is set" time="0.041071517" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; renames the workspace inline" time="0.090351397" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; shows transition status as muted text with a dot, not badges" time="0.071409153" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; shows an amber status dot when a session is active" time="0.041689028" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; shows a stop action in the overflow menu for a running workspace" time="0.045858967" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; shows a start action in the overflow menu for a stopped workspace" time="0.048994941" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; F079 captures a clean stopped workspace even though chat cannot run" time="0.054769617" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; F080 prioritizes runner disconnect over an in-flight operation label" time="0.056857093" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; F081 never shows a green running indicator for failed or stopped workspaces" time="0.073360807" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; disables the power button while a transition is running" time="0.044178506" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; emits side panel toggle, processes toggle and new chat" time="0.024608223" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; places the side panel toggle right of the overflow menu" time="0.025274672" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; places background processes immediately left of the overflow menu" time="0.046872698" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; plays the entrance animation when animateEntrance is set" time="0.058110391" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; does not play the entrance animation by default" time="0.029219478" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; routes overflow actions through emits" time="0.036579742" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; hides the back button and breadcrumb on a root session" time="0.042005411" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; shows a back button and breadcrumb in a subagent session" time="0.061179569" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; collapses middle ancestors into a dropdown when the chain is deep" time="0.032111493" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader &gt; falls back to parent_id when the parent session is not in the lineage" time="0.024378724" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="disables actions including an already-open rename during capture" time="0.080499791" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader workspace status &gt; keeps the status line quiet while the disk has room" time="0.067345725" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader workspace status &gt; surfaces an almost full disk next to the status, escalating when full" time="0.082442779" />
+    <testcase classname="src/components/chat/WorkspaceChatHeader.test.ts" name="WorkspaceChatHeader workspace status &gt; asks for more disk when the user requests it from the status panel" time="0.028219448" />
+  </testsuite>
+  <testsuite name="src/components/images/imageDefinitionLifecycle.test.ts" timestamp="2026-10-31T11:46:08.977Z" tests="32" failures="0" errors="0" skipped="0" time="0.023316573">
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="formatRunnerBuildSummary &gt; uses API counts without requiring expanded builds" time="0.003626162" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="formatRunnerBuildSummary &gt; shows a clear empty state instead of zeros" time="0.000343635" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="formatRunnerBuildSummary &gt; includes inactive and removing counts when present" time="0.00018229" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="getRunnerBuildActions &gt; offers Build when the runner has never been assigned" time="0.000949191" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="getRunnerBuildActions &gt; offers Rebuild as the primary action for an active image" time="0.004420656" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="getRunnerBuildActions &gt; activates a deactivated image without requiring rebuild as the primary action" time="0.000284204" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="getRunnerBuildActions &gt; offers retry and log for failed builds" time="0.000281739" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="getRunnerBuildActions &gt; hides runner mutations while a definition delete is in flight" time="0.000188012" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="getRunnerBuildStatusLabel &gt; labels pending offline builds as waiting for the runner" time="0.000364285" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F041' image undefined online=true" time="0.003599399" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F042' image undefined online=false" time="0.000252951" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F043' image 'pending' online=true" time="0.000162183" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F044' image 'pending' online=false" time="0.000137343" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F045' image 'building' online=true" time="0.000164397" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F046' image 'building' online=false" time="0.000217216" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F047' image 'active' online=true" time="0.000165265" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F048' image 'active' online=false" time="0.000135738" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F049' image 'deactivated' online=true" time="0.000145467" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F050' image 'deactivated' online=false" time="0.000151126" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F051' image 'failed' online=true" time="0.000165891" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F052' image 'failed' online=false" time="0.000127458" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F053' image 'pending_deletion' online=true" time="0.000133953" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F054' image 'pending_deletion' online=false" time="0.000120274" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F055' image 'deleting' online=true" time="0.000113915" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F056' image 'deleting' online=false" time="0.000113253" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F057' image 'delete_failed' online=true" time="0.000125678" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F058' image 'delete_failed' online=false" time="0.002557392" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F059' image 'deleted' online=true" time="0.000193427" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="'F060' image 'deleted' online=false" time="0.000131464" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="definition visibility and actions &gt; hides fully deleted definitions" time="0.000358217" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="definition visibility and actions &gt; locks mutations during deletion and exposes restore after failure" time="0.001079571" />
+    <testcase classname="src/components/images/imageDefinitionLifecycle.test.ts" name="definition visibility and actions &gt; keeps deleting definitions out of the workspace picker" time="0.00023938" />
+  </testsuite>
+  <testsuite name="src/components/layout/ChatSidebar.test.ts" timestamp="2026-10-31T11:46:08.988Z" tests="24" failures="0" errors="0" skipped="0" time="6.264917996">
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; renders the OpenCuria brand name" time="0.694969648" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; starts each shared data poll with a single initial request" time="0.311947666" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; shows unread chats in their workspace and hides empty stopped workspaces" time="0.291045487" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; shows action-required chats at the top and in their workspace" time="0.236238085" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; hides stopped-workspace chats even when they require action" time="0.093035435" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; shows stopped history only while its workspace detail route is open" time="0.269329281" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; marks unread chats in the opened stopped workspace and running workspaces as read" time="0.51801504" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; combines gates and idle unread across workspaces with one count and no busy results" time="0.392408452" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; hides the inbox when there are only read or busy chats" time="0.212207862" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; opens and marks a stopped workspace inbox chat as read" time="0.284931516" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; persists collapsed workspace IDs across sidebar remounts, without navigating" time="0.490387371" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; keeps collapsed inbox results readable while capture disables their mutations" time="0.186199727" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; renders new chat and search actions" time="0.108046914" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; navigates to the workspace thread on chat click" time="0.192428181" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; starts with four chats and reveals four more per click" time="0.244007517" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; marks only unread chats from running workspaces as read" time="0.16342943" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; opens workspace navigation and management from the merged list" time="0.189340539" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; forwards rename and read actions from workspace chat rows" time="0.166343997" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; places scheduled tasks after the workspace chat section and opens settings without navigation" time="0.257939683" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; shows scheduled task titles on their own line with concise cadence and pauses" time="0.200074375" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; opens the scheduled-task calendar from the section and the collapsed rail" time="0.165815809" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; keeps active once tasks visible until completion and marks recurring runs" time="0.330575059" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; shows empty chat state for a running workspace" time="0.082852754" />
+    <testcase classname="src/components/layout/ChatSidebar.test.ts" name="ChatSidebar &gt; emits opencuria:open-settings from the user menu" time="0.179511813" />
+  </testsuite>
+  <testsuite name="src/components/workspaces/EditWorkspaceDialog.test.ts" timestamp="2026-10-31T11:46:08.996Z" tests="20" failures="0" errors="0" skipped="0" time="0.844241448">
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F061 rejects invalid qemuVcpus=0 before any PATCH" time="0.200066583" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F062 rejects invalid qemuVcpus=9 before any PATCH" time="0.043953099" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F063 rejects invalid qemuVcpus=1.5 before any PATCH" time="0.028293479" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F064 rejects invalid qemuVcpus=NaN before any PATCH" time="0.044324362" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F065 rejects invalid qemuMemoryMb=512 before any PATCH" time="0.020801697" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F066 rejects invalid qemuMemoryMb=16385 before any PATCH" time="0.038641296" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F067 rejects invalid qemuMemoryMb=4096.5 before any PATCH" time="0.013654693" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F068 rejects invalid qemuDiskSizeGb=19 before any PATCH" time="0.039897298" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F069 rejects invalid qemuDiskSizeGb=201 before any PATCH" time="0.044128499" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F070 rejects invalid qemuDiskSizeGb=50.5 before any PATCH" time="0.035861688" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F071 rejects invalid desktopWidth=1921 before any PATCH" time="0.050904806" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F072 rejects invalid desktopHeight=1081 before any PATCH" time="0.020677996" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F073 accepts valid resource limits" time="0.041177229" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; F074 accepts valid resource limits" time="0.038077621" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; restores persisted plugin IDs and sends one final PATCH containing credentials, plugins and resource fields" time="0.047364273" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; restores edit fields and selected references after a new component is mounted" time="0.049641615" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; submits no patch while shared selector has unsatisfied required dependencies" time="0.018936505" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; focuses the storage size when opened to increase the disk" time="0.023834032" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; keeps the default focus when not opened for the disk" time="0.014728863" />
+    <testcase classname="src/components/workspaces/EditWorkspaceDialog.test.ts" name="EditWorkspaceDialog single-patch workspace configuration &gt; keeps the edit dialog open when the single backend update fails" time="0.025890127" />
+  </testsuite>
+  <testsuite name="src/components/workspaces/WorkspaceActions.test.ts" timestamp="2026-10-31T11:46:09.000Z" tests="15" failures="0" errors="0" skipped="0" time="3.095366023">
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; keeps stop and the menu visible and opens editing without clicking through the card" time="0.764289124" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; starts a stopped workspace directly" time="0.050312415" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; F075 offers failed-deletion retry to ordinary users" time="0.373423106" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; F076 permits queued offline removal while blocking runner-dependent actions" time="0.168435123" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; F077 hides controls for a fully deleted workspace" time="0.003788527" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; F078 explains offline automatic recovery without administrator acknowledgment" time="0.147461437" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; emits capture and reset from the menu" time="0.258069282" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; requires confirmation before removing a workspace" time="0.238535999" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; blocks capture when stopped credentials remain on disk" time="0.132904871" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; allows capture of a stopped workspace after credentials have been removed" time="0.206564415" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; blocks runner-dependent actions offline while keeping queued removal accessible" time="0.128319298" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; shows a single pending action and disables menu actions during transitions" time="0.176766779" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; links admins to runner activity while keeping lifecycle actions blocked" time="0.182135452" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; explains automatic recovery without requiring an administrator" time="0.112463354" />
+    <testcase classname="src/components/workspaces/WorkspaceActions.test.ts" name="WorkspaceActions menu &gt; respects the hidden destructive actions setting" time="0.149638394" />
+  </testsuite>
+</testsuites>

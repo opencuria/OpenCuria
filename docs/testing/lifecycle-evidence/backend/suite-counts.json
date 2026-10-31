@@ -1,0 +1,40 @@
+{
+  "full_baseline": {
+    "sqlite": {
+      "total": 1522,
+      "passed": 1501,
+      "skipped": 21,
+      "source": [
+        "sqlite-final-verified.xml"
+      ]
+    },
+    "postgres": {
+      "total": 1522,
+      "passed": 1521,
+      "skipped": 1,
+      "source": [
+        "postgres-verified.xml"
+      ]
+    }
+  },
+  "focused_post_suite_delta": {
+    "sqlite": {
+      "total": 180,
+      "passed": 161,
+      "skipped": 19,
+      "source": [
+        "projection-final-sqlite.xml"
+      ]
+    },
+    "postgres": {
+      "total": 180,
+      "passed": 180,
+      "skipped": 0,
+      "source": [
+        "projection-final-postgres.xml"
+      ]
+    }
+  },
+  "catalog_case_groups": 134,
+  "node_count_method": "JUnit testcase elements, with no subtest inflation; merged coverage is not claimed as a new complete suite"
+}

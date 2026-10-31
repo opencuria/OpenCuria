@@ -1,0 +1,8 @@
+{
+  "passed": 1397,
+  "skipped": 8,
+  "failed": 0,
+  "subtests_passed_separately": 36,
+  "junit": "full-merged.xml",
+  "source_changed_by_runner_owner": false
+}

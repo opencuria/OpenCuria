@@ -1,0 +1,145 @@
+{
+  "verification_complete": true,
+  "introduction": [
+    "Expectations were recorded before execution. The [original frozen plan](plan-before-execution.md), explicit continuation addenda and exact evidence remain available. New findings were added before their regression tests ran. Catalog entries are acceptance groups; parametrized executable tests and broad suite totals are reported separately.",
+    "",
+    "## Changes and state model",
+    "",
+    "- Removed the redundant backend/API workspace `removed` status; migration 0031 normalizes old rows to `deleted`. Runtime removal remains a transport observation.",
+    "- Execution outcome, delivery/proof phase and parent workflow phase remain distinct because they authorize different effects. The legacy internal `intervention` phase now waits for automatic verification; ordinary interruption recovery requires no administrator acknowledgement.",
+    "- Unknown initialization is never replayed. Exact, fresh, sealed quiescence closes interrupted history into a retryable failure. Partial files stay until an ordinary authorized remove; durable allocation lineage allows exact lost-cache cleanup and completed removal revokes stale ownership.",
+    "- Capacity includes retained and stopped disks, unresolved operations, parent workflows and confirmed sizing after failed settings changes. Undelivered actions on existing guests never claim physical absence. Disk shrink and invalid activation requests fail before mutation.",
+    "- Publication integrity is separate from dependency graph completeness. A readable corrupt image becomes unusable, while unrelated cleanup proceeds and backing dependencies remain protected. Unreadable backing metadata still blocks destructive work.",
+    "- Direct, discovered and inventory power-state observations now agree. Explicit paused, crashed, suspended, stopping or unknown guests cannot remain chat-ready. Non-stopped observations revoke stale credential scrub proof. Missing rows cannot prove absence.",
+    "- UI eligibility is shared across list and detail actions. Normal users can retry failed deletion and queue removal while offline. Pending/recovery states have clear labels and block conflicting actions. Invalid resource inputs are rejected before mutation.",
+    "- Fresh runtime startup creates every configured owned storage root, including the image cache. A first inventory before any download is complete; permission errors fail startup clearly instead of silently stranding recovery.",
+    "- Invalid current image publications also project a failed assignment in the image summary. Rebuilds enter pending even while the old pointer is retained; a failed successor cannot restore an unusable predecessor to active. Newer generations and deletion/deactivated state remain protected.",
+    "",
+    "All implementation edits stayed in this repository; reference repositories and existing user work were preserved. At historical audit completion, no commit or external deployment had yet been performed. Later integration and publication are documented separately."
+  ],
+  "suite_rows": [
+    {
+      "name": "Backend complete baseline — SQLite",
+      "result": "1501 passed; 21 skipped; final projection delta tested separately below",
+      "evidence": "[JUnit](backend/sqlite-final-verified.xml)"
+    },
+    {
+      "name": "Backend complete baseline — PostgreSQL",
+      "result": "1521 passed; 1 skipped; final projection delta tested separately below",
+      "evidence": "[JUnit](backend/postgres-verified.xml)"
+    },
+    {
+      "name": "Final backend image-projection delta — SQLite",
+      "result": "161 passed; 19 skipped; 180 nodes, including 13 new B131–B134 nodes",
+      "evidence": "[JUnit](backend/projection-final-sqlite.xml), [source scope](backend/final-verification.json)"
+    },
+    {
+      "name": "Final backend image-projection delta — PostgreSQL",
+      "result": "180 passed; 0 skipped; 180 nodes, including 13 new B131–B134 nodes",
+      "evidence": "[JUnit](backend/projection-final-postgres.xml), [source scope](backend/final-verification.json)"
+    },
+    {
+      "name": "Runner complete suite",
+      "result": "1364 passed; 8 skipped; 36 subtests passed",
+      "evidence": "[JUnit](runner/full-fresh-cache-final.xml)"
+    },
+    {
+      "name": "Frontend complete suite",
+      "result": "2247 passed; 0 skipped",
+      "evidence": "[JUnit](frontend/full-suite-green.xml)"
+    },
+    {
+      "name": "Frontend production build, type check, touched-file lint",
+      "result": "PASS",
+      "evidence": "[Build](frontend/checks.json), [type check](frontend/checks.json), [lint](frontend/checks.json)"
+    },
+    {
+      "name": "Headed production Chromium with isolated API fixtures",
+      "result": "16 assertions passed; 0 page errors",
+      "evidence": "[Browser evidence](frontend/browser-smoke.json)"
+    },
+    {
+      "name": "Real KVM lifecycle matrices — Ubuntu 22.04 and 24.04",
+      "result": "64 cases passed; parallel builds and queued third build included",
+      "evidence": "[22.04](vm/artifacts/ubuntu22/report.json), [24.04](vm/artifacts/ubuntu24-final/report.json)"
+    },
+    {
+      "name": "Storage, hardware admission and guest failure boundaries",
+      "result": "5 cases passed",
+      "evidence": "[Evidence](vm/artifacts/hardware-faults/report.json)"
+    },
+    {
+      "name": "Real runner process SIGKILL recovery",
+      "result": "3 additional cases passed",
+      "evidence": "[Evidence](vm/artifacts/crash-recovery/report.json)"
+    },
+    {
+      "name": "Root verification harness lint/compilation, shell syntax and whitespace",
+      "result": "PASS; final runner source fingerprint unchanged",
+      "evidence": "[Checks](root-final-checks.json)"
+    },
+    {
+      "name": "Backend architecture, lint and migration consistency",
+      "result": "13 architecture assertions pass on both databases; 50 Python files lint clean; no migration drift",
+      "evidence": "[Review](backend/review.md), [migration check](backend/checks.json), [lint](backend/checks.json)"
+    },
+    {
+      "name": "Complete standard desktop image recipes — Ubuntu 22.04 and 24.04",
+      "result": "Both passed: build/publication, boot/dependencies, real Xfce/KasmVNC, visible/headless Chrome, persistent stop/start; all test resources removed",
+      "evidence": "[22.04](vm/artifacts/desktop22/report.json), [24.04](vm/artifacts/desktop24/report.json)"
+    },
+    {
+      "name": "Test-resource cleanup and existing user workspace preservation",
+      "result": "PASS; only original user guest and original networks remain; user guest XML and disk/seed inode, size and modification time unchanged",
+      "evidence": "[VM/storage cleanup](final-cleanup.json), [database cleanup](backend/cleanup.json)"
+    }
+  ],
+  "methodology": [
+    "",
+    "## Coverage and interpretation",
+    "",
+    "Verification ran at explicit hardening checkpoints. The real matrix reports retain their exact source digests; later power-observation/cache changes are covered by the complete final runner suite and subsequent fault, crash and desktop runs. Backend whole-suite baselines and the final bounded image-projection delta have separate frozen manifests and result files; earlier full-suite files named `*-complete` are intermediate evidence, not the final baselines.",
+    "",
+    "Backend coverage enumerates durable command kinds, every capture/recreate child phase, task/delivery/session/identity/proof/ownership gates, fresh and stale observations, and CPU/RAM/disk admission. The frontend matrix covers all 8 canonical workspace states × 2 runner connection states × 2 recovery states, plus operation overlays, image lifecycle and settings bounds. Runner cases cover admission, journal durability, cancellation, replay, publication and dependency graphs.",
+    "",
+    "The catalog represents finite reachable state and failure classes plus rejected invalid combinations. It does not claim every corrupt database or every physical hardware device was exercised. A catalog case may expand to several parameter combinations; broad suites and original U acceptance groups intentionally overlap detailed regression cases.",
+    "",
+    "U007 is a cross-layer acceptance group: frontend tests prove image readiness/version selection and resource bounds; authoritative image disk minimum enforcement is tested by backend admission and real VM cases V016/V048. No client-local image-floor check is claimed.",
+    "",
+    "Independent [coverage review](runner/coverage-review.md), [runner case map](runner/catalog-coverage.json), and [frontend case map](frontend/case-evidence-map.json) link planned cases to actual named results. Historical source manifests are included in the portable evidence bundle. Sensitive raw commands and logs remain in the original workspace and are not published.",
+    "",
+    "## Hardware and outage boundaries",
+    "",
+    "- Real KVM/libvirt, SSH, cloud-init and QCOW2: Ubuntu 22.04/24.04, parallel image initialization, a queued third build, mixed workspace actions, capture/clone, resource changes, paused guests and abrupt guest shutdown.",
+    "- Real separate runner processes receive SIGKILL during workspace initialization, image initialization, after committed publication and after partial disk allocation. Matching replay and ACK must preserve the exact result without rerunning recipes.",
+    "- Memory shortage is injected at the admission boundary while a real VM build waits without disk/network/domain allocation; removal of pressure lets it complete. Slow guest writes use actual libvirt disk throttling. ENOSPC uses a real isolated 2 MiB filesystem, preserving a known publication.",
+    "- Socket.IO startup outage, disconnection during execution, reconnect, duplicate delivery and ACK use a real loopback server with an isolated runtime substitute. Real VM transport-outage cases inject emission failure. These are distinct integration claims.",
+    "- Physical host power removal, defective RAM and SSD firmware/controller failure were not induced. Fully unreadable backing metadata requires restored storage or inspection. Arbitrary external replacement of owned resources is outside managed allocation lineage. Optional unavailable package/desktop fixtures are reported as skips, never acceptance passes.",
+    "",
+    "## Earlier failures and corrections",
+    "",
+    "Previous failed/interrupted raw runs remain in the original workspace-local evidence directory and are not included in the portable bundle. The first real matrix exposed an incorrect test query: operation-specific replay deliberately retains acknowledged tombstones; the pending queue must be queried without that selector. The standalone import bootstrap was then corrected after import sorting. Neither failed harness attempt is presented as a complete passing VM suite.",
+    "",
+    "Earlier test-driver ownership fixtures modified only inactive XML while asserting live corruption; the final test boots the corrupt definition before checking refusal. Synthetic disk-only tests now isolate unrelated host RAM pressure while dedicated admission and real VM cases still test it. A stale sidebar assertion expected 'Stopped' for an explicitly offline runner; the corrected expectation and final complete frontend suite both pass.",
+    "",
+    "An inherited interrupted-run publication had a mismatching SHA-256. Its manifest/digest evidence was preserved before exact disposable fixture cleanup. This exposed the unrelated-cleanup integrity/graph issue; the audit does not infer why the older artifact changed.",
+    "",
+    "## Reproduction",
+    "",
+    "See [lifecycle implementation and commands](../../workspace-lifecycle-hardening.md). The opt-in scripts use fresh writable output directories and only local test data. Their output ancestors must be traversable by libvirt-qemu. Run suites sequentially on a shared host; each matrix exercises parallel operations internally.",
+    "",
+    "",
+    "The first V067 harness imposed a five-second full-inventory deadline, which was absent from its original responsiveness expectation. The revised predeclared protocol measures concurrent event-loop scheduling, SSH and unrelated guest stop separately, requires all of them while the throttled write is unfinished, then verifies the completed scan and write. Storage mutations may wait for the scan lock; cancellation drains issued IO. Both failed attempts and the precise protocol addendum are retained.",
+    "",
+    "## Resource cleanup and visual evidence",
+    "",
+    "The host exposes 4 logical CPUs and about 7.8 GiB RAM. Disposable VM disks, downloaded cloud-image fixtures, private test keys/journals and the isolated PostgreSQL databases/role were removed after their evidence was archived. About 19.6 GiB is free at completion. The existing user workspace stayed shut off and its XML, disk and seed metadata match the starting snapshot. [Cleanup evidence](final-cleanup.json), [resource samples and period](resource-summary.json).",
+    "",
+    "The late resource sampler has a bounded timestamped period; it is not claimed as continuous telemetry for earlier checkpoints. Initial cleanup recovered about 8.7 GiB from exactly identified old disposable fixtures; no user base image, user disk or reference repository was removed.",
+    "",
+    "![Offline removal is explicitly queued](frontend/offline-removal-queued.png)",
+    "",
+    "![Actual Ubuntu 24.04 desktop built and booted from the standard recipe](vm/artifacts/desktop24/desktop.png)",
+    ""
+  ]
+}

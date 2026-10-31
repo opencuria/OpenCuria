@@ -1,0 +1,29 @@
+{
+  "historical_audit_commit": "4d26708",
+  "upstream_dev": "62f4b9d",
+  "merge_commit": "0628411",
+  "bounded_dependency_fix_commit": "74485e6",
+  "status": "PASS",
+  "scope": "Later integration verification, separate from historical 578-case acceptance snapshot; not a complete repeat of that audit or a new whole-backend suite.",
+  "frontend": {
+    "passed": 236,
+    "failed": 0,
+    "skipped": 0,
+    "files": 10,
+    "production_build_exit_code": 0
+  },
+  "runner": {
+    "passed": 1397,
+    "skipped": 8,
+    "failed": 0,
+    "subtests_passed_separately": 36
+  },
+  "backend": {
+    "lifecycle_process_architecture_passed": 461,
+    "real_runtime_contracts_passed": 15,
+    "failed": 0,
+    "skipped": 0,
+    "own_moved_python_files_ruff_clean": 52,
+    "migration_model_state": "No changes detected"
+  }
+}

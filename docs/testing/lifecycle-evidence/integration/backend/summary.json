@@ -1,0 +1,39 @@
+{
+  "merge_head": "06284115f1fda383b797d6f4af6fce6bf9ee3d0d",
+  "suites": {
+    "lifecycle-process-architecture.xml": {
+      "nodes": 461,
+      "passed": 461,
+      "skipped": 0,
+      "xml_seconds": 68.499
+    },
+    "runtime-contracts.xml": {
+      "nodes": 15,
+      "passed": 15,
+      "skipped": 0,
+      "xml_seconds": 25.466
+    }
+  },
+  "own_moved_files_ruff": {
+    "files": 52,
+    "passed": true
+  },
+  "migration_model_state": "No changes detected",
+  "release_body_equivalent_to_audited_implementation": true,
+  "integration_fix_files": [
+    "backend/apps/runners/operations.py",
+    "backend/apps/runners/repositories.py",
+    "backend/apps/runners/workspace_operation_repository.py"
+  ],
+  "final_source_files_verified_unchanged_during_tests": 796,
+  "source_manifest_sha256": "ad1d6e94c7bab7ba138692d37782b535178254368f49f9f30cb3a2ad710e3d14",
+  "historical_lifecycle_evidence_untouched": true,
+  "postgres_rerun": false,
+  "postgres_reason": "Same repository classes/query/lock behavior; exact existing release statements moved into lower-level owner, preserving both callers; earlier full dual-DB audit retained.",
+  "inherited_upstream_lint_findings": {
+    "process_manager.py": 50,
+    "test_tools_task.py": 1,
+    "provenance": "preexisting-upstream-lint.json"
+  },
+  "runtime_cleanup": "runtime-cleanup.json"
+}

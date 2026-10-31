@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites>
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="15" time="25.466" timestamp="2026-10-31T11:50:16.123598+00:00">
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_mcp_todowrite_updates_open_curia_session_state" time="15.608" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_runtime_accepts_production_config[False-chatgpt]" time="0.179" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_runtime_accepts_production_config[False-openrouter]" time="0.190" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_runtime_accepts_production_config[True-chatgpt]" time="0.247" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_runtime_accepts_production_config[True-openrouter]" time="0.264" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_bundled_model_catalog_matches_pinned_metadata" time="0.193" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_memory_selection_preserves_legacy_and_defaults_to_v2[False]" time="0.266" />
+    <testcase classname="apps.harness.tests.test_codex_runtime_contract" name="test_real_memory_selection_preserves_legacy_and_defaults_to_v2[True]" time="0.217" />
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_exposes_no_unmanaged_upgrade_tools_and_disables_forks" time="0.806" />
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_loads_only_selected_managed_skill_and_invokes_native_skill" time="0.954" />
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_native_edit_completes_file_change" time="0.904" />
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_cancellation_cleans_up_pending_question_and_process" time="0.820" />
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_ignores_repository_settings_and_hooks" time="0.877" />
+    <testcase classname="apps.harness.tests.test_claude_upgrade_contracts" name="test_real_cli_preserves_every_turn_across_consecutive_resumes" time="2.720" />
+    <testcase classname="apps.harness.tests.test_claude_engine" name="test_bundled_cli_matches_runner_artifact_and_sdk_pin" time="1.037" />
+  </testsuite>
+</testsuites>

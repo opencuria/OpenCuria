@@ -1,0 +1,9 @@
+{
+  "logical_cpus": 4,
+  "sample_count": 33,
+  "sample_period_start": "2026-10-31T11:29:00.711519+00:00",
+  "sample_period_end": "2026-10-31T11:37:00.730501+00:00",
+  "minimum_free_in_sample_period_bytes": 13278326784,
+  "minimum_available_memory_in_sample_period_bytes": 4313317376,
+  "final_free_bytes": 20993716224
+}

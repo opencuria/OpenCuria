@@ -1,0 +1,11 @@
+{
+  "historical_checkpoint": true,
+  "passed": 1364,
+  "skipped": 8,
+  "failed": 0,
+  "nodes": 1372,
+  "subtests_passed_separately": 36,
+  "seconds": 152.8,
+  "optional_skips": "Outside mapped lifecycle acceptance cases.",
+  "junit": "full-fresh-cache-final.xml"
+}

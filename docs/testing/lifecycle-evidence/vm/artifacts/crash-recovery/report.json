@@ -1,0 +1,51 @@
+{
+  "passed": true,
+  "cleanup_errors": [],
+  "cases": {
+    "V066": {
+      "status": "PASS",
+      "mode": "initializing",
+      "terminal": "image:build_failed",
+      "recipe_replayed": false,
+      "matching_ack_clears_result": true,
+      "evidence": {
+        "status": "terminal",
+        "execution_finished": true,
+        "outcome_known": false,
+        "quiescent": true,
+        "workspace_status": "absent",
+        "event": "image:build_failed"
+      }
+    },
+    "V069": {
+      "status": "PASS",
+      "mode": "published",
+      "terminal": "image:built",
+      "recipe_replayed": false,
+      "matching_ack_clears_result": true,
+      "evidence": {
+        "status": "terminal",
+        "execution_finished": true,
+        "outcome_known": true,
+        "quiescent": true,
+        "workspace_status": "absent",
+        "event": "image:built"
+      }
+    },
+    "V073": {
+      "status": "PASS",
+      "mode": "partial",
+      "terminal": "workspace:error",
+      "recipe_replayed": false,
+      "matching_ack_clears_result": true,
+      "evidence": {
+        "status": "terminal",
+        "execution_finished": true,
+        "outcome_known": false,
+        "quiescent": true,
+        "workspace_status": "unknown",
+        "event": "workspace:error"
+      }
+    }
+  }
+}

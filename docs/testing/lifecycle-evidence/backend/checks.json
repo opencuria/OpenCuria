@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "historical_checkpoint": true,
+  "python_files_ruff_clean": 50,
+  "migration_model_state": "No changes detected",
+  "dependency_direction_assertions_passed_per_database": 13,
+  "raw_commands_and_logs": "Retained only in original audit workspace; credentials and test role identifiers are not published."
+}

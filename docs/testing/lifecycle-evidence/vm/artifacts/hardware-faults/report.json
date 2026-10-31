@@ -1,0 +1,47 @@
+{
+  "cleanup_errors": [],
+  "passed": true,
+  "checks": [
+    {
+      "id": "V065",
+      "status": "PASS",
+      "queued_without_disk_network_domain": true,
+      "automatic_completion": true
+    },
+    {
+      "id": "V067",
+      "status": "PASS",
+      "throttle_bytes_per_second": 524288,
+      "write_bytes": 4194304,
+      "seconds": 8.69383209499938,
+      "total_seconds": 8.71626331600055,
+      "unrelated_exec_stop_seconds": 0.35417217899885145,
+      "inventory_seconds": 4.287414058999275,
+      "event_loop": {
+        "ticks": 429,
+        "max_gap_seconds": 0.022260706002271036
+      }
+    },
+    {
+      "id": "V068",
+      "status": "PASS",
+      "abrupt_poweroff_detected": true,
+      "resumed_with_data": true,
+      "controlled_stop_verified": true
+    },
+    {
+      "id": "V072",
+      "status": "PASS",
+      "deletion_refused": true,
+      "original_disk_unchanged": true
+    },
+    {
+      "id": "V071",
+      "status": "PASS",
+      "filesystem": "isolated 2 MiB tmpfs",
+      "attempted_source_bytes": 4521984,
+      "known_publication_unchanged": true,
+      "failed_publication_not_ready": true
+    }
+  ]
+}

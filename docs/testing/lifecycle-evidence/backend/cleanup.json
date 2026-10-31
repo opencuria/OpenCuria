@@ -1,0 +1,10 @@
+{
+  "base_database_public_tables": 0,
+  "other_owned_database_count": 0,
+  "active_connection_count_before_cleanup": 0,
+  "removed_database_count": 2,
+  "audit_role_removed": true,
+  "service_check_succeeded": true,
+  "unrelated_database_or_service_changes": false,
+  "identifiers_omitted": true
+}
