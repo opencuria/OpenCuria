@@ -9,7 +9,6 @@ need not send potentially large tool input/output fields.
 
 from __future__ import annotations
 
-import io
 import json
 import re
 from typing import Any
@@ -111,94 +110,79 @@ def _question_rows(
 
 
 def _patch_projection(output: str) -> tuple[list[dict[str, Any]], int, int]:
-    """Mirror the frontend collapsed window with bounded-memory scans."""
-    def parsed_lines():
-        old_no = new_no = 1
-        in_hunk = False
-        for raw in io.StringIO(output or ""):
-            raw = raw.rstrip("\r\n")
-            if raw.startswith(("--- ", "+++ ", "\\")):
-                continue
+    """Count a diff once, retaining only the bounded collapsed-window candidates."""
+    leading: list[dict[str, Any]] = []
+    window: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    old_no = new_no = 1
+    additions = deletions = line_count = 0
+    first_change = last_change = -1
+    cursor = 0
+    while cursor < len(output):
+        # StringIO copies the whole diff. Slice one physical line at a time,
+        # retaining the existing LF/CRLF handling, including bare internal CRs.
+        end = output.find("\n", cursor)
+        if end < 0:
+            end = len(output)
+        raw = output[cursor:end].rstrip("\r")
+        cursor = end + 1
+        if not raw or raw.startswith(("--- ", "+++ ", "\\")):
+            continue
+        if raw.startswith("@@ "):
             match = _HUNK_RE.match(raw)
             if match:
                 old_no, new_no = int(match.group(1)), int(match.group(3))
-                in_hunk = True
-                continue
-            if not raw:
-                continue
-            if raw.startswith("+"):
-                if not in_hunk:
-                    old_no = new_no = 1
-                    in_hunk = True
-                yield {
-                    "type": "add",
-                    "oldNo": None,
-                    "newNo": new_no,
-                    "content": raw[1:],
-                }
-                new_no += 1
-            elif raw.startswith("-"):
-                if not in_hunk:
-                    old_no = new_no = 1
-                    in_hunk = True
-                yield {
-                    "type": "del",
-                    "oldNo": old_no,
-                    "newNo": None,
-                    "content": raw[1:],
-                }
-                old_no += 1
-            elif raw.startswith(" "):
-                if not in_hunk:
-                    old_no = new_no = 1
-                    in_hunk = True
-                yield {
-                    "type": "context",
-                    "oldNo": old_no,
-                    "newNo": new_no,
-                    "content": raw[1:],
-                }
-                old_no += 1
-                new_no += 1
-
-    additions = deletions = line_count = 0
-    first_change = last_change = -1
-    for index, line in enumerate(parsed_lines()):
-        line_count += 1
-        kind = line["type"]
-        if kind == "add":
+            continue
+        prefix = raw[0]
+        if prefix == "+":
+            kind, line_old, line_new = "add", None, new_no
+            new_no += 1
             additions += 1
-        elif kind == "del":
+        elif prefix == "-":
+            kind, line_old, line_new = "del", old_no, None
+            old_no += 1
             deletions += 1
+        elif prefix == " ":
+            kind, line_old, line_new = "context", old_no, new_no
+            old_no += 1
+            new_no += 1
+        else:
+            continue
+
+        index = line_count
+        line_count += 1
         if kind != "context":
             if first_change < 0:
                 first_change = index
+                # Before the first change, every parsed line is context.
+                if previous is not None:
+                    window.append(previous)
             last_change = index
+        if (
+            index < PATCH_PREVIEW_LINES
+            or first_change < 0
+            or len(window) < PATCH_PREVIEW_LINES
+        ):
+            line = {
+                "type": kind,
+                "oldNo": line_old,
+                "newNo": line_new,
+                "content": raw[1:501],
+            }
+            if index < PATCH_PREVIEW_LINES:
+                leading.append(line)
+            if first_change < 0:
+                previous = line
+            elif len(window) < PATCH_PREVIEW_LINES:
+                window.append(line)
 
     if line_count <= PATCH_PREVIEW_LINES or first_change < 0:
-        start, end = 0, min(line_count, PATCH_PREVIEW_LINES)
-    elif additions + deletions >= 1 and additions <= 1 and deletions <= 1:
+        return leading, additions, deletions
+    if additions <= 1 and deletions <= 1:
+        # Single-line changes end after their first trailing context line.
         start = max(0, first_change - 1)
-        end = min(line_count, last_change + 2, start + PATCH_PREVIEW_LINES)
-    else:
-        preceding = next(
-            (
-                line["type"]
-                for index, line in enumerate(parsed_lines())
-                if index == first_change - 1
-            ),
-            None,
-        )
-        start = first_change - 1 if preceding == "context" else first_change
-        end = min(line_count, start + PATCH_PREVIEW_LINES)
-
-    preview = []
-    for index, line in enumerate(parsed_lines()):
-        if start <= index < end:
-            bounded = dict(line)
-            bounded["content"] = bounded["content"][:500]
-            preview.append(bounded)
-    return preview, additions, deletions
+        window = window[: last_change + 2 - start]
+    return window, additions, deletions
 
 
 def build_part_display(
