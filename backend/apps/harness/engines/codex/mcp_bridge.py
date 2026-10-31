@@ -143,7 +143,18 @@ class ManagedMcpBridge:
             response = None
             if identifier is not None:
                 try:
-                    result = await self._request(request)
+                    # A child-scope exit may cancel this invocation without
+                    # destroying the relay used by the parent and other agents.
+                    operation = asyncio.create_task(self._request(request))
+                    try:
+                        result = await operation
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():
+                            raise
+                        result = {
+                            "isError": True,
+                            "content": [{"type": "text", "text": "Agent run ended"}],
+                        }
                     response = {"jsonrpc": "2.0", "id": identifier, "result": result}
                 except asyncio.CancelledError:
                     raise
@@ -184,11 +195,18 @@ class ManagedMcpBridge:
                     "isError": True,
                     "content": [{"type": "text", "text": "Unknown tool"}],
                 }
+            metadata = params.get("_meta") or {}
+            turn = metadata.get("x-codex-turn-metadata") or {}
+            if not isinstance(turn, dict):
+                raise ValueError("Invalid native MCP turn identity")
             return await self.invoke(
                 {
                     "tool": self.names[params["name"]],
                     "arguments": params.get("arguments", {}),
                     "callId": "mcp_" + uuid.uuid4().hex,
+                    "sourceCallId": metadata.get("callId", ""),
+                    "sourceThreadId": turn.get("thread_id", ""),
+                    "sourceTurnId": turn.get("turn_id", ""),
                 }
             )
         raise ValueError("Unsupported managed MCP method")

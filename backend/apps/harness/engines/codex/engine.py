@@ -13,9 +13,13 @@ from dataclasses import replace
 from functools import partial
 from typing import Any, TypeVar
 
+import anyio
+
 from ...access.base import WorkspaceAccessor, sanitize_exec_workdir
 from ...agents.definitions import get_agent
 from ...desktop_leases import DesktopLease
+from ...mcp_client.scopes import close_desktop_agent_scope
+from ...media.context import mcp_content_blocks
 from ...permissions.evaluator import PermissionEvaluator
 from ...prompts.opencuria import opencuria_context
 from ...providers.base import LLMMessage, Usage
@@ -134,6 +138,44 @@ class CodexEngine:
         self.invoker = ManagedToolInvoker(
             tools, accessor, self._send, evaluator, secrets=lambda: self.secret_values
         )
+        self._mcp_call_contexts: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._used_mcp_calls: set[tuple[str, str, str]] = set()
+        self._native_scopes_ready: set[str] = set()
+        self._mcp_context_changed = asyncio.Event()
+
+    async def _invoke_managed_mcp(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Attribute MCP calls using pinned Codex call IDs and observed threads."""
+        source = tuple(
+            params.get(key)
+            for key in ("sourceThreadId", "sourceTurnId", "sourceCallId")
+        )
+        if any(
+            not isinstance(value, str) or not value or len(value) > 256
+            for value in source
+        ):
+            raise RuntimeError("Managed MCP request lacks native call identity")
+        with anyio.fail_after(5):
+            while True:
+                context = self._mcp_call_contexts.get(source)
+                if context is not None and (
+                    source[0] == self.thread_id
+                    or source[0] in self._native_scopes_ready
+                    or f"{source[0]}:{source[1]}" in self._native_scopes_ready
+                ):
+                    break
+                self._mcp_context_changed.clear()
+                await self._mcp_context_changed.wait()
+        context = self._mcp_call_contexts[source]
+        if source in self._used_mcp_calls:
+            raise RuntimeError("Managed MCP call was already dispatched")
+        if params.get("tool") != context["tool"]:
+            raise RuntimeError("Managed MCP call identity does not match its tool")
+        self._used_mcp_calls.add(source)
+        response = await self._server_request("item/tool/call", {**params, **context})
+        return {
+            "content": mcp_content_blocks(response["contentItems"]),
+            "isError": not response["success"],
+        }
 
     def _create_projector(self) -> CodexEventProjector:
         """Wire event projection without exposing the engine or workspace to it."""
@@ -152,6 +194,13 @@ class CodexEngine:
 
     async def _send(self, event: dict[str, Any], parent: str | None = None) -> None:
         """Redact events and route projected children or the managed tool scope."""
+        if event.get("type") == "subtask_finished" and event.get("turn_id"):
+            thread = str(event.get("subtask_id", "")).split(":", 1)[0]
+            self._native_scopes_ready.discard(thread)
+            self._native_scopes_ready.discard(f"{thread}:{event['turn_id']}")
+            await close_desktop_agent_scope(
+                self.tools, f"codex:{thread}:{event['turn_id']}"
+            )
         safe = redact_value(event, self.secret_values)
         child = parent or self._child_scope.get()
         try:
@@ -166,6 +215,11 @@ class CodexEngine:
             task = asyncio.current_task()
             if not self._stopping or (task is not None and task.cancelling()):
                 raise
+        if event.get("type") == "subtask_started":
+            # The root sink admits/persists the child before its first managed
+            # call can publish events into that child's timeline.
+            self._native_scopes_ready.add(str(event["subtask_id"]))
+            self._mcp_context_changed.set()
 
     async def _bind(self, **state: Any) -> None:
         """Publish checkpoint metadata through the execution owner fence."""
@@ -237,7 +291,14 @@ class CodexEngine:
             )
             try:
                 return await self.invoker.invoke(
-                    params,
+                    {
+                        **params,
+                        "agentScope": (
+                            f"codex:{params['threadId']}:{params['turnId']}"
+                            if child
+                            else ""
+                        ),
+                    },
                     agent=get_agent("general") if child else self.agent,
                     mode=self.mode,
                     opts=replace(self.opts, depth=self.opts.depth + 1)
@@ -392,6 +453,9 @@ class CodexEngine:
         native_names: dict[str, dict[str, str]] = {}
         dynamic_schemas = []
         self.native_managed_tools.clear()
+        self._mcp_call_contexts.clear()
+        self._used_mcp_calls.clear()
+        self._native_scopes_ready.clear()
         for spec in schemas:
             tool = self.tools.get(spec["name"])
             if "code_mode" not in tool.omit_tools_from:
@@ -489,14 +553,7 @@ class CodexEngine:
             for server, server_schemas in native_groups.items():
                 bridge = ManagedMcpBridge(
                     server_schemas,
-                    partial(
-                        self.invoker.invoke_mcp,
-                        agent=self.agent,
-                        mode=mode,
-                        opts=opts,
-                        model=model,
-                        allowed=self.allowed,
-                    ),
+                    self._invoke_managed_mcp,
                     names=native_names[server],
                 )
                 mcp_bridges.append(bridge)
@@ -761,6 +818,26 @@ class CodexEngine:
     async def _notification(self, message: dict[str, Any]) -> None:
         """Map only current-turn notifications into canonical harness events."""
         method, params = message.get("method"), message.get("params", {})
+        item = params.get("item") or {}
+        if method == "item/started" and item.get("type") == "mcpToolCall":
+            native = f"mcp__{item.get('server')}__{item.get('tool')}"
+            if native in self.native_managed_tools:
+                if len(self._mcp_call_contexts) >= 4096:
+                    raise ValueError("Managed MCP call context limit reached")
+                registered = next(
+                    tool
+                    for tool in self.tools.list()
+                    if getattr(tool, "native_mcp_server", None) == item.get("server")
+                    and getattr(tool, "original_name", None) == item.get("tool")
+                )
+                self._mcp_call_contexts[
+                    (params.get("threadId"), params.get("turnId"), item["id"])
+                ] = {
+                    "threadId": params.get("threadId"),
+                    "turnId": params.get("turnId"),
+                    "tool": registered.name,
+                }
+                self._mcp_context_changed.set()
         if params.get("threadId") != self.thread_id:
             await self.projector.child_notification(message)
             return

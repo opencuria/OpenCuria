@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 
+class DesktopInputBusyError(ValueError):
+    """Another live lease owns the workspace input stream."""
+
+
 class DesktopLeaseStore:
     """Single-writer SQLite ownership ledger. Only metadata is persisted."""
 
@@ -48,6 +52,19 @@ class DesktopLeaseStore:
                 db.execute("""CREATE TABLE IF NOT EXISTS desktop_input (
                     workspace_id TEXT PRIMARY KEY, lease_id TEXT,
                     last_lease_id TEXT NOT NULL, fence INTEGER NOT NULL)""")
+                lease_columns = {
+                    r[1] for r in db.execute("PRAGMA table_info(desktop_leases)")
+                }
+                for name in (
+                    "activation_revision",
+                    "activation_target",
+                    "input_ended_revision",
+                ):
+                    if name not in lease_columns:
+                        db.execute(
+                            f"ALTER TABLE desktop_leases ADD COLUMN {name} "
+                            "INTEGER NOT NULL DEFAULT 0"
+                        )
                 # Upgrade existing recording ledgers without inventing old tokens.
                 if "guest_token" not in {
                     r[1] for r in db.execute("PRAGMA table_info(desktop_recordings)")
@@ -90,10 +107,17 @@ class DesktopLeaseStore:
         revision: int,
         *,
         acquire: bool,
+        activation_revision: int | None = None,
     ) -> int:
         """Serialize input across desktop consumers under live lease fencing."""
 
         def operation(db: sqlite3.Connection) -> int:
+            if activation_revision is not None and (
+                isinstance(activation_revision, bool)
+                or not isinstance(activation_revision, int)
+                or activation_revision < 0
+            ):
+                raise ValueError("Invalid desktop input activation revision")
             lease = self._row(
                 db.execute(
                     "SELECT * FROM desktop_leases WHERE lease_id=?", (lease_id,)
@@ -109,11 +133,23 @@ class DesktopLeaseStore:
             row = db.execute(
                 "SELECT * FROM desktop_input WHERE workspace_id=?", (workspace_id,)
             ).fetchone()
+            sequence_matches = (activation_revision or 0) == lease[
+                "activation_revision"
+            ]
             if acquire:
+                if (
+                    not sequence_matches
+                    or (lease["activation_revision"] and not lease["activation_target"])
+                    or (
+                        activation_revision
+                        and activation_revision <= lease["input_ended_revision"]
+                    )
+                ):
+                    raise ValueError("Stale desktop input activation")
                 if lease["state"] != "held" or lease["expires_at"] <= time.time():
                     raise ValueError("Desktop input requires a live held lease")
                 if row and row["lease_id"] not in (None, lease_id):
-                    raise ValueError("Workspace desktop is busy")
+                    raise DesktopInputBusyError("Workspace desktop is busy")
                 fence = (row["fence"] if row else 0) + int(
                     row is None or row["last_lease_id"] != lease_id
                 )
@@ -122,7 +158,17 @@ class DesktopLeaseStore:
                     (workspace_id, lease_id, lease_id, fence),
                 )
                 return fence
-            if row and row["lease_id"] == lease_id:
+            if (
+                activation_revision
+                and activation_revision <= lease["activation_revision"]
+            ):
+                # Fence a delayed acquire even when release arrived first.
+                db.execute(
+                    "UPDATE desktop_leases SET input_ended_revision="
+                    "MAX(input_ended_revision,?) WHERE lease_id=?",
+                    (activation_revision, lease_id),
+                )
+            if row and row["lease_id"] == lease_id and sequence_matches:
                 db.execute(
                     "UPDATE desktop_input SET lease_id=NULL WHERE workspace_id=?",
                     (workspace_id,),
@@ -243,7 +289,10 @@ class DesktopLeaseStore:
                 if old["activated"] and old["epoch"] != epoch:
                     raise ValueError("Previous epoch requires cleanup")
             db.execute(
-                "INSERT OR REPLACE INTO desktop_leases VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO desktop_leases "
+                "(lease_id,workspace_id,instance_id,kind,owner_id,epoch,revision,"
+                "state,activated,expires_at,activation_revision,activation_target,"
+                "input_ended_revision) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     lease_id,
                     str(workspace_id),
@@ -255,6 +304,9 @@ class DesktopLeaseStore:
                     "reserved",
                     int(bool(old and old["activated"])),
                     time.time() + ttl,
+                    old["activation_revision"] if old else 0,
+                    old["activation_target"] if old else 0,
+                    old["input_ended_revision"] if old else 0,
                 ),
             )
             return self._row(
@@ -290,7 +342,15 @@ class DesktopLeaseStore:
 
         return await asyncio.to_thread(self._run, operation)
 
-    async def activate(self, lease_id: str, epoch: str, revision: int) -> dict:
+    async def activate(
+        self,
+        lease_id: str,
+        epoch: str,
+        revision: int,
+        activation_revision: int | None = None,
+        *,
+        active: bool = True,
+    ) -> dict:
         """Record protective membership before starting guest side effects."""
 
         def operation(db: sqlite3.Connection) -> dict:
@@ -309,14 +369,66 @@ class DesktopLeaseStore:
                 raise ValueError("Desktop lease ended or stale")
             if row["kind"] == "agent":
                 raise ValueError("Agent desktop leases cannot be activated")
+            if activation_revision is not None and (
+                isinstance(activation_revision, bool)
+                or not isinstance(activation_revision, int)
+                or activation_revision < 1
+            ):
+                raise ValueError("Invalid desktop activation revision")
+            sequence = activation_revision or 0
+            if sequence < row["activation_revision"] or (
+                sequence != 0
+                and sequence == row["activation_revision"]
+                and bool(row["activation_target"]) != active
+            ):
+                raise ValueError("Stale desktop activation revision")
+            if not active:
+                if (
+                    row["kind"] not in {"computeruse", "mcp"}
+                    or activation_revision is None
+                ):
+                    raise ValueError("Only managed agent claims support unhold")
+                if db.execute(
+                    "SELECT 1 FROM desktop_input WHERE lease_id=?", (lease_id,)
+                ).fetchone():
+                    raise ValueError("Desktop input is still owned")
+                if db.execute(
+                    "SELECT 1 FROM desktop_recordings "
+                    "WHERE lease_id=? AND state!='closed'",
+                    (lease_id,),
+                ).fetchone():
+                    raise ValueError("Desktop recording is still active")
             db.execute(
-                "UPDATE desktop_leases SET activated=1,state='held' WHERE lease_id=?",
-                (lease_id,),
+                "UPDATE desktop_leases SET activation_revision=?,activation_target=? "
+                "WHERE lease_id=?",
+                (sequence, int(active), lease_id),
             )
-            row.update(activated=True, state="held")
+            row.update(activation_revision=sequence, activation_target=int(active))
+            if active:
+                db.execute(
+                    "UPDATE desktop_leases SET activated=1,state='held' "
+                    "WHERE lease_id=?",
+                    (lease_id,),
+                )
+                row.update(activated=True, state="held")
             return row
 
         return await asyncio.to_thread(self._run, operation)
+
+    async def finish_unhold(self, lease_id: str, activation_revision: int) -> None:
+        """Drop protective membership only after the physical stop is confirmed."""
+
+        def operation(db: sqlite3.Connection) -> None:
+            changed = db.execute(
+                "UPDATE desktop_leases SET activated=0,state='reserved' "
+                "WHERE lease_id=? AND activation_revision=? "
+                "AND activation_target=0 AND state IN ('reserved','held')",
+                (lease_id, activation_revision),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("Desktop unhold was superseded")
+
+        await asyncio.to_thread(self._run, operation)
 
     async def mark_closing(self, lease_id: str) -> dict:
         """Fence new work while preserving protective activated membership."""
@@ -384,7 +496,8 @@ class DesktopLeaseStore:
             ):
                 raise ValueError("Recording owner is ended or mismatched")
             existing = db.execute(
-                "SELECT * FROM desktop_recordings WHERE lease_id=?", (row["lease_id"],)
+                "SELECT * FROM desktop_recordings WHERE lease_id=? AND state!='closed'",
+                (row["lease_id"],),
             ).fetchone()
             if existing:
                 raise ValueError("Recording attempt already exists for lease")

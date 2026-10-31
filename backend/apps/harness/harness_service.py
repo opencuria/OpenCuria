@@ -2244,6 +2244,7 @@ class HarnessService:
                     runtime_options=computer_options,
                 )
                 mcp_runtime.register_tools(tools)
+                accessor = await mcp_runtime.execution_accessor(accessor)
                 if agent_key == "computeruse":
                     mcp_runtime.require_computer_use()
                 if mcp_runtime.skipped:

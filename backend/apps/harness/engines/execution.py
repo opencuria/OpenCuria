@@ -124,6 +124,7 @@ async def execute_external_run(
                 runtime_options=computer_options,
             )
             mcp_runtime.register_tools(tools)
+            accessor = await mcp_runtime.execution_accessor(accessor)
             if session.agent_name == "computeruse":
                 mcp_runtime.require_computer_use()
             if mcp_runtime.skipped:

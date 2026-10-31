@@ -415,7 +415,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "status": "ready",
                 "inventory_epoch": interface._inventory_epoch,
                 "desktop_leases": {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "epoch": interface._desktop_epoch,
                 },
             },

@@ -170,7 +170,12 @@ class LocalAccessor:
         return str(PINNED)
 
     async def open_process(self, argv, cwd, env, **kwargs):
-        assert set(env) <= {"CODEX_HOME", "OPENCURIA_CODEX_API_KEY"}
+        assert set(env) <= {
+            "CODEX_HOME",
+            "OPENCURIA_CODEX_API_KEY",
+            "DISPLAY",
+            "XAUTHORITY",
+        }
         assert kwargs["owner"]["lease_id"]
         self.opened.append(argv)
         home = self.path(env.get("CODEX_HOME", "/workspace/home/.codex"))
@@ -196,7 +201,13 @@ class LocalAccessor:
     async def desktop_action(self, action, args):
         self.actions.append(action)
         if action == "binding":
-            return {"ok": True, "epoch": "test"}
+            return {
+                "ok": True,
+                "epoch": "test",
+                "display": ":1",
+                "xauthority": "/root/.Xauthority",
+                "protocol_version": 2,
+            }
         if action == "release":
             assert all(s.process.returncode is not None for s in self.streams)
             return {"ok": True, "lease_state": "released"}
@@ -246,6 +257,7 @@ async def fixture_run(
     steering: SteeringChannel | None = None,
     request_hook: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     resume_prompt: str = "Continue the local conversation.",
+    execution_environment: dict[str, str] | None = None,
 ):
     if not PINNED.exists():
         pytest.skip("Pinned Codex binary unavailable; set OPENCURIA_TEST_CODEX_BINARY")
@@ -360,6 +372,10 @@ async def fixture_run(
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
     accessor = LocalAccessor(tmp_path / "workspace")
+    if execution_environment is not None:
+        from apps.harness.access.environment import ExecutionEnvironmentAccessor
+
+        accessor = ExecutionEnvironmentAccessor(accessor, execution_environment)
     for path, content in (fixture_files or {}).items():
         await accessor.write_file("/workspace/" + path, content)
     store = MemoryStore(fail_save=fail_checkpoint)

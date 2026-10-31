@@ -785,3 +785,98 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.get("viewer-tab"))["state"], "expired")
         held = await manager.desktop_action(self.ws, "hold", self.viewer(2))
         self.assertEqual(held["lease_state"], "held")
+
+    async def test_unhold_rejects_active_input_and_stale_actions(self):
+        manager = self.manager()
+        intent = {**self.intent(), "kind": "computeruse", "activation_revision": 1}
+        await manager.desktop_action(self.ws, "hold", intent)
+        await manager.desktop_action(self.ws, "input_acquire", intent)
+        with self.assertRaisesRegex(ValueError, "input is still owned"):
+            await manager.desktop_action(
+                self.ws, "unhold", {**intent, "activation_revision": 2}
+            )
+        await manager.desktop_action(self.ws, "input_release", intent)
+        await manager.desktop_action(
+            self.ws, "unhold", {**intent, "activation_revision": 2}
+        )
+        self.assertFalse((await self.store.get("one"))["activated"])
+        with self.assertRaisesRegex(ValueError, "Stale desktop activation"):
+            await manager.desktop_action(self.ws, "hold", intent)
+        with self.assertRaisesRegex(ValueError, "Stale desktop activation"):
+            await manager.desktop_action(
+                self.ws, "hold", {**intent, "activation_revision": 2}
+            )
+        await manager.desktop_action(
+            self.ws, "hold", {**intent, "activation_revision": 3}
+        )
+        with self.assertRaisesRegex(ValueError, "Stale desktop activation"):
+            await manager.desktop_action(
+                self.ws, "unhold", {**intent, "activation_revision": 2}
+            )
+        self.assertTrue((await self.store.get("one"))["activated"])
+
+    async def test_unhold_rejects_mismatched_identity_and_workspace(self):
+        manager = self.manager()
+        intent = {**self.intent(), "kind": "computeruse", "activation_revision": 1}
+        await manager.desktop_action(self.ws, "hold", intent)
+        for extra in ({"owner_id": "other"}, {"epoch": "old"}, {"kind": "viewer"}):
+            with self.assertRaises(ValueError):
+                await manager.desktop_action(
+                    self.ws, "unhold", {**intent, **extra, "activation_revision": 2}
+                )
+        with self.assertRaisesRegex(ValueError, "workspace mismatch"):
+            await manager.desktop_action(
+                uuid.uuid4(), "unhold", {**intent, "activation_revision": 2}
+            )
+        self.assertTrue((await self.store.get("one"))["activated"])
+
+    async def test_activation_revision_survives_ledger_reopen(self):
+        await self.reserve(kind="computeruse")
+        await self.store.activate("one", "epoch", 1, 1)
+        await self.store.activate("one", "epoch", 1, 2, active=False)
+        # A crash during stop leaves membership protective and fences old holds.
+        reopened = DesktopLeaseStore(self.directory.name)
+        self.assertTrue((await reopened.get("one"))["activated"])
+        with self.assertRaisesRegex(ValueError, "Stale desktop activation"):
+            await reopened.activate("one", "epoch", 1, 1)
+        await reopened.finish_unhold("one", 2)
+        self.assertFalse((await reopened.get("one"))["activated"])
+
+    async def test_delayed_input_from_same_agent_cannot_unlock_new_operation(self):
+        manager = self.manager()
+        intent = {**self.intent(), "kind": "computeruse", "activation_revision": 1}
+        await manager.desktop_action(self.ws, "hold", intent)
+        await manager.desktop_action(self.ws, "input_acquire", intent)
+        await manager.desktop_action(self.ws, "input_release", intent)
+        newer = {**intent, "activation_revision": 2}
+        await manager.desktop_action(self.ws, "hold", newer)
+        await manager.desktop_action(self.ws, "input_acquire", newer)
+        await manager.desktop_action(self.ws, "input_release", intent)
+        with self.assertRaisesRegex(ValueError, "Stale desktop input"):
+            await manager.desktop_action(self.ws, "input_acquire", intent)
+        other = {**self.intent(), "lease_id": "other", "owner_id": "other-agent"}
+        await manager.desktop_action(self.ws, "hold", other)
+        self.assertEqual(
+            await manager.desktop_action(self.ws, "input_acquire", other),
+            {"ok": False, "busy": True},
+        )
+        await manager.desktop_action(self.ws, "input_release", newer)
+        self.assertTrue(
+            (await manager.desktop_action(self.ws, "input_acquire", other))["ok"]
+        )
+
+    async def test_input_release_fences_delayed_reacquire_and_release_before_acquire(
+        self,
+    ):
+        manager = self.manager()
+        intent = {**self.intent(), "kind": "computeruse", "activation_revision": 1}
+        await manager.desktop_action(self.ws, "hold", intent)
+        await manager.desktop_action(self.ws, "input_release", intent)
+        with self.assertRaisesRegex(ValueError, "Stale desktop input"):
+            await manager.desktop_action(self.ws, "input_acquire", intent)
+        newer = {**intent, "activation_revision": 2}
+        await manager.desktop_action(self.ws, "hold", newer)
+        await manager.desktop_action(self.ws, "input_acquire", newer)
+        await manager.desktop_action(self.ws, "input_release", newer)
+        with self.assertRaisesRegex(ValueError, "Stale desktop input"):
+            await manager.desktop_action(self.ws, "input_acquire", newer)

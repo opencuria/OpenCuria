@@ -111,6 +111,14 @@ class FakeAccessor(WorkspaceAccessor):
     ) -> dict[str, Any]:
         if self.desktop_result is not None:
             return dict(self.desktop_result)
+        if action == "binding":
+            return {
+                "ok": True,
+                "display": ":1",
+                "xauthority": "/root/.Xauthority",
+                "epoch": "epoch",
+                "protocol_version": 2,
+            }
         if action == "hold":
             return {
                 "ok": True,

@@ -234,6 +234,7 @@ class ManagedToolInvoker(AuthorizedToolDispatcher):
             run_subagent=opts.run_subagent,
             on_question=opts.on_question,
             question_timeout=opts.question_timeout,
+            agent_scope=str(params.get("agentScope") or ""),
         )
         outcome = await self._dispatch_tool_call(
             call=_PendingToolCall(call_id, name, args, raw),

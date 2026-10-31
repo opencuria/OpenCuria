@@ -570,7 +570,7 @@ class WebSocketInterface(Interface):
                     "status": "ready",
                     "inventory_epoch": self._inventory_epoch,
                     "desktop_leases": {
-                        "protocol_version": 1,
+                        "protocol_version": 2,
                         "epoch": self._desktop_epoch,
                     },
                 },

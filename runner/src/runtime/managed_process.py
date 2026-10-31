@@ -21,6 +21,7 @@ ISOLATED_CODEX_PATH = (
     "/opt/opencuria/runtimes/codex-agent/0.166.0/codex-path:" + ISOLATED_AGENT_PATH
 )
 ISOLATED_AGENT_ENV_MAX_SIZE = 256 * 1024
+_AGENT_DESKTOP_ENV = {"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"}
 _AGENT_AUTH_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 _AGENT_FIXED_ENV = {
     "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
@@ -175,12 +176,22 @@ def _isolated_agent_env(
         raise TypeError("Invalid isolated agent environment")
     if any(not isinstance(key, str) for key in explicit):
         raise TypeError("Invalid isolated agent environment")
+    desktop_keys = set(explicit) & _AGENT_DESKTOP_ENV.keys()
+    if desktop_keys and (
+        desktop_keys != _AGENT_DESKTOP_ENV.keys()
+        or any(explicit[key] != value for key, value in _AGENT_DESKTOP_ENV.items())
+    ):
+        raise ValueError("Invalid managed desktop environment")
     if process_profile == "helper":
         isolated_agent_profile(explicit, config_root, process_profile=process_profile)
         return {}
     if "CODEX_HOME" in explicit:
         _, root = isolated_agent_profile(explicit, config_root)
-        if set(explicit) - {"CODEX_HOME", "OPENCURIA_CODEX_API_KEY"}:
+        if set(explicit) - {
+            "CODEX_HOME",
+            "OPENCURIA_CODEX_API_KEY",
+            *_AGENT_DESKTOP_ENV,
+        }:
             raise ValueError("Unsupported environment variable for isolated agent")
         for value in explicit.values():
             if not isinstance(value, str) or len(value) > 8192 or "\x00" in value:
@@ -192,7 +203,7 @@ def _isolated_agent_env(
         ):
             raise ValueError("Codex authentication value must not be empty")
         return dict(explicit)
-    if set(explicit) - _AGENT_ENV_ALLOWLIST:
+    if set(explicit) - (_AGENT_ENV_ALLOWLIST | _AGENT_DESKTOP_ENV.keys()):
         raise ValueError("Unsupported environment variable for isolated agent")
     for key, value in explicit.items():
         if (
@@ -323,11 +334,17 @@ if action == 'start':
             'CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH',
             'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS', 'MAX_CONCURRENT_SUBAGENTS',
         }
-        if profile == 'codex': allowed = {'CODEX_HOME', 'OPENCURIA_CODEX_API_KEY'}
+        desktop_env = {'DISPLAY': ':1', 'XAUTHORITY': '/root/.Xauthority'}
+        allowed.update(desktop_env)
+        if profile == 'codex': allowed = {'CODEX_HOME', 'OPENCURIA_CODEX_API_KEY', *desktop_env}
         if profile == 'helper': allowed = set()
         if any(not isinstance(k, str) or k not in allowed or
                not isinstance(v, str) or len(v) > 8192 or '\x00' in v
                for k, v in explicit.items()): sys.exit(125)
+        desktop_keys = set(explicit) & desktop_env.keys()
+        if desktop_keys and (desktop_keys != desktop_env.keys() or
+                any(explicit[key] != value for key, value in desktop_env.items())):
+            sys.exit(125)
         if profile == 'claude':
             auth_keys = set(explicit) & {'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'}
             if len(auth_keys) != 1 or any(not explicit[key].strip() for key in auth_keys):

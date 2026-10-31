@@ -536,6 +536,9 @@ async def test_runner_factory_sees_registered_mcp_tools(harness_workspace):
     seen_names: list[list[str]] = []
 
     class StubRuntime:
+        async def execution_accessor(self, accessor):
+            return accessor
+
         skipped: list[dict] = []
 
         async def setup(self, **kwargs):

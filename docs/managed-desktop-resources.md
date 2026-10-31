@@ -43,7 +43,8 @@ Activation policies:
   when initialization itself needs X11.
 - `first_tool`: reserve and inject the binding before server launch, but hold the
   display only before the first tool call. Discovery/initialization does not
-  activate the display. The hold lasts for the connection, not just that call.
+  activate the display. The hold belongs to the agent run, not just that call
+  or connection; its desktop consumers share the claim.
   Only use this for servers that tolerate an inactive display at initialization.
 
 The standard seeded Playwright plugin uses **`first_tool`**, headed Chromium,
@@ -74,10 +75,38 @@ every Playwright copy. Migration reversal does not restore the seed data changes
 
 ## Ownership and lifetime
 
-The runner understands generic lease kinds: `viewer`, `computeruse`, and `mcp`.
+The runner understands generic lease kinds: `viewer`, `computeruse`, `mcp`, and
+process-only `agent`.
 A lease carries workspace/incarnation identity, owner, runner epoch, revision,
 and state. Binding/reservation alone does not start Xvnc; a held lease activates
 it. Releasing one owner does not stop a display held by another owner.
+
+The harness groups desktop-dependent MCP transports under one activation lease
+per agent execution, including headed Playwright. It uses `computeruse` when
+Computer Use is configured and `mcp` for other desktop-only plugin selections. Process-only CLI agent
+leases remain separate and cannot activate a display. `desktop(start|stop|status)`
+is exposed by the Computer Use plugin. Start and automatic operational tools
+activate the same run claim. Stop uses `unhold`: it serializes against that
+agent's in-flight desktop calls, finalizes recording, and releases activation
+without closing MCP transports. The lease stays reserved and renewed. Final
+release/expiry fences and closes all its streams before removing protective
+membership or transferring input ownership.
+
+Hold/unhold carry a separate durable monotonic `activation_revision`. A delayed
+hold cannot undo a newer stop, and a delayed stop cannot undo a newer start.
+Deactivation intent is persisted before stopping Xvnc; membership stays protective
+until stop is confirmed. Pending input or recording prevents unhold. A failed
+stop may be retried with a newer revision. Ordinary release tombstones still
+permanently fence ended runs. Input acquire/release also carries the activation
+revision; a durable ended-input revision fences delayed reacquisition or unlocks
+from an earlier operation of the same agent. These semantics require desktop
+protocol 2.
+
+Native provider child executions own separate run-local MCP scopes and claims.
+Their SDK connections are created and torn down by the same dedicated owner task;
+child completion rejects late calls and closes only that child scope. Parent-run
+cleanup joins all child owners. Ordinary OpenCuria task agents already have their
+own independent harness runs. User viewer intents remain independent throughout.
 
 Owners renew every **45 seconds**; runner TTL is **180 seconds**. The runner
 sweeper runs every **15 seconds** by default (`RUNNER_DESKTOP_LEASE_INTERVAL`).

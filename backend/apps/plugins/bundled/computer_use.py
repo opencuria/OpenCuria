@@ -8,10 +8,10 @@ SERVER_SLUG = "cua_repl"
 ARTIFACT_ID = "computer-use"
 VERSION = "0.2.0"
 TOOL_POLICY = {
-    "exposed_tools": ["js", "js_reset"],
+    "exposed_tools": ["js", "js_reset", "desktop"],
     "internal_tools": ["turn_ended"],
     "desktop_tools": ["js"],
-    "execution_tools": ["js", "js_reset"],
+    "execution_tools": ["js", "js_reset", "desktop"],
     "omit_tools_from": ["code_mode", "deferred"],
     "on_run_end": "turn_ended",
     "desktop_kind": "computeruse",

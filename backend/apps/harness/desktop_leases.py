@@ -51,6 +51,7 @@ class DesktopLease:
         self.attempted = False
         self.held = False
         self.hold_attempted = False
+        self.activation_revision = 0
         self.healthy = True
         self.closed = False
         self._renew_task: asyncio.Task | None = None
@@ -69,6 +70,7 @@ class DesktopLease:
             "kind": self.kind,
             "owner_id": self.owner_id,
             "revision": 1,
+            "activation_revision": self.activation_revision,
         }
 
     async def _rpc(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -107,15 +109,19 @@ class DesktopLease:
                 log.warning("desktop_lease_compensation_failed", lease_id=self.lease_id)
             raise
 
-    async def hold(self) -> None:
+    async def hold(self, *, refresh: bool = False) -> None:
         """Activate a reservation; failure interrupts owner, not SDK teardown."""
         try:
             async with self._lifecycle_lock:
                 self.check_health()
-                if self.held:
+                if self.held and not refresh:
                     return
                 self.hold_attempted = True
-                result = await self._rpc("hold", self._args())
+                self.activation_revision += 1
+                result = await self._rpc(
+                    "hold",
+                    {**self._args(), "activation_revision": self.activation_revision},
+                )
                 if (
                     result.get("epoch") != self.epoch
                     or result.get("lease_state") != "held"
@@ -130,6 +136,23 @@ class DesktopLease:
                 if self._on_failure is not None:
                     self._on_failure()
             raise
+
+    async def unhold(self) -> None:
+        """Release activation without ending ownership of MCP process streams."""
+        async with self._lifecycle_lock:
+            self.check_health()
+            self.activation_revision += 1
+            result = await self._rpc(
+                "unhold",
+                {**self._args(), "activation_revision": self.activation_revision},
+            )
+            if (
+                result.get("epoch") != self.epoch
+                or result.get("lease_state") != "reserved"
+            ):
+                raise RuntimeError("Desktop deactivation is unconfirmed")
+            self.binding.update(result)
+            self.held = False
 
     def check_health(self) -> None:
         """Fail closed after renewal rejection or closure."""

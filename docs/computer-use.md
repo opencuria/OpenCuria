@@ -14,12 +14,15 @@ service: it installs a pinned artifact and owns VM processes, desktop input
 coordination and recordings. The workspace runs the stdio MCP server, a
 persistent JavaScript worker and a bounded Linux native I/O helper.
 
-The public tools are `mcp_computer-use_cua_repl_js` and
-`mcp_computer-use_cua_repl_js_reset`. `turn_ended` is a private lifecycle RPC,
+The public tools are `mcp_computer-use_cua_repl_js`,
+`mcp_computer-use_cua_repl_js_reset` and
+`mcp_computer-use_cua_repl_desktop`. The backend adds `desktop` to the effective
+Computer Use plugin surface; it is not a new workspace-runtime RPC and does not
+change the pinned CUA contract. `turn_ended` is a private lifecycle RPC,
 filtered from model schemas and rejected by the agent invocation path. It
 bypasses the execution lock so stopping a busy call cannot deadlock teardown.
 All three harness engines use the same plugin tool contracts. Codex exposes
-`js` and `js_reset` through a native managed MCP bridge with
+`js`, `js_reset` and `desktop` through a native managed MCP bridge with
 `omit_tools_from = ["code_mode", "deferred"]`, including for models that require
 Code Mode. Its private Unix socket relay forwards to the existing backend
 dispatcher; approvals, events, desktop ownership and images stay on the ordinary
@@ -77,6 +80,69 @@ independent. An interrupted owner's input ownership is removed only after its
 owned streams have been closed. Human input does not share this automation
 lock; reobserve after intervening manual interaction.
 
+## Desktop lifecycle and shell applications
+
+Use `desktop({"action":"start"})` before launching a GUI application with Bash.
+It acquires this agent's claim and waits for an actual X11 handshake and the
+viewer endpoint. It also revalidates an already-held display. `js` and managed
+headed Playwright tools automatically acquire the **same** claim.
+`desktop({"action":"stop"})` releases activation, retaining managed MCP
+transports for later calls. A subsequent operational tool acquires the claim
+again. The actual display stops only when no other agent or viewer holds it;
+stopping the X server closes its GUI applications.
+
+`desktop({"action":"status"})` observes without acquiring a claim. For example,
+a viewer or another agent may own an active display while this agent does not:
+
+```json
+{
+  "active": true,
+  "own_claim": false,
+  "own_claim_state": "reserved",
+  "held_by_others": true,
+  "other_claim_count": 1,
+  "needs_start": true,
+  "DISPLAY": ":1",
+  "XAUTHORITY": "/root/.Xauthority"
+}
+```
+
+When `needs_start` is true, call `start` before depending on the display. Another
+owner can leave at any time. A closing/expired claim is never reported as usable;
+unconfirmed operations may retain protective membership until verified cleanup.
+
+Each OpenCuria agent run has one claim shared across its desktop consumers.
+Separate runs, task agents, and provider-native Codex/Claude child executions
+have separate claims; viewers keep their existing independent intents. Native
+children lazily create independent desktop MCP connections under their admitted
+thread/turn or delegation identity. Child completion fences late calls and closes
+only that child's connections and claim. A resumed native child turn gets a fresh
+scope. Codex MCP calls are attributed using the pinned runtime's request call ID
+and observed thread notifications, not model-provided ownership arguments.
+
+All three engines receive the runner's `DISPLAY` and `XAUTHORITY` before agent
+execution, including when only a viewer supplies the desktop or no desktop
+plugin is selected. These variables are addresses and do not start a display.
+Native Codex/Claude Bash children inherit them even if the desktop starts later.
+OpenCuria Bash/background-process tools receive the same defaults; an explicit
+environment can select another display for tests. Isolated native agent profiles
+accept only the runner's exact display/authority pair. Infrastructure helpers
+retain their minimal environments, and undeclared managed MCP servers receive
+no implicit display binding.
+
+Deploy backend and runner together: shared claims require desktop protocol 2.
+Apply Django migrations as part of deployment. `plugins.0014` adds `desktop` to
+the built-in server's canonical exposure policy, preserving customized allowlists
+and organization-owned copies. To adopt the tool in a restricted/custom copy,
+explicitly include `desktop` in `exposed_tools` (and `execution_tools`). An absent
+exposure allowlist permits it; an explicit list or internal-tool declaration is
+respected. The existing plugin and global permission gates still apply.
+The runner upgrades its SQLite lease schema in place; preserve the existing
+databases and follow the drained rollout in the managed-desktop resource guide.
+Existing Codex conversations whose recorded tool signatures predate `desktop`
+require a fork or new chat, as with other managed tool inventory changes; the
+existing resume guard rejects incompatible signatures before execution.
+
 ## Settings, migration and recording
 
 `GET/PUT /api/v1/computer-use-config/` exposes partial updates of `max_steps`
@@ -88,8 +154,9 @@ or org configuration. Other workspaces opt in through plugin selection.
 
 Recording starts on the first operational desktop call. Confirmed MP4 paths
 are appended to the chat on success, error or interruption, after recording
-finalization. Recording and viewer ownership use the existing runner resource
-ledger; Computer Use never shuts down a desktop still held by a viewer.
+finalization. Stop/start cycles finalize separate uniquely named recording
+segments; all confirmed segments are retained. Recording and viewer ownership use
+the existing runner resource ledger; Computer Use never shuts down a desktop still held by a viewer.
 
 ## Packaging and rollout
 

@@ -264,7 +264,13 @@ class LocalSseWorkspaceAccessor:
         timeout: float | None = None,
     ) -> dict[str, Any]:
         if action == "binding":
-            return {"ok": True, "epoch": self.lease_epoch}
+            return {
+                "ok": True,
+                "epoch": self.lease_epoch,
+                "display": ":1",
+                "xauthority": "/root/.Xauthority",
+                "protocol_version": 2,
+            }
         if action == "reserve":
             return {"ok": True, "epoch": self.lease_epoch, "lease_state": "reserved"}
         if action == "release":
@@ -696,6 +702,7 @@ async def _run_local_cli_fixture(
     permission_response: str = "once",
     steering: Any | None = None,
     question_hook: Any | None = None,
+    execution_environment: dict[str, str] | None = None,
 ) -> tuple[
     Any,
     list[dict[str, Any]],
@@ -776,6 +783,10 @@ async def _run_local_cli_fixture(
         return permission_response
 
     fixture_store = store or FixtureSessionStore()
+    if execution_environment is not None:
+        from apps.harness.access.environment import ExecutionEnvironmentAccessor
+
+        accessor = ExecutionEnvironmentAccessor(accessor, execution_environment)
     engine = ClaudeEngine(
         tools=tools,
         accessor=accessor,
@@ -1107,3 +1118,53 @@ async def test_real_sdk_cli_folds_steer_into_the_running_turn(tmp_path: Path) ->
     assert len(folded) == 1
     assert "steered.txt" in json.dumps(folded[0]["content"])
     assert channel.pending() == []
+
+
+async def test_real_claude_native_bash_inherits_runner_display_binding(tmp_path):
+    require_pinned_cli()
+    _, events, _, _, _, _, _ = await _run_local_cli_fixture(
+        tmp_path,
+        tools=default_tool_registry(),
+        tool_name="Bash",
+        tool_arguments={"command": 'printf "%s|%s" "$DISPLAY" "$XAUTHORITY"'},
+        execution_environment={"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"},
+    )
+    assert any(
+        event["type"] == "tool_completed"
+        and ":1|/root/.Xauthority" in event.get("output", "")
+        for event in events
+    )
+
+
+async def test_claude_mcp_child_scope_uses_approved_parent_identity(
+    fake_accessor, monkeypatch
+):
+    from unittest.mock import AsyncMock
+
+    from apps.harness.engines.base import RunOptions
+
+    tools = default_tool_registry()
+    tools.execute = AsyncMock(return_value=ToolResult(output="ok"))
+    engine = ClaudeEngine(tools=tools, accessor=fake_accessor)
+    engine._options = RunOptions(session_id="root", workspace_id="workspace")
+    engine._agent = get_agent("build")
+    engine._bridge = SimpleNamespace(take_mcp_call=AsyncMock(return_value="child-call"))
+    engine._tool_events["child-call"] = {
+        "permission_decision": "allow",
+        "parent_tool_use_id": "delegate-call",
+        "agent_name": "general",
+        "depth": 1,
+    }
+    result = await engine._mcp_handler("desktop", "mcp_computer-use_cua_repl_desktop")(
+        {"action": "start"}
+    )
+    assert not result["is_error"]
+    assert tools.execute.call_args.args[2].agent_scope == "claude:delegate-call"
+    ended = AsyncMock()
+    monkeypatch.setattr(
+        "apps.harness.mcp_client.scopes.close_desktop_agent_scope", ended
+    )
+    await engine._send(
+        {"type": "subtask_finished", "parent_tool_use_id": "delegate-call"}
+    )
+    ended.assert_awaited_once_with(tools, "claude:delegate-call")

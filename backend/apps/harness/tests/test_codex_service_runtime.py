@@ -84,6 +84,14 @@ class ServiceAccessor(LocalAccessor):
 
     async def desktop_action(self, action, args):
         self.actions.append(action)
+        if action == "binding":
+            return {
+                "ok": True,
+                "epoch": "local-epoch",
+                "display": ":1",
+                "xauthority": "/root/.Xauthority",
+                "protocol_version": 2,
+            }
         if action == "release":
             assert all(
                 s.process.returncode is not None
@@ -1350,3 +1358,59 @@ async def test_superseded_owner_cannot_emit_bind_checkpoint_or_finalize(runtime)
     assert all(s.process.returncode is not None for s in data.accessor.streams)
     assert str(session.id) not in data.service._tasks
     assert str(session.id) not in data.service._runs
+
+
+async def test_real_native_codex_child_mcp_retains_separate_agent_scope(
+    runtime, monkeypatch
+):
+    from apps.harness.tools.base import ToolResult
+    from apps.harness.tools.desktop import DesktopTool
+
+    data = runtime
+    scopes = []
+
+    class ProbeDesktop(DesktopTool):
+        async def execute(self, args, ctx):
+            scopes.append(ctx.agent_scope)
+            return ToolResult(output=ctx.agent_scope)
+
+    original_registry = harness_tools.default_tool_registry
+
+    def registry():
+        tools = original_registry()
+        tools.register(ProbeDesktop(None))
+        return tools
+
+    monkeypatch.setattr(harness_tools, "default_tool_registry", registry)
+    native_delegation(data.provider)
+    delegation = data.provider.respond
+
+    def respond(body):
+        inputs = body.get("input", [])
+        child = any(
+            item.get("role") == "user" and "NATIVE_CHILD_PROMPT" in json.dumps(item)
+            for item in inputs
+        )
+        if child and not any(
+            item.get("type") == "function_call_output" for item in inputs
+        ):
+            return {
+                **Responses.tool("desktop", action="status"),
+                "namespace": "mcp__opencuria_computer_use_cua_repl",
+            }
+        return delegation(body)
+
+    data.provider.respond = respond
+    session = new_session(data)
+    assistant = await finish(data, session)
+    assert_settled(data, session, assistant)
+    assert len(scopes) == 1 and scopes[0].startswith("codex:")
+    assert len(scopes[0].split(":")) == 3
+    child = HarnessSession.objects.get(parent=session)
+    assert child.status == "idle"
+    child_assistant = HarnessMessage.objects.get(session=child, role="assistant")
+    assert HarnessPart.objects.filter(
+        message=child_assistant,
+        type="tool",
+        state="completed",
+    ).exists()

@@ -284,6 +284,9 @@ async def test_harness_service_mcp_wiring_success_and_cleanup(harness_workspace)
     real_mcp_runtime = mcp_runtime_module.McpRuntime
 
     class StubRuntime:
+        async def execution_accessor(self, accessor):
+            return accessor
+
         def __init__(self) -> None:
             self.skipped: list[dict] = []
 
@@ -413,6 +416,9 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
     real_mcp_runtime = mcp_runtime_module.McpRuntime
 
     class PartialRuntime:
+        async def execution_accessor(self, accessor):
+            return accessor
+
         skipped = [{"plugin": "demo", "server": "broken", "error": "boom"}]
 
         async def setup(  # type: ignore[no-untyped-def]

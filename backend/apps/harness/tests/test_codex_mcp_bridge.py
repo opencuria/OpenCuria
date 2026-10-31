@@ -133,3 +133,125 @@ async def test_native_mcp_stays_direct_and_preserves_media_and_permissions(
     if mode == "plan" and not deny:
         assert len(permissions) == 1
     assert all(stream.process.returncode is not None for stream in accessor.streams)
+
+
+async def test_real_codex_native_shell_inherits_runner_display_binding(tmp_path):
+    _, events, _, requests, _, _ = await fixture_run(
+        tmp_path,
+        tool="exec_command",
+        args={"cmd": 'printf "%s|%s" "$DISPLAY" "$XAUTHORITY"'},
+        execution_environment={"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"},
+    )
+    assert any(
+        event["type"] == "tool_completed"
+        and ":1|/root/.Xauthority" in event.get("output", "")
+        for event in events
+    ), requests[-1].get("input")
+
+
+async def test_native_mcp_child_identity_and_replay_are_fenced(monkeypatch):
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.engines.base import RunOptions
+    from apps.harness.engines.codex.engine import CodexEngine
+    from apps.harness.tests.test_codex_core_safety import auth
+    from apps.harness.tools.base import ToolResult
+    from apps.harness.tools.desktop import DesktopTool
+
+    seen = []
+
+    class Probe(DesktopTool):
+        async def execute(self, args, ctx):
+            seen.append(ctx.agent_scope)
+            return ToolResult(output=ctx.agent_scope)
+
+    registry = extension_registry()
+    tool = Probe(None)
+    registry.register(tool)
+    engine = CodexEngine(tools=registry, accessor=None, auth=auth())
+    engine.thread_id, engine.turn_id = "root-thread", "root-turn"
+    engine.agent, engine.mode, engine.opts = get_agent("build"), "build", RunOptions()
+    engine.model = "chatgpt/gpt-6.1-sol"
+    engine.items = {}
+    engine.allowed = {tool.name}
+    engine.native_managed_tools = {f"mcp__{tool.native_mcp_server}__desktop"}
+    engine.turn_ready.set()
+    engine.projector.children["child-thread"] = {
+        "finished": False,
+        "turn_id": "child-turn",
+        "parent_tool_use_id": "delegate-call",
+        "subtask_id": "child-thread",
+    }
+    await engine._notification(
+        {
+            "method": "item/started",
+            "params": {
+                "threadId": "child-thread",
+                "turnId": "child-turn",
+                "item": {
+                    "id": "native-call",
+                    "type": "mcpToolCall",
+                    "server": tool.native_mcp_server,
+                    "tool": "desktop",
+                },
+            },
+        }
+    )
+    params = {
+        "sourceCallId": "native-call",
+        "sourceThreadId": "child-thread",
+        "sourceTurnId": "child-turn",
+        "callId": "backend-call",
+        "tool": tool.name,
+        "arguments": {"action": "status"},
+    }
+    import asyncio
+
+    pending = asyncio.create_task(engine._invoke_managed_mcp(params))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    await engine._send({"type": "subtask_started", "subtask_id": "child-thread"})
+    result = await pending
+    assert not result["isError"]
+    assert seen == ["codex:child-thread:child-turn"]
+    with pytest.raises(RuntimeError, match="already dispatched"):
+        await engine._invoke_managed_mcp(params)
+    # Provider call IDs may repeat across threads; native thread/turn metadata
+    # must distinguish them rather than attributing the parent's call to a child.
+    await engine._notification(
+        {
+            "method": "item/started",
+            "params": {
+                "threadId": "root-thread",
+                "turnId": "root-turn",
+                "item": {
+                    "id": "native-call",
+                    "type": "mcpToolCall",
+                    "server": tool.native_mcp_server,
+                    "tool": "desktop",
+                },
+            },
+        }
+    )
+    await engine._invoke_managed_mcp(
+        {
+            **params,
+            "callId": "backend-root",
+            "sourceThreadId": "root-thread",
+            "sourceTurnId": "root-turn",
+        }
+    )
+    assert seen == ["codex:child-thread:child-turn", ""]
+    ended = AsyncMock()
+    monkeypatch.setattr(
+        "apps.harness.engines.codex.engine.close_desktop_agent_scope", ended
+    )
+    await engine._notification(
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": "child-thread",
+                "turn": {"id": "child-turn", "status": "completed", "items": []},
+            },
+        }
+    )
+    ended.assert_awaited_once_with(registry, "codex:child-thread:child-turn")

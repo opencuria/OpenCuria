@@ -397,7 +397,6 @@ async def test_recovery_bound_runtime_not_replacement_status(tmp_path):
             return RuntimeStatus(instance_id, "running")
 
     class ReplacementRuntime(LocalRuntime):
-
         async def get_workspace_status(self, instance_id):
             raise AssertionError("replacement status is not old death evidence")
 
@@ -529,9 +528,11 @@ async def test_supervisor_drops_stdin_while_descendant_lives(tmp_path):
             [
                 sys.executable,
                 "-c",
-                ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
-                "'import time; time.sleep(90)'],stdin=subprocess.DEVNULL); "
-                "print('ready',flush=True)"),
+                (
+                    "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+                    "'import time; time.sleep(90)'],stdin=subprocess.DEVNULL); "
+                    "print('ready',flush=True)"
+                ),
             ],
             expected_token=current_token(),
         ),
@@ -1058,3 +1059,183 @@ def test_isolated_agent_config_root_is_testable_without_internal_workspace_state
     }
     assert _isolated_agent_env(env, config_root=temp_root) == env
     assert len(isolated_agent_env_preamble(env, config_root=temp_root)) > 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["claude", "codex"])
+@pytest.mark.parametrize("real_display", [False, True])
+async def test_isolated_agents_pass_display_to_native_shell_children(
+    tmp_path, profile, real_display
+):
+    """The real guest supervisor must preserve binding across another shell spawn."""
+    import shutil
+
+    config_root = tmp_path / "config-root"
+    config = config_root / str(uuid.uuid4()) / "config"
+    config.mkdir(parents=True)
+    env = (
+        _claude_env(str(config)) if profile == "claude" else {"CODEX_HOME": str(config)}
+    )
+    env.update(DISPLAY=":1", XAUTHORITY="/root/.Xauthority")
+    home = "/tmp/opencuria-agent-home-" + uuid.uuid4().hex
+    marker = tmp_path / "shell-env.json"
+    if real_display and (
+        not shutil.which("Xvfb") or Path("/tmp/.X11-unix/X1").exists()
+    ):
+        pytest.skip("Real display test needs Xvfb and an unused :1")
+    shell = 'printf "%s|%s" "$DISPLAY" "$XAUTHORITY"'
+    if real_display:
+        shell += "; xdpyinfo >/dev/null"
+    script = (
+        "import json,subprocess,sys; print('ready',flush=True); "
+        "sys.stdin.readline(); "
+        f"result=subprocess.check_output(['/bin/bash','-c',{shell!r}]); "
+        f"open({str(marker)!r},'w').write(json.dumps(result.decode()))"
+    )
+    display = process = None
+    try:
+        argv = managed_isolated_argv(
+            str(tmp_path / "control"),
+            str(tmp_path),
+            [sys.executable, "-c", script],
+            env=env,
+            config_root=str(config_root),
+            isolated_home=home,
+            expected_token=current_token(),
+        )
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        process.stdin.write(
+            isolated_agent_env_preamble(env, config_root=str(config_root))
+        )
+        await process.stdin.drain()
+        assert await asyncio.wait_for(process.stdout.readline(), 5) == b"ready\n"
+        # The agent already exists before the display starts. Its later native
+        # Bash child must connect without changing the agent's environment.
+        if real_display:
+            display = await asyncio.create_subprocess_exec(
+                "Xvfb",
+                ":1",
+                "-screen",
+                "0",
+                "640x480x24",
+                "-ac",
+                "-nolisten",
+                "tcp",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            for _ in range(100):
+                if Path("/tmp/.X11-unix/X1").exists():
+                    break
+                await asyncio.sleep(0.02)
+            assert Path("/tmp/.X11-unix/X1").exists()
+        _, stderr = await asyncio.wait_for(process.communicate(b"\n"), 10)
+        assert process.returncode == 0, stderr.decode()
+        assert json.loads(marker.read_text()) == ":1|/root/.Xauthority"
+    finally:
+        for child in (process, display):
+            if child is not None and child.returncode is None:
+                child.terminate()
+                await asyncio.wait_for(child.wait(), 5)
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@pytest.mark.parametrize("profile", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "desktop",
+    [
+        {"DISPLAY": ":99", "XAUTHORITY": "/root/.Xauthority"},
+        {"DISPLAY": ":1", "XAUTHORITY": "/attacker/authority"},
+        {"DISPLAY": ":1"},
+        {"XAUTHORITY": "/root/.Xauthority"},
+    ],
+)
+def test_isolated_agent_rejects_unmanaged_display_binding(profile, desktop):
+    config = f"/workspace/.opencuria/harness/{profile}/{uuid.uuid4()}/config"
+    env = _claude_env(config) if profile == "claude" else {"CODEX_HOME": config}
+    with pytest.raises(ValueError, match="managed desktop"):
+        _isolated_agent_env({**env, **desktop})
+
+
+@pytest.mark.asyncio
+async def test_shared_desktop_unhold_preserves_mcp_streams_but_release_closes_them(
+    tmp_path,
+):
+    from unittest.mock import AsyncMock
+
+    from src.models import DesktopSession
+    from src.services.sessions.desktop import DesktopManager
+    from src.services.sessions.desktop_leases import DesktopLeaseStore
+
+    workspace = uuid.uuid4()
+    store = DesktopLeaseStore(tmp_path)
+    runtime = LocalRuntime()
+    info = SimpleNamespace(instance_id="instance")
+    streams = StreamManager(
+        get_cached=lambda _: info,
+        get_runtime=lambda _: runtime,
+        lease_store=store,
+        state_dir=tmp_path,
+        epoch="epoch",
+    )
+    desktop = DesktopManager(
+        get_cached=lambda _: info,
+        get_runtime=lambda _: runtime,
+        lease_store=store,
+        epoch="epoch",
+        close_owner_streams=streams.close_owner_streams,
+    )
+    desktop._ensure_desktop_process_locked = AsyncMock(
+        side_effect=lambda *a, **kw: desktop._desktop_sessions.setdefault(
+            workspace, DesktopSession(workspace, "instance")
+        )
+    )
+    desktop._verify_binding = AsyncMock()
+    desktop._stop_desktop_process = AsyncMock(
+        side_effect=lambda *a, **kw: desktop._desktop_sessions.pop(workspace, None)
+    )
+    intent = dict(
+        lease_id="shared-agent",
+        kind="computeruse",
+        owner_id="agent",
+        epoch="epoch",
+        revision=1,
+    )
+    owner = {"lease_id": intent["lease_id"], "epoch": intent["epoch"]}
+    await desktop.desktop_action(workspace, "reserve", intent)
+    processes = []
+    try:
+        for name in ("cua", "playwright"):
+            session = await streams.stream_start_process(
+                workspace,
+                name,
+                ["/bin/cat"],
+                workdir=str(tmp_path),
+                owner=owner,
+            )
+            processes.append(session.handle.handle)
+        await desktop.desktop_action(
+            workspace, "hold", {**intent, "activation_revision": 1}
+        )
+        await desktop.desktop_action(
+            workspace, "unhold", {**intent, "activation_revision": 2}
+        )
+        for proc in processes:
+            assert proc.returncode is None
+            proc.stdin.write(b"still alive\n")
+            await proc.stdin.drain()
+            assert await asyncio.wait_for(proc.stdout.readline(), 3) == b"still alive\n"
+        await desktop.desktop_action(
+            workspace, "hold", {**intent, "activation_revision": 3}
+        )
+    finally:
+        result = await desktop.desktop_action(workspace, "release", intent)
+        assert result["ok"]
+    for proc in processes:
+        assert await asyncio.wait_for(proc.wait(), 5) != 0
+    assert not await store.list_unfinished(str(workspace))

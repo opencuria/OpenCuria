@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -31,6 +32,7 @@ from pydantic import BaseModel, ConfigDict
 
 from common import stream_diagnostics
 
+from ..agent_desktop import AgentDesktop, DesktopBusyError
 from ..desktop_leases import DesktopLease, cleanup_rpc
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
 from .builtin import open_builtin_server
@@ -526,6 +528,7 @@ class McpServerConnection:
     harness_tools: list[Any] = field(default_factory=list)
 
     desktop_lease: DesktopLease | None = field(default=None, repr=False)
+    agent_desktop: AgentDesktop | None = field(default=None, repr=False)
     desktop_activation: str = "server_start"
 
     _stack: AsyncExitStack | None = None
@@ -576,12 +579,19 @@ class McpServerConnection:
         try:
             try:
                 if self.desktop_lease is not None:
-                    binding = await self.desktop_lease.reserve()
+                    binding = (
+                        self.agent_desktop.binding
+                        if self.agent_desktop is not None
+                        else await self.desktop_lease.reserve()
+                    )
                     self.env.update(
                         DISPLAY=binding["display"], XAUTHORITY=binding["xauthority"]
                     )
                     if self.desktop_activation == "server_start":
-                        await self.desktop_lease.hold()
+                        if self.agent_desktop is not None:
+                            await self.agent_desktop.action("start")
+                        else:
+                            await self.desktop_lease.hold()
                 await self._open_transport(stack, accessor)
                 await self._open_session(stack)
                 await self._discover()
@@ -648,7 +658,11 @@ class McpServerConnection:
             )
             raise
         finally:
-            if not startup_ok and self.desktop_lease is not None:
+            if (
+                not startup_ok
+                and self.desktop_lease is not None
+                and self.agent_desktop is None
+            ):
                 try:
                     await self.desktop_lease.aclose()
                 except BaseException:
@@ -858,6 +872,10 @@ class McpServerConnection:
         exposed = self.tool_policy.get("exposed_tools")
         internal = set(self.tool_policy.get("internal_tools", []))
         available = {tool.name for tool in self.tools}
+        if self.plugin_slug == "computer-use" and self.server_slug == "cua_repl":
+            # This control-plane tool is implemented by the backend, not the
+            # pinned CUA workspace artifact. It still obeys plugin exposure.
+            available.add("desktop")
         declared = set(exposed or []) | internal
         if not declared <= available:
             raise McpServerHealthError(
@@ -872,7 +890,13 @@ class McpServerConnection:
     def _request_meta(self) -> dict[str, Any] | None:
         if not self.tool_policy.get("on_run_end"):
             return None
-        binding = self.desktop_lease.binding if self.desktop_lease else {}
+        binding = (
+            self.agent_desktop.binding
+            if self.agent_desktop is not None
+            else self.desktop_lease.binding
+            if self.desktop_lease
+            else {}
+        )
         context = {
             **self.run_context,
             **{
@@ -949,6 +973,39 @@ class McpServerConnection:
             return True
         return False
 
+    async def stop_desktop_work(self) -> None:
+        """Confirm the worker stopped before allowing activation to be released."""
+        await self.notify_turn_ended()
+        if not self.healthy:
+            if self.desktop_lease is not None:
+                await cleanup_rpc(self.desktop_lease.aclose())
+            raise RuntimeError("Desktop worker stop could not be confirmed")
+
+    @asynccontextmanager
+    async def _desktop_operation(self, original_name: str) -> AsyncIterator[None]:
+        """Share activation and serialization across this agent's MCP servers."""
+        required = self.tool_policy.get("desktop_tools")
+        desktop = self.agent_desktop
+        if desktop is None or (required is not None and original_name not in required):
+            yield
+            return
+        async with desktop.operation(
+            exclusive_input=bool(self.tool_policy.get("exclusive_input"))
+        ):
+            if self.tool_policy.get(
+                "desktop_kind"
+            ) == "computeruse" and self.run_context.get("enable_recording"):
+                await desktop.record()
+            self._turn_ended = False
+            try:
+                yield
+            except BaseException:
+                # Fence late native work before releasing the shared input owner.
+                await cleanup_rpc(self.notify_turn_ended("Interrupt"))
+                if not self.healthy and self.desktop_lease is not None:
+                    await cleanup_rpc(self.desktop_lease.aclose())
+                raise
+
     async def call_tool(self, original_name: str, args: dict[str, Any]) -> ToolResult:
         """Call one tool with per-server serialization + request timeout.
 
@@ -978,17 +1035,19 @@ class McpServerConnection:
             try:
                 try:
                     with anyio.fail_after(timeout):
-                        owns_input = await self._prepare_desktop(original_name)
-                        result = await self._session.call_tool(
-                            original_name,
-                            dict(args or {}),
-                            read_timeout_seconds=timedelta(seconds=timeout),
-                            **(
-                                {"meta": self._request_meta()}
-                                if self._request_meta()
-                                else {}
-                            ),
-                        )
+                        async with self._desktop_operation(original_name):
+                            if self.agent_desktop is None:
+                                owns_input = await self._prepare_desktop(original_name)
+                            result = await self._session.call_tool(
+                                original_name,
+                                dict(args or {}),
+                                read_timeout_seconds=timedelta(seconds=timeout),
+                                **(
+                                    {"meta": self._request_meta()}
+                                    if self._request_meta()
+                                    else {}
+                                ),
+                            )
                 except TimeoutError as exc:
                     await cleanup_rpc(self.notify_turn_ended("Interrupt"))
                     raise ToolError(
@@ -997,6 +1056,8 @@ class McpServerConnection:
                     ) from exc
             except ToolError:
                 raise
+            except DesktopBusyError as exc:
+                raise ToolError(str(exc), tool=original_name) from exc
             except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
                 await cleanup_rpc(self.notify_turn_ended("Interrupt"))
                 raise
@@ -1070,7 +1131,7 @@ class McpServerConnection:
 
     async def _close_desktop_lease(self) -> None:
         """Best-effort authoritative RPC closure without masking owner errors."""
-        if self.desktop_lease is not None:
+        if self.desktop_lease is not None and self.agent_desktop is None:
             try:
                 await self.desktop_lease.aclose()
             except Exception:

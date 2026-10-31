@@ -12,14 +12,17 @@ import structlog
 from apps.plugins import runtime as plugin_runtime
 from apps.plugins.runtime_snapshot import PreparedPluginRuntime
 
-from ..desktop_leases import DesktopLease
+from ..access.environment import ExecutionEnvironmentAccessor
+from ..agent_desktop import AgentDesktop
 from ..tools.base import ToolRegistry
+from ..tools.desktop import DesktopTool
 from .connection import (
     McpServerConnection,
     McpServerHealthError,
     McpTool,
     check_name_collisions,
 )
+from .scopes import DesktopAgentScopes, ScopedDesktopTool
 
 log = structlog.get_logger(__name__)
 
@@ -49,10 +52,29 @@ def _record_skip(
 class McpRuntime:
     """Owns one harness run's MCP connections (no cross-workspace pool)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, scope_enabled: bool = True) -> None:
         self._stack = AsyncExitStack()
         self.connections: list[McpServerConnection] = []
         self.skipped: list[dict[str, str]] = []
+        self.desktop: AgentDesktop | None = None
+        self.agent_scopes: DesktopAgentScopes | None = None
+        self._scope_enabled = scope_enabled
+
+    async def execution_accessor(self, accessor: Any) -> Any:
+        """Give all three engines the binding before their processes start."""
+        if self.desktop is None:
+            # A viewer may own the display even without any desktop plugin.
+            # Binding discovery neither reserves nor activates a desktop.
+            binding = await accessor.desktop_action("binding", {})
+            if not binding.get("ok"):
+                raise RuntimeError("Runner desktop binding is unavailable")
+            environment = {
+                "DISPLAY": binding["display"],
+                "XAUTHORITY": binding["xauthority"],
+            }
+        else:
+            environment = self.desktop.environment
+        return ExecutionEnvironmentAccessor(accessor, environment)
 
     async def setup(
         self,
@@ -73,6 +95,24 @@ class McpRuntime:
         wins deterministically, the colliding server is closed and skipped).
         """
         snapshot = prepared.snapshot
+        computer_use_declared = any(
+            server.tool_policy.get("desktop_kind") == "computeruse"
+            or (plugin.slug == "computer-use" and server.slug == "cua_repl")
+            for plugin in snapshot.plugins
+            for server in plugin.mcp_servers
+            if server.resources.desktop is not None
+        )
+        if self._scope_enabled:
+            self.agent_scopes = DesktopAgentScopes(
+                {
+                    "prepared": prepared,
+                    "accessor": accessor,
+                    "core_tool_names": core_tool_names,
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "runtime_options": runtime_options,
+                }
+            )
         if not snapshot.plugins:
             return
         owner_id = owner_id or str(uuid4())
@@ -149,18 +189,23 @@ class McpRuntime:
                         getattr(server, "resources", None), "desktop", None
                     )
                     if desktop is not None:
-
-                        def failed(conn=connection):
-                            conn.healthy = False
-                            if owner_task is not None:
-                                owner_task.cancel()
-
-                        connection.desktop_lease = DesktopLease(
-                            accessor,
-                            kind=server.tool_policy.get("desktop_kind", "mcp"),
-                            owner_id=owner_id,
-                            on_failure=failed,
-                        )
+                        if self.desktop is None:
+                            self.desktop = AgentDesktop(
+                                accessor,
+                                owner_id,
+                                on_failure=(
+                                    owner_task.cancel
+                                    if owner_task is not None
+                                    else None
+                                ),
+                                kind="computeruse" if computer_use_declared else "mcp",
+                            )
+                            # Registered before connections: release the display
+                            # only after all SDK scopes and processes are closed.
+                            self._stack.push_async_callback(self.desktop.aclose)
+                            await self.desktop.prepare()
+                        connection.agent_desktop = self.desktop
+                        connection.desktop_lease = self.desktop.lease
                         connection.desktop_activation = desktop.activation
                     try:
                         if server.runtime_artifact:
@@ -232,6 +277,10 @@ class McpRuntime:
                             pass
                         continue
                     connection.harness_tools = tools
+                    if connection.agent_desktop is not None:
+                        connection.agent_desktop.before_stop.append(
+                            connection.stop_desktop_work
+                        )
                     self.connections.append(connection)
                     self._stack.push_async_callback(connection.aclose)
                     seen.update(lowered)
@@ -272,19 +321,52 @@ class McpRuntime:
             if not connection.healthy:
                 continue
             for tool in connection.harness_tools:
+                if (
+                    connection.agent_desktop is not None
+                    and self.agent_scopes is not None
+                ):
+                    tool = ScopedDesktopTool(tool, self.agent_scopes)
                 registry.register(tool)
                 names.append(tool.name)
+        if self.desktop is not None and any(
+            connection.plugin_slug == "computer-use"
+            and connection.server_slug == "cua_repl"
+            and connection.healthy
+            and connection.agent_desktop is self.desktop
+            and (
+                connection.tool_policy.get("exposed_tools") is None
+                or "desktop" in connection.tool_policy["exposed_tools"]
+            )
+            and "desktop" not in connection.tool_policy.get("internal_tools", [])
+            for connection in self.connections
+        ):
+            tool = DesktopTool(self.desktop)
+            if tool.name in registry.names():
+                raise McpServerHealthError("Desktop tool name collision")
+            registry.register(
+                ScopedDesktopTool(tool, self.agent_scopes)
+                if self.agent_scopes is not None
+                else tool
+            )
+            names.append(tool.name)
         return names
 
     async def finish(self) -> list[str]:
         """Finalize runtime effects and return only confirmed recording paths."""
+        if self.agent_scopes is not None:
+            await self.agent_scopes.aclose()
         for connection in self.connections:
             await connection.finish()
-        return [
+        paths = [
             connection.recording_path
             for connection in self.connections
             if connection.recording_path
         ]
+        if self.desktop is not None:
+            paths.extend(await self.desktop.finish())
+        if self.agent_scopes is not None:
+            paths.extend(self.agent_scopes.recordings)
+        return list(dict.fromkeys(paths))
 
     def require_computer_use(self) -> None:
         """Fail an explicitly requested specialist before calling its model."""
@@ -305,7 +387,11 @@ class McpRuntime:
         ``PreparedPluginRuntime`` drops out of scope with the run.
         """
         try:
-            await self._stack.aclose()
+            try:
+                if self.agent_scopes is not None:
+                    await self.agent_scopes.aclose()
+            finally:
+                await self._stack.aclose()
         except Exception:  # pragma: no cover - best effort
             log.warning("mcp_runtime_close_failed")
         finally:

@@ -172,6 +172,12 @@ class ClaudeEngine:
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Forward a root event without letting observer failures abort a run."""
+        if event.get("type") == "subtask_finished" and event.get("parent_tool_use_id"):
+            from ...mcp_client.scopes import close_desktop_agent_scope
+
+            await close_desktop_agent_scope(
+                self.tools, f"claude:{event['parent_tool_use_id']}"
+            )
         try:
             await self._emit(self._sanitize_event(event))
         except asyncio.CancelledError:
@@ -587,6 +593,11 @@ class ClaudeEngine:
                 call_id=call_id,
                 on_question=options.on_question,
                 question_timeout=options.question_timeout,
+                agent_scope=(
+                    f"claude:{state['parent_tool_use_id']}"
+                    if state.get("parent_tool_use_id")
+                    else ""
+                ),
             )
             try:
                 result = await self.tools.execute(name, arguments, context)

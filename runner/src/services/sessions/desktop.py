@@ -27,7 +27,7 @@ from ..capture_fence import CaptureFence, live_interaction
 from ..workspace_helpers import KeyedLockMap
 from ..workspace_helpers import sanitize_path as _sanitize_path
 from .clipboard_selection import build_guest_command
-from .desktop_leases import DesktopLeaseStore
+from .desktop_leases import DesktopInputBusyError, DesktopLeaseStore
 
 logger = structlog.get_logger(__name__)
 
@@ -215,6 +215,8 @@ class DesktopManager:
             ):
                 raise ValueError("Recording owner has ended")
             existing = await self.lease_store.recordings(owner["lease_id"])
+            if payload.get("path"):
+                existing = [r for r in existing if r["path"] == payload["path"]]
             if existing:
                 row = existing[0]
                 if row["state"] != "starting":
@@ -385,7 +387,7 @@ class DesktopManager:
             "display": DESKTOP_DISPLAY,
             "xauthority": DESKTOP_XAUTHORITY_PATH,
             "epoch": self.epoch,
-            "protocol_version": 1,
+            "protocol_version": 2,
             "lease_ttl_seconds": 180,
             "renew_interval_seconds": 45,
         }
@@ -494,18 +496,53 @@ class DesktopManager:
             if row and row["workspace_id"] != str(workspace_id):
                 raise ValueError("Desktop lease workspace mismatch")
             if action == "lease_status":
-                return {
+                result = {
                     **self.binding(),
                     **await self._lease_projection(workspace_id),
                     "lease_state": row["state"] if row else "unknown",
                     "revision": row["revision"] if row else None,
+                    "lease_activated": bool(row and row["activated"]),
+                    "lease_live": bool(
+                        row
+                        and row["epoch"] == self.epoch
+                        and row["instance_id"]
+                        == self._get_cached(workspace_id).instance_id
+                        and row["state"] in {"reserved", "held"}
+                        and row["expires_at"] > time.time()
+                    ),
                 }
+                if payload.get("probe"):
+                    result["active"] = await self._is_desktop_session_live(workspace_id)
+                return result
             epoch = str(payload.get("epoch") or "")
             revision = payload.get("revision", 1)
             if epoch != self.epoch:
                 raise ValueError("Stale runner epoch")
             if action == "renew":
                 row = await self.lease_store.renew(lease_id, epoch, revision, 180)
+            elif action == "unhold":
+                if (
+                    not row
+                    or row["instance_id"] != self._get_cached(workspace_id).instance_id
+                ):
+                    raise ValueError("Unknown or stale desktop claim")
+                for key in ("kind", "owner_id"):
+                    if payload.get(key) != row[key]:
+                        raise ValueError("Desktop lease identity mismatch")
+                sequence = payload.get("activation_revision")
+                row = await self.lease_store.activate(
+                    lease_id, epoch, revision, sequence, active=False
+                )
+                summary = await self._lease_projection(workspace_id)
+                if row["activated"] and summary["holder_count"] == 1:
+                    session = self._desktop_sessions.setdefault(
+                        workspace_id, DesktopSession(workspace_id, row["instance_id"])
+                    )
+                    await self._stop_desktop_process(
+                        workspace_id, expected_session=session
+                    )
+                await self.lease_store.finish_unhold(lease_id, sequence)
+                row = await self.lease_store.get(lease_id)
             else:
                 await self._check_unfinished_incarnations(workspace_id)
                 info = self._get_cached(workspace_id)
@@ -522,7 +559,9 @@ class DesktopManager:
                 if action == "hold":
                     # Persist activation BEFORE guest effects: cancellation or
                     # failed start must leave a protective owner for recovery.
-                    row = await self.lease_store.activate(lease_id, epoch, revision)
+                    row = await self.lease_store.activate(
+                        lease_id, epoch, revision, payload.get("activation_revision")
+                    )
                     try:
                         await self._ensure_desktop_process_locked(
                             workspace_id,
@@ -1231,7 +1270,15 @@ class DesktopManager:
         if action == "hold" and payload.get("kind") == "agent":
             raise ValueError("Agent desktop leases are process ownership only")
 
-        if action in {"binding", "reserve", "renew", "lease_status", "hold", "release"}:
+        if action in {
+            "binding",
+            "reserve",
+            "renew",
+            "lease_status",
+            "hold",
+            "unhold",
+            "release",
+        }:
             return await self._lease_action(workspace_id, action, payload)
 
         if action in {"input_acquire", "input_release"}:
@@ -1241,13 +1288,17 @@ class DesktopManager:
             async with lock:
                 if self.capture_fence is not None:
                     self.capture_fence.check_current(workspace_id)
-                fence = await self.lease_store.input_ownership(
-                    str(workspace_id),
-                    str(payload.get("lease_id", "")),
-                    self.epoch,
-                    payload.get("revision", 1),
-                    acquire=action == "input_acquire",
-                )
+                try:
+                    fence = await self.lease_store.input_ownership(
+                        str(workspace_id),
+                        str(payload.get("lease_id", "")),
+                        self.epoch,
+                        payload.get("revision", 1),
+                        acquire=action == "input_acquire",
+                        activation_revision=payload.get("activation_revision"),
+                    )
+                except DesktopInputBusyError:
+                    return {"ok": False, "busy": True}
                 return {
                     "ok": True,
                     "input_generation": fence,
