@@ -34,6 +34,9 @@ def builder(tmp_path, monkeypatch):
         if domain.isActive():
             domain.destroy()
         domain.undefine()
+    # Test-driver guests do not consume physical CPUs; host admission tests
+    # override this value explicitly to exercise one-core hardware.
+    monkeypatch.setattr("src.runtime.qemu_runtime.psutil.cpu_count", lambda: 8)
     r = runtime(tmp_path)
     r._settings = SimpleNamespace(
         qemu_image_cache_dir=str(tmp_path / "images"),
@@ -49,6 +52,7 @@ def builder(tmp_path, monkeypatch):
     qcow(base)
     r._resolve_build_base_image = MagicMock(return_value=base)
     r._wait_for_ssh = AsyncMock()
+    r._wait_for_cloud_init = AsyncMock()
     r.put_archive = AsyncMock()
     r._stream_ssh_process = AsyncMock()
     yield r
@@ -115,6 +119,10 @@ async def test_parallel_builds_have_distinct_networks_and_inventory_stays_availa
         manifest = json.loads(target.with_suffix(".manifest.json").read_text())
         assert manifest["kind"] == "build"
         assert manifest["self_contained"]
+        assert manifest["virtual_size_bytes"] == 1024**3
+        assert manifest["min_disk_size_gb"] == 1
+        assert result["virtual_size_bytes"] == 1024**3
+        assert result["min_disk_size_gb"] == 1
         assert not (await r._image_info(target)).get("backing-filename")
     assert r._libvirt_conn().listAllDomains(0) == []
     assert not any(

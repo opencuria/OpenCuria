@@ -1,5 +1,8 @@
 """Independent durable delivery loop shared by deployment and tests."""
 
+from collections.abc import Callable
+from typing import Any
+
 import structlog
 from asgiref.sync import sync_to_async
 
@@ -17,34 +20,54 @@ class RecoveryService:
 
     async def tick(self, transport) -> None:
         """Advance durable coordinators and deliver due commands independently."""
-        await sync_to_async(DeletionRepository.tick)()
-        finished = await sync_to_async(CaptureService.tick)()
-        finished += await sync_to_async(RecreateService.tick)()
+        failures: list[tuple[str, Exception]] = []
+
+        async def stage(name: str, operation: Callable[..., Any], **kwargs: Any) -> Any:
+            try:
+                return await sync_to_async(operation)(**kwargs)
+            except Exception as error:
+                # A broken coordinator must not starve unrelated durable commands.
+                # Still fail the tick after making progress so the supervisor
+                # never treats a persistent database/coordinator fault as healthy.
+                failures.append((name, error))
+                logger.exception("lifecycle_recovery_stage_failed", stage=name)
+                return []
+
+        await stage("deletion", DeletionRepository.tick)
+        finished = await stage("capture", CaptureService.tick)
+        finished += await stage("recreate", RecreateService.tick)
         if finished:
             from . import RunnerService
 
             service = RunnerService(transport)
             for result in finished:
-                workspace_id = result["workspace_id"]
-                if result.get("status"):
-                    await sync_to_async(service._forward_to_frontend)(
-                        "workspace:status_changed",
-                        {"workspace_id": workspace_id, "status": result["status"]},
-                        workspace_id,
+                try:
+                    workspace_id = result["workspace_id"]
+                    if result.get("status"):
+                        await sync_to_async(service._forward_to_frontend)(
+                            "workspace:status_changed",
+                            {"workspace_id": workspace_id, "status": result["status"]},
+                            workspace_id,
+                        )
+                    await sync_to_async(service._forward_workspace_operation)(
+                        workspace_id, None
                     )
-                await sync_to_async(service._forward_workspace_operation)(
-                    workspace_id, None
-                )
-                if result["diagnostic"]:
-                    await sync_to_async(service._forward_to_frontend)(
-                        "workspace:error",
-                        {"workspace_id": workspace_id, "error": result["diagnostic"]},
-                        workspace_id,
-                    )
-        await sync_to_async(ImageRetentionService.tick)()
+                    if result["diagnostic"]:
+                        await sync_to_async(service._forward_to_frontend)(
+                            "workspace:error",
+                            {
+                                "workspace_id": workspace_id,
+                                "error": result["diagnostic"],
+                            },
+                            workspace_id,
+                        )
+                except Exception as error:
+                    failures.append(("notification", error))
+                    logger.exception("lifecycle_recovery_notification_failed")
+        await stage("retention", ImageRetentionService.tick)
         from ..inventory_repository import InventoryRepository
 
-        refreshes = await sync_to_async(InventoryRepository.refresh_candidates)()
+        refreshes = await stage("inventory", InventoryRepository.refresh_candidates)
         for refresh in refreshes:
             try:
                 await transport.emit("inventory:refresh", {}, room=refresh.runner.sid)
@@ -52,7 +75,7 @@ class RecoveryService:
                 logger.exception(
                     "inventory_refresh_deferred", runner_id=str(refresh.runner_id)
                 )
-        unresolved = await sync_to_async(OperationRepository.list_for_inspection)()
+        unresolved = await stage("inspection", OperationRepository.list_for_inspection)
         for row in unresolved:
             try:
                 await transport.emit(
@@ -64,8 +87,10 @@ class RecoveryService:
                 logger.exception(
                     "operation_inspection_deferred", task_id=str(row.task_id)
                 )
-        commands = await sync_to_async(OperationRepository.candidates)(
-            delivery_allowed=DeletionRepository.delivery_allowed
+        commands = await stage(
+            "commands",
+            OperationRepository.candidates,
+            delivery_allowed=DeletionRepository.delivery_allowed,
         )
         for command in commands:
             try:
@@ -99,3 +124,8 @@ class RecoveryService:
                 logger.exception(
                     "lifecycle_delivery_deferred", task_id=str(command.task_id)
                 )
+        if failures:
+            names = ", ".join(name for name, _ in failures)
+            raise RuntimeError(
+                f"Lifecycle recovery stages failed: {names}"
+            ) from failures[0][1]

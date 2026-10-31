@@ -139,14 +139,13 @@ class OperationResultRepository:
         self._task.refresh_from_db()
         return self._task.status, self._task.error
 
-    def retain_intervention_fence(self) -> None:
-        """Reserve the task identity when a callback still needs intervention."""
-        self._command.phase = "intervention"
-        self._command.save(update_fields=["phase"])
-        if self._task.workspace_id:
-            Workspace.objects.filter(pk=self._task.workspace_id).update(
-                current_task=self._task, active_operation=None
-            )
+    def record_runtime_observation(self, status: str) -> None:
+        """Keep terminal resource evidence for aggregate capacity accounting."""
+        self._command.payload = {
+            **self._command.payload,
+            "_observed_workspace_status": status,
+        }
+        self._command.save(update_fields=["payload"])
 
     def release_workspace(self) -> None:
         """Release only this child identity, preserving capture/recreate ownership."""

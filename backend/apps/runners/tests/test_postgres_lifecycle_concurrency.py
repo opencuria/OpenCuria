@@ -503,3 +503,53 @@ def test_credential_injection_admission_vs_capture(runner, workspace):
             workspace=workspace, type="inject_credentials"
         ).exists()
         assert WorkspaceOperationRepository.capture_active(workspace.id)
+
+
+def test_heartbeat_cas_rechecks_after_waiting_for_newer_workspace_commit(
+    runner, workspace
+):
+    """A blocked observation must recheck state after the lifecycle writer wins."""
+    from threading import Event
+
+    from apps.runners.repositories import WorkspaceRepository
+
+    if connection.vendor != "postgresql":
+        pytest.skip("requires PostgreSQL UPDATE predicate recheck")
+    stale = WorkspaceRepository.get_by_id(workspace.id)
+    pids = Queue()
+
+    def heartbeat():
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '10s'")
+                cursor.execute("SELECT pg_backend_pid()")
+                pids.put(cursor.fetchone()[0])
+            return WorkspaceRepository.reconcile_heartbeat_status(
+                stale, "stopped", runner_sid=runner.sid
+            )
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with transaction.atomic():
+            Workspace.objects.select_for_update().get(pk=workspace.id)
+            future = pool.submit(heartbeat)
+            pid = pids.get(timeout=5)
+            deadline = time.monotonic() + 5
+            while True:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                        [pid],
+                    )
+                    if cursor.fetchone()[0] == "Lock":
+                        break
+                assert time.monotonic() < deadline
+                Event().wait(0.01)
+            Workspace.objects.filter(pk=workspace.id).update(
+                status="deleted", updated_at=timezone.now()
+            )
+        assert future.result(timeout=10) is False
+    workspace.refresh_from_db()
+    assert workspace.status == "deleted"

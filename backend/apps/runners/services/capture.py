@@ -22,8 +22,10 @@ from ..models import (
     Workspace,
     WorkspaceRecreateRequest,
 )
+from ..provisioning import disk_size_for
 from ..workspace_operation_repository import WorkspaceOperationRepository
 from .recreate import RecreateService
+from .workspace_capacity import WorkspaceCapacityService
 
 logger = structlog.get_logger("apps.runners.capture_repository")
 
@@ -85,6 +87,13 @@ class CaptureService:
                 ws.base_image_instance_id
             ):
                 raise ConflictError("Source image is retired or unavailable")
+            WorkspaceCapacityService.ensure(
+                ws.runner_id,
+                vcpus=ws.qemu_vcpus,
+                memory_mb=ws.qemu_memory_mb,
+                disk_size_gb=ws.qemu_disk_size_gb,
+                exclude_workspace_id=ws.id,
+            )
             line = CaptureService._reserve_line(ws, name, captured_image_id)
             phase = "stop" if ws.status == "running" else "capture"
             # The image and first prepared command commit together, closing the old
@@ -205,8 +214,19 @@ class CaptureService:
                     and not request.resume_suppressed
                     and ws.status == "stopped"
                 ):
-                    CaptureService._child(request, ws, "resume")
-                    return
+                    try:
+                        WorkspaceCapacityService.ensure(
+                            ws.runner_id,
+                            vcpus=ws.qemu_vcpus,
+                            memory_mb=ws.qemu_memory_mb,
+                            disk_size_gb=ws.qemu_disk_size_gb,
+                            exclude_workspace_id=ws.id,
+                        )
+                    except ConflictError as exc:
+                        request.diagnostic += f"; workspace remains stopped: {exc}"
+                    else:
+                        CaptureService._child(request, ws, "resume")
+                        return
                 request.phase = "completed" if child.status == "completed" else "failed"
             elif request.phase == "resume":
                 request.phase = (
@@ -254,6 +274,19 @@ class CaptureService:
             return (
                 f"Image saved as v{image.generation}, but it exceeds the runner disk "
                 "limit; the workspace stays on its previous version"
+            )
+        try:
+            WorkspaceCapacityService.ensure(
+                ws.runner_id,
+                vcpus=ws.qemu_vcpus,
+                memory_mb=ws.qemu_memory_mb,
+                disk_size_gb=disk_size_for(ws.qemu_disk_size_gb, image),
+                exclude_workspace_id=ws.id,
+            )
+        except ConflictError as exc:
+            return (
+                f"Image saved as v{image.generation}, but replacement cannot reserve "
+                f"runner resources: {exc}; the workspace stays on its previous version"
             )
         return None
 

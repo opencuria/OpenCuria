@@ -429,8 +429,8 @@ def test_legacy_migration_preserves_queued_without_physical_dispatch(runner, use
     executor.migrate(old)
     try:
         apps = executor.loader.project_state(old).apps
-        Image = apps.get_model("runners", "ImageInstance")
-        queued = Image.objects.create(
+        image_model = apps.get_model("runners", "ImageInstance")
+        queued = image_model.objects.create(
             runner_id=runner.id,
             created_by_id=user.id,
             name="legacy",
@@ -441,12 +441,12 @@ def test_legacy_migration_preserves_queued_without_physical_dispatch(runner, use
         executor = MigrationExecutor(connection)
         preserved = [("runners", "0023_preserve_delete_intents")]
         executor.migrate(preserved)
-        Image = executor.loader.project_state(preserved).apps.get_model(
+        image_model = executor.loader.project_state(preserved).apps.get_model(
             "runners", "ImageInstance"
         )
         row = ImageDeletionRequest.objects.get(target_id=queued.id)
         assert row.phase == "waiting_inventory" and row.children == {}
-        assert Image.objects.get(pk=queued.id).runner_ref == "/legacy"
+        assert image_model.objects.get(pk=queued.id).runner_ref == "/legacy"
         assert not Task.objects.exists()
     finally:
         executor = MigrationExecutor(connection)
@@ -476,7 +476,7 @@ def test_runner_finished_failures_bounded_but_unknown_never_retry(runner, user):
         Repo.tick()
         observe(runner, [resource(base)])
     Repo.tick()
-    assert ImageDeletionRequest.objects.get(pk=plan["id"]).phase == "intervention"
+    assert ImageDeletionRequest.objects.get(pk=plan["id"]).phase == "failed"
     assert Task.objects.count() == 3
 
 

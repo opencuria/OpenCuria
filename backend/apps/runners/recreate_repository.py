@@ -24,7 +24,7 @@ from .models import (
     WorkspaceRecreateRequest,
 )
 from .phase_children import fence_unknown_child
-from .repositories import TaskRepository
+from .repositories import ImageInstanceRepository, TaskRepository
 from .workspace_operation_repository import REQUEST_TERMINAL_PHASES
 
 
@@ -77,13 +77,15 @@ class RecreateRepository:
     def lock_image(runner_id: uuid.UUID, image_id: uuid.UUID) -> ImageInstance | None:
         """Lock a runner-scoped version and its captured-image line, if any."""
         image = (
-            ImageInstance.objects.select_for_update()
+            ImageInstance.objects.select_for_update(of=("self",))
             .select_related("captured_image", "build_job__image_definition")
             .filter(pk=image_id, runner_id=runner_id)
             .first()
         )
         if image is not None and image.captured_image_id:
             CapturedImage.objects.select_for_update().get(pk=image.captured_image_id)
+        if image is not None:
+            ImageInstanceRepository.populate_disk_floor(image)
         return image
 
     @staticmethod

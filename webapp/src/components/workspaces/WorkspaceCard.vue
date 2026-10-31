@@ -46,14 +46,11 @@ const transitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
 )
 const isRunnerOfflineState = computed(
-  () =>
-    !props.workspace.runner_online &&
-    props.workspace.status !== WorkspaceStatus.DELETED &&
-    props.workspace.status !== WorkspaceStatus.REMOVED,
+  () => !props.workspace.runner_online && props.workspace.status !== WorkspaceStatus.DELETED,
 )
 
 const statusVariant = computed(() => {
-  if (props.workspace.intervention_required) return 'destructive'
+  if (props.workspace.intervention_required) return 'outline'
   if (transitionLabel.value) {
     return 'default'
   }
@@ -70,7 +67,6 @@ const statusVariant = computed(() => {
     case WorkspaceStatus.FAILED:
     case WorkspaceStatus.DELETE_FAILED:
       return 'destructive'
-    case WorkspaceStatus.REMOVED:
     case WorkspaceStatus.DELETED:
       return 'secondary'
     default:
@@ -79,11 +75,9 @@ const statusVariant = computed(() => {
 })
 
 const statusLabel = computed(() => {
-  if (props.workspace.intervention_required) return 'Needs review'
+  if (isRunnerOfflineState.value) return 'Runner offline'
+  if (props.workspace.intervention_required) return 'Checking state'
   if (transitionLabel.value) return transitionLabel.value
-  if (isRunnerOfflineState.value) {
-    return 'Runner offline'
-  }
   if (props.workspace.status === WorkspaceStatus.RUNNING && props.workspace.has_active_session) {
     return 'Busy'
   }
@@ -109,11 +103,7 @@ const imminentAutoStopLabel = computed(() => {
 
 const disk = computed(() => {
   const usage = props.workspace.disk_usage
-  if (
-    !usage ||
-    props.workspace.status === WorkspaceStatus.DELETED ||
-    props.workspace.status === WorkspaceStatus.REMOVED
-  ) {
+  if (!usage || props.workspace.status === WorkspaceStatus.DELETED) {
     return null
   }
   const view = describeDiskUsage(usage)
@@ -152,8 +142,7 @@ const disk = computed(() => {
                     : workspace.status === WorkspaceStatus.FAILED ||
                         workspace.status === WorkspaceStatus.DELETE_FAILED
                       ? 'bg-destructive/10 text-destructive'
-                      : workspace.status === WorkspaceStatus.REMOVED ||
-                          workspace.status === WorkspaceStatus.DELETED
+                      : workspace.status === WorkspaceStatus.DELETED
                         ? 'bg-muted/50 text-muted-foreground/50'
                         : 'bg-muted text-muted-foreground',
             ]"

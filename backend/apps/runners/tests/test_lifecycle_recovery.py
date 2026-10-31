@@ -78,8 +78,8 @@ def test_unprepared_intent_and_lost_lease_bounded(runner, workspace):
     task.refresh_from_db()
     workspace.refresh_from_db()
     assert task.status == "failed"
-    assert "intervention" in task.error
-    assert workspace.current_task_id == task.id
+    assert "before delivery" in task.error
+    assert workspace.current_task_id is None
     assert workspace.active_operation is None
 
 
@@ -115,7 +115,7 @@ def test_sanitized_outbox_and_offline_expiry(runner, workspace):
     )
     OperationRepository.candidates(delivery_allowed=DeletionRepository.delivery_allowed)
     task.refresh_from_db()
-    assert task.status == "failed"
+    assert task.status == "pending"  # unissued offline work remains queued
 
 
 @pytest.mark.asyncio
@@ -154,6 +154,13 @@ def test_fresh_execution_heartbeat_suppresses_duplicate_delivery(runner, workspa
     assert task.status == "pending"
     LifecycleCommand.objects.filter(task=task).update(
         deadline_at=timezone.now() - timedelta(seconds=1)
+    )
+    OperationRepository.candidates(delivery_allowed=DeletionRepository.delivery_allowed)
+    task.refresh_from_db()
+    assert task.status == "pending"  # a live operation may legitimately take hours
+    LifecycleCommand.objects.filter(task=task).update(
+        deadline_at=timezone.now() - timedelta(seconds=1),
+        heartbeat_at=timezone.now() - timedelta(minutes=5),
     )
     OperationRepository.candidates(delivery_allowed=DeletionRepository.delivery_allowed)
     task.refresh_from_db()

@@ -44,7 +44,10 @@ class ImageAssignmentRepository:
             elif (
                 task.status == TaskStatus.FAILED
                 and image.status == "failed"
-                and not job.current_generation_id
+                and (
+                    not job.current_generation_id
+                    or job.current_generation.status != "ready"
+                )
                 and job.status != "deactivated"
             ):
                 job.status = "failed"

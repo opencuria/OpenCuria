@@ -10,8 +10,6 @@ from __future__ import annotations
 from django.db import models
 
 
-
-
 class RunnerStatus(models.TextChoices):
     """Connection status of a runner."""
 
@@ -30,7 +28,6 @@ class WorkspaceStatus(models.TextChoices):
     DELETING = "deleting", "Deleting"
     DELETED = "deleted", "Deleted"
     DELETE_FAILED = "delete_failed", "Delete Failed"
-    REMOVED = "removed", "Removed"
 
 
 class WorkspaceOperation(models.TextChoices):

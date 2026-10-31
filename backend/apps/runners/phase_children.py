@@ -1,7 +1,7 @@
 """Shared rules for durable multi-step workspace requests (capture, recreate).
 
 A request owns its workspace between child tasks. A child with an unknown
-outcome is never advanced past: it stays fenced until an operator resolves it.
+outcome is never advanced past: it stays fenced until automatic inspection resolves it.
 """
 
 from __future__ import annotations
@@ -18,11 +18,7 @@ def fence_unknown_child(
     request, ws: Workspace, child: Task, command: LifecycleCommand
 ) -> tuple[bool, dict | None]:
     """Fence an ambiguous child; return (fenced, notification-if-changed)."""
-    if not (
-        command.phase == "intervention"
-        or ws.current_task_id
-        or (child.status == "failed" and "intervention" in child.error.lower())
-    ):
+    if not (command.phase == "intervention" or ws.current_task_id):
         return False, None
     changed = request.diagnostic != UNKNOWN_CHILD_DIAGNOSTIC
     OperationRepository.intervene(child, UNKNOWN_CHILD_DIAGNOSTIC)

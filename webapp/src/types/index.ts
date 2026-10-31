@@ -14,7 +14,6 @@ export enum WorkspaceStatus {
   RUNNING = 'running',
   STOPPED = 'stopped',
   FAILED = 'failed',
-  REMOVED = 'removed',
   PENDING_DELETION = 'pending_deletion',
   DELETING = 'deleting',
   DELETED = 'deleted',

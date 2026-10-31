@@ -19,6 +19,7 @@ import type {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { isWorkspaceReadyForChat } from '@opencuria/chat-core/workspaceReadiness'
+import { isWorkspaceLifecycleBusy } from '@/lib/workspaceLifecycle'
 import { useNotificationStore } from './notifications'
 import { useImageStore } from './images'
 
@@ -72,8 +73,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       ? {
           ...workspace,
           active_operation: event.operation,
-          ...(event.intervention_required !== undefined ? { intervention_required: event.intervention_required } : {}),
-          ...(event.lifecycle_diagnostic !== undefined ? { lifecycle_diagnostic: event.lifecycle_diagnostic } : {}),
+          ...(event.intervention_required !== undefined
+            ? { intervention_required: event.intervention_required }
+            : {}),
+          ...(event.lifecycle_diagnostic !== undefined
+            ? { lifecycle_diagnostic: event.lifecycle_diagnostic }
+            : {}),
         }
       : workspace
   }
@@ -118,7 +123,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     running: workspaces.value.filter((w) => w.status === WorkspaceStatus.RUNNING),
     stopped: workspaces.value.filter((w) => w.status === WorkspaceStatus.STOPPED),
     failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.FAILED),
-    removed: workspaces.value.filter((w) => w.status === WorkspaceStatus.REMOVED),
     pending_deletion: workspaces.value.filter((w) => w.status === WorkspaceStatus.PENDING_DELETION),
     deleting: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETING),
     deleted: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETED),
@@ -153,8 +157,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
     return Boolean(
-      workspace &&
-        isWorkspaceReadyForChat(workspace, isWorkspaceTransitioning(workspaceId)),
+      workspace && isWorkspaceReadyForChat(workspace, isWorkspaceTransitioning(workspaceId)),
     )
   }
 
@@ -203,27 +206,22 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
     if (!workspace) return Boolean(pendingWorkspaceOperations.value[workspaceId])
-    // Workspaces in deletion states are always "transitioning" (no actions allowed)
-    const deletionStates: string[] = [
-      WorkspaceStatus.PENDING_DELETION,
-      WorkspaceStatus.DELETING,
-      WorkspaceStatus.REMOVED,
-      WorkspaceStatus.DELETED,
-    ]
-    if (workspace.intervention_required || deletionStates.includes(workspace.status)) return true
-    return Boolean(workspace.active_operation || pendingWorkspaceOperations.value[workspaceId])
+    return (
+      isWorkspaceLifecycleBusy(workspace) || Boolean(pendingWorkspaceOperations.value[workspaceId])
+    )
   }
 
   function getWorkspaceTransitionLabel(workspaceId: string): string | null {
     const workspace =
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
+    if (workspace?.intervention_required) return 'Checking state'
     if (
       pendingCaptures.value[workspaceId] ||
       workspace?.active_operation === WorkspaceOperation.CAPTURING_IMAGE
     )
       return 'Capturing'
-    if (workspace?.intervention_required) return 'Needs attention'
+    if (workspace?.status === WorkspaceStatus.PENDING_DELETION) return 'Removal queued'
     switch (workspace?.active_operation) {
       case WorkspaceOperation.CREATING:
         return 'Creating…'
@@ -242,7 +240,16 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
 
     const pending = pendingWorkspaceOperations.value[workspaceId]
-    if (!pending) return null
+    if (!pending) {
+      switch (workspace?.status) {
+        case WorkspaceStatus.CREATING:
+          return 'Creating…'
+        case WorkspaceStatus.DELETING:
+          return 'Removing…'
+        default:
+          return null
+      }
+    }
     switch (pending.operation) {
       case 'create':
         return 'Creating…'
@@ -267,10 +274,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     if (!pending) return
     if (previousStatus && previousStatus === status) return
 
-    const removeCompleted =
-      pending.operation === 'remove' &&
-      (status === WorkspaceStatus.REMOVED || status === WorkspaceStatus.DELETED)
-    if (status === pending.expectedStatus || removeCompleted) {
+    if (status === pending.expectedStatus) {
       const workspaceName = getWorkspaceName(workspaceId)
       switch (pending.operation) {
         case 'create':
@@ -649,7 +653,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     try {
       await workspacesApi.deleteWorkspace(id)
       setPendingWorkspaceOperation(id, 'remove', WorkspaceStatus.DELETED)
-      notifications.info('Removing workspace', `${getWorkspaceName(id)} is being removed…`)
+      const workspace = workspaces.value.find((entry) => entry.id === id) ?? activeWorkspace.value
+      if (workspace?.runner_online === false) {
+        notifications.info('Removal queued', 'Removal continues when the runner reconnects.')
+      } else {
+        notifications.info('Removing workspace', `${getWorkspaceName(id)} is being removed…`)
+      }
       await fetchWorkspaces()
     } catch (e: unknown) {
       notifications.error('Removal failed', e instanceof Error ? e.message : 'Unknown error')
@@ -765,8 +774,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
     if (activeWorkspace.value?.id === workspaceId) {
       activeWorkspace.value.active_operation = activeOperation
-      if (interventionRequired !== undefined) activeWorkspace.value.intervention_required = interventionRequired
-      if (lifecycleDiagnostic !== undefined) activeWorkspace.value.lifecycle_diagnostic = lifecycleDiagnostic
+      if (interventionRequired !== undefined)
+        activeWorkspace.value.intervention_required = interventionRequired
+      if (lifecycleDiagnostic !== undefined)
+        activeWorkspace.value.lifecycle_diagnostic = lifecycleDiagnostic
     }
 
     if (activeOperation === null) {
@@ -808,7 +819,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       ) ||
       (activeWorkspace.value?.id === workspaceId &&
         activeWorkspace.value.active_operation === WorkspaceOperation.CAPTURING_IMAGE)
-    ) return
+    )
+      return
     updateWorkspaceOperation(workspaceId, null)
     clearPendingWorkspaceOperation(workspaceId)
   }

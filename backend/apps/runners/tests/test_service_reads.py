@@ -130,7 +130,7 @@ def test_runner_status_events_preserve_workspace_recipients(
             str(row.id),
         )
         for row in reversed(workspaces)
-        if row.status not in {WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED}
+        if row.status not in {WorkspaceStatus.DELETED, WorkspaceStatus.FAILED}
     ]
 
 

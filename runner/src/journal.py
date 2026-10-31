@@ -9,9 +9,16 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
+from typing import Any
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 _terminal = contextvars.ContextVar("lifecycle_terminal", default=None)
 _active = contextvars.ContextVar("lifecycle_operation", default=None)
@@ -40,17 +47,45 @@ COMMANDS = {
     "task:create_image_artifact",
     "task:delete_image_artifact",
 }
+DISK_HELPERS = {
+    "qemu-img", "virt-customize", "guestfish", "genisoimage", "mkisofs",
+}
+
+
+def _disk_helper_active(comm: Path) -> bool:
+    """Recognize disk helpers still capable of effects, excluding zombie exits."""
+    if comm.read_text().strip() not in DISK_HELPERS:
+        return False
+    # stat is an atomic process observation. Parse after the final name delimiter
+    # because process names can themselves contain spaces or parentheses.
+    _, separator, status = comm.with_name("stat").read_text().rpartition(") ")
+    if not separator or not status:
+        return True
+    return status.split()[0] not in {"Z", "X", "x"}
+
+
+def serialized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Keep synchronous callers and the journal worker on one transaction owner."""
+
+    @wraps(method)
+    def wrapped(self: Journal, *args: Any, **kwargs: Any) -> Any:
+        with self._mutex:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 class Journal:
     """SQLite FULL sync; acknowledged tombstones are retained indefinitely."""
 
     def __init__(self, state_dir: str, *, defer_recovery: bool = False) -> None:
+        self._mutex = threading.RLock()
+        self._io_lock = asyncio.Lock()
         path = Path(state_dir).expanduser()
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._lock_file = (path / "operations.lock").open("a")
         fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.db = sqlite3.connect(path / "operations.sqlite3")
+        self.db = sqlite3.connect(path / "operations.sqlite3", check_same_thread=False)
         os.chmod(path / "operations.sqlite3", 0o600)
         self.instance_id = str(uuid.uuid4())
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -64,11 +99,74 @@ class Journal:
             "CREATE TABLE IF NOT EXISTS checkpoints "
             "(workspace_id TEXT PRIMARY KEY, incarnation TEXT, proof TEXT)"
         )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS operations_pending "
+            "ON operations(ack) WHERE result IS NOT NULL"
+        )
         if not defer_recovery:
             self.interrupt_unproven()
+    async def call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Run serialized disk IO off the event loop, joining it on cancellation.
 
+        Queue before starting a thread, so slow storage consumes at most one
+        worker. A cancelled caller must not release a lifecycle fence while its
+        uninterruptible SQLite transaction can still commit.
+        """
+        async with self._io_lock:
+            work = asyncio.create_task(
+                asyncio.to_thread(getattr(self, method), *args, **kwargs)
+            )
+            cancelled = False
+            while not work.done():
+                try:
+                    await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except BaseException:  # noqa: BLE001 - drain worker before unlock
+                    break
+            if cancelled:
+                # Consume a worker exception but preserve cancellation authority.
+                if not work.cancelled():
+                    work.exception()
+                raise asyncio.CancelledError
+            return work.result()
 
+    @serialized
+    def lookup(self, op_id: str | None) -> tuple[dict, str | None, dict | None] | None:
+        """Read a complete operation record under the transaction mutex."""
+        row = self.db.execute(
+            "SELECT identity,event,result FROM operations WHERE id=?", (op_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0]), row[1], json.loads(row[2]) if row[2] else None
 
+    @serialized
+    def seal(self, identity: dict) -> None:
+        """Permanently reject delayed execution of an inspected missing identity."""
+        with self.db:
+            self.db.execute(
+                "INSERT OR IGNORE INTO operations"
+                "(id,fingerprint,identity,event,result) VALUES(?,?,?,?,?)",
+                (
+                    identity["operation_id"],
+                    "recovery-sealed",
+                    json.dumps(identity),
+                    "workspace:error",
+                    json.dumps(
+                        {
+                            **identity,
+                            "task_id": identity["operation_id"],
+                            "diagnostic_code": "interrupted",
+                            "outcome_known": False,
+                            "execution_finished": True,
+                            "error": "Operation interrupted; resources preserved for retry",
+                        }
+                    ),
+                ),
+            )
+
+    @serialized
     def unfinished(self) -> list[tuple[str, dict]]:
         """Read identities only; no execution recipes or credentials are persisted."""
         return [
@@ -78,6 +176,32 @@ class Journal:
             ).fetchall()
         ]
 
+    @serialized
+    def owns_workspace_allocation(self, workspace_id: str) -> bool:
+        """Retain newest allocation lineage, revoked by a completed removal."""
+        for encoded, event, result in self.db.execute(
+            "SELECT identity,event,result FROM operations ORDER BY rowid DESC"
+        ):
+            identity = json.loads(encoded)
+            if (
+                identity.get("workspace_id") != workspace_id
+                or identity.get("target") != workspace_id
+            ):
+                continue
+            if event == "workspace:removed":
+                return False
+            if identity.get("command") in {
+                "task:create_workspace", "task:create_workspace_from_image_artifact",
+            }:
+                terminal = json.loads(result) if result else None
+                return (
+                    terminal is None
+                    or event == "workspace:created"
+                    or terminal.get("outcome_known") is False
+                )
+        return False
+
+    @serialized
     def interrupt_unproven(self) -> None:
         """Fence effects with no terminal publication evidence; never rerun them."""
         for op_id, identity in self.unfinished():
@@ -87,18 +211,20 @@ class Journal:
                 event,
                 {
                     **identity,
-                    "error": "Manual intervention required",
+                    "error": "Operation interrupted; resources preserved for retry",
                     "diagnostic_code": "interrupted",
                     "outcome_known": False,
                     "execution_finished": True,
                 },
             )
 
+    @serialized
     def close(self) -> None:
         """Release storage after executor has drained all handlers."""
         self.db.close()
         self._lock_file.close()
 
+    @serialized
     def begin(self, event: str, data: dict) -> bool:
         """Reserve identity before any runtime effect; reject payload collisions."""
         identity = {
@@ -127,6 +253,7 @@ class Journal:
             else "workspace:error"
         )
         identity["failure_event"] = failure
+        identity["command"] = event
         # Credentials are resolved anew at delivery. Exclude all secret-bearing
         # fields and recipe contents from persistent hash/material.
         safe = {
@@ -158,10 +285,13 @@ class Journal:
             )
         return True
 
+    @serialized
     def finish(self, op_id: str, event: str, data: dict) -> None:
         """Persist terminal evidence before emitting, with sanitized errors."""
         clean = {
-            k: v for k, v in data.items() if k not in {"env_vars", "files", "ssh_keys"}
+            k: v
+            for k, v in data.items()
+            if k not in {"env_vars", "files", "ssh_keys", "init_script"}
         }
         if "error" in clean:
             interrupted = (
@@ -169,7 +299,7 @@ class Journal:
                 or clean.get("outcome_known") is False
             )
             clean["error"] = (
-                "Operation interrupted; manual intervention required"
+                "Operation interrupted; resources preserved for retry"
                 if interrupted
                 else "Operation failed; execution finished"
             )
@@ -186,6 +316,7 @@ class Journal:
                 (event, json.dumps(clean), op_id),
             )
 
+    @serialized
     def invalidate_checkpoint(self, workspace_id: str) -> None:
         """Revoke scrub proof before any injection, even when runtime scan fails."""
         with self.db:
@@ -193,6 +324,7 @@ class Journal:
                 "DELETE FROM checkpoints WHERE workspace_id=?", (workspace_id,)
             )
 
+    @serialized
     def checkpoint(self, workspace_id: str, incarnation: dict, proof: dict) -> None:
         """Persist only runtime identity and scrub/readiness evidence, never secrets."""
         with self.db:
@@ -205,6 +337,7 @@ class Journal:
                 ),
             )
 
+    @serialized
     def observe_workspace(self, workspace_id: str, state: str) -> None:
         """Permanently revoke stopped scrub evidence on an observed boot."""
         row = self.db.execute(
@@ -212,11 +345,12 @@ class Journal:
         ).fetchone()
         if (
             row
-            and state == "running"
+            and state not in {"exited", "stopped"}
             and json.loads(row[0]).get("state") in {"exited", "stopped"}
         ):
             self.invalidate_checkpoint(workspace_id)
 
+    @serialized
     def proof(self, workspace_id: str, incarnation: dict) -> dict | None:
         """Trust a checkpoint only for an exact unchanged runtime incarnation."""
         row = self.db.execute(
@@ -241,6 +375,7 @@ class Journal:
                 return proof
         return None
 
+    @serialized
     def pending(self, op_id: str | None = None) -> list:
         """Read terminal replay records, optionally including acknowledged result."""
         sql = "SELECT event,result FROM operations WHERE result IS NOT NULL"
@@ -250,6 +385,7 @@ class Journal:
             for event, data in self.db.execute(sql, (op_id,) if op_id else ())
         ]
 
+    @serialized
     def acknowledge(self, data: dict) -> None:
         """ACK requires the same attempt/target, not merely an operation UUID."""
         row = self.db.execute(
@@ -280,8 +416,15 @@ class OperationExecutor:
         self.journal = journal
         self.emit = sio.emit
         self.running: dict[str, asyncio.Task] = {}
+        self._bindings: dict[str, dict] = {}
+        self._unresolved = dict(journal.unfinished())
+        self._admissions: set[asyncio.Task] = set()
+        self._admission_lock = asyncio.Lock()
+        self._recovery_lock = asyncio.Lock()
+        self._execution_epoch = 0
+        self._closing = False
         sio.emit = self.record_emit
-        sio.on("operation:ack", journal.acknowledge)
+        sio.on("operation:ack", self.acknowledge)
         sio.on("operation:inspect", self.inspect)
         sio.on("operation:seal", self.seal)
         sio.on("operation:inspect_request", self.inspect_request)
@@ -289,8 +432,72 @@ class OperationExecutor:
             handler = sio.handlers["/"][event]
             sio.on(event, self.wrap(event, handler))
 
+    @staticmethod
+    def helpers_active() -> bool:
+        """Fail closed while crashed-runner disk helpers may still have effects."""
+        proc_root = Path("/proc")
+        if not proc_root.is_dir():
+            return True
+        for proc in proc_root.glob("[0-9]*/comm"):
+            try:
+                if _disk_helper_active(proc):
+                    return True
+            except FileNotFoundError:
+                continue  # The process exited between enumeration and inspection.
+            except OSError:
+                return True  # An unreadable helper is not proven quiescent.
+        return False
+
+    def _live_build_guests(
+        self, snapshot: dict, *, inspected_operation: str | None = None
+    ) -> bool:
+        """Find temporary guests which may still execute orphaned image scripts."""
+        owned = {
+            f"image-build-{op_id}"
+            for op_id in self.running
+            if op_id != inspected_operation
+        }
+        return any(
+            resource.get("kind") == "workspace"
+            and resource.get("metadata", {}).get("workspace_id", "").startswith(
+                "image-build-"
+            )
+            and resource.get("state") not in {"exited", "stopped", "removed"}
+            and resource.get("metadata", {}).get("workspace_id") not in owned
+            for runtime in snapshot.get("runtimes", [])
+            for resource in runtime.get("resources", [])
+        )
+
+    async def _build_guests_quiescent(self, operation_id: str | None = None) -> bool:
+        """Require complete observation before sealing an interrupted build."""
+        if self.observer is None or not hasattr(self.observer, "inventory_for_runner"):
+            return True
+        snapshot = await self.observer.inventory_for_runner()
+        return snapshot.get("complete") is True and not self._live_build_guests(
+            snapshot, inspected_operation=operation_id
+        )
+
+    async def acknowledge(self, data: dict) -> None:
+        """Commit backend receipt without blocking transport health on fsync."""
+        await self.journal.call("acknowledge", data)
+
+    async def drain(self) -> None:
+        """Fence new deliveries and join admitted work before runner shutdown."""
+        self._closing = True
+        if self._admissions:
+            await asyncio.gather(*self._admissions, return_exceptions=True)
+        if self.running:
+            await asyncio.gather(*self.running.values(), return_exceptions=True)
+
+    def _target_running(self, target: str | None) -> bool:
+        """Do not make unrelated long-running builds block target recovery."""
+        return any(
+            operation_id in self.running and binding.get("target") == target
+            for operation_id, binding in self._bindings.items()
+        )
+
     async def seal(self, data: dict) -> dict:
-        """Fence a never-delivered identity before operator releases its DB fence."""
+        """Fence a never-delivered identity before releasing its backend fence."""
         evidence = await self.inspect(data)
         if evidence.get(
             "diagnostic_code"
@@ -299,41 +506,32 @@ class OperationExecutor:
         identity = {
             k: data[k] for k in ("operation_id", "runner_id", "attempt", "target")
         }
-        # Unique permanent tombstone rejects every future delayed delivery;
-        # its fingerprint deliberately cannot match an execution recipe.
-        with self.journal.db:
-            self.journal.db.execute(
-                "INSERT OR IGNORE INTO operations(id,fingerprint,identity,event,result) VALUES(?,?,?,?,?)",
-                (
-                    data["operation_id"],
-                    "operator-sealed",
-                    json.dumps(identity),
-                    "workspace:error",
-                    json.dumps(
-                        {
-                            **identity,
-                            "task_id": data["operation_id"],
-                            "diagnostic_code": "interrupted",
-                            "outcome_known": False,
-                            "execution_finished": True,
-                            "error": "Interrupted allocation acknowledged; resources preserved",
-                        }
-                    ),
-                ),
-            )
+        # Inventory awaited runtime IO. Recheck admission under its mutex before
+        # turning that observation into a permanent delayed-delivery fence.
+        async with self._admission_lock:
+            if (
+                self._target_running(data.get("target"))
+                or evidence.get("execution_epoch") != self._execution_epoch
+            ):
+                return {**evidence, "quiescent": False, "execution_finished": False}
+            await self.journal.call("seal", identity)
         return await self.inspect(data)
 
     async def inspect_request(self, data: dict) -> None:
         """Reply-event variant for the independent backend recovery worker."""
         evidence = await self.inspect(data)
+        if (
+            evidence.get("diagnostic_code") == "identity_not_recorded"
+            and evidence.get("quiescent") is True
+        ):
+            # A delayed delivery must never execute after recovery releases the
+            # backend fence. seal() repeats inspection and admission-epoch checks.
+            evidence = await self.seal(data)
         await self.emit("operation:inspection", evidence)
 
     async def inspect(self, data: dict) -> dict:
         """Inspect exact identity on this exclusive journal instance without secrets."""
-        row = self.journal.db.execute(
-            "SELECT identity,event,result FROM operations WHERE id=?",
-            (data.get("operation_id"),),
-        ).fetchone()
+        row = await self.journal.call("lookup", data.get("operation_id"))
         if hasattr(self.sio, "connected") and not self.sio.connected:
             return {"status": "unknown", "execution_finished": False}
         response = {
@@ -343,7 +541,7 @@ class OperationExecutor:
             "outcome_known": False,
         }
         if row:
-            identity = json.loads(row[0])
+            identity = row[0]
         else:
             identity = {
                 k: data.get(k)
@@ -356,24 +554,22 @@ class OperationExecutor:
             identity.get(k) != data.get(k) for k in ("runner_id", "attempt", "target")
         ):
             return response
+        if (
+            row and row[2] and row[2].get("outcome_known") is False
+            and identity.get("failure_event") is not None
+        ):
+            recover = getattr(self.observer, "recover_interrupted_operation", None)
+            if recover is not None:
+                await recover(identity)
         if self.observer is not None and hasattr(self.observer, "inventory_for_runner"):
+            epoch = self._execution_epoch
             snapshot = await self.observer.inventory_for_runner()
             from datetime import datetime, timezone
 
             response["inspected_at"] = datetime.now(timezone.utc).isoformat()
             response["inventory"] = snapshot
             # Orphan conversion/build helper processes are live effects too.
-            helpers = False
-            for proc in Path("/proc").glob("[0-9]*/comm"):
-                try:
-                    if proc.read_text().strip() in {
-                        "qemu-img",
-                        "virt-customize",
-                        "guestfish",
-                    }:
-                        helpers = True
-                except OSError:
-                    continue
+            helpers = await asyncio.to_thread(self.helpers_active)
             foreign_effects = any(
                 r.get("kind") == "foreign_reference"
                 and r.get("state") in {"running", "unknown"}
@@ -384,23 +580,36 @@ class OperationExecutor:
                 snapshot.get("complete") is True
                 and not helpers
                 and not foreign_effects
-                and not self.running
+                and not self._live_build_guests(snapshot)
+                and not self._target_running(identity.get("target"))
+                and epoch == self._execution_epoch
             )
+            response["execution_epoch"] = epoch
+            workspace_evidence = getattr(
+                self.observer, "operation_workspace_evidence", None
+            )
+            if workspace_evidence is not None:
+                response.update(await workspace_evidence(identity, snapshot))
+            if epoch != self._execution_epoch or self._target_running(
+                identity.get("target")
+            ):
+                response.update(quiescent=False, workspace_status="unknown")
+                response.pop("credentials_present", None)
         response["identity"] = {
             k: v for k, v in identity.items() if k != "failure_event"
         }
         if data["operation_id"] in self.running:
             return {**response, "status": "running"}
         if not row:
-            # Explicit operator acknowledgment can release an allocation that
-            # never reached this journal; no destructive runtime effect is run.
+            # Automatic recovery seals this identity before releasing a backend
+            # allocation which never reached this journal. No recipe is rerun.
             return {
                 **response,
                 "execution_finished": response.get("quiescent", False),
                 "diagnostic_code": "identity_not_recorded",
             }
         if row[2]:
-            result = json.loads(row[2])
+            result = row[2]
             return {
                 **response,
                 "status": "terminal",
@@ -414,44 +623,78 @@ class OperationExecutor:
     async def replay(self, op_id: str | None = None, *, recover: bool = True) -> None:
         """Retry delivery until backend durably acknowledges."""
         if recover and not self._recovered:
-            self._recovered = True
-            for interrupted_id, identity in self.journal.unfinished():
-                if interrupted_id in self.running:
-                    continue
-                proof = await self.reconciler(identity) if self.reconciler else None
-                if proof:
-                    event, result = proof
-                    result.pop("failure_event", None)
-                    result.update(execution_finished=True)
-                    result.setdefault("outcome_known", True)
-                    self.journal.finish(interrupted_id, event, result)
-                else:
-                    failure = identity.pop("failure_event")
-                    self.journal.finish(
-                        interrupted_id,
-                        failure,
-                        {
-                            **identity,
-                            "error": "Manual intervention required",
-                            "diagnostic_code": "interrupted",
-                            "outcome_known": False,
-                            "execution_finished": True,
-                        },
-                    )
+            async with self._recovery_lock:
+                if not self._recovered and not await asyncio.to_thread(
+                    self.helpers_active
+                ):
+                    complete = True
+                    unfinished = await self.journal.call("unfinished")
+                    for interrupted_id, identity in unfinished:
+                        if interrupted_id in self.running:
+                            continue
+                        try:
+                            proof = (
+                                await self.reconciler(identity)
+                                if self.reconciler
+                                and identity.get("failure_event") != "image:build_failed"
+                                else None
+                            )
+                            recover = getattr(
+                                self.observer, "recover_interrupted_operation", None
+                            )
+                            if recover is not None and not proof:
+                                await recover(identity)
+                            if (
+                                identity.get("failure_event") == "image:build_failed"
+                                and not await self._build_guests_quiescent()
+                            ):
+                                complete = False
+                                continue
+                            if identity.get("failure_event") == "image:build_failed":
+                                proof = (
+                                    await self.reconciler(identity)
+                                    if self.reconciler else None
+                                )
+                            if proof:
+                                event, result = proof
+                                result.pop("failure_event", None)
+                                result.update(execution_finished=True)
+                                result.setdefault("outcome_known", True)
+                            else:
+                                event = identity.pop("failure_event")
+                                result = {
+                                    **identity,
+                                    "error": (
+                                        "Operation interrupted; resources preserved "
+                                        "for retry"
+                                    ),
+                                    "diagnostic_code": "interrupted",
+                                    "outcome_known": False,
+                                    "execution_finished": True,
+                                }
+                            await self.journal.call(
+                                "finish", interrupted_id, event, result
+                            )
+                            self._unresolved.pop(interrupted_id, None)
+                        except Exception:
+                            complete = False
+                            logger.exception(
+                                "operation_recovery_failed", operation_id=interrupted_id
+                            )
+                    self._recovered = complete
         if op_id is None:
-            for running_id in list(self.running):
-                row = self.journal.db.execute(
-                    "SELECT identity FROM operations WHERE id=?", (running_id,)
-                ).fetchone()
-                identity = json.loads(row[0])
-                identity.pop("failure_event", None)
-                try:
-                    await self.emit("operation:heartbeat", identity)
-                except Exception:  # noqa: BLE001 - isolate transport/runtime failures
-                    return
-        for event, data in self.journal.pending(op_id):
+            await self.heartbeat()
+        for event, data in await self.journal.call("pending", op_id):
             try:
                 await self.emit("operation:result", {"event": event, "data": data})
+            except Exception:  # noqa: BLE001 - isolate transport/runtime failures
+                return
+
+    async def heartbeat(self) -> None:
+        """Renew executing operations from memory even when journal IO is delayed."""
+        for identity in list(self._bindings.values()):
+            try:
+                await self.emit("operation:heartbeat", identity)
             except Exception:  # noqa: BLE001 - isolate transport/runtime failures
                 return
 
@@ -464,10 +707,38 @@ class OperationExecutor:
                 buffered[:] = [(event, data or {})]
                 return
             result = {**(data or {}), **binding, "execution_finished": True}
+            if event in {"image:built", "image:build_failed"}:
+                recover = getattr(
+                    self.observer, "recover_interrupted_operation", None
+                )
+                if recover is not None:
+                    try:
+                        await recover({**binding, "failure_event": "image:build_failed"})
+                    except Exception:
+                        logger.exception(
+                            "image_build_cleanup_unverified",
+                            operation_id=binding["operation_id"],
+                        )
+                        return
+            if event in {"image:built", "image:build_failed"} and not (
+                await self._build_guests_quiescent(binding["operation_id"])
+            ):
+                # Cleanup may fail while the script still runs inside its guest.
+                # Keep the original unfinished identity and target fence; recovery
+                # can seal it only after those untracked effects have ended.
+                logger.warning(
+                    "image_build_effects_unverified", operation_id=binding["operation_id"]
+                )
+                return
+            lifecycle = getattr(self.observer, "lifecycle", None)
             if (
                 self.observer is not None
                 and hasattr(self.observer, "workspace_incarnation")
                 and binding.get("workspace_id")
+                # Production lifecycle checkpoints are written while holding its
+                # workspace mutex. Re-observing after it returns could attach an
+                # older result to a later credential injection/incarnation.
+                and getattr(lifecycle, "checkpoint_hook", None) is None
             ):
                 workspace_id = binding["workspace_id"]
                 try:
@@ -480,7 +751,8 @@ class OperationExecutor:
                     "workspace:resumed",
                 }:
                     incarnation, state = observed
-                    self.journal.checkpoint(
+                    await self.journal.call(
+                        "checkpoint",
                         workspace_id,
                         incarnation,
                         {
@@ -502,7 +774,8 @@ class OperationExecutor:
                 except Exception:  # noqa: BLE001 - failed inspection is not proof
                     observed = None
                 proof = (
-                    self.journal.proof(workspace_id, observed[0]) if observed else None
+                    await self.journal.call("proof", workspace_id, observed[0])
+                    if observed else None
                 )
                 if not (
                     proof
@@ -511,7 +784,8 @@ class OperationExecutor:
                     and observed[1] in {"exited", "stopped"}
                 ):
                     result.update(diagnostic_code="interrupted", outcome_known=False)
-            self.journal.finish(binding["operation_id"], event, result)
+            await self.journal.call("finish", binding["operation_id"], event, result)
+            self._unresolved.pop(binding["operation_id"], None)
             await self.replay(binding["operation_id"])
             return
         if binding:
@@ -538,42 +812,20 @@ class OperationExecutor:
         return observed[1] in {"running", "exited", "stopped"}
 
     def wrap(self, event: str, handler: Callable) -> Callable:
-        """Shield lifecycle execution from disconnect/caller cancellation."""
+        """Shield durable admission and execution from caller cancellation."""
 
-        async def execute(data: dict):
-            # Same-version protocol is mandatory; legacy lifecycle work is unsafe.
-            if not all(
-                k in data for k in ("operation_id", "attempt", "target", "runner_id")
-            ):
-                return
+        async def admit(data: dict) -> None:
             op_id = data["operation_id"]
-            for running_id in list(self.running):
-                if running_id == op_id:
-                    continue
-                row = self.journal.db.execute(
-                    "SELECT identity FROM operations WHERE id=?", (running_id,)
-                ).fetchone()
-                if row and json.loads(row[0]).get("target") == data["target"]:
-                    return
-            if not self.journal.begin(event, data):
-                await self.replay(op_id)
-                return
+            binding = {
+                key: data[key]
+                for key in (
+                    "task_id", "operation_id", "attempt", "target", "runner_id",
+                    "workspace_id", "build_job_id", "image_instance_id",
+                )
+                if key in data
+            }
 
-            async def run():
-                binding = {
-                    k: data[k]
-                    for k in (
-                        "task_id",
-                        "operation_id",
-                        "attempt",
-                        "target",
-                        "runner_id",
-                        "workspace_id",
-                        "build_job_id",
-                        "image_instance_id",
-                    )
-                    if k in data
-                }
+            async def run() -> None:
                 token = _active.set(binding)
                 try:
                     terminal = []
@@ -586,10 +838,8 @@ class OperationExecutor:
                             if (
                                 not failed
                                 or execution_attempt == 2
-                                or event
-                                not in {
-                                    "task:resume_workspace",
-                                    "task:stop_workspace",
+                                or event not in {
+                                    "task:resume_workspace", "task:stop_workspace",
                                     "task:remove_workspace",
                                 }
                                 or not await self.safe_retry(event, data)
@@ -598,22 +848,17 @@ class OperationExecutor:
                             await asyncio.sleep(2**execution_attempt)
                     finally:
                         _terminal.reset(terminal_token)
-                    if terminal:
-                        self.running.pop(op_id, None)
-                        await self.record_emit(*terminal[0])
-                    else:
+                    if not terminal:
                         raise RuntimeError("Handler returned without terminal result")
-                except Exception:  # noqa: BLE001 - isolate transport/runtime failures
-                    row = self.journal.db.execute(
-                        "SELECT identity FROM operations WHERE id=?", (op_id,)
-                    ).fetchone()
-                    failure_event = json.loads(row[0])["failure_event"]
-                    self.running.pop(op_id, None)
+                    await self.record_emit(*terminal[0])
+                except Exception:  # noqa: BLE001 - isolate runtime/transport failures
+                    row = await self.journal.call("lookup", op_id)
+                    failure_event = row[0]["failure_event"]
                     await self.record_emit(
                         failure_event,
                         {
                             **binding,
-                            "error": "Handler failed; manual intervention required",
+                            "error": "Handler failed; resources preserved for retry",
                             "diagnostic_code": "handler_failed",
                             "outcome_known": False,
                         },
@@ -621,9 +866,45 @@ class OperationExecutor:
                 finally:
                     _active.reset(token)
                     self.running.pop(op_id, None)
+                    self._bindings.pop(op_id, None)
+                    self._execution_epoch += 1
+                    if op_id in self._unresolved:
+                        self._recovered = False
 
-            task = asyncio.create_task(run())
-            self.running[op_id] = task
+            async with self._admission_lock:
+                if self._closing:
+                    return
+                if any(
+                    identity.get("target") == data["target"] and running_id != op_id
+                    for running_id, identity in (
+                        self._bindings | self._unresolved
+                    ).items()
+                ):
+                    return
+                fresh = await self.journal.call("begin", event, data)
+                if fresh:
+                    task = asyncio.create_task(run())
+                    self.running[op_id] = task
+                    self._bindings[op_id] = binding
+                    self._unresolved[op_id] = binding
+                    self._execution_epoch += 1
+            if fresh:
+                await asyncio.shield(task)
+            else:
+                await self.replay(op_id)
+
+        async def execute(data: dict) -> None:
+            # Same-version protocol is mandatory; legacy lifecycle work is unsafe.
+            if not all(
+                key in data
+                for key in ("operation_id", "attempt", "target", "runner_id")
+            ):
+                return
+            # Admission includes an uninterruptible fsync. Shield it too: losing
+            # the delivery waiter must not strand a committed, unexecuted recipe.
+            task = asyncio.create_task(admit(data))
+            self._admissions.add(task)
+            task.add_done_callback(self._admissions.discard)
             await asyncio.shield(task)
 
         return execute

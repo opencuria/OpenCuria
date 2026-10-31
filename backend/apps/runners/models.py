@@ -51,7 +51,9 @@ class Runner(models.Model):
     qemu_max_active_vcpus = models.PositiveIntegerField(
         null=True,
         blank=True,
-        help_text="Optional cap for total vCPUs across active (running) QEMU workspaces.",
+        help_text=(
+            "Optional cap for total vCPUs across active (running) QEMU workspaces."
+        ),
     )
     qemu_max_active_memory_mb = models.PositiveIntegerField(
         null=True,
@@ -61,7 +63,9 @@ class Runner(models.Model):
     qemu_max_active_disk_size_gb = models.PositiveIntegerField(
         null=True,
         blank=True,
-        help_text="Optional cap for total disk size (GiB) across active QEMU workspaces.",
+        help_text=(
+            "Optional cap for total disk size (GiB) across active QEMU workspaces."
+        ),
     )
     status = models.CharField(
         max_length=20,
@@ -240,7 +244,7 @@ class Workspace(models.Model):
 
     @property
     def intervention_required(self) -> bool:
-        """A terminal task with a retained fence is explicit operator work, not busy."""
+        """A failed task retains its fence until automatic runner verification."""
         return bool(self.current_task_id and self.current_task.status == "failed")
 
     @property
@@ -666,7 +670,8 @@ class ImageBuildJob(models.Model):
     def __str__(self) -> str:
         return (
             "ImageBuildJob("
-            f"definition={self.image_definition_id}, runner={self.runner_id}, status={self.status})"
+            f"definition={self.image_definition_id}, runner={self.runner_id}, "
+            f"status={self.status})"
         )
 
 

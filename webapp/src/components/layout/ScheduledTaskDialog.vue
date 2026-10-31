@@ -153,7 +153,6 @@ const visibleWorkspaces = computed(() =>
   workspaceStore.workspaces.filter(
     (workspace) =>
       ![
-        WorkspaceStatus.REMOVED,
         WorkspaceStatus.DELETED,
         WorkspaceStatus.DELETING,
         WorkspaceStatus.PENDING_DELETION,

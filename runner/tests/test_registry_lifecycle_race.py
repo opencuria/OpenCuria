@@ -10,6 +10,7 @@ from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
 from src.models import WorkspaceInfo
 from src.runtime.base import RuntimeWorkspaceInfo
+from src.runtime.inventory import RuntimeInventory, StorageResource
 from src.service import WorkspaceService
 
 
@@ -235,7 +236,7 @@ async def test_failed_live_observation_never_scrubs_or_stops(tmp_path):
     assert result["execution_finished"] is True
     assert result["observed_status"] == "stopped"
     assert "credentials_present" not in result
-    assert "intervention" in result["error"]
+    assert "preserved" in result["error"]
     assert not runtime.scrubs
     assert not runtime.entered.is_set()
     assert service.registry.get_cached(ws_id) is canonical
@@ -301,3 +302,171 @@ async def test_incomplete_create_failure_is_preserved_for_recovery(tmp_path):
     assert service.registry.get_cached(ws_id).status == "creating"
     assert service.registry.get_cached(ws_id).credentials_present is None
     interface._operations.journal.close()
+
+
+@pytest.mark.parametrize("creation", ["base", "artifact"])
+async def test_duplicate_create_preserves_existing_physical_registry_identity(
+    tmp_path, creation
+):
+    ws_id, runtime, service, interface = setup(tmp_path)
+    canonical = service.registry.get_cached(ws_id)
+    canonical.credentials_present = False
+    runtime.create_workspace = AsyncMock()
+    runtime.create_workspace_from_image_artifact = AsyncMock()
+    try:
+        with pytest.raises(ValueError, match="already exists"):
+            if creation == "base":
+                await service.lifecycle.create_workspace(
+                    [], workspace_id=ws_id, base_image_path="/managed/base.qcow2"
+                )
+            else:
+                await service.images.create_workspace_from_image_artifact("base", ws_id)
+        assert service.registry.get_cached(ws_id) is canonical
+        assert canonical.instance_id == runtime.instance_id
+        assert canonical.credentials_present is False
+        runtime.create_workspace.assert_not_awaited()
+        runtime.create_workspace_from_image_artifact.assert_not_awaited()
+    finally:
+        interface._operations.journal.close()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_credential_replacement_updates_presence_and_invalidates_old_proof(
+    tmp_path, fails
+):
+    ws_id, runtime, service, interface = setup(tmp_path)
+    runtime.state = "running"
+    canonical = service.registry.get_cached(ws_id)
+    canonical.status = "running"
+    canonical.credentials_present = False
+    await interface._checkpoint_workspace(ws_id, False, "workspace:created")
+    incarnation = (await runtime.workspace_incarnation(str(ws_id)))[0]
+
+    async def inject(*args):
+        assert canonical.credentials_present is None
+        assert interface._operations.journal.proof(str(ws_id), incarnation) is None
+        if fails:
+            raise OSError("partial injection")
+        return True
+
+    service.credentials.inject_workspace_credentials = AsyncMock(side_effect=inject)
+    try:
+        if fails:
+            with pytest.raises(OSError, match="partial injection"):
+                await service.lifecycle.inject_credentials(ws_id, env_vars={"A": "B"})
+            assert canonical.credentials_present is None
+            assert interface._operations.journal.proof(str(ws_id), incarnation) is None
+        else:
+            assert await service.lifecycle.inject_credentials(ws_id, env_vars={"A": "B"})
+            assert canonical.credentials_present is True
+            proof = interface._operations.journal.proof(str(ws_id), incarnation)
+            assert proof["credentials_present"] is True
+            assert proof["event"] == "workspace:credentials_injected"
+    finally:
+        interface._operations.journal.close()
+
+
+async def test_partial_scrub_revokes_running_proof_before_any_credential_write(tmp_path):
+    ws_id, runtime, service, interface = setup(tmp_path)
+    runtime.state = "running"
+    canonical = service.registry.get_cached(ws_id)
+    canonical.status = "running"
+    canonical.credentials_present = True
+    await interface._checkpoint_workspace(ws_id, True, "workspace:created")
+    incarnation = (await runtime.workspace_incarnation(str(ws_id)))[0]
+
+    async def scrub(*args):
+        assert canonical.credentials_present is None
+        assert interface._operations.journal.proof(str(ws_id), incarnation) is None
+        raise OSError("partial scrub")
+
+    service.credentials.remove_workspace_credentials = AsyncMock(side_effect=scrub)
+    try:
+        with pytest.raises(OSError, match="partial scrub"):
+            await service.lifecycle.stop_workspace(ws_id)
+        assert canonical.credentials_present is None
+        assert interface._operations.journal.proof(str(ws_id), incarnation) is None
+    finally:
+        interface._operations.journal.close()
+
+
+@pytest.mark.parametrize("removed", [False, True, OSError("inventory failed")])
+async def test_missing_workspace_removal_requires_complete_physical_absence(
+    tmp_path, removed
+):
+    ws_id, runtime, service, interface = setup(tmp_path)
+    service.registry._cache.clear()
+    runtime.workspace_removed = AsyncMock(
+        side_effect=removed if isinstance(removed, Exception) else None,
+        return_value=removed,
+    )
+    runtime.remove_workspace = AsyncMock()
+    service.lifecycle._confirm_workspace_ended = AsyncMock()
+    try:
+        if removed is True:
+            await service.lifecycle.remove_workspace(ws_id)
+            evidence = service.lifecycle._confirm_workspace_ended.await_args.args[0]
+            assert evidence.instance_id == str(ws_id)
+            assert not service.registry.workspace_exists(ws_id)
+        else:
+            with pytest.raises((OSError, RuntimeError)):
+                await service.lifecycle.remove_workspace(ws_id)
+            service.lifecycle._confirm_workspace_ended.assert_not_awaited()
+        runtime.remove_workspace.assert_not_awaited()
+        runtime.workspace_removed.assert_awaited_once_with(str(ws_id))
+    finally:
+        interface._operations.journal.close()
+
+
+@pytest.mark.parametrize("probe", ["incarnation", "inventory"])
+async def test_stale_running_observation_cannot_revoke_new_stop_checkpoint(
+    tmp_path, probe
+):
+    ws_id, runtime, service, interface = setup(tmp_path)
+    runtime.state = "running"
+    service.registry.get_cached(ws_id).status = "running"
+    runtime.release.set()
+    entered, release = asyncio.Event(), asyncio.Event()
+    source = runtime.workspace_incarnation
+    calls = 0
+
+    async def incarnation(workspace_id):
+        nonlocal calls
+        snapshot = await source(workspace_id)
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+        return snapshot
+
+    async def inventory():
+        snapshot = RuntimeInventory(
+            complete=True, resources=[StorageResource(
+                "guest", "workspace", True, state=runtime.state,
+                metadata={"workspace_id": str(ws_id)},
+            )],
+        )
+        entered.set()
+        await release.wait()
+        return snapshot
+
+    if probe == "incarnation":
+        runtime.workspace_incarnation = incarnation
+        pending = asyncio.create_task(service.workspace_incarnation(str(ws_id)))
+    else:
+        runtime.inventory = inventory
+        pending = asyncio.create_task(service.inventory_for_runner())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await service.lifecycle.stop_workspace(ws_id)
+        stopped_incarnation = (await source(str(ws_id)))[0]
+        assert interface._operations.journal.proof(str(ws_id), stopped_incarnation)
+        release.set()
+        await pending
+        proof = interface._operations.journal.proof(str(ws_id), stopped_incarnation)
+        assert proof["state"] == "stopped"
+        assert proof["credentials_present"] is False
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        interface._operations.journal.close()

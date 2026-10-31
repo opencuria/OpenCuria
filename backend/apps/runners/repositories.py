@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, NamedTuple
 
 from django.db import connection, transaction
-from django.db.models import Count, F, Q, QuerySet, Value
+from django.db.models import Count, F, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
@@ -308,15 +308,12 @@ class WorkspaceRepository:
     @staticmethod
     def list_all() -> QuerySet[Workspace]:
         """Return all workspaces."""
-        return (
-            Workspace.objects.select_related(
-                "runner",
-                "runner__organization",
-                "base_image_instance",
-                "base_image_instance__origin_definition",
-            )
-            .prefetch_related("credentials__service")
-        )
+        return Workspace.objects.select_related(
+            "runner",
+            "runner__organization",
+            "base_image_instance",
+            "base_image_instance__origin_definition",
+        ).prefetch_related("credentials__service")
 
     @staticmethod
     def list_by_runner(runner_id: uuid.UUID) -> QuerySet[Workspace]:
@@ -538,6 +535,32 @@ class WorkspaceRepository:
         return workspace
 
     @staticmethod
+    def reconcile_heartbeat_status(
+        workspace: Workspace, status: str, *, runner_sid: str
+    ) -> bool:
+        """Apply an observation only while its workspace snapshot is still idle.
+
+        Lifecycle results and deletion can commit after the heartbeat's list
+        query. Compare both state and version so that even a stop/resume cycle
+        returning to the same status cannot be overwritten by that old scan.
+        """
+        now = timezone.now()
+        changed = Workspace.objects.filter(
+            pk=workspace.id,
+            status=workspace.status,
+            updated_at=workspace.updated_at,
+            current_task_id__isnull=True,
+            active_operation__isnull=True,
+            runner_id__in=Runner.objects.filter(
+                pk=workspace.runner_id, sid=runner_sid
+            ).values("pk"),
+        ).update(status=status, updated_at=now)
+        if changed:
+            workspace.status = status
+            workspace.updated_at = now
+        return bool(changed)
+
+    @staticmethod
     def update_credentials_present(
         workspace: Workspace,
         credentials_present: bool,
@@ -707,6 +730,117 @@ class WorkspaceRepository:
         )
 
     @staticmethod
+    def list_reserved_qemu_by_runner(
+        runner_id: uuid.UUID, *, include_retained_disk: bool = False
+    ) -> list[Workspace]:
+        """Read active capacity and reservations, including ambiguous outcomes.
+
+        Parent workflows retain their reservation between children. Runtime
+        observations distinguish an absent failed guest from preserved resources.
+        Stopped guests release compute but retain their physical disk reservation.
+        """
+        from .models import CaptureRequest, LifecycleCommand, WorkspaceRecreateRequest
+
+        captures = CaptureRequest.objects.exclude(
+            phase__in=["completed", "failed"]
+        ).values("workspace_id")
+        recreates = WorkspaceRecreateRequest.objects.exclude(
+            phase__in=["completed", "failed"]
+        ).values("workspace_id")
+        retained = [WorkspaceStatus.FAILED, WorkspaceStatus.DELETE_FAILED]
+        if include_retained_disk:
+            retained.extend(
+                [
+                    WorkspaceStatus.STOPPED,
+                    WorkspaceStatus.PENDING_DELETION,
+                    WorkspaceStatus.DELETING,
+                ]
+            )
+        rows = list(
+            Workspace.objects.filter(runner_id=runner_id)
+            .filter(
+                Q(
+                    status__in=[
+                        WorkspaceStatus.RUNNING,
+                        WorkspaceStatus.CREATING,
+                        *retained,
+                    ]
+                )
+                | Q(current_task_id__isnull=False)
+                | Q(pk__in=captures)
+                | Q(pk__in=recreates)
+            )
+            .exclude(status=WorkspaceStatus.DELETED)
+            .annotate(
+                capacity_observation=Subquery(
+                    LifecycleCommand.objects.filter(
+                        task__workspace_id=OuterRef("pk"),
+                    )
+                    .order_by("-task__created_at", "-task_id")
+                    .values("payload___observed_workspace_status")[:1]
+                ),
+                capacity_payload=Subquery(
+                    WorkspaceRepository._resource_commands()
+                    .filter(task__workspace_id=OuterRef("pk"))
+                    .values("payload")[:1]
+                ),
+                capacity_status=Subquery(
+                    WorkspaceRepository._resource_commands()
+                    .filter(task__workspace_id=OuterRef("pk"))
+                    .values("task__status")[:1]
+                ),
+            )
+            .only(
+                "id",
+                "status",
+                "current_task_id",
+                "active_operation",
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+            )
+        )
+        return [
+            row
+            for row in rows
+            if row.status not in {WorkspaceStatus.FAILED, WorkspaceStatus.DELETE_FAILED}
+            or row.current_task_id
+            or row.active_operation
+            or row.capacity_observation
+            not in (
+                {"absent"} if include_retained_disk else {"absent", "stopped", "exited"}
+            )
+        ]
+
+    @staticmethod
+    def _resource_commands() -> QuerySet:
+        """Read sizing changes that reserve or confirm actual guest resources."""
+        from .models import LifecycleCommand
+
+        return LifecycleCommand.objects.filter(
+            Q(task__type=TaskType.UPDATE_WORKSPACE)
+            | Q(
+                task__type__in=[
+                    TaskType.CREATE_WORKSPACE,
+                    TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
+                    TaskType.RESUME_WORKSPACE,
+                ],
+                task__status=TaskStatus.COMPLETED,
+            )
+        ).order_by("-task__created_at", "-task_id")
+
+    @staticmethod
+    def last_resource_command(workspace_id: uuid.UUID) -> dict:
+        """Read the latest sizing reservation or confirmed startup for a guest."""
+        return (
+            WorkspaceRepository._resource_commands()
+            .filter(task__workspace_id=workspace_id)
+            .values("payload", "task__status")
+            .first()
+            or {}
+        )
+
+    @staticmethod
     def list_by_base_image_instance(
         image_instance_id: uuid.UUID,
     ) -> QuerySet[Workspace]:
@@ -717,7 +851,6 @@ class WorkspaceRepository:
             status__in=[
                 WorkspaceStatus.PENDING_DELETION,
                 WorkspaceStatus.DELETING,
-                WorkspaceStatus.REMOVED,
                 WorkspaceStatus.DELETED,
             ]
         )
@@ -1294,6 +1427,35 @@ class ImageInstanceRepository:
     """Data access for ImageInstance records."""
 
     @staticmethod
+    def populate_disk_floor(image: ImageInstance) -> ImageInstance:
+        """Recover a virtual disk bound from mapped complete inventory.
+
+        The caller holds the runner/image locks. Physical allocation is not a
+        virtual size: only known, managed resources associated by inventory's
+        identity validation can supply this bound.
+        """
+        from django.db.models import Max
+
+        from .models import InventoryResource
+
+        virtual = (
+            InventoryResource.objects.filter(
+                image=image,
+                managed=True,
+                runtime__complete=True,
+                runtime__snapshot__complete=True,
+                virtual_bytes__gt=0,
+            )
+            .exclude(state="unknown")
+            .aggregate(virtual=Max("virtual_bytes"))["virtual"]
+        )
+        minimum = (virtual + (1 << 30) - 1) // (1 << 30) if virtual else 0
+        if minimum > (image.min_disk_size_gb or 0):
+            image.min_disk_size_gb = minimum
+            image.save(update_fields=["min_disk_size_gb", "updated_at"])
+        return image
+
+    @staticmethod
     def get_by_id(image_id: uuid.UUID) -> ImageInstance | None:
         """Fetch an image instance by ID, including source and runner info."""
         return (
@@ -1770,7 +1932,9 @@ class ImageGenerationRepository:
             job.build_task = task
             job.build_log = ""
             # Availability belongs to current; rebuild failure never removes it.
-            if not job.current_generation_id:
+            if not job.current_generation_id or (
+                job.status == "failed" and job.current_generation.status != "ready"
+            ):
                 job.status = "pending"
             job.save()
             from .operations import OperationRepository
@@ -1793,6 +1957,7 @@ class ImageGenerationRepository:
         runner_id: str | None,
         runner_ref: str = "",
         error: str | None = None,
+        min_disk_size_gb: int | None = None,
     ) -> bool:
         """Accept only the exact live creation task and immutable runner target."""
         try:
@@ -1837,13 +2002,21 @@ class ImageGenerationRepository:
                 return False
             if error is None and (not runner_ref or runner_ref != image.runner_ref):
                 return False
+            if min_disk_size_gb is not None and (
+                type(min_disk_size_gb) is not int or min_disk_size_gb <= 0
+            ):
+                return False
             retiring = image.status == "pending_deletion"
             image.status = (
                 "pending_deletion"
                 if retiring
                 else ("ready" if error is None else "failed")
             )
-            image.save(update_fields=["status", "updated_at"])
+            if error is None and min_disk_size_gb is not None:
+                image.min_disk_size_gb = max(
+                    image.min_disk_size_gb or 0, min_disk_size_gb
+                )
+            image.save(update_fields=["status", "min_disk_size_gb", "updated_at"])
             if error is None:
                 TaskRepository.complete(task)
             else:
@@ -1871,6 +2044,7 @@ class ImageGenerationRepository:
             ImageDefinition.objects.select_for_update().get(id=definition_id)
             ImageBuildJob.objects.select_for_update().get(id=image.build_job_id)
         image = ImageInstance.objects.select_for_update().get(id=image_id)
+        ImageInstanceRepository.populate_disk_floor(image)
         if image.status != "ready" or not image.runner_ref:
             raise ConflictError("Selected image is no longer ready")
         if image.build_job_id:
@@ -1921,7 +2095,14 @@ class ImageGenerationRepository:
 
     @staticmethod
     def capture_result(
-        *, task_id, workspace_id, runner_id, runner_ref="", size_bytes=None, error=None
+        *,
+        task_id,
+        workspace_id,
+        runner_id,
+        runner_ref="",
+        size_bytes=None,
+        error=None,
+        min_disk_size_gb=None,
     ) -> bool:
         """Serialize capture callbacks against deletion and terminal task state."""
         try:
@@ -1961,14 +2142,35 @@ class ImageGenerationRepository:
             if error is None:
                 if not runner_ref or (size_bytes is not None and size_bytes < 0):
                     return False
+                if min_disk_size_gb is not None and (
+                    type(min_disk_size_gb) is not int or min_disk_size_gb <= 0
+                ):
+                    return False
                 image.runner_ref = runner_ref
                 image.size_bytes = size_bytes
+                if min_disk_size_gb is not None:
+                    image.min_disk_size_gb = max(
+                        image.min_disk_size_gb or 0, min_disk_size_gb
+                    )
+                    Workspace.objects.filter(pk=task.workspace_id).filter(
+                        Q(qemu_disk_size_gb__lt=min_disk_size_gb)
+                        | Q(qemu_disk_size_gb__isnull=True)
+                    ).update(
+                        qemu_disk_size_gb=min_disk_size_gb, updated_at=timezone.now()
+                    )
                 image.status = (
                     "pending_deletion"
                     if image.status == "pending_deletion"
                     else "ready"
                 )
-                image.save(update_fields=["runner_ref", "size_bytes", "status"])
+                image.save(
+                    update_fields=[
+                        "runner_ref",
+                        "size_bytes",
+                        "status",
+                        "min_disk_size_gb",
+                    ]
+                )
                 TaskRepository.complete(task)
             else:
                 image.status = (

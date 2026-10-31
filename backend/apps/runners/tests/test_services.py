@@ -957,6 +957,7 @@ class TestWorkspaceOperationState:
         import os
 
         from django.core.exceptions import SynchronousOnlyOperation
+
         workspace.qemu_vcpus = 2
         workspace.qemu_memory_mb = 4096
         workspace.qemu_disk_size_gb = 50
@@ -1153,7 +1154,7 @@ class TestHeartbeatReconciliation:
 
     @pytest.mark.parametrize(
         "terminal_state",
-        [WorkspaceStatus.FAILED, WorkspaceStatus.REMOVED],
+        [WorkspaceStatus.FAILED, WorkspaceStatus.DELETED],
     )
     def test_terminal_backend_state_does_not_authorize_cleanup(
         self, service, sio_mock, terminal_state
@@ -1299,7 +1300,7 @@ class TestForwardFilesFind:
         )
         workspace = Workspace.objects.create(
             runner=runner,
-            status=WorkspaceStatus.REMOVED,
+            status=WorkspaceStatus.DELETED,
             created_by=user,
             name="Heartbeat Workspace",
         )
@@ -1511,18 +1512,20 @@ class TestHarnessReplyRouting:
 
 
 @pytest.mark.django_db
-class TestAgentSWorkspaceDependencies:
-    """Agent-S computer-use workspace deps ship in every non-Alpine image."""
+class TestNativeComputerUseWorkspaceDependencies:
+    """Native Computer Use dependencies ship in every QEMU image."""
 
-    _AGENT_S_APT = (
-        "tesseract-ocr",
+    _NATIVE_APT = (
+        "python3-xlib",
+        "python3-pil",
+        "python3-structlog",
+        "python3-gi",
+        "gir1.2-atspi-2.0",
+        "at-spi2-core",
         "wmctrl",
         "xclip",
-        "xsel",
         "libreoffice-calc",
         "python3-uno",
-        "python3-pyperclip",
-        "python3-tk",
         "sudo",
         "iproute2",
     )
@@ -1533,35 +1536,27 @@ class TestAgentSWorkspaceDependencies:
         params = {
             "organization": runner.organization,
             "created_by": user,
-            "name": "AgentS Deps",
+            "name": "Native Computer Use Deps",
             "base_distro": "ubuntu:24.04",
         }
         params.update(kw)
         return ImageDefinition.objects.create(**params)
 
-
-    def test_qemu_init_script_pins_agent_s_packages(self, service, runner, user):
-        """QEMU init script carries the same Agent-S deps (xfce stack intact)."""
+    def test_qemu_init_script_installs_native_desktop_dependencies(
+        self, service, runner, user
+    ):
+        """The native X11/AT-SPI helpers and the XFCE desktop share one image."""
         definition = self._definition(
             runner,
             user,
         )
         script = service._build_qemu_init_script_content(definition)
-        for package in self._AGENT_S_APT:
+        for package in self._NATIVE_APT:
             assert package in script
-        assert "python3-pyautogui" in script
-        assert "python3 -m pip install --break-system-packages pyautogui" in script
-        # pyautogui imports mouseinfo, which imports tkinter: without
-        # python3-tk every execute snippet dies at import time.
-        assert "python3-tk" in script
         assert "startxfce4" in script
         # python-Xlib opens $XAUTHORITY/~/.Xauthority unconditionally,
-        # even against the auth-less Xvnc: bake an empty file into the
-        # image so PyAutoGUI connects out of the box.
+        # even against the auth-less Xvnc: native input needs this file.
         assert "touch /root/.Xauthority" in script
-
-
-
 
 
 @pytest.mark.django_db
@@ -1595,8 +1590,6 @@ class TestDesktopSessionImageContent:
         assert "openbox-session" not in script
         assert "xfce4-session" in script
         assert 'cd "$THEME_WORKDIR/cursors" && ./install.sh' in script
-
-
 
 
 @pytest.mark.django_db(transaction=True)

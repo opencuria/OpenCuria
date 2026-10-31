@@ -95,6 +95,26 @@ const rows = '[data-testid="conversation-row"]'
 const more = '[data-testid="show-more-chats"]'
 
 describe('ConversationWorkspaceList', () => {
+  it.each([
+    { active_operation: WorkspaceOperation.CAPTURING_IMAGE },
+    { intervention_required: true },
+  ])('F080 reports offline instead of stale activity in sidebar: %j', (operation) => {
+    const workspaces = [workspace('Alpha', { runner_online: false, ...operation })]
+    useWorkspaceStore().workspaces = workspaces
+    const wrapper = mountList({ workspaces, conversations: chats('Alpha', 1) })
+    const alpha = wrapper.get(groupSelector('Alpha'))
+    expect(alpha.get('[data-testid="workspace-row"]').attributes('title')).toBe(
+      'Alpha — Runner offline',
+    )
+    expect(alpha.get('[data-testid="workspace-row"]').text()).toContain('Runner offline')
+    expect(alpha.find('[data-testid="workspace-busy"]').exists()).toBe(false)
+    expect(
+      alpha
+        .findAll('button')
+        .find((button) => button.text() === 'Rename')!
+        .attributes('disabled'),
+    ).toBeDefined()
+  })
   it('shows four newest chats per workspace without a global cap', async () => {
     const wrapper = mountList()
     const alpha = wrapper.get(groupSelector('Alpha'))

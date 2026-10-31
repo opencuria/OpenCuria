@@ -2,8 +2,15 @@
 
 import asyncio
 from unittest.mock import AsyncMock
+
 import pytest
 from src.journal import Journal, OperationExecutor
+
+
+@pytest.fixture(autouse=True)
+def isolated_helper_observation(monkeypatch):
+    """Keep synthetic inventories independent of unrelated host disk helpers."""
+    monkeypatch.setattr(OperationExecutor, "helpers_active", staticmethod(lambda: False))
 
 
 def command():
@@ -27,7 +34,7 @@ def test_reopen_interrupted_never_reexecutes(tmp_path):
     assert not journal.begin("task:create_workspace", command())
     event, data = journal.pending()[0]
     assert event == "workspace:error"
-    assert "intervention" in data["error"]
+    assert "preserved" in data["error"]
     assert data["workspace_id"] == "workspace"
     assert b"DO_NOT_STORE" not in (tmp_path / "operations.sqlite3").read_bytes()
     assert b"SECRET" not in (tmp_path / "operations.sqlite3").read_bytes()
@@ -136,15 +143,17 @@ async def test_inspect_running_and_interrupted_are_distinct(tmp_path):
 
     sio = Socket()
     gate = asyncio.Event()
+    entered = asyncio.Event()
 
     async def handler(data):
+        entered.set()
         await gate.wait()
         await sio.emit("workspace:error", {"error": "SECRET", "task_id": "task"})
 
     sio.handlers["/"] = {event: handler for event in COMMANDS}
     executor = OperationExecutor(sio, Journal(str(tmp_path)))
     work = asyncio.create_task(sio.handlers["/"]["task:stop_workspace"](command()))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(entered.wait(), 2)
     # Lightweight replay renews an executing lease without recovery scans.
     executor.reconciler = AsyncMock(side_effect=AssertionError("heavy recovery"))
     await executor.replay(recover=False)
@@ -343,7 +352,7 @@ async def test_effect_then_generic_exception_is_unknown(tmp_path):
     assert event == "workspace:error"
     assert result["execution_finished"] is True
     assert result["outcome_known"] is False
-    assert "intervention" in result["error"]
+    assert "preserved" in result["error"]
     await socket.handlers["/"]["task:create_workspace"](command())
     assert executor.journal.pending()[0][1] == result
 

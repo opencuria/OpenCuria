@@ -591,10 +591,10 @@ onUnmounted(() => {
                           >
                             <Loader2 :size="12" class="animate-spin" />
                             {{
-                              getBuild(definition.id, runner.id)?.status === 'pending' &&
-                              !isRunnerOnline(runner)
-                                ? 'Waiting for runner'
-                                : 'Building…'
+                              getRunnerBuildStatusLabel(
+                                getBuild(definition.id, runner.id)?.status,
+                                isRunnerOnline(runner),
+                              )
                             }}
                           </Button>
                           <Button

@@ -11,8 +11,10 @@ from apps.runners.enums import TaskType
 from common.exceptions import ConflictError, NotFoundError
 from common.utils import generate_uuid
 
+from ..provisioning import disk_size_for
 from ..repositories import TaskRepository, WorkspaceRepository
 from ..workspace_configuration_repository import WorkspaceConfigurationRepository
+from .workspace_capacity import WorkspaceCapacityService
 
 if TYPE_CHECKING:
     from ..models import Task, Workspace
@@ -52,6 +54,20 @@ class WorkspaceConfigurationService:
                 ):
                     raise NotFoundError("Image artifact", str(selected.id))
                 workspace_fields["base_image_instance"] = selected
+                workspace_fields["qemu_disk_size_gb"] = disk_size_for(
+                    workspace_fields.get("qemu_disk_size_gb"), selected
+                )
+                if operation_payload is not None:
+                    operation_payload = {
+                        **operation_payload,
+                        "qemu_disk_size_gb": workspace_fields["qemu_disk_size_gb"],
+                    }
+            WorkspaceCapacityService.ensure(
+                runner.id,
+                vcpus=workspace_fields.get("qemu_vcpus"),
+                memory_mb=workspace_fields.get("qemu_memory_mb"),
+                disk_size_gb=workspace_fields.get("qemu_disk_size_gb"),
+            )
             credentials = self._resolve_final_credentials(
                 credentials, owner=user, org_id=organization_id
             )
@@ -109,6 +125,29 @@ class WorkspaceConfigurationService:
             # current_task_id has already been cleared. Recheck both under lock.
             if workspace.active_operation or workspace.current_task_id:
                 raise ConflictError("Workspace lifecycle outcome unresolved")
+            if qemu_values is not None:
+                requested_disk = (
+                    qemu_values[2]
+                    if qemu_values[2] is not None
+                    else workspace.runner.qemu_default_disk_size_gb
+                )
+                disk_floor = WorkspaceCapacityService.previous_resources(workspace)[
+                    "disk_size_gb"
+                ]
+                if requested_disk < disk_floor:
+                    raise ConflictError(
+                        "Workspace disk size cannot be reduced; "
+                        f"the retained volume requires at least {disk_floor} GiB"
+                    )
+            if qemu_values is not None and workspace.status in {"running", "stopped"}:
+                WorkspaceCapacityService.ensure(
+                    workspace.runner_id,
+                    vcpus=qemu_values[0],
+                    memory_mb=qemu_values[1],
+                    disk_size_gb=qemu_values[2],
+                    exclude_workspace_id=workspace.id,
+                    reserve_compute=workspace.status == "running",
+                )
             current_credentials = self.workspaces.list_attached_credentials(
                 workspace.id
             )
@@ -130,6 +169,11 @@ class WorkspaceConfigurationService:
                 raise PluginSelectionError(
                     "Missing required credentials for selected plugins", gaps
                 )
+            previous_resources = (
+                WorkspaceCapacityService.previous_resources(workspace)
+                if qemu_values is not None and workspace.status == "running"
+                else None
+            )
             workspace = self.workspaces.replace_configuration(
                 workspace,
                 name=name,
@@ -145,6 +189,9 @@ class WorkspaceConfigurationService:
                     runner=workspace.runner,
                     task_type=TaskType.UPDATE_WORKSPACE,
                     workspace=workspace,
+                    operation_payload={
+                        "_previous_qemu_resources": previous_resources,
+                    },
                 )
             return workspace
 

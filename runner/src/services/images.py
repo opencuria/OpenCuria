@@ -60,7 +60,7 @@ class ImageManager:
         progress_callback=None,
         operation_id: str | None = None,
         image_instance_id: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | int]:
         """Build runtime image from definition payload.
 
         Returns a dict containing ``image_path``.

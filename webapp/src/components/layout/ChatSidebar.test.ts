@@ -282,7 +282,10 @@ describe('ChatSidebar', () => {
     ]
     const wrapper = mountSidebar()
     const stopped = wrapper.get('[data-workspace-id="ws-2"]')
-    expect(stopped.get('[data-testid="workspace-stopped"]').text()).toBe('Stopped')
+    expect(stopped.get('[data-testid="workspace-row"]').attributes('title')).toBe(
+      'Beta — Runner offline',
+    )
+    expect(stopped.get('[data-testid="workspace-row"]').text()).toContain('Runner offline')
     const chat = stopped.get('[aria-label="Open chat Archived chat"]')
     expect(chat.attributes('aria-selected')).toBe('true')
     await chat.trigger('click')
@@ -308,10 +311,7 @@ describe('ChatSidebar', () => {
     ]
     const wrapper = mountSidebar()
     await wrapper.get('[data-testid="mark-all-read"]').trigger('click')
-    expect(conversationStore.markAsRead.mock.calls).toEqual([
-      ['running-unread'],
-      ['opened-unread'],
-    ])
+    expect(conversationStore.markAsRead.mock.calls).toEqual([['running-unread'], ['opened-unread']])
   })
 
   it('combines gates and idle unread across workspaces with one count and no busy results', () => {
@@ -624,11 +624,24 @@ describe('ChatSidebar', () => {
     const wrapper = mountSidebar()
     const store = useScheduledTaskStore()
     const once: ScheduledTask = {
-      id: 'once', name: 'One-time check', workspace_id: 'ws-1', prompt: 'Check',
-      mode: 'build', model: '', reasoning_effort: '', skill_ids: [],
-      recurrence: 'once', weekdays: [], run_date: '2020-01-01', local_time: '09:00',
-      timezone_name: 'UTC', enabled: false, is_running: true,
-      next_run_at: '2020-01-01T09:00:00Z', created_at: '', updated_at: '',
+      id: 'once',
+      name: 'One-time check',
+      workspace_id: 'ws-1',
+      prompt: 'Check',
+      mode: 'build',
+      model: '',
+      reasoning_effort: '',
+      skill_ids: [],
+      recurrence: 'once',
+      weekdays: [],
+      run_date: '2020-01-01',
+      local_time: '09:00',
+      timezone_name: 'UTC',
+      enabled: false,
+      is_running: true,
+      next_run_at: '2020-01-01T09:00:00Z',
+      created_at: '',
+      updated_at: '',
     }
     store.tasks = [
       once,

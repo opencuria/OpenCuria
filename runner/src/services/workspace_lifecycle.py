@@ -70,6 +70,9 @@ class WorkspaceLifecycle:
         self.capture_fence: CaptureFence | None = None
         self.checkpoint_hook = None
         self.scrub_proof_hook = None
+        self.partial_workspace_identity: (
+            Callable[[uuid.UUID], Awaitable[str | None]] | None
+        ) = None
         self._registry = registry
         self._runtime = runtime
         self._credentials = credentials
@@ -193,10 +196,12 @@ class WorkspaceLifecycle:
         # (which can take 60 s+ for QEMU) do not drop this workspace and
         # cause the backend to mark it as failed.  instance_id is unknown at
         # this point — it will be updated once create_workspace() returns.
-        self._registry._cache[workspace_id] = WorkspaceInfo(
-            workspace_id=workspace_id,
-            instance_id="",
-            status="creating",
+        self._registry.register_new_workspace(
+            WorkspaceInfo(
+                workspace_id=workspace_id,
+                instance_id="",
+                status="creating",
+            )
         )
 
         try:
@@ -204,7 +209,7 @@ class WorkspaceLifecycle:
         except Exception:
             log.exception("workspace_creation_failed")
             # A thrown error need not mean runtime creation had no effects.
-            # Keep the incomplete entry for reconciliation/operator recovery.
+            # Keep the incomplete entry for reconciliation and safe retry/removal.
             self._registry.get_cached(workspace_id).credentials_present = None
             raise
 
@@ -264,12 +269,15 @@ class WorkspaceLifecycle:
                 info.credentials_present = False
                 return False
             raise RuntimeError(
-                "Stopped guest has no exact scrub proof; manual intervention required"
+                "Stopped guest has no exact scrub proof; "
+                "resume and stop to verify credential removal"
             )
         if info.status != "running":
             raise RuntimeError("Workspace live status is unknown or not running")
 
         info.credentials_present = None
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(workspace_id, None, "scrubbing")
         await self._credentials.remove_workspace_credentials(
             runtime, info.instance_id, log
         )
@@ -332,6 +340,10 @@ class WorkspaceLifecycle:
         )
         log.info("workspace_resumed", credentials_present=credentials_present)
         info.credentials_present = credentials_present
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(
+                workspace_id, credentials_present, "workspace:resumed"
+            )
         return credentials_present
 
     @coordinated
@@ -348,7 +360,8 @@ class WorkspaceLifecycle:
         runtime = self._registry.get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
-        return await self._inject_with_checkpoint(
+        info.credentials_present = None
+        credentials_present = await self._inject_with_checkpoint(
             runtime,
             info.instance_id,
             env_vars,
@@ -356,6 +369,12 @@ class WorkspaceLifecycle:
             ssh_keys,
             log,
         )
+        info.credentials_present = credentials_present
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(
+                workspace_id, credentials_present, "workspace:credentials_injected"
+            )
+        return credentials_present
 
     @coordinated
     async def update_workspace_resources(
@@ -395,13 +414,35 @@ class WorkspaceLifecycle:
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
         """Remove the exact guest before finalizing durable owners and cache state."""
         info = self._registry._cache.get(workspace_id)
-        if info is None:
-            raise RuntimeError(
-                "Managed workspace removal requires physical registry identity"
-            )
         runtime = self._runtime
-        if runtime is None or not info.instance_id:
-            raise RuntimeError("Managed workspace removal requires runtime identity")
+        if runtime is None:
+            raise RuntimeError("Workspace runtime is unavailable")
+        if (info is None or not info.instance_id) and self.partial_workspace_identity:
+            instance_id = await self.partial_workspace_identity(workspace_id)
+            if instance_id is not None:
+                if info is None:
+                    info = WorkspaceInfo(workspace_id, instance_id, "creating")
+                    self._registry.register_new_workspace(info)
+                else:
+                    info.instance_id = instance_id
+        if info is None or not info.instance_id:
+            # QEMU can prove the exact canonical allocation is fully absent,
+            # including files and network. Domain absence alone is insufficient.
+            verify_removed = getattr(runtime, "workspace_removed", None)
+            instance_id = str(workspace_id)
+            if verify_removed is None or not await verify_removed(instance_id):
+                raise RuntimeError(
+                    "Managed workspace removal requires physical registry identity"
+                )
+            if info is None:
+                info = WorkspaceInfo(workspace_id, instance_id, "removed")
+                self._registry.register_new_workspace(info)
+            else:
+                info.instance_id = instance_id
+                info.status = "removed"
+            await self._confirm_workspace_ended(info, "remove")
+            self._registry._cache.pop(workspace_id, None)
+            return
         await self._background._kill_all_background_processes(
             workspace_id, reason="remove"
         )

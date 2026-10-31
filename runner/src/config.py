@@ -7,6 +7,7 @@ and optionally from a .env file in the runner directory.
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,9 +37,15 @@ class RunnerSettings(BaseSettings):
     qemu_vcpus: int = 2
     qemu_memory_mb: int = 4096
     qemu_disk_size_gb: int = 50
+    # Temporary image-build guests have a separate bounded resource budget.
+    qemu_build_vcpus: int = Field(default=1, gt=0)
+    qemu_build_memory_mb: int = Field(default=2048, gt=0)
+    qemu_build_concurrency: int = Field(default=2, gt=0)
+    qemu_build_queue_timeout: float = Field(default=1800, gt=0)
     qemu_ssh_key_path: str = str(Path.home() / ".local/share/opencuria/ssh/runner_key")
     qemu_ssh_user: str = "root"
     qemu_ssh_timeout: int = 60  # seconds to wait for VM SSH readiness
+    qemu_cloud_init_timeout: int = Field(default=300, gt=0)
 
     # Heartbeat
     inventory_interval: int = 120

@@ -146,7 +146,7 @@ def test_unknown_child_is_fenced_and_not_replaced(runner: Runner, user) -> None:
     _, remove, request = RecreateService.allocate(
         ws.id, image.id, has_busy_agent=has_busy_agent
     )
-    TaskRepository.fail(remove, "Manual intervention required")
+    OperationRepository.intervene(remove, "Runner disconnected before result")
     assert RecreateService.advance(request.id) == {
         "workspace_id": str(ws.id),
         "phase": "intervention",

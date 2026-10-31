@@ -16,12 +16,13 @@ from common.exceptions import ConflictError, NotFoundError
 from ..enums import TaskType, WorkspaceStatus
 from ..image_lines import ImageLineRepository
 from ..models import ImageInstance, Task, Workspace, WorkspaceRecreateRequest
-from ..provisioning import provisioning_command
+from ..provisioning import disk_size_for, provisioning_command
 from ..recreate_repository import RecreateRepository
 from ..workspace_operation_repository import (
     REQUEST_TERMINAL_PHASES,
     WorkspaceOperationRepository,
 )
+from .workspace_capacity import WorkspaceCapacityService
 
 logger = structlog.get_logger("apps.runners.recreate_repository")
 
@@ -56,6 +57,12 @@ class RecreateService:
                 WorkspaceRecreateRequest.Reason.RESET
                 if target.id == ws.base_image_instance_id
                 else WorkspaceRecreateRequest.Reason.UPDATE
+            )
+            qemu_disk_size_gb = disk_size_for(
+                qemu_disk_size_gb
+                if qemu_disk_size_gb is not None
+                else ws.qemu_disk_size_gb,
+                target,
             )
             if qemu_disk_size_gb is not None:
                 ws.qemu_disk_size_gb = qemu_disk_size_gb
@@ -142,9 +149,18 @@ class RecreateService:
 
         CaptureService uses the same workflow inside its handoff transaction.
         """
+        disk_size_gb = disk_size_for(ws.qemu_disk_size_gb, target)
+        WorkspaceCapacityService.ensure(
+            ws.runner_id,
+            vcpus=ws.qemu_vcpus,
+            memory_mb=ws.qemu_memory_mb,
+            disk_size_gb=disk_size_gb,
+            exclude_workspace_id=ws.id,
+        )
+        ws.qemu_disk_size_gb = disk_size_gb
         ws.pending_base_image_instance = target
         RecreateRepository.save_workspace(
-            ws, ["pending_base_image_instance", "updated_at"]
+            ws, ["qemu_disk_size_gb", "pending_base_image_instance", "updated_at"]
         )
         request = RecreateRepository.create_request(
             ws, reason=reason, final_running=final_running, requested_by=requested_by

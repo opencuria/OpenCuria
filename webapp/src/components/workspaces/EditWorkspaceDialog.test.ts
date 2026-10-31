@@ -131,6 +131,8 @@ function mountDialog(
     selectedPluginIds: string[]
     selectedCredentialIds: string[]
     qemuMemoryMb: number
+    qemuVcpus: number
+    qemuDiskSizeGb: number
     desktopWidth: number
     desktopHeight: number
     open: boolean
@@ -158,6 +160,54 @@ beforeEach(() => {
 })
 
 describe('EditWorkspaceDialog single-patch workspace configuration', () => {
+  it.each([
+    ['F061', 'qemuVcpus', 0],
+    ['F062', 'qemuVcpus', 9],
+    ['F063', 'qemuVcpus', 1.5],
+    ['F064', 'qemuVcpus', Number.NaN],
+    ['F065', 'qemuMemoryMb', 512],
+    ['F066', 'qemuMemoryMb', 16385],
+    ['F067', 'qemuMemoryMb', 4096.5],
+    ['F068', 'qemuDiskSizeGb', 19],
+    ['F069', 'qemuDiskSizeGb', 201],
+    ['F070', 'qemuDiskSizeGb', 50.5],
+    ['F071', 'desktopWidth', 1921],
+    ['F072', 'desktopHeight', 1081],
+  ] as const)('%s rejects invalid %s=%s before any PATCH', async (_id, field, value) => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    vm[field] = value
+    await nextTick()
+    expect(wrapper.get('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeDefined()
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).not.toHaveBeenCalled()
+    expect(vm.open).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['F073', 1, 1024, 20, 800, 600],
+    ['F074', 8, 16384, 200, 3840, 2160],
+  ])('%s accepts valid resource limits', async (_id, vcpus, ram, disk, width, height) => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    Object.assign(vm, {
+      qemuVcpus: vcpus,
+      qemuMemoryMb: ram,
+      qemuDiskSizeGb: disk,
+      desktopWidth: width,
+      desktopHeight: height,
+    })
+    await nextTick()
+    expect(
+      wrapper.get('[data-testid="edit-workspace-save"]').attributes('disabled'),
+    ).toBeUndefined()
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
   it('restores persisted plugin IDs and sends one final PATCH containing credentials, plugins and resource fields', async () => {
     const { vm } = mountDialog()
     await vm.handleOpen()

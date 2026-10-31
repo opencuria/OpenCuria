@@ -17,12 +17,7 @@ const DEFINITION_LOCKED_STATUSES = new Set([
 
 const DEFINITION_POLLING_STATUSES = new Set(['pending_deletion', 'deleting'])
 
-const BUILD_POLLING_STATUSES = new Set([
-  'pending',
-  'building',
-  'pending_deletion',
-  'deleting',
-])
+const BUILD_POLLING_STATUSES = new Set(['pending', 'building', 'pending_deletion', 'deleting'])
 
 const HIDDEN_DEFINITION_STATUSES = new Set(['deleted'])
 
@@ -86,12 +81,9 @@ export function isDefinitionSelectableForWorkspace(definition: {
   return definition.is_active && !WORKSPACE_HIDDEN_DEFINITION_STATUSES.has(definition.status)
 }
 
-export function formatRunnerBuildSummary(
-  summary?: ImageDefinitionBuildSummary | null,
-): string {
+export function formatRunnerBuildSummary(summary?: ImageDefinitionBuildSummary | null): string {
   const counts = summary ?? EMPTY_BUILD_SUMMARY
-  const total =
-    counts.active + counts.building + counts.failed + counts.inactive + counts.removing
+  const total = counts.active + counts.building + counts.failed + counts.inactive + counts.removing
   if (total === 0) return 'Not built on any runner'
 
   const parts = [
@@ -132,9 +124,11 @@ export function getRunnerBuildStatusLabel(
   status: string | null | undefined,
   runnerOnline: boolean,
 ): string {
-  if (!status) return 'Not built'
+  if (!status || status === 'deleted') return 'Not built'
   if (status === 'pending' && !runnerOnline) return 'Waiting for runner'
-  if (status === 'pending' || status === 'building') return 'Building'
+  if (status === 'building' && !runnerOnline) return 'Runner offline'
+  if (status === 'pending') return 'Queued'
+  if (status === 'building') return 'Building'
   if (status === 'active') return 'Active'
   if (status === 'deactivated') return 'Inactive'
   if (status === 'failed') return 'Failed'
@@ -184,9 +178,7 @@ export function getRunnerBuildActions(
   }
 }
 
-export function visibleImageDefinitions(
-  definitions: ImageDefinition[],
-): ImageDefinition[] {
+export function visibleImageDefinitions(definitions: ImageDefinition[]): ImageDefinition[] {
   return definitions.filter((definition) => !isDefinitionHidden(definition.status))
 }
 

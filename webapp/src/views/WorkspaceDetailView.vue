@@ -43,10 +43,7 @@ const animateEntrance = ref(isComposerTransitionPending())
 
 const canPrompt = computed(() => workspaceStore.canUseWorkspace(workspaceId.value))
 const isRunnerOfflineState = computed(
-  () =>
-    !workspace.value?.runner_online &&
-    workspace.value?.status !== WorkspaceStatus.DELETED &&
-    workspace.value?.status !== WorkspaceStatus.REMOVED,
+  () => !workspace.value?.runner_online && workspace.value?.status !== WorkspaceStatus.DELETED,
 )
 const workspaceTransitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(workspaceId.value),

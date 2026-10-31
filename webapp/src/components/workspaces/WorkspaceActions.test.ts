@@ -106,6 +106,43 @@ describe('WorkspaceActions menu', () => {
     await wrapper.get('button[title="Resume workspace"]').trigger('click')
     expect(mocks.resumeWorkspace).toHaveBeenCalledWith('workspace-1')
   })
+  it('F075 offers failed-deletion retry to ordinary users', async () => {
+    mocks.auth.isAdmin = false
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper } = mountActions({ status: WorkspaceStatus.DELETE_FAILED })
+    await openMenu(wrapper)
+    const retry = menuItem('Retry removal')
+    expect(retry.attributes('data-disabled')).toBeUndefined()
+    await retry.trigger('click')
+    expect(mocks.removeWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1')
+  })
+  it('F076 permits queued offline removal while blocking runner-dependent actions', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper } = mountActions({ runner_online: false })
+    expect(wrapper.get('button[title="Runner offline"]').attributes('disabled')).toBeDefined()
+    await openMenu(wrapper)
+    expect(menuItem('Edit workspace').attributes('data-disabled')).toBeDefined()
+    const remove = menuItem('Remove workspace')
+    expect(remove.attributes('data-disabled')).toBeUndefined()
+    await remove.trigger('click')
+    expect(mocks.removeWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1')
+    expect(mocks.resumeWorkspace).not.toHaveBeenCalled()
+  })
+  it('F077 hides controls for a fully deleted workspace', () => {
+    mocks.isWorkspaceTransitioning.mockReturnValue(true)
+    const { wrapper } = mountActions({ status: WorkspaceStatus.DELETED })
+    expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Working')
+  })
+  it('F078 explains offline automatic recovery without administrator acknowledgment', async () => {
+    mocks.auth.isAdmin = false
+    const { wrapper } = mountActions({ runner_online: false, intervention_required: true })
+    await openMenu(wrapper)
+    expect(document.body.textContent).toContain('Recovery continues when it reconnects')
+    expect(menuItem('Remove workspace').attributes('data-disabled')).toBeDefined()
+    expect(document.body.textContent).not.toContain('administrator')
+    expect(document.body.textContent).not.toContain('View recovery status')
+  })
   it('emits capture and reset from the menu', async () => {
     const { wrapper, onClick } = mountActions({
       pending_base_image: { id: 'image-1', version: 1 } as Workspace['pending_base_image'],
@@ -145,12 +182,12 @@ describe('WorkspaceActions menu', () => {
     await menuItem('Capture image').trigger('click')
     expect(wrapper.emitted('captureImage')).toHaveLength(1)
   })
-  it('blocks actions offline while keeping the menu accessible', async () => {
+  it('blocks runner-dependent actions offline while keeping queued removal accessible', async () => {
     const { wrapper } = mountActions({ runner_online: false })
     expect(wrapper.get('button[title="Runner offline"]').attributes('disabled')).toBeDefined()
     await openMenu(wrapper)
     expect(menuItem('Edit workspace').attributes('data-disabled')).toBeDefined()
-    expect(menuItem('Remove workspace').attributes('data-disabled')).toBeDefined()
+    expect(menuItem('Remove workspace').attributes('data-disabled')).toBeUndefined()
     expect(document.body.textContent).not.toContain('Capture image')
   })
   it('shows a single pending action and disables menu actions during transitions', async () => {
@@ -170,7 +207,7 @@ describe('WorkspaceActions menu', () => {
       const { wrapper } = mountActions({ intervention_required: true })
       await openMenu(wrapper)
       expect(menuItem('Capture image').attributes('data-disabled')).toBeDefined()
-      await menuItem('Review workspace issue').trigger('click')
+      await menuItem('View recovery status').trigger('click')
       expect(event.mock.calls[0]![0].detail).toEqual({
         tab: 'runners',
         runnerId: 'runner-1',
@@ -180,12 +217,13 @@ describe('WorkspaceActions menu', () => {
       window.removeEventListener('opencuria:open-settings', event)
     }
   })
-  it('explains the admin requirement without offering members an inaccessible action', async () => {
+  it('explains automatic recovery without requiring an administrator', async () => {
     mocks.auth.isAdmin = false
     const { wrapper } = mountActions({ intervention_required: true })
     await openMenu(wrapper)
-    expect(document.body.textContent).toContain('Ask an organization admin')
-    expect(document.body.textContent).not.toContain('Review workspace issue')
+    expect(document.body.textContent).toContain('Checking the interrupted operation automatically')
+    expect(document.body.textContent).not.toContain('Ask an organization admin')
+    expect(document.body.textContent).not.toContain('View recovery status')
   })
   it('respects the hidden destructive actions setting', async () => {
     const { wrapper } = mountActions({}, true)

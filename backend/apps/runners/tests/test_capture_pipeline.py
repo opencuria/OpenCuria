@@ -67,9 +67,7 @@ def test_unknown_capture_fences_and_suppressed_resume(
 ):
     ws = stopped_workspace
     ws.save()
-    _, task = CaptureService.allocate(
-        ws.id, "capture", has_busy_agent=has_busy_agent
-    )
+    _, task = CaptureService.allocate(ws.id, "capture", has_busy_agent=has_busy_agent)
     OperationRepository.intervene(task, "Unknown capture deadline")
     CaptureService.tick()
     req = CaptureRequest.objects.get(workspace=ws)
@@ -100,15 +98,15 @@ def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
 def test_journal_interruption_failure_retains_fence(service, runner, stopped_workspace):
     ws = stopped_workspace
     ws.save()
-    _, task = CaptureService.allocate(
-        ws.id, "capture", has_busy_agent=has_busy_agent
-    )
+    _, task = CaptureService.allocate(ws.id, "capture", has_busy_agent=has_busy_agent)
     assert not result(
         service,
         runner,
         task,
         "image_artifact:failed",
-        error="Manual intervention required",
+        error="Operation interrupted",
+        outcome_known=False,
+        execution_finished=True,
     )
     CaptureService.tick()
     ws.refresh_from_db()
@@ -236,6 +234,7 @@ def test_full_success_holds_parent_until_recovery(
     from apps.runners.repositories import TaskRepository, WorkspaceRepository
     from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
+
     workspace.credentials_present = True
     workspace.save()
     frontend = Mock()
@@ -363,9 +362,7 @@ def test_stopped_capture_final_clear_without_resume(service, runner, stopped_wor
 
     ws = stopped_workspace
     ws.save()
-    _, child = CaptureService.allocate(
-        ws.id, "capture", has_busy_agent=has_busy_agent
-    )
+    _, child = CaptureService.allocate(ws.id, "capture", has_busy_agent=has_busy_agent)
     request = CaptureRequest.objects.get(workspace=ws)
     assert not request.prior_running and request.phase == "capture"
     assert result(
@@ -412,6 +409,7 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
 
     from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
+
     workspace.save()
     _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent

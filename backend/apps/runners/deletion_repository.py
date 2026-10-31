@@ -89,7 +89,7 @@ class DeletionRepository:
 
     @staticmethod
     def graph(org_id, kind, target_id):
-        """Return structural approval only; scans/timestamps are diagnostics, not digest."""
+        """Return structural approval; observation times do not affect its digest."""
         target, roots, jobs = DeletionRepository.target(org_id, kind, target_id)
         result = {
             "roots": sorted(str(i.id) for i in roots),
@@ -351,6 +351,36 @@ class DeletionRepository:
                     "Fresh unblocked preview and matching fingerprint required"
                 )
             if old:
+                if old.phase == "failed":
+                    # A completed bounded retry series is a normal retryable
+                    # failure. Keep the original dependency approval and completed
+                    # children; a repeated delete request retries failed leaves.
+                    failed = {
+                        key: task_id
+                        for key, task_id in old.children.items()
+                        if Task.objects.filter(pk=task_id, status="failed").exists()
+                    }
+                    for key in failed:
+                        resource_type, identity = key.split(":", 1)
+                        model = (
+                            Workspace if resource_type == "workspace" else ImageInstance
+                        )
+                        model.objects.filter(
+                            pk=identity, status="delete_failed"
+                        ).update(status="pending_deletion")
+                    old.approval = {
+                        **old.approval,
+                        "retry_counts": {},
+                        "failed_children": old.approval.get("failed_children", [])
+                        + list(failed.values()),
+                    }
+                    old.children = {
+                        key: task_id
+                        for key, task_id in old.children.items()
+                        if key not in failed
+                    }
+                    old.phase, old.diagnostic = "waiting_inventory", ""
+                    old.save()
                 if mode == "force" and (
                     old.phase == "reconfirmation_required"
                     or (old.mode == "deferred" and not old.released_at)
@@ -569,8 +599,7 @@ class DeletionRepository:
                     command = LifecycleCommand.objects.get(task=task)
                     counts = plan.approval.get("retry_counts", {})
                     if (
-                        command.phase == "result"
-                        and "intervention" not in task.error.lower()
+                        command.phase in {"result", "disposed"}
                         and counts.get(key, 0) < 2
                     ):
                         # Only a finished runner failure, never a timeout/ambiguous
@@ -596,6 +625,13 @@ class DeletionRepository:
                         wait(
                             "waiting_inventory",
                             "Finished failure; bounded retry waits for fresh inventory",
+                        )
+                    elif command.phase in {"result", "disposed"}:
+                        wait(
+                            "failed",
+                            "Deletion failed after three attempts. Retry deletion "
+                            "after resolving the runner or storage error: "
+                            + task.error,
                         )
                     else:
                         wait(
@@ -851,7 +887,7 @@ class DeletionRepository:
 
     @staticmethod
     def delivery_allowed(task_id):
-        """Recheck graph/freshness at each actual outbox release, not just allocation."""
+        """Recheck graph/freshness at every outbox release."""
         task = Task.objects.get(pk=task_id)
         with transaction.atomic():
             from .locking import lock_runner

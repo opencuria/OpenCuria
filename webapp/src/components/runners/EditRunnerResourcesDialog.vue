@@ -267,7 +267,7 @@ watch(open, (value) => {
       <DialogHeader>
         <DialogTitle>QEMU Runner Limits</DialogTitle>
         <DialogDescription>
-          Configure per-workspace defaults/min/max and optional active totals for this runner.
+          Configure per-workspace defaults/min/max and optional resource totals for this runner.
         </DialogDescription>
       </DialogHeader>
 
@@ -340,10 +340,10 @@ watch(open, (value) => {
             </div>
           </section>
 
-          <!-- Active totals -->
+          <!-- Resource totals -->
           <section class="space-y-3 rounded-md border border-border bg-muted/50 p-3">
             <div class="flex items-center justify-between">
-              <p class="text-sm font-medium text-foreground">Active totals</p>
+              <p class="text-sm font-medium text-foreground">Resource totals</p>
               <p class="text-xs text-muted-foreground">optional cap, can exceed host marker</p>
             </div>
 
@@ -397,12 +397,13 @@ watch(open, (value) => {
 
             <div class="space-y-2 rounded-sm border border-border bg-background p-3">
               <div class="flex items-center justify-between">
-                <p class="text-sm text-foreground">Total active disk (GiB)</p>
+                <p class="text-sm text-foreground">Total allocated disk (GiB)</p>
                 <label class="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
                   <Checkbox :disabled="submitting" v-model="unlimitedActiveDiskSizeGb" />
                   Unlimited
                 </label>
               </div>
+              <p class="text-xs text-muted-foreground">Stopped workspaces and retained disks also count.</p>
               <template v-if="!unlimitedActiveDiskSizeGb">
                 <div class="flex items-center gap-2">
                   <input :disabled="submitting" v-model.number="maxActiveDiskSizeGb" type="range" class="w-full accent-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />

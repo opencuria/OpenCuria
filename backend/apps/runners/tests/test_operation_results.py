@@ -88,7 +88,7 @@ def test_nonterminal_callback_filters_and_normalizes_payload(
     assert command.heartbeat_at is not None
 
 
-def test_callback_intervention_restores_workspace_fence(
+def test_failure_message_does_not_create_a_hidden_intervention_fence(
     runner, workspace, pending_result
 ) -> None:
     """A callback requiring intervention keeps its identity reserved for recovery."""
@@ -96,17 +96,18 @@ def test_callback_intervention_restores_workspace_fence(
 
     def callback(task_id: str) -> None:
         TaskRepository.fail(
-            Task.objects.get(pk=task_id), "Manual intervention required"
+            Task.objects.get(pk=task_id),
+            "Failure text mentioning intervention must not create a second state",
         )
 
     service = Mock(handle_workspace_stopped=callback)
-    assert not apply_result(service, str(runner.id), "workspace:stopped", data)
+    assert apply_result(service, str(runner.id), "workspace:stopped", data)
     workspace.refresh_from_db()
     task.refresh_from_db()
     assert task.status == "failed"
-    assert workspace.current_task_id == task.id
+    assert workspace.current_task_id is None
     assert workspace.active_operation is None
-    assert LifecycleCommand.objects.get(task=task).phase == "intervention"
+    assert LifecycleCommand.objects.get(task=task).phase == "result"
 
 
 @pytest.mark.parametrize(

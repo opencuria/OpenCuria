@@ -11,6 +11,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .models import (
+    ImageBuildJob,
     ImageInstance,
     InventoryAlias,
     InventoryEdge,
@@ -116,15 +117,21 @@ class InventoryRepository:
                         physical_id = item["resource_id"]
                         aliases = item.get("aliases", [])
                         metadata = item.get("metadata", {})
+                        invalid_publication = (
+                            item["kind"] == "disk"
+                            and metadata.get("diagnostic_code") == "invalid_publication"
+                        )
                         candidates = [
                             i
                             for i in images
                             if (
                                 item["kind"] == "image"
                                 or ((i.is_legacy) and (item["kind"] == "disk"))
+                                or invalid_publication
                             )
                             and (
                                 (i.is_legacy)
+                                or invalid_publication
                                 or (
                                     str(i.id) == metadata.get("artifact_id")
                                     and i.creating_task_id is not None
@@ -137,14 +144,22 @@ class InventoryRepository:
                                     bool(i.runner_ref)
                                     and i.runner_ref in [physical_id, *aliases]
                                 )
-                                or (str(i.id) == metadata.get("artifact_id"))
+                                or (
+                                    not invalid_publication
+                                    and str(i.id) == metadata.get("artifact_id")
+                                )
                             )
                         ]
                         asserted_id = metadata.get("artifact_id")
                         image = candidates[0] if len(candidates) == 1 else None
-                        if image and asserted_id and str(image.id) != asserted_id:
+                        if (
+                            image
+                            and asserted_id
+                            and str(image.id) != asserted_id
+                            and not invalid_publication
+                        ):
                             image = None
-                        if (image) and (image.is_legacy):
+                        if image and (image.is_legacy or invalid_publication):
                             # Exact references establish association, not publication.
                             # Shared aliases cannot identify a unique physical object.
                             matches = [
@@ -188,6 +203,28 @@ class InventoryRepository:
                             image=image,
                             workspace=workspace,
                         )
+                        if (
+                            image
+                            and invalid_publication
+                            and resource.managed
+                            and snapshot.complete
+                            and runtime.complete
+                            and timezone.now() - timedelta(minutes=5)
+                            < collected
+                            <= timezone.now()
+                        ):
+                            # Unique physical association is enough to reject
+                            # corrupt publication, never to publish or delete it.
+                            ImageInstance.objects.filter(
+                                pk=image.id, status="ready"
+                            ).update(status="failed", updated_at=timezone.now())
+                            ImageBuildJob.objects.filter(
+                                current_generation_id=image.id,
+                                runner_id=runner.id,
+                                current_generation__status="failed",
+                                pending_generation__isnull=True,
+                                status="active",
+                            ).update(status="failed", updated_at=timezone.now())
                         resources[physical_id] = resource
                         InventoryAlias.objects.bulk_create(
                             [
@@ -204,12 +241,15 @@ class InventoryRepository:
                             < collected
                             <= timezone.now()
                         ):
-                            size = (
-                                sizes["allocated_bytes"]
-                            )
-                            ImageInstance.objects.filter(pk=image.id).update(
-                                size_bytes=size
-                            )
+                            size = sizes["allocated_bytes"]
+                            updates = {"size_bytes": size}
+                            virtual = sizes["virtual_bytes"]
+                            if virtual:
+                                updates["min_disk_size_gb"] = max(
+                                    image.min_disk_size_gb or 0,
+                                    (virtual + (1 << 30) - 1) // (1 << 30),
+                                )
+                            ImageInstance.objects.filter(pk=image.id).update(**updates)
                     for item in raw:
                         for target_id in set(item.get("dependencies", [])):
                             if target_id not in resources:

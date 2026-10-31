@@ -519,7 +519,6 @@ describe('groupConversationsByWorkspace', () => {
     )
     expect(groups.map((group) => group.workspaceId)).toContain(WorkspaceStatus.STOPPED)
     for (const status of [
-      WorkspaceStatus.REMOVED,
       WorkspaceStatus.DELETED,
       WorkspaceStatus.DELETING,
       WorkspaceStatus.PENDING_DELETION,

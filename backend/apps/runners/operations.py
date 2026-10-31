@@ -87,6 +87,8 @@ class OperationRepository:
             if identity["workspace_id"]:
                 Workspace.objects.select_for_update().get(pk=identity["workspace_id"])
             task = Task.objects.select_for_update().get(pk=task_id)
+            if task.status in {"completed", "failed"}:
+                raise ConflictError("Operation has already ended")
             if not LifecycleCommand.objects.filter(task=task).exists():
                 OperationRepository.allocate(task)
             command = LifecycleCommand.objects.select_for_update().get(task_id=task_id)
@@ -131,6 +133,8 @@ class OperationRepository:
     def delivery_payload(command: LifecycleCommand) -> dict:
         """Rehydrate persisted immutable recipe inputs inside the repository."""
         payload = dict(command.payload)
+        payload.pop("_previous_qemu_resources", None)
+        payload.pop("_observed_workspace_status", None)
         revision_id = payload.pop("_revision_id", None)
         if revision_id:
             from .models import ImageRevision
@@ -139,12 +143,42 @@ class OperationRepository:
                 ImageRevision.objects.get(pk=revision_id).rendered_input or {}
             )
         if payload.pop("_unreproducible_credentials", False):
-            OperationRepository.intervene(
+            OperationRepository.fail_unissued(
                 command.task,
-                "Credential inputs not reproducible; intervention required",
+                "Credential inputs could not be restored. "
+                "Retry with attached credentials.",
             )
             raise ConflictError("Unreproducible credential inputs")
         return payload
+
+    @staticmethod
+    def claim_direct_delivery(task_id: uuid.UUID) -> str | None:
+        """Lease immediate dispatch before emitting, just like recovery delivery.
+
+        Recording the issue boundary first makes zero deliveries reliable proof
+        that an unprepared intent never reached a runner. The lease also prevents
+        the worker racing a direct dispatch with another delivery.
+        """
+        with transaction.atomic():
+            runner_id = Task.objects.values_list("runner_id", flat=True).get(pk=task_id)
+            runner = lock_runner(runner_id)
+            task = Task.objects.select_for_update().get(pk=task_id)
+            row = LifecycleCommand.objects.select_for_update().get(task_id=task_id)
+            now = timezone.now()
+            if (
+                task.status not in {"pending", "in_progress"}
+                or not row.event
+                or not runner.is_online
+                or not runner.sid
+                or row.lease_until > now
+                or row.next_delivery_at > now
+            ):
+                return None
+            row.deliveries += 1
+            row.lease_until = now + timedelta(seconds=30)
+            row.next_delivery_at = now + timedelta(seconds=min(300, 2**row.deliveries))
+            row.save(update_fields=["deliveries", "lease_until", "next_delivery_at"])
+            return runner.sid
 
     @staticmethod
     def envelope(command: LifecycleCommand, payload: dict) -> dict:
@@ -217,6 +251,13 @@ class OperationRepository:
             )
             claimed = []
             for row in rows:
+                if not row.event and row.created_at < now - timedelta(seconds=60):
+                    OperationRepository.fail_unissued(
+                        row.task,
+                        "Operation preparation was interrupted before delivery. "
+                        "Retry the action.",
+                    )
+                    continue
                 if not row.deliveries and not delivery_allowed(row.task_id):
                     # An explicitly withheld, never-executed approval is idle,
                     # not an ambiguous runtime deadline failure.
@@ -226,14 +267,20 @@ class OperationRepository:
                 alive = row.heartbeat_at and row.heartbeat_at > now - timedelta(
                     seconds=90
                 )
-                if (
-                    row.deadline_at <= now
-                    or (row.deliveries >= 12 and not alive)
-                    or (not row.event and row.created_at < now - timedelta(seconds=60))
-                ):
+                if alive:
+                    # A queue slot or slow but live execution is not a timeout.
+                    row.deadline_at = now + timedelta(hours=2)
+                    row.save(update_fields=["deadline_at"])
+                    continue
+                if not row.deliveries and row.deadline_at <= now:
+                    # Offline/withheld work has not executed and remains queued.
+                    row.deadline_at = now + timedelta(hours=2)
+                    row.save(update_fields=["deadline_at"])
+                if row.deadline_at <= now or row.deliveries >= 12:
                     OperationRepository.intervene(
                         row.task,
-                        "Lifecycle outcome unknown; manual intervention required",
+                        "Connection to the operation was lost. Recovery will "
+                        "continue when the runner can verify its state.",
                     )
                     continue
                 if not row.event or not row.task.runner.is_online or alive:
@@ -250,6 +297,42 @@ class OperationRepository:
                 )
                 claimed.append(row)
             return claimed
+
+    @staticmethod
+    def fail_unissued(task: Task, reason: str) -> None:
+        """Close local preparation failures only before the durable issue boundary."""
+        from .repositories import TaskRepository
+
+        with transaction.atomic():
+            lock_runner(task.runner_id)
+            command = LifecycleCommand.objects.select_for_update().get(task=task)
+            if command.deliveries:
+                OperationRepository.intervene(task, reason)
+                return
+            fresh_creation = (
+                task.type
+                in {"create_workspace", "create_workspace_from_image_artifact"}
+                and Workspace.objects.filter(
+                    pk=task.workspace_id, status="creating"
+                ).exists()
+            )
+            OperationRepository.intervene(task, reason)
+            LifecycleCommand.objects.filter(task=task).update(
+                phase="disposed",
+                payload={
+                    **command.payload,
+                    "_observed_workspace_status": (
+                        "absent" if fresh_creation else "unknown"
+                    ),
+                },
+            )
+            if task.type == "remove_workspace":
+                Workspace.objects.filter(current_task=task).update(
+                    status="delete_failed",
+                    delete_last_error=reason,
+                    updated_at=timezone.now(),
+                )
+            TaskRepository.release_workspace(task)
 
     @staticmethod
     def intervene(task: Task, reason: str) -> None:
@@ -273,8 +356,8 @@ class OperationRepository:
                 pk=task.id, status__in=["pending", "in_progress"]
             ).update(status="failed", error=reason, completed_at=timezone.now())
             LifecycleCommand.objects.filter(task=task).update(phase="intervention")
-            # Keep current_task as an intervention fence. Explicit deletion is allowed
-            # only after operator resolves this identity, not on GET or heartbeat.
+            # Keep the identity until fresh automatic inspection proves execution
+            # has ended. GETs and ordinary heartbeats cannot clear this fence.
             Workspace.objects.filter(current_task=task).update(active_operation=None)
             if task.type in {
                 "create_workspace",
@@ -314,4 +397,8 @@ class OperationRepository:
         if OperationRepository.validate_result(runner_id, data):
             LifecycleCommand.objects.filter(
                 task_id=data["task_id"], task__status__in=["pending", "in_progress"]
-            ).update(heartbeat_at=timezone.now(), phase="executing")
+            ).update(
+                heartbeat_at=timezone.now(),
+                deadline_at=timezone.now() + timedelta(hours=2),
+                phase="executing",
+            )

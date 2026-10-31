@@ -7,15 +7,15 @@ from django.db import migrations, models
 
 def backfill(apps, schema_editor):
     """Give every existing capture its own line (v1) and persist create repos."""
-    Image = apps.get_model("runners", "ImageInstance")
-    Line = apps.get_model("runners", "CapturedImage")
-    Workspace = apps.get_model("runners", "Workspace")
-    Command = apps.get_model("runners", "LifecycleCommand")
-    captures = Image.objects.filter(
+    image_model = apps.get_model("runners", "ImageInstance")
+    line_model = apps.get_model("runners", "CapturedImage")
+    workspace_model = apps.get_model("runners", "Workspace")
+    command_model = apps.get_model("runners", "LifecycleCommand")
+    captures = image_model.objects.filter(
         origin_type="workspace_capture", captured_image__isnull=True
     ).select_related("runner", "origin_workspace")
     for image in captures:
-        line = Line.objects.create(
+        line = line_model.objects.create(
             id=uuid.uuid4(),
             organization_id=image.runner.organization_id,
             runner_id=image.runner_id,
@@ -24,17 +24,26 @@ def backfill(apps, schema_editor):
             status="deleted" if image.status == "deleted" else "active",
         )
         source = image.origin_workspace
-        Image.objects.filter(pk=image.pk).update(
+        image_model.objects.filter(pk=image.pk).update(
             captured_image=line,
             generation=1,
             min_disk_size_gb=source.qemu_disk_size_gb if source else None,
         )
-    for command in Command.objects.filter(
+    for command in command_model.objects.filter(
         task__type="create_workspace", task__workspace__isnull=False
     ).select_related("task"):
         repos = (command.payload or {}).get("repos") or []
         if repos:
-            Workspace.objects.filter(pk=command.task.workspace_id).update(repos=repos)
+            workspace_model.objects.filter(pk=command.task.workspace_id).update(
+                repos=repos
+            )
+
+
+def flush_deferred_constraints(apps, schema_editor):
+    """Drain data-migration FK triggers before adding PostgreSQL constraints."""
+    if schema_editor.connection.vendor == "postgresql":
+        schema_editor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        schema_editor.execute("SET CONSTRAINTS ALL DEFERRED")
 
 
 class Migration(migrations.Migration):
@@ -42,6 +51,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(backfill, migrations.RunPython.noop),
+        migrations.RunPython(flush_deferred_constraints, migrations.RunPython.noop),
         migrations.AddConstraint(
             model_name="imageinstance",
             constraint=models.UniqueConstraint(

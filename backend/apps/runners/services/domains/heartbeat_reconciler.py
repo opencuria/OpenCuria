@@ -194,15 +194,8 @@ class HeartbeatReconcilerMixin:
             runner_status = runner_ws_states.get(ws_id_str)
             runner_payload = runner_ws_payloads.get(ws_id_str, {})
 
-            if ws.status in (WorkspaceStatus.FAILED, WorkspaceStatus.REMOVED):
+            if ws.status in (WorkspaceStatus.FAILED, WorkspaceStatus.DELETED):
                 continue
-            if getattr(ws, "pending_base_image_instance_id", None) and (
-                ws.active_operation or ws.current_task_id
-            ):
-                # The runtime is being removed and recreated under the same id;
-                # the recreate request, not the heartbeat, owns the status.
-                continue
-
             if ws.status in (
                 WorkspaceStatus.PENDING_DELETION,
                 WorkspaceStatus.DELETING,
@@ -211,14 +204,18 @@ class HeartbeatReconcilerMixin:
             ):
                 self._cleanup_desktop_state(ws_id_str)
                 continue
+            if ws.current_task_id or ws.active_operation:
+                # Observations may arrive before guest preparation/scrubbing is
+                # finished. The bound lifecycle result owns these transitions.
+                continue
 
-            if runner_status is None:
+            if ws_id_str not in runner_ws_states:
                 # Absence from a partial/failed scan proves nothing.
                 continue
             else:
                 # Map the observed VM status to workspace status
                 new_status = self._map_instance_status(runner_status)
-                if new_status and new_status != ws.status:
+                if new_status != ws.status:
                     # Never promote CREATING → RUNNING via heartbeat.
                     # Only the explicit workspace:created event (sent after
                     # repos are cloned and SSH is established) may do that.
@@ -233,15 +230,17 @@ class HeartbeatReconcilerMixin:
                         ws.status,
                         new_status,
                     )
-                    self.workspaces.update_status(ws, new_status)
+                    if not self.workspaces.reconcile_heartbeat_status(
+                        ws, new_status, runner_sid=runner.sid
+                    ):
+                        # A newer result/admission/tombstone won since the list
+                        # query; do not apply any cleanup from this old snapshot.
+                        continue
                     self._forward_workspace_status(ws, status=new_status)
 
-                if not (
-                    new_status == WorkspaceStatus.RUNNING
-                    or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
-                ):
+                if new_status != WorkspaceStatus.RUNNING:
                     self._cleanup_desktop_state(ws_id_str)
-                    effective = new_status or ws.status
+                    effective = new_status
                     if effective == WorkspaceStatus.STOPPED:
                         try:
                             self.mark_processes_killed(
@@ -288,9 +287,9 @@ class HeartbeatReconcilerMixin:
                 # ``reconcile_vanished_processes`` pass after verify.
                 # Live-exited rows are marked EXITED immediately.
                 reported_processes = runner_payload.get("processes")
-                if isinstance(reported_processes, list) and (
-                    new_status == WorkspaceStatus.RUNNING
-                    or (new_status is None and ws.status == WorkspaceStatus.RUNNING)
+                if (
+                    isinstance(reported_processes, list)
+                    and new_status == WorkspaceStatus.RUNNING
                 ):
                     try:
                         _, vanished = self.reconcile_workspace_processes(
@@ -312,7 +311,9 @@ class HeartbeatReconcilerMixin:
                         runner_id=runner_id_str,
                         desktop_epoch=runner_payload["desktop_epoch"],
                         desktop_generation=runner_payload["desktop_generation"],
-                        desktop_session_tracked=runner_payload["desktop_session_tracked"],
+                        desktop_session_tracked=runner_payload[
+                            "desktop_session_tracked"
+                        ],
                     )
 
         async_to_sync(self.auto_stop_inactive_workspaces)(
@@ -386,19 +387,24 @@ class HeartbeatReconcilerMixin:
         return changed
 
     @staticmethod
-    def _map_instance_status(status: str) -> str | None:
+    def _map_instance_status(status: str) -> str:
         """Map a runtime instance status string to a WorkspaceStatus value.
 
         Supports normalized QEMU/libvirt domain states.
         """
         mapping = {
             "running": WorkspaceStatus.RUNNING,
+            "blocked": WorkspaceStatus.RUNNING,
             "exited": WorkspaceStatus.STOPPED,
             "dead": WorkspaceStatus.FAILED,
-            "removing": WorkspaceStatus.REMOVED,
+            "removing": WorkspaceStatus.DELETING,
             "created": WorkspaceStatus.CREATING,
             "stopped": WorkspaceStatus.STOPPED,
             "failed": WorkspaceStatus.FAILED,
-            "removed": WorkspaceStatus.REMOVED,
+            "removed": WorkspaceStatus.DELETED,
         }
-        return mapping.get(status)
+        return (
+            mapping.get(status, WorkspaceStatus.FAILED)
+            if isinstance(status, str)
+            else WorkspaceStatus.FAILED
+        )

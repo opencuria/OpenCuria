@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useAuthStore } from '@/stores/auth'
+import { getWorkspaceActionAvailability } from '@/lib/workspaceLifecycle'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
 
 const props = defineProps<{
@@ -54,10 +55,10 @@ const transitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
 )
 const isRunnerOfflineState = computed(
-  () =>
-    !props.workspace.runner_online &&
-    props.workspace.status !== WorkspaceStatus.DELETED &&
-    props.workspace.status !== WorkspaceStatus.REMOVED,
+  () => !props.workspace.runner_online && props.workspace.status !== WorkspaceStatus.DELETED,
+)
+const actions = computed(() =>
+  getWorkspaceActionAvailability(props.workspace, isTransitioning.value),
 )
 
 const canStop = computed(
@@ -66,12 +67,13 @@ const canStop = computed(
 const canResume = computed(
   () => isRunnerOfflineState.value || props.workspace.status === WorkspaceStatus.STOPPED,
 )
-const canRemove = computed(
-  () =>
-    isRunnerOfflineState.value ||
-    [WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED, WorkspaceStatus.FAILED].includes(
-      props.workspace.status,
-    ),
+const canRemove = computed(() =>
+  [
+    WorkspaceStatus.RUNNING,
+    WorkspaceStatus.STOPPED,
+    WorkspaceStatus.FAILED,
+    WorkspaceStatus.DELETE_FAILED,
+  ].includes(props.workspace.status),
 )
 const canCaptureImage = computed(
   () =>
@@ -97,10 +99,6 @@ const captureTitle = computed(() =>
   captureBlockedByCredentials.value
     ? 'Credentials are still on disk. Stop the workspace to remove them before capturing. If it was stopped externally, resume and stop it again.'
     : 'Capture image',
-)
-const areActionsDisabled = computed(
-  () =>
-    isTransitioning.value || isRunnerOfflineState.value || props.workspace.intervention_required,
 )
 
 function handleEdit(e: Event): void {
@@ -137,7 +135,11 @@ function handleRecreate(e: Event): void {
 </script>
 
 <template>
-  <div class="flex shrink-0 items-center gap-1" @click.stop>
+  <div
+    v-if="workspace.status !== WorkspaceStatus.DELETED"
+    class="flex shrink-0 items-center gap-1"
+    @click.stop
+  >
     <Button
       v-if="isTransitioning && !workspace.intervention_required"
       variant="ghost"
@@ -153,7 +155,7 @@ function handleRecreate(e: Event): void {
       variant="ghost"
       :size="size || 'default'"
       title="Stop workspace"
-      :disabled="areActionsDisabled"
+      :disabled="!actions.stop"
       @click="handleStop"
     >
       <Square :size="14" />
@@ -164,7 +166,7 @@ function handleRecreate(e: Event): void {
       variant="secondary"
       :size="size || 'default'"
       :title="isRunnerOfflineState ? 'Runner offline' : 'Resume workspace'"
-      :disabled="areActionsDisabled"
+      :disabled="!actions.start"
       @click="handleResume"
     >
       <Play :size="14" />
@@ -189,25 +191,25 @@ function handleRecreate(e: Event): void {
             class="whitespace-normal text-xs font-normal text-destructive"
           >
             {{
-              auth.isAdmin
-                ? 'A previous operation could not be confirmed. Review its status to continue.'
-                : 'A previous operation could not be confirmed. Ask an organization admin to review it.'
+              isRunnerOfflineState
+                ? 'Runner offline. Recovery continues when it reconnects.'
+                : 'Checking the interrupted operation automatically. Actions unlock after recovery.'
             }}
           </DropdownMenuLabel>
           <DropdownMenuItem v-if="auth.isAdmin" @select="inspectRunner">
             <AlertTriangle />
-            Review workspace issue
+            View recovery status
           </DropdownMenuItem>
           <DropdownMenuSeparator />
         </template>
-        <DropdownMenuItem :disabled="areActionsDisabled" @select="handleEdit">
+        <DropdownMenuItem :disabled="!actions.edit" @select="handleEdit">
           <Pencil />
           Edit workspace
         </DropdownMenuItem>
         <DropdownMenuItem
           v-if="canCaptureImage"
           :title="captureTitle"
-          :disabled="areActionsDisabled || captureBlockedByCredentials"
+          :disabled="!actions.capture"
           @select="handleCaptureImage"
         >
           <Camera />
@@ -216,7 +218,7 @@ function handleRecreate(e: Event): void {
         <DropdownMenuItem
           v-if="canRecreate && !hideDestructive"
           data-testid="workspace-actions-recreate"
-          :disabled="areActionsDisabled"
+          :disabled="!actions.reset"
           @select="handleRecreate"
         >
           <RotateCcw />
@@ -226,11 +228,15 @@ function handleRecreate(e: Event): void {
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
-            :disabled="areActionsDisabled"
+            :disabled="!actions.remove"
             @select="handleRemove"
           >
             <Trash2 />
-            Remove workspace
+            {{
+              workspace.status === WorkspaceStatus.DELETE_FAILED
+                ? 'Retry removal'
+                : 'Remove workspace'
+            }}
           </DropdownMenuItem>
         </template>
       </DropdownMenuContent>
@@ -238,7 +244,7 @@ function handleRecreate(e: Event): void {
     <EditWorkspaceDialog
       ref="editDialog"
       :workspace="workspace"
-      :disabled="areActionsDisabled"
+      :disabled="!actions.edit"
       hide-trigger
     />
   </div>

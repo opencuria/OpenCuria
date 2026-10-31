@@ -41,7 +41,10 @@ def runtime(tmp_path):
     images = tmp_path / "images"
     for directory in (r._snapshot_dir, r._disk_dir, images):
         directory.mkdir()
-    r._settings = SimpleNamespace(qemu_image_cache_dir=str(images))
+    r._settings = SimpleNamespace(
+        qemu_image_cache_dir=str(images), qemu_vcpus=1, qemu_memory_mb=128,
+        qemu_disk_size_gb=1,
+    )
     r._libvirt_conn = MagicMock()
     r._libvirt_conn.return_value.listAllDomains.return_value = []
     return r
@@ -699,7 +702,7 @@ async def test_cached_publication_foreign_overwrite_cannot_be_deleted(tmp_path):
     import os
 
     os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
-    with pytest.raises(RuntimeError, match="Incomplete"):
+    with pytest.raises(RuntimeError, match="Unknown image"):
         await r.delete_image_artifact("verified")
     assert target.exists()
     assert target.with_suffix(".manifest.json").exists()

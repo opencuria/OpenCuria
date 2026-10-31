@@ -38,7 +38,6 @@ const searchQuery = ref('')
 const createOpen = ref(false)
 
 const HIDDEN_STATUSES = new Set<string>([
-  WorkspaceStatus.REMOVED,
   WorkspaceStatus.DELETED,
   WorkspaceStatus.DELETING,
   WorkspaceStatus.PENDING_DELETION,

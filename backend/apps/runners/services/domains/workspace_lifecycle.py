@@ -47,6 +47,7 @@ from ...exceptions import (
 from ...provisioning import disk_size_for, provisioning_command, uses_artifact_clone
 from ...workspace_operation_repository import WorkspaceOperationRepository
 from ..recreate import RecreateService
+from ..workspace_capacity import WorkspaceCapacityService
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import ImageInstance, Runner, Task, Workspace
@@ -524,7 +525,10 @@ class WorkspaceLifecycleMixin:
                     else:
                         workspace.credentials_present = acknowledged_credentials_present
                         workspace.credential_sync_status = "pending"
-                        workspace.credential_sync_detail = "Configuration saved; runner disk-state acknowledgement pending."
+                        workspace.credential_sync_detail = (
+                            "Configuration saved; "
+                            "runner disk-state acknowledgement pending."
+                        )
                 except Exception:
                     logger.exception(
                         "Credential sync failed for workspace %s", workspace_id
@@ -638,9 +642,12 @@ class WorkspaceLifecycleMixin:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        qemu_vcpus = workspace.qemu_vcpus
-        qemu_memory_mb = workspace.qemu_memory_mb
-        qemu_disk_size_gb = workspace.qemu_disk_size_gb
+        effective = await sync_to_async(WorkspaceCapacityService.previous_resources)(
+            workspace
+        )
+        qemu_vcpus = effective["vcpus"]
+        qemu_memory_mb = effective["memory_mb"]
+        qemu_disk_size_gb = effective["disk_size_gb"]
         self._validate_runner_qemu_limits(runner)
         (
             qemu_vcpus,
@@ -661,11 +668,8 @@ class WorkspaceLifecycleMixin:
         )
 
         task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.RESUME_WORKSPACE,
-            workspace=workspace,
+        workspace, task = await sync_to_async(WorkspaceCapacityService.resume)(
+            workspace_id, task_id
         )
 
         # Phase-4 port: prefer the injected credential_resolver.
@@ -777,7 +781,8 @@ class WorkspaceLifecycleMixin:
             WorkspaceStatus.DELETED,
         ):
             raise ConflictError(
-                f"Workspace '{workspace.id}' is already in deletion state '{workspace.status}'"
+                f"Workspace '{workspace.id}' is already in deletion state "
+                f"'{workspace.status}'"
             )
 
         if (
@@ -785,7 +790,8 @@ class WorkspaceLifecycleMixin:
             and workspace.active_operation != WorkspaceOperation.REMOVING
         ):
             raise ConflictError(
-                f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
+                f"Workspace '{workspace.id}' is currently "
+                f"{self._workspace_operation_label(workspace.active_operation)}"
             )
 
         runner = workspace.runner
@@ -1067,7 +1073,8 @@ class WorkspaceLifecycleMixin:
             self.workspaces.mark_delete_failed(workspace.id, error=error)
 
         if workspace and task.type in {
-            TaskType.RESUME_WORKSPACE, TaskType.STOP_WORKSPACE
+            TaskType.RESUME_WORKSPACE,
+            TaskType.STOP_WORKSPACE,
         }:
             status = {
                 "running": WorkspaceStatus.RUNNING,
@@ -1077,7 +1084,9 @@ class WorkspaceLifecycleMixin:
             if status is not None:
                 self.workspaces.update_status(workspace, status)
             if isinstance(credentials_present, bool):
-                self.workspaces.update_credentials_present(workspace, credentials_present)
+                self.workspaces.update_credentials_present(
+                    workspace, credentials_present
+                )
 
         self.tasks.fail(task, error)
         logger.error("Workspace error (task=%s): %s", task_id, error)
@@ -1319,7 +1328,8 @@ class WorkspaceLifecycleMixin:
             },
         )
         logger.info(
-            "Dispatched create_workspace_from_image_artifact (workspace=%s, artifact=%s, task=%s)",
+            "Dispatched create_workspace_from_image_artifact "
+            "(workspace=%s, artifact=%s, task=%s)",
             workspace_id,
             image_artifact_id,
             task_id,

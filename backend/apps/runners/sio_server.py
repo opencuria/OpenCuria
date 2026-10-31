@@ -137,20 +137,14 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     @sio.on("operation:inspection")
     async def operation_inspection(sid: str, evidence: dict):
-        """Reconcile exact finished journal outcomes on the current SID."""
+        """Reconcile terminal outcomes and safely close verified interruptions."""
+        from .services.disposition import DispositionService
+
         runner_id = await _require_runner_id(sio, sid, "operation:inspection")
-        if (
-            not runner_id
-            or not evidence.get("instance_id")
-            or evidence.get("status") != "terminal"
-            or not evidence.get("outcome_known")
-            or not evidence.get("execution_finished")
-        ):
+        if not runner_id:
             return
-        await sync_to_async(get_runner_service().apply_operation_result)(
-            runner_id,
-            evidence.get("event", ""),
-            evidence.get("result", {}),
+        await sync_to_async(DispositionService.recover_inspection)(
+            get_runner_service(), runner_id, sid, evidence
         )
 
     @sio.on("operation:result")

@@ -58,9 +58,7 @@ class WorkspaceService:
             runtime,
             get_cached,
             get_runtime,
-            store_workspace=lambda info: self.registry._cache.__setitem__(
-                info.workspace_id, info
-            ),
+            store_workspace=self.registry.register_new_workspace,
             credentials_injector=self.credentials.inject_workspace_credentials,
         )
         self.images.lifecycle_context = self.registry.lifecycle
@@ -93,6 +91,7 @@ class WorkspaceService:
             self.streams,
             self.desktop,
         )
+        self.lifecycle.partial_workspace_identity = self.partial_workspace_identity
         self.registry.desktop_sessions = self.desktop._desktop_sessions
         self.registry.background_entries = self.background._background_processes
         self.registry.background_statuses = partial(
@@ -126,15 +125,24 @@ class WorkspaceService:
 
         snapshots = []
         runtime = self._runtime
+        epochs = self.registry._epochs.copy()
+        active = self.registry._active.copy()
         try:
             scan = await runtime.inventory()
-        except Exception:
+        except Exception:  # noqa: BLE001 - failed scan is incomplete evidence
             scan = RuntimeInventory(errors=["Runtime unavailable"])
         if getattr(self, "_journal", None):
             for resource in scan.resources:
                 workspace_id = resource.metadata.get("workspace_id")
                 if resource.kind == "workspace" and workspace_id:
-                    self._journal.observe_workspace(workspace_id, resource.state)
+                    try:
+                        workspace_uuid = uuid.UUID(workspace_id)
+                    except ValueError:
+                        continue
+                    await self._observe_workspace_state(
+                        workspace_uuid, resource.state,
+                        epochs.get(workspace_uuid, 0), workspace_uuid in active,
+                    )
         snapshots.append(asdict(scan))
         return {
             "schema_version": 1,
@@ -142,17 +150,36 @@ class WorkspaceService:
             "complete": all(s["complete"] for s in snapshots),
         }
 
+    async def _observe_workspace_state(
+        self, workspace_id: uuid.UUID, state: str, epoch: int, active: bool
+    ) -> None:
+        """Do not revoke newer scrub evidence with a stale running observation."""
+        if (
+            active
+            or workspace_id in self.registry._active
+            or epoch != self.registry._epochs.get(workspace_id, 0)
+        ):
+            return
+        # Queue immediately after the epoch check. Journal's FIFO IO admission
+        # orders this before checkpoints from any lifecycle starting afterwards.
+        await self._journal.call("observe_workspace", str(workspace_id), state)
+
     async def workspace_incarnation(self, workspace_id: str) -> tuple[dict, str] | None:
         """Read exact current resource identity for durable checkpoint validation."""
         from dataclasses import asdict
 
         matches = []
         runtime = self._runtime
+        workspace_uuid = uuid.UUID(workspace_id)
+        epoch = self.registry._epochs.get(workspace_uuid, 0)
+        active = workspace_uuid in self.registry._active
         inspect_source = getattr(runtime, "workspace_incarnation", None)
         if inspect_source is not None:
             result = await inspect_source(workspace_id)
             if result and getattr(self, "_journal", None):
-                self._journal.observe_workspace(workspace_id, result[1])
+                await self._observe_workspace_state(
+                    workspace_uuid, result[1], epoch, active
+                )
             return result
         scan = asdict(await runtime.inventory())
         if not scan["complete"]:
@@ -175,7 +202,9 @@ class WorkspaceService:
                 )
         result = matches[0] if len(matches) == 1 else None
         if result and getattr(self, "_journal", None):
-            self._journal.observe_workspace(workspace_id, result[1])
+            await self._observe_workspace_state(
+                workspace_uuid, result[1], epoch, active
+            )
         return result
 
     async def publication_evidence(self, identity: dict) -> tuple[str, dict] | None:
@@ -183,7 +212,7 @@ class WorkspaceService:
         if identity.get("workspace_id") and getattr(self, "_journal", None):
             observed = await self.workspace_incarnation(identity["workspace_id"])
             proof = (
-                self._journal.proof(identity["workspace_id"], observed[0])
+                await self._journal.call("proof", identity["workspace_id"], observed[0])
                 if observed
                 else None
             )
@@ -216,21 +245,33 @@ class WorkspaceService:
                 meta = resource["metadata"]
                 op = meta.get("operation_id")
                 image = meta.get("artifact_id")
+                failure = identity.get("failure_event")
+                capture = failure == "image_artifact:failed"
+                target = identity.get("workspace_id") if capture else image
                 if (
                     op != identity.get("operation_id")
                     or image != identity.get("image_instance_id")
-                    or image != identity.get("target")
+                    or target != identity.get("target")
+                    or capture and meta.get("instance_id") != identity.get("workspace_id")
                 ):
                     continue
                 if (identity.get("image_path")) and (
                     meta.get("image_path") != identity["image_path"]
                 ):
                     continue
-                failure = identity.get("failure_event")
+                size = meta.get("virtual_size_bytes") or resource.get("virtual_bytes")
+                floor = meta.get("min_disk_size_gb")
+                if floor is None and isinstance(size, int):
+                    floor = (size + 1024**3 - 1) // 1024**3
+                size_details = {
+                    **({"virtual_size_bytes": size} if size is not None else {}),
+                    **({"min_disk_size_gb": floor} if floor is not None else {}),
+                }
                 if failure == "image:build_failed":
                     return "image:built", {
                         **identity,
                         "image_path": meta.get("image_path", ""),
+                        **size_details,
                     }
                 if (
                     failure == "image_artifact:failed"
@@ -242,8 +283,84 @@ class WorkspaceService:
                         "name": meta["name"],
                         "created_at": meta["created_at"],
                         "size_bytes": meta["size_bytes"],
+                        **size_details,
                     }
         return None
+
+    async def recover_interrupted_operation(self, identity: dict) -> None:
+        """Quiesce exact interrupted guests without replaying initialization.
+
+        Preserved workspace disks retain unknown credential cleanliness. Stopping
+        the exact guest prevents remote cloud-init/git/credential shell commands
+        outliving the execution fence. Only disposable build guests are removed.
+        """
+        failure = identity.get("failure_event")
+        if failure == "image:build_failed":
+            recover = getattr(self._runtime, "recover_interrupted_build", None)
+            if recover is not None:
+                await recover(identity["operation_id"])
+        elif failure in {"workspace:error", "image_artifact:failed"}:
+            workspace_id = identity.get("workspace_id")
+            recover = getattr(self._runtime, "quiesce_interrupted_workspace", None)
+            if workspace_id and recover is not None:
+                await recover(workspace_id)
+
+    async def partial_workspace_identity(self, workspace_id: uuid.UUID) -> str | None:
+        """Recover a partial allocation only from durable exact create ownership."""
+        journal = getattr(self, "_journal", None)
+        recover = getattr(self._runtime, "quiesce_interrupted_workspace", None)
+        if (
+            journal is None
+            or recover is None
+            or not await journal.call("owns_workspace_allocation", str(workspace_id))
+        ):
+            return None
+        if await recover(str(workspace_id)) not in {"partial", "stopped"}:
+            return None
+        return str(workspace_id)
+
+    async def operation_workspace_evidence(
+        self, identity: dict, snapshot: dict
+    ) -> dict[str, object]:
+        """Report physical target state without treating cache as credential proof."""
+        result: dict[str, object] = {"workspace_status": "unknown"}
+        if snapshot.get("complete") is not True:
+            return result
+        workspace_id = identity.get("workspace_id") or identity.get("target")
+        try:
+            uuid.UUID(workspace_id)
+        except (ValueError, TypeError, AttributeError):
+            return result
+        matches = [
+            resource
+            for scan in snapshot.get("runtimes", [])
+            for resource in scan.get("resources", [])
+            if resource.get("kind") == "workspace"
+            and resource.get("metadata", {}).get("workspace_id") == workspace_id
+        ]
+        if not matches:
+            removed = getattr(self._runtime, "workspace_removed", None)
+            if removed is not None and await removed(workspace_id):
+                result["workspace_status"] = "absent"
+            return result
+        if len(matches) != 1:
+            return result
+        state = matches[0].get("state")
+        if state not in {"running", "exited", "stopped"}:
+            return result
+        result["workspace_status"] = "running" if state == "running" else "stopped"
+        if getattr(self, "_journal", None) is not None:
+            observed = await self.workspace_incarnation(workspace_id)
+            proof = (
+                await self._journal.call("proof", workspace_id, observed[0])
+                if observed is not None and observed[1] == state
+                else None
+            )
+            if proof is not None and proof.get("state") == state:
+                present = proof.get("credentials_present")
+                if isinstance(present, bool):
+                    result["credentials_present"] = present
+        return result
 
     async def recover_desktop_sessions_from_runtime(self) -> None:
         """Reconcile desktops from live runtime state with bounded workers."""

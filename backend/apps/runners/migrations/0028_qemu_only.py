@@ -6,13 +6,20 @@ from django.db import migrations, models
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 
 
-def retain_qemu_inventory(
-    apps: Apps, schema_editor: BaseDatabaseSchemaEditor
-) -> None:
+def retain_qemu_inventory(apps: Apps, schema_editor: BaseDatabaseSchemaEditor) -> None:
     """Discard retired runtime scans before each snapshot becomes unique."""
     apps.get_model("runners", "InventoryRuntime").objects.using(
         schema_editor.connection.alias
     ).exclude(runtime_type="qemu").delete()
+
+
+def flush_deferred_constraints(
+    apps: Apps, schema_editor: BaseDatabaseSchemaEditor
+) -> None:
+    """Drain deleted inventory FK triggers before changing PostgreSQL tables."""
+    if schema_editor.connection.vendor == "postgresql":
+        schema_editor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        schema_editor.execute("SET CONSTRAINTS ALL DEFERRED")
 
 
 class Migration(migrations.Migration):
@@ -23,6 +30,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(retain_qemu_inventory, migrations.RunPython.noop),
+        migrations.RunPython(flush_deferred_constraints, migrations.RunPython.noop),
         migrations.RemoveConstraint(
             model_name="imageinstance",
             name="image_origin_valid",

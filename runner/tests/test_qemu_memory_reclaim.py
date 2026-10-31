@@ -49,6 +49,7 @@ def runtime() -> tuple[QemuRuntime, MagicMock]:
     runtime = object.__new__(QemuRuntime)
     runtime._ssh_states = {}
     runtime._invalidate_ssh = AsyncMock()
+    runtime._assert_memory_available = MagicMock()
     runtime._wait_for_ssh = AsyncMock()
     runtime._libvirt_conn = MagicMock()
     domain = runtime._libvirt_conn.return_value.lookupByName.return_value

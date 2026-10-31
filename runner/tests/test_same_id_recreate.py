@@ -68,6 +68,10 @@ def qemu_ready(tmp_path):
         return_value=("10.100.1.1", "10.100.1.2")
     )
     r._wait_for_ssh = AsyncMock(return_value="10.100.1.2")
+    r._wait_for_cloud_init = AsyncMock()
+    # These guests use mocked libvirt and consume no physical RAM. Host admission
+    # has dedicated pressure/race tests; unrelated real VM tests cannot gate these.
+    r._assert_memory_available = MagicMock()
     r._settings = SimpleNamespace(
         qemu_image_cache_dir=str(tmp_path / "images"),
         qemu_vcpus=2,

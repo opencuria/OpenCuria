@@ -26,6 +26,60 @@ class DispositionService:
     """Inspect is non-destructive, including offline; disposition requires proof."""
 
     @staticmethod
+    def recover_inspection(
+        service: Any, runner_id: str, sid: str, evidence: dict
+    ) -> bool:
+        """Resolve sealed interrupted attempts automatically, without replaying work.
+
+        Unknown execution outcomes remain failed history. A fresh, complete
+        runtime observation only releases the reservation after the runner has
+        fenced the exact identity against delayed delivery and ongoing effects.
+        """
+        identity = evidence.get("identity")
+        if not isinstance(identity, dict):
+            return False
+        row = DispositionRepository.for_runner(
+            runner_id, identity.get("operation_id", "")
+        )
+        if (
+            row is None
+            or row.runner.sid != sid
+            or not row.runner.is_online
+            or any(identity.get(k) != v for k, v in row.identity.items())
+            or evidence.get("status") != "terminal"
+            or not evidence.get("instance_id")
+            or evidence.get("execution_finished") is not True
+        ):
+            return False
+        if evidence.get("outcome_known") is True:
+            with DispositionRepository.locked(row) as repository:
+                current = repository.state()
+                if current.runner.sid != sid or not current.runner.is_online:
+                    return False
+                return apply_result(
+                    service,
+                    runner_id,
+                    evidence.get("event", ""),
+                    evidence.get("result", {}),
+                )
+        if (
+            evidence.get("outcome_known") is not False
+            or evidence.get("quiescent") is not True
+        ):
+            return False
+        try:
+            DispositionService._dispose(row, evidence, "recover_interrupted")
+        except ConflictError:
+            return False
+        if row.workspace_id:
+            workspace_id = str(row.workspace_id)
+            service._forward_workspace_operation(workspace_id, None)
+            workspace = service.workspaces.get_by_id(row.workspace_id)
+            if workspace is not None:
+                service._forward_workspace_status(workspace)
+        return True
+
+    @staticmethod
     def authorized(
         user: Any,
         organization_id: uuid.UUID,
@@ -109,7 +163,10 @@ class DispositionService:
         identity = evidence.get("identity", {})
         if any(identity.get(k) != v for k, v in state.identity.items()):
             raise ConflictError("Runner evidence identity mismatch")
-        if action == "acknowledge_interrupted" and evidence.get("outcome_known"):
+        if action in {
+            "acknowledge_interrupted",
+            "recover_interrupted",
+        } and evidence.get("outcome_known"):
             raise ConflictError(
                 "Known outcome must be reconciled, not acknowledged as interrupted"
             )
@@ -122,6 +179,14 @@ class DispositionService:
                 current.operation_id,
             }:
                 raise ConflictError("Another operation owns the workspace")
+            if (
+                action == "recover_interrupted"
+                and current.workspace_id
+                and current.current_task_id != current.operation_id
+            ):
+                raise ConflictError(
+                    "The interrupted operation no longer owns the workspace"
+                )
             if action == "retry" and current.retry_count >= 2:
                 raise ConflictError("Safe retry limit reached")
             if action == "retry" and (
@@ -133,27 +198,41 @@ class DispositionService:
                 raise ConflictError(
                     "Only proven finished failed start/stop/remove may retry"
                 )
-            if action not in {"acknowledge_interrupted", "retry"}:
+            if action not in {
+                "acknowledge_interrupted",
+                "recover_interrupted",
+                "retry",
+            }:
                 raise ConflictError("Unsupported disposition")
             if current.status == "completed" or current.phase == "disposed":
                 raise ConflictError("Operation already resolved")
+            automatic = action == "recover_interrupted"
             repository.fail_task(
-                "Interrupted execution acknowledged after fresh runtime scan; "
+                "Execution was interrupted. The runner verified that it has ended; "
+                "existing resources were kept. Retry the action if needed."
+                if automatic
+                else "Interrupted execution acknowledged after fresh runtime scan; "
                 "no resources deleted or recreated"
             )
-            if action == "acknowledge_interrupted":
+            if action in {"acknowledge_interrupted", "recover_interrupted"}:
                 repository.interrupt_children(
                     capture_diagnostic=(
-                        "Interrupted child acknowledged; resources preserved, "
+                        "Interrupted child closed; resources preserved, "
                         "no automatic restart"
                     ),
                     recreate_diagnostic=(
-                        "Interrupted reset acknowledged; retry the reset or "
+                        "Interrupted reset closed; retry the reset or "
                         "delete the workspace"
                     ),
                 )
             workspace_status = current.workspace_status
             if current.workspace_id:
+                if automatic:
+                    workspace_status = {
+                        "running": "running",
+                        "stopped": "stopped",
+                        "exited": "stopped",
+                    }.get(evidence.get("workspace_status"), "failed")
                 if current.task_type in {
                     "create_workspace",
                     "create_workspace_from_image_artifact",
@@ -165,7 +244,11 @@ class DispositionService:
                         if repository.has_recreate_request()
                         else "delete_failed"
                     )
-            repository.release(workspace_status)
+            repository.release(
+                workspace_status,
+                evidence.get("credentials_present") if automatic else None,
+                observed_status=evidence.get("workspace_status"),
+            )
             if action == "retry":
                 new_id = repository.create_retry(current.retry_count + 1)
                 return {

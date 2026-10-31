@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
@@ -19,6 +20,9 @@ from django.db import transaction
 from ...enums import WorkspaceStatus
 from ...workspace_operation_repository import WorkspaceOperationRepository
 from . import realtime
+
+if TYPE_CHECKING:
+    from ...models import Runner, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +126,7 @@ class FrontendBusMixin:
 
     def _forward_runner_status_to_frontend(
         self,
-        runner: "Runner",
+        runner: Runner,
         status: str,
     ) -> None:
         """Emit runner status change events for all workspaces of this runner.
@@ -133,7 +137,7 @@ class FrontendBusMixin:
         """
         workspaces = self.workspaces.list_for_scope(
             runner_id=runner.id,
-            exclude_statuses=(WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED),
+            exclude_statuses=(WorkspaceStatus.DELETED, WorkspaceStatus.FAILED),
         )
         event = "runner:offline" if status == "offline" else "runner:online"
         for ws in workspaces:
@@ -203,7 +207,7 @@ class FrontendBusMixin:
 
     def _forward_workspace_status(
         self,
-        workspace: "Workspace",
+        workspace: Workspace,
         *,
         task_id: str | None = None,
         status: str | None = None,

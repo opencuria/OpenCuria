@@ -159,7 +159,7 @@ def test_late_task_failure_rolls_back_all_configuration(
                 credentials=[credential],
                 plugin_ids=[plugin.id],
                 name="Changed",
-                qemu_values=(4, 4096, 40),
+                qemu_values=(4, 4096, 60),
                 desktop_values=(1280, 720),
             )
 

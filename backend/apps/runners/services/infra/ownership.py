@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class OwnershipMixin:
     """Ownership/availability guards shared by RunnerService."""
 
-    def _ensure_workspace_available(self, workspace: "Workspace") -> None:
+    def _ensure_workspace_available(self, workspace: Workspace) -> None:
         """Reject mutating operations while another blocking lifecycle action runs."""
         if workspace.status in (
             WorkspaceStatus.PENDING_DELETION,
@@ -40,10 +40,13 @@ class OwnershipMixin:
                 f"Workspace '{workspace.id}' is pending deletion and cannot be modified"
             )
         if workspace.current_task_id and not workspace.active_operation:
-            raise ConflictError("Workspace lifecycle outcome unresolved; intervention required")
+            raise ConflictError(
+                "Workspace recovery is waiting for the runner to verify its state"
+            )
         if workspace.active_operation:
             raise ConflictError(
-                f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
+                f"Workspace '{workspace.id}' is currently "
+                f"{self._workspace_operation_label(workspace.active_operation)}"
             )
 
     def is_workspace_available(self, workspace_id: uuid.UUID) -> bool:
@@ -56,7 +59,6 @@ class OwnershipMixin:
         except ConflictError:
             return False
         return True
-
 
     def _validate_task_runner(self, task, runner_id: str | None) -> bool:
         """Return True if the task belongs to the given runner.
@@ -112,16 +114,13 @@ class OwnershipMixin:
         cached = self._desktop_workspace_runner.get(workspace_id)
         if cached is not None and cached != runner_id:
             logger.warning(
-                "desktop event rejected: workspace %s is owned by "
-                "runner %s, not %s",
+                "desktop event rejected: workspace %s is owned by runner %s, not %s",
                 workspace_id,
                 cached,
                 runner_id,
             )
             return False
-        owner_id = await sync_to_async(self.workspaces.get_runner_id)(
-            workspace_uuid
-        )
+        owner_id = await sync_to_async(self.workspaces.get_runner_id)(workspace_uuid)
         if owner_id is None:
             logger.warning(
                 "desktop event rejected: workspace %s not found",
@@ -137,7 +136,7 @@ class OwnershipMixin:
             return False
         return True
 
-    def _ensure_process_dispatchable(self, workspace: "Workspace") -> "Runner":
+    def _ensure_process_dispatchable(self, workspace: Workspace) -> Runner:
         """Validate that a process RPC may be dispatched (sync).
 
         Processes never set ``active_operation``, but live dispatch must
@@ -163,7 +162,7 @@ class OwnershipMixin:
             raise RunnerOfflineError(str(runner.id))
         return runner
 
-    def _ensure_git_dispatchable(self, workspace: "Workspace") -> "Runner":
+    def _ensure_git_dispatchable(self, workspace: Workspace) -> Runner:
         """Validate that a git RPC may be dispatched (sync).
 
         Git never touches ``active_operation`` for dispatch bookkeeping,
@@ -226,4 +225,3 @@ class OwnershipMixin:
             )
             return False
         return True
-

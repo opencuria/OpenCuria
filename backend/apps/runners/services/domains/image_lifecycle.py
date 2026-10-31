@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 class ImageLifecycleMixin:
     """Image definition/build/artifact flows shared by RunnerService."""
 
-
     @staticmethod
     def _validate_qemu_base_distro(base_distro: str) -> None:
         """Ensure QEMU image definitions use a supported distro source."""
@@ -46,7 +45,6 @@ class ImageLifecycleMixin:
         raise ConflictError(
             "QEMU image definitions currently require an ubuntu:<version> base distro"
         )
-
 
     @staticmethod
     def _desktop_session_init_script_block() -> str:
@@ -104,7 +102,6 @@ class ImageLifecycleMixin:
         lines += [cls._desktop_session_init_script_block(), ""]
 
         return "\n".join(lines).strip() + "\n"
-
 
     def _ensure_definition_mutable(self, definition) -> None:
         """Reject runner mutations while a definition is deleted or being removed."""
@@ -242,6 +239,7 @@ class ImageLifecycleMixin:
         build_job_id: str,
         image_path: str = "",
         runner_id: str | None = None,
+        min_disk_size_gb: int | None = None,
     ) -> None:
         """Mark a runner image build as active and complete its task."""
 
@@ -252,6 +250,7 @@ class ImageLifecycleMixin:
             build_job_id=build_job_id,
             runner_id=runner_id,
             runner_ref=image_path,
+            min_disk_size_gb=min_disk_size_gb,
         )
 
     def handle_image_build_failed(
@@ -279,7 +278,7 @@ class ImageLifecycleMixin:
         organization_id: uuid.UUID | None = None,
         captured_image_id: uuid.UUID | None = None,
         message: str = "",
-    ) -> tuple["Workspace", "Task"]:
+    ) -> tuple[Workspace, Task]:
         """Reserve an automatic QEMU capture; recovery owns child progression.
 
         Without ``captured_image_id`` a new image (v1) is created; otherwise the
@@ -310,6 +309,7 @@ class ImageLifecycleMixin:
         name: str,
         size_bytes: int = 0,
         runner_id: str | None = None,
+        min_disk_size_gb: int | None = None,
     ) -> None:
         """Handle image_artifact:created from runner and mark the image ready."""
         from ...repositories import ImageGenerationRepository
@@ -320,6 +320,7 @@ class ImageLifecycleMixin:
             runner_id=runner_id,
             runner_ref=artifact_id,
             size_bytes=size_bytes,
+            min_disk_size_gb=min_disk_size_gb,
         ):
             return
 
@@ -423,7 +424,7 @@ class ImageLifecycleMixin:
         *,
         error: str,
     ) -> None:
-        """Move a definition delete flow into DELETE_FAILED when a child cleanup fails."""
+        """Mark a definition delete flow failed when child cleanup fails."""
         if definition_id is None:
             return
         definition = self.image_definitions.get_by_id(definition_id)

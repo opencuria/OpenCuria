@@ -82,7 +82,10 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
             and data.get("outcome_known") is False
             and (state.status not in TERMINAL_STATUSES or state.phase == "intervention")
         ):
-            reason = "Unknown outcome; intervention required"
+            reason = (
+                "Operation interrupted; automatic recovery will verify "
+                "the runner state."
+            )
             result.intervene(reason)
             if state.workspace_id:
                 service._forward_workspace_operation(str(state.workspace_id), None)
@@ -126,11 +129,19 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
             if k in inspect.signature(method).parameters
         }
         method(**kwargs)
-        status, error = result.outcome()
+        status, _ = result.outcome()
         if status not in TERMINAL_STATUSES:
             return False
-        if status == "failed" and "intervention" in error.lower():
-            result.retain_intervention_fence()
-            return False
+        result.record_runtime_observation(
+            {
+                "workspace:created": "running",
+                "workspace:resumed": "running",
+                "workspace:updated": "running",
+                "workspace:stopped": "stopped",
+                "workspace:removed": "absent",
+            }.get(event, data.get("observed_status") or "unknown")
+            if status == "completed"
+            else data.get("observed_status") or "unknown"
+        )
         result.release_workspace()
         return True

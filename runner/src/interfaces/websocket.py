@@ -82,6 +82,7 @@ class WebSocketInterface(Interface):
         self._inventory_epoch = str(uuid.uuid4())
         self._desktop_epoch = self._inventory_epoch
         self._inventory_sequence = 0
+        self._stopping = asyncio.Event()
         self._last_inventory_at = 0.0
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
         self._desktop_lease_task: asyncio.Task | None = None
@@ -89,6 +90,7 @@ class WebSocketInterface(Interface):
         self._inventory_lock = asyncio.Lock()
         self._cached_heartbeat_workspaces: list[dict] = []
         self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._delivery_task: asyncio.Task | None = None
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._system_metrics = SystemMetricsCollector(settings)
         self._desktop_proxy = DesktopProxy(
@@ -130,9 +132,13 @@ class WebSocketInterface(Interface):
         """Verify the durable scrub checkpoint against a fresh unchanged incarnation."""
         observed = await self._service.workspace_incarnation(str(workspace_id))
         if not observed or observed[1] not in {"exited", "stopped"}:
-            self._operations.journal.invalidate_checkpoint(str(workspace_id))
+            await self._operations.journal.call(
+                "invalidate_checkpoint", str(workspace_id)
+            )
             return False
-        proof = self._operations.journal.proof(str(workspace_id), observed[0])
+        proof = await self._operations.journal.call(
+            "proof", str(workspace_id), observed[0]
+        )
         return bool(
             proof
             and proof.get("credentials_present") is False
@@ -150,8 +156,10 @@ class WebSocketInterface(Interface):
         self, workspace_id: uuid.UUID, credentials_present: bool | None, event: str
     ) -> None:
         """Checkpoint scrub/readiness against inspected identity, not caller booleans."""
-        if event == "injecting":
-            self._operations.journal.invalidate_checkpoint(str(workspace_id))
+        if event in {"injecting", "scrubbing"}:
+            await self._operations.journal.call(
+                "invalidate_checkpoint", str(workspace_id)
+            )
             return
         try:
             observed = await self._service.workspace_incarnation(str(workspace_id))
@@ -161,7 +169,8 @@ class WebSocketInterface(Interface):
             from ..journal import _active
 
             binding = _active.get() or {}
-            self._operations.journal.checkpoint(
+            await self._operations.journal.call(
+                "checkpoint",
                 str(workspace_id),
                 observed[0],
                 {
@@ -169,7 +178,10 @@ class WebSocketInterface(Interface):
                     "state": observed[1],
                     "operation_id": binding.get("operation_id"),
                     "credentials_present": credentials_present,
-                    "initialized": event == "workspace:created",
+                    "initialized": event in {
+                        "workspace:created", "workspace:resumed",
+                        "workspace:credentials_injected",
+                    },
                 },
             )
 
@@ -184,7 +196,9 @@ class WebSocketInterface(Interface):
                 return evidence
             incarnation, state = observed
             evidence["observed_status"] = state
-            proof = self._operations.journal.proof(str(workspace_id), incarnation)
+            proof = await self._operations.journal.call(
+                "proof", str(workspace_id), incarnation
+            )
             # Lifecycle marks credentials unknown before a potentially partial scrub.
             # An older running checkpoint cannot prove what remains after that write.
             registry = getattr(self._service, "registry", None)
@@ -398,13 +412,25 @@ class WebSocketInterface(Interface):
                             "inventory_sequence": self._inventory_sequence,
                         },
                     )
-                    await self._operations.replay(recover=False)
+                    await self._operations.heartbeat()
                 await asyncio.sleep(self._settings.heartbeat_interval)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("heartbeat_failed")
                 await asyncio.sleep(self._settings.heartbeat_interval)
+
+    async def _delivery_loop(self) -> None:
+        """Retry durable results independently of runtime scans and health ticks."""
+        while True:
+            try:
+                if self._sio.connected:
+                    await self._operations.replay(recover=False)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("operation_delivery_failed")
+            await asyncio.sleep(self._settings.heartbeat_interval)
 
     async def _observation_loop(self) -> None:
         """Collect slow observations separately from transport health."""
@@ -442,17 +468,24 @@ class WebSocketInterface(Interface):
                             },
                         )
                 for workspace_id, info in list(registry._cache.items()):
+                    epoch = registry._epochs.get(workspace_id, 0)
                     observed = await self._service.workspace_incarnation(
                         str(workspace_id)
                     )
                     if observed and registry._cache.get(workspace_id) is info:
-                        proof = self._operations.journal.proof(
-                            str(workspace_id), observed[0]
+                        proof = await self._operations.journal.call(
+                            "proof", str(workspace_id), observed[0]
                         )
-                        if proof and (
-                            proof.get("state") == observed[1]
-                            or proof.get("event") == "scrubbed"
-                            and observed[1] in {"exited", "stopped"}
+                        if (
+                            registry._cache.get(workspace_id) is info
+                            and workspace_id not in registry._active
+                            and epoch == registry._epochs.get(workspace_id, 0)
+                            and proof
+                            and (
+                                proof.get("state") == observed[1]
+                                or proof.get("event") == "scrubbed"
+                                and observed[1] in {"exited", "stopped"}
+                            )
                         ):
                             info.credentials_present = proof.get("credentials_present")
                 workspaces = await registry.get_workspace_heartbeat_statuses()
@@ -544,6 +577,8 @@ class WebSocketInterface(Interface):
             )
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            if self._delivery_task is None or self._delivery_task.done():
+                self._delivery_task = asyncio.create_task(self._delivery_loop())
             if self._observation_task is None or self._observation_task.done():
                 self._observation_task = asyncio.create_task(self._observation_loop())
             if self._desktop_lease_task is None or self._desktop_lease_task.done():
@@ -661,6 +696,7 @@ class WebSocketInterface(Interface):
                     {
                         "task_id": task_id,
                         "error": str(exc),
+                        "outcome_known": False,
                     },
                 )
                 log.exception("task_failed")
@@ -699,6 +735,11 @@ class WebSocketInterface(Interface):
                         "task_id": task_id,
                         "build_job_id": build_job_id,
                         "image_path": result.get("image_path", ""),
+                        **{
+                            key: result[key]
+                            for key in ("min_disk_size_gb", "virtual_size_bytes")
+                            if key in result
+                        },
                     },
                 )
             except Exception as exc:
@@ -802,7 +843,7 @@ class WebSocketInterface(Interface):
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
+                    {"task_id": task_id, "error": str(exc), "outcome_known": False},
                 )
                 log.exception("update_workspace_failed")
 
@@ -848,8 +889,11 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
-                # A fresh successful runtime scan is required for absence proof.
-                await self._service.registry.sync_from_runtime()
+                # Preserve the last exact physical identity until cleanup has
+                # completed; an earlier partial remove may have lost its domain
+                # while disk/network/managed-owner cleanup is still outstanding.
+                if not self._service.registry.workspace_exists(workspace_id):
+                    await self._service.registry.sync_from_runtime()
                 already_absent = not self._service.registry.workspace_exists(
                     workspace_id
                 )
@@ -870,7 +914,7 @@ class WebSocketInterface(Interface):
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
+                    {"task_id": task_id, "error": str(exc), "outcome_known": False},
                 )
                 log.exception("remove_failed")
 
@@ -2754,6 +2798,11 @@ class WebSocketInterface(Interface):
                             else str(artifact.created_at)
                         ),
                         "size_bytes": artifact.size_bytes,
+                        **{
+                            key: getattr(artifact, key)
+                            for key in ("min_disk_size_gb", "virtual_size_bytes")
+                            if getattr(artifact, key, None) is not None
+                        },
                     },
                 )
                 log.info(
@@ -2844,6 +2893,7 @@ class WebSocketInterface(Interface):
                         "task_id": task_id,
                         "workspace_id": str(new_workspace_id),
                         "error": str(exc),
+                        "outcome_known": False,
                     },
                 )
                 log.exception("clone_failed")
@@ -2851,7 +2901,7 @@ class WebSocketInterface(Interface):
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect to the backend and block until disconnected."""
+        """Keep connecting through startup outages and failed reconnect loops."""
         headers = {"Authorization": f"Bearer {self._settings.api_token}"}
         url = self._settings.backend_url
         auth = {"token": self._settings.api_token} if self._settings.api_token else None
@@ -2861,25 +2911,42 @@ class WebSocketInterface(Interface):
             url=self._settings.backend_url,
         )
 
-        await self._sio.connect(
-            url,
-            headers=headers,
-            auth=auth,
-            transports=["websocket"],
-            socketio_path=self._settings.socketio_path,
-        )
-
-        # Block until the connection is closed (reconnects are automatic)
-        await self._sio.wait()
+        retry_delay = 2
+        while not self._stopping.is_set():
+            try:
+                if not self._sio.connected:
+                    await self._sio.connect(
+                        url,
+                        headers=headers,
+                        auth=auth,
+                        transports=["websocket"],
+                        socketio_path=self._settings.socketio_path,
+                    )
+                retry_delay = 2
+                await self._sio.wait()
+            except (
+                socketio.exceptions.ConnectionError,
+                asyncio.TimeoutError,
+                aiohttp.ClientError,
+                OSError,
+            ) as exc:
+                logger.warning(
+                    "websocket_retrying", error_type=type(exc).__name__,
+                    retry_delay=retry_delay,
+                )
+            if not self._stopping.is_set():
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), retry_delay)
+                except asyncio.TimeoutError:
+                    pass
+                retry_delay = min(retry_delay * 2, 30)
 
     async def stop(self) -> None:
         """Cancel running tasks, stop heartbeat and metrics loop, and disconnect."""
+        self._stopping.set()
         # Runtime effects in executor threads are not cancellable. Wait for
         # lifecycle completion/journal fsync instead of announcing interruption.
-        if self._operations.running:
-            await asyncio.gather(
-                *self._operations.running.values(), return_exceptions=True
-            )
+        await self._operations.drain()
 
         if self._desktop_lease_task is not None:
             self._desktop_lease_task.cancel()
@@ -2894,19 +2961,26 @@ class WebSocketInterface(Interface):
             # Durable closing ownership remains protective for the next retry.
             # A timeout is not evidence of guest-side process termination.
             logger.warning("stream_shutdown_unconfirmed", exc_info=True)
-        # Cancel heartbeat
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-        if self._observation_task and not self._observation_task.done():
-            self._observation_task.cancel()
-        # Cancel metrics loop
-        if self._metrics_task and not self._metrics_task.done():
-            self._metrics_task.cancel()
+        maintenance = [
+            task for task in (
+                self._heartbeat_task, self._delivery_task, self._observation_task,
+                self._metrics_task,
+            ) if task is not None
+        ]
+        for task in maintenance:
+            task.cancel()
+        await asyncio.gather(*maintenance, return_exceptions=True)
 
-        for task_id, task in self._running_tasks.items():
+        running_tasks = list(self._running_tasks.items())
+        for task_id, task in running_tasks:
             task.cancel()
             logger.info("task_cancelled", task_id=task_id)
         self._running_tasks.clear()
+        await asyncio.gather(
+            *(task for _, task in running_tasks), return_exceptions=True
+        )
 
-        if self._sio.connected:
-            await self._sio.disconnect()
+        # shutdown also aborts an offline reconnect task; disconnect releases
+        # the HTTP session after an initial handshake that never connected.
+        await self._sio.shutdown()
+        await self._sio.disconnect()

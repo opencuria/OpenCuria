@@ -45,6 +45,7 @@ const actionsDisabled = computed(() =>
 const transitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(props.group.workspaceId),
 )
+const runnerOffline = computed(() => props.group.workspace?.runner_online === false)
 const operating = computed(() =>
   Boolean(
     transitionLabel.value || (props.group.workspace && isOperatingWorkspace(props.group.workspace)),
@@ -56,16 +57,17 @@ const busy = computed(
     props.group.conversations.some((conversation) => conversation.status === 'busy'),
 )
 const stopped = computed(() => props.group.workspace?.status === WorkspaceStatus.STOPPED)
-const statusLabel = computed(
-  () =>
-    transitionLabel.value ??
-    (operating.value
-      ? 'In progress'
-      : stopped.value
-        ? 'Stopped'
-        : props.group.online
-          ? 'Online'
-          : 'Offline'),
+const statusLabel = computed(() =>
+  runnerOffline.value
+    ? 'Runner offline'
+    : (transitionLabel.value ??
+      (operating.value
+        ? 'In progress'
+        : stopped.value
+          ? 'Stopped'
+          : props.group.online
+            ? 'Online'
+            : 'Offline')),
 )
 
 // Also runs when history arrives after the route or a refresh changes its order.
@@ -122,7 +124,8 @@ watch(
         <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{
           props.group.name
         }}</span>
-        <span v-if="transitionLabel" class="text-xs text-muted-foreground">{{
+        <span v-if="runnerOffline" class="text-xs text-muted-foreground">Runner offline</span>
+        <span v-else-if="transitionLabel" class="text-xs text-muted-foreground">{{
           transitionLabel
         }}</span>
         <span
@@ -132,7 +135,7 @@ watch(
           >Stopped</span
         >
         <Loader2
-          v-if="busy || operating"
+          v-if="!runnerOffline && (busy || operating)"
           data-testid="workspace-busy"
           class="size-3 shrink-0 animate-spin text-primary"
         />

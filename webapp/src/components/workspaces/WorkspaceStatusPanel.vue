@@ -24,10 +24,14 @@ import {
   usageLevel,
 } from '@/lib/workspaceDisk'
 
-const props = defineProps<{
-  workspace: Workspace
-  runnerOffline: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    workspace: Workspace
+    runnerOffline: boolean
+    canEdit?: boolean
+  }>(),
+  { canEdit: true },
+)
 
 const emit = defineEmits<{
   'increase-disk': []
@@ -151,6 +155,7 @@ onMounted(start)
           size="sm"
           class="mt-2 h-7 text-xs"
           data-testid="workspace-status-increase-disk"
+          :disabled="!canEdit"
           @click="emit('increase-disk')"
         >
           Increase disk

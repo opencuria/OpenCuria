@@ -69,11 +69,51 @@ Cloud images are cached in `RUNNER_QEMU_IMAGE_CACHE_DIR`. Definition builds are
 published to `/var/lib/opencuria/base-images`, the path used by the control
 plane. Both publication directories (builds and snapshots) are validated and
 included in storage inventory; no cache-directory override is needed.
+Runner startup initializes the configured disk, snapshot and cloud-image cache
+directories before the first inventory; missing directory permissions fail
+startup with the affected path and setup command.
 
-Image builds provision separate VMs concurrently. Subnet allocation, publication
-and removal still serialize against storage scans, while guest provisioning and
+Image builds provision separate VMs concurrently. Temporary build guests default
+to 1 vCPU and 2048 MiB, with at most two active builds per runner. Configure
+`RUNNER_QEMU_BUILD_VCPUS`, `RUNNER_QEMU_BUILD_MEMORY_MB` and
+`RUNNER_QEMU_BUILD_CONCURRENCY` to match the host's available resources and build
+workloads; these positive values are independent of workspace resource defaults.
+The effective build concurrency also respects the host's logical CPU count.
+Builds wait for a slot or temporary host RAM pressure to clear, reporting the
+queue reason without allocating a guest. `RUNNER_QEMU_BUILD_QUEUE_TIMEOUT`
+(default 1800 seconds) bounds admission waiting. Requests exceeding the host's
+physical CPU/RAM budget fail immediately with a configuration diagnostic.
+Every guest activation (create, clone, build, start and resource-change restart)
+checks available host RAM and the configured RAM of every active libvirt guest.
+Workspace activations that would consume the host margin (at least 1 GiB or 10%
+of host RAM) fail before starting a guest and can be retried after memory becomes
+available; image builds wait automatically within their queue deadline.
+Creation and cloning check admission before allocating disks or networks; paused
+guests retain their existing reservation when resumed.
+Create, clone and resource changes reject nonpositive CPU/RAM/disk settings and
+vCPU requests exceeding host capacity; explicit zero never selects a default.
+Queued builds do not allocate guests. Guest disk overlays remain sparse and
+published images are flattened, verified and durably committed before readiness.
+Workspace readiness and graceful shutdown hold only the affected guest's lifecycle
+lock, allowing other guests and inventory scans to continue.
+Direct status, discovered workspaces and inventory share the same libvirt state
+mapping. Paused, suspended, shutting-down and crashed guests never appear usable
+merely because their domains remain active. Nonstopped observations also revoke
+older stopped credential-scrub proof.
+
+Subnet allocation, publication and removal still serialize against storage scans, while guest provisioning and
 SSH readiness do not hold the shared storage lock. libvirt assigns unique bridge
 names, including when older interrupted build VMs still exist.
+Temporary build guests are named from the durable operation UUID. Recovery can
+remove the exact interrupted guest without guessing ownership from image paths.
+Interrupted workspace allocation before domain definition can also settle
+automatically once complete inventory proves its partial files have no consumers.
+Files remain preserved with unknown credential state. A later ordinary remove
+reconstructs a missing runtime identity only from an exact durable create/clone
+admission and a fresh ownership/quiescence check.
+Completed removal revokes that allocation lineage; a later same-ID create
+establishes a new one. Arbitrary external replacement of owned guest resources
+is outside this ownership model.
 
 New guests use their network gateway's [libvirt DNS resolver][libvirt-dns], which
 forwards via the host's resolver configuration. This also works with host-local
@@ -89,9 +129,22 @@ so it does not contact public STUN servers. Restart the desktop after updating.
 [kasm-public-ip]: https://kasmweb.com/kasmvnc/docs/master/man/Xvnc.html
 
 Built and captured images use `.manifest.json` publication markers. Inventory
-only classifies images with verified manifests as ready; cloning requires a
-manifest. Unpublished disks remain visible with their physical dependencies
-and cannot be deleted as image artifacts.
+only classifies images with verified manifests as ready; cloning verifies the
+manifest, byte count and SHA-256 before allocating a guest. Unpublished disks
+remain visible with their physical dependencies
+and cannot be deleted as image artifacts. Publication and inventory include the
+measured virtual disk size and minimum GiB, so provisioning can reserve the same
+capacity the guest receives. Requests below a source image's actual minimum fail
+before creating its disk or network.
+Invalid publication markers leave readable images unknown and unusable, while
+their inspected backing dependencies still protect referenced storage. They do
+not block unrelated workspace cleanup. If the disk header or backing graph
+cannot be read, mutation remains blocked until storage can be inspected again.
+
+Initial workspace creation, cloning and image builds wait for cloud-init to
+finish before reporting readiness or running the image script. The read-only
+status probe tolerates the first-boot SSH restart; the image script is never
+replayed. `RUNNER_QEMU_CLOUD_INIT_TIMEOUT` bounds this wait (default 300 seconds).
 
 Each newly provisioned VM gets a fresh
 [cloud-init instance ID](https://docs.cloud-init.io/en/26.1/reference/datasources/nocloud.html#example-creating-a-disk)

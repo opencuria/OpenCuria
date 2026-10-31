@@ -12,6 +12,26 @@ echo "=== Installing KasmVNC desktop session support (XFCE + WhiteSur) ==="
 export DEBIAN_FRONTEND=noninteractive
 export HOME=/root
 
+# Dependency repair can remove an unconfigured .deb instead of installing it.
+# Prove the required package and commands exist before publishing this image.
+require_installed_package() {
+    local package="$1"
+    if [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" != "install ok installed" ]; then
+        echo "Required image package is not fully installed: $package" >&2
+        return 1
+    fi
+}
+
+require_image_commands() {
+    local executable
+    for executable in "$@"; do
+        if ! command -v "$executable" >/dev/null 2>&1; then
+            echo "Missing required image command: $executable" >&2
+            return 1
+        fi
+    done
+}
+
 apt-get update
 apt-get install -y --no-install-recommends \
     xfonts-base \
@@ -63,6 +83,17 @@ apt-get install -y --no-install-recommends \
     python3-xlib python3-pil python3-structlog python3-gi \
     gir1.2-atspi-2.0 at-spi2-core xclip wmctrl \
     libreoffice-calc python3-uno sudo iproute2
+require_image_commands xclip wmctrl xdotool libreoffice
+/usr/bin/python3 - <<'NATIVE_RUNTIME_CHECK'
+import Xlib
+import PIL
+import structlog
+import gi
+import uno
+
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+NATIVE_RUNTIME_CHECK
 
 # Exposé: Ubuntu 22.04 ships skippy-xd; 24.04 does not.
 if ! apt-get install -y skippy-xd; then
@@ -83,12 +114,17 @@ wget -q -O /tmp/kasmvnc.deb \
     "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
 apt-get install -y /tmp/kasmvnc.deb || true
 apt-get install -f -y
+require_installed_package kasmvncserver
+require_image_commands Xvnc vncserver
 rm -f /tmp/kasmvnc.deb
 
 # Real Chrome .deb — Ubuntu Chromium packages route through snapd.
 wget -q -O /tmp/google-chrome.deb \
     https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
+require_installed_package google-chrome-stable
+require_image_commands google-chrome-stable
+google-chrome-stable --version
 rm -f /tmp/google-chrome.deb
 
 mkdir -p /root/.vnc
@@ -630,6 +666,7 @@ rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
 DESKSTOP
 
 chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
+apt-get clean
 rm -rf /var/lib/apt/lists/*
 
 echo "=== XFCE + WhiteSur desktop session installed ==="

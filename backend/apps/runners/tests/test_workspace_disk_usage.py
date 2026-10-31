@@ -29,7 +29,7 @@ def _guest(used: int, free: int, total: int) -> dict[str, int]:
 
 def _metrics(vm_metrics: dict) -> dict:
     return {
-        "timestamp": "2026-10-25T12:00:00Z",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "cpu_usage_percent": 1.0,
         "ram_used_bytes": 1,
         "ram_total_bytes": 2,

@@ -120,6 +120,17 @@ describe('WorkspacesView workspace storage', () => {
   afterEach(() => {
     mounted.splice(0).forEach((wrapper) => wrapper.unmount())
     vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('F080 prioritizes runner offline on cards while an operation is interrupted', async () => {
+    workspaceStore.workspaces = [makeWorkspace('offline', { runner_online: false })]
+    vi.spyOn(workspaceStore, 'getWorkspaceTransitionLabel').mockReturnValue('Capturing' as never)
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.getComponent(WorkspaceCard).get('[title="Runner offline"]').text()).toBe(
+      'Runner offline',
+    )
   })
 
   it('shows free space inside each workspace and hides unmeasured storage', async () => {
@@ -177,8 +188,8 @@ describe('WorkspacesView workspace storage', () => {
     workspaceStore.workspaces = [makeWorkspace('blocked', { intervention_required: true })]
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.getComponent(WorkspaceCard).get('[title="Needs review"]').text()).toBe(
-      'Needs review',
+    expect(wrapper.getComponent(WorkspaceCard).get('[title="Checking state"]').text()).toBe(
+      'Checking state',
     )
   })
 

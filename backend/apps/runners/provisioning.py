@@ -23,13 +23,11 @@ class ProvisioningCommand:
 
 def uses_artifact_clone(image) -> bool:
     """Published QEMU captures are cloned by artifact id, not by image path."""
-    return (
-        image.origin_type == "workspace_capture"
-    )
+    return image.origin_type == "workspace_capture"
 
 
 def disk_size_for(requested_gb: int | None, image) -> int | None:
-    """A workspace disk must be at least as large as the captured version."""
+    """A workspace disk must be at least as large as its image's virtual disk."""
     minimum = getattr(image, "min_disk_size_gb", None)
     if requested_gb is None or minimum is None:
         return requested_gb if requested_gb is not None else minimum

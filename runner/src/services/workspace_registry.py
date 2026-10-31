@@ -53,6 +53,12 @@ class WorkspaceRegistry:
 
     # -- cache ownership -------------------------------------------------
 
+    def register_new_workspace(self, info: WorkspaceInfo) -> None:
+        """Reserve a new workspace without erasing an existing incarnation."""
+        if info.workspace_id in self._cache:
+            raise ValueError(f"Workspace {info.workspace_id} already exists")
+        self._cache[info.workspace_id] = info
+
     @asynccontextmanager
     async def lifecycle(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:
         """Serialize one resource, not heartbeats or unrelated workspaces.

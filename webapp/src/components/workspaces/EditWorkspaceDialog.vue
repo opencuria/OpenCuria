@@ -188,6 +188,16 @@ async function handleOpen(): Promise<void> {
   ])
 }
 const resourceSelectionValid = computed(() => {
+  if (
+    ![
+      qemuVcpus.value,
+      qemuMemoryMb.value,
+      qemuDiskSizeGb.value,
+      desktopWidth.value,
+      desktopHeight.value,
+    ].every(Number.isInteger)
+  )
+    return false
   const widthValid =
     desktopWidth.value >= 800 && desktopWidth.value <= 3840 && desktopWidth.value % 2 === 0
   const heightValid =
@@ -222,6 +232,7 @@ function buildPayload(): WorkspaceUpdateIn {
 }
 async function handleSubmit(): Promise<void> {
   if (
+    submitting.value ||
     !name.value.trim() ||
     !pluginSelectionValid.value ||
     !resourceSelectionValid.value ||

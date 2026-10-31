@@ -48,7 +48,9 @@ def test_unknown_result_notifies_only_after_commit(
     _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
-    diagnostic = "Unknown outcome; intervention required"
+    diagnostic = (
+        "Operation interrupted; automatic recovery will verify the runner state."
+    )
     with transaction.atomic():
         assert not result(
             service,
@@ -254,9 +256,7 @@ async def test_async_operation_projection_without_unsafe_orm(
 
     def allocate():
         workspace.save()
-        CaptureService.allocate(
-            workspace.id, "capture", has_busy_agent=has_busy_agent
-        )
+        CaptureService.allocate(workspace.id, "capture", has_busy_agent=has_busy_agent)
 
     await sync_to_async(allocate)()
     service._forward_workspace_operation(str(workspace.id), None)

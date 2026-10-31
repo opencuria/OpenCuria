@@ -8,13 +8,12 @@ import {
   isDefinitionHidden,
   isDefinitionLocked,
   isDefinitionSelectableForWorkspace,
+  buildNeedsPolling,
   visibleImageDefinitions,
 } from './imageDefinitionLifecycle'
 import type { ImageDefinition } from '@/types'
 
-function makeDefinition(
-  overrides: Partial<ImageDefinition> = {},
-): ImageDefinition {
+function makeDefinition(overrides: Partial<ImageDefinition> = {}): ImageDefinition {
   return {
     id: 'def-1',
     organization_id: 'org-1',
@@ -109,9 +108,44 @@ describe('getRunnerBuildActions', () => {
 describe('getRunnerBuildStatusLabel', () => {
   it('labels pending offline builds as waiting for the runner', () => {
     expect(getRunnerBuildStatusLabel('pending', false)).toBe('Waiting for runner')
-    expect(getRunnerBuildStatusLabel('pending', true)).toBe('Building')
+    expect(getRunnerBuildStatusLabel('pending', true)).toBe('Queued')
     expect(getRunnerBuildStatusLabel(null, true)).toBe('Not built')
   })
+})
+
+const buildStates = [
+  [undefined, 'Not built', ['build'], false],
+  ['pending', 'Queued', ['view_log'], true],
+  ['building', 'Building', ['view_log'], true],
+  ['active', 'Active', ['rebuild', 'deactivate', 'remove'], false],
+  ['deactivated', 'Inactive', ['activate', 'rebuild', 'remove'], false],
+  ['failed', 'Failed', ['retry', 'view_log', 'remove'], false],
+  ['pending_deletion', 'Removing', [], true],
+  ['deleting', 'Removing', [], true],
+  ['delete_failed', 'Remove failed', ['retry_remove'], false],
+  ['deleted', 'Not built', ['build'], false],
+] as const
+let buildCaseIndex = 40
+const buildCases = buildStates.flatMap(([status, label, actions, polling]) =>
+  [true, false].map((online) => ({
+    id: `F${String(++buildCaseIndex).padStart(3, '0')}`,
+    status,
+    online,
+    label:
+      !online && status === 'pending'
+        ? 'Waiting for runner'
+        : !online && status === 'building'
+          ? 'Runner offline'
+          : label,
+    actions,
+    polling,
+  })),
+)
+it.each(buildCases)('$id image $status online=$online', (row) => {
+  expect(getRunnerBuildStatusLabel(row.status, row.online)).toBe(row.label)
+  expect(getRunnerBuildActions(row.status).map((action) => action.id)).toEqual(row.actions)
+  expect(getRunnerBuildActions(row.status, { definitionLocked: true })).toEqual([])
+  expect(buildNeedsPolling(row.status)).toBe(row.polling)
 })
 
 describe('definition visibility and actions', () => {
@@ -156,9 +190,7 @@ describe('definition visibility and actions', () => {
       ),
     ).toBe(false)
     expect(
-      isDefinitionSelectableForWorkspace(
-        makeDefinition({ status: 'deleted', is_active: false }),
-      ),
+      isDefinitionSelectableForWorkspace(makeDefinition({ status: 'deleted', is_active: false })),
     ).toBe(false)
   })
 })

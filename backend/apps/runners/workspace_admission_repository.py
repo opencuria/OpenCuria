@@ -36,7 +36,11 @@ class WorkspaceAdmissionRepository:
             raise ConflictError(f"Workspace is currently {workspace.active_operation}")
         if workspace.current_task_id and not workspace.active_operation:
             raise ConflictError(
-                "Workspace lifecycle outcome unresolved; intervention required"
+                "Workspace recovery is waiting for the runner to verify its state"
+            )
+        if workspace.status == "failed":
+            raise ConflictError(
+                "Workspace runtime is unavailable; reset or delete the workspace"
             )
 
     @staticmethod

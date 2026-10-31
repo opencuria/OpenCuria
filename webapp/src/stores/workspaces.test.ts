@@ -23,6 +23,7 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     getWorkspace: vi.fn(),
     listWorkspaces: vi.fn(),
     recreateWorkspace: vi.fn(),
+    deleteWorkspace: vi.fn(),
   }
 })
 
@@ -60,6 +61,44 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
 }
 
 describe('workspace transition state', () => {
+  it('F076 labels accepted offline removal as queued until runner reconnection', async () => {
+    setActivePinia(createPinia())
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ runner_online: false })]
+    vi.mocked(workspacesApi.deleteWorkspace).mockResolvedValue({ id: 'remove-task' } as never)
+    vi.mocked(workspacesApi.listWorkspaces).mockResolvedValue([
+      makeWorkspace({
+        runner_online: false,
+        status: WorkspaceStatus.PENDING_DELETION,
+        active_operation: WorkspaceOperation.REMOVING,
+      }),
+    ])
+    await store.removeWorkspace('workspace-1')
+    expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Removal queued')
+    expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+    expect(toast.info).toHaveBeenCalledWith(
+      'Removal queued',
+      expect.objectContaining({
+        description: 'Removal continues when the runner reconnects.',
+      }),
+    )
+  })
+  it('F082 fences persisted lifecycle transitions even without an operation event', async () => {
+    setActivePinia(createPinia())
+    const store = useWorkspaceStore()
+    for (const [status, label] of [
+      [WorkspaceStatus.CREATING, 'Creating…'],
+      [WorkspaceStatus.PENDING_DELETION, 'Removal queued'],
+      [WorkspaceStatus.DELETING, 'Removing…'],
+      [WorkspaceStatus.DELETED, null],
+    ] as const) {
+      store.workspaces = [makeWorkspace({ status, active_operation: null })]
+      expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+      expect(store.canUseWorkspace('workspace-1')).toBe(false)
+      expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe(label)
+      expect(await store.updateWorkspace('workspace-1', { name: 'unsafe' })).toBe(false)
+    }
+  })
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
@@ -113,7 +152,7 @@ describe('workspace transition state', () => {
     expect(store.isWorkspaceTransitioning('workspace-stop')).toBe(false)
   })
 
-  it('treats legacy removed workspaces as completed removals', () => {
+  it('treats deleted workspaces as completed removals', () => {
     const store = useWorkspaceStore()
     store.workspaces = [makeWorkspace({ id: 'workspace-remove' })]
     store.pendingWorkspaceOperations['workspace-remove'] = {
@@ -121,10 +160,10 @@ describe('workspace transition state', () => {
       expectedStatus: WorkspaceStatus.DELETED,
     }
 
-    store.updateWorkspaceStatus('workspace-remove', WorkspaceStatus.REMOVED)
+    store.updateWorkspaceStatus('workspace-remove', WorkspaceStatus.DELETED)
 
     expect(store.pendingWorkspaceOperations['workspace-remove']).toBeUndefined()
-    expect(store.workspacesByStatus.removed.map((workspace) => workspace.id)).toEqual([
+    expect(store.workspacesByStatus.deleted.map((workspace) => workspace.id)).toEqual([
       'workspace-remove',
     ])
     expect(store.isWorkspaceTransitioning('workspace-remove')).toBe(true)
@@ -418,7 +457,7 @@ it('releases Capturing on unknown completion but preserves intervention until ex
   )
   await store.captureImage('workspace-1', async () => {})
   store.updateWorkspaceOperation('workspace-1', null, true, 'Capture outcome unknown')
-  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Needs attention')
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Checking state')
   expect(store.pendingCaptures['workspace-1']).toBeUndefined()
   expect(store.canUseWorkspace('workspace-1')).toBe(false)
   expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)

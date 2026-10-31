@@ -20,6 +20,7 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
         self.runtime = object.__new__(QemuRuntime)
         self.runtime._disk_dir = Path(self.directory.name)
         self.runtime._ssh_states = {}
+        self.runtime._assert_memory_available = MagicMock()
         self.runtime._get_ssh_public_key = MagicMock(
             return_value="ssh-ed25519 test-runner-key"
         )
@@ -156,7 +157,7 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
                 WorkspaceConfig(workspace_id=self.workspace_id, image="base.qcow2")
             )
 
-        self.runtime._libvirt_conn.assert_not_called()
+        self.runtime._libvirt_conn.return_value.defineXML.assert_not_called()
         self.runtime._wait_for_ssh.assert_not_awaited()
 
     @unittest.skipUnless(
@@ -361,6 +362,7 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
         runtime._create_overlay_disk = AsyncMock(return_value=Path("/tmp/build.qcow2"))
         runtime._create_cloud_init_iso = AsyncMock(return_value=Path("/tmp/build.iso"))
         runtime._wait_for_ssh = AsyncMock()
+        runtime._wait_for_cloud_init = AsyncMock()
         runtime.put_archive = AsyncMock()
         runtime._stream_ssh_process = AsyncMock()
         runtime.stop_workspace = AsyncMock()
@@ -373,6 +375,8 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
 
             async def publish(disk, target, manifest):
                 target.write_bytes(b"qcow2")
+                return {"size_bytes": 5, "min_disk_size_gb": 20,
+                        "virtual_size_bytes": 20 * 1024**3}
 
             runtime._publish_image = AsyncMock(side_effect=publish)
 
@@ -397,7 +401,7 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
                     base_distro="ubuntu:24.04",
                     init_script="#!/bin/bash\napt-get update\n",
                     image_path=str(target_path),
-                    operation_id="op",
+                    operation_id="12345678-1234-5678-1234-567812345678",
                     image_instance_id="image",
                 )
 

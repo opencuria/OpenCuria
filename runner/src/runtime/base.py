@@ -103,6 +103,8 @@ class ImageArtifactInfo:
     name: str
     created_at: datetime
     size_bytes: int | None = None
+    min_disk_size_gb: int | None = None
+    virtual_size_bytes: int | None = None
 
 
 class RuntimeBackend(abc.ABC):

@@ -18,6 +18,7 @@
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
 import { WorkspaceStatus } from '@/types'
+import { getWorkspaceActionAvailability, isWorkspaceLifecycleBusy } from '@/lib/workspaceLifecycle'
 import type { HarnessSession } from '@/types/harness'
 import { formatSubagentType } from '@/lib/harnessSubtaskActivity'
 import { versionLabel } from '@/lib/imageVersions'
@@ -141,7 +142,10 @@ const workspaceNameInput = ref('')
 
 const statusDotClass = computed(() => {
   if (props.runnerOffline) return 'bg-muted-foreground/40'
-  if (props.transitionLabel) return 'bg-amber-500'
+  if (props.workspace.intervention_required || props.transitionLabel) return 'bg-amber-500'
+  if ([WorkspaceStatus.FAILED, WorkspaceStatus.DELETE_FAILED].includes(props.workspace.status))
+    return 'bg-destructive'
+  if (props.workspace.status !== WorkspaceStatus.RUNNING) return 'bg-muted-foreground/40'
   if (props.hasActiveSession) return 'bg-amber-500'
   return 'bg-green-500'
 })
@@ -155,21 +159,31 @@ const diskAlert = computed(() => {
 })
 
 function handleIncreaseDisk(): void {
+  if (!actions.value.edit) return
   statusOpen.value = false
   emit('increase-disk')
 }
 
 const baseVersionLabel = computed(() => versionLabel(props.workspace.base_image))
 const statusText = computed(() => {
-  if (props.transitionLabel) return props.transitionLabel
   if (props.runnerOffline) return 'Runner offline'
+  if (props.workspace.intervention_required) return 'Checking state'
+  if (props.transitionLabel) return props.transitionLabel
   if (props.autoStopLabel) return props.autoStopLabel
   return props.workspace.status
 })
 
 // Start/stop (same logic as WorkspaceActions): stop only for a running
 // workspace with an online runner, start for a stopped workspace.
-const isTransitioning = computed(() => props.transitionLabel !== null)
+const isTransitioning = computed(
+  () => props.transitionLabel !== null || isWorkspaceLifecycleBusy(props.workspace),
+)
+const actions = computed(() =>
+  getWorkspaceActionAvailability(
+    { ...props.workspace, runner_online: !props.runnerOffline },
+    isTransitioning.value,
+  ),
+)
 const showStopButton = computed(
   () => !props.runnerOffline && props.workspace.status === WorkspaceStatus.RUNNING,
 )
@@ -178,9 +192,7 @@ const showStartButton = computed(
     !showStopButton.value &&
     (props.runnerOffline || props.workspace.status === WorkspaceStatus.STOPPED),
 )
-const powerDisabled = computed(
-  () => isTransitioning.value || (showStartButton.value && props.runnerOffline),
-)
+const powerDisabled = computed(() => !actions.value.stop && !actions.value.start)
 const powerTitle = computed(() => {
   if (isTransitioning.value) return props.transitionLabel ?? 'Workspace action in progress'
   if (showStopButton.value) return 'Stop workspace'
@@ -189,7 +201,7 @@ const powerTitle = computed(() => {
 })
 
 function startWorkspaceRename(): void {
-  if (props.transitionLabel) return
+  if (!actions.value.edit) return
   workspaceNameInput.value = props.workspace.name
   editingWorkspace.value = true
 }
@@ -200,7 +212,10 @@ function cancelWorkspaceRename(): void {
 }
 
 function saveWorkspaceRename(): void {
-  if (props.transitionLabel) { cancelWorkspaceRename(); return }
+  if (!actions.value.edit) {
+    cancelWorkspaceRename()
+    return
+  }
   const trimmed = workspaceNameInput.value.trim()
   editingWorkspace.value = false
   workspaceNameInput.value = ''
@@ -292,11 +307,7 @@ watch(
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <ChevronRight
-              :size="14"
-              class="shrink-0 text-muted-foreground/50"
-              aria-hidden="true"
-            />
+            <ChevronRight :size="14" class="shrink-0 text-muted-foreground/50" aria-hidden="true" />
           </template>
         </template>
         <div
@@ -324,7 +335,7 @@ watch(
             maxlength="255"
             placeholder="Workspace name"
             data-testid="workspace-chat-header-name-input"
-            :disabled="isTransitioning"
+            :disabled="!actions.edit"
             @keydown.enter.prevent="saveWorkspaceRename"
             @keydown.esc.prevent="cancelWorkspaceRename"
           />
@@ -334,7 +345,7 @@ watch(
             class="h-6 w-6 shrink-0"
             title="Save workspace name"
             data-testid="workspace-chat-header-name-save"
-            :disabled="isTransitioning"
+            :disabled="!actions.edit"
             @click="saveWorkspaceRename"
           >
             <Check :size="14" />
@@ -359,7 +370,11 @@ watch(
                 title="Workspace status"
                 data-testid="workspace-chat-header-status-trigger"
               >
-                <span class="size-1.5 shrink-0 rounded-full" :class="statusDotClass" aria-hidden="true" />
+                <span
+                  class="size-1.5 shrink-0 rounded-full"
+                  :class="statusDotClass"
+                  aria-hidden="true"
+                />
                 <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
                 <span class="truncate">{{ statusText }}</span>
                 <template v-if="diskAlert">
@@ -379,6 +394,7 @@ watch(
               <WorkspaceStatusPanel
                 :workspace="workspace"
                 :runner-offline="runnerOffline"
+                :can-edit="actions.edit"
                 @increase-disk="handleIncreaseDisk"
               />
             </PopoverContent>
@@ -390,7 +406,7 @@ watch(
             :class="transitionLabel ? 'cursor-default' : 'cursor-pointer'"
             title="Rename workspace"
             data-testid="workspace-chat-header-name"
-            :disabled="isTransitioning"
+            :disabled="!actions.edit"
             @click="startWorkspaceRename"
           >
             {{ workspace.name }}
@@ -404,7 +420,7 @@ watch(
             · {{ baseVersionLabel }}
           </span>
           <button
-            v-if="!transitionLabel"
+            v-if="actions.edit"
             type="button"
             class="hidden shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 sm:block [div:hover>&]:opacity-100"
             title="Rename workspace"
@@ -428,7 +444,7 @@ watch(
         size="icon-sm"
         title="New chat"
         data-testid="workspace-chat-header-new-chat"
-            :disabled="isTransitioning"
+        :disabled="isTransitioning"
         @click="emit('new-chat')"
       >
         <Plus :size="16" />
@@ -438,7 +454,7 @@ watch(
         size="icon-sm"
         title="Background processes"
         data-testid="workspace-chat-header-toggle-processes"
-            :disabled="isTransitioning"
+        :disabled="isTransitioning"
         @click="emit('toggle-processes')"
       >
         <span class="relative inline-flex">
@@ -475,7 +491,9 @@ watch(
             class="text-xs"
             :disabled="powerDisabled"
             :title="powerTitle"
-            :data-testid="showStopButton ? 'workspace-chat-header-stop' : 'workspace-chat-header-start'"
+            :data-testid="
+              showStopButton ? 'workspace-chat-header-stop' : 'workspace-chat-header-start'
+            "
             @select="handlePowerClick"
           >
             <Loader2 v-if="isTransitioning" :size="14" class="animate-spin" />
@@ -487,7 +505,7 @@ watch(
           <DropdownMenuItem
             class="text-xs"
             data-testid="workspace-chat-header-capture-image"
-            :disabled="isTransitioning || !canPrompt"
+            :disabled="!actions.capture"
             @select="emit('capture-image')"
           >
             <Camera :size="14" />
@@ -497,7 +515,7 @@ watch(
             v-if="workspace.base_image || workspace.pending_base_image"
             class="text-xs"
             data-testid="workspace-chat-header-recreate"
-            :disabled="isTransitioning || runnerOffline"
+            :disabled="!actions.reset"
             @select="emit('recreate-workspace')"
           >
             <RotateCcw :size="14" />
@@ -507,16 +525,24 @@ watch(
             class="text-xs"
             variant="destructive"
             data-testid="workspace-chat-header-delete-workspace"
-            :disabled="isTransitioning"
+            :disabled="!actions.remove"
             @select="emit('delete-workspace')"
           >
             <Trash2 :size="14" />
-            Delete workspace
+            {{
+              workspace.status === WorkspaceStatus.DELETE_FAILED
+                ? 'Retry removal'
+                : 'Delete workspace'
+            }}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <SidePanelToggle :open="sidePanelOpen" :disabled="isTransitioning" @toggle="emit('toggle-side-panel')" />
+      <SidePanelToggle
+        :open="sidePanelOpen"
+        :disabled="isTransitioning"
+        @toggle="emit('toggle-side-panel')"
+      />
     </div>
   </header>
 </template>

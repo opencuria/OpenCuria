@@ -73,7 +73,7 @@ const filteredWorkspaces = computed(() => {
 
   if (!showDeleted.value) {
     workspaces = workspaces.filter(
-      (w) => w.status !== WorkspaceStatus.DELETED && w.status !== WorkspaceStatus.REMOVED,
+      (w) => w.status !== WorkspaceStatus.DELETED,
     )
   }
 

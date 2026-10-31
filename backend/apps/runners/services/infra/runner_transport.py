@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from ...exceptions import RunnerOfflineError
 from ...operations import LIFECYCLE_TYPES, OperationRepository
 from ..operation_results import apply_result
+
+if TYPE_CHECKING:
+    from ...models import Runner
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +29,7 @@ class RunnerTransportMixin:
 
     async def _emit_to_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         data: dict,
     ) -> None:
@@ -49,8 +53,13 @@ class RunnerTransportMixin:
             # Lost emit is recoverable from the DB outbox, not an operation failure.
             if not runner.sid or self.sio is None:
                 return
+            sid = await sync_to_async(OperationRepository.claim_direct_delivery)(
+                command.task_id
+            )
+            if not sid:
+                return
             try:
-                await self.sio.emit(event, data, to=runner.sid)
+                await self.sio.emit(event, data, to=sid)
             except Exception:
                 logger.warning("Lifecycle delivery deferred: %s", data["task_id"])
             return
@@ -79,7 +88,7 @@ class RunnerTransportMixin:
 
     async def _call_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         data: dict,
         *,
@@ -92,9 +101,7 @@ class RunnerTransportMixin:
             raise RunnerOfflineError(str(runner.id))
 
         try:
-            response = await self.sio.call(
-                event, data, to=runner.sid, timeout=timeout
-            )
+            response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
         except SocketIOTimeoutError as exc:
             raise RuntimeError(f"Runner call timed out for event '{event}'") from exc
         if response is None:
@@ -162,7 +169,7 @@ class RunnerTransportMixin:
 
     async def emit_harness_event(
         self,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         payload: dict,
     ) -> None:

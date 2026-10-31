@@ -140,7 +140,9 @@ async def test_expiry_uses_creation_time_and_strict_120_second_limit(
 ) -> None:
     """A chunk at 120 seconds survives; a later chunk expires the same upload."""
     service, interface, prefix, payload = transfer
-    now = [time.monotonic()]
+    # Use an exactly representable origin: adding 120 to an arbitrary float
+    # can round the subtraction above the strict expiry boundary.
+    now = [1000.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
     handlers = interface._sio.handlers["/"]
     await handlers[f"{prefix}_start"]({**payload, "total_chunks": 2})

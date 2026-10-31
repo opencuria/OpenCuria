@@ -87,6 +87,23 @@ class DispositionRepository:
         return _snapshot(row) if row is not None else None
 
     @staticmethod
+    def for_runner(runner_id: str, operation_id: str) -> DispositionState | None:
+        """Load an authenticated runner's operation without user authorization."""
+        try:
+            operation_uuid = uuid.UUID(str(operation_id))
+            runner_uuid = uuid.UUID(str(runner_id))
+            row = (
+                LifecycleCommand.objects.select_related(
+                    "task__runner", "task__workspace"
+                )
+                .filter(task_id=operation_uuid, task__runner_id=runner_uuid)
+                .first()
+            )
+        except (ValueError, TypeError):
+            return None
+        return _snapshot(row) if row is not None else None
+
+    @staticmethod
     @contextmanager
     def locked(state: DispositionState) -> Iterator[DispositionRepository]:
         """Keep the existing allocation/callback lock order through all writes.
@@ -150,8 +167,20 @@ class DispositionRepository:
         # still owns an unfinished image with no creating_task yet.
         ImageInstance.objects.filter(
             Q(creating_task=task) | Q(pk__in=capture_image_ids, status="capturing")
-        ).exclude(status__in=["ready", "deleted", "pending_deletion"]).update(
-            status="failed", updated_at=timezone.now()
+        ).exclude(
+            status__in=[
+                "ready",
+                "retired",
+                "deleted",
+                "pending_deletion",
+                "deleting",
+                "delete_failed",
+            ]
+        ).update(status="failed", updated_at=timezone.now())
+        ImageInstance.objects.filter(deleting_task=task, status="deleting").update(
+            status="delete_failed",
+            delete_last_error=task.error,
+            updated_at=timezone.now(),
         )
         for job in ImageBuildJob.objects.select_for_update().filter(build_task=task):
             ImageAssignmentRepository.reconcile(job)
@@ -160,16 +189,29 @@ class DispositionRepository:
         """Read whether the locked child belongs to a workspace reset."""
         return WorkspaceRecreateRequest.objects.filter(child=self._task).exists()
 
-    def release(self, workspace_status: str | None) -> None:
+    def release(
+        self,
+        workspace_status: str | None,
+        credentials_present: bool | None = None,
+        observed_status: str | None = None,
+    ) -> None:
         """Mark the command disposed and release its workspace reservation."""
         self._command.phase = "disposed"
-        self._command.save(update_fields=["phase"])
+        self._command.payload = {
+            **self._command.payload,
+            "_observed_workspace_status": observed_status or "unknown",
+        }
+        self._command.save(update_fields=["phase", "payload"])
         if self._workspace is not None:
             workspace = self._workspace
             workspace.current_task = None
             workspace.active_operation = None
             workspace.status = workspace_status
-            workspace.save(update_fields=["current_task", "active_operation", "status"])
+            fields = ["current_task", "active_operation", "status"]
+            if isinstance(credentials_present, bool):
+                workspace.credentials_present = credentials_present
+                fields.append("credentials_present")
+            workspace.save(update_fields=fields)
 
     def create_retry(self, retry_count: int) -> uuid.UUID:
         """Allocate a new task identity inside the disposition transaction."""

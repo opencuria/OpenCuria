@@ -65,7 +65,7 @@ async def test_started_guest_with_failed_injection_is_unknown(interface):
     assert result["observed_status"] == "running"
     assert result["outcome_known"] is False
     assert "credentials_present" not in result
-    assert "intervention" in result["error"]
+    assert "preserved" in result["error"]
     runtime.start_workspace.assert_awaited_once()
     assert service.registry._cache[ws].credentials_present is None
 
@@ -172,7 +172,7 @@ async def test_partial_stop_without_proof_emits_unknown_wrapped_result(
     assert result["observed_status"] == "running"
     assert result["outcome_known"] is False
     assert "credentials_present" not in result
-    assert "intervention" in result["error"]
+    assert "preserved" in result["error"]
     assert result["execution_finished"] is True
     service.credentials.remove_workspace_credentials.assert_awaited_once()
     assert service.registry._cache[ws].credentials_present is None

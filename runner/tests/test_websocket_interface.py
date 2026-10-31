@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
+import socketio
 from src.config import RunnerSettings
 from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
 from src.models import DesktopSession, WorkspaceInfo
@@ -22,6 +23,8 @@ class DummyService:
     def __init__(self) -> None:
         self.registry = SimpleNamespace(
             _cache={},
+            _epochs={},
+            _active=set(),
             sync_from_runtime=AsyncMock(),
             get_workspace_heartbeat_statuses=AsyncMock(return_value=[]),
         )
@@ -454,6 +457,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
         interface._sio.emit = AsyncMock(side_effect=emit)
         interface._operations.replay = AsyncMock()
+        interface._operations.heartbeat = AsyncMock()
         observation = asyncio.create_task(interface._observation_loop())
         heartbeat = None
         try:
@@ -463,7 +467,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 10)
             heartbeat = asyncio.create_task(interface._heartbeat_loop())
             await asyncio.wait_for(emitted.wait(), 10)
-            interface._operations.replay.assert_any_await(recover=False)
+            interface._operations.heartbeat.assert_awaited()
             assert not blocked.is_set()
             assert not observation.done()
         finally:
@@ -1015,8 +1019,8 @@ class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet[0], "operation:result")
         self.assertEqual(packet[1]["event"], "workspace:error")
         self.assertEqual(packet[1]["data"]["workspace_id"], str(workspace_id))
-        self.assertIn("execution finished", packet[1]["data"]["error"])
-        self.assertTrue(packet[1]["data"]["outcome_known"])
+        self.assertIn("preserved", packet[1]["data"]["error"])
+        self.assertFalse(packet[1]["data"]["outcome_known"])
 
 
 class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
@@ -1108,6 +1112,50 @@ class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, {"ok": True, "credentials_present": False})
+
+
+@pytest.mark.asyncio
+async def test_start_retries_initial_backend_outage_without_leaving_runner(tmp_path):
+    interface = WebSocketInterface(DummyService(), RunnerSettings(state_dir=str(tmp_path)))
+    interface._sio.connect = AsyncMock(
+        side_effect=[socketio.exceptions.ConnectionError("backend offline"), None]
+    )
+    interface._stopping.wait = AsyncMock(side_effect=asyncio.TimeoutError)
+
+    async def connected_wait():
+        interface._stopping.set()
+
+    interface._sio.wait = AsyncMock(side_effect=connected_wait)
+    try:
+        await interface.start()
+        assert interface._sio.connect.await_count == 2
+        interface._sio.wait.assert_awaited_once()
+    finally:
+        interface._operations.journal.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_wakes_startup_backoff_without_waiting_for_backend(tmp_path):
+    interface = WebSocketInterface(DummyService(), RunnerSettings(state_dir=str(tmp_path)))
+    interface._sio.connect = AsyncMock(
+        side_effect=socketio.exceptions.ConnectionError("backend offline")
+    )
+    attempted = asyncio.Event()
+    wait = interface._stopping.wait
+
+    async def waiting_to_retry():
+        attempted.set()
+        return await wait()
+
+    interface._stopping.wait = waiting_to_retry
+    task = asyncio.create_task(interface.start())
+    try:
+        await asyncio.wait_for(attempted.wait(), 2)
+        await interface.stop()
+        await asyncio.wait_for(task, 2)
+        interface._sio.connect.assert_awaited_once()
+    finally:
+        interface._operations.journal.close()
 
 
 if __name__ == "__main__":

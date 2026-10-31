@@ -180,7 +180,8 @@ def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
         assert workspace.active_operation is None
         assert workspace.intervention_required
         assert (
-            workspace.lifecycle_diagnostic == "Unknown outcome; intervention required"
+            workspace.lifecycle_diagnostic
+            == "Operation interrupted; automatic recovery will verify the runner state."
         )
         assert workspace.current_task_id == child.id
         assert workspace.credentials_present
@@ -199,6 +200,7 @@ def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
 def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status):
     """A reconciliation admitted first must settle before capture can own scrub."""
     from apps.runners.repositories import TaskRepository
+
     task = TaskRepository.create(
         task_id=uuid.uuid4(),
         runner=runner,
@@ -207,9 +209,7 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
     )
     Task.objects.filter(pk=task.id).update(status=task_status)
     with pytest.raises(ConflictError, match="credentials are synchronizing"):
-        CaptureService.allocate(
-            workspace.id, "capture", has_busy_agent=has_busy_agent
-        )
+        CaptureService.allocate(workspace.id, "capture", has_busy_agent=has_busy_agent)
     assert not CaptureRequest.objects.filter(workspace=workspace).exists()
     assert not ImageInstance.objects.filter(origin_workspace=workspace).exists()
     TaskRepository.complete(task)
@@ -221,6 +221,7 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
 
 def test_capture_admitted_first_blocks_delayed_credential_sync(runner, workspace):
     from apps.runners.repositories import TaskRepository
+
     _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
