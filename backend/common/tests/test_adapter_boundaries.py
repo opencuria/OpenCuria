@@ -52,6 +52,9 @@ validation stays with accounts and revocation wakeups use a leaf event module.
 Account transactions, admission fencing and commit hooks belong to the account
 repository, including OAuth completion; services choose policy and effects
 without importing Django DB.
+Provider-turn snapshot admission follows the same boundary: its service checks
+membership through OrganizationService and validates account scope; turn
+persistence never imports organization policy or application services.
 Provider-history reconstruction is independent of run orchestration; its caller
 supplies persistence ports to ``ProviderHistoryService``.
 Permission and question interactions own pending requests and live waiters in
@@ -777,7 +780,7 @@ def test_provider_accounts_never_import_their_orchestration_consumers() -> None:
 def test_provider_account_service_delegates_transactions_and_locks() -> None:
     """Account and OAuth policy use the repository-owned admission fence."""
     violations = []
-    for name in ("provider_accounts.py", "provider_oauth.py"):
+    for name in ("provider_accounts.py", "provider_oauth.py", "provider_turns.py"):
         path = APPS_ROOT / "harness" / name
         tree = ast.parse(path.read_text())
         violations.extend(
@@ -793,7 +796,25 @@ def test_provider_account_service_delegates_transactions_and_locks() -> None:
         )
     assert violations == [], (
         "Keep provider account transactions, admission locking and commit hooks "
-        "in ProviderAccountRepository:\n" + "\n".join(violations)
+        "in account/turn repositories:\n" + "\n".join(violations)
+    )
+
+
+def test_provider_turn_persistence_never_imports_other_contexts_or_services() -> None:
+    """Snapshot persistence leaves membership and admission policy to services."""
+    path = APPS_ROOT / "harness" / "provider_turn_repository.py"
+    violations = [
+        module
+        for module in _imported_modules(path, ast.parse(path.read_text()))
+        if module.startswith("apps.")
+        and not module.startswith("apps.harness.")
+        or {"services", "provider_turns", "provider_accounts"}
+        & set(module.split("."))
+    ]
+    assert violations == [], (
+        "Keep provider snapshot authorization in ProviderTurnService and use "
+        "OrganizationService for membership policy; persistence must not import "
+        "other contexts or services:\n" + "\n".join(sorted(violations))
     )
 
 

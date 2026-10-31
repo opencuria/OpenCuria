@@ -1,10 +1,14 @@
-"""Per-answer provider account snapshots and dependency tracking."""
+"""Per-answer provider snapshot admission policy and dependency tracking.
+
+The repository owns the transaction and revocation fence; this service validates
+membership through the organizations context and checks the selected accounts.
+"""
 
 from __future__ import annotations
 
 import uuid
 
-from django.db import transaction
+from apps.organizations.services import OrganizationService
 
 from .provider_accounts import ProviderAccountService
 from .provider_turn_models import ProviderTurn
@@ -32,6 +36,7 @@ class ProviderTurnService:
     ) -> None:
         self.accounts = accounts or ProviderAccountService()
         self.repository = repository or ProviderTurnRepository
+        self.organizations = OrganizationService()
 
     def capture_account_ids(
         self, organization_id: uuid.UUID, user_id: int | None
@@ -39,8 +44,7 @@ class ProviderTurnService:
         """Capture currently selected provider IDs without storing credentials."""
         if user_id is None:
             return {}
-        with transaction.atomic():
-            self.repository.lock_mutex()
+        with self.repository.admission_transaction():
             selected = self.accounts.selected_accounts(organization_id, user_id)
             return {provider: str(account.id) for provider, account in selected.items()}
 
@@ -52,13 +56,46 @@ class ProviderTurnService:
         user_id: int | None,
         account_ids: dict[str, str],
     ) -> ProviderTurn:
-        """Persist an active snapshot once the assistant shell exists."""
-        return self.repository.admit(
-            assistant_message_id=assistant_message_id,
-            organization_id=organization_id,
-            user_id=user_id,
-            account_ids=account_ids,
-        )
+        """Authorize and persist a snapshot under the account revocation fence."""
+        with self.repository.admission_transaction():
+            if (
+                user_id is not None
+                and self.organizations.get_active_membership(user_id, organization_id)
+                is None
+            ):
+                raise ValueError(
+                    "The initiating user no longer has active organization membership"
+                )
+            parsed = {
+                provider: uuid.UUID(str(value))
+                for provider, value in account_ids.items()
+            }
+            ids = list(parsed.values())
+            if len(ids) != len(set(ids)):
+                raise ValueError("A provider snapshot contains duplicate accounts")
+            if ids:
+                accounts = self.repository.snapshot_accounts(ids)
+                rows = {str(row.id): row for row in accounts}
+                if len(rows) != len(set(ids)):
+                    raise ValueError("A selected provider account no longer exists")
+                for provider, account_id in parsed.items():
+                    account = rows[str(account_id)]
+                    if account.deleted_at is not None:
+                        raise ValueError("A selected provider account was revoked")
+                    if account.organization_id != organization_id:
+                        raise ValueError("A selected provider account is out of scope")
+                    if account.provider != provider:
+                        raise ValueError("A selected provider account changed provider")
+                    if user_id is not None and account.user_id not in (None, user_id):
+                        raise ValueError(
+                            "A selected provider account is no longer visible"
+                        )
+            return self.repository.create(
+                assistant_message_id=assistant_message_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                account_ids=account_ids,
+            )
 
     def get(self, turn_id: uuid.UUID | str) -> ProviderTurn | None:
         """Read a turn state through the repository boundary."""

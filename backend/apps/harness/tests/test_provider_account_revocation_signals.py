@@ -124,7 +124,7 @@ def test_membership_delete_revokes_turns_using_personal_accounts(
 @pytest.mark.django_db(transaction=True)
 def test_admission_rejects_user_without_active_membership(harness_workspace):
     """A stale request cannot enter the turn after org membership is deleted."""
-    from apps.harness.provider_turn_repository import ProviderTurnRepository
+    from apps.harness.provider_turns import ProviderTurnService
 
     member = harness_workspace.created_by
     organization = harness_workspace.runner.organization
@@ -139,7 +139,7 @@ def test_admission_rejects_user_without_active_membership(harness_workspace):
     Membership.objects.filter(user=member, organization=organization).delete()
 
     with pytest.raises(ValueError, match="active organization membership"):
-        ProviderTurnRepository.admit(
+        ProviderTurnService().admit(
             assistant_message_id=assistant.id,
             organization_id=organization.id,
             user_id=member.id,

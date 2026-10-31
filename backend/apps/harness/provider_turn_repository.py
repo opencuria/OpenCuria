@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
+from .models import ProviderConnection
 from .provider_turn_models import ProviderTurn, ProviderTurnMutex
 
 
@@ -24,64 +27,40 @@ class ProviderTurnRepository:
         ProviderTurnMutex.objects.select_for_update().get(id=1)
 
     @classmethod
-    def admit(
-        cls,
+    @contextmanager
+    def admission_transaction(cls) -> Iterator[None]:
+        """Hold the revocation fence through snapshot reads, policy and writes."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            yield
+
+    @staticmethod
+    def snapshot_accounts(account_ids: list[uuid.UUID]) -> list[ProviderConnection]:
+        """Load requested accounts, including revoked and out-of-scope records.
+
+        Admission policy needs the full state to distinguish its error cases.
+        The caller holds ``admission_transaction`` while validating these rows.
+        """
+        return list(ProviderConnection.objects.filter(id__in=account_ids))
+
+    @staticmethod
+    def create(
         *,
         assistant_message_id: uuid.UUID,
         organization_id: uuid.UUID,
         user_id: int | None,
         account_ids: dict[str, str],
     ) -> ProviderTurn:
-        """Persist an active turn and recheck that its accounts are live."""
-        from .models import ProviderConnection
-
-        with transaction.atomic():
-            cls.lock_mutex()
-            if user_id is not None:
-                from apps.organizations.models import Membership
-
-                if not Membership.objects.filter(
-                    organization_id=organization_id,
-                    user_id=user_id,
-                    user__is_active=True,
-                ).exists():
-                    raise ValueError(
-                        "The initiating user no longer has active "
-                        "organization membership"
-                    )
-            parsed = {
-                provider: uuid.UUID(str(value))
-                for provider, value in account_ids.items()
-            }
-            ids = list(parsed.values())
-            if len(ids) != len(set(ids)):
-                raise ValueError("A provider snapshot contains duplicate accounts")
-            if ids:
-                accounts = ProviderConnection.objects.filter(id__in=ids)
-                rows = {str(row.id): row for row in accounts}
-                if len(rows) != len(set(ids)):
-                    raise ValueError("A selected provider account no longer exists")
-                for provider, account_id in parsed.items():
-                    account = rows[str(account_id)]
-                    if account.deleted_at is not None:
-                        raise ValueError("A selected provider account was revoked")
-                    if account.organization_id != organization_id:
-                        raise ValueError("A selected provider account is out of scope")
-                    if account.provider != provider:
-                        raise ValueError("A selected provider account changed provider")
-                    if user_id is not None and account.user_id not in (None, user_id):
-                        raise ValueError(
-                            "A selected provider account is no longer visible"
-                        )
-            return ProviderTurn.objects.create(
-                assistant_message_id=assistant_message_id,
-                organization_id=organization_id,
-                initiated_by_id=user_id,
-                account_ids=dict(account_ids),
-                dependency_account_ids=[],
-                holder_tokens=[str(uuid.uuid4())],
-                holds=1,
-            )
+        """Persist a validated snapshot inside the caller's admission scope."""
+        return ProviderTurn.objects.create(
+            assistant_message_id=assistant_message_id,
+            organization_id=organization_id,
+            initiated_by_id=user_id,
+            account_ids=dict(account_ids),
+            dependency_account_ids=[],
+            holder_tokens=[str(uuid.uuid4())],
+            holds=1,
+        )
 
     @classmethod
     def register_use(
@@ -94,8 +73,6 @@ class ProviderTurnRepository:
         if account_id is None:
             return
         parsed_id = uuid.UUID(str(account_id))
-        from .models import ProviderConnection
-
         rejected = False
         with transaction.atomic():
             cls.lock_mutex()
