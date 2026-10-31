@@ -43,6 +43,16 @@ def providers(result=DeliveryResult("sent")):
     return Providers()
 
 
+@pytest.mark.parametrize("organization", [None, "", "not-a-uuid"])
+def test_invalid_organization_context_is_rejected(client, headers, organization):
+    headers.pop("HTTP_X_ORGANIZATION_ID")
+    if organization is not None:
+        headers["HTTP_X_ORGANIZATION_ID"] = organization
+    response = client.get("/api/v1/notifications/capabilities/", **headers)
+    assert response.status_code == 403
+    assert response.json()["code"] == "authentication_error"
+
+
 def test_device_api_enforces_scope_and_never_echoes_tokens(client, setup, headers):
     org, user, *_ = setup
     device_id = uuid.uuid4()

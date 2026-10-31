@@ -29,6 +29,7 @@ from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.request_context import get_organization_id
 
 from .conversation_service import ConversationService
 from .model_catalog_service import clear_models_cache
@@ -98,17 +99,6 @@ def _resolve_harness_service():  # type: ignore[no-untyped-def]
     return get_harness_service()
 
 
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract the organization ID from the X-Organization-Id header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
-
-
 def _non_empty(value: str) -> str | None:
     """Return the stripped string or None when blank (edit no-op)."""
     stripped = (value or "").strip()
@@ -164,7 +154,7 @@ def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
     """Return all harness sessions of a workspace (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         _owned_workspace(request, org_id, workspace_id)
@@ -209,7 +199,7 @@ async def create_harness_session(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -271,7 +261,7 @@ async def send_harness_message(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -348,7 +338,7 @@ async def steer_harness_session(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
@@ -386,7 +376,7 @@ async def withdraw_harness_steer(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
@@ -418,7 +408,7 @@ async def fork_harness_session(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -457,7 +447,7 @@ async def edit_harness_message(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -511,7 +501,7 @@ async def patch_harness_session(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -542,7 +532,7 @@ async def delete_harness_session(request: HttpRequest, session_id: uuid.UUID):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -566,7 +556,7 @@ def list_harness_conversations(request: HttpRequest):
     """Return root sessions across the caller's workspaces in the org."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     runner_service = _get_service()
     workspaces = runner_service.list_workspaces(
@@ -611,7 +601,7 @@ def mark_harness_session_read(request: HttpRequest, session_id: uuid.UUID):
     """Record that the user opened a harness session (dashboard unread)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         service = ConversationService()
@@ -632,7 +622,7 @@ def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
     """Record that the user explicitly marked a harness session unread."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         service = ConversationService()
@@ -655,7 +645,7 @@ def dismiss_harness_notice(
     """Persist that the user dismissed one stopped/failed notice."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         service = ConversationService()
@@ -680,7 +670,7 @@ async def set_harness_session_mode(
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -716,7 +706,7 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -742,7 +732,7 @@ def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
     """Return the session envelope without heavyweight detail fields."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         conversations = ConversationService()
@@ -768,7 +758,7 @@ def get_harness_part(request: HttpRequest, session_id: uuid.UUID, part_id: uuid.
     """Return full detail for one part in an owned session."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         service = ConversationService()
@@ -789,7 +779,7 @@ def list_harness_todos(request: HttpRequest, session_id: uuid.UUID):
     """Return persisted todos of a session (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         service = ConversationService()
@@ -826,7 +816,7 @@ async def resolve_harness_permission(
         return _perm_denied(APIKeyPermission.HARNESS_PERMISSIONS)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -875,7 +865,7 @@ async def resolve_harness_question(
         return _perm_denied(APIKeyPermission.HARNESS_PERMISSIONS)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -924,7 +914,7 @@ def list_recent_models(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import RecentModelService
 
@@ -946,7 +936,7 @@ def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import RecentModelService
 
@@ -980,7 +970,7 @@ def list_org_agent_configs(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import AgentConfigService
 
@@ -1002,7 +992,7 @@ def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import AgentConfigService
 
@@ -1029,7 +1019,7 @@ def get_org_subagent_config(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import SubagentConfigService
 
@@ -1050,7 +1040,7 @@ def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import SubagentConfigService
 
@@ -1075,7 +1065,7 @@ def get_org_computer_use_config(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import ComputerUseConfigService
 
@@ -1098,7 +1088,7 @@ def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfi
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import ComputerUseConfigService
 
@@ -1125,7 +1115,7 @@ def get_org_provider_config(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import ProviderConfigService
 
@@ -1146,7 +1136,7 @@ def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import ProviderConfigService
 
@@ -1172,7 +1162,7 @@ def list_provider_accounts(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
 
@@ -1196,7 +1186,7 @@ def create_provider_account(
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
 
@@ -1240,7 +1230,7 @@ def update_provider_account(
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
 
@@ -1282,7 +1272,7 @@ def delete_provider_account(request: HttpRequest, provider: str, account_id: uui
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
 
@@ -1315,7 +1305,7 @@ def select_provider_account(
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
 
@@ -1351,7 +1341,7 @@ async def start_chatgpt_oauth(request: HttpRequest, payload: ChatGPTOAuthStartIn
     from apps.harness.providers.base import ProviderError
 
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         result = await ProviderOAuthService().start(
             organization_id=org_id,
             user=request.user,
@@ -1395,7 +1385,9 @@ async def poll_chatgpt_oauth_status(request: HttpRequest, flow_id: uuid.UUID):
 
     try:
         result = await ProviderOAuthService().status(
-            organization_id=_get_org_id(request), user=request.user, flow_id=flow_id
+            organization_id=get_organization_id(request),
+            user=request.user,
+            flow_id=flow_id
         )
         if result["status"] == "no_flow":
             return 404, {
@@ -1434,7 +1426,7 @@ async def cancel_chatgpt_oauth(request: HttpRequest, payload: ChatGPTOAuthCancel
         from asgiref.sync import sync_to_async
 
         cancelled = await sync_to_async(ProviderOAuthService().cancel)(
-            organization_id=_get_org_id(request),
+            organization_id=get_organization_id(request),
             user=request.user,
             flow_id=payload.flow_id,
         )

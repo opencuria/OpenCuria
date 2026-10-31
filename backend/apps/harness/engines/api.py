@@ -11,6 +11,7 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
+from common.request_context import get_organization_id
 
 from .schemas import (
     EngineModelOut,
@@ -30,20 +31,9 @@ def _permission_denied(permission: APIKeyPermission) -> tuple[int, dict[str, str
     }
 
 
-def _organization_id(request: HttpRequest) -> uuid.UUID:
-    """Read and validate the active organization request header."""
-    raw_value = request.headers.get("X-Organization-Id", "")
-    if not raw_value:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(raw_value)
-    except (TypeError, ValueError, AttributeError):
-        raise AuthenticationError("Invalid X-Organization-Id header") from None
-
-
 def _require_membership(request: HttpRequest) -> uuid.UUID:
     """Return the active organization ID after membership validation."""
-    organization_id = _organization_id(request)
+    organization_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, organization_id)
     return organization_id
 

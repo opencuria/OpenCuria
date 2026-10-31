@@ -13,6 +13,7 @@ from ninja import Router, Schema
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.request_context import get_organization_id
 
 from .mcp_oauth import frontend_return_url, state_cookie_name
 from .oauth_errors import OAuthError
@@ -38,14 +39,6 @@ class OAuthErrorOut(Schema):
 
 service_oauth_router = Router(tags=["credential-oauth"])
 credential_oauth_router = Router(tags=["credential-oauth"])
-
-
-def _org_id(request: HttpRequest) -> uuid.UUID:
-    value = request.headers.get("X-Organization-Id", "")
-    try:
-        return uuid.UUID(value)
-    except (TypeError, ValueError):
-        raise AuthenticationError("X-Organization-Id header is required") from None
 
 
 def _deny_anonymous(request: HttpRequest):
@@ -94,7 +87,7 @@ def _begin_response(request: HttpRequest, *, service_id, credential_id, payload)
     """Call the OAuth service and format its interactive response."""
     authorization_url, binding, cookie_name = CredentialOAuthSvc().start_connection(
         user=request.user,
-        organization_id=_org_id(request),
+        organization_id=get_organization_id(request),
         organization_credential=payload.organization_credential,
         service_id=service_id,
         credential_id=credential_id,
@@ -193,7 +186,7 @@ def disconnect(request: HttpRequest, credential_id: uuid.UUID):
     ):
         return 403, OAuthErrorOut(detail="Permission denied", code="permission_denied")
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         CredentialOAuthSvc().disconnect(
             credential_id=credential_id, user=request.user, organization_id=org_id
         )

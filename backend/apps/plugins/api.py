@@ -16,7 +16,8 @@ from ninja import Router
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
-from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.exceptions import ConflictError, NotFoundError
+from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
 from .schemas import (
@@ -37,17 +38,6 @@ def _perm_denied(permission: APIKeyPermission):
         detail=f"API key lacks permission: {permission.value}",
         code="permission_denied",
     )
-
-
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract the organization ID from the X-Organization-Id header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
 
 
 def _get_org_service() -> OrganizationService:
@@ -97,7 +87,7 @@ def list_plugins(request: HttpRequest):
     """Return visible global + org-owned plugins with readiness summary."""
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_READ):
         return _perm_denied(APIKeyPermission.PLUGINS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     _get_org_service().require_membership(request.user, org_id)
 
     payloads = _get_plugin_service().list_visible(org_id=org_id)
@@ -113,7 +103,7 @@ def create_plugin(request: HttpRequest, payload: PluginCreateIn):
     """Create an org-owned plugin with nested components (admin only)."""
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_WRITE):
         return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
@@ -159,7 +149,7 @@ def update_plugin(request: HttpRequest, plugin_id: uuid.UUID, payload: PluginUpd
     """Replace metadata and/or full component lists (org-owned + admin)."""
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_WRITE):
         return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
@@ -217,7 +207,7 @@ def delete_plugin(request: HttpRequest, plugin_id: uuid.UUID):
     """Delete an org-owned plugin (admin only)."""
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_WRITE):
         return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
@@ -259,7 +249,7 @@ def toggle_plugin_activation(
     """
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_WRITE):
         return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":

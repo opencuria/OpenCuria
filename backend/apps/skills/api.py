@@ -14,23 +14,13 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
+from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
 from .schemas import SkillCreateIn, SkillOut, SkillUpdateIn
 from .services import SkillService
 
 skill_router = Router(tags=["skills"])
-
-
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract and validate the organization ID from the request header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
 
 
 def _get_org_service() -> OrganizationService:
@@ -67,7 +57,7 @@ def list_skills(request: HttpRequest):
             detail="API key lacks permission: skills:read",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -91,7 +81,7 @@ def create_skill(request: HttpRequest, payload: SkillCreateIn):
             detail="API key lacks permission: skills:write",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -137,7 +127,7 @@ def update_skill(request: HttpRequest, skill_id: uuid.UUID, payload: SkillUpdate
             detail="API key lacks permission: skills:write",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     is_admin = org_service.get_user_role(request.user, org_id) == "admin"
@@ -177,7 +167,7 @@ def delete_skill(request: HttpRequest, skill_id: uuid.UUID):
             detail="API key lacks permission: skills:write",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     is_admin = org_service.get_user_role(request.user, org_id) == "admin"

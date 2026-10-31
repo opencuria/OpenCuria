@@ -17,6 +17,7 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
 from .schemas import (
@@ -38,17 +39,6 @@ def _perm_denied(permission: APIKeyPermission):
         detail=f"API key lacks permission: {permission.value}",
         code="permission_denied",
     )
-
-
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract the organization ID from the X-Organization-Id header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
 
 
 def _get_org_service() -> OrganizationService:
@@ -142,7 +132,7 @@ def list_credential_services(request: HttpRequest):
             detail="API key lacks permission: credentials:read",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -179,7 +169,7 @@ def list_credentials(request: HttpRequest):
             detail="API key lacks permission: credentials:read",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -203,7 +193,7 @@ def create_credential(request: HttpRequest, payload: CredentialCreateIn):
             detail="API key lacks permission: credentials:write",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -261,7 +251,7 @@ def get_public_key(request: HttpRequest, credential_id: uuid.UUID):
             detail="API key lacks permission: credentials:read",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -297,7 +287,7 @@ def update_credential(
             detail="API key lacks permission: credentials:write",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     is_admin = org_service.get_user_role(request.user, org_id) == "admin"
@@ -338,7 +328,7 @@ def delete_credential(request: HttpRequest, credential_id: uuid.UUID):
             detail="API key lacks permission: credentials:write",
             code="permission_denied",
         )
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     is_admin = org_service.get_user_role(request.user, org_id) == "admin"
@@ -380,7 +370,7 @@ def list_org_credential_services(request: HttpRequest):
         request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ
     ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
@@ -409,7 +399,7 @@ def create_org_credential_service(
         request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE
     ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
@@ -461,7 +451,7 @@ def toggle_org_credential_service_activation(
         request, APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE
     ):
         return _perm_denied(APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":

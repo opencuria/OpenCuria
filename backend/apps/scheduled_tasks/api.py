@@ -13,7 +13,8 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from apps.runners.services import get_runner_service
-from common.exceptions import NotFoundError
+from common.exceptions import AuthenticationError, NotFoundError
+from common.request_context import get_organization_id
 
 from .models import ScheduledTask, ScheduledTaskRun
 from .services import ScheduledTaskService
@@ -30,16 +31,6 @@ def _permission_denied(permission: APIKeyPermission) -> tuple[int, dict[str, str
         "detail": f"API key lacks permission: {permission.value}",
         "code": "permission_denied",
     }
-
-
-def _org_id(request: HttpRequest) -> uuid.UUID:
-    raw = request.headers.get("X-Organization-Id")
-    if not raw:
-        raise ValueError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(raw)
-    except ValueError as exc:
-        raise ValueError("Invalid X-Organization-Id header") from exc
 
 
 def _require_membership(request: HttpRequest, org_id: uuid.UUID) -> None:
@@ -188,7 +179,7 @@ def list_scheduled_tasks(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         _require_membership(request, org_id)
         return 200, [
             _task_out(task)
@@ -198,7 +189,7 @@ def list_scheduled_tasks(request: HttpRequest):
         ]
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
 
 
@@ -210,7 +201,7 @@ async def create_scheduled_task(request: HttpRequest, payload: ScheduledTaskIn):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _permission_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         await sync_to_async(_require_membership)(request, org_id)
         workspace = await _owned_workspace(request, org_id, payload.workspace_id)
         task = await sync_to_async(_service().create)(
@@ -224,7 +215,7 @@ async def create_scheduled_task(request: HttpRequest, payload: ScheduledTaskIn):
         return 404, {"detail": exc.message, "code": exc.code}
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
 
 
@@ -236,11 +227,11 @@ def get_scheduled_task(request: HttpRequest, task_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         _require_membership(request, org_id)
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     try:
         return 200, _task_out(
@@ -262,11 +253,11 @@ async def patch_scheduled_task(
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _permission_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         await sync_to_async(_require_membership)(request, org_id)
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     try:
         task = await sync_to_async(_service().get)(
@@ -299,11 +290,11 @@ def delete_scheduled_task(request: HttpRequest, task_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _permission_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         _require_membership(request, org_id)
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     try:
         service = _service()
@@ -325,11 +316,11 @@ async def run_scheduled_task(request: HttpRequest, task_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _permission_denied(APIKeyPermission.HARNESS_RUN)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         await sync_to_async(_require_membership)(request, org_id)
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     try:
         service = _service()
@@ -352,11 +343,11 @@ def list_scheduled_task_runs(request: HttpRequest, task_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
-        org_id = _org_id(request)
+        org_id = get_organization_id(request)
         _require_membership(request, org_id)
     except _OrganizationNotFound as exc:
         return 404, {"detail": str(exc), "code": "not_found"}
-    except ValueError as exc:
+    except (AuthenticationError, ValueError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     try:
         service = _service()
