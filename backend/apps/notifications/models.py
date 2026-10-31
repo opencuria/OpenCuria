@@ -9,29 +9,6 @@ from django.db import models
 from django.utils import timezone
 
 
-class PushConfiguration(models.Model):
-    """Organization push providers reference the existing credential vault."""
-
-    organization = models.OneToOneField(
-        "organizations.Organization", primary_key=True, on_delete=models.CASCADE
-    )
-    apns_credential = models.ForeignKey(
-        "credentials.Credential",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="apns_configurations",
-    )
-    fcm_credential = models.ForeignKey(
-        "credentials.Credential",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="fcm_configurations",
-    )
-    updated_at = models.DateTimeField(auto_now=True)
-
-
 class MobileDevice(models.Model):
     """One installation, scoped to the signed-in user and organization.
 

@@ -10,3 +10,6 @@ mobile/ios
 .opencuria
 backend
 runner
+
+# Hosting secrets are runtime mounts, never image contents.
+secrets/

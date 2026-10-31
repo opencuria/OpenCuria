@@ -203,8 +203,7 @@ def list_credentials(ctx: ToolContext) -> list[Any]:
         for credential in CredentialSvc().list_credentials(
             ctx.user, ctx.organization_id
         )
-        if credential.service.credential_type
-        not in {"provider_secret", "server_secret"}
+        if credential.service.credential_type != "provider_secret"
     ]
 
 

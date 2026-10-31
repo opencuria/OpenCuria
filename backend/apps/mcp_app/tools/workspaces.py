@@ -132,8 +132,7 @@ def _details(ctx: ToolContext, workspace: Any) -> dict[str, Any]:
                     for credential in CredentialSvc().list_workspace_credentials(
                         workspace.id
                     )
-                    if credential.service.credential_type
-                    not in {"provider_secret", "server_secret"}
+                    if credential.service.credential_type != "provider_secret"
                 ],
             }
         )

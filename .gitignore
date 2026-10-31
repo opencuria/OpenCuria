@@ -33,3 +33,6 @@ dist/
 /mobile/ios/
 /mobile/coverage/
 /mobile/.worklets/
+
+# Hosting push signing files (mounted read-only into the backend).
+/secrets/

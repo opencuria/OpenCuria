@@ -1,60 +1,16 @@
-"""Direct APNs/FCM delivery using organization credentials from the vault."""
+"""Direct APNs/FCM delivery using instance-wide hosting settings."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from dataclasses import dataclass
 from typing import Literal
 
 import httpx
 import jwt
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from pydantic import BaseModel, Field, SecretStr
 
-from apps.credentials.models import Credential
-from common.utils import decrypt_value
-
-
-class APNsSecret(BaseModel):
-    """An Apple token-signing key; no client receives this object."""
-
-    team_id: str = Field(pattern=r"^[A-Z0-9]{10}$")
-    key_id: str = Field(pattern=r"^[A-Z0-9]{10}$")
-    private_key: SecretStr
-
-
-class FCMSecret(BaseModel):
-    """Only fields used for the fixed Google service-account OAuth flow."""
-
-    project_id: str = Field(pattern=r"^[a-z][a-z0-9-]{4,61}[a-z0-9]$")
-    client_email: str = Field(pattern=r"^[^\s@]+@[^\s@]+\.iam\.gserviceaccount\.com$")
-    private_key: SecretStr
-
-
-def load_secret(credential: Credential, provider: str) -> APNsSecret | FCMSecret:
-    """Validate encrypted vault contents without including secrets in errors."""
-    try:
-        data = json.loads(decrypt_value(credential.encrypted_value))
-        schema = APNsSecret if provider == "apns" else FCMSecret
-        secret = schema.model_validate(data)
-        key = serialization.load_pem_private_key(
-            secret.private_key.get_secret_value().encode(), password=None
-        )
-        if provider == "apns":
-            if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(
-                key.curve, ec.SECP256R1
-            ):
-                raise ValueError
-        elif not isinstance(key, rsa.RSAPrivateKey):
-            raise ValueError
-        return secret
-    except Exception:
-        raise ValueError(
-            f"Invalid {provider.upper()} credential JSON or private key"
-        ) from None
+from .configuration import get_push_settings
 
 
 @dataclass(frozen=True)
@@ -70,7 +26,8 @@ class PushProviders:
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         self.client = client or httpx.AsyncClient(http2=True, timeout=15.0)
-        self._tokens: dict[tuple[str, str], tuple[str, float]] = {}
+        self.settings = get_push_settings()
+        self._tokens: dict[str, tuple[str, float]] = {}
 
     async def close(self) -> None:
         """Release connections at ASGI shutdown."""
@@ -79,7 +36,6 @@ class PushProviders:
     async def send_apns(
         self,
         *,
-        credential: Credential,
         token: str,
         app_id: str,
         environment: str,
@@ -88,9 +44,10 @@ class PushProviders:
         live_activity: bool = False,
     ) -> DeliveryResult:
         """Send alert or ActivityKit updates to the correct signing environment."""
-        secret = await asyncio.to_thread(load_secret, credential, "apns")
-        cache_key = (str(credential.id), credential.encrypted_value)
-        cached = self._tokens.get(cache_key)
+        secret = self.settings.apns
+        if secret is None:
+            return DeliveryResult("failed", "provider_not_configured")
+        cached = self._tokens.get("apns")
         now = int(time.time())
         if cached is None or cached[1] <= now:
             authorization = await asyncio.to_thread(
@@ -100,7 +57,7 @@ class PushProviders:
                 algorithm="ES256",
                 headers={"kid": secret.key_id},
             )
-            self._remember(cache_key, authorization, now + 50 * 60)
+            self._tokens["apns"] = (authorization, now + 50 * 60)
         else:
             authorization = cached[0]
         host = (
@@ -138,7 +95,6 @@ class PushProviders:
     async def send_fcm(
         self,
         *,
-        credential: Credential,
         token: str,
         title: str,
         body: str,
@@ -146,10 +102,11 @@ class PushProviders:
         collapse_id: str,
         app_id: str,
     ) -> DeliveryResult:
-        """Use FCM HTTP v1; never trust a credential-supplied token endpoint."""
-        secret = await asyncio.to_thread(load_secret, credential, "fcm")
-        cache_key = (str(credential.id), credential.encrypted_value)
-        cached = self._tokens.get(cache_key)
+        """Use FCM HTTP v1 with fixed Google OAuth and messaging endpoints."""
+        secret = self.settings.fcm
+        if secret is None:
+            return DeliveryResult("failed", "provider_not_configured")
+        cached = self._tokens.get("fcm")
         now = int(time.time())
         if cached is None or cached[1] <= now:
             assertion = await asyncio.to_thread(
@@ -185,7 +142,7 @@ class PushProviders:
                     raise ValueError
             except (KeyError, ValueError, TypeError):
                 return DeliveryResult("retry", "fcm_invalid_auth_response")
-            self._remember(cache_key, authorization, now + max(0, expires_in - 60))
+            self._tokens["fcm"] = (authorization, now + max(0, expires_in - 60))
         else:
             authorization = cached[0]
         response = await self.client.post(
@@ -226,12 +183,3 @@ class PushProviders:
             "invalid" if invalid else "failed",
             "fcm_unregistered" if invalid else f"fcm_{response.status_code}",
         )
-
-    def _remember(self, key: tuple[str, str], token: str, expires: float) -> None:
-        # Configuration rotation cannot leave unbounded old secrets in memory.
-        self._tokens = {
-            k: v
-            for k, v in self._tokens.items()
-            if k[0] != key[0] and v[1] > time.time()
-        }
-        self._tokens[key] = (token, expires)

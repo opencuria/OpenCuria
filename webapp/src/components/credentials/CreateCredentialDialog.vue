@@ -87,9 +87,6 @@ const selectedService = computed(() =>
 const isOAuth = computed(() => selectedService.value?.credential_type === 'mcp_oauth')
 const isSSHKey = computed(() => selectedService.value?.credential_type === 'ssh_key')
 const isFileCredential = computed(() => selectedService.value?.credential_type === 'file')
-const isServerCredential = computed(
-  () => selectedService.value?.credential_type === 'server_secret',
-)
 const isValid = computed(
   () =>
     !!selectedService.value &&
@@ -233,14 +230,10 @@ function handleClose(): void {
           <div v-if="selectedServiceId && !isSSHKey && !isOAuth" class="space-y-1.5">
             <Label>Value</Label
             ><Textarea
-              v-if="isFileCredential || isServerCredential"
+              v-if="isFileCredential"
               v-model="value"
               :rows="6"
-              :placeholder="
-                isServerCredential
-                  ? 'Server credential JSON'
-                  : `Contents for ${selectedService?.target_path}`
-              "
+              :placeholder="`Contents for ${selectedService?.target_path}`"
             /><Input
               v-else
               v-model="value"

@@ -15,7 +15,6 @@
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   BookText,
-  Bell,
   Bot,
   Building2,
   Camera,
@@ -41,7 +40,6 @@ import {
 } from './settingsTabs'
 
 const WorkspacePolicyTab = defineAsyncComponent(() => import('./WorkspacePolicyTab.vue'))
-const MobileNotificationsTab = defineAsyncComponent(() => import('./MobileNotificationsTab.vue'))
 const ProviderConfigTab = defineAsyncComponent(() => import('./ProviderConfigTab.vue'))
 const AgentConfigTab = defineAsyncComponent(() => import('./AgentConfigTab.vue'))
 const CredentialServicesTab = defineAsyncComponent(() => import('./CredentialServicesTab.vue'))
@@ -79,7 +77,6 @@ interface SettingsNavItem {
 
 const navItems: SettingsNavItem[] = [
   { id: 'general', label: 'General', icon: Settings2 },
-  { id: 'notifications', label: 'Mobile Notifications', icon: Bell, adminOnly: true },
   { id: 'provider', label: 'Provider & Models', icon: Bot },
   { id: 'agents', label: 'Agents', icon: Sparkles },
   { id: 'skills', label: 'Skills', icon: BookText },
@@ -102,10 +99,7 @@ function openSheet(tab?: unknown): void {
   const next = resolveSettingsTab(tab)
   // Runners is admin-only — fall back to General.
   activeTab.value =
-    (next === 'runners' || next === 'credential-services' || next === 'notifications') &&
-    !isAdmin.value
-      ? 'general'
-      : next
+    (next === 'runners' || next === 'credential-services') && !isAdmin.value ? 'general' : next
   open.value = true
 }
 
@@ -195,12 +189,7 @@ onUnmounted(() => {
 
 // If an admin has Runners open and loses the role (org switch), fall back.
 watch(isAdmin, (admin) => {
-  if (
-    !admin &&
-    (activeTab.value === 'runners' ||
-      activeTab.value === 'credential-services' ||
-      activeTab.value === 'notifications')
-  ) {
+  if (!admin && (activeTab.value === 'runners' || activeTab.value === 'credential-services')) {
     activeTab.value = 'general'
   }
 })
@@ -307,7 +296,6 @@ watch(isAdmin, (admin) => {
             :aria-label="activeLabel"
           >
             <WorkspacePolicyTab v-if="open && activeTab === 'general'" />
-            <MobileNotificationsTab v-else-if="open && activeTab === 'notifications' && isAdmin" />
             <ProviderConfigTab v-else-if="open && activeTab === 'provider'" />
             <AgentConfigTab v-else-if="open && activeTab === 'agents'" />
             <SkillsPanel v-else-if="open && activeTab === 'skills'" />

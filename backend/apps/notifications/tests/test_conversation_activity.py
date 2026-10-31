@@ -21,7 +21,7 @@ pytestmark = pytest.mark.django_db
 
 
 def test_source_selects_latest_assistant_and_hides_non_root_completions(setup):
-    org, _, workspace, session, first, _ = setup
+    org, _, workspace, session, first = setup
     latest = HarnessMessage.objects.create(
         session=session, role="assistant", position=2
     )
@@ -43,7 +43,7 @@ def test_source_selects_latest_assistant_and_hides_non_root_completions(setup):
 
 
 def test_root_resolution_has_no_depth_cap_and_rejects_cycles(setup):
-    org, _, workspace, root, _, _ = setup
+    org, _, workspace, root, _ = setup
     child = root
     for _ in range(12):
         child = HarnessSession.objects.create(
@@ -56,7 +56,7 @@ def test_root_resolution_has_no_depth_cap_and_rejects_cycles(setup):
 
 
 def test_active_rows_use_busy_descendant_gates_and_permission_priority(setup):
-    org, user, workspace, session, message, _ = setup
+    org, user, workspace, session, message = setup
     activity = ConversationActivityService()
     child = HarnessSession.objects.create(
         workspace=workspace, organization_id=org.id, parent=session, status="idle"
@@ -88,7 +88,7 @@ def test_active_rows_use_busy_descendant_gates_and_permission_priority(setup):
     ],
 )
 def test_pending_gate_requires_exact_scope_and_pending_state(setup, model, phase):
-    org, _, workspace, session, _, _ = setup
+    org, _, workspace, session, _ = setup
     gate = model.objects.create(
         organization_id=org.id,
         workspace_id=workspace.id,
@@ -106,7 +106,7 @@ def test_pending_gate_requires_exact_scope_and_pending_state(setup, model, phase
 
 
 def test_repair_limits_completion_and_attention_history(setup):
-    org, _, workspace, session, message, _ = setup
+    org, _, workspace, session, message = setup
     old = timezone.now() - timedelta(minutes=16)
     HarnessMessage.objects.filter(id=message.id).update(completed_at=old)
     recent = HarnessMessage.objects.create(
@@ -146,7 +146,7 @@ def test_repair_limits_completion_and_attention_history(setup):
 def test_activity_results_are_immutable_metadata_without_lazy_queries(
     setup, django_assert_num_queries
 ):
-    org, user, workspace, session, message, _ = setup
+    org, user, workspace, session, message = setup
     message.content = "Private assistant response"
     message.error = "Private provider error"
     message.save()
@@ -197,7 +197,7 @@ def test_completion_outcomes_preserve_abort_precedence(setup, finish, error, pha
 
 @pytest.mark.django_db(transaction=True)
 def test_worker_repairs_missed_harness_events_through_activity_service(setup, device):
-    org, _, workspace, session, message, _ = setup
+    org, _, workspace, session, message = setup
     HarnessMessage.objects.filter(id=message.id).update(completed_at=timezone.now())
     question = QuestionRequest.objects.create(
         organization_id=org.id, workspace_id=workspace.id, session_id=session.id

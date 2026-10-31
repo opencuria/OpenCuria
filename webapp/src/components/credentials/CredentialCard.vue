@@ -34,7 +34,6 @@ const canEdit = computed(() => {
 
 const typeLabel = computed(() => {
   if (isOAuth.value) return 'OAuth'
-  if (props.credential.credential_type === 'server_secret') return 'Server only'
   if (props.credential.credential_type === 'ssh_key') return 'SSH Key'
   if (props.credential.credential_type === 'file') return 'File'
   return 'ENV'

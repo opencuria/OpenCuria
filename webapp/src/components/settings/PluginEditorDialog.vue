@@ -803,9 +803,8 @@ async function handleSubmit(): Promise<void> {
                       ><SelectItem
                         v-for="service in credentialStore.services.filter(
                           (item) =>
-                            item.credential_type !== 'server_secret' &&
-                            (item.organization_id === null ||
-                              item.organization_id === authStore.activeOrganizationId),
+                            item.organization_id === null ||
+                            item.organization_id === authStore.activeOrganizationId,
                         )"
                         :key="service.id"
                         :value="service.id"

@@ -47,6 +47,10 @@ services:
     environment: &backend_environment
       DJANGO_ENV: production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_PRIVATE_KEY_FILE: ${APNS_PRIVATE_KEY_FILE:-}
+      FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
       DB_NAME: ${DB_NAME:-opencuria}
       DB_USER: ${DB_USER:-opencuria}
@@ -65,6 +69,8 @@ services:
         public HTTPS frontend return URL}
       DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-}
       DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
+    volumes: &backend_volumes
+    - ./secrets/push:/run/secrets:ro
     ports:
     - ${BACKEND_PORT:-8000}:8000
     networks: &id002
@@ -95,6 +101,7 @@ services:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     restart: unless-stopped
     environment: *backend_environment
+    volumes: *backend_volumes
     networks: *id002
     container_name: opencuria_recovery
     entrypoint:

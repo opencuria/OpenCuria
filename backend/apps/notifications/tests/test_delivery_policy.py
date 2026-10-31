@@ -59,7 +59,7 @@ def test_enqueue_requires_active_owner_membership_and_recent_registration(
     eligible: bool,
 ) -> None:
     """Apply the same recipient scope to both alerts and live activities."""
-    _, user, _, _, message, _ = setup
+    _, user, _, _, message = setup
     now = timezone.now()
     monkeypatch.setattr(timezone, "now", lambda: now)
     MobileDevice.objects.filter(id=device.id).update(encrypted_activity_token="token")
@@ -82,7 +82,7 @@ def test_delivery_rechecks_recipient_after_enqueue(
     eligible: bool,
 ) -> None:
     """Queued work never grants delivery to a revoked or expired recipient."""
-    _, user, _, _, message, _ = setup
+    _, user, _, _, message = setup
     now = timezone.now()
     monkeypatch.setattr(timezone, "now", lambda: now)
     message.completed_at = now

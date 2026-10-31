@@ -530,13 +530,6 @@ class CredentialSvc:
             raise ConflictError(
                 "Internal provider secrets cannot be attached to workspaces"
             )
-        if any(
-            credential.service.credential_type == CredentialType.SERVER_SECRET
-            for credential in credentials
-        ):
-            raise ConflictError(
-                "Server-only credentials cannot be attached to workspaces"
-            )
         if not credentials:
             return ResolvedCredentials()
         self._validate_credential_ownership(
@@ -621,8 +614,6 @@ class CredentialSvc:
 
         for cred in credentials:
             svc = cred.service
-            if svc.credential_type == CredentialType.SERVER_SECRET:
-                raise NotFoundError("Credential", str(cred.id))
             if svc.credential_type == CredentialType.MCP_OAUTH:
                 result.oauth_credentials.append(cred.id)
                 continue

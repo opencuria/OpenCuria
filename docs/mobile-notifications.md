@@ -37,9 +37,72 @@ No Expo push relay, EAS project ID or background Socket.IO connection is needed.
   Registrations expire after 30 days without foreground renewal. Membership,
   account status, workspace ownership and current opt-in are rechecked at delivery.
 
-## Organization setup
+## Server setup
 
-1. Update backend dependencies, apply migrations and restart the ASGI backend:
+Push providers belong to the hosted OpenCuria instance. The host configures them
+once for all organizations using backend environment variables. Organization
+admins cannot configure signing keys or select providers in the webapp.
+
+1. Place the original provider files on the backend host:
+
+   - APNs: the Apple `.p8` private key (EC P-256), unchanged.
+   - FCM: the downloaded Firebase service-account JSON, unchanged. This is a
+     server service account, separate from the Android `google-services.json`.
+
+   For Docker Compose, put the files in `OpenCuria/secrets/push/`:
+
+   ```text
+   OpenCuria/
+     .env
+     secrets/push/
+       apns.p8
+       firebase.json
+   ```
+
+   Both Compose templates mount this directory read-only at `/run/secrets/` in
+   the backend and recovery containers. The directory is excluded from Git and
+   Docker build contexts. Only create the files for the providers you use.
+
+   Set these variables in the hosting `OpenCuria/.env`:
+
+   ```dotenv
+   APNS_TEAM_ID=YOURTEAMID
+   APNS_KEY_ID=YOURKEYID0
+   APNS_PRIVATE_KEY_FILE=/run/secrets/apns.p8
+   FCM_SERVICE_ACCOUNT_FILE=/run/secrets/firebase.json
+   ```
+
+   These are **container paths**. For a source deployment, use `backend/.env`
+   with absolute paths on the backend host instead, for example:
+
+   ```dotenv
+   APNS_TEAM_ID=YOURTEAMID
+   APNS_KEY_ID=YOURKEYID0
+   APNS_PRIVATE_KEY_FILE=/etc/opencuria/secrets/apns.p8
+   FCM_SERVICE_ACCOUNT_FILE=/etc/opencuria/secrets/firebase.json
+   ```
+
+   All three APNs variables must be set together. Leave all three empty to
+   disable iOS notifications and Live Activities. Leave `FCM_SERVICE_ACCOUNT_FILE`
+   empty to disable Android notifications. File paths are the only supported
+   key source; inline JSON or private keys in environment variables are not
+   supported. Restrict file access to the hosting administrator and backend
+   process; files must be readable by the user running the backend.
+
+   The APNs key must permit the app's bundle identifier and environment. Topics
+   are restricted to `com.opencuria.mobile` and `com.opencuria.mobile.dev`;
+   Live Activities append `.push-type.liveactivity`.
+
+   For FCM, OpenCuria reads `project_id`, `client_email` and the RSA `private_key`
+   from the service-account file; extra fields are ignored. OAuth and FCM URLs
+   are fixed server-side. Enable the Firebase Cloud Messaging API and grant the
+   service account permission to send messages for that Firebase project.
+
+   Signing files are backend-only hosting secrets. They are never stored in
+   the credential catalog, attached to workspaces, rendered in plugins or sent
+   to clients. Do not include them in app bundles or `EXPO_PUBLIC_*` variables.
+
+2. Update backend dependencies, apply migrations and restart the ASGI backend:
 
    ```sh
    cd backend
@@ -47,45 +110,29 @@ No Expo push relay, EAS project ID or background Socket.IO connection is needed.
    .venv/bin/python manage.py migrate
    ```
 
+   The migration deletes the old organization push configuration, push catalog
+   entries and their credentials/references. It does not copy secrets into the
+   hosting files or provide a fallback. Configure hosting settings explicitly.
+
    APNs requires HTTP/2; `httpx[http2]` installs its transport. The notification
    worker starts/stops with the existing ASGI lifespan alongside the scheduler.
    Use the project's normal single-worker Uvicorn command with `--lifespan on`.
    A WSGI server or ASGI server with lifespan disabled does not run this worker.
+   Partial configuration, invalid keys and missing or unreadable files prevent
+   backend startup with a bounded error that identifies the affected settings.
+   Files are loaded once at startup; restart the backend and recovery processes
+   after replacing them. Recreate Compose containers after changing `.env`:
 
-2. As an organization admin, open **Settings → Credentials** and add an
-   **organization** credential for **Mobile Push APNS** and/or **Mobile Push FCM**.
-   Migrations add the services to the existing catalog and activate them for
-   existing organizations. New organizations receive the normal catalog defaults.
-   An admin can re-enable a service in Credential Services if it was disabled.
-
-   For APNs, paste JSON containing the Apple team ID, signing-key ID and the
-   complete `.p8` EC private key (JSON-escaped newlines):
-
-   ```json
-   {
-     "team_id": "YOURTEAMID",
-     "key_id": "YOURKEYID0",
-     "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-   }
+   ```sh
+   docker compose -f compose.server.yml up -d --force-recreate backend recovery
    ```
 
-   The key must permit APNs for the app's bundle identifier and environment.
-   APNs topics are restricted to `com.opencuria.mobile` and
-   `com.opencuria.mobile.dev`; Live Activities append `.push-type.liveactivity`.
+   Omit `-f compose.server.yml` for the local Compose deployment.
 
-   For FCM, paste the Firebase service-account JSON. OpenCuria uses only
-   `project_id`, `client_email` and the RSA `private_key`; OAuth and FCM URLs are
-   fixed server-side. Enable the Firebase Cloud Messaging API and grant the
-   service account permission to send messages for that Firebase project.
-
-   These credentials use the existing Fernet vault's `server_secret` type.
-   Workspace attachment and plugin requirements/rendering reject this type;
-   signing keys cannot be injected into runners or agents. Never include them in
-   the app bundle.
-
-3. Open **Settings → Mobile Notifications** and select the corresponding
-   organization credentials. Changes autosave. Personal/foreign credentials and
-   malformed signing keys are rejected; secret values are never returned to clients.
+3. Each person enables notifications in the mobile app. The authenticated
+   capabilities endpoint reports the same provider availability to all
+   organizations; device registrations and delivery authorization remain scoped
+   to the signed-in user and selected organization.
 
 ## Native builds
 
@@ -134,8 +181,8 @@ Firebase initialization or the widget extension.
   notification permission is requested after creating the **Agent activity**
   channel (`agent-activity`). Standard background notifications are displayed by
   the OS; no foreground/background service is needed.
-- The Firebase service account belongs in the backend vault. The Android client
-  configuration file is separate. Do not commit a service-account key or put it in
+- The Firebase service-account file belongs on the backend host. The Android
+  client configuration file is separate. Do not commit a service-account key or put it in
   `EXPO_PUBLIC_*` variables.
 
 ## Delivery and privacy
@@ -165,8 +212,8 @@ or provider credentials. Users can control lock-screen previews in OS settings.
 Delivery errors store bounded codes such as `apns_403`, `fcm_auth_failed` or
 `provider_unreachable` in `notifications.PushDelivery.error_code`. HTTP client
 request logging is kept at WARNING because APNs URLs contain device tokens.
-Configuration readiness means a valid vault reference, not proof that Apple or
-Google has accepted that account/key.
+Configuration readiness means validated server settings, not proof that Apple
+or Google has accepted that account/key.
 
 ## Verification
 

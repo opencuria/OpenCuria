@@ -54,7 +54,6 @@ const typeOptions = [
   { value: 'file', label: 'Credential File' },
   { value: 'ssh_key', label: 'SSH Key Pair' },
   { value: 'mcp_oauth', label: 'MCP OAuth' },
-  { value: 'server_secret', label: 'Server only' },
 ] as const
 const valid = computed(() => {
   if (!serviceName.value.trim() || !slugify(serviceName.value)) return false

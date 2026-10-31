@@ -141,7 +141,6 @@ vi.mock('@/services/workspaces.api', () => ({
   getRunnerImageBuildLog: vi.fn(),
 }))
 
-
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
 
 function mountSheet() {
@@ -237,6 +236,12 @@ describe('SettingsSheet', () => {
     ]) {
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     }
+  })
+
+  it('has no organization push configuration tab for admins', () => {
+    authMock.isAdmin = true
+    const wrapper = mountSheet()
+    expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
   })
 
   it('hides admin-only services and runners tabs for members while keeping plugins visible', () => {

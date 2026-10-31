@@ -19,10 +19,10 @@ from apps.harness.run_events import publish_assistant_run_finished
 from apps.organizations.models import Membership, Organization
 from common.utils import decrypt_value
 
-from ..models import MobileDevice, PushConfiguration, PushDelivery
+from ..models import MobileDevice, PushDelivery
 from ..providers import DeliveryResult
 from ..repositories import NotificationRepository
-from ..schemas import ActivityRegistrationIn, DeviceRegistrationIn, PushConfigurationIn
+from ..schemas import ActivityRegistrationIn, DeviceRegistrationIn
 from ..services import NotificationService
 
 pytestmark = pytest.mark.django_db
@@ -94,49 +94,9 @@ def test_device_api_enforces_scope_and_never_echoes_tokens(client, setup, header
     assert client.delete(path, **headers).status_code == 204
 
 
-def test_configuration_only_admins_and_organization_credentials(client, setup, headers):
-    org, user, _, _, _, credentials = setup
-    member = User.objects.create_user(email="member@example.com")
-    Membership.objects.create(user=member, organization=org)
-    token = DjangoJWTBackend().generate_tokens(member).access_token
-    member_headers = {
-        **headers,
-        "HTTP_AUTHORIZATION": f"Bearer {token}",
-    }
-    path = "/api/v1/notifications/configuration/"
-    assert client.get(
-        "/api/v1/notifications/capabilities/", **member_headers
-    ).json() == {"ios": True, "android": True, "live_activities": True}
-    assert client.get(path, **member_headers).status_code == 403
-    assert (
-        client.put(
-            path, data="{}", content_type="application/json", **member_headers
-        ).status_code
-        == 403
-    )
-    response = client.put(
-        path,
-        data=json.dumps({"apns_credential_id": str(credentials["apns"].id)}),
-        content_type="application/json",
-        **headers,
-    )
-    assert response.status_code == 200
-    assert "private_key" not in response.content.decode()
-    credentials["apns"].organization = Organization.objects.create(
-        name="Other", slug="other"
-    )
-    credentials["apns"].save()
-    response = client.put(
-        path,
-        data=json.dumps({"apns_credential_id": str(credentials["apns"].id)}),
-        content_type="application/json",
-        **headers,
-    )
-    assert response.status_code == 400
-    assert NotificationService().configuration(user, org.id)["ios"] is False
-
-
-def test_invalid_native_registration_and_missing_provider(client, setup, headers):
+def test_invalid_native_registration_and_missing_provider(
+    client, setup, headers, settings
+):
     for payload in (
         {"platform": "web", "app_id": "com.opencuria.mobile"},
         {"platform": "ios", "app_id": "attacker.app"},
@@ -156,7 +116,7 @@ def test_invalid_native_registration_and_missing_provider(client, setup, headers
             == 422
         )
     org, user, *_ = setup
-    PushConfiguration.objects.filter(organization=org).delete()
+    settings.FCM_SERVICE_ACCOUNT_FILE = ""
     with pytest.raises(ValueError, match="not configured"):
         NotificationService().register(
             user,
@@ -174,7 +134,7 @@ def test_invalid_native_registration_and_missing_provider(client, setup, headers
 @pytest.mark.parametrize("engine", ["native", "claude", "codex"])
 @pytest.mark.django_db(transaction=True)
 def test_finished_signal_is_idempotent_and_no_transcript_leaks(setup, device, engine):
-    _, _, _, session, message, _ = setup
+    _, _, _, session, message = setup
     message.harness_id = engine
     message.content = "This private response must not appear on a lock screen"
     message.save()
@@ -207,7 +167,7 @@ def test_outcomes_distinguish_failure_and_user_stop(
 
 
 def test_child_completion_and_foreign_workspace_do_not_notify(setup, device):
-    org, _, workspace, session, _, _ = setup
+    org, _, workspace, session, _ = setup
     child = HarnessSession.objects.create(
         workspace=workspace, organization_id=org.id, parent=session
     )
@@ -226,7 +186,7 @@ def test_child_completion_and_foreign_workspace_do_not_notify(setup, device):
 
 @pytest.mark.django_db(transaction=True)
 def test_gate_events_include_child_attention_and_resolutions(setup, device):
-    org, _, workspace, session, _, _ = setup
+    org, _, workspace, session, _ = setup
     child = HarnessSession.objects.create(
         workspace=workspace, organization_id=org.id, parent=session, status="busy"
     )
@@ -257,7 +217,7 @@ def test_gate_events_include_child_attention_and_resolutions(setup, device):
 
 
 def test_permission_phase_is_current_and_payload_is_bounded(setup, device):
-    org, user, workspace, session, _, _ = setup
+    org, user, workspace, session, _ = setup
     session.title = "😀" * 255
     session.save()
     workspace.name = "😀" * 255
@@ -284,7 +244,7 @@ def test_permission_phase_is_current_and_payload_is_bounded(setup, device):
 def test_attention_targets_its_own_root_among_runs_in_one_workspace(
     setup, device, model, phase
 ):
-    org, user, workspace, session, _, _ = setup
+    org, user, workspace, session, _ = setup
     other = HarnessSession.objects.create(
         workspace=workspace, organization_id=org.id, status="busy", title="Other run"
     )
@@ -310,7 +270,7 @@ def test_attention_targets_its_own_root_among_runs_in_one_workspace(
 
 
 def test_workspace_organization_change_fences_old_notification_scope(setup, device):
-    _, _, workspace, session, message, _ = setup
+    _, _, workspace, session, message = setup
     other = Organization.objects.create(name="Moved workspace", slug="moved-workspace")
     runner = workspace.runner
     runner.organization = other
@@ -382,7 +342,7 @@ def test_transient_delivery_retries_then_acknowledges(setup, device):
 
 @pytest.mark.django_db(transaction=True)
 def test_activity_token_registration_updates_and_ends_in_background(setup, device):
-    org, user, _, session, message, _ = setup
+    org, user, _, session, message = setup
     transport = providers()
     service = NotificationService(providers=transport)
     service.register_activity(
@@ -444,7 +404,7 @@ def test_membership_revocation_and_expired_jobs_never_reach_provider(setup, devi
 
 @pytest.mark.django_db(transaction=True)
 def test_android_alert_keeps_direct_fcm_navigation_data(setup):
-    org, user, _, session, message, _ = setup
+    org, user, _, session, message = setup
     NotificationService().register(
         user,
         org.id,
@@ -467,7 +427,7 @@ def test_android_alert_keeps_direct_fcm_navigation_data(setup):
 
 
 def test_new_opt_in_does_not_replay_earlier_completions(setup, device):
-    org, user, _, _, message, _ = setup
+    org, user, _, _, message = setup
     finish(message)
     service = NotificationService()
     off = DeviceRegistrationIn(platform="ios", app_id="com.opencuria.mobile.dev")
@@ -479,7 +439,7 @@ def test_new_opt_in_does_not_replay_earlier_completions(setup, device):
 
 
 def test_repair_of_missed_attention_is_repeat_safe(setup, device):
-    org, _, workspace, session, _, _ = setup
+    org, _, workspace, session, _ = setup
     PermissionRequest.objects.create(
         organization_id=org.id,
         workspace_id=workspace.id,
@@ -494,17 +454,3 @@ def test_repair_of_missed_attention_is_repeat_safe(setup, device):
         PushDelivery.objects.get(kind="alert").payload["phase"]
         == "waiting_for_approval"
     )
-
-
-def test_configuration_rejects_invalid_key_without_disclosing_secret(setup):
-    org, user, _, _, _, credentials = setup
-    credential = credentials["apns"]
-    from common.utils import encrypt_value
-
-    credential.encrypted_value = encrypt_value('{"private_key":"private-sentinel"}')
-    credential.save()
-    with pytest.raises(ValueError, match="Invalid APNS credential") as error:
-        NotificationService().configure(
-            user, org.id, PushConfigurationIn(apns_credential_id=credential.id)
-        )
-    assert "private-sentinel" not in str(error.value)

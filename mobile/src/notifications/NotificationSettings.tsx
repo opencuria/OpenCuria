@@ -71,7 +71,7 @@ export function NotificationSettings(): React.JSX.Element {
       ) : null}
       {state.ready && state.capabilities && !configured ? (
         <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-          Your organization has not set up mobile notifications yet.
+          This server has not set up mobile notifications yet.
         </Text>
       ) : null}
       {state.notifications && !state.permissionGranted ? (

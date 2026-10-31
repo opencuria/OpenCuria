@@ -230,8 +230,6 @@ def _workspace_credentials_by_service(
     )
     if any(row.service.credential_type == "provider_secret" for row in attached):
         raise ConflictError("Internal provider secrets cannot be used by plugins")
-    if any(row.service.credential_type == "server_secret" for row in attached):
-        raise ConflictError("Server-only credentials cannot be used by plugins")
     by_service: dict[uuid.UUID, object] = {}
     owner_id = getattr(workspace, "created_by_id", None)
     for credential in attached:
@@ -265,13 +263,6 @@ def resolve_plugin_plaintexts(
     req_by_key = {req.key: req for req in plugin.requirements}
     for key, req in req_by_key.items():
         credential = credentials_by_service.get(req.service_id)
-        if (
-            credential is not None
-            and credential.service.credential_type == "server_secret"
-        ):
-            raise PluginCredentialConfigError(
-                "Server-only credentials cannot be rendered by plugins"
-            )
         if credential is None or credential.service.credential_type == "mcp_oauth":
             if req.required:
                 raise PluginCredentialConfigError(

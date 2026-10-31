@@ -10,6 +10,10 @@ services:
     environment: &id002
       DJANGO_ENV: development
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_PRIVATE_KEY_FILE: ${APNS_PRIVATE_KEY_FILE:-}
+      FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
       SQLITE_PATH: /data/db.sqlite3
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
@@ -21,6 +25,7 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes: &id003
     - backend-data:/data
+    - ./secrets/push:/run/secrets:ro
     ports:
     - 127.0.0.1:${BACKEND_PORT:-8000}:8000
     networks: &id004

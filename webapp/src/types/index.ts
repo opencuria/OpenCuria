@@ -349,7 +349,7 @@ export interface Credential {
   service_id: string
   service_name: string
   service_slug: string
-  credential_type: 'env' | 'file' | 'ssh_key' | 'mcp_oauth' | 'server_secret'
+  credential_type: 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
   env_var_name: string
   target_path: string
   has_public_key: boolean

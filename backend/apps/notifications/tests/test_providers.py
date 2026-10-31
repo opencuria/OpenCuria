@@ -10,14 +10,14 @@ from cryptography.hazmat.primitives import serialization
 
 from ..providers import PushProviders
 
-pytestmark = pytest.mark.django_db
+pytestmark = pytest.mark.usefixtures("push_settings")
 
 
 @pytest.mark.parametrize(
     "environment,host",
     [("sandbox", "api.sandbox.push.apple.com"), ("production", "api.push.apple.com")],
 )
-def test_apns_headers_jwt_and_activity_payload(setup, push_keys, environment, host):
+def test_apns_headers_jwt_and_activity_payload(push_keys, environment, host):
     observed = []
 
     def handle(request):
@@ -30,7 +30,6 @@ def test_apns_headers_jwt_and_activity_payload(setup, push_keys, environment, ho
         )
         for _ in range(2):
             result = await provider.send_apns(
-                credential=setup[5]["apns"],
                 token="ab" * 32,
                 app_id="com.opencuria.mobile",
                 environment=environment,
@@ -71,7 +70,7 @@ def test_apns_headers_jwt_and_activity_payload(setup, push_keys, environment, ho
         (403, "InvalidProviderToken", "failed"),
     ],
 )
-def test_apns_error_classification(setup, status, reason, expected):
+def test_apns_error_classification(status, reason, expected):
     async def run():
         provider = PushProviders(
             httpx.AsyncClient(
@@ -81,7 +80,6 @@ def test_apns_error_classification(setup, status, reason, expected):
             )
         )
         result = await provider.send_apns(
-            credential=setup[5]["apns"],
             token="ab" * 32,
             app_id="com.opencuria.mobile",
             environment="production",
@@ -94,7 +92,7 @@ def test_apns_error_classification(setup, status, reason, expected):
     assert asyncio.run(run()).status == expected
 
 
-def test_fcm_uses_fixed_oauth_and_http_v1_and_caches_auth(setup, push_keys):
+def test_fcm_uses_fixed_oauth_and_http_v1_and_caches_auth(push_keys):
     observed = []
 
     def handle(request):
@@ -111,7 +109,6 @@ def test_fcm_uses_fixed_oauth_and_http_v1_and_caches_auth(setup, push_keys):
         )
         for _ in range(2):
             result = await provider.send_fcm(
-                credential=setup[5]["fcm"],
                 token="fcm-device-token",
                 title="Agent finished",
                 body="Conversation",
@@ -144,7 +141,7 @@ def test_fcm_uses_fixed_oauth_and_http_v1_and_caches_auth(setup, push_keys):
         ("SENDER_ID_MISMATCH", "failed"),
     ],
 )
-def test_fcm_does_not_delete_tokens_for_configuration_errors(setup, code, expected):
+def test_fcm_does_not_delete_tokens_for_configuration_errors(code, expected):
     def handle(request):
         if request.url.host == "oauth2.googleapis.com":
             return httpx.Response(200, json={"access_token": "test-token"})
@@ -155,7 +152,6 @@ def test_fcm_does_not_delete_tokens_for_configuration_errors(setup, code, expect
             httpx.AsyncClient(transport=httpx.MockTransport(handle))
         )
         result = await provider.send_fcm(
-            credential=setup[5]["fcm"],
             token="fcm-device-token",
             title="Finished",
             body="Test",

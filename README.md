@@ -199,6 +199,12 @@ root npm workspace. Start with the [mobile developer guide](./mobile/README.md);
 architecture, security and device-network setup are in
 [docs/mobile-app.md](./docs/mobile-app.md).
 
+Native push providers are hosting settings shared by every organization. Configure
+`APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE` and/or
+`FCM_SERVICE_ACCOUNT_FILE` in the backend environment. Keys are read from files at
+startup; Compose mounts `./secrets/push/` read-only at `/run/secrets/`. See
+[mobile notification setup](./docs/mobile-notifications.md).
+
 ## 📦 Images
 
 Published via GHCR:

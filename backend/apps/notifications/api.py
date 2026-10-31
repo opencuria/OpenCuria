@@ -1,4 +1,4 @@
-"""JWT-only mobile registration and organization push-provider configuration."""
+"""JWT-only mobile registration and server-wide push capabilities."""
 
 from __future__ import annotations
 
@@ -18,8 +18,6 @@ from .schemas import (
     DeviceOut,
     DeviceRegistrationIn,
     PushCapabilitiesOut,
-    PushConfigurationIn,
-    PushConfigurationOut,
 )
 from .services import NotificationService
 
@@ -48,33 +46,9 @@ ERRORS = {400: ErrorOut, 403: ErrorOut, 404: ErrorOut}
     "/capabilities/", response={200: PushCapabilitiesOut, **ERRORS}
 )
 def capabilities(request: HttpRequest) -> Any:
-    """Tell native settings which providers the selected organization has configured."""
+    """Tell native settings which providers this server has configured."""
     try:
-        return NotificationService().configuration(request.user, _org_id(request))
-    except (NotFoundError, AuthenticationError, ValueError) as exc:
-        return _error(exc)
-
-
-@notification_router.get(
-    "/configuration/", response={200: PushConfigurationOut, **ERRORS}
-)
-def configuration(request: HttpRequest) -> Any:
-    """Return credential references for organization administrators."""
-    try:
-        return NotificationService().configuration(
-            request.user, _org_id(request), admin=True
-        )
-    except (NotFoundError, AuthenticationError, ValueError) as exc:
-        return _error(exc)
-
-
-@notification_router.put(
-    "/configuration/", response={200: PushConfigurationOut, **ERRORS}
-)
-def configure(request: HttpRequest, payload: PushConfigurationIn) -> Any:
-    """Select existing organization-owned APNs/FCM credentials from the vault."""
-    try:
-        return NotificationService().configure(request.user, _org_id(request), payload)
+        return NotificationService().capabilities(request.user, _org_id(request))
     except (NotFoundError, AuthenticationError, ValueError) as exc:
         return _error(exc)
 

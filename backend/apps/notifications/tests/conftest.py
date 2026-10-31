@@ -9,13 +9,10 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from apps.accounts.auth_backends import DjangoJWTBackend
 from apps.accounts.models import User
-from apps.credentials.models import Credential, CredentialService
 from apps.harness.models import HarnessMessage, HarnessSession
 from apps.organizations.models import Membership, Organization
 from apps.runners.models import Runner, Workspace
-from common.utils import encrypt_value
 
-from ..models import PushConfiguration
 from ..schemas import DeviceRegistrationIn
 from ..services import NotificationService
 
@@ -48,7 +45,21 @@ def push_keys():
 
 
 @pytest.fixture
-def setup(db, push_keys):
+def push_settings(settings, push_keys, tmp_path):
+    """Enable both providers exclusively through hosting key files."""
+    apns_key = tmp_path / "apns.p8"
+    apns_key.write_text(push_keys["apns"]["private_key"], encoding="utf-8")
+    fcm_account = tmp_path / "firebase.json"
+    fcm_account.write_text(json.dumps(push_keys["fcm"]), encoding="utf-8")
+    settings.APNS_TEAM_ID = push_keys["apns"]["team_id"]
+    settings.APNS_KEY_ID = push_keys["apns"]["key_id"]
+    settings.APNS_PRIVATE_KEY_FILE = str(apns_key)
+    settings.FCM_SERVICE_ACCOUNT_FILE = str(fcm_account)
+    return settings
+
+
+@pytest.fixture
+def setup(db, push_settings):
     """Create the same owner/membership boundary used by workspace REST."""
     org = Organization.objects.create(name="Push test", slug=f"push-{uuid.uuid4().hex}")
     user = User.objects.create_user(
@@ -69,30 +80,7 @@ def setup(db, push_keys):
         status="busy",
     )
     message = HarnessMessage.objects.create(session=session, role="assistant")
-    credentials = {}
-    for provider in ("apns", "fcm"):
-        service, _ = CredentialService.objects.get_or_create(
-            slug=f"mobile-push-{provider}",
-            organization=None,
-            defaults={
-                "name": provider,
-                "credential_type": "server_secret",
-                "target_path": f"{provider}.json",
-            },
-        )
-        credentials[provider] = Credential.objects.create(
-            service=service,
-            name=provider,
-            organization=org,
-            created_by=user,
-            encrypted_value=encrypt_value(json.dumps(push_keys[provider])),
-        )
-    PushConfiguration.objects.create(
-        organization=org,
-        apns_credential=credentials["apns"],
-        fcm_credential=credentials["fcm"],
-    )
-    return org, user, workspace, session, message, credentials
+    return org, user, workspace, session, message
 
 
 @pytest.fixture

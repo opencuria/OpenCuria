@@ -1,4 +1,4 @@
-"""Native notification policy, vault configuration and recoverable delivery."""
+"""Native notification policy and recoverable delivery."""
 
 from __future__ import annotations
 
@@ -14,8 +14,6 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from apps.accounts.models import User
-from apps.credentials.models import Credential
-from apps.credentials.services import CredentialSvc
 from apps.harness.conversation_activity_service import (
     ConversationActivity,
     ConversationActivityService,
@@ -24,10 +22,11 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, hash_token
 
-from .models import MobileDevice, PushConfiguration, PushDelivery
-from .providers import DeliveryResult, PushProviders, load_secret
+from .configuration import get_push_settings
+from .models import MobileDevice, PushDelivery
+from .providers import DeliveryResult, PushProviders
 from .repositories import NotificationRepository
-from .schemas import ActivityRegistrationIn, DeviceRegistrationIn, PushConfigurationIn
+from .schemas import ActivityRegistrationIn, DeviceRegistrationIn
 
 log = structlog.get_logger(__name__)
 REGISTRATION_MAX_AGE = timedelta(days=30)
@@ -75,58 +74,12 @@ class NotificationService:
         self.activity = activity or ConversationActivityService()
         self.organizations = organizations or OrganizationService()
         self.providers = providers
+        self.push_settings = get_push_settings()
 
-    def configuration(
-        self, user: User, org_id: uuid.UUID, *, admin: bool = False
-    ) -> dict:
-        """Return setup readiness, exposing credential references only to admins."""
-        self.organizations.require_admin(
-            user, org_id
-        ) if admin else self.organizations.require_membership(user, org_id)
-        config = self.repo.configuration(org_id)
-        apns = self._credential(config, "apns", org_id)
-        fcm = self._credential(config, "fcm", org_id)
-        result = {
-            "ios": apns is not None,
-            "android": fcm is not None,
-            "live_activities": apns is not None,
-        }
-        if admin:
-            result.update(
-                apns_credential_id=apns.id if apns else None,
-                fcm_credential_id=fcm.id if fcm else None,
-            )
-        return result
-
-    def configure(
-        self, user: User, org_id: uuid.UUID, data: PushConfigurationIn
-    ) -> dict:
-        """Only organization admins may select scope-matched vault credentials."""
-        self.organizations.require_admin(user, org_id)
-        credentials = {
-            credential.id: credential
-            for credential in CredentialSvc().list_credentials(user, org_id)
-        }
-        for provider in ("apns", "fcm"):
-            credential_id = getattr(data, f"{provider}_credential_id")
-            if credential_id is None:
-                continue
-            credential = credentials.get(credential_id)
-            if (
-                credential is None
-                or credential.organization_id != org_id
-                or credential.user_id is not None
-            ):
-                raise ValueError("Select an organization-owned push credential")
-            if (
-                credential.service.slug != f"mobile-push-{provider}"
-                or credential.service.organization_id not in {None, org_id}
-                or credential.service.credential_type != "server_secret"
-            ):
-                raise ValueError(f"Select a Mobile Push {provider.upper()} credential")
-            load_secret(credential, provider)
-        self.repo.save_configuration(org_id, **data.model_dump())
-        return self.configuration(user, org_id, admin=True)
+    def capabilities(self, user: User, org_id: uuid.UUID) -> dict[str, bool]:
+        """Return server-wide availability to authenticated organization members."""
+        self.organizations.require_membership(user, org_id)
+        return self.push_settings.capabilities()
 
     def register(
         self,
@@ -136,7 +89,7 @@ class NotificationService:
         data: DeviceRegistrationIn,
     ) -> MobileDevice:
         """Save opt-in without granting access to another user's runs."""
-        capabilities = self.configuration(user, org_id)
+        capabilities = self.capabilities(user, org_id)
         if data.notifications_enabled and not capabilities[data.platform]:
             raise ValueError("Push notifications are not configured for this platform")
         if data.live_activities_enabled and (
@@ -373,10 +326,7 @@ class NotificationService:
                 or source[0].organization_id != device.organization_id
             ):
                 return DeliveryResult("failed", "conversation_unavailable")
-        config = await sync_to_async(self.repo.configuration)(device.organization_id)
-        provider = "apns" if device.platform == "ios" else "fcm"
-        credential = self._credential(config, provider, device.organization_id)
-        if credential is None:
+        if not self.push_settings.capabilities()[device.platform]:
             return DeliveryResult("failed", "provider_not_configured")
         if self.providers is None:
             raise RuntimeError("A push provider client is required for delivery")
@@ -406,7 +356,6 @@ class NotificationService:
             if ending:
                 aps["dismissal-date"] = now
             result = await self.providers.send_apns(
-                credential=credential,
                 token=decrypt_value(device.encrypted_activity_token),
                 app_id=device.app_id,
                 environment=device.apns_environment,
@@ -448,7 +397,6 @@ class NotificationService:
         token = decrypt_value(device.encrypted_push_token)
         if device.platform == "ios":
             result = await self.providers.send_apns(
-                credential=credential,
                 token=token,
                 app_id=device.app_id,
                 environment=device.apns_environment,
@@ -465,7 +413,6 @@ class NotificationService:
             )
         else:
             result = await self.providers.send_fcm(
-                credential=credential,
                 token=token,
                 title=title,
                 body=body,
@@ -478,27 +425,6 @@ class NotificationService:
                 device.id, device.encrypted_push_token
             )
         return result
-
-    @staticmethod
-    def _credential(
-        config: PushConfiguration | None, provider: str, org_id: uuid.UUID
-    ) -> Credential | None:
-        if config is None:
-            return None
-        credential = getattr(config, f"{provider}_credential", None)
-        if (
-            credential is None
-            or credential.organization_id != org_id
-            or credential.user_id is not None
-        ):
-            return None
-        if (
-            credential.service.slug != f"mobile-push-{provider}"
-            or credential.service.organization_id not in {None, org_id}
-            or credential.service.credential_type != "server_secret"
-        ):
-            return None
-        return credential
 
     async def process_one(self) -> bool:
         """Attempt one leased delivery with bounded retries and bounded age."""
@@ -516,7 +442,7 @@ class NotificationService:
             result = DeliveryResult("failed", "invalid_provider_configuration")
         except Exception:
             # Provider/JSON failures must not leak token-bearing request URLs,
-            # signing assertions or encrypted credential contents into logs.
+            # signing assertions or provider configuration into logs.
             log.error("mobile_push_delivery_failed", delivery_id=str(job.id))
             result = DeliveryResult("retry", "delivery_failed")
         retry = result.status == "retry" and job.attempts < 6

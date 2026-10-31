@@ -3,7 +3,39 @@
 Verified in the isolated Linux workspace on 2026-10-26 with Expo SDK 57.
 See [setup and delivery behavior](mobile-notifications.md) for configuration.
 
-## Automated checks
+## Hosting configuration verification (2026-10-31)
+
+The server-wide configuration change was checked separately from the earlier
+native build verification below. Signing keys are loaded exclusively from files
+configured by `APNS_PRIVATE_KEY_FILE` and `FCM_SERVICE_ACCOUNT_FILE`; APNs also
+requires `APNS_TEAM_ID` and `APNS_KEY_ID`. File validation covers missing and
+unreadable files, invalid JSON/PEM, wrong key types, partial APNs settings and
+startup-only reads:
+
+| Check | Result |
+| --- | --- |
+| Organization-removal regression: notifications, credentials, plugins and MCP | 416 passed; 2 existing skips |
+| File-based configuration, notification delivery/migration and ASGI lifespan | 101 passed |
+| Real Django startup: valid files, invalid key, providers disabled | Passed |
+| Changed web settings and credential components | 58 passed |
+| Mobile logic / native notification adapter | 87 / 5 passed |
+| Web/mobile TypeScript, web production build, ESLint and changed Python Ruff | Passed |
+| Django checks and migration drift | Passed |
+| Compose environment wiring and read-only key mounts | Passed |
+
+The populated-database migration test confirms that push configurations, retired
+services, signing credentials, activations and references are deleted. Ordinary
+credentials, workspace attachments, plugins, devices and queued deliveries remain.
+Provider tests sign requests using hosting key files against mock HTTP transports;
+no Apple or Google delivery was attempted. Capabilities are identical across
+organizations, with membership and per-device authorization still enforced.
+
+Headed Playwright checked the real backend with a disposable local admin account:
+no organization push settings tab, no push catalog entries, and no Server-only
+credential type in the service creation dialog. Backend startup and shutdown
+were also checked with both providers disabled.
+
+## Earlier automated checks (2026-10-26)
 
 | Check | Result |
 | --- | --- |
@@ -28,7 +60,7 @@ The notification tests verify native/Claude/Codex completion events, stopped run
 subagent gates, pending-gate and completion repair, idempotency, claimed-job leases,
 fenced acknowledgements, provider retries, token replacement and invalidation,
 account/membership/workspace/organization authorization, stale attention suppression,
-payload limits and server-only vault boundaries. Provider tests verify signed
+payload limits and provider secret boundaries. Provider tests verify signed
 APNs/FCM requests against mock HTTP transports without contacting Apple or Google.
 The iOS alert contract is checked against Expo's native `userInfo["body"]` format;
 Android custom data remains flat FCM data.
@@ -50,23 +82,15 @@ Existing Django/Ninja deprecation warnings were not suppressed.
 
 Built the native Android development APK with the new Expo modules, installed it
 on an isolated read-only API 35 emulator and connected it to the real local backend.
-Verified sign-in, profile/settings rendering, the disabled state for an organization
-without FCM configuration, no unsolicited OS permission prompt, and confirmed
-sign-out returning to the login screen. Native logcat had no remaining runtime
-errors. The disposable account, organization, credentials and workspace were
+Verified sign-in, profile/settings rendering, the disabled state without FCM
+configuration, no unsolicited OS permission prompt, and confirmed sign-out
+returning to the login screen. Native logcat had no remaining runtime
+errors. The disposable account, organization and workspace were
 removed after verification.
 
 The Android check also caught and fixed SDK-specific default channel sound handling.
 Native source inspection caught the token-read event feedback loop; a regression
 test now proves that reading a token causes only one registration.
-
-The web admin settings were checked in headed Playwright against the real backend,
-including selecting an organization vault credential and successful autosave.
-No production credentials or external agent runs were used.
-
-| Android native settings | Organization provider configuration |
-| --- | --- |
-| ![Android notification settings](images/mobile/notification-settings-android.png) | ![Organization push provider settings](images/mobile/notification-providers-web.png) |
 
 The iOS prebuild generated the Expo Widgets extension, matching application groups,
 `NSSupportsLiveActivities` and a valid `aps-environment=development` entitlement.

@@ -4,7 +4,6 @@ import { resolveSettingsTab } from './settingsTabs'
 describe('resolveSettingsTab', () => {
   it.each([
     'general',
-    'notifications',
     'provider',
     'agents',
     'skills',
@@ -21,6 +20,7 @@ describe('resolveSettingsTab', () => {
 
   it('falls back to general for unknown values', () => {
     expect(resolveSettingsTab('nope')).toBe('general')
+    expect(resolveSettingsTab('notifications')).toBe('general')
     expect(resolveSettingsTab(undefined)).toBe('general')
     expect(resolveSettingsTab(null)).toBe('general')
   })

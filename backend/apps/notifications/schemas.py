@@ -41,20 +41,10 @@ class ActivityRegistrationIn(Schema):
     push_token: str = Field(min_length=32, max_length=512, pattern=r"^[a-fA-F0-9]+$")
 
 
-class PushConfigurationIn(Schema):
-    apns_credential_id: uuid.UUID | None = None
-    fcm_credential_id: uuid.UUID | None = None
-
-
 class PushCapabilitiesOut(Schema):
     ios: bool
     android: bool
     live_activities: bool
-
-
-class PushConfigurationOut(PushCapabilitiesOut):
-    apns_credential_id: uuid.UUID | None
-    fcm_credential_id: uuid.UUID | None
 
 
 class DeviceOut(Schema):

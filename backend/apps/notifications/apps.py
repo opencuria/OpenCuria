@@ -10,3 +10,6 @@ class NotificationsConfig(AppConfig):
     def ready(self) -> None:
         """Register consumers without coupling the harness to this app."""
         from . import signals  # noqa: F401
+        from .configuration import get_push_settings
+
+        get_push_settings()

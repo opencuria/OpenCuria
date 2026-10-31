@@ -226,10 +226,10 @@ export class NotificationController {
       );
     if (enabling === "notifications" && !capabilities[this.native.platform])
       throw new Error(
-        "Your organization has not configured push notifications for this device.",
+        "This server has not configured push notifications for this device.",
       );
     if (enabling === "liveActivities" && !capabilities.live_activities)
-      throw new Error("Your organization has not configured Live Activities.");
+      throw new Error("This server has not configured Live Activities.");
     if (enabling === "liveActivities" && !this.live.available)
       throw new Error(
         "Live Activities are unavailable in this build or on this device.",

@@ -1,4 +1,4 @@
-"""ORM operations for mobile destinations, configuration and outbox claims."""
+"""ORM operations for mobile destinations and outbox claims."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from common.exceptions import NotFoundError
 
-from .models import MobileDevice, PushConfiguration, PushDelivery
+from .models import MobileDevice, PushDelivery
 
 
 class NotificationRepository:
@@ -34,24 +34,6 @@ class NotificationRepository:
     def device_exists(device_id: uuid.UUID) -> bool:
         """Recheck that a loaded registration has not been removed."""
         return MobileDevice.objects.filter(id=device_id).exists()
-
-    @staticmethod
-    def configuration(org_id: uuid.UUID) -> PushConfiguration | None:
-        """Load provider credential references, including scope for revalidation."""
-        return (
-            PushConfiguration.objects.select_related(
-                "apns_credential__service", "fcm_credential__service"
-            )
-            .filter(organization_id=org_id)
-            .first()
-        )
-
-    @staticmethod
-    def save_configuration(org_id: uuid.UUID, **fields: Any) -> PushConfiguration:
-        """Replace only provider references; vault contents remain separate."""
-        return PushConfiguration.objects.update_or_create(
-            organization_id=org_id, defaults=fields
-        )[0]
 
     @staticmethod
     def device(device_id: uuid.UUID, user_id: int, org_id: uuid.UUID) -> MobileDevice:
