@@ -1,6 +1,7 @@
 /** Bounded, cancellable microphone lifecycle shared by the voice composer UI. */
 import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 import { fileToBase64 } from '@/lib/chatUpload'
+import { createSecureUuid } from '@/lib/secureUuid'
 import { startPointing, type PointingResult } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
@@ -9,7 +10,22 @@ const MAX_BYTES = 1_500_000
 let microphoneOwner: symbol | null = null
 
 export function voiceSupported(): boolean {
-  return !!globalThis.navigator?.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined'
+  return (
+    typeof globalThis.navigator?.mediaDevices?.getUserMedia === 'function' &&
+    typeof MediaRecorder !== 'undefined'
+  )
+}
+
+/** Explain browser capabilities without imposing a protocol restriction in the app. */
+export function voiceUnavailableReason(): string {
+  if (voiceSupported()) return ''
+  if (
+    globalThis.isSecureContext === false &&
+    typeof globalThis.navigator?.mediaDevices?.getUserMedia !== 'function'
+  ) {
+    return 'Your browser blocks microphone access at this HTTP address. Open OpenCuria via http://localhost or allow this origin in your browser settings.'
+  }
+  return 'This browser does not provide microphone recording. Use a browser with getUserMedia and MediaRecorder support.'
 }
 
 export function useVoiceInput(onResult: (text: string, path?: string) => void) {
@@ -100,10 +116,15 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       return
     }
     if (!voiceSupported()) {
-      error.value = 'Voice input requires HTTPS and a browser with microphone recording support.'
+      error.value = voiceUnavailableReason()
       return
     }
     cancel()
+    const id = createSecureUuid()
+    if (!id) {
+      error.value = 'Secure voice recording IDs are unavailable in this browser.'
+      return
+    }
     const current = generation
     microphoneOwner = owner
     workspaceId = options.workspaceId
@@ -128,7 +149,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
         ...(mimeType ? { mimeType } : {}),
         audioBitsPerSecond: 24_000,
       })
-      recordingId = crypto.randomUUID()
+      recordingId = id
       origin = performance.now()
       durationMs = 0
       elapsedMs.value = 0

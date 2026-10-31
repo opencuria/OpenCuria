@@ -71,6 +71,7 @@ describe('voice pointing', () => {
     unregister = null
     document.body.innerHTML = ''
     activePointingWorkspace.value = null
+    vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
@@ -173,6 +174,27 @@ describe('voice pointing', () => {
     const cancelled = expect(captureDesktopFrame(iframe, abort.signal)).rejects.toThrow('cancelled')
     abort.abort()
     await cancelled
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('captures on HTTP browsers that expose getRandomValues without randomUUID', async () => {
+    vi.stubGlobal('crypto', { getRandomValues: (bytes: Uint8Array) => bytes.fill(255) })
+    const { iframe, send } = viewer()
+    const promise = captureDesktopFrame(iframe, new AbortController().signal)
+    const requestId = send.mock.calls[0]![0].requestId as string
+    expect(requestId).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff')
+    frameReply(iframe, requestId)
+    expect((await promise).type).toBe('image/jpeg')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('fails capture without sending a request when secure randomness is unavailable', async () => {
+    vi.stubGlobal('crypto', undefined)
+    const { iframe, send } = viewer()
+    await expect(captureDesktopFrame(iframe, new AbortController().signal)).rejects.toThrow(
+      'Secure desktop capture IDs are unavailable',
+    )
+    expect(send).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
 

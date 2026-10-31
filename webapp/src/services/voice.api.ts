@@ -7,6 +7,7 @@ export interface VoiceConfig {
   reason?: string
   models: { id: string; name: string }[]
   default_model: string
+  cleanup_model: string
   max_duration_ms: number
   max_audio_bytes: number
 }

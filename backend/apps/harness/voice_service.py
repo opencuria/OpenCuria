@@ -157,7 +157,12 @@ class VoiceService:
             ),
             models[0]["id"] if models else "",
         )
-        return VoiceConfig(available=True, models=models, default_model=preferred)
+        return VoiceConfig(
+            available=True,
+            models=models,
+            default_model=preferred,
+            cleanup_model=model,
+        )
 
     async def transcribe(
         self, organization_id: uuid.UUID, user_id: int, payload: VoiceTranscribeIn

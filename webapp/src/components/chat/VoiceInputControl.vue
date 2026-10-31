@@ -6,7 +6,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Checkbox } from '@/components/ui/checkbox'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import { getVoiceConfig, type VoiceConfig } from '@/services/voice.api'
-import { useVoiceInput, voiceSupported } from '@/composables/useVoiceInput'
+import { useVoiceInput, voiceSupported, voiceUnavailableReason } from '@/composables/useVoiceInput'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
 import type { ProviderModel } from '@/lib/harnessModels'
 
@@ -19,6 +19,7 @@ const loading = ref(false)
 const model = ref('')
 const pointing = ref(false)
 const supported = voiceSupported()
+const unavailableReason = voiceUnavailableReason()
 const voice = useVoiceInput((text, path) => emit('result', text, path))
 const { state, error, warning, elapsedMs, busy, pointingFailed } = voice
 const models = computed<ProviderModel[]>(() =>
@@ -96,7 +97,7 @@ onBeforeUnmount(() => {
   if (voiceCaptureControls.value?.cancel === voice.cancel) voiceCaptureControls.value = null
 })
 async function start(): Promise<void> {
-  if (props.disabled || !config.value?.available || !model.value.trim()) return
+  if (!supported || props.disabled || !config.value?.available || !model.value.trim()) return
   open.value = false
   await voice.start({
     workspaceId: props.workspaceId,
@@ -140,9 +141,9 @@ async function start(): Promise<void> {
       <PopoverContent align="end" side="top" class="w-80 space-y-3" @open-auto-focus.prevent>
         <div class="text-sm font-medium">Voice input</div>
         <p v-if="!supported" class="text-xs text-muted-foreground">
-          Requires HTTPS and a browser with microphone recording support.
+          {{ unavailableReason }}
         </p>
-        <div v-else-if="loading" class="flex items-center gap-2 text-xs text-muted-foreground">
+        <div v-if="loading" class="flex items-center gap-2 text-xs text-muted-foreground">
           <Loader2 :size="14" class="animate-spin" /> Loading voice settings…
         </div>
         <template v-else>
@@ -159,6 +160,14 @@ async function start(): Promise<void> {
               variant="field"
               default-model-label="Speech model"
             />
+            <p
+              v-if="config.cleanup_model"
+              class="break-all text-xs text-muted-foreground"
+              data-testid="voice-cleanup-model"
+            >
+              Text cleanup: {{ config.cleanup_model }} · Settings → Provider &amp; Models → Small Model (Build
+              default if unset).
+            </p>
             <label class="flex cursor-pointer items-center gap-2 text-sm">
               <Checkbox :model-value="pointing" @update:model-value="pointing = $event === true" />
               Record pointing too
@@ -170,7 +179,7 @@ async function start(): Promise<void> {
                   : 'Filler words are removed and punctuation is added. Review the text before sending.'
               }}
             </p>
-            <Button class="w-full" size="sm" :disabled="!model.trim()" @click="start"
+            <Button class="w-full" size="sm" :disabled="!supported || !model.trim()" @click="start"
               ><Mic :size="14" /> Start dictating</Button
             >
             <p class="text-xs text-muted-foreground">

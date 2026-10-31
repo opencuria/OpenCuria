@@ -408,6 +408,42 @@ def test_cleanup_model_falls_back_to_build(organization) -> None:
     assert VoiceService._cleanup_model(organization.id) == ("openrouter/test", "low")
 
 
+@pytest.mark.parametrize(
+    "small_model,expected",
+    [("openrouter/small", "openrouter/small"), ("", "openrouter/build")],
+)
+async def test_voice_config_exposes_effective_cleanup_model(
+    monkeypatch, small_model: str, expected: str
+) -> None:
+    """The composer shows the model actually chosen by the existing fallback."""
+    monkeypatch.setattr(
+        "apps.harness.voice_service.ProviderConfigRepository.get_by_org",
+        lambda org: SimpleNamespace(small_model=small_model, small_effort="low"),
+    )
+    monkeypatch.setattr(
+        "apps.harness.voice_service.AgentConfigRepository.get_by_org_agent",
+        lambda org, agent: SimpleNamespace(model="openrouter/build", effort="high"),
+    )
+    provider = SimpleNamespace(
+        models=AsyncMock(
+            return_value=[{"id": "openrouter/speech", "name": "Speech"}]
+        )
+    )
+    service = VoiceService(provider)
+    monkeypatch.setattr(
+        service,
+        "_accounts",
+        lambda *args: {"openrouter": VoiceAccount("openrouter", "secret")},
+    )
+
+    config = await service.config(uuid.uuid4(), 1)
+
+    assert config.available
+    assert config.cleanup_model == expected
+    assert config.default_model == "openrouter/speech"
+    assert "secret" not in config.model_dump_json()
+
+
 def test_partial_provider_segments_keep_all_speech() -> None:
     """Timing metadata covering only part of a transcript cannot lose its rest."""
     segments, timing = VoiceService._segments(

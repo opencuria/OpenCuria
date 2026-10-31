@@ -4,7 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import VoiceInputControl from './VoiceInputControl.vue'
 import VoiceCaptureBar from './VoiceCaptureBar.vue'
 import { getVoiceConfig, type VoiceConfig } from '@/services/voice.api'
-import { voiceSupported } from '@/composables/useVoiceInput'
+import { voiceSupported, voiceUnavailableReason } from '@/composables/useVoiceInput'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
 
 let deliverResult: (text: string, path?: string) => void
@@ -13,6 +13,7 @@ let voice: ReturnType<typeof makeVoice>
 vi.mock('@/services/voice.api', () => ({ getVoiceConfig: vi.fn() }))
 vi.mock('@/composables/useVoiceInput', () => ({
   voiceSupported: vi.fn(() => true),
+  voiceUnavailableReason: vi.fn(() => ''),
   useVoiceInput: (callback: typeof deliverResult) => { deliverResult = callback; return voice },
 }))
 
@@ -29,7 +30,7 @@ function makeVoice() {
   }
 }
 const config: VoiceConfig = {
-  available: true, default_model: 'openrouter/openai/whisper-1',
+  available: true, default_model: 'openrouter/openai/whisper-1', cleanup_model: 'openrouter/cleanup-model',
   models: [{ id: 'openrouter/openai/whisper-1', name: 'Whisper' }],
   max_duration_ms: 300_000, max_audio_bytes: 20 * 1024 * 1024,
 }
@@ -69,6 +70,7 @@ beforeEach(() => {
   voice = makeVoice()
   voiceCaptureControls.value = null
   vi.mocked(voiceSupported).mockReturnValue(true)
+  vi.mocked(voiceUnavailableReason).mockReturnValue('')
   vi.mocked(getVoiceConfig).mockResolvedValue(config)
   vi.stubGlobal('ResizeObserver', class { observe = vi.fn(); unobserve = vi.fn(); disconnect = vi.fn() })
 })
@@ -87,6 +89,7 @@ describe('VoiceInputControl', () => {
     await open(wrapper)
     expect(getVoiceConfig).toHaveBeenCalledWith('workspace-1', expect.any(AbortSignal))
     expect(document.body.textContent).toContain('Filler words are removed')
+    expect(document.body.querySelector('[data-testid="voice-cleanup-model"]')?.textContent).toContain(config.cleanup_model)
     expect(document.querySelector('[role="checkbox"]')?.getAttribute('aria-checked')).toBe('false')
     namedButton('Start dictating').click()
     await flushPromises()
@@ -156,12 +159,18 @@ describe('VoiceInputControl', () => {
     expect(voice.start).not.toHaveBeenCalled()
   })
 
-  it('explains unsupported browsers', async () => {
+  it('keeps model settings visible when this browser blocks microphone access', async () => {
     vi.mocked(voiceSupported).mockReturnValue(false)
+    vi.mocked(voiceUnavailableReason).mockReturnValue('Your browser blocks microphone access at this HTTP address. Open via http://localhost.')
     const wrapper = create()
     await open(wrapper)
-    expect(document.body.textContent).toContain('Requires HTTPS')
-    expect(document.body.textContent).not.toContain('Start dictating')
+    expect(document.body.textContent).toContain('http://localhost')
+    expect(document.body.querySelector('[aria-label="Speech model"]')).not.toBeNull()
+    expect(document.body.querySelector('[data-testid="voice-cleanup-model"]')?.textContent).toContain(config.cleanup_model)
+    const button = namedButton('Start dictating')
+    expect(button.disabled).toBe(true)
+    button.click()
+    expect(voice.start).not.toHaveBeenCalled()
   })
 
   it('cancels on workspace or chat navigation and ignores stale settings', async () => {

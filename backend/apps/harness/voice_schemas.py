@@ -26,6 +26,7 @@ class VoiceConfig(Schema):
     available: bool
     models: list[VoiceModel] = Field(default_factory=list)
     default_model: str = ""
+    cleanup_model: str = ""
     reason: str = ""
     max_duration_ms: int = MAX_DURATION_MS
     max_audio_bytes: int = MAX_AUDIO_BYTES

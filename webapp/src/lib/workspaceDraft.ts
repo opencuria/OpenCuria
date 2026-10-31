@@ -1,3 +1,5 @@
+import { createSecureUuid } from './secureUuid'
+
 export const WORKSPACE_DRAFT_TTL_MS = 60 * 60 * 1000
 const DRAFT_PREFIX = 'opencuria:workspace-draft:'
 const ACTIVE_DRAFT_KEY = 'opencuria:workspace-draft-active'
@@ -140,20 +142,6 @@ function isWorkspaceDraftFields(value: unknown): value is WorkspaceDraftFields {
   return true
 }
 
-function createSecureDraftId(): string | null {
-  try {
-    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
-    if (!globalThis.crypto?.getRandomValues) return null
-    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
-    bytes[6] = (bytes[6]! & 0x0f) | 0x40
-    bytes[8] = (bytes[8]! & 0x3f) | 0x80
-    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-  } catch {
-    return null
-  }
-}
-
 function isDraft(value: unknown): value is WorkspaceDraft {
   if (!isRecord(value) || Object.keys(value).some((key) => !DRAFT_KEYS.has(key))) return false
   return (
@@ -186,7 +174,7 @@ export function saveWorkspaceDraft(
   if (!String(identity.userId).trim() || !identity.organizationId) {
     return { id: '', error: 'Sign in and choose an organization before saving a workspace draft.' }
   }
-  const id = createSecureDraftId()
+  const id = createSecureUuid()
   if (!id) return { id: '', error: 'Secure workspace draft IDs are unavailable in this browser.' }
   const safeFields: WorkspaceDraftFields = {
     ...fields,

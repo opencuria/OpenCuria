@@ -27,7 +27,6 @@ requires an explicit choice to use the dictation without visual artifacts.
 Each recording is limited to five minutes and 1,500,000 audio bytes. The browser
 requests 24 kbit/s audio; a browser-selected codec or bitrate can reach the byte
 limit sooner. Recognition and cleanup each have a 65-second total timeout.
-Microphone recording requires a secure browser context (HTTPS or localhost).
 Audio is sent to the selected speech provider; text cleanup uses the configured
 text provider. Desktop screenshots are stored in the workspace.
 
@@ -39,6 +38,72 @@ the transcript explicitly records
 does not support precise sentence-to-pointer alignment; select a model with
 structured timing when that precision is needed.
 
+
+### Models used
+
+There are two independent model choices. Both are shown in the microphone's
+settings, including the effective text-cleanup model:
+
+- **Speech model:** select it in the microphone's settings. OpenRouter models are
+  discovered through its transcription catalog. OpenCuria prefers
+  `openrouter/openai/whisper-large-v3` when listed, otherwise the first available
+  speech model. The OpenAI-compatible default is `openai-compatible/whisper-1`.
+  A custom provider/model ID can be entered through the shared model picker.
+  The choice currently lasts for this composer instance; it is not an
+  organization-wide saved speech default.
+- **Text cleanup:** **Settings → Provider & Models → Small Model**. If unset, OpenCuria
+  uses the default **Build** agent model. The current chat's model selection does
+  not override this. Provider accounts supply credentials server-side.
+
+### Running over HTTP
+
+OpenCuria does not impose an HTTPS check. It uses the microphone APIs exposed
+by the browser. HTTP can work, but the browser decides whether an origin may
+request microphone access:
+
+- `http://localhost` and `http://127.0.0.1` are trusted browser contexts and work
+  over HTTP with the normal microphone permission prompt.
+- On a regular HTTP LAN hostname or IP, browsers block microphone APIs by
+  default. Webapp code and server response headers cannot grant that access.
+- Chrome/Chromium can explicitly trust your chosen HTTP origin: open
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, enter the exact
+  origin including the port (for example `http://192.168.1.20:8080`), enable the
+  setting, and relaunch. Then grant microphone permission normally. Alternatively
+  start a separate browser instance/profile with
+  `--unsafely-treat-insecure-origin-as-secure=http://192.168.1.20:8080`.
+  This exception changes the browser's security treatment of that origin; it
+  does not encrypt HTTP traffic. Configure only your intended OpenCuria origin.
+
+A server can also be reached through local port forwarding without deploying
+HTTPS. For the default local `compose.yml` configuration, run this on the
+computer whose microphone you want to use:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 -L 8000:127.0.0.1:8000 user@server
+```
+
+Then open `http://127.0.0.1:8080`. Both ports are forwarded because this Compose
+configuration points API and WebSocket traffic at `127.0.0.1:8000`. Adapt ports
+if changed. Other deployments with fixed public API/WebSocket URLs also need
+those URLs, CORS and Socket.IO allowed origins configured for the local browser
+address. A tunnel alone does not rewrite them.
+
+Browsers that separately permit microphone APIs on HTTP may still omit
+`crypto.randomUUID`. Recording IDs and desktop frame request IDs use
+`crypto.getRandomValues` as a fallback. No protocol-based gate overrides an
+available microphone API. Model settings remain visible when microphone access
+is blocked, and the UI explains the browser restriction.
+
+Verification included Chromium on an HTTP non-loopback hostname with the
+origin exception enabled and a browser-provided fake microphone. It returned a
+nonempty MediaRecorder audio blob. A separate component browser check used HTTP
+loopback, synthetic audio and mocked providers with `crypto.randomUUID` removed;
+it completed recording and inserted text. Neither check exercised physical
+microphone hardware or billable model requests.
+
+See [MDN getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia),
+[MDN secure contexts](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Secure_Contexts),
+and [Chromium's HTTP-origin exception](https://new.chromium.org/Home/chromium-security/deprecating-powerful-features-on-insecure-origins/).
 
 ### Saved artifact format
 

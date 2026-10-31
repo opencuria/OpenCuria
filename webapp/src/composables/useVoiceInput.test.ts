@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
-import { useVoiceInput } from './useVoiceInput'
+import { useVoiceInput, voiceSupported, voiceUnavailableReason } from './useVoiceInput'
 import { fileToBase64 } from '@/lib/chatUpload'
 import { startPointing } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
@@ -102,6 +102,49 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+describe('voice browser capabilities', () => {
+  it('records when microphone APIs are available even in a browser-approved insecure context without randomUUID', async () => {
+    vi.stubGlobal('isSecureContext', false)
+    const getRandomValues = globalThis.crypto.getRandomValues.bind(globalThis.crypto)
+    vi.stubGlobal('crypto', { getRandomValues })
+    expect(voiceSupported()).toBe(true)
+    expect(voiceUnavailableReason()).toBe('')
+    const { voice } = create()
+    await voice.start({ ...options, pointing: true })
+    expect(voice.state.value).toBe('recording')
+    expect(startPointing).toHaveBeenCalledWith('workspace-1', expect.stringMatching(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/), expect.any(Number))
+  })
+
+  it('explains the HTTP browser restriction before requesting microphone access', async () => {
+    vi.stubGlobal('isSecureContext', false)
+    vi.stubGlobal('navigator', {})
+    expect(voiceSupported()).toBe(false)
+    expect(voiceUnavailableReason()).toContain('http://localhost')
+    const { voice } = create()
+    await voice.start(options)
+    expect(voice.error.value).toContain('browser blocks microphone')
+    expect(voice.state.value).toBe('idle')
+    expect(getUserMedia).not.toHaveBeenCalled()
+  })
+
+  it('reports missing cryptography before reserving or opening the microphone', async () => {
+    vi.stubGlobal('crypto', {})
+    const { voice } = create()
+    await voice.start(options)
+    expect(voice.error.value).toContain('Secure voice recording IDs are unavailable')
+    expect(getUserMedia).not.toHaveBeenCalled()
+    expect(voice.state.value).toBe('idle')
+  })
+
+  it('reports missing recording APIs without claiming HTTPS is required', () => {
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('MediaRecorder', undefined)
+    expect(voiceSupported()).toBe(false)
+    expect(voiceUnavailableReason()).toContain('MediaRecorder')
+    expect(voiceUnavailableReason()).not.toContain('HTTPS')
+  })
 })
 
 describe('useVoiceInput microphone lifecycle', () => {

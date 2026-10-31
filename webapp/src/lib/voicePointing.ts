@@ -4,6 +4,7 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { sendFilesUpload } from '@/services/socket'
 import { fileToBase64 } from '@/lib/chatUpload'
 import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
+import { createSecureUuid } from '@/lib/secureUuid'
 
 export interface PointerTarget {
   kind: 'image' | 'desktop'
@@ -74,7 +75,11 @@ function workspaceImagePath(path: string | undefined): path is string {
 /** Request a JPEG from the authenticated viewer, accepting only this frame and origin. */
 export function captureDesktopFrame(iframe: HTMLIFrameElement, signal: AbortSignal): Promise<Blob> {
   return new Promise((resolve, reject) => {
-    const requestId = crypto.randomUUID()
+    const requestId = createSecureUuid()
+    if (!requestId) {
+      reject(new Error('Secure desktop capture IDs are unavailable in this browser.'))
+      return
+    }
     const finish = (error?: Error, blob?: Blob): void => {
       clearTimeout(timer)
       window.removeEventListener('message', onMessage)
