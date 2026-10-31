@@ -18,8 +18,26 @@ def fence_unknown_child(
     request, ws: Workspace, child: Task, command: LifecycleCommand
 ) -> tuple[bool, dict | None]:
     """Fence an ambiguous child; return (fenced, notification-if-changed)."""
-    if not (command.phase == "intervention" or ws.current_task_id):
+    if not (
+        command.phase in {"intervention", "attention_required"} or ws.current_task_id
+    ):
         return False, None
+    if command.phase == "attention_required":
+        # A coordinator tick cannot downgrade an explicit storage repair blocker
+        # to generic uncertainty. Inspection still owns releasing this child.
+        changed = request.diagnostic != child.error
+        if changed:
+            request.diagnostic = child.error
+            request.save(update_fields=["diagnostic"])
+        return True, (
+            {
+                "workspace_id": str(ws.id),
+                "phase": "attention_required",
+                "diagnostic": child.error,
+            }
+            if changed
+            else None
+        )
     changed = request.diagnostic != UNKNOWN_CHILD_DIAGNOSTIC
     OperationRepository.intervene(child, UNKNOWN_CHILD_DIAGNOSTIC)
     ws.current_task = child

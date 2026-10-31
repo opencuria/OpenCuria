@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -968,7 +969,9 @@ class ScheduledTaskScheduler:
         self._lease = None
         self._started = False
 
-    async def start(self) -> None:
+    async def start(
+        self, *, before_dispatch: Callable[[], Awaitable[None]] | None = None
+    ) -> None:
         """Acquire process ownership before recovery and start one scheduler."""
         if self._started:
             return
@@ -985,6 +988,8 @@ class ScheduledTaskScheduler:
         try:
             await sync_to_async(self.recovery.recover_backend_restart)()
             await self.service.skip_due_on_startup()
+            if before_dispatch is not None:
+                await before_dispatch()
         except BaseException:
             try:
                 await asyncio.shield(lease.release())

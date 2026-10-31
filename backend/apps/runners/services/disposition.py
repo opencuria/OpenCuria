@@ -12,6 +12,7 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from ..disposition_repository import DispositionRepository, DispositionState
+from ..operations import OperationRepository
 from .operation_results import apply_result
 
 #: API-key scope a retry needs, per retryable lifecycle task type.
@@ -20,6 +21,7 @@ RETRY_PERMISSIONS = {
     "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
     "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
 }
+RECOVERY_BLOCKED_CODES = {"publication_ownership_conflict"}
 
 
 class DispositionService:
@@ -46,9 +48,50 @@ class DispositionService:
             or row.runner.sid != sid
             or not row.runner.is_online
             or any(identity.get(k) != v for k, v in row.identity.items())
-            or evidence.get("status") != "terminal"
             or not evidence.get("instance_id")
+        ):
+            return False
+        blocked_code = evidence.get("recovery_blocked_code")
+        if blocked_code is not None:
+            diagnostic = evidence.get("diagnostic")
+            if (
+                not isinstance(blocked_code, str)
+                or blocked_code not in RECOVERY_BLOCKED_CODES
+                or row.task_type not in {"build_image", "create_image_artifact"}
+                or not isinstance(diagnostic, str)
+                or not diagnostic.strip()
+                or not isinstance(evidence.get("instance_id"), str)
+                or evidence.get("status") != "unknown"
+                or evidence.get("execution_finished") is not False
+                or evidence.get("quiescent") is not False
+            ):
+                return False
+            diagnostic = (
+                f"Automatic recovery blocked ({blocked_code}): "
+                + diagnostic.strip()[:1000]
+            )
+            changed = OperationRepository.require_attention(
+                runner_id, sid, identity, diagnostic
+            )
+            if changed and row.workspace_id:
+                workspace_id = str(row.workspace_id)
+                service._forward_workspace_operation(workspace_id, None)
+                service._forward_to_frontend(
+                    "workspace:error",
+                    {"workspace_id": workspace_id, "error": diagnostic},
+                    workspace_id,
+                )
+            return changed
+        if (
+            evidence.get("status") != "terminal"
             or evidence.get("execution_finished") is not True
+            or (
+                row.legacy_credentials
+                and (
+                    evidence.get("durable_credentials") is not True
+                    or evidence.get("legacy_credential_quiesced") is not True
+                )
+            )
         ):
             return False
         if evidence.get("outcome_known") is True:
@@ -109,7 +152,8 @@ class DispositionService:
             "target": state.identity["target"],
             "attempt": state.identity["attempt"],
             "diagnostic": state.diagnostic,
-            "intervention_required": state.phase == "intervention",
+            "intervention_required": state.phase
+            in {"intervention", "attention_required"},
         }
 
     @staticmethod
@@ -151,6 +195,11 @@ class DispositionService:
     @staticmethod
     def _dispose(state: DispositionState, evidence: dict, action: str) -> dict:
         """Revalidate a preauthorized disposition and apply it atomically."""
+        if state.legacy_credentials and (
+            evidence.get("durable_credentials") is not True
+            or evidence.get("legacy_credential_quiesced") is not True
+        ):
+            raise ConflictError("Credential recovery requires an upgraded runner")
         if (
             not evidence.get("instance_id")
             or not evidence.get("execution_finished")
@@ -238,6 +287,10 @@ class DispositionService:
                     "create_workspace_from_image_artifact",
                 }:
                     workspace_status = "failed"
+                elif (
+                    current.legacy_credentials and current.workspace_status == "deleted"
+                ):
+                    workspace_status = "deleted"
                 elif current.task_type == "remove_workspace":
                     workspace_status = (
                         "failed"
@@ -246,7 +299,15 @@ class DispositionService:
                     )
             repository.release(
                 workspace_status,
-                evidence.get("credentials_present") if automatic else None,
+                (
+                    evidence.get("credentials_present")
+                    if isinstance(evidence.get("credentials_present"), bool)
+                    else True
+                    if current.task_type == "inject_credentials"
+                    else None
+                )
+                if automatic
+                else None,
                 observed_status=evidence.get("workspace_status"),
             )
             if action == "retry":
@@ -296,7 +357,14 @@ class DispositionService:
             evidence = await transport._call_runner(
                 row.runner,
                 "operation:inspect",
-                row.identity,
+                {
+                    **row.identity,
+                    **(
+                        {"legacy_credential_sync": True}
+                        if row.legacy_credentials
+                        else {}
+                    ),
+                },
                 timeout=60,
             )
             # Recheck connection binding after RPC: old SID responses cannot resolve.
@@ -382,7 +450,14 @@ class DispositionService:
             evidence = await transport._call_runner(
                 row.runner,
                 "operation:seal",
-                row.identity,
+                {
+                    **row.identity,
+                    **(
+                        {"legacy_credential_sync": True}
+                        if row.legacy_credentials
+                        else {}
+                    ),
+                },
                 timeout=60,
             )
             if evidence.get("status") != "terminal":

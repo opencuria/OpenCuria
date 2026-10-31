@@ -348,6 +348,36 @@ async def test_create_harness_accessor_rejects_unknown_workspace() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("fence", ["failed", "capturing_image", "resetting"])
+async def test_recovery_accessor_only_releases_lease_across_interaction_fence(
+    harness_workspace, fence
+) -> None:
+    """Cleanup can settle a failed VM without admitting new live interaction."""
+    from common.exceptions import ConflictError
+
+    workspace = harness_workspace
+    if fence == "failed":
+        workspace.status = fence
+    else:
+        workspace.active_operation = fence
+    workspace.save(update_fields=["status", "active_operation"])
+    service = _RecordingRunnerService()
+    with pytest.raises(ConflictError):
+        await create_harness_accessor(service, str(workspace.id))
+    accessor = await create_harness_accessor(
+        service, str(workspace.id), allow_lease_cleanup=True
+    )
+    await accessor.desktop_action("release", {"lease_id": str(uuid.uuid4())})
+    assert service.emitted[-1][1] == "harness:desktop_action"
+    assert service.emitted[-1][2]["action"] == "release"
+    with pytest.raises(ConflictError):
+        await accessor.list_dir("/workspace")
+    with pytest.raises(ConflictError):
+        await accessor.desktop_action("reserve", {})
+    assert len(service.emitted) == 1
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_emit_fails_when_runner_goes_offline_mid_run(harness_workspace) -> None:
     """A later emit surfaces a tool-level accessor error if the runner drops."""
     from apps.runners.enums import RunnerStatus

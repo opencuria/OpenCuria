@@ -5,6 +5,13 @@ safe when it preserves the previous usable image, retains owned storage, and
 leaves a retryable failure or a temporary automatic recovery fence. A timeout or lost
 connection is never sufficient evidence to repeat an unknown destructive effect.
 
+The current responsibility/state contract and follow-up fixes are documented in
+[the 2026-10-31 recovery audit](testing/lifecycle-recovery-audit-2026-10-31.md).
+Automatic interruption recovery appears as **Recovering** in active activity;
+ordinary failed deletion appears in history. Proven storage/record inconsistencies
+require administrator repair; a changed destructive dependency approval requires
+an explicit decision. Both are separate from transient automatic recovery.
+
 ## Concurrency and resource admission
 
 Workspace creation, resume, resource updates and capture/recreate allocation

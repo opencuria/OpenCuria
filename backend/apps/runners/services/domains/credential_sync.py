@@ -128,8 +128,6 @@ class CredentialSyncMixin:
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
-        key = (str(runner.id), str(workspace.id))
-
         if resolved is None:
             fresh = await sync_to_async(self.workspaces.get_by_id)(workspace.id)
             if fresh is None:
@@ -145,9 +143,6 @@ class CredentialSyncMixin:
                 workspace
             )
 
-        if not wait and key in self._pending_credential_inject:
-            return None
-
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(
             task_id=task_id,
@@ -155,7 +150,6 @@ class CredentialSyncMixin:
             task_type=TaskType.INJECT_CREDENTIALS,
             workspace=workspace,
         )
-        self._pending_credential_inject.add(key)
         payload = {
             "task_id": str(task_id),
             "workspace_id": str(workspace.id),
@@ -170,38 +164,50 @@ class CredentialSyncMixin:
                     payload,
                     timeout=_CREDENTIAL_INJECT_TIMEOUT_SECONDS,
                 )
-                if response.get("ok") is False:
-                    error = str(response.get("error") or "Credential inject failed")
-                    self._pending_credential_inject.discard(key)
-                    await sync_to_async(self.tasks.fail)(task, error)
-                    raise ConflictError(error)
-                # Only an explicit runner disk-state acknowledgement updates
-                # the flag. A successful RPC without that field is not proof.
+                # An ACK is another delivery of the exact journal result. Use
+                # the common callback boundary; never complete an unbound task
+                # or infer credential state from RPC success alone.
+                identity = response.get("_operation_identity")
                 acknowledged_present = response.get("credentials_present")
-                workspace = await sync_to_async(self.workspaces.get_by_id)(workspace.id)
-                if isinstance(acknowledged_present, bool):
-                    workspace = await sync_to_async(
-                        self.workspaces.update_credentials_present
-                    )(workspace, acknowledged_present)
-                await sync_to_async(self.tasks.complete)(task)
-                self._pending_credential_inject.discard(key)
-                self._forward_workspace_status(workspace, task_id=str(task_id))
-                if isinstance(acknowledged_present, bool):
+                accepted = False
+                if isinstance(identity, dict) and (
+                    response.get("ok") is False
+                    or isinstance(acknowledged_present, bool)
+                ):
+                    accepted = await sync_to_async(self.apply_operation_result)(
+                        str(runner.id),
+                        "workspace:error"
+                        if response.get("ok") is False
+                        else "workspace:credentials_injected",
+                        {
+                            "task_id": str(task.id),
+                            "workspace_id": str(workspace.id),
+                            "credentials_present": acknowledged_present,
+                            "execution_finished": True,
+                            "outcome_known": response.get("outcome_known", True)
+                            if response.get("ok") is not False
+                            else response.get("outcome_known", False),
+                            "error": str(
+                                response.get("error") or "Credential inject failed"
+                            ),
+                            **identity,
+                        },
+                    )
+                if response.get("ok") is False:
+                    raise ConflictError(
+                        str(response.get("error") or "Credential inject failed")
+                    )
+                if accepted and isinstance(acknowledged_present, bool):
                     return acknowledged_present
                 return None
 
-            await self._emit_to_runner(
-                runner,
-                "task:inject_credentials",
-                payload,
-            )
+            await self._emit_to_runner(runner, "task:inject_credentials", payload)
             await sync_to_async(self.tasks.mark_in_progress)(task)
             return None
-        except ConflictError:
-            raise
         except Exception as exc:
-            self._pending_credential_inject.discard(key)
-            await sync_to_async(self.tasks.fail)(task, str(exc))
+            # The durable command keeps the workspace fence on transport loss.
+            # A late secret write must settle or be sealed before capture/reset.
+            # Delivery/recovery resolves the task after backend/runner restart.
             if wait:
                 raise ConflictError(
                     f"Failed to apply credentials to the running workspace: {exc}"
@@ -246,11 +252,14 @@ class CredentialSyncMixin:
             return
 
         workspace = task.workspace
-        if task.status == TaskStatus.COMPLETED:
-            if workspace:
-                self._pending_credential_inject.discard(
-                    (str(workspace.runner_id), str(workspace.id))
-                )
+        if (
+            task.type != TaskType.INJECT_CREDENTIALS
+            or str(task.workspace_id) != workspace_id
+            or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+            or not isinstance(credentials_present, bool)
+            or workspace is None
+            or workspace.current_task_id != task.id
+        ):
             return
 
         if workspace:

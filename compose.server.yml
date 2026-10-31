@@ -46,6 +46,7 @@ services:
         condition: service_healthy
     environment: &backend_environment
       DJANGO_ENV: production
+      BACKEND_PROCESS_LOCK_PATH: /var/lib/opencuria/backend/process.lock
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
@@ -70,6 +71,7 @@ services:
       DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-}
       DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
     volumes: &backend_volumes
+    - backend-runtime:/var/lib/opencuria/backend
     - ./secrets/push:/run/secrets:ro
     ports:
     - ${BACKEND_PORT:-8000}:8000
@@ -112,6 +114,7 @@ services:
       backend:
         condition: service_healthy
 volumes:
+  backend-runtime: null
   pgdata: null
   redisdata: null
 networks:

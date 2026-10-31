@@ -8,6 +8,7 @@ websocket's durable workspace state.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import uuid
 from collections.abc import Awaitable, Callable
@@ -66,6 +67,8 @@ class WorkspaceLifecycle:
         background: Any | None = None,
         streams: Any | None = None,
         desktop: Any | None = None,
+        *,
+        repo_clone_timeout: float = 1800,
     ) -> None:
         self.capture_fence: CaptureFence | None = None
         self.checkpoint_hook = None
@@ -80,6 +83,7 @@ class WorkspaceLifecycle:
         self._background = background
         self._streams = streams
         self._desktop = desktop
+        self._repo_clone_timeout = repo_clone_timeout
 
     async def _confirm_workspace_ended(
         self, info: WorkspaceInfo, operation: str
@@ -227,9 +231,29 @@ class WorkspaceLifecycle:
 
         for repo_url in repos:
             log.info("cloning_repo", repo=repo_url)
-            exit_code, stdout, stderr = await self._exec_harness_command(
-                workspace_id, ["git", "clone", repo_url]
-            )
+            # Bound the guest process itself: cancelling SSH only abandons the
+            # wait and cannot prove that git stopped writing to the disk.
+            try:
+                exit_code, stdout, stderr = await asyncio.wait_for(
+                    self._exec_harness_command(
+                        workspace_id,
+                        [
+                            "timeout",
+                            "--kill-after=10s",
+                            f"{self._repo_clone_timeout:g}s",
+                            "env",
+                            "GIT_TERMINAL_PROMPT=0",
+                            "git",
+                            "clone",
+                            repo_url,
+                        ],
+                    ),
+                    timeout=self._repo_clone_timeout + 15,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    "Repository clone did not return after its execution limit"
+                ) from exc
             if exit_code != 0:
                 log.warning("repo_clone_failed", repo=repo_url, output=stdout + stderr)
             else:

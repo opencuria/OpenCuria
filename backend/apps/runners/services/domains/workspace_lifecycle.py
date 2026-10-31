@@ -1075,6 +1075,7 @@ class WorkspaceLifecycleMixin:
         if workspace and task.type in {
             TaskType.RESUME_WORKSPACE,
             TaskType.STOP_WORKSPACE,
+            TaskType.INJECT_CREDENTIALS,
         }:
             status = {
                 "running": WorkspaceStatus.RUNNING,

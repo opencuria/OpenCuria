@@ -237,6 +237,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         return 'Resetting…'
       case WorkspaceOperation.UPDATING:
         return 'Updating…'
+      case WorkspaceOperation.SYNCHRONIZING_CREDENTIALS:
+        return 'Syncing credentials…'
     }
 
     const pending = pendingWorkspaceOperations.value[workspaceId]

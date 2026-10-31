@@ -6,7 +6,9 @@ without importing ``src.service``.
 
 from __future__ import annotations
 
+import asyncio
 import shlex
+from collections.abc import Coroutine
 from typing import Any
 
 import structlog
@@ -33,7 +35,30 @@ WORKSPACE_CREDENTIAL_ENVIRONMENT_END = "# OPENCURIA_CREDENTIALS_END"
 class CredentialManager:
     """Own persistent workspace credential inject / remove operations."""
 
+    def __init__(self, *, sync_timeout: float = 120) -> None:
+        self._sync_timeout = sync_timeout
+
+    async def _within_deadline(self, operation: Coroutine[Any, Any, Any]) -> Any:
+        try:
+            return await asyncio.wait_for(operation, timeout=self._sync_timeout)
+        except asyncio.TimeoutError as exc:
+            # Abandoning SSH is not scrub proof. Lifecycle handlers record the
+            # outcome as unknown; recovery quiesces the exact guest before
+            # releasing its durable reservation.
+            raise RuntimeError(
+                "Workspace credential synchronization exceeded "
+                f"its {self._sync_timeout:g}s execution limit"
+            ) from exc
+
     async def remove_workspace_credentials(
+        self, runtime: RuntimeBackend, instance_id: str, log: Any
+    ) -> None:
+        """Remove credential material within a bounded execution period."""
+        await self._within_deadline(
+            self._remove_workspace_credentials(runtime, instance_id, log)
+        )
+
+    async def _remove_workspace_credentials(
         self,
         runtime: RuntimeBackend,
         instance_id: str,
@@ -82,6 +107,22 @@ class CredentialManager:
         log.info("workspace_credentials_removed")
 
     async def inject_workspace_credentials(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        env_vars: dict[str, str] | None,
+        files: list[dict[str, Any]] | None,
+        ssh_keys: list[str] | None,
+        log: Any,
+    ) -> bool:
+        """Replace credentials within a bounded execution period."""
+        return await self._within_deadline(
+            self._inject_workspace_credentials(
+                runtime, instance_id, env_vars, files, ssh_keys, log
+            )
+        )
+
+    async def _inject_workspace_credentials(
         self,
         runtime: RuntimeBackend,
         instance_id: str,
@@ -148,7 +189,7 @@ class CredentialManager:
         archive_files.append(
             (
                 "profile.d.sh",
-                (f"{WORKSPACE_CREDENTIAL_BASHRC_LINE}\n").encode("utf-8"),
+                (f"{WORKSPACE_CREDENTIAL_BASHRC_LINE}\n").encode(),
                 0o644,
             )
         )
@@ -262,14 +303,14 @@ class CredentialManager:
 
 
 __all__ = [
-    "CredentialManager",
     "WORKSPACE_CREDENTIAL_BASHRC",
     "WORKSPACE_CREDENTIAL_BASHRC_LINE",
     "WORKSPACE_CREDENTIAL_DIR",
-    "WORKSPACE_CREDENTIAL_ENV_FILE",
     "WORKSPACE_CREDENTIAL_ENVIRONMENT",
     "WORKSPACE_CREDENTIAL_ENVIRONMENT_END",
     "WORKSPACE_CREDENTIAL_ENVIRONMENT_START",
+    "WORKSPACE_CREDENTIAL_ENV_FILE",
     "WORKSPACE_CREDENTIAL_MANIFEST",
     "WORKSPACE_CREDENTIAL_PROFILE_D",
+    "CredentialManager",
 ]

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from apps.runners.credential_sync_repository import LegacyCredentialSyncRepository
 from apps.runners.deletion_repository import DeletionRepository
 from apps.runners.inventory_repository import InventoryRepository
 from apps.runners.operations import OperationRepository
@@ -19,6 +20,7 @@ from apps.runners.services.recreate import RecreateService
 def stages(monkeypatch):
     """Replace persistence boundaries; these tests never access a database."""
     boundaries = {
+        "legacy_credentials": (LegacyCredentialSyncRepository, "fence"),
         "deletion": (DeletionRepository, "tick"),
         "capture": (CaptureService, "tick"),
         "recreate": (RecreateService, "tick"),
@@ -48,6 +50,7 @@ def stages(monkeypatch):
 @pytest.mark.parametrize(
     "failing",
     [
+        "legacy_credentials",
         "deletion",
         "capture",
         "recreate",

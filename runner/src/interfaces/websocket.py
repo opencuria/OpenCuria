@@ -876,12 +876,13 @@ class WebSocketInterface(Interface):
                     "credentials_present": credentials_present,
                 }
             except Exception as exc:
+                evidence = await self._workspace_failure_evidence(workspace_id)
                 await sio.emit(
                     "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
+                    {"task_id": task_id, "error": str(exc), **evidence},
                 )
                 log.exception("inject_credentials_failed")
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": str(exc), **evidence}
 
         @sio.on("task:remove_workspace")
         async def on_remove_workspace(data: dict) -> None:

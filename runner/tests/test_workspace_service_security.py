@@ -32,9 +32,9 @@ def test_convert_archive_to_tar_rejects_links(link_type: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("clone_exit_code", [0, 7])
+@pytest.mark.parametrize("clone_exit_code", [0, 7, None])
 async def test_create_workspace_clones_with_persistent_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_exit_code: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_exit_code: int | None
 ) -> None:
     env_path = tmp_path / "env.sh"
     clone_args = tmp_path / "clone-args"
@@ -45,7 +45,7 @@ async def test_create_workspace_clones_with_persistent_credentials(
         f'printf "%s\\n" "$@" >> {shlex.quote(str(clone_args))}\n'
         "echo clone-output\n"
         "echo clone-error >&2\n"
-        f"exit {clone_exit_code}\n"
+        + ("sleep 60\n" if clone_exit_code is None else f"exit {clone_exit_code}\n")
     )
     git.chmod(0o700)
 
@@ -81,7 +81,10 @@ async def test_create_workspace_clones_with_persistent_credentials(
             return "instance-1"
 
     runtime = DummyRuntime()
-    service = WorkspaceService(runtime, RunnerSettings())
+    service = WorkspaceService(
+        runtime,
+        RunnerSettings(workspace_repo_clone_timeout=0.1),
+    )
     service.harness._credential_env_file = str(env_path)
     log = Mock()
     log.bind.return_value = log
@@ -109,8 +112,8 @@ async def test_create_workspace_clones_with_persistent_credentials(
     assert clone_args.read_text().splitlines() == ["clone", repos[0], "clone", repos[1]]
     assert not (tmp_path / "injected").exists()
     assert service.registry.get_cached(workspace_id).status == "running"
-    assert log.warning.call_count == (len(repos) if clone_exit_code else 0)
-    if clone_exit_code:
+    assert log.warning.call_count == (0 if clone_exit_code == 0 else len(repos))
+    if clone_exit_code != 0:
         assert log.warning.call_args.kwargs["output"] == "clone-output\nclone-error\n"
 
 
@@ -159,7 +162,9 @@ async def test_inject_workspace_credentials_materializes_file_credentials() -> N
 
     assert "~/.codex/auth.json" in install
     assert "install -m 600" in install
-    assert WORKSPACE_CREDENTIAL_ENV_FILE.split("/")[-1] in env_file or "PATH=" in env_file
+    assert (
+        WORKSPACE_CREDENTIAL_ENV_FILE.split("/")[-1] in env_file or "PATH=" in env_file
+    )
     assert "~/.codex/auth.json" in manifest
     assert any("install.sh" in " ".join(cmd) for cmd in runtime.commands)
 
@@ -207,7 +212,10 @@ async def test_stop_workspace_removes_credentials_before_runtime_stop(tmp_path) 
     assert present is False
     service.credentials.remove_workspace_credentials.assert_awaited_once()
     runtime.stop_workspace.assert_awaited_once_with("instance-1")
-    assert service.credentials.remove_workspace_credentials.await_args.args[1] == "instance-1"
+    assert (
+        service.credentials.remove_workspace_credentials.await_args.args[1]
+        == "instance-1"
+    )
 
 
 @pytest.mark.asyncio

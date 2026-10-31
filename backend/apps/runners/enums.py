@@ -1,8 +1,9 @@
 """
 Enums for the runners app.
 
-Mirror the state machines from the runner codebase so the backend
-can enforce identical transitions.
+Backend workflow and selection states are authoritative here. The runner owns
+physical guest states; authenticated results and observations map those into
+these control-plane states without deciding workflow policy.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ class RunnerStatus(models.TextChoices):
 
 
 class WorkspaceStatus(models.TextChoices):
-    """Lifecycle status of a workspace — mirrors runner WorkspaceStatus."""
+    """Control-plane workspace state; separate from observed guest power state."""
 
     CREATING = "creating", "Creating"
     RUNNING = "running", "Running"
@@ -41,6 +42,7 @@ class WorkspaceOperation(models.TextChoices):
     CAPTURING_IMAGE = "capturing_image", "Capturing Image"
     RESETTING = "resetting", "Resetting"
     UPDATING = "updating", "Updating"
+    SYNCHRONIZING_CREDENTIALS = "synchronizing_credentials", "Synchronizing credentials"
 
 
 class TaskType(models.TextChoices):

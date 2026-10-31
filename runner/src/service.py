@@ -46,7 +46,7 @@ class WorkspaceService:
         self.registry = WorkspaceRegistry(runtime, settings)
         get_cached = self.registry.get_cached
         get_runtime = self.registry.get_runtime
-        self.credentials = CredentialManager()
+        self.credentials = CredentialManager(sync_timeout=settings.credential_sync_timeout)
         self.terminal_manager = TerminalManager(
             runtime,
             get_cached,
@@ -90,6 +90,7 @@ class WorkspaceService:
             self.background,
             self.streams,
             self.desktop,
+            repo_clone_timeout=settings.workspace_repo_clone_timeout,
         )
         self.lifecycle.partial_workspace_identity = self.partial_workspace_identity
         self.registry.desktop_sessions = self.desktop._desktop_sessions
@@ -268,6 +269,7 @@ class WorkspaceService:
                     **({"min_disk_size_gb": floor} if floor is not None else {}),
                 }
                 if failure == "image:build_failed":
+                    await self._recover_image_publication(identity)
                     return "image:built", {
                         **identity,
                         "image_path": meta.get("image_path", ""),
@@ -277,6 +279,7 @@ class WorkspaceService:
                     failure == "image_artifact:failed"
                     and meta.get("credential_clean") is True
                 ):
+                    await self._recover_image_publication(identity)
                     return "image_artifact:created", {
                         **identity,
                         "image_artifact_id": image,
@@ -287,7 +290,18 @@ class WorkspaceService:
                     }
         return None
 
-    async def recover_interrupted_operation(self, identity: dict) -> None:
+    async def _recover_image_publication(self, identity: dict) -> None:
+        """Join publication effects before cleaning exact journal-owned staging."""
+        recover = getattr(self._runtime, "recover_image_publication", None)
+        if recover is None:
+            return
+        from .journal import OperationExecutor
+
+        if await asyncio.to_thread(OperationExecutor.helpers_active):
+            raise RuntimeError("Image publication helpers have not finished")
+        await recover(identity)
+
+    async def recover_interrupted_operation(self, identity: dict) -> str | None:
         """Quiesce exact interrupted guests without replaying initialization.
 
         Preserved workspace disks retain unknown credential cleanliness. Stopping
@@ -295,6 +309,8 @@ class WorkspaceService:
         outliving the execution fence. Only disposable build guests are removed.
         """
         failure = identity.get("failure_event")
+        if failure in {"image:build_failed", "image_artifact:failed"}:
+            await self._recover_image_publication(identity)
         if failure == "image:build_failed":
             recover = getattr(self._runtime, "recover_interrupted_build", None)
             if recover is not None:
@@ -303,7 +319,8 @@ class WorkspaceService:
             workspace_id = identity.get("workspace_id")
             recover = getattr(self._runtime, "quiesce_interrupted_workspace", None)
             if workspace_id and recover is not None:
-                await recover(workspace_id)
+                return await recover(workspace_id)
+        return None
 
     async def partial_workspace_identity(self, workspace_id: uuid.UUID) -> str | None:
         """Recover a partial allocation only from durable exact create ownership."""

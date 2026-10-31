@@ -175,8 +175,11 @@ async def test_ordinary_reconciliation_resumes_including_removal(
 async def test_explicit_lifecycle_credential_delivery_is_not_fenced(credential_service):
     service, workspace = credential_service
     service._call_runner = AsyncMock(
-        return_value={"ok": True, "credentials_present": True}
+        return_value={
+            "ok": True, "credentials_present": True, "_operation_identity": {},
+        }
     )
+    service.apply_operation_result = Mock(return_value=True)
     service._forward_workspace_status = Mock()
     service.workspaces.update_credentials_present.return_value = workspace
     assert (
@@ -188,4 +191,5 @@ async def test_explicit_lifecycle_credential_delivery_is_not_fenced(credential_s
         is True
     )
     service._call_runner.assert_awaited_once()
-    service.tasks.complete.assert_called_once()
+    service.apply_operation_result.assert_called_once()
+    service.tasks.complete.assert_not_called()

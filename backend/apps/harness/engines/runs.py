@@ -9,6 +9,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+import structlog
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
@@ -19,6 +20,7 @@ from .run_repository import HarnessRunRepository
 
 RUN_HEARTBEAT_SECONDS = 30
 RUN_HEARTBEAT_GRACE_SECONDS = 240
+log = structlog.get_logger(__name__)
 
 
 class RunOwnership:
@@ -277,22 +279,40 @@ class HarnessRunService:
         return True
 
     async def sweep_stale(
-        self, accessor_for_session: Callable[[uuid.UUID], Any]
+        self,
+        accessor_for_session: Callable[[uuid.UUID], Any],
+        *,
+        on_recovered: Callable[[uuid.UUID], Any] | None = None,
     ) -> int:
         """Best-effort bounded recovery entrypoint usable by a maintenance job."""
         rows = await sync_to_async(self.repository.list_open, thread_sensitive=True)()
         recovered = 0
         for row in rows:
-            if row.status != HarnessRunStatus.CLOSING and row.heartbeat_at > (
-                timezone.now() - self.heartbeat_grace
-            ):
+            # Unlike explicit admission recovery, maintenance must not race a
+            # healthy owner's finally block while it is releasing its lease.
+            if row.heartbeat_at > timezone.now() - self.heartbeat_grace:
                 continue
             try:
-                accessor = accessor_for_session(row.session_id)
-                if asyncio.iscoroutine(accessor):
-                    accessor = await accessor
+                accessor = None
+                if row.lease_id is not None:
+                    accessor = accessor_for_session(row.session_id)
+                    if asyncio.iscoroutine(accessor):
+                        accessor = await accessor
                 await self.prepare_session(row.session_id, accessor)
             except ConflictError:
                 continue
+            except Exception:
+                # An offline runner/accessor must not starve unrelated attempts.
+                log.exception("harness_run_recovery_deferred", run_id=str(row.id))
+                continue
             recovered += 1
+            if on_recovered is not None:
+                try:
+                    result = on_recovered(row.id)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:
+                    log.exception(
+                        "harness_recovery_notification_failed", run_id=str(row.id)
+                    )
         return recovered

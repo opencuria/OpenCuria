@@ -107,6 +107,92 @@ def finish(service, runner, task_id):
     assert apply_result(service, str(runner.id), event, data)
 
 
+@pytest.mark.parametrize("complete", [False, True])
+def test_only_complete_physical_cycle_requires_admin_repair(runner, user, complete):
+    """Incomplete evidence waits; a proven cycle admits no deletion effects."""
+    base = image(runner, user)
+    dependent = image(runner, user, "dependent")
+    observe(
+        runner,
+        [
+            resource(base, [dependent.runner_ref]),
+            resource(dependent, [base.runner_ref]),
+        ],
+        complete=complete,
+    )
+    plan = request(runner, user, base, force=complete)
+    Repo.tick()
+    row = ImageDeletionRequest.objects.get(pk=plan["id"])
+    assert not Task.objects.exists()
+    if not complete:
+        assert row.phase == "waiting_inventory"
+        return
+    assert row.phase == "attention_required"
+    assert "physical dependency cycle" in row.diagnostic
+    assert Repo.output(row)["can_cancel"]
+    assert Repo.cancel(runner.organization_id, row.id)["phase"] == "cancelled"
+    base.refresh_from_db()
+    dependent.refresh_from_db()
+    assert base.status == dependent.status == "ready"
+
+
+def test_cycle_repair_is_rechecked_and_changed_approval_is_required(runner, user):
+    base = image(runner, user)
+    dependent = image(runner, user, "dependent")
+    observe(
+        runner,
+        [
+            resource(base, [dependent.runner_ref]),
+            resource(dependent, [base.runner_ref]),
+        ],
+    )
+    plan = request(runner, user, base, force=True)
+    Repo.tick()
+    assert ImageDeletionRequest.objects.get(pk=plan["id"]).phase == "attention_required"
+    observe(runner, [resource(base), resource(dependent, [base.runner_ref])])
+    Repo.tick()
+    assert (
+        ImageDeletionRequest.objects.get(pk=plan["id"]).phase
+        == "reconfirmation_required"
+    )
+    assert not Task.objects.exists()
+    request(runner, user, base, force=True)
+    Repo.tick()
+    row = ImageDeletionRequest.objects.get(pk=plan["id"])
+    assert row.phase == "executing"
+    assert list(row.children) == ["image:" + str(dependent.id)]
+
+
+def test_confirmed_success_without_tombstone_requires_repair_not_guessed_deletion(
+    runner, user
+):
+    base = image(runner, user)
+    observe(runner, [resource(base)])
+    plan = request(runner, user, base, force=True)
+    Repo.tick()
+    row = ImageDeletionRequest.objects.get(pk=plan["id"])
+    child_id = next(iter(row.children.values()))
+    Task.objects.filter(pk=child_id).update(
+        status="completed", completed_at=timezone.now()
+    )
+    LifecycleCommand.objects.filter(task_id=child_id).update(phase="result")
+    Repo.tick()
+    row.refresh_from_db()
+    base.refresh_from_db()
+    assert row.phase == "attention_required"
+    assert "matching resource tombstone" in row.diagnostic
+    assert base.status == "deleting"
+    assert not Repo.output(row)["can_cancel"]
+    # Restoring the record and proving physical absence clears attention on the
+    # ordinary tick. Neither an acknowledgement nor an elapsed timer does so.
+    ImageInstance.objects.filter(pk=base.id).update(status="deleted")
+    observe(runner, [])
+    Repo.tick()
+    row.refresh_from_db()
+    assert row.phase == "completed"
+    assert Task.objects.count() == 1
+
+
 def test_force_physical_chain_excludes_independent_capture(runner, user):
     base = image(runner, user)
     w1 = Workspace.objects.create(
@@ -783,7 +869,7 @@ def test_force_real_qcow_overlay_domain_and_cloud_init(runner, user, tmp_path):
     output = tmp_path / "scan.json"
     # Only libvirt is mocked: qemu-img creates/inspects the base and overlay.
     code = """
-import asyncio, json, sys
+import asyncio, json, sys, uuid
 from pathlib import Path
 from dataclasses import asdict
 sys.path.insert(0, 'tests')
@@ -793,7 +879,9 @@ async def run():
     base = r._snapshot_dir / 'published.qcow2'
     source = r._disk_dir / 'source.qcow2'
     qcow(source)
-    await r._publish_image(source, base, {'artifact_id': sys.argv[2]})
+    await r._publish_image(source, base, {
+        'artifact_id': sys.argv[2], 'operation_id': str(uuid.uuid4())
+    })
     source.unlink()
     disk = r._disk_path(sys.argv[3])
     qcow(disk, base)

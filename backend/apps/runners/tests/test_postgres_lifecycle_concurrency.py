@@ -480,7 +480,9 @@ def test_credential_injection_admission_vs_capture(runner, workspace):
         for status in ["pending", "in_progress"]:
             task.refresh_from_db()
             assert task.status == status
-            with pytest.raises(ConflictError, match="credentials are synchronizing"):
+            with pytest.raises(
+                ConflictError, match="unresolved capture/lifecycle operation"
+            ):
                 Capture.allocate(
                     workspace.id,
                     "Must wait for injection",

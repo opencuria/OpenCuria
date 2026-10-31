@@ -20,6 +20,8 @@ from ..models import (
     HarnessSession,
     HarnessSessionStatus,
 )
+from ..provider_turn_models import ProviderTurn
+from ..run_recovery_repository import RunRecoveryRepository
 
 LIVE_STATUSES = (
     HarnessRunStatus.STARTING,
@@ -285,6 +287,21 @@ class HarnessRunRepository:
                 message_id=row.assistant_message_id,
                 state__in=("pending", "running"),
             ).update(state="error", updated_at=moment)
+            RunRecoveryRepository.reject_pending_inputs(
+                {row.session_id}, message_id=row.assistant_message_id, at=moment
+            )
+            ProviderTurn.objects.filter(
+                assistant_message_id=row.assistant_message_id, active=True
+            ).update(
+                active=False,
+                holds=0,
+                holder_tokens=[],
+                monitor_required=False,
+                completed_at=moment,
+            )
+            RunRecoveryRepository.interrupt_unowned_descendants(
+                row.session_id, at=moment, error=INTERRUPTED_ERROR
+            )
             HarnessSession.objects.filter(
                 id=row.session_id, status=HarnessSessionStatus.BUSY
             ).update(

@@ -67,7 +67,7 @@ def test_rest_exposes_grouped_activity(
     )
     response = client.get(f"/api/v1/runners/{runner.id}/storage/")
     assert response.status_code == 200
-    assert response.json()["activities"][0]["state"] == "attention"
+    assert response.json()["activities"][0]["state"] == "active"
     assert "must-not-be-returned" not in response.content.decode()
 
 
@@ -103,7 +103,7 @@ def detail(user: User, runner: Runner) -> dict:
     return StorageService().detail(user, runner.organization_id, runner.id)
 
 
-def test_only_blender_needs_attention_and_closed_capture_is_one_history_entry(
+def test_automatic_recovery_and_closed_capture_are_separate_from_attention(
     runner: Runner, workspace: Workspace, user: User
 ) -> None:
     workspace.name = "OpenCuria 3"
@@ -134,9 +134,13 @@ def test_only_blender_needs_attention_and_closed_capture_is_one_history_entry(
     result = detail(user, runner)
     attention = [a for a in result["activities"] if a["state"] == "attention"]
     history = [a for a in result["activities"] if a["state"] == "history"]
-    assert len(attention) == 1
-    assert attention[0]["target_name"] == "Blender"
-    assert attention[0]["operation_ids"] == [str(unresolved.id)]
+    assert not attention
+    active = [a for a in result["activities"] if a["state"] == "active"]
+    assert len(active) == 1
+    assert active[0]["target_name"] == "Blender"
+    assert active[0]["outcome"] == "recovering"
+    assert "automatically" in active[0]["summary"]
+    assert active[0]["operation_ids"] == [str(unresolved.id)]
     assert len(history) == 1
     assert history[0]["target_name"] == "OpenCuria 3"
     assert history[0]["outcome"] == "resolved"
@@ -156,7 +160,7 @@ def test_only_blender_needs_attention_and_closed_capture_is_one_history_entry(
     [
         ("disposed", "failed", "history", "resolved"),
         ("result", "failed", "history", "failed"),
-        ("intervention", "failed", "attention", "blocked"),
+        ("intervention", "failed", "active", "recovering"),
         ("delivery", "pending", "active", "in_progress"),
     ],
 )
@@ -196,7 +200,7 @@ def test_failed_capture_with_retained_child_stays_visible_and_counted_once(
     activities = detail(user, runner)["activities"]
     assert len(activities) == 1
     assert activities[0]["kind"] == "capture"
-    assert activities[0]["state"] == "attention"
+    assert activities[0]["state"] == "active"
     assert activities[0]["operation_ids"] == [str(task.id)]
 
 
@@ -228,7 +232,7 @@ def test_capture_replacement_is_part_of_the_same_workflow(
     activities = detail(user, runner)["activities"]
     assert len(activities) == 1
     assert activities[0]["id"] == str(capture.id)
-    assert activities[0]["state"] == "attention"
+    assert activities[0]["state"] == "active"
     assert activities[0]["operation_ids"] == [str(blocked.id)]
 
 
@@ -257,7 +261,7 @@ def test_deletion_approval_and_child_are_one_open_activity(
     activities = detail(user, runner)["activities"]
     assert len(activities) == 1
     assert activities[0]["id"] == str(deletion.id)
-    assert activities[0]["state"] == "attention"
+    assert activities[0]["state"] == "active"
     deletion.phase = "cancelled"
     deletion.save(update_fields=["phase"])
     LifecycleCommand.objects.filter(task=task).update(phase="disposed")
@@ -287,3 +291,31 @@ def test_activity_does_not_leak_to_members_or_another_runner(
         )["activities"]
         == []
     )
+
+
+@pytest.mark.parametrize(
+    ("phase", "state", "outcome"),
+    [
+        ("failed", "history", "failed"),
+        ("reconfirmation_required", "attention", "blocked"),
+        ("attention_required", "attention", "blocked"),
+    ],
+)
+def test_only_changed_approval_or_proven_inconsistency_needs_attention(
+    runner, user, phase, state, outcome
+):
+    """Exhausted safe retries are an ordinary retryable failure in history."""
+    ImageDeletionRequest.objects.create(
+        organization=runner.organization,
+        requested_by=user,
+        target_type="image",
+        target_id=uuid.uuid4(),
+        phase=phase,
+        approval={
+            "images": [{"id": "image", "name": "Image", "runner_id": str(runner.id)}],
+            "workspaces": [],
+        },
+    )
+    activity = detail(user, runner)["activities"][0]
+    assert activity["state"] == state
+    assert activity["outcome"] == outcome

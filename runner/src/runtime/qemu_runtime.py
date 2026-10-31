@@ -40,6 +40,7 @@ from .base import (
     WorkspaceConfig,
 )
 from .inventory import RuntimeInventory, StorageResource
+from .recovery import RecoveryConflict
 from .managed_process import (
     ProcessProfile,
     isolated_agent_env_preamble,
@@ -2411,12 +2412,21 @@ class QemuRuntime(RuntimeBackend):
                 info.size = len(script_bytes)
                 tar.addfile(info, io.BytesIO(script_bytes))
             archive.seek(0)
-            await self.put_archive(instance_id, "/tmp", archive.getvalue())
-            await self._stream_ssh_process(
-                instance_id,
-                f"sudo -E bash {remote_script}",
-                progress_callback,
-            )
+            async def provision() -> None:
+                await self.put_archive(instance_id, "/tmp", archive.getvalue())
+                await self._stream_ssh_process(
+                    instance_id,
+                    f"sudo -E bash {remote_script}",
+                    progress_callback,
+                )
+
+            timeout = getattr(self._settings, "qemu_build_script_timeout", 7200)
+            try:
+                await asyncio.wait_for(provision(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    f"Image build script exceeded its {timeout:g}s execution limit"
+                ) from exc
 
             manifest = await self._finalize_build_image(
                 instance_id,
@@ -2859,53 +2869,333 @@ class QemuRuntime(RuntimeBackend):
         scan.collected_at = datetime.now(timezone.utc).isoformat()
         return scan
 
+    def _publication_stage(self, target: Path, operation_id: str) -> Path:
+        """Locate one operation's private staging area without searching storage."""
+        key = uuid.uuid5(uuid.NAMESPACE_URL, operation_id + ":" + str(target))
+        return target.parent / f".publication-{key}"
+
+    def _reserve_image_publication(
+        self, target: Path, manifest: dict, ownership: dict | None = None
+    ) -> dict:
+        """Persist directory ownership before creating any conversion output."""
+        stage = self._publication_stage(target, str(manifest["operation_id"]))
+        stage.mkdir(mode=0o700)
+        stat = stage.stat()
+        if ownership is not None:
+            ownership["directory_identity"] = [stat.st_dev, stat.st_ino]
+        intent = {
+            "version": 1,
+            "operation_id": manifest["operation_id"],
+            "artifact_id": manifest.get("artifact_id", ""),
+            "target": str(target),
+            "directory_identity": [stat.st_dev, stat.st_ino],
+            "disk_identity": None,
+            "marker_identity": None,
+        }
+
+        def save(first: bool = False) -> None:
+            path = stage / ("intent.json" if first else "intent.next")
+            with path.open("x") as stream:
+                json.dump(intent, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if not first:
+                os.replace(path, stage / "intent.json")
+            for directory in (stage, target.parent):
+                fd = os.open(directory, os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+
+        save(first=True)
+        for name, identity_field in (
+            ("disk.part", "disk_identity"),
+            ("manifest.part", "marker_identity"),
+        ):
+            with (stage / name).open("xb") as stream:
+                stat = os.fstat(stream.fileno())
+                intent[identity_field] = [stat.st_dev, stat.st_ino]
+                if ownership is not None:
+                    ownership.setdefault("files", {})[str(stage / name)] = (
+                        stat.st_dev,
+                        stat.st_ino,
+                    )
+            anchor = stage / (name + ".owner")
+            os.link(stage / name, anchor)
+            if ownership is not None:
+                ownership["files"][str(anchor)] = (stat.st_dev, stat.st_ino)
+        save()
+        return intent
+
+    @storage_mutation
+    async def recover_image_publication(self, identity: dict) -> None:
+        """Clean only a quiescent journal attempt's attested staging resources.
+
+        The caller joins disk helpers before invoking recovery. Staged outputs
+        never serve as backing images, but explicit external references still
+        appear in the complete inventory and prevent their removal.
+        """
+        operation_id = identity.get("operation_id")
+        artifact_id = identity.get("image_instance_id")
+        if not operation_id or not artifact_id:
+            return
+        reference = identity.get("image_path")
+        if not reference:
+            reference = (
+                str(
+                    getattr(self, "_build_image_dir", _BUILD_IMAGE_DIR)
+                    / f"{artifact_id}.qcow2"
+                )
+                if identity.get("failure_event") == "image:build_failed"
+                else artifact_id
+            )
+        target = self._managed_image_path(reference)
+        stage = self._publication_stage(target, operation_id)
+        if not stage.exists():
+            return
+
+        def metadata_only() -> bool:
+            import stat as stat_module
+
+            if stage.is_symlink():
+                raise RecoveryConflict("Publication staging ownership is unverified")
+            entries = list(stage.iterdir())
+            if not entries:
+                # rmdir is atomic and cannot remove newly appearing contents.
+                stage.rmdir()
+                fd = os.open(target.parent, os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                return True
+            # Death before the initial intent commit cannot have started a
+            # converter. Keep unverified metadata, but close its execution;
+            # it must not turn an interrupted reservation into a live fence.
+            return all(
+                path.name in {"intent.json", "intent.next"}
+                and stat_module.S_ISREG(path.lstat().st_mode)
+                for path in entries
+            )
+
+        if await asyncio.to_thread(metadata_only):
+            return
+
+        def load() -> dict:
+            import stat as stat_module
+
+            if stage.is_symlink() or (stage / "intent.json").is_symlink():
+                raise RecoveryConflict("Publication staging ownership is unverified")
+            try:
+                intent = json.loads((stage / "intent.json").read_text())
+            except (FileNotFoundError, ValueError, UnicodeError) as error:
+                raise RecoveryConflict(
+                    "Publication staging intent cannot be verified"
+                ) from error
+            if not isinstance(intent, dict):
+                raise RecoveryConflict("Publication staging intent cannot be verified")
+            stat = stage.stat()
+            if (
+                intent.get("version") != 1
+                or intent.get("operation_id") != operation_id
+                or intent.get("artifact_id") != artifact_id
+                or intent.get("target") != str(target)
+                or intent.get("directory_identity") != [stat.st_dev, stat.st_ino]
+            ):
+                raise RecoveryConflict("Publication staging identity mismatch")
+            for name, identity_field in (
+                ("disk.part", "disk_identity"),
+                ("manifest.part", "marker_identity"),
+            ):
+                path = stage / name
+                anchor = stage / (name + ".owner")
+                expected = intent.get(identity_field)
+                existing = {}
+                for child in (path, anchor):
+                    try:
+                        stat = child.lstat()
+                    except FileNotFoundError:
+                        continue
+                    existing[child] = stat
+                    if (
+                        not stat_module.S_ISREG(stat.st_mode)
+                        or (expected is None and stat.st_size != 0)
+                        or (
+                            expected is not None
+                            and expected != [stat.st_dev, stat.st_ino]
+                        )
+                    ):
+                        raise RecoveryConflict(
+                            "Publication staging file ownership changed"
+                        )
+                if path in existing and expected is not None and anchor not in existing:
+                    raise RecoveryConflict(
+                        "Publication staging anchor ownership changed"
+                    )
+            if {path.name for path in stage.iterdir()} - {
+                "intent.json",
+                "intent.next",
+                "disk.part",
+                "manifest.part",
+                "disk.part.owner",
+                "manifest.part.owner",
+            }:
+                raise RecoveryConflict("Unexpected publication staging resources")
+            return intent
+
+        intent = await asyncio.to_thread(load)
+        scan = await self.inventory()
+        if not scan.complete:
+            raise RuntimeError("Incomplete inventory blocks publication cleanup")
+        staged_paths = {
+            str(stage / name)
+            for name in (
+                "disk.part",
+                "manifest.part",
+                "disk.part.owner",
+                "manifest.part.owner",
+                "intent.json",
+                "intent.next",
+            )
+        }
+        if any(
+            staged_paths.intersection(resource.dependencies)
+            for resource in scan.resources
+        ):
+            raise RuntimeError("Publication staging has physical dependents")
+        marker = target.with_suffix(".manifest.json")
+        published = next(
+            (
+                resource
+                for resource in scan.resources
+                if resource.resource_id == str(target)
+            ),
+            None,
+        )
+        committed = (
+            published is not None
+            and published.state == "ready"
+            and published.metadata.get("operation_id") == operation_id
+            and published.metadata.get("artifact_id") == artifact_id
+        )
+        if marker.exists() and not committed:
+            raise RecoveryConflict("Publication commit cannot be verified")
+        if target.exists() and not committed:
+            stat = await asyncio.to_thread(target.lstat)
+            if intent.get("disk_identity") != [stat.st_dev, stat.st_ino]:
+                raise RecoveryConflict("Unpublished target ownership changed")
+            if any(str(target) in resource.dependencies for resource in scan.resources):
+                raise RuntimeError("Unpublished target has physical dependents")
+
+        def cleanup() -> None:
+            # Revalidate after inspection and before removing the exact inodes.
+            load()
+            if target.exists() and not committed:
+                stat = target.lstat()
+                if intent.get("disk_identity") != [stat.st_dev, stat.st_ino]:
+                    raise RecoveryConflict("Unpublished target ownership changed")
+                target.unlink()
+            for name in (
+                "disk.part",
+                "manifest.part",
+                "disk.part.owner",
+                "manifest.part.owner",
+            ):
+                (stage / name).unlink(missing_ok=True)
+            # Ownership metadata must outlive durable removal of every output.
+            # A crash cannot resurrect a disk after its intent has disappeared.
+            for directory in (stage, target.parent):
+                fd = os.open(directory, os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            (stage / "intent.next").unlink(missing_ok=True)
+            (stage / "intent.json").unlink()
+            stage.rmdir()
+            fd = os.open(target.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+        await asyncio.to_thread(cleanup)
+
     @storage_mutation
     async def _publish_image(self, disk: Path, target: Path, manifest: dict) -> dict:
-        """Commit immutable self-contained disk, then durable JSON commit marker."""
-        import os
+        """Publish an immutable image or roll back this attempt's owned files.
 
+        A committed marker keeps its disk even if the final directory fsync
+        fails: journal recovery can validate and recover that publication.
+        Ordinary conversion/commit failures must not leave truncated files that
+        make every subsequent inventory and unrelated deletion fail.
+        """
         target = self._managed_image_path(str(target))
         marker = target.with_suffix(".manifest.json")
         if target.exists() or marker.exists():
             raise FileExistsError("Publication target already exists")
-        temp = target.with_name(target.name + ".tmp-" + str(uuid.uuid4()))
-        # Failed publication files remain discoverable; never silently clean unknown files.
-        proc = await asyncio.create_subprocess_exec(
-            "qemu-img",
-            "convert",
-            "-f",
-            "qcow2",
-            "-O",
-            "qcow2",
-            str(disk),
-            str(temp),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if proc.returncode:
-            raise RuntimeError("Image conversion failed")
-        info = await self._image_info(temp)
-        if info.get("backing-filename") or info.get("full-backing-filename"):
-            raise RuntimeError("Published image must be self-contained")
-        proc = await asyncio.create_subprocess_exec(
-            "qemu-img",
-            "check",
-            str(temp),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if proc.returncode:
-            raise RuntimeError("Image integrity check failed")
+        stage = self._publication_stage(target, str(manifest["operation_id"]))
+        temp = stage / "disk.part"
+        tmp_marker = stage / "manifest.part"
+        stage_identity = None
+        owned: dict[Path, tuple[int, int]] = {}
+        marker_published = False
 
-        def commit() -> dict:
+        def reserve() -> None:
+            nonlocal stage_identity
+            # The exclusive directory prevents cleanup from claiming a preexisting
+            # attempt. No disk output exists until its initial intent is durable.
+            ownership = {}
+            try:
+                self._reserve_image_publication(target, manifest, ownership)
+            finally:
+                stage_identity = ownership.get("directory_identity")
+                owned.update(
+                    {
+                        Path(path): identity
+                        for path, identity in ownership.get("files", {}).items()
+                    }
+                )
+
+        def cleanup() -> None:
+            for path, identity in owned.items():
+                if marker_published and path == target:
+                    continue
+                try:
+                    stat = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if (stat.st_dev, stat.st_ino) != identity:
+                    raise RuntimeError("Publication cleanup ownership changed")
+                path.unlink()
+            if stage_identity is not None:
+                stat = stage.lstat()
+                if stage_identity != [stat.st_dev, stat.st_ino]:
+                    raise RuntimeError("Publication staging ownership changed")
+                for path in (stage, target.parent):
+                    fd = os.open(path, os.O_DIRECTORY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
+                (stage / "intent.next").unlink(missing_ok=True)
+                (stage / "intent.json").unlink(missing_ok=True)
+                stage.rmdir()
+            directory = os.open(target.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+
+        def commit(info: dict) -> dict:
+            nonlocal marker_published
             # qemu-img writes as the runner, while libvirt may use another UID.
             temp.chmod(0o644)
             with temp.open("rb") as stream:
                 os.fsync(stream.fileno())
             os.link(temp, target)  # exclusive, never replaces a published inode
-            temp.unlink()
+            owned[target] = owned[temp]
             published = {
                 **manifest,
                 "sha256": self._publication_digest(target),
@@ -2914,24 +3204,56 @@ class QemuRuntime(RuntimeBackend):
                 "size_bytes": target.stat().st_size,
                 "self_contained": True,
                 "virtual_size_bytes": int(info["virtual-size"]),
-                "min_disk_size_gb": (int(info["virtual-size"]) + 1024**3 - 1) // 1024**3,
+                "min_disk_size_gb": (int(info["virtual-size"]) + 1024**3 - 1)
+                // 1024**3,
             }
             directory = os.open(target.parent, os.O_DIRECTORY)
             try:
                 os.fsync(directory)
-                tmp_marker = marker.with_name(marker.name + ".tmp-" + str(uuid.uuid4()))
-                with tmp_marker.open("x") as stream:
+                with tmp_marker.open("w") as stream:
                     json.dump(published, stream)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.link(tmp_marker, marker)
-                tmp_marker.unlink()
+                marker_published = True
                 os.fsync(directory)
             finally:
                 os.close(directory)
             return published
 
-        return await asyncio.to_thread(commit)
+        try:
+            await asyncio.to_thread(reserve)
+            proc = await asyncio.create_subprocess_exec(
+                "qemu-img",
+                "convert",
+                "-f",
+                "qcow2",
+                "-O",
+                "qcow2",
+                str(disk),
+                str(temp),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if proc.returncode:
+                raise RuntimeError("Image conversion failed")
+            info = await self._image_info(temp)
+            if info.get("backing-filename") or info.get("full-backing-filename"):
+                raise RuntimeError("Published image must be self-contained")
+            proc = await asyncio.create_subprocess_exec(
+                "qemu-img",
+                "check",
+                str(temp),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if proc.returncode:
+                raise RuntimeError("Image integrity check failed")
+            return await asyncio.to_thread(commit, info)
+        finally:
+            await asyncio.to_thread(cleanup)
 
     @workspace_mutation
     @storage_mutation

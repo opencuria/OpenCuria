@@ -941,6 +941,15 @@ class TaskRepository:
                     and WorkspaceOperationRepository.recreate_active(workspace.id)
                 ):
                     raise ConflictError("Workspace is being reset")
+                if task_type == TaskType.INJECT_CREDENTIALS and Task.objects.filter(
+                    workspace_id=workspace.id,
+                    type=TaskType.INJECT_CREDENTIALS,
+                    status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
+                    lifecyclecommand__isnull=True,
+                ).exists():
+                    raise ConflictError(
+                        "Workspace has an unresolved legacy credential synchronization"
+                    )
             task = Task.objects.create(
                 id=task_id,
                 runner=runner,

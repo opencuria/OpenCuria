@@ -42,6 +42,31 @@ class DeletionRepository:
     """All ORM and atomic deletion policy live at this boundary."""
 
     @staticmethod
+    def _has_physical_dependency_cycle(graph: dict) -> bool:
+        """Prove a cycle only inside an otherwise complete physical graph."""
+        if graph["blockers"] or not graph["snapshots"]:
+            return False
+        nodes = {resource["key"] for resource in graph["resources"]}
+        outgoing = {key: set() for key in nodes}
+        incoming = dict.fromkeys(nodes, 0)
+        for source, target in graph["edges"]:
+            if source not in nodes or target not in nodes:
+                return False  # An incomplete graph is not a cycle proof.
+            if target not in outgoing[source]:
+                outgoing[source].add(target)
+                incoming[target] += 1
+        leaves = [key for key, count in incoming.items() if count == 0]
+        visited = 0
+        while leaves:
+            current = leaves.pop()
+            visited += 1
+            for dependency in outgoing[current]:
+                incoming[dependency] -= 1
+                if incoming[dependency] == 0:
+                    leaves.append(dependency)
+        return visited != len(nodes)
+
+    @staticmethod
     def target(org_id, kind, target_id):
         """Resolve only same-organization targets (global recipes are read-only)."""
         if kind == "image":
@@ -633,6 +658,8 @@ class DeletionRepository:
                             "after resolving the runner or storage error: "
                             + task.error,
                         )
+                    elif command.phase == "attention_required":
+                        wait("attention_required", task.error)
                     else:
                         wait(
                             "intervention",
@@ -652,8 +679,10 @@ class DeletionRepository:
                 model = Workspace if kind == "workspace" else ImageInstance
                 if not model.objects.filter(pk=pk, status__in=TERMINAL).exists():
                     wait(
-                        "intervention",
-                        "Task success without matching resource tombstone",
+                        "attention_required",
+                        "Removal succeeded without its matching resource tombstone. "
+                        "An administrator must repair the inconsistent resource "
+                        "record; OpenCuria will verify it again automatically.",
                     )
                     return
             for task_id in [
@@ -698,6 +727,15 @@ class DeletionRepository:
                     else "waiting_inventory"
                 )
                 wait(phase, "; ".join(graph["blockers"]))
+                return
+            if DeletionRepository._has_physical_dependency_cycle(graph):
+                wait(
+                    "attention_required",
+                    "Complete runner inventory proves a physical dependency cycle. "
+                    "Repair the backing chain on the runner; OpenCuria will check "
+                    "again automatically. The request can be cancelled before "
+                    "deletion has started.",
+                )
                 return
             if plan.mode == "force":
                 completed = {

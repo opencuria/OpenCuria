@@ -1,8 +1,8 @@
 """Lightweight dataclasses for in-memory workspace state.
 
-The runner no longer uses a local database. All workspace state is
-derived from libvirt and cached
-in memory via these dataclasses.
+Physical workspace state is derived from libvirt and cached through these
+dataclasses. Durable operation outcomes, delivery fences and credential
+checkpoints are stored separately in the runner's SQLite journal.
 """
 
 from __future__ import annotations

@@ -18,6 +18,8 @@ from typing import Any
 
 import structlog
 
+from .runtime.recovery import RecoveryConflict
+
 logger = structlog.get_logger(__name__)
 
 _terminal = contextvars.ContextVar("lifecycle_terminal", default=None)
@@ -28,6 +30,7 @@ TERMINAL = {
     "workspace:resumed",
     "workspace:updated",
     "workspace:removed",
+    "workspace:credentials_injected",
     "workspace:error",
     "image:built",
     "image:build_failed",
@@ -43,6 +46,7 @@ COMMANDS = {
     "task:resume_workspace",
     "task:update_workspace",
     "task:remove_workspace",
+    "task:inject_credentials",
     "task:build_image",
     "task:create_image_artifact",
     "task:delete_image_artifact",
@@ -536,6 +540,7 @@ class OperationExecutor:
             return {"status": "unknown", "execution_finished": False}
         response = {
             "instance_id": self.journal.instance_id,
+            "durable_credentials": True,
             "status": "unknown",
             "execution_finished": False,
             "outcome_known": False,
@@ -554,13 +559,54 @@ class OperationExecutor:
             identity.get(k) != data.get(k) for k in ("runner_id", "attempt", "target")
         ):
             return response
+        unfinished_publication = row and row[2] is None and identity.get(
+            "failure_event"
+        ) in {"image:build_failed", "image_artifact:failed"}
+        needs_recovery = row and (
+            data.get("legacy_credential_sync") is True
+            or unfinished_publication
+            or (
+                row[2] and row[2].get("outcome_known") is False
+                and identity.get("failure_event") is not None
+            )
+        )
+        if needs_recovery and await asyncio.to_thread(self.helpers_active):
+            return {
+                **response,
+                "identity": {k: v for k, v in identity.items() if k != "failure_event"},
+                "diagnostic_code": "disk_helpers_active",
+            }
+        if data.get("legacy_credential_sync") is True and row and row[2]:
+            # New runners reject legacy credential packets without envelopes.
+            # Seal that delayed-delivery identity first, then stop the exact
+            # guest so a previous runner's remote credential shell cannot keep
+            # writing after the backend releases the old reservation.
+            recover = getattr(self.observer, "recover_interrupted_operation", None)
+            if recover is not None:
+                try:
+                    state = await recover({
+                        **identity,
+                        "workspace_id": identity.get("target"),
+                        "failure_event": "workspace:error",
+                    })
+                except RecoveryConflict as error:
+                    return self._recovery_blocked(response, identity, error)
+                response["legacy_credential_quiesced"] = state in {
+                    "stopped", "absent", "partial",
+                }
         if (
-            row and row[2] and row[2].get("outcome_known") is False
+            row and (
+                unfinished_publication
+                or (row[2] and row[2].get("outcome_known") is False)
+            )
             and identity.get("failure_event") is not None
         ):
             recover = getattr(self.observer, "recover_interrupted_operation", None)
             if recover is not None:
-                await recover(identity)
+                try:
+                    await recover(identity)
+                except RecoveryConflict as error:
+                    return self._recovery_blocked(response, identity, error)
         if self.observer is not None and hasattr(self.observer, "inventory_for_runner"):
             epoch = self._execution_epoch
             snapshot = await self.observer.inventory_for_runner()
@@ -619,6 +665,19 @@ class OperationExecutor:
                 "result": result,
             }
         return response
+
+    @staticmethod
+    def _recovery_blocked(response: dict, identity: dict, error: RecoveryConflict) -> dict:
+        """Report proven ownership contradiction without asserting quiescence."""
+        return {
+            **response,
+            "identity": {k: v for k, v in identity.items() if k != "failure_event"},
+            "status": "unknown",
+            "execution_finished": False,
+            "quiescent": False,
+            "recovery_blocked_code": error.code,
+            "diagnostic": str(error),
+        }
 
     async def replay(self, op_id: str | None = None, *, recover: bool = True) -> None:
         """Retry delivery until backend durably acknowledges."""
@@ -814,18 +873,19 @@ class OperationExecutor:
     def wrap(self, event: str, handler: Callable) -> Callable:
         """Shield durable admission and execution from caller cancellation."""
 
-        async def admit(data: dict) -> None:
+        async def admit(data: dict) -> dict | None:
             op_id = data["operation_id"]
             binding = {
                 key: data[key]
                 for key in (
                     "task_id", "operation_id", "attempt", "target", "runner_id",
                     "workspace_id", "build_job_id", "image_instance_id",
+                    "image_path",
                 )
                 if key in data
             }
 
-            async def run() -> None:
+            async def run() -> dict | None:
                 token = _active.set(binding)
                 try:
                     terminal = []
@@ -833,7 +893,7 @@ class OperationExecutor:
                     try:
                         for execution_attempt in range(3):
                             terminal.clear()
-                            await handler(data)
+                            response = await handler(data)
                             failed = terminal and terminal[0][0] == "workspace:error"
                             if (
                                 not failed
@@ -851,6 +911,7 @@ class OperationExecutor:
                     if not terminal:
                         raise RuntimeError("Handler returned without terminal result")
                     await self.record_emit(*terminal[0])
+                    return response
                 except Exception:  # noqa: BLE001 - isolate runtime/transport failures
                     row = await self.journal.call("lookup", op_id)
                     failure_event = row[0]["failure_event"]
@@ -889,11 +950,17 @@ class OperationExecutor:
                     self._unresolved[op_id] = binding
                     self._execution_epoch += 1
             if fresh:
-                await asyncio.shield(task)
+                return await asyncio.shield(task)
             else:
                 await self.replay(op_id)
+                row = await self.journal.call("lookup", op_id)
+                if event == "task:inject_credentials" and row and row[2]:
+                    return {
+                        **row[2],
+                        "ok": row[1] == "workspace:credentials_injected",
+                    }
 
-        async def execute(data: dict) -> None:
+        async def execute(data: dict) -> dict | None:
             # Same-version protocol is mandatory; legacy lifecycle work is unsafe.
             if not all(
                 key in data
@@ -905,6 +972,6 @@ class OperationExecutor:
             task = asyncio.create_task(admit(data))
             self._admissions.add(task)
             task.add_done_callback(self._admissions.discard)
-            await asyncio.shield(task)
+            return await asyncio.shield(task)
 
         return execute

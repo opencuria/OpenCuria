@@ -131,5 +131,5 @@ class WorkspaceOperationRepository:
             task_id=Workspace.objects.filter(pk=workspace_id).values("current_task_id")[
                 :1
             ],
-            phase="intervention",
+            phase__in={"intervention", "attention_required"},
         ).exists()

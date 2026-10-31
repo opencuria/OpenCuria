@@ -34,28 +34,11 @@ class RunnerTransportMixin:
         data: dict,
     ) -> None:
         """Send a Socket.IO event to a specific runner by its SID."""
-        from asgiref.sync import sync_to_async
-
         lifecycle_type = event.removeprefix("task:")
         if lifecycle_type == "delete_image_artifact":
             lifecycle_type = "delete_image"
         if lifecycle_type in LIFECYCLE_TYPES:
-            command = await sync_to_async(OperationRepository.prepare)(
-                data["task_id"], event, data
-            )
-            durable = await sync_to_async(OperationRepository.delivery_payload)(command)
-            # Every delivery hashes the same durable inputs. Resolved credential
-            # material is transient and deliberately outside journal fingerprint.
-            durable.update(
-                {k: data[k] for k in ("env_vars", "files", "ssh_keys") if k in data}
-            )
-            data = await sync_to_async(OperationRepository.envelope)(command, durable)
-            # Lost emit is recoverable from the DB outbox, not an operation failure.
-            if not runner.sid or self.sio is None:
-                return
-            sid = await sync_to_async(OperationRepository.claim_direct_delivery)(
-                command.task_id
-            )
+            sid, data = await self._prepare_lifecycle_delivery(runner, event, data)
             if not sid:
                 return
             try:
@@ -77,6 +60,27 @@ class RunnerTransportMixin:
 
         await self.sio.emit(event, data, to=runner.sid)
         logger.debug("Emitted %s to runner %s", event, runner.id)
+
+    async def _prepare_lifecycle_delivery(
+        self, runner: Runner, event: str, data: dict
+    ) -> tuple[str | None, dict]:
+        """Prepare and claim one durable attempt for either emit or ACK transport."""
+        from asgiref.sync import sync_to_async
+
+        command = await sync_to_async(OperationRepository.prepare)(
+            data["task_id"], event, data
+        )
+        durable = await sync_to_async(OperationRepository.delivery_payload)(command)
+        durable.update(
+            {k: data[k] for k in ("env_vars", "files", "ssh_keys") if k in data}
+        )
+        envelope = await sync_to_async(OperationRepository.envelope)(command, durable)
+        if not runner.sid or self.sio is None:
+            return None, envelope
+        sid = await sync_to_async(OperationRepository.claim_direct_delivery)(
+            command.task_id
+        )
+        return sid, envelope
 
     def record_operation_heartbeat(self, runner_id: str, data: dict) -> None:
         """Record that the runner is executing the bound lifecycle attempt."""
@@ -100,15 +104,31 @@ class RunnerTransportMixin:
         if not runner.sid:
             raise RunnerOfflineError(str(runner.id))
 
+        identity = None
+        sid = runner.sid
+        if event.removeprefix("task:") in LIFECYCLE_TYPES:
+            sid, data = await self._prepare_lifecycle_delivery(runner, event, data)
+            if not sid:
+                return {}
+            identity = {
+                key: data[key]
+                for key in ("operation_id", "attempt", "target", "runner_id")
+            }
         try:
-            response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
+            response = await self.sio.call(event, data, to=sid, timeout=timeout)
         except SocketIOTimeoutError as exc:
             raise RuntimeError(f"Runner call timed out for event '{event}'") from exc
         if response is None:
             return {}
-        if isinstance(response, dict):
-            return response
-        return {"result": response}
+        if not isinstance(response, dict):
+            return {"result": response}
+        if identity is not None:
+            from asgiref.sync import sync_to_async
+
+            if not await sync_to_async(self.runners.has_session)(str(runner.id), sid):
+                return {}
+            response = {**response, "_operation_identity": identity}
+        return response
 
     def _route_harness_reply(
         self,

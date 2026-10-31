@@ -28,6 +28,7 @@ LIFECYCLE_TYPES = {
     "build_image",
     "create_image_artifact",
     "delete_image",
+    "inject_credentials",
 }
 OPERATIONS = {
     "create_workspace": "creating",
@@ -37,7 +38,9 @@ OPERATIONS = {
     "update_workspace": "restarting",
     "remove_workspace": "removing",
     "create_image_artifact": "capturing_image",
+    "inject_credentials": "synchronizing_credentials",
 }
+INSPECTION_PHASES = {"intervention", "attention_required"}
 
 
 class OperationRepository:
@@ -193,14 +196,59 @@ class OperationRepository:
 
     @staticmethod
     def list_for_inspection() -> list[LifecycleCommand]:
-        """Read interventions whose runner can receive an inspection request."""
+        """Keep checking unresolved operations, including explicit repair blockers."""
         return list(
             LifecycleCommand.objects.filter(
-                phase="intervention", task__runner__status="online"
+                phase__in=INSPECTION_PHASES, task__runner__status="online"
             )
             .exclude(task__runner__sid="")
             .select_related("task__runner")
         )
+
+    @staticmethod
+    def require_attention(
+        runner_id: str, sid: str, identity: dict, diagnostic: str
+    ) -> bool:
+        """Retain an exact current operation after a proven permanent blocker.
+
+        Return whether the persisted diagnostic changed. Recheck the runner
+        session and workspace reservation under the same locks as disposition;
+        a delayed observation must never revive a completed or replaced command.
+        """
+        with transaction.atomic():
+            runner = lock_runner(runner_id)
+            if runner.sid != sid or not runner.is_online:
+                return False
+            task = Task.objects.filter(
+                pk=identity["operation_id"], runner=runner
+            ).first()
+            if task is None:
+                return False
+            if task.workspace_id:
+                workspace = Workspace.objects.select_for_update().get(
+                    pk=task.workspace_id
+                )
+                if workspace.current_task_id != task.id:
+                    return False
+            command = LifecycleCommand.objects.filter(task=task).first()
+            if (
+                command is None
+                or any(
+                    identity.get(key) != value
+                    for key, value in OperationRepository.envelope(command, {}).items()
+                )
+                or command.phase in {"disposed", "result"}
+                or task.status == "completed"
+                or (task.status == "failed" and command.phase not in INSPECTION_PHASES)
+                or (command.phase == "attention_required" and task.error == diagnostic)
+            ):
+                return False
+            OperationRepository.intervene(task, diagnostic)
+            Task.objects.filter(pk=task.id).update(error=diagnostic)
+            LifecycleCommand.objects.filter(task=task).update(
+                phase="attention_required"
+            )
+            return True
 
     @staticmethod
     def candidates(
@@ -247,8 +295,15 @@ class OperationRepository:
                     task__status__in=["pending", "in_progress"],
                     next_delivery_at__lte=now,
                     lease_until__lte=now,
-                )[:100]
+                )
+                .order_by("next_delivery_at", "task_id")[:100]
             )
+            # Rotate every inspected row, including offline, withheld and live
+            # work. Otherwise the same first 100 rows can occupy this bounded
+            # batch forever and starve unrelated deliverable commands.
+            LifecycleCommand.objects.filter(
+                task_id__in=[row.task_id for row in rows]
+            ).update(next_delivery_at=now)
             claimed = []
             for row in rows:
                 if not row.event and row.created_at < now - timedelta(seconds=60):

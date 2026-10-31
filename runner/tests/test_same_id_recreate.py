@@ -136,7 +136,10 @@ async def test_same_id_artifact_clone_after_remove(tmp_path):
     capture = r._snapshot_dir / f"{artifact_id}.qcow2"
     source = r._disk_path("source")
     qcow(source)
-    await r._publish_image(source, capture, {"artifact_id": artifact_id})
+    await r._publish_image(
+        source, capture,
+        {"artifact_id": artifact_id, "operation_id": str(uuid.uuid4())},
+    )
     leftover = r._disk_path(workspace_id)
     qcow(leftover, capture)
     r._get_domain = lambda _: (_ for _ in ()).throw(RuntimeError("absent"))

@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 from ..operation_result_repository import OperationResultRepository
-from ..operations import LIFECYCLE_TYPES
+from ..operations import INSPECTION_PHASES, LIFECYCLE_TYPES
 
 RESULT_METHODS = {
     "workspace:created": (
@@ -18,6 +18,10 @@ RESULT_METHODS = {
     "workspace:resumed": ("handle_workspace_resumed", {"resume_workspace"}),
     "workspace:updated": ("handle_workspace_updated", {"update_workspace"}),
     "workspace:removed": ("handle_workspace_removed", {"remove_workspace"}),
+    "workspace:credentials_injected": (
+        "handle_credentials_injected",
+        {"inject_credentials"},
+    ),
     "workspace:error": (
         "handle_workspace_error",
         LIFECYCLE_TYPES - {"build_image", "delete_image", "create_image_artifact"},
@@ -80,14 +84,24 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
         if (
             event in FAILURE_EVENTS
             and data.get("outcome_known") is False
-            and (state.status not in TERMINAL_STATUSES or state.phase == "intervention")
+            and (
+                state.status not in TERMINAL_STATUSES
+                or state.phase in INSPECTION_PHASES
+            )
         ):
+            if state.phase == "attention_required":
+                # Replayed uncertainty cannot erase a proven repair requirement.
+                return False
             reason = (
                 "Operation interrupted; automatic recovery will verify "
                 "the runner state."
             )
-            result.intervene(reason)
-            if state.workspace_id:
+            newly_interrupted = (
+                state.status != "failed" or state.phase != "intervention"
+            )
+            if newly_interrupted:
+                result.intervene(reason)
+            if state.workspace_id and newly_interrupted:
                 service._forward_workspace_operation(str(state.workspace_id), None)
                 service._forward_to_frontend(
                     "workspace:error",
@@ -100,7 +114,7 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
                 )
             return False
         if state.status in TERMINAL_STATUSES:
-            if state.status == "failed" and state.phase == "intervention":
+            if state.status == "failed" and state.phase in INSPECTION_PHASES:
                 # Backend delivery deadlines are not runner terminal outcomes.
                 # Exact authenticated journal completion can still resolve the fence.
                 if event in FAILURE_EVENTS and (
@@ -139,6 +153,7 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
                 "workspace:updated": "running",
                 "workspace:stopped": "stopped",
                 "workspace:removed": "absent",
+                "workspace:credentials_injected": "running",
             }.get(event, data.get("observed_status") or "unknown")
             if status == "completed"
             else data.get("observed_status") or "unknown"

@@ -41,7 +41,6 @@ def test_runner_reply_registration() -> None:
     assert {
         "operation:result",
         "workspace:error",
-        "workspace:credentials_injected",
         "image:build_progress",
         "harness:exec_wait_result",
         "workspace:stream_output",
@@ -68,7 +67,6 @@ def runner_sio(monkeypatch, runner):
         TaskType.START_TERMINAL,
         TaskType.START_DESKTOP,
         TaskType.STOP_DESKTOP,
-        TaskType.INJECT_CREDENTIALS,
     ],
 )
 async def test_direct_rpc_errors_remain_authenticated(runner_sio, runner, workspace, kind):

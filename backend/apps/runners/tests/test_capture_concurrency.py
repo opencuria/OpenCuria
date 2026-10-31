@@ -208,7 +208,7 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
         task_type="inject_credentials",
     )
     Task.objects.filter(pk=task.id).update(status=task_status)
-    with pytest.raises(ConflictError, match="credentials are synchronizing"):
+    with pytest.raises(ConflictError, match="unresolved capture/lifecycle operation"):
         CaptureService.allocate(workspace.id, "capture", has_busy_agent=has_busy_agent)
     assert not CaptureRequest.objects.filter(workspace=workspace).exists()
     assert not ImageInstance.objects.filter(origin_workspace=workspace).exists()

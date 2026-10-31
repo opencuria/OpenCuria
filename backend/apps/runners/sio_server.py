@@ -238,20 +238,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         # DB worker owns lifecycle delivery. Result replay from runner runs
         # before its first heartbeat; reconnect never authorizes cleanup.
 
-    @sio.on("workspace:credentials_injected")
-    async def on_workspace_credentials_injected(sid: str, data: dict):
-        """Handle persistent credential injection confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:credentials_injected")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_credentials_injected)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            credentials_present=bool(data.get("credentials_present")),
-            runner_id=runner_id,
-        )
-
     @sio.on("workspace:error")
     async def on_workspace_error(sid: str, data: dict):
         """Handle direct RPC errors; lifecycle failures require operation:result."""

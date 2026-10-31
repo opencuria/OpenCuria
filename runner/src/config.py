@@ -42,10 +42,14 @@ class RunnerSettings(BaseSettings):
     qemu_build_memory_mb: int = Field(default=2048, gt=0)
     qemu_build_concurrency: int = Field(default=2, gt=0)
     qemu_build_queue_timeout: float = Field(default=1800, gt=0)
+    qemu_build_script_timeout: float = Field(default=7200, gt=0)
     qemu_ssh_key_path: str = str(Path.home() / ".local/share/opencuria/ssh/runner_key")
     qemu_ssh_user: str = "root"
     qemu_ssh_timeout: int = 60  # seconds to wait for VM SSH readiness
     qemu_cloud_init_timeout: int = Field(default=300, gt=0)
+
+    credential_sync_timeout: float = Field(default=120, gt=0)
+    workspace_repo_clone_timeout: float = Field(default=1800, gt=0)
 
     # Heartbeat
     inventory_interval: int = 120
@@ -60,7 +64,6 @@ class RunnerSettings(BaseSettings):
     # Logging
     log_level: str = "INFO"
     log_format: Literal["json", "console"] = "console"
-
 
 
 def get_settings() -> RunnerSettings:

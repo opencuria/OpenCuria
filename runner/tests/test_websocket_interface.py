@@ -1067,7 +1067,7 @@ class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        interface._sio.emit = AsyncMock()
+        interface._operations.emit = AsyncMock()
         task_id = "inject-task-1"
         workspace_id = uuid.uuid4()
 
@@ -1075,6 +1075,8 @@ class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
         result = await handler(
             {
                 "task_id": task_id,
+                "operation_id": task_id, "target": str(workspace_id),
+                "attempt": 1, "runner_id": "runner",
                 "workspace_id": str(workspace_id),
                 "env_vars": {"GITHUB_TOKEN": "secret"},
                 "files": [],
@@ -1083,27 +1085,25 @@ class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result, {"ok": True, "credentials_present": True})
-        interface._sio.emit.assert_awaited_with(
-            "workspace:credentials_injected",
-            {
-                "task_id": task_id,
-                "workspace_id": str(workspace_id),
-                "credentials_present": True,
-            },
-        )
+        emitted = interface._operations.emit.await_args
+        self.assertEqual(emitted.args[0], "operation:result")
+        self.assertEqual(emitted.args[1]["event"], "workspace:credentials_injected")
+        self.assertTrue(emitted.args[1]["data"]["credentials_present"])
 
     async def test_inject_credentials_empty_set_acks_absent(self) -> None:
         service = DummyService()
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        interface._sio.emit = AsyncMock()
+        interface._operations.emit = AsyncMock()
         workspace_id = uuid.uuid4()
 
         handler = interface._sio.handlers["/"]["task:inject_credentials"]
         result = await handler(
             {
                 "task_id": "inject-task-empty",
+                "operation_id": "inject-task-empty", "target": str(workspace_id),
+                "attempt": 1, "runner_id": "runner",
                 "workspace_id": str(workspace_id),
                 "env_vars": {},
                 "files": [],

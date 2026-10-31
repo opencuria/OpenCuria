@@ -2333,7 +2333,11 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(credential)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present"])
-        sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
+        sio_mock.call = AsyncMock(
+            return_value={
+                "ok": False, "error": "runner failed", "outcome_known": True,
+            }
+        )
         updated = asyncio.run(
             service.update_workspace(
                 workspace.id,

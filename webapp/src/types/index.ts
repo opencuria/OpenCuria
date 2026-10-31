@@ -29,6 +29,7 @@ export enum WorkspaceOperation {
   CAPTURING_IMAGE = 'capturing_image',
   RESETTING = 'resetting',
   UPDATING = 'updating',
+  SYNCHRONIZING_CREDENTIALS = 'synchronizing_credentials',
 }
 
 export enum TaskStatus {

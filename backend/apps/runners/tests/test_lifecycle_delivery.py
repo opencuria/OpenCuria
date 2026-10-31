@@ -9,7 +9,7 @@ from django.db import connection
 from django.utils import timezone
 
 from apps.runners.deletion_repository import DeletionRepository
-from apps.runners.models import LifecycleCommand, Runner, Workspace
+from apps.runners.models import LifecycleCommand, Runner, Task, Workspace
 from apps.runners.operations import OperationRepository
 from apps.runners.repositories import TaskRepository
 from apps.runners.services.recovery import RecoveryService
@@ -137,3 +137,45 @@ async def test_recovery_checks_approval_at_each_release_boundary(
         )
     else:
         transport.emit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("waiting", ["offline", "heartbeat", "approval", "unprepared"])
+def test_waiting_batch_cannot_starve_other_commands(
+    command: LifecycleCommand, offline_runner: Runner, waiting: str
+) -> None:
+    """More than one batch of waiting work still lets a ready command progress."""
+    now = timezone.now()
+    waiting_runner = offline_runner if waiting == "offline" else command.task.runner
+    tasks = [
+        Task(
+            id=uuid.uuid4(), runner=waiting_runner, type="build_image", status="pending"
+        )
+        for _ in range(100)
+    ]
+    Task.objects.bulk_create(tasks)
+    LifecycleCommand.objects.bulk_create(
+        [
+            LifecycleCommand(
+                task=task,
+                event="" if waiting == "unprepared" else "task:build_image",
+                deadline_at=now + timedelta(hours=2),
+                next_delivery_at=now - timedelta(minutes=1),
+                heartbeat_at=now if waiting == "heartbeat" else None,
+            )
+            for task in tasks
+        ]
+    )
+    ready_id = command.task_id
+
+    def allowed(task_id: uuid.UUID) -> bool:
+        return waiting != "approval" or task_id == ready_id
+
+    assert OperationRepository.candidates(delivery_allowed=allowed) == []
+    ready = OperationRepository.candidates(delivery_allowed=allowed)
+    assert [row.task_id for row in ready] == [ready_id]
+    assert (
+        LifecycleCommand.objects.filter(
+            task_id__in=[task.id for task in tasks], deliveries=0
+        ).count()
+        == 100
+    )

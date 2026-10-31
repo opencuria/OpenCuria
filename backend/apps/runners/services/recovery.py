@@ -6,6 +6,7 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from ..credential_sync_repository import LegacyCredentialSyncRepository
 from ..deletion_repository import DeletionRepository
 from ..operations import OperationRepository
 from .capture import CaptureService
@@ -33,6 +34,7 @@ class RecoveryService:
                 logger.exception("lifecycle_recovery_stage_failed", stage=name)
                 return []
 
+        await stage("legacy_credentials", LegacyCredentialSyncRepository.fence)
         await stage("deletion", DeletionRepository.tick)
         finished = await stage("capture", CaptureService.tick)
         finished += await stage("recreate", RecreateService.tick)
@@ -80,7 +82,12 @@ class RecoveryService:
             try:
                 await transport.emit(
                     "operation:inspect_request",
-                    OperationRepository.envelope(row, {}),
+                    OperationRepository.envelope(
+                        row,
+                        {"legacy_credential_sync": True}
+                        if row.payload.get("_legacy_credential_sync") is True
+                        else {},
+                    ),
                     room=row.task.runner.sid,
                 )
             except Exception:
@@ -105,6 +112,7 @@ class RecoveryService:
                     "task:create_workspace",
                     "task:create_workspace_from_image_artifact",
                     "task:resume_workspace",
+                    "task:inject_credentials",
                 }:
                     from apps.credentials.services import CredentialSvc
 

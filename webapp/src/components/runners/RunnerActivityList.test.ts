@@ -186,3 +186,19 @@ it('reports unavailable activity when connected to an older backend', () => {
   expect(w.text()).toContain('Activity status unavailable')
   w.unmount()
 })
+
+it('shows automatic recovery in progress without an administrator alert', () => {
+  const w = mountList(
+    data([
+      activity({
+        state: 'active',
+        outcome: 'recovering',
+        summary: 'OpenCuria is checking the interrupted operation automatically.',
+      }),
+    ]),
+  )
+  expect(w.find('[aria-label="Needs attention"]').exists()).toBe(false)
+  expect(w.get('[aria-label="In progress"]').text()).toContain('Recovering')
+  expect(w.text()).toContain('automatically')
+  w.unmount()
+})

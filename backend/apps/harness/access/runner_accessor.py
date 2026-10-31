@@ -1782,12 +1782,15 @@ async def create_harness_accessor(
     workspace_id: str,
     *,
     default_timeout: float = DEFAULT_TIMEOUT,
+    allow_lease_cleanup: bool = False,
 ) -> RunnerWorkspaceAccessor:
     """Build a runner-backed accessor for *workspace_id*.
 
     Args:
         service: The runners ``RunnerService`` used to emit events.
         workspace_id: Workspace UUID string owned by an online runner.
+        allow_lease_cleanup: Let only lease release bypass interaction admission,
+            so recovery can clean failed or lifecycle-fenced workspaces.
 
     Raises:
         WorkspaceNotFoundError: If the workspace does not exist.
@@ -1822,7 +1825,8 @@ async def create_harness_accessor(
     )
     if workspace is None:
         raise WorkspaceNotFoundError(workspace_id)
-    await sync_to_async(admission.ensure_interactions_available)(workspace.id)
+    if not allow_lease_cleanup:
+        await sync_to_async(admission.ensure_interactions_available)(workspace.id)
     runner = workspace.runner
     if not runner.is_online or not runner.sid:
         raise RunnerOfflineError(str(runner.id))
@@ -1836,7 +1840,13 @@ async def create_harness_accessor(
             raise RunnerAccessorError(
                 f"{event} failed: workspace {workspace_id} not found"
             )
-        await sync_to_async(admission.ensure_interactions_available)(current.id)
+        cleanup_release = (
+            allow_lease_cleanup
+            and event == "harness:desktop_action"
+            and payload.get("action") == "release"
+        )
+        if not cleanup_release:
+            await sync_to_async(admission.ensure_interactions_available)(current.id)
         live_runner = current.runner
         if not live_runner.is_online or not live_runner.sid:
             raise RunnerAccessorError(

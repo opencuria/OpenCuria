@@ -11,7 +11,8 @@ export function runnerActivityGroups(activities: RunnerActivity[] = []) {
 
 export function runnerActivityLabel(activity: RunnerActivity): string {
   if (activity.state === 'attention') return 'Needs attention'
-  if (activity.state === 'active') return 'In progress'
+  if (activity.state === 'active')
+    return activity.outcome === 'recovering' ? 'Recovering' : 'In progress'
   return (
     { failed: 'Failed', resolved: 'Handled', cancelled: 'Cancelled', completed: 'Completed' }[
       activity.outcome

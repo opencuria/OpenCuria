@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -18,7 +19,10 @@ from apps.harness.models import (
     HarnessPart,
     HarnessRunStatus,
     HarnessSessionStatus,
+    QuestionRequest,
 )
+from apps.harness.permissions.models import PermissionRequest
+from apps.harness.provider_turn_models import ProviderTurn
 from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
 from common.exceptions import ConflictError
 
@@ -260,6 +264,59 @@ async def test_stale_attempt_without_identity_is_safe_to_interrupt(harness_works
     assistant.refresh_from_db()
     assert row is not None and row.status == HarnessRunStatus.INTERRUPTED
     assert assistant.error == "Run interrupted after worker ownership expired."
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_sweep_isolates_offline_runner_and_does_not_need_runner_without_lease(
+    harness_workspace,
+):
+    offline, _, offline_owner = _make_attempt(harness_workspace)
+    unbound, assistant, unbound_owner = _make_attempt(harness_workspace)
+    HarnessRunRepository.model.objects.filter(
+        id__in=[offline_owner.run_id, unbound_owner.run_id]
+    ).update(heartbeat_at=timezone.now() - timedelta(minutes=10))
+    HarnessRunRepository.model.objects.filter(id=offline_owner.run_id).update(
+        lease_id=uuid.uuid4(), lease_epoch="offline-epoch"
+    )
+    fields = {
+        "organization_id": unbound.organization_id,
+        "session_id": unbound.id,
+        "message_id": assistant.id,
+    }
+    permission = PermissionRequest.objects.create(**fields, tool="exec", pattern="*")
+    question = QuestionRequest.objects.create(**fields, questions=[])
+    snapshot = ProviderTurn.objects.create(
+        assistant_message=assistant,
+        organization_id=unbound.organization_id,
+        holder_tokens=["lost-holder"],
+        monitor_required=True,
+    )
+    accessor_factory = AsyncMock(side_effect=RuntimeError("runner offline"))
+    notify = AsyncMock()
+    assert (
+        await HarnessRunService().sweep_stale(accessor_factory, on_recovered=notify)
+        == 1
+    )
+    notify.assert_awaited_once_with(unbound_owner.run_id)
+    accessor_factory.assert_awaited_once_with(offline.id)
+    assert HarnessRunRepository.get_open_for_session(offline.id) is not None
+    assert HarnessRunRepository.get_open_for_session(unbound.id) is None
+    for request in (permission, question):
+        request.refresh_from_db()
+        assert request.status == "rejected" and request.resolved_at is not None
+    snapshot.refresh_from_db()
+    assert not snapshot.active and snapshot.holds == 0
+    assert snapshot.holder_tokens == [] and not snapshot.monitor_required
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_sweep_leaves_fresh_closing_owner_time_to_finish(harness_workspace):
+    session, _assistant, owner = _make_attempt(harness_workspace)
+    assert await owner.begin_close()
+    accessor_factory = AsyncMock()
+    assert await HarnessRunService().sweep_stale(accessor_factory) == 0
+    accessor_factory.assert_not_called()
+    assert HarnessRunRepository.get_open_for_session(session.id).status == "closing"
 
 
 @pytest.mark.django_db(transaction=True)

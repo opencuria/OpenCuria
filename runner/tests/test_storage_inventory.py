@@ -129,7 +129,9 @@ async def test_capture_descendant_and_unreadable_scan_block_delete(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_publication_crash_marker_enospc_and_invalid_path(tmp_path, monkeypatch):
+async def test_publication_marker_enospc_rolls_back_and_rejects_invalid_path(
+    tmp_path, monkeypatch
+):
     r = runtime(tmp_path)
     disk = r._disk_dir / "workspace.qcow2"
     qcow(disk)
@@ -149,15 +151,12 @@ async def test_publication_crash_marker_enospc_and_invalid_path(tmp_path, monkey
     monkeypatch.setattr(os, "fsync", fail)
     with pytest.raises(OSError):
         await r._publish_image(disk, target, {"operation_id": "op"})
-    assert target.exists()
+    assert not target.exists()
     assert not target.with_suffix(".manifest.json").exists()
+    assert not list(r._snapshot_dir.glob("*.tmp-*"))
     scan = await r.inventory()
-    assert (
-        next(i for i in scan.resources if i.resource_id == str(target)).state
-        == "unknown"
-    )
-    with pytest.raises(RuntimeError, match="Unknown"):
-        await r.delete_image_artifact("target")
+    assert scan.complete, scan.errors
+    assert disk.exists()
     for reference in ("../escape", "/tmp/foreign.qcow2", "x/y"):
         with pytest.raises(ValueError):
             r._managed_image_path(reference)

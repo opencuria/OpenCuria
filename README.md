@@ -244,8 +244,14 @@ the [mobile app guide](./docs/mobile-app.md).
 The Docker backend entrypoint runs migrations automatically and starts one Uvicorn
 ASGI worker. The worker owns the in-process scheduled-task loop alongside Socket.IO
 and the harness; keep it single-process/single-worker. A PostgreSQL advisory lock
-rejects duplicate workers before recovery starts; SQLite uses a renewed TTL-row lease
-(best effort, not suitable for separate hosts without shared locking semantics).
+or SQLite TTL-row lease controls scheduling, but lease expiry does not prove that
+native chat execution has stopped. Before restart recovery, a process-lifetime
+file lock also excludes another live local backend. SQLite places it next to its
+database; PostgreSQL deployments should set `BACKEND_PROCESS_LOCK_PATH` to a file
+on shared backend storage. Server Compose mounts that storage for the backend.
+Successful or failed ASGI startup retains ownership until process exit, including
+while native tasks drain after shutdown. This supports one backend on one host;
+separate hosts without a common file lock are not supported for native recovery.
 Raw Django `runserver` has no scheduler startup hook and is not suitable for production.
 Scheduled tasks are personal
 prompts in an IANA timezone: `recurrence: "once"` runs a single time on `run_date`

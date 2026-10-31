@@ -69,6 +69,7 @@ describe('canonical lifecycle state/action matrix', () => {
     ['F038', WorkspaceOperation.CAPTURING_IMAGE, 'Capturing'],
     ['F039', WorkspaceOperation.RESETTING, 'Resetting…'],
     ['F040', WorkspaceOperation.UPDATING, 'Updating…'],
+    ['F041', WorkspaceOperation.SYNCHRONIZING_CREDENTIALS, 'Syncing credentials…'],
   ] as const)('%s active %s blocks every mutation', (_id, active_operation, label) => {
     const workspace = {
       id: 'workspace-operation',

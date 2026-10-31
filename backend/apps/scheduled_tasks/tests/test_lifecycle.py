@@ -1,10 +1,9 @@
 import asyncio
-import uuid
 from datetime import datetime, time, timezone
 from types import SimpleNamespace
 
 import pytest
-from apps.organizations.models import Organization
+
 from apps.scheduled_tasks.models import ScheduledTaskRun
 from apps.scheduled_tasks.services import ScheduledTaskScheduler, ScheduledTaskService
 
@@ -90,6 +89,53 @@ async def test_scheduler_recovers_under_lease_before_dispatch(
         assert events == ["acquire", "recover", "skip_due", "release"]
     assert scheduler._lease is None
     assert scheduler._task is None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_does_not_dispatch_until_harness_repair_finishes(monkeypatch):
+    events = []
+
+    class FakeLease:
+        async def acquire(self):
+            events.append("acquire")
+            return True
+
+        async def release(self):
+            events.append("release")
+
+    class FakeRecovery:
+        def recover_backend_restart(self):
+            events.append("schedule_recovery")
+
+    async def skip_due():
+        pass
+
+    async def repair():
+        events.append("harness_recovery")
+        # Give dispatch every opportunity to run during database recovery.
+        await asyncio.sleep(0)
+        assert scheduler._task is None
+        assert scheduler._lease is not None
+
+    async def dispatch():
+        events.append("dispatch")
+
+    monkeypatch.setattr("apps.scheduled_tasks.lease.ScheduledTaskLease", FakeLease)
+    service = ScheduledTaskService(repository=FakeRepository())
+    service.skip_due_on_startup = skip_due
+    scheduler = ScheduledTaskScheduler(service=service, recovery=FakeRecovery())
+    scheduler._run = dispatch
+    await scheduler.start(before_dispatch=repair)
+    try:
+        await asyncio.sleep(0)
+        assert events == [
+            "acquire",
+            "schedule_recovery",
+            "harness_recovery",
+            "dispatch",
+        ]
+    finally:
+        await scheduler.stop()
 
 
 @pytest.mark.asyncio

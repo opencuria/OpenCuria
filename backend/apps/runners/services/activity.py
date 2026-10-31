@@ -8,13 +8,17 @@ OPERATION_TITLES = {
     "stop_workspace": "Stop workspace",
     "resume_workspace": "Start workspace",
     "update_workspace": "Update workspace",
+    "inject_credentials": "Sync credentials",
     "remove_workspace": "Delete workspace",
     "build_image": "Build image",
     "create_image_artifact": "Save workspace as image",
     "delete_image_artifact": "Delete image",
 }
 TERMINAL_PHASES = {"completed", "cancelled", "failed", "disposed", "result"}
-ATTENTION_PHASES = {"intervention", "intervention_required", "reconfirmation_required"}
+# Connection interruptions recover automatically. Changed destructive approval
+# and proven storage/record inconsistencies require an administrator's decision.
+RECOVERY_PHASES = {"intervention", "intervention_required"}
+ATTENTION_PHASES = {"reconfirmation_required", "attention_required"}
 
 
 class ActivityService:
@@ -47,12 +51,13 @@ class ActivityService:
             children = [op for identity, op in operations.items() if identity in ids]
             grouped.update(ids)
             blocked = [op for op in children if ActivityService.unresolved(op)]
+            repair_blocked = [op for op in blocked if op["phase"] in ATTENTION_PHASES]
             phase = record["phase"]
             state = (
                 "attention"
-                if blocked
-                or phase in ATTENTION_PHASES
-                or (kind == "deletion" and phase == "failed")
+                if phase in ATTENTION_PHASES or repair_blocked
+                else "active"
+                if blocked or phase in RECOVERY_PHASES
                 else "history"
                 if phase in TERMINAL_PHASES
                 else "active"
@@ -60,6 +65,8 @@ class ActivityService:
             outcome = (
                 "blocked"
                 if state == "attention"
+                else "recovering"
+                if blocked or phase in RECOVERY_PHASES
                 else "resolved"
                 if any(op["phase"] == "disposed" for op in children)
                 and phase == "failed"
@@ -68,6 +75,10 @@ class ActivityService:
                 else "in_progress"
             )
             diagnostic = record.get("diagnostic", "")
+            if repair_blocked:
+                diagnostic = "\n".join(
+                    dict.fromkeys(op["task__error"] for op in repair_blocked)
+                )
             if kind == "capture" and record.get("resume_suppressed"):
                 diagnostic = (
                     diagnostic + "\nAutomatic restart was skipped for this capture."
@@ -87,7 +98,10 @@ class ActivityService:
                     state=state,
                     outcome=outcome,
                     summary=ActivityService.summary(
-                        summary_title, state, outcome, phase
+                        summary_title,
+                        state,
+                        outcome,
+                        "attention_required" if repair_blocked else phase,
                     ),
                     diagnostic=diagnostic,
                     operation_ids=[str(op["task_id"]) for op in blocked],
@@ -165,6 +179,8 @@ class ActivityService:
                 continue
             state = (
                 "attention"
+                if op["phase"] in ATTENTION_PHASES
+                else "active"
                 if ActivityService.unresolved(op)
                 else "history"
                 if op["phase"] in TERMINAL_PHASES
@@ -174,6 +190,8 @@ class ActivityService:
             outcome = (
                 "blocked"
                 if state == "attention"
+                else "recovering"
+                if ActivityService.unresolved(op)
                 else "resolved"
                 if op["phase"] == "disposed"
                 else op["task__status"]
@@ -192,7 +210,7 @@ class ActivityService:
                     outcome=outcome,
                     summary=ActivityService.summary(title, state, outcome, op["phase"]),
                     diagnostic=op["task__error"],
-                    operation_ids=[identity] if state == "attention" else [],
+                    operation_ids=[identity] if ActivityService.unresolved(op) else [],
                     created_at=op["created_at"],
                 )
             )
@@ -202,9 +220,9 @@ class ActivityService:
 
     @staticmethod
     def unresolved(operation: dict) -> bool:
-        """An acknowledged failure is history even though execution stays failed."""
+        """An interrupted attempt stays active until automatic proof closes it."""
         return operation["phase"] != "disposed" and (
-            operation["phase"] in ATTENTION_PHASES
+            operation["phase"] in RECOVERY_PHASES | ATTENTION_PHASES
             or (
                 operation["task__status"] == "failed"
                 and operation["task__workspace__current_task_id"]
@@ -217,6 +235,17 @@ class ActivityService:
         """Explain the next decision without exposing transport or locking terms."""
         if phase == "reconfirmation_required":
             return "Dependencies changed. Review the deletion before continuing."
+        if phase == "attention_required":
+            return (
+                "Storage or resource records need administrator repair. "
+                "See details; OpenCuria will check again automatically."
+            )
+        if outcome == "recovering":
+            return (
+                "OpenCuria is checking the interrupted operation automatically. "
+                "Recovery continues when the runner is connected and can verify "
+                "its resources."
+            )
         if state == "attention":
             return (
                 f"{title} could not be confirmed. "

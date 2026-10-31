@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from django.utils import timezone
+
 from .models import HarnessMessage
 from .run_recovery_repository import RunRecoveryRepository
 
@@ -19,6 +21,12 @@ class RunRecoveryService:
 
     def __init__(self, repository: type[RunRecoveryRepository] | None = None) -> None:
         self.repository = repository or RunRecoveryRepository
+
+    def recover_backend_restart(self) -> int:
+        """Recover unowned turns once the ASGI singleton lease is held."""
+        return self.repository.recover_backend_restart(
+            at=timezone.now(), error="Backend restarted before the run completed"
+        )
 
     def find_assistant(
         self, session_id: uuid.UUID | None, assistant: HarnessMessage | None

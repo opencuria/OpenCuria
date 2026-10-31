@@ -83,6 +83,9 @@ Builds wait for a slot or temporary host RAM pressure to clear, reporting the
 queue reason without allocating a guest. `RUNNER_QEMU_BUILD_QUEUE_TIMEOUT`
 (default 1800 seconds) bounds admission waiting. Requests exceeding the host's
 physical CPU/RAM budget fail immediately with a configuration diagnostic.
+`RUNNER_QEMU_BUILD_SCRIPT_TIMEOUT` (default 7200 seconds) bounds script upload
+and execution. A hanging recipe fails, removes its temporary guest and releases
+the build slot; previous published versions remain available.
 Every guest activation (create, clone, build, start and resource-change restart)
 checks available host RAM and the configured RAM of every active libvirt guest.
 Workspace activations that would consume the host margin (at least 1 GiB or 10%
@@ -144,7 +147,14 @@ cannot be read, mutation remains blocked until storage can be inspected again.
 Initial workspace creation, cloning and image builds wait for cloud-init to
 finish before reporting readiness or running the image script. The read-only
 status probe tolerates the first-boot SSH restart; the image script is never
-replayed. `RUNNER_QEMU_CLOUD_INIT_TIMEOUT` bounds this wait (default 300 seconds).
+replayed. Credential upload/replacement/scrubbing is bounded by
+`RUNNER_CREDENTIAL_SYNC_TIMEOUT` (default 120 seconds). A timeout never claims
+clean credentials: durable recovery first quiesces the exact guest.
+Repository cloning is noninteractive and bounded inside the guest by
+`RUNNER_WORKSPACE_REPO_CLONE_TIMEOUT` (default 1800 seconds per repository).
+A failed/timed-out clone remains a provisioning warning, as other clone failures
+do; loss of execution confirmation fails creation and retains the guest for
+recovery. `RUNNER_QEMU_CLOUD_INIT_TIMEOUT` bounds this wait (default 300 seconds).
 
 Each newly provisioned VM gets a fresh
 [cloud-init instance ID](https://docs.cloud-init.io/en/26.1/reference/datasources/nocloud.html#example-creating-a-disk)
