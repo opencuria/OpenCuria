@@ -86,9 +86,13 @@ class VoiceProvider:
                 # A custom ID remains possible while catalog service is unavailable.
                 models = [
                     {
+                        "id": "openrouter/elevenlabs/scribe-v2",
+                        "name": "Scribe v2",
+                    },
+                    {
                         "id": "openrouter/openai/whisper-large-v3",
                         "name": "Whisper large v3",
-                    }
+                    },
                 ]
             _catalog[key] = (time.monotonic() + 300, models)
             return models
@@ -121,6 +125,7 @@ class VoiceProvider:
                     }
                     options: dict[str, Any] = {
                         "model": model,
+                        "temperature": 0,
                         "response_format": "verbose_json" if verbose else "json",
                     }
                     if verbose:

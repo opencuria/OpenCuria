@@ -5,6 +5,7 @@ export interface VoiceCaptureControls {
   workspaceId: string
   state: 'requesting' | 'recording' | 'processing' | 'error'
   elapsedMs: number
+  audioLevel?: number
   pointing: boolean
   stop: () => void
   cancel: () => void

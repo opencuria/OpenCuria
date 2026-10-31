@@ -29,7 +29,7 @@ import {
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { MousePointerClick } from '@lucide/vue'
-import { activePointingWorkspace, registerPointingDesktop } from '@/lib/voicePointing'
+import { registerPointingDesktop } from '@/lib/voicePointing'
 
 const props = defineProps<{ workspaceId: string }>()
 
@@ -51,7 +51,10 @@ const {
 
 const surfaceRef = ref<HTMLElement | null>(null)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
-const unregisterPointingDesktop = registerPointingDesktop(props.workspaceId, () => desktopIframeRef.value)
+let unregisterPointingDesktop = registerPointingDesktop(
+  props.workspaceId,
+  () => desktopIframeRef.value,
+)
 const viewportWidth = ref(0)
 const viewportHeight = ref(0)
 const iframeLoaded = ref(false)
@@ -430,6 +433,14 @@ watch(
   },
 )
 
+watch(
+  () => props.workspaceId,
+  (workspaceId) => {
+    unregisterPointingDesktop()
+    unregisterPointingDesktop = registerPointingDesktop(workspaceId, () => desktopIframeRef.value)
+  },
+)
+
 watch([sidebarDesktopHost, modalDesktopHost], refreshHostBounds)
 
 watch(
@@ -481,20 +492,9 @@ watch(desktopIframeRef, () => {
           sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
           allow="clipboard-read; clipboard-write"
           data-testid="desktop-surface-iframe"
-          @load="handleIframeLoad"
-        />
-        <div
-          v-if="activePointingWorkspace === workspaceId && iframeLoaded && viewerStatus === 'connected'"
-          class="absolute inset-0 cursor-crosshair"
-          data-voice-desktop
+          :data-voice-desktop="iframeLoaded && viewerStatus === 'connected' ? '' : undefined"
           :data-voice-workspace="workspaceId"
-          :data-voice-width="desktopSize.width"
-          :data-voice-height="desktopSize.height"
-          aria-label="Point at the desktop while speaking"
-          title="Pointing mode · desktop input is paused"
-          @pointerdown.prevent
-          @click.prevent.stop
-          @contextmenu.prevent
+          @load="handleIframeLoad"
         />
       </div>
     </div>

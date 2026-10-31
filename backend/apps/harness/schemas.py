@@ -220,14 +220,19 @@ class HarnessPermissionOut(Schema):
 
 
 class ProviderConfigIn(Schema):
-    """Org-wide small-model defaults; agent defaults live in AgentConfig."""
+    """Org-wide helper-model defaults; agent defaults live in AgentConfig."""
 
     small_model: str = ""
     small_effort: str = ""
+    speech_model: str | None = Field(default=None, max_length=255)
+    voice_cleanup_model: str | None = Field(default=None, max_length=255)
 
 
 class ProviderConfigOut(ProviderConfigIn):
-    """Saved org-wide small-model defaults."""
+    """Saved org-wide helper-model defaults."""
+
+    speech_model: str = ""
+    voice_cleanup_model: str = ""
 
 
 class AgentConfigIn(Schema):

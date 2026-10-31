@@ -30,6 +30,7 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from .services import get_runner_service
 from .services.infra.desktop_tunnels import register_ws_tunnel, unregister_ws_tunnel
+from .voice_viewer_bridge import VOICE_VIEWER_BRIDGE
 
 logger = logging.getLogger(__name__)
 
@@ -62,19 +63,8 @@ _KASM_IDLE_GUARD_SCRIPT = (
     b"var args=Array.prototype.slice.call(arguments);args[0]=wrapped;"
     b"return n.apply(this,args);};"
     b"})();"
-    # Voice pointing captures the already displayed framebuffer. Accept only
-    # requests from the embedding parent and reply to that exact origin.
-    b"(function(){var parentOrigin;try{parentOrigin=new URL(document.referrer).origin;}"
-    b"catch(e){return;}var busy=false;window.addEventListener('message',function(e){"
-    b"var d=e.data;if(e.source!==window.parent||e.origin!==parentOrigin||"
-    b"!d||d.type!=='opencuria:voice-frame'||typeof d.requestId!=='string'||"
-    b"d.requestId.length>80||busy){return;}busy=true;"
-    b"var reply=function(blob){busy=false;window.parent.postMessage({"
-    b"type:'opencuria:voice-frame',requestId:d.requestId,blob:blob},parentOrigin);};"
-    b"try{var c=document.querySelector('#noVNC_canvas')||document.querySelector('canvas');"
-    b"if(!c||!c.width||!c.height){reply(null);return;}"
-    b"c.toBlob(reply,'image/jpeg',0.72);}catch(err){reply(null);}});})();"
-    b"</script>"
+    + VOICE_VIEWER_BRIDGE
+    + b"</script>"
 )
 
 

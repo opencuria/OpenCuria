@@ -691,24 +691,114 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 let message;
 let captures = 0;
+let time = 0;
 const replies = [];
+const listeners = {};
 const parent = { postMessage: (...args) => replies.push(args) };
-const window = { parent, setInterval() {},
+let pointerTick;
+let timerCleared = false;
+const window = { parent,
+  setInterval: (handler) => { pointerTick = handler; return 1; },
+  clearInterval: () => { timerCleared = true; },
   addEventListener: (type, handler) => { if (type === 'message') message = handler; } };
-const document = { referrer: 'https://app.example/chat', querySelector: () => ({
-  width: 1920, height: 1080, toBlob: (reply) => { captures++; reply('jpeg'); }
-}) };
-vm.runInNewContext(SCRIPT, { window, document, URL });
+const framebuffer = { width: 1920, height: 1080,
+  getBoundingClientRect: () => ({ left: 40, top: 60, width: 960, height: 540 }) };
+const document = { referrer: 'https://app.example/chat',
+  addEventListener: (type, handler, options) => {
+    assert.equal(options.passive, true);
+    assert.equal(options.capture, true);
+    listeners[type] = handler;
+  },
+  querySelector: (selector) => {
+    // The previous bridge captured the first arbitrary auxiliary canvas.
+    assert.equal(selector, '#noVNC_container > div > canvas');
+    return framebuffer;
+  },
+  createElement: (tag) => {
+    assert.equal(tag, 'canvas');
+    return { getContext: () => ({
+        drawImage: (source) => assert.equal(source, framebuffer) }),
+      toBlob: (reply) => { captures++; reply('jpeg'); } };
+  }
+};
+const performance = { timeOrigin: 1000, now: () => time };
+vm.runInNewContext(SCRIPT, { window, document, URL, performance });
 const data = { type: 'opencuria:voice-frame', requestId: 'request-1' };
 message({ source: {}, origin: 'https://app.example', data });
 message({ source: parent, origin: 'https://evil.example', data });
-message({ source: parent, origin: 'https://app.example', data: { ...data, requestId: {} } });
+message({ source: parent, origin: 'https://app.example',
+  data: { ...data, requestId: {} } });
 assert.equal(captures, 0);
 message({ source: parent, origin: 'https://app.example', data });
 assert.equal(captures, 1);
 assert.equal(replies[0][0].requestId, 'request-1');
 assert.equal(replies[0][0].blob, 'jpeg');
+assert.equal(replies[0][0].width, 1920);
+assert.equal(replies[0][0].height, 1080);
+assert.equal(replies[0][0].captured_at, 1000);
 assert.equal(replies[0][1], 'https://app.example');
+const pointer = { type: 'pointerdown', target: framebuffer, clientX: 200, clientY: 160,
+  preventDefault: () => assert.fail('Recording must not block desktop input'),
+  stopPropagation: () => assert.fail('Recording must not block desktop input') };
+listeners.pointerdown(pointer);
+assert.equal(replies.length, 1); // no observer outside an active recording
+const sessionId = '11111111-1111-4111-8111-111111111111';
+const observe = { type: 'opencuria:voice-observe', sessionId, enabled: true };
+message({ source: parent, origin: 'https://evil.example', data: observe });
+listeners.pointerdown(pointer);
+assert.equal(replies.length, 1);
+message({ source: parent, origin: 'https://app.example', data: observe });
+listeners.pointerdown(pointer);
+assert.equal(replies[1][0].type, 'opencuria:voice-pointer');
+assert.equal(replies[1][0].sessionId, sessionId);
+assert.equal(replies[1][0].x, 320);
+assert.equal(replies[1][0].y, 200);
+assert.equal(replies[1][0].event, 'down');
+assert.equal(replies[1][0].observed_at, 1000);
+// Reproduce Kasm's real mouse capture sequence followed by a final move only
+// 64ms after the previous one. It must survive throttling and remain sampled.
+const captureElement = { id: 'noVNC_mouse_capture_elem' };
+time = 10;
+listeners.pointermove({ ...pointer, type: 'pointermove' });
+const beforeTransfer = replies.length;
+time = 20;
+listeners.pointerout({ ...pointer, type: 'pointerout',
+  relatedTarget: captureElement });
+assert.equal(replies.length, beforeTransfer);
+time = 21;
+listeners.pointerup({ ...pointer, type: 'pointerup', target: captureElement });
+assert.equal(replies[replies.length - 1][0].event, 'up');
+time = 22;
+listeners.pointerout({ ...pointer, type: 'pointerout', target: captureElement,
+  relatedTarget: framebuffer });
+assert.equal(replies[replies.length - 1][0].event, 'up');
+time = 74;
+const beforeFinalMove = replies.length;
+listeners.pointermove({ ...pointer, type: 'pointermove',
+  clientX: 440, clientY: 260 });
+assert.equal(replies.length, beforeFinalMove); // immediate messages are throttled
+for (const tick of [110, 210, 1210, 2210]) {
+  time = tick;
+  pointerTick();
+  assert.equal(replies[replies.length - 1][0].x, 800);
+  assert.equal(replies[replies.length - 1][0].y, 400);
+  assert.equal(replies[replies.length - 1][0].event, 'move');
+  assert.equal(replies[replies.length - 1][0].observed_at, 1000 + tick);
+}
+// Keepalive renewals retain the last position rather than starting over.
+time = 2500;
+message({ source: parent, origin: 'https://app.example', data: observe });
+time = 3510;
+pointerTick();
+assert.equal(replies[replies.length - 1][0].x, 800);
+const beforeExpiry = replies.length;
+time = 5600;
+pointerTick();
+listeners.pointerdown(pointer);
+assert.equal(replies.length, beforeExpiry);
+assert.equal(timerCleared, true); // abandoned recordings expire in the viewer
+
+
 """
     subprocess.run(
         [node, "-e", "const SCRIPT=" + json.dumps(script) + ";" + check],

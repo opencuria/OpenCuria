@@ -16,6 +16,60 @@ def compact_text(value: str) -> str:
     return re.sub(r"[\W_]+", "", value).casefold()
 
 
+def without_silent_segments(raw: dict[str, Any]) -> dict[str, Any]:
+    """Honor explicit non-speech confidence without guessing from repeated text.
+
+    Whisper's own silence test requires both high no-speech probability and low
+    average token probability. Only apply it to complete segment metadata, so a
+    partial provider response cannot accidentally discard unaligned speech.
+    """
+    items = raw.get("segments")
+    if not isinstance(items, list) or not items or len(items) > 3000:
+        return raw
+    try:
+        if compact_text(" ".join(item["text"] for item in items)) != compact_text(
+            raw["text"]
+        ):
+            return raw
+        silent = []
+        kept = []
+        for item in items:
+            probability = float(item.get("no_speech_prob", 0))
+            logprob = float(item.get("avg_logprob", 0))
+            start, end = float(item["start"]), float(item["end"])
+            if (
+                not all(
+                    math.isfinite(value) for value in (probability, logprob, start, end)
+                )
+                or not 0 <= start <= end
+            ):
+                return raw
+            if 0.6 < probability <= 1 and logprob < -1:
+                silent.append((start, end))
+            else:
+                kept.append(item)
+        if not silent:
+            return raw
+        result = {
+            **raw,
+            "text": " ".join(item["text"].strip() for item in kept),
+            "segments": kept,
+        }
+        words = raw.get("words")
+        if isinstance(words, list):
+            result["words"] = [
+                item
+                for item in words
+                if not any(
+                    start <= (float(item["start"]) + float(item["end"])) / 2 <= end
+                    for start, end in silent
+                )
+            ]
+        return result
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return raw
+
+
 def word_sentences(text: str, items: Any, duration_ms: int) -> list[VoiceSegment]:
     """Use sentence punctuation only where it coincides with a measured word end.
 

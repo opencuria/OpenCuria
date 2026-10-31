@@ -7,6 +7,7 @@ import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import * as harnessApi from '@/services/harness.api'
 import * as providerCatalog from '@/lib/providerCatalog'
+import { getVoiceSettings } from '@/services/voice.api'
 import { useAuthStore } from '@/stores/auth'
 import { ApiRequestError } from '@/services/api'
 import { toast } from 'vue-sonner'
@@ -19,6 +20,8 @@ async function autosave() {
   await vi.advanceTimersByTimeAsync(500)
   await flushPromises()
 }
+
+vi.mock('@/services/voice.api', () => ({ getVoiceSettings: vi.fn() }))
 
 vi.mock('vue-sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
@@ -79,6 +82,8 @@ function mountTab(admin = false) {
 const config = {
   small_model: 'openrouter/model-big',
   small_effort: '',
+  speech_model: '',
+  voice_cleanup_model: '',
 }
 
 describe('ProviderConfigTab', () => {
@@ -93,6 +98,10 @@ describe('ProviderConfigTab', () => {
       ...payload,
     }))
     vi.mocked(harnessApi.listProviderAccounts).mockResolvedValue([account])
+    vi.mocked(getVoiceSettings).mockResolvedValue({
+      available: true, default_model: 'openrouter/speech', cleanup_model: config.small_model,
+      models: [{ id: 'openrouter/speech', name: 'Speech' }], max_duration_ms: 300000, max_audio_bytes: 1500000,
+    })
   })
 
   it('shows account counts and active label while keeping the shared model picker', async () => {
@@ -106,7 +115,8 @@ describe('ProviderConfigTab', () => {
       'Personal · Personal',
     )
     expect(wrapper.find('[data-testid="provider-status-openrouter"]').text()).toBe('Active')
-    expect(wrapper.findAllComponents(ModelPicker)).toHaveLength(1)
+    expect(wrapper.findAllComponents(ModelPicker)).toHaveLength(3)
+    expect(wrapper.text()).toContain('Voice input')
   })
 
   it('aggregates Codex-only models without double-counting native/catalog overlaps', async () => {
@@ -139,8 +149,38 @@ describe('ProviderConfigTab', () => {
     expect(harnessApi.saveProviderConfig).toHaveBeenCalledWith({
       small_model: 'openrouter/model-next',
       small_effort: '',
+      speech_model: '',
+      voice_cleanup_model: '',
     })
     expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('All changes saved')
+  })
+
+  it('persists speech and cleanup choices through the existing defaults endpoint', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    const speech = wrapper.findAllComponents(ModelPicker).find((picker) => picker.props('inputId') === 'provider-speech-model')!
+    const cleanup = wrapper.findAllComponents(ModelPicker).find((picker) => picker.props('inputId') === 'provider-voice-cleanup-model')!
+    expect(speech.props('models').map((model) => model.id)).toEqual(['openrouter/speech'])
+    expect(speech.props('showEffort')).toBe(false)
+    await speech.vm.$emit('update:model', 'openrouter/speech')
+    await cleanup.vm.$emit('update:model', 'openrouter/cleaner')
+    await autosave()
+    expect(harnessApi.saveProviderConfig).toHaveBeenCalledExactlyOnceWith({
+      ...config, speech_model: 'openrouter/speech', voice_cleanup_model: 'openrouter/cleaner',
+    })
+    expect(wrapper.get('[data-testid="voice-defaults-status"]').text()).toBe('All changes saved')
+  })
+
+  it('loads saved voice models and keeps manual model entry after catalog failure', async () => {
+    vi.mocked(harnessApi.getProviderConfig).mockResolvedValue({ ...config, speech_model: 'compatible/custom-speech', voice_cleanup_model: 'openrouter/custom-cleaner' })
+    vi.mocked(getVoiceSettings).mockRejectedValue(new Error('Catalog down'))
+    const wrapper = mountTab()
+    await flushPromises()
+    const speech = wrapper.findAllComponents(ModelPicker).find((picker) => picker.props('inputId') === 'provider-speech-model')!
+    expect(speech.props('model')).toBe('compatible/custom-speech')
+    expect(speech.props('manualFallback')).toBe(true)
+    expect(wrapper.get('[data-testid="voice-catalog-error"]').text()).toContain('manually')
+    expect(wrapper.find('[data-testid="provider-row-openrouter"]').exists()).toBe(true)
   })
 
   it('shows None when accounts exist but none are selected', async () => {

@@ -29,12 +29,13 @@ from .voice_schemas import (
 from .voice_service import VoiceService
 
 voice_router = Router(tags=["voice"])
+voice_settings_router = Router(tags=["voice"])
 _ERRORS = {code: ErrorOut for code in (400, 403, 404, 409, 429, 502, 504)}
 
 
 async def _authorized(
     request: HttpRequest,
-    workspace_id: uuid.UUID,
+    workspace_id: uuid.UUID | None,
     operation: Callable[[uuid.UUID], Awaitable[Any]],
     *,
     write: bool = False,
@@ -53,14 +54,25 @@ async def _authorized(
         await sync_to_async(OrganizationService().require_membership)(
             request.user, org_id
         )
-        await sync_to_async(get_runner_service().get_workspace_for_user)(
-            workspace_id, user=request.user, organization_id=org_id
-        )
+        if workspace_id is not None:
+            await sync_to_async(get_runner_service().get_workspace_for_user)(
+                workspace_id, user=request.user, organization_id=org_id
+            )
         return 200, await operation(org_id)
     except VoiceProviderError as exc:
         return exc.status, ErrorOut(detail=str(exc), code="voice_provider_error")
     except Exception as exc:
         return git_error_to_response(exc)
+
+
+@voice_settings_router.get("/config/", response={200: VoiceConfig, **_ERRORS})
+async def voice_settings_config(
+    request: HttpRequest,
+) -> tuple[int, VoiceConfig | ErrorOut]:
+    """Read org-level speech choices for Settings without requiring a workspace."""
+    return await _authorized(
+        request, None, lambda org: VoiceService().config(org, request.user.id)
+    )
 
 
 @voice_router.get(

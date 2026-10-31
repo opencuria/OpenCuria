@@ -134,6 +134,7 @@ async def test_provider_verbose_fallback() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         requests.append(body)
+        assert body["temperature"] == 0
         if body["response_format"] == "verbose_json":
             return httpx.Response(400, json={"error": "unsupported format"})
         return httpx.Response(200, json={"text": "hello"})
@@ -182,14 +183,14 @@ async def test_provider_timeout() -> None:
     assert "secret" not in str(exc.value)
 
 
-async def test_cleanup_has_no_tools_and_preserves_anchors(monkeypatch) -> None:
+async def test_cleanup_has_no_tools_and_edits_complete_dictation(monkeypatch) -> None:
     """The editing call cannot execute speech or lose its phrase alignment."""
 
     async def stream(model, messages, tools, opts):
         assert tools == []
         assert model == "small"
         assert json.loads(messages[-1].content) == ["äh change this", "um"]
-        yield Delta(text='["Change this.", ""]')
+        yield Delta(text='{"text":"Change this."}')
 
     resolver = SimpleNamespace(
         prepare_adapters=lambda: None,
@@ -211,10 +212,7 @@ async def test_cleanup_has_no_tools_and_preserves_anchors(monkeypatch) -> None:
             VoiceSegment(start_ms=600, end_ms=900, text="um"),
         ],
     )
-    assert [(item.start_ms, item.end_ms, item.text) for item in result] == [
-        (50, 500, "Change this."),
-        (600, 900, ""),
-    ]
+    assert result == "Change this."
 
 
 async def test_cleanup_failure_keeps_transcript(monkeypatch) -> None:
@@ -228,6 +226,7 @@ async def test_cleanup_failure_keeps_transcript(monkeypatch) -> None:
         lambda *args: {"openrouter": VoiceAccount("openrouter", "secret")},
     )
     monkeypatch.setattr(service, "_cleanup_model", lambda *args: ("small", ""))
+    monkeypatch.setattr(service, "_speech_model", lambda *args: "openrouter/test")
     monkeypatch.setattr(
         service, "_clean", AsyncMock(side_effect=RuntimeError("outage"))
     )
@@ -242,6 +241,8 @@ async def test_cleanup_failure_keeps_transcript(monkeypatch) -> None:
         ),
     )
     assert response.text == "original"
+    assert response.speech_model == "openrouter/test"
+    assert response.cleanup_model == "small"
     assert response.cleanup_warning
     assert response.timing == "approximate"
 
@@ -388,7 +389,7 @@ async def test_malformed_catalog_has_safe_fallback(body) -> None:
         models = await VoiceProvider(client).models(
             VoiceAccount("openrouter", "secret")
         )
-    assert models[0]["id"] == "openrouter/openai/whisper-large-v3"
+    assert models[0]["id"] == "openrouter/elevenlabs/scribe-v2"
     _catalog.clear()
 
 
@@ -425,9 +426,7 @@ async def test_voice_config_exposes_effective_cleanup_model(
         lambda org, agent: SimpleNamespace(model="openrouter/build", effort="high"),
     )
     provider = SimpleNamespace(
-        models=AsyncMock(
-            return_value=[{"id": "openrouter/speech", "name": "Speech"}]
-        )
+        models=AsyncMock(return_value=[{"id": "openrouter/speech", "name": "Speech"}])
     )
     service = VoiceService(provider)
     monkeypatch.setattr(
@@ -440,7 +439,7 @@ async def test_voice_config_exposes_effective_cleanup_model(
 
     assert config.available
     assert config.cleanup_model == expected
-    assert config.default_model == "openrouter/speech"
+    assert config.default_model == "openrouter/elevenlabs/scribe-v2"
     assert "secret" not in config.model_dump_json()
 
 
@@ -556,3 +555,318 @@ def test_sentence_boundary_inside_one_word_keeps_measured_phrase() -> None:
     assert timing == "provider"
     assert len(segments) == 1
     assert segments[0].text == "Hello. There!"
+
+
+@pytest.mark.parametrize("silent", [True, False])
+def test_confident_nonspeech_is_removed_without_text_heuristics(silent: bool) -> None:
+    """Only acoustic provider metadata can suppress a hallucinated phrase."""
+    raw = {
+        "text": "Vielen Dank. Change this.",
+        "segments": [
+            {
+                "start": 0,
+                "end": 1,
+                "text": "Vielen Dank.",
+                "no_speech_prob": 0.98,
+                "avg_logprob": -2 if silent else -0.1,
+            },
+            {
+                "start": 2,
+                "end": 3,
+                "text": "Change this.",
+                "no_speech_prob": 0.02,
+                "avg_logprob": -0.1,
+            },
+        ],
+        "words": [
+            {"word": "Vielen", "start": 0.1, "end": 0.3},
+            {"word": "Dank.", "start": 0.4, "end": 0.8},
+            {"word": "Change", "start": 2.1, "end": 2.3},
+            {"word": "this.", "start": 2.4, "end": 2.8},
+        ],
+    }
+    segments, timing = VoiceService._segments(raw, 4000)
+    assert timing == "provider"
+    assert [item.text for item in segments] == (
+        ["Change this."] if silent else ["Vielen Dank.", "Change this."]
+    )
+    assert raw["text"] == "Vielen Dank. Change this."
+
+
+@pytest.mark.parametrize("silent", [True, False])
+def test_repeated_text_is_not_discarded_without_acoustic_evidence(silent: bool) -> None:
+    """Repeated legitimate dictation and incomplete metadata remain recoverable."""
+    raw = {
+        "text": "Vielen Dank. Vielen Dank.",
+        "segments": [
+            {
+                "start": 0,
+                "end": 1,
+                "text": "Vielen Dank.",
+                "no_speech_prob": 0.98 if silent else 0.01,
+                "avg_logprob": -2,
+            },
+        ],
+    }
+    segments, timing = VoiceService._segments(raw, 3000)
+    assert timing == "approximate"
+    assert segments[0].text == raw["text"]
+
+
+async def test_saved_speech_model_is_authoritative(monkeypatch) -> None:
+    """A stale composer cannot override the model configured in Settings."""
+    provider = SimpleNamespace(transcribe=AsyncMock(return_value={"text": "hello"}))
+    service = VoiceService(provider)
+    monkeypatch.setattr(
+        service,
+        "_accounts",
+        lambda *args: {"openrouter": VoiceAccount("openrouter", "secret")},
+    )
+    monkeypatch.setattr(
+        service, "_speech_model", lambda *args: "openrouter/saved-speech"
+    )
+    monkeypatch.setattr(service, "_cleanup_model", lambda *args: ("cleanup", ""))
+    monkeypatch.setattr(service, "_clean", AsyncMock(return_value="hello"))
+    result = await service.transcribe(
+        uuid.uuid4(),
+        1,
+        VoiceTranscribeIn(
+            audio_base64="YXVkaW8=",
+            mime_type="audio/webm",
+            duration_ms=1000,
+            model="openrouter/stale-composer",
+        ),
+    )
+    assert provider.transcribe.await_args.args[1] == "saved-speech"
+    assert result.speech_model == "openrouter/saved-speech"
+    assert result.raw_text == "hello"
+    assert not result.cleanup_warning
+
+
+async def test_config_catalog_available_before_cleanup_setup(monkeypatch) -> None:
+    """Settings can choose speech and cleanup models in either order."""
+    provider = SimpleNamespace(
+        models=AsyncMock(return_value=[{"id": "openrouter/speech", "name": "Speech"}])
+    )
+    service = VoiceService(provider)
+    monkeypatch.setattr(
+        service,
+        "_accounts",
+        lambda *args: {"openrouter": VoiceAccount("openrouter", "secret")},
+    )
+    monkeypatch.setattr(service, "_speech_model", lambda *args: "openrouter/speech")
+    monkeypatch.setattr(service, "_cleanup_model", lambda *args: ("", ""))
+    result = await service.config(uuid.uuid4(), 1)
+    assert not result.available
+    assert result.models[0].id == "openrouter/speech"
+    assert "cleanup" in result.reason
+
+
+@pytest.mark.django_db(transaction=True)
+def test_voice_cleanup_override_and_saved_speech_defaults(organization) -> None:
+    """Voice overrides are independent of unrelated helper-model defaults."""
+    from apps.harness.services import ProviderConfigService
+
+    service = ProviderConfigService()
+    service.save_config(
+        organization_id=organization.id,
+        small_model="openrouter/small",
+        small_effort="high",
+        speech_model="openrouter/speech",
+        voice_cleanup_model="openrouter/editor",
+    )
+    assert VoiceService._cleanup_model(organization.id) == ("openrouter/editor", "")
+    assert (
+        VoiceService._speech_model(organization.id, ["openrouter"])
+        == "openrouter/speech"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "permissions,status", [([], 403), ([APIKeyPermission.HARNESS_RUN.value], 200)]
+)
+def test_voice_settings_config_permission_boundary(
+    harness_workspace, monkeypatch, permissions, status
+) -> None:
+    """Org-level Settings discovery does not require or bypass workspace access."""
+    from apps.harness.voice_schemas import VoiceConfig
+
+    service = SimpleNamespace(
+        config=AsyncMock(return_value=VoiceConfig(available=True))
+    )
+    monkeypatch.setattr("apps.harness.voice_api.VoiceService", lambda: service)
+    token = "voice-settings-key"
+    APIKey.objects.create(
+        user=harness_workspace.created_by,
+        name="voice-settings",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=permissions,
+    )
+    response = Client().get(
+        "/api/v1/voice/config/",
+        HTTP_X_API_KEY=token,
+        HTTP_X_ORGANIZATION_ID=str(harness_workspace.runner.organization_id),
+    )
+    assert response.status_code == status
+    assert service.config.await_count == (1 if status == 200 else 0)
+
+
+@pytest.mark.parametrize(
+    "intervals",
+    [
+        [{"start": -1, "end": 0.5, "text": "Hello"}],
+        [{"start": 0, "end": 10, "text": "Hello"}],
+        [
+            {"start": 0.5, "end": 0.8, "text": "Hel"},
+            {"start": 0.1, "end": 0.3, "text": "lo"},
+        ],
+    ],
+)
+def test_impossible_provider_timing_is_not_repaired_into_fake_precision(intervals):
+    """Only plausible measured timestamps may be marked as provider timing."""
+    segments, timing = VoiceService._segments(
+        {"text": "Hello", "segments": intervals}, 1000
+    )
+    assert timing == "approximate"
+    assert segments[0].text == "Hello"
+
+
+async def test_global_cleanup_is_independent_of_immutable_source_timing(
+    monkeypatch,
+) -> None:
+    """Edited text may resolve corrections while ASR source words stay timed."""
+    original = [
+        VoiceSegment(
+            start_ms=0,
+            end_ms=1000,
+            text="Move blue right.",
+            raw_text="Move blue right.",
+        ),
+        VoiceSegment(
+            start_ms=1500, end_ms=2300, text="No, green.", raw_text="No, green."
+        ),
+        VoiceSegment(start_ms=2500, end_ms=3000, text="Where?", raw_text="Where?"),
+        VoiceSegment(start_ms=3500, end_ms=4000, text="Where?", raw_text="Where?"),
+    ]
+
+    async def stream(model, messages, tools, options):
+        assert "Resolve explicit self-corrections" in messages[0].content
+        assert "Repeated complete questions" in messages[0].content
+        assert json.loads(messages[1].content) == [item.text for item in original]
+        yield Delta(text='{"text":"Move green right. Where? Where?"}')
+
+    resolver = SimpleNamespace(
+        prepare_adapters=lambda: None,
+        resolve=lambda model: SimpleNamespace(
+            model_id="editor", adapter=SimpleNamespace(chat_stream=stream)
+        ),
+    )
+    monkeypatch.setattr(
+        "apps.harness.voice_service.ProviderConfigService.build_resolver",
+        lambda *args, **kwargs: resolver,
+    )
+    cleaned = await VoiceService()._clean(uuid.uuid4(), 1, "editor", "", original)
+    assert cleaned == "Move green right. Where? Where?"
+    assert original[0].text == original[0].raw_text == "Move blue right."
+    assert original[0].start_ms == 0
+
+
+async def test_transcription_keeps_source_segments_with_global_cleaned_text(
+    monkeypatch,
+) -> None:
+    """A corrected color is not falsely presented as an earlier spoken word."""
+    raw = {
+        "text": "Move blue. No, green.",
+        "segments": [
+            {"start": 0, "end": 1, "text": "Move blue."},
+            {"start": 1, "end": 2, "text": "No, green."},
+        ],
+    }
+    service = VoiceService(SimpleNamespace(transcribe=AsyncMock(return_value=raw)))
+    monkeypatch.setattr(
+        service,
+        "_accounts",
+        lambda *args: {"openrouter": VoiceAccount("openrouter", "secret")},
+    )
+    monkeypatch.setattr(service, "_speech_model", lambda *args: "openrouter/speech")
+    monkeypatch.setattr(service, "_cleanup_model", lambda *args: ("cleanup", ""))
+    monkeypatch.setattr(service, "_clean", AsyncMock(return_value="Move green."))
+    result = await service.transcribe(
+        uuid.uuid4(),
+        1,
+        VoiceTranscribeIn(
+            audio_base64="YXVkaW8=", mime_type="audio/webm", duration_ms=2000
+        ),
+    )
+    assert result.text == "Move green."
+    assert result.segments_kind == "source"
+    assert [item.text for item in result.segments] == ["Move blue.", "No, green."]
+    assert [item.start_ms for item in result.segments] == [0, 1000]
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        (
+            "Ähm, bitte verschiebe den grünen Knopf.",
+            "bitte verschiebe den grünen Knopf.",
+        ),
+        ("Äh… ähm, ändere den Knopf.", "ändere den Knopf."),
+        ("  Ähm, npm run build  ", "npm run build"),
+        ("Uh, run git status.", "run git status."),
+        ("Ähm", ""),
+        (
+            '"Ähm," soll wörtlich im Label stehen.',
+            '"Ähm," soll wörtlich im Label stehen.',
+        ),
+        (
+            "„Ähm,“ soll wörtlich im Label stehen.",
+            "„Ähm,“ soll wörtlich im Label stehen.",
+        ),
+        ("`ähm` is the variable name.", "`ähm` is the variable name."),
+        (
+            "Um das Element zu bewegen, ziehe es.",
+            "Um das Element zu bewegen, ziehe es.",
+        ),
+        ("Das Wort ähm soll im Label stehen.", "Das Wort ähm soll im Label stehen."),
+        ("Ähm ist das gesuchte Wort.", "Ähm ist das gesuchte Wort."),
+        ("Ähm: ein Füllwort.", "Ähm: ein Füllwort."),
+        ("uhmHandler is undefined.", "uhmHandler is undefined."),
+    ],
+)
+def test_cleanup_normalization_only_removes_clear_unquoted_initial_hesitation(
+    text, expected
+):
+    """The fallback cannot rewrite quoted fillers, prepositions or identifiers."""
+    from apps.harness.voice_cleanup import normalize_edited_dictation
+
+    assert normalize_edited_dictation(text) == expected
+
+
+async def test_cleanup_strips_unquoted_hesitation_left_by_editor(monkeypatch) -> None:
+    """A model cleanup miss must not reintroduce the observed leading Ähm."""
+
+    async def stream(model, messages, tools, options):
+        yield Delta(text='{"text":"Ähm, bitte ändere den Knopf."}')
+
+    resolver = SimpleNamespace(
+        prepare_adapters=lambda: None,
+        resolve=lambda model: SimpleNamespace(
+            model_id="editor", adapter=SimpleNamespace(chat_stream=stream)
+        ),
+    )
+    monkeypatch.setattr(
+        "apps.harness.voice_service.ProviderConfigService.build_resolver",
+        lambda *args, **kwargs: resolver,
+    )
+    source = VoiceSegment(
+        start_ms=500,
+        end_ms=2000,
+        text="Ähm, bitte ändere den Knopf.",
+        raw_text="Ähm, bitte ändere den Knopf.",
+    )
+    result = await VoiceService()._clean(uuid.uuid4(), 1, "editor", "", [source])
+    assert result == "bitte ändere den Knopf."
+    assert source.raw_text == source.text == "Ähm, bitte ändere den Knopf."

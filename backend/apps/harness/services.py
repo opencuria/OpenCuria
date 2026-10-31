@@ -203,7 +203,7 @@ class ComputerUseConfigService:
 
 
 class ProviderConfigService:
-    """Business logic for org-wide small-model configuration."""
+    """Business logic for org-wide helper-model configuration."""
 
     def __init__(
         self,
@@ -217,8 +217,10 @@ class ProviderConfigService:
         organization_id: uuid.UUID,
         small_model: str = "",
         small_effort: str = "",
+        speech_model: str | None = None,
+        voice_cleanup_model: str | None = None,
     ) -> ProviderConfig:
-        """Create or update the small model and reasoning effort."""
+        """Create or update helper-model defaults; preserve omitted voice choices."""
         existing = self.repository.get_by_org(organization_id)
 
         if existing is None:
@@ -226,6 +228,8 @@ class ProviderConfigService:
                 organization_id=organization_id,
                 small_model=small_model.strip(),
                 small_effort=small_effort.strip(),
+                speech_model=(speech_model or "").strip(),
+                voice_cleanup_model=(voice_cleanup_model or "").strip(),
             )
             log.info("provider_config_created", organization_id=str(organization_id))
         else:
@@ -233,6 +237,12 @@ class ProviderConfigService:
                 existing,
                 small_model=small_model.strip(),
                 small_effort=small_effort.strip(),
+                speech_model=speech_model.strip() if speech_model is not None else None,
+                voice_cleanup_model=(
+                    voice_cleanup_model.strip()
+                    if voice_cleanup_model is not None
+                    else None
+                ),
             )
             log.info("provider_config_updated", organization_id=str(organization_id))
 

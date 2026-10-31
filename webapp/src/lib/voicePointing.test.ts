@@ -35,6 +35,10 @@ function move(type: string, x = 200, y = 100): void {
 function viewer(): { iframe: HTMLIFrameElement; send: ReturnType<typeof vi.fn> } {
   const iframe = document.createElement('iframe')
   iframe.src = 'https://desktop.test/viewer'
+  iframe.dataset.voiceDesktop = ''
+  iframe.dataset.voiceWorkspace = 'workspace-a'
+  iframe.getBoundingClientRect = () => ({ width: 960, height: 540 }) as DOMRect
+  document.body.append(iframe)
   const send = vi.fn()
   Object.defineProperty(iframe, 'contentWindow', { value: { postMessage: send } })
   return { iframe, send }
@@ -49,6 +53,9 @@ function frameReply(iframe: HTMLIFrameElement, requestId: string, overrides = {}
         type: 'opencuria:voice-frame',
         requestId,
         blob: new Blob(['jpeg'], { type: 'image/jpeg' }),
+        width: 1920,
+        height: 1080,
+        captured_at: performance.timeOrigin + performance.now(),
       },
       ...overrides,
     }),
@@ -161,7 +168,7 @@ describe('voice pointing', () => {
     await Promise.resolve()
     expect(settled).toBe(false)
     frameReply(iframe, requestId)
-    expect((await promise).type).toBe('image/jpeg')
+    expect((await promise).blob.type).toBe('image/jpeg')
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -184,7 +191,7 @@ describe('voice pointing', () => {
     const requestId = send.mock.calls[0]![0].requestId as string
     expect(requestId).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff')
     frameReply(iframe, requestId)
-    expect((await promise).type).toBe('image/jpeg')
+    expect((await promise).blob.type).toBe('image/jpeg')
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -201,15 +208,10 @@ describe('voice pointing', () => {
   it('ignores a frame observed after stop and never uploads it', async () => {
     const { iframe, send } = viewer()
     unregister = registerPointingDesktop('workspace-a', () => iframe)
-    const overlay = document.createElement('div')
-    overlay.dataset.voiceDesktop = ''
-    overlay.dataset.voiceWorkspace = 'workspace-a'
-    overlay.getBoundingClientRect = () => ({ width: 960, height: 540 }) as DOMRect
-    document.body.append(overlay)
     recording = startPointing('workspace-a', recordingId, performance.now())
     await vi.advanceTimersByTimeAsync(0)
     const result = recording.stop()
-    frameReply(iframe, send.mock.calls[0]![0].requestId)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
     expect((await result).frames).toEqual([])
     expect(transport.send).not.toHaveBeenCalled()
   })
@@ -221,17 +223,9 @@ describe('voice pointing', () => {
     expect(activePointingWorkspace.value).toBeNull()
   })
 
-  it('serializes desktop captures, saves frames and drains the upload on stop', async () => {
+  it('captures fresh frames while uploads drain and observes real iframe clicks without intercepting input', async () => {
     const { iframe, send } = viewer()
     unregister = registerPointingDesktop('workspace-a', () => iframe)
-    const overlay = document.createElement('div')
-    overlay.dataset.voiceDesktop = ''
-    overlay.dataset.voiceWorkspace = 'workspace-a'
-    overlay.dataset.voiceWidth = '1920'
-    overlay.dataset.voiceHeight = '1080'
-    overlay.getBoundingClientRect = () => ({ left: 0, top: 0, width: 960, height: 540 }) as DOMRect
-    document.body.append(overlay)
-    hit = overlay
     let completeUpload!: () => void
     transport.track.mockImplementationOnce(
       () =>
@@ -241,20 +235,118 @@ describe('voice pointing', () => {
     )
     recording = startPointing('workspace-a', recordingId, performance.now())
     await vi.advanceTimersByTimeAsync(0)
-    expect(send).toHaveBeenCalledOnce()
-    await vi.advanceTimersByTimeAsync(500)
-    expect(send).toHaveBeenCalledOnce()
-    frameReply(iframe, send.mock.calls[0]![0].requestId)
-    await Promise.resolve()
-    await Promise.resolve()
-    const resultPromise = recording.stop()
+    expect(frameRequests(send)).toHaveLength(1)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(100)
     expect(transport.track).toHaveBeenCalledOnce()
+    const point = {
+      type: 'opencuria:voice-pointer',
+      sessionId: recordingId,
+      event: 'down',
+      observed_at: performance.timeOrigin + performance.now(),
+      width: 1920,
+      height: 1080,
+      x: 1500,
+      y: 700,
+    }
+    const dispatch = (
+      data = point,
+      origin = 'https://desktop.test',
+      source = iframe.contentWindow,
+    ) => window.dispatchEvent(new MessageEvent('message', { source, origin, data }))
+    dispatch({ ...point, sessionId: 'other-recording' })
+    dispatch(point, 'https://evil.test')
+    dispatch(point, 'https://desktop.test', window)
+    dispatch()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(frameRequests(send)).toHaveLength(2) // first upload is still pending
+    frameReply(iframe, frameRequests(send)[1]!.requestId)
+    await vi.advanceTimersByTimeAsync(0)
+    const resultPromise = recording.stop()
     completeUpload()
     const result = await resultPromise
     expect(result.frames).toEqual([
-      { t_ms: 500, path: `/workspace/.opencuria/recordings/${recordingId}/frames/000000.jpg` },
+      { t_ms: 0, path: `/workspace/.opencuria/recordings/${recordingId}/frames/000000.jpg` },
+      { t_ms: 500, path: `/workspace/.opencuria/recordings/${recordingId}/frames/000001.jpg` },
     ])
-    expect(transport.send).toHaveBeenCalledOnce()
+    expect(result.pointers.filter((item) => item.event === 'down')).toEqual([
+      {
+        t_ms: 100,
+        event: 'down',
+        x: 1500,
+        y: 700,
+        target: { kind: 'desktop', path: result.frames[0]!.path, width: 1920, height: 1080 },
+      },
+    ])
+    expect(send).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'opencuria:voice-observe', enabled: false }),
+      'https://desktop.test',
+    )
     expect(activePointingWorkspace.value).toBeNull()
   })
+
+  it('never attaches pointer coordinates to a frame with different natural dimensions', async () => {
+    const { iframe, send } = viewer()
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(100)
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        source: iframe.contentWindow,
+        origin: 'https://desktop.test',
+        data: {
+          type: 'opencuria:voice-pointer',
+          sessionId: recordingId,
+          event: 'down',
+          observed_at: performance.timeOrigin + performance.now(),
+          width: 700,
+          height: 230,
+          x: 350,
+          y: 115,
+        },
+      }),
+    )
+    const result = await recording.stop()
+    expect(result.frames).toHaveLength(1)
+    expect(result.pointers.find((point) => point.event === 'down')?.target).toBeNull()
+  })
+
+  it('does not capture a hidden or disconnected viewer', async () => {
+    const { iframe, send } = viewer()
+    iframe.removeAttribute('data-voice-desktop')
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(500)
+    expect(frameRequests(send)).toHaveLength(0)
+    iframe.dataset.voiceDesktop = ''
+    iframe.style.visibility = 'hidden'
+    await vi.advanceTimersByTimeAsync(500)
+    expect(frameRequests(send)).toHaveLength(0)
+    await recording.stop()
+  })
+
+  it('rejects malformed framebuffer dimensions instead of assigning workspace display dimensions', async () => {
+    const { iframe, send } = viewer()
+    const promise = captureDesktopFrame(iframe, new AbortController().signal)
+    const rejected = expect(promise).rejects.toThrow('could not be captured')
+    frameReply(iframe, frameRequests(send)[0]!.requestId, {
+      data: {
+        type: 'opencuria:voice-frame',
+        requestId: frameRequests(send)[0]!.requestId,
+        blob: new Blob(['jpeg'], { type: 'image/jpeg' }),
+        width: 0,
+        height: 1080,
+        captured_at: performance.timeOrigin,
+      },
+    })
+    await rejected
+  })
 })
+
+function frameRequests(send: ReturnType<typeof vi.fn>): { requestId: string }[] {
+  return send.mock.calls
+    .map((call) => call[0])
+    .filter((data) => data.type === 'opencuria:voice-frame')
+}

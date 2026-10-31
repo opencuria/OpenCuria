@@ -1,0 +1,121 @@
+"""Passive recording bridge injected into the authenticated KasmVNC viewer."""
+
+VOICE_VIEWER_BRIDGE = b"""
+(function () {
+  var parentOrigin;
+  try { parentOrigin = new URL(document.referrer).origin; } catch (error) { return; }
+  var busy = false;
+  var sessionId = null;
+  var expiresAt = 0;
+  var lastMove = 0;
+  var lastPoint = null;
+  var pointerTimer = null;
+  var now = function () { return performance.timeOrigin + performance.now(); };
+  var canvas = function () {
+    // KasmVNC creates auxiliary cursor canvases before the RFB framebuffer.
+    // Only the canvas in its desktop container represents the displayed VM.
+    return document.querySelector('#noVNC_container > div > canvas');
+  };
+  var post = function (value) { window.parent.postMessage(value, parentOrigin); };
+  var inputSurface = function (element, target) {
+    return element === target || (element && element.id === 'noVNC_mouse_capture_elem');
+  };
+  var sendPoint = function (kind) {
+    if (!sessionId || !lastPoint || now() > expiresAt) { return; }
+    var target = canvas();
+    if (!target || !target.width || !target.height) { return; }
+    var rect = target.getBoundingClientRect();
+    var x = (lastPoint.x - rect.left) / rect.width;
+    var y = (lastPoint.y - rect.top) / rect.height;
+    var inside = rect.width > 0 && rect.height > 0 &&
+      x >= 0 && x < 1 && y >= 0 && y < 1;
+    if (!inside) { kind = 'leave'; }
+    post({ type: 'opencuria:voice-pointer', sessionId: sessionId,
+      observed_at: now(), event: kind,
+      x: kind === 'leave' ? null :
+        Math.min(target.width - 1, Math.floor(x * target.width)),
+      y: kind === 'leave' ? null :
+        Math.min(target.height - 1, Math.floor(y * target.height)),
+      width: target.width, height: target.height });
+    if (kind === 'leave') { lastPoint = null; }
+  };
+  var point = function (event) {
+    if (!sessionId || now() > expiresAt) { return; }
+    var target = canvas();
+    if (!target || !target.width || !target.height) { return; }
+    if (event.type === 'pointerout') {
+      // Kasm temporarily captures dragging on this full-document element.
+      // Transfers between it and the canvas do not leave the VM desktop.
+      if (!inputSurface(event.target, target) ||
+          inputSurface(event.relatedTarget, target)) { return; }
+      if (lastPoint) { sendPoint('leave'); }
+      return;
+    }
+    if (!inputSurface(event.target, target)) {
+      if (lastPoint) { sendPoint('leave'); }
+      return;
+    }
+    // Retain every position before throttling. The final move in a burst may
+    // be followed by seconds of stillness, especially just after mouseup.
+    lastPoint = { x: event.clientX, y: event.clientY };
+    var kind = event.type === 'pointerdown' ? 'down' :
+      event.type === 'pointerup' ? 'up' : 'move';
+    var observed = now();
+    if (kind === 'move' && observed - lastMove < 100) { return; }
+    if (kind === 'move') { lastMove = observed; }
+    sendPoint(kind);
+  };
+  var stopObserver = function () {
+    sessionId = null; lastPoint = null;
+    if (pointerTimer !== null) { window.clearInterval(pointerTimer); }
+    pointerTimer = null;
+  };
+  var startObserver = function (id) {
+    if (sessionId !== id) { stopObserver(); lastMove = 0; }
+    sessionId = id; expiresAt = now() + 3000;
+    if (pointerTimer !== null) { return; }
+    pointerTimer = window.setInterval(function () {
+      if (!sessionId || now() > expiresAt) { stopObserver(); return; }
+      sendPoint('move');
+    }, 100);
+  };
+  ['pointermove', 'pointerdown', 'pointerup', 'pointerout'].forEach(function (kind) {
+    document.addEventListener(kind, point, { capture: true, passive: true });
+  });
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (event.source !== window.parent || event.origin !== parentOrigin || !data) {
+      return;
+    }
+    if (data.type === 'opencuria:voice-observe') {
+      if (typeof data.sessionId !== 'string' ||
+          !/^[a-f0-9-]{36}$/i.test(data.sessionId)) { return; }
+      if (data.enabled === true) { startObserver(data.sessionId); }
+      else if (data.sessionId === sessionId) { stopObserver(); }
+      return;
+    }
+    if (data.type !== 'opencuria:voice-frame' || typeof data.requestId !== 'string' ||
+        data.requestId.length > 80 || busy) { return; }
+    var target = canvas();
+    var observed = now();
+    var width = target ? target.width : 0;
+    var height = target ? target.height : 0;
+    var reply = function (blob) {
+      busy = false;
+      post({ type: 'opencuria:voice-frame', requestId: data.requestId,
+        blob: blob, width: width, height: height, captured_at: observed });
+    };
+    if (!target || !width || !height || width > 32768 || height > 32768) {
+      reply(null); return;
+    }
+    busy = true;
+    try {
+      // Freeze pixels now. Encoding may run later while the live desktop changes.
+      var snapshot = document.createElement('canvas');
+      snapshot.width = width; snapshot.height = height;
+      snapshot.getContext('2d').drawImage(target, 0, 0);
+      snapshot.toBlob(reply, 'image/jpeg', 0.85);
+    } catch (error) { reply(null); }
+  });
+})();
+"""

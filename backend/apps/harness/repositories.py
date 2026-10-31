@@ -71,12 +71,16 @@ class ProviderConfigRepository:
         organization_id: uuid.UUID,
         small_model: str = "",
         small_effort: str = "",
+        speech_model: str = "",
+        voice_cleanup_model: str = "",
     ) -> ProviderConfig:
         """Create a provider config for an organization."""
         return ProviderConfig.objects.create(
             organization_id=organization_id,
             small_model=small_model,
             small_effort=small_effort,
+            speech_model=speech_model,
+            voice_cleanup_model=voice_cleanup_model,
         )
 
     @staticmethod
@@ -85,6 +89,8 @@ class ProviderConfigRepository:
         *,
         small_model: str | None = None,
         small_effort: str | None = None,
+        speech_model: str | None = None,
+        voice_cleanup_model: str | None = None,
     ) -> ProviderConfig:
         """Update provider config fields."""
         update_fields = ["updated_at"]
@@ -94,6 +100,12 @@ class ProviderConfigRepository:
         if small_effort is not None:
             config.small_effort = small_effort
             update_fields.append("small_effort")
+        if speech_model is not None:
+            config.speech_model = speech_model
+            update_fields.append("speech_model")
+        if voice_cleanup_model is not None:
+            config.voice_cleanup_model = voice_cleanup_model
+            update_fields.append("voice_cleanup_model")
         config.save(update_fields=update_fields)
         return config
 

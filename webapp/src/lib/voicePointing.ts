@@ -72,20 +72,30 @@ function workspaceImagePath(path: string | undefined): path is string {
   )
 }
 
+export interface DesktopFrame {
+  blob: Blob
+  width: number
+  height: number
+  capturedAt: number
+}
+
 /** Request a JPEG from the authenticated viewer, accepting only this frame and origin. */
-export function captureDesktopFrame(iframe: HTMLIFrameElement, signal: AbortSignal): Promise<Blob> {
+export function captureDesktopFrame(
+  iframe: HTMLIFrameElement,
+  signal: AbortSignal,
+): Promise<DesktopFrame> {
   return new Promise((resolve, reject) => {
     const requestId = createSecureUuid()
     if (!requestId) {
       reject(new Error('Secure desktop capture IDs are unavailable in this browser.'))
       return
     }
-    const finish = (error?: Error, blob?: Blob): void => {
+    const finish = (error?: Error, frame?: DesktopFrame): void => {
       clearTimeout(timer)
       window.removeEventListener('message', onMessage)
       signal.removeEventListener('abort', onAbort)
       if (error) reject(error)
-      else resolve(blob!)
+      else resolve(frame!)
     }
     const onAbort = (): void => finish(new Error('Desktop capture cancelled.'))
     const onMessage = (event: MessageEvent): void => {
@@ -96,10 +106,23 @@ export function captureDesktopFrame(iframe: HTMLIFrameElement, signal: AbortSign
         !(data.blob instanceof Blob) ||
         data.blob.type !== 'image/jpeg' ||
         data.blob.size === 0 ||
-        data.blob.size > MAX_FRAME_BYTES
+        data.blob.size > MAX_FRAME_BYTES ||
+        !Number.isInteger(data.width) ||
+        data.width < 1 ||
+        data.width > 32768 ||
+        !Number.isInteger(data.height) ||
+        data.height < 1 ||
+        data.height > 32768 ||
+        !Number.isFinite(data.captured_at)
       ) {
         finish(new Error('The desktop frame could not be captured.'))
-      } else finish(undefined, data.blob)
+      } else
+        finish(undefined, {
+          blob: data.blob,
+          width: data.width,
+          height: data.height,
+          capturedAt: data.captured_at,
+        })
     }
     const timer = setTimeout(
       () => finish(new Error('Desktop capture timed out. Reopen the desktop and retry.')),
@@ -121,7 +144,7 @@ export function captureDesktopFrame(iframe: HTMLIFrameElement, signal: AbortSign
   })
 }
 
-/** Record only marked images and the desktop overlay; stop drains the single upload. */
+/** Observe image and iframe pointers without intercepting desktop interaction. */
 export function startPointing(
   workspaceId: string,
   recordingId: string,
@@ -138,23 +161,81 @@ export function startPointing(
   activePointingWorkspace.value = workspaceId
   const pointers: PointerSample[] = []
   const frames: PointingResult['frames'] = []
+  const frameSizes = new Map<string, { width: number; height: number }>()
   const abort = new AbortController()
   let lastPoint: { x: number; y: number } | null = null
+  let desktopPoint: { x: number; y: number; width: number; height: number } | null = null
+  let observedViewer: HTMLIFrameElement | null = null
   let stopped = false
   let cancelled = false
   let failure: Error | null = null
-  let pending: Promise<void> | null = null
-  let uploadId: string | null = null
+  let pendingCapture: Promise<void> | null = null
+  const pendingUploads = new Set<Promise<void>>()
+  const uploadIds = new Set<string>()
   let totalBytes = 0
+  const originEpoch = performance.timeOrigin + originMs
+  const elapsed = (): number => Math.max(0, Math.round(performance.now() - originMs))
   const fail = (error: Error): void => {
     failure = error
     if (activeOwner === owner) pointingError.value = error.message
   }
-  const elapsed = (): number => Math.max(0, Math.round(performance.now() - originMs))
-
-  const resolvePoint = (): Omit<PointerSample, 'event' | 't_ms'> => {
+  const observe = (iframe: HTMLIFrameElement, enabled: boolean): void => {
+    try {
+      iframe.contentWindow?.postMessage(
+        { type: 'opencuria:voice-observe', sessionId: recordingId, enabled },
+        new URL(iframe.src, window.location.href).origin,
+      )
+    } catch {
+      /* A navigating viewer will be retried on the next observation. */
+    }
+  }
+  const visibleViewer = (): HTMLIFrameElement | null => {
+    const iframe = desktops.get(workspaceId)?.()
+    if (
+      !iframe ||
+      !iframe.hasAttribute('data-voice-desktop') ||
+      iframe.dataset.voiceWorkspace !== workspaceId
+    )
+      return null
+    const rect = iframe.getBoundingClientRect()
+    const style = getComputedStyle(iframe)
+    return rect.width > 1 &&
+      rect.height > 1 &&
+      style.visibility !== 'hidden' &&
+      style.display !== 'none'
+      ? iframe
+      : null
+  }
+  const syncViewer = (): HTMLIFrameElement | null => {
+    const iframe = visibleViewer()
+    if (observedViewer && observedViewer !== iframe) {
+      observe(observedViewer, false)
+      desktopPoint = null
+    }
+    observedViewer = iframe
+    if (iframe) observe(iframe, true)
+    return iframe
+  }
+  const resolvePoint = (t_ms: number): Omit<PointerSample, 'event' | 't_ms'> => {
     const empty = { x: null, y: null, target: null }
-    if (!lastPoint || document.visibilityState === 'hidden') return empty
+    if (document.visibilityState === 'hidden') return empty
+    if (desktopPoint && observedViewer) {
+      const frame = [...frames].reverse().find((item) => item.t_ms <= t_ms)
+      const size = frame && frameSizes.get(frame.path)
+      if (frame && size?.width === desktopPoint.width && size.height === desktopPoint.height)
+        return {
+          x: desktopPoint.x,
+          y: desktopPoint.y,
+          target: {
+            kind: 'desktop',
+            path: frame.path,
+            width: desktopPoint.width,
+            height: desktopPoint.height,
+          },
+        }
+      return empty
+    }
+    if (!lastPoint) return empty
     const element = document.elementFromPoint(lastPoint.x, lastPoint.y)
     const image = element?.closest<HTMLImageElement>('img[data-voice-image-path]')
     if (
@@ -180,83 +261,104 @@ export function startPointing(
           },
         }
     }
-    const desktop = element?.closest<HTMLElement>('[data-voice-desktop]')
-    const frame = frames[frames.length - 1]
-    if (desktop?.dataset.voiceWorkspace === workspaceId && frame) {
-      const width = Number(desktop.dataset.voiceWidth)
-      const height = Number(desktop.dataset.voiceHeight)
-      const point = imagePoint(
-        desktop.getBoundingClientRect(),
-        width,
-        height,
-        lastPoint.x,
-        lastPoint.y,
-      )
-      if (point) return { ...point, target: { kind: 'desktop', path: frame.path, width, height } }
-    }
     return empty
   }
-  const sample = (event: PointerSample['event']): void => {
-    const t_ms = elapsed()
-    if (stopped || t_ms > MAX_DURATION_MS) return
+  const sample = (event: PointerSample['event'], t_ms = elapsed()): void => {
+    if (stopped || failure || t_ms > MAX_DURATION_MS) return
     if (pointers.length >= 6000) {
       fail(new Error('The pointing recording reached its event limit.'))
       return
     }
-    pointers.push({ t_ms, event, ...resolvePoint() })
+    pointers.push({ t_ms, event, ...resolvePoint(t_ms) })
   }
   const pointer = (event: PointerEvent): void => {
+    desktopPoint = null
     lastPoint = { x: event.clientX, y: event.clientY }
     if (event.type === 'pointerdown') sample('down')
     else if (event.type === 'pointerup') sample('up')
   }
   const leave = (): void => {
     lastPoint = null
+    desktopPoint = null
     sample('leave')
   }
   const onOut = (event: PointerEvent): void => {
     if (!event.relatedTarget) leave()
   }
+  const onBlur = (): void => {
+    // Focusing an iframe blurs the parent window without leaving the desktop.
+    if (document.activeElement !== observedViewer) leave()
+  }
   const visibility = (): void => {
     if (document.visibilityState === 'hidden') leave()
   }
-
-  const capture = (): void => {
+  const desktopPointer = (event: MessageEvent): void => {
+    const iframe = observedViewer
+    if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return
+    const data = event.data
     if (
-      pending ||
-      stopped ||
-      failure ||
-      document.visibilityState === 'hidden' ||
-      elapsed() > MAX_DURATION_MS
+      data?.type !== 'opencuria:voice-pointer' ||
+      data.sessionId !== recordingId ||
+      !Number.isFinite(data.observed_at)
     )
       return
-    const overlay = Array.from(document.querySelectorAll<HTMLElement>('[data-voice-desktop]')).find(
-      (entry) =>
-        entry.dataset.voiceWorkspace === workspaceId &&
-        entry.getBoundingClientRect().width > 1 &&
-        entry.getBoundingClientRect().height > 1 &&
-        getComputedStyle(entry).visibility !== 'hidden' &&
-        getComputedStyle(entry).display !== 'none',
+    const t_ms = Math.round(data.observed_at - originEpoch)
+    if (t_ms < 0 || t_ms > elapsed() + 100 || !['move', 'down', 'up', 'leave'].includes(data.event))
+      return
+    if (data.event === 'leave') {
+      leave()
+      return
+    }
+    if (
+      !Number.isInteger(data.width) ||
+      data.width < 1 ||
+      data.width > 32768 ||
+      !Number.isInteger(data.height) ||
+      data.height < 1 ||
+      data.height > 32768 ||
+      !Number.isFinite(data.x) ||
+      data.x < 0 ||
+      data.x >= data.width ||
+      !Number.isFinite(data.y) ||
+      data.y < 0 ||
+      data.y >= data.height
     )
-    const iframe = desktops.get(workspaceId)?.()
-    if (!overlay || !iframe) return
-    pending = (async () => {
-      const blob = await captureDesktopFrame(iframe, abort.signal)
-      const t_ms = elapsed()
-      if (stopped || cancelled || t_ms > MAX_DURATION_MS) return
-      totalBytes += blob.size
+      return
+    lastPoint = null
+    desktopPoint = { x: data.x, y: data.y, width: data.width, height: data.height }
+    // The parent supplies regular 100 ms move samples; retain discrete clicks.
+    if (data.event !== 'move') sample(data.event, t_ms)
+  }
+  const capture = (): void => {
+    if (stopped || failure || document.visibilityState === 'hidden' || elapsed() > MAX_DURATION_MS)
+      return
+    const iframe = syncViewer()
+    if (pendingCapture || !iframe) return
+    if (pendingUploads.size >= 8) {
+      fail(new Error('Desktop uploads are too slow to keep recording.'))
+      return
+    }
+    pendingCapture = (async () => {
+      const frame = await captureDesktopFrame(iframe, abort.signal)
+      const t_ms = Math.round(frame.capturedAt - originEpoch)
+      if (stopped || cancelled || iframe !== observedViewer || t_ms > MAX_DURATION_MS) return
+      if (t_ms < 0 || t_ms > elapsed() + 100)
+        throw new Error('The desktop returned an invalid frame timestamp.')
+      totalBytes += frame.blob.size
       if (totalBytes > MAX_TOTAL_BYTES)
         throw new Error('The visual recording reached its size limit.')
       const directory = `/workspace/.opencuria/recordings/${recordingId}/frames`
-      const filename = `${String(frames.length).padStart(6, '0')}.jpg`
-      // Reference the frame as soon as it is observed, independently of upload
-      // latency. stop() requires its upload to succeed before returning logs.
-      frames.push({ t_ms, path: `${directory}/${filename}` })
-      const content = await fileToBase64(new File([blob], filename, { type: 'image/jpeg' }))
-      if (cancelled) return
+      const index = frames.length
+      const filename = `${String(index).padStart(6, '0')}.jpg`
+      const content = await fileToBase64(new File([frame.blob], filename, { type: 'image/jpeg' }))
+      if (stopped || cancelled) return
+      const path = `${directory}/${filename}`
+      frameSizes.set(path, { width: frame.width, height: frame.height })
+      frames.push({ t_ms, path })
       const store = useFileExplorerStore()
-      uploadId = `voice-frame-${recordingId}-${frames.length}`
-      const upload = store.trackAndUpload(
+      const uploadId = `voice-frame-${recordingId}-${index}`
+      uploadIds.add(uploadId)
+      const tracked = store.trackAndUpload(
         workspaceId,
         uploadId,
         directory,
@@ -264,20 +366,28 @@ export function startPointing(
         content,
         false,
       )
+      const upload = tracked
+        .catch((error: unknown) => {
+          if (!cancelled)
+            fail(error instanceof Error ? error : new Error('Desktop recording upload failed.'))
+        })
+        .finally(() => {
+          uploadIds.delete(uploadId)
+          pendingUploads.delete(upload)
+        })
+      pendingUploads.add(upload)
       try {
         sendFilesUpload(workspaceId, uploadId, directory, filename, content, false)
       } catch {
         store.failUpload(uploadId, 'The desktop frame could not be saved.')
       }
-      await upload
-      uploadId = null
     })()
       .catch((error: unknown) => {
         if (!cancelled)
           fail(error instanceof Error ? error : new Error('Desktop recording failed.'))
       })
       .finally(() => {
-        pending = null
+        pendingCapture = null
       })
   }
   const sampleTimer = setInterval(() => sample('move'), 100)
@@ -285,9 +395,9 @@ export function startPointing(
   const listeners = ['pointermove', 'pointerdown', 'pointerup'] as const
   for (const name of listeners) document.addEventListener(name, pointer, true)
   document.addEventListener('pointerout', onOut, true)
-  window.addEventListener('blur', leave)
+  window.addEventListener('blur', onBlur)
+  window.addEventListener('message', desktopPointer)
   document.addEventListener('visibilitychange', visibility)
-  // The desktop overlay is reactive and mounts on the next Vue render.
   queueMicrotask(capture)
 
   const cleanup = (): void => {
@@ -296,8 +406,11 @@ export function startPointing(
     clearInterval(frameTimer)
     for (const name of listeners) document.removeEventListener(name, pointer, true)
     document.removeEventListener('pointerout', onOut, true)
-    window.removeEventListener('blur', leave)
+    window.removeEventListener('blur', onBlur)
+    window.removeEventListener('message', desktopPointer)
     document.removeEventListener('visibilitychange', visibility)
+    if (observedViewer) observe(observedViewer, false)
+    observedViewer = null
     if (activeOwner === owner) {
       activePointingWorkspace.value = null
       activeOwner = null
@@ -307,16 +420,18 @@ export function startPointing(
     async stop() {
       if (!stopped) leave()
       cleanup()
-      await pending
+      await pendingCapture
+      await Promise.all(pendingUploads)
       if (cancelled) throw new Error('Pointing recording cancelled.')
       if (failure) throw failure
+      pointers.sort((a, b) => a.t_ms - b.t_ms)
       return { pointers, frames }
     },
     cancel() {
       cancelled = true
       cleanup()
       abort.abort()
-      if (uploadId) useFileExplorerStore().cancelUpload(uploadId)
+      for (const uploadId of uploadIds) useFileExplorerStore().cancelUpload(uploadId)
     },
   }
 }

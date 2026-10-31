@@ -212,28 +212,24 @@ describe('DesktopSurface', () => {
     expect(surface.style.left).toBe('10px')
   })
 
-  it('covers the desktop with a pointing surface only during a matching recording', async () => {
+  it('observes the connected viewer without placing an input-blocking overlay over it', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
     mountSurface()
     await nextTick()
     const iframe = document.querySelector('iframe')!
+    expect(iframe.hasAttribute('data-voice-desktop')).toBe(false)
     iframe.dispatchEvent(new Event('load'))
     connectionMessage(iframe.contentWindow, 'connected')
     await nextTick()
-    expect(document.querySelector('[data-voice-desktop]')).toBeNull()
-    activePointingWorkspace.value = 'different-workspace'
-    await nextTick()
-    expect(document.querySelector('[data-voice-desktop]')).toBeNull()
+    expect(document.querySelector('[data-voice-desktop]')).toBe(iframe)
     activePointingWorkspace.value = 'ws-1'
     await nextTick()
-    const overlay = document.querySelector<HTMLElement>('[data-voice-desktop]')!
-    expect(overlay.dataset.voiceWorkspace).toBe('ws-1')
-    expect(overlay.dataset.voiceWidth).toBe('1920')
-    expect(overlay.dataset.voiceHeight).toBe('1080')
+    expect(document.querySelectorAll('[data-voice-desktop]')).toHaveLength(1)
+    expect(iframe.dataset.voiceWorkspace).toBe('ws-1')
+    expect(document.querySelector('[title*="desktop input is paused"]')).toBeNull()
     activePointingWorkspace.value = null
     await nextTick()
-    expect(document.querySelector('[data-voice-desktop]')).toBeNull()
     expect(document.querySelector('iframe')).toBe(iframe)
   })
 

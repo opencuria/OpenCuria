@@ -16,6 +16,7 @@ import {
   loadEngineModelsCached,
 } from '@/lib/providerCatalog'
 import { ApiRequestError } from '@/services/api'
+import { getVoiceSettings, type VoiceConfig } from '@/services/voice.api'
 import { useAutosave } from '@/composables/useAutosave'
 import AutosaveStatus from './AutosaveStatus.vue'
 import { useAuthStore } from '@/stores/auth'
@@ -43,6 +44,21 @@ const catalog = ref<ProviderModel[]>([])
 const externalCatalog = ref<ProviderModel[]>([])
 const smallModel = ref('')
 const smallEffort = ref('')
+const speechModel = ref('')
+const voiceCleanupModel = ref('')
+const voiceSettings = ref<VoiceConfig | null>(null)
+const voiceCatalogError = ref('')
+const speechCatalog = computed<ProviderModel[]>(() =>
+  (voiceSettings.value?.models ?? []).map((model) => ({
+    ...model,
+    provider: model.id.split('/')[0] || '',
+    reasoning_efforts: [],
+    default_effort: '',
+    supports_tools: false,
+    context_length: 0,
+    max_output_tokens: 0,
+  })),
+)
 const activeProvider = ref<SettingsProviderId | null>(null)
 
 const accountsByProvider = computed(() => {
@@ -82,13 +98,17 @@ const modelCountByProvider = computed(() => {
 const defaultsDirty = computed(
   () =>
     smallModel.value.trim() !== (config.value?.small_model ?? '') ||
-    smallEffort.value.trim() !== (config.value?.small_effort ?? ''),
+    smallEffort.value.trim() !== (config.value?.small_effort ?? '') ||
+    speechModel.value.trim() !== (config.value?.speech_model ?? '') ||
+    voiceCleanupModel.value.trim() !== (config.value?.voice_cleanup_model ?? ''),
 )
 
 function applyConfig(next: HarnessProviderConfig | null): void {
   config.value = next
   smallModel.value = next?.small_model || ''
   smallEffort.value = next?.small_effort || ''
+  speechModel.value = next?.speech_model || ''
+  voiceCleanupModel.value = next?.voice_cleanup_model || ''
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -103,7 +123,7 @@ async function refreshAll(): Promise<void> {
   const previousConfig = config.value
   const revision = ++loadRevision
   invalidateProviderCatalog()
-  const [configRes, accountRes, modelsRes, externalModels] = await Promise.all([
+  const [configRes, accountRes, modelsRes, externalModels, voiceResult] = await Promise.all([
     getProviderConfig().catch((error: unknown) => {
       if (isNotFoundError(error)) return null
       throw error
@@ -114,6 +134,13 @@ async function refreshAll(): Promise<void> {
       loadEngineModelsCached('claude').catch(() => [] as ProviderModel[]),
       loadEngineModelsCached('codex').catch(() => [] as ProviderModel[]),
     ]).then((rows) => rows.flat()),
+    getVoiceSettings().then(
+      (value) => ({ value, error: '' }),
+      () => ({
+        value: null,
+        error: 'Speech models could not be loaded. You can enter a model ID manually.',
+      }),
+    ),
   ])
   if (context !== currentContextKey() || revision !== loadRevision) return
   if (
@@ -124,6 +151,8 @@ async function refreshAll(): Promise<void> {
   accounts.value = accountRes
   catalog.value = modelsRes
   externalCatalog.value = externalModels
+  voiceSettings.value = voiceResult.value
+  voiceCatalogError.value = voiceResult.error
 }
 
 async function loadState(): Promise<void> {
@@ -142,6 +171,10 @@ async function loadState(): Promise<void> {
     externalCatalog.value = []
     smallModel.value = ''
     smallEffort.value = ''
+    speechModel.value = ''
+    voiceCleanupModel.value = ''
+    voiceSettings.value = null
+    voiceCatalogError.value = ''
     const message = e instanceof Error ? e.message : 'Failed to load provider settings'
     if (!message.toLowerCase().includes('not found')) error.value = message
   } finally {
@@ -171,7 +204,7 @@ async function handleAccountsChanged(): Promise<void> {
 }
 
 const autosave = useAutosave({
-  source: () => [smallModel.value, smallEffort.value],
+  source: () => [smallModel.value, smallEffort.value, speechModel.value, voiceCleanupModel.value],
   dirty: () => defaultsDirty.value,
   enabled: () => !loading.value && !error.value,
   errorMessage: 'Failed to save default models',
@@ -179,6 +212,8 @@ const autosave = useAutosave({
     const saved = await saveProviderConfig({
       small_model: smallModel.value.trim(),
       small_effort: smallEffort.value.trim(),
+      speech_model: speechModel.value.trim(),
+      voice_cleanup_model: voiceCleanupModel.value.trim(),
     })
     if (isCurrent()) config.value = saved
   },
@@ -312,6 +347,72 @@ watch(organizationId, () => {
         </div>
 
         <AutosaveStatus :state="autosave" data-testid="defaults-status" />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Voice input"
+        description="Models used for dictation. Audio is sent to your selected speech provider."
+      >
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="provider-speech-model" class="block text-sm font-medium"
+                >Speech recognition</Label
+              >
+              <p class="text-sm text-muted-foreground">
+                Transcribes speech and provides timing for pointing.
+              </p>
+            </div>
+            <div class="w-full shrink-0 sm:w-80">
+              <ModelPicker
+                input-id="provider-speech-model"
+                v-model:model="speechModel"
+                effort=""
+                :models="speechCatalog"
+                :show-effort="false"
+                variant="field"
+                manual-fallback
+                allow-default
+                default-model-label="Automatic"
+                default-option-label="Automatic"
+              />
+            </div>
+          </div>
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="provider-voice-cleanup-model" class="block text-sm font-medium"
+                >Text cleanup</Label
+              >
+              <p class="text-sm text-muted-foreground">Removes fillers and improves punctuation.</p>
+            </div>
+            <div class="w-full shrink-0 sm:w-80">
+              <ModelPicker
+                input-id="provider-voice-cleanup-model"
+                v-model:model="voiceCleanupModel"
+                effort=""
+                :models="catalog"
+                :show-effort="false"
+                variant="field"
+                manual-fallback
+                allow-default
+                default-model-label="Small Model / Build default"
+                default-option-label="Small Model / Build default"
+              />
+            </div>
+          </div>
+        </div>
+        <p
+          v-if="voiceCatalogError"
+          class="text-sm text-muted-foreground"
+          data-testid="voice-catalog-error"
+        >
+          {{ voiceCatalogError }}
+        </p>
+        <AutosaveStatus :state="autosave" data-testid="voice-defaults-status" />
       </SettingsSection>
     </template>
 

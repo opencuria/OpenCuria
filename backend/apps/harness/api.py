@@ -1108,10 +1108,10 @@ def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfi
 @harness_router.get(
     "/provider-config/",
     response={200: ProviderConfigOut, 401: dict, 403: dict, 404: dict},
-    summary="Get the org-wide small-model defaults",
+    summary="Get the org-wide helper-model defaults",
 )
 def get_org_provider_config(request: HttpRequest):
-    """Return the organization's small model and reasoning effort."""
+    """Return the organization's helper-model and voice defaults."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
@@ -1129,10 +1129,10 @@ def get_org_provider_config(request: HttpRequest):
 @harness_router.put(
     "/provider-config/",
     response={200: ProviderConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Save the org-wide small-model defaults",
+    summary="Save the org-wide helper-model defaults",
 )
 def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
-    """Save small-model defaults; agent models belong to AgentConfig."""
+    """Save helper-model and voice defaults; agent models belong to AgentConfig."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:

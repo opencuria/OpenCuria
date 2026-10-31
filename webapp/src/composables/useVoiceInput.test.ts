@@ -3,9 +3,11 @@ import { defineComponent } from 'vue'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { useVoiceInput, voiceSupported, voiceUnavailableReason } from './useVoiceInput'
 import { fileToBase64 } from '@/lib/chatUpload'
+import { monitorVoiceAudio } from '@/lib/voiceAudio'
 import { startPointing } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
+vi.mock('@/lib/voiceAudio', () => ({ monitorVoiceAudio: vi.fn(() => null) }))
 vi.mock('@/lib/chatUpload', () => ({ fileToBase64: vi.fn() }))
 vi.mock('@/lib/voicePointing', () => ({ startPointing: vi.fn() }))
 vi.mock('@/services/voice.api', () => ({
@@ -82,6 +84,7 @@ beforeEach(() => {
   vi.spyOn(performance, 'now').mockImplementation(() => now)
   now = 0
   vi.clearAllMocks()
+  vi.mocked(monitorVoiceAudio).mockReturnValue(null)
   FakeMediaRecorder.instances = []
   vi.stubGlobal('MediaRecorder', FakeMediaRecorder)
   media = makeStream()
@@ -148,6 +151,31 @@ describe('voice browser capabilities', () => {
 })
 
 describe('useVoiceInput microphone lifecycle', () => {
+  it('rejects microphone silence without sending audio to the model', async () => {
+    const close = vi.fn()
+    vi.mocked(monitorVoiceAudio).mockReturnValue({ sample: () => 0, hasSignal: () => false, close })
+    const { voice, onResult } = create()
+    await voice.start(options)
+    now = 2500
+    await voice.stop()
+    expect(voice.error.value).toContain('No microphone audio')
+    expect(transcribeVoice).not.toHaveBeenCalled()
+    expect(onResult).not.toHaveBeenCalled()
+    expect(close).toHaveBeenCalledOnce()
+    expect(media.track.stop).toHaveBeenCalledOnce()
+  })
+
+  it('retains quiet audio and exposes signal level without changing recording timestamps', async () => {
+    vi.mocked(monitorVoiceAudio).mockReturnValue({ sample: () => 0.1, hasSignal: () => true, close: vi.fn() })
+    const { voice } = create()
+    await voice.start(options)
+    now = 600
+    await vi.advanceTimersByTimeAsync(100)
+    expect(voice.audioLevel.value).toBe(0.1)
+    await voice.stop()
+    expect(transcribeVoice).toHaveBeenCalledWith('workspace-1', expect.objectContaining({ duration_ms: 600 }), expect.any(AbortSignal))
+  })
+
   it('reports permission denial and releases the shared microphone reservation', async () => {
     getUserMedia.mockRejectedValueOnce(new DOMException('Denied', 'NotAllowedError'))
     const { voice, onResult } = create()

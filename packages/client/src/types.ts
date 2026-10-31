@@ -141,6 +141,10 @@ export interface AgentConfigInput {
 export interface ProviderConfig {
   small_model: string;
   small_effort: string;
+  /** Organization speech default. Empty uses the connected provider default. */
+  speech_model?: string;
+  /** Dictation text editor. Empty inherits Small Model, then Build. */
+  voice_cleanup_model?: string;
 }
 
 export type ProviderConfigInput = Partial<ProviderConfig>;

@@ -6,50 +6,34 @@ import VoiceCaptureBar from './VoiceCaptureBar.vue'
 import { getVoiceConfig, type VoiceConfig } from '@/services/voice.api'
 import { voiceSupported, voiceUnavailableReason } from '@/composables/useVoiceInput'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
+import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 
 let deliverResult: (text: string, path?: string) => void
 let voice: ReturnType<typeof makeVoice>
-
 vi.mock('@/services/voice.api', () => ({ getVoiceConfig: vi.fn() }))
 vi.mock('@/composables/useVoiceInput', () => ({
-  voiceSupported: vi.fn(() => true),
-  voiceUnavailableReason: vi.fn(() => ''),
+  voiceSupported: vi.fn(() => true), voiceUnavailableReason: vi.fn(() => ''),
   useVoiceInput: (callback: typeof deliverResult) => { deliverResult = callback; return voice },
 }))
-
 function makeVoice() {
   const state = ref<'idle' | 'requesting' | 'recording' | 'processing' | 'error'>('idle')
   return {
-    state, error: ref(''), warning: ref(''), elapsedMs: ref(0), pointingFailed: ref(false),
+    state, error: ref(''), warning: ref(''), elapsedMs: ref(0), audioLevel: ref(0), pointingFailed: ref(false),
     busy: computed(() => state.value !== 'idle'),
     start: vi.fn(async () => { state.value = 'recording' }),
     stop: vi.fn(async () => { state.value = 'processing' }),
-    retry: vi.fn(async () => {}),
-    useDictationOnly: vi.fn(async () => {}),
+    retry: vi.fn(async () => {}), useDictationOnly: vi.fn(async () => {}),
     cancel: vi.fn(() => { state.value = 'idle' }),
   }
 }
 const config: VoiceConfig = {
-  available: true, default_model: 'openrouter/openai/whisper-1', cleanup_model: 'openrouter/cleanup-model',
-  models: [{ id: 'openrouter/openai/whisper-1', name: 'Whisper' }],
-  max_duration_ms: 300_000, max_audio_bytes: 20 * 1024 * 1024,
+  available: true, default_model: 'openrouter/saved-speech', cleanup_model: 'openrouter/cleanup-model',
+  models: [{ id: 'openrouter/saved-speech', name: 'Saved speech' }],
+  max_duration_ms: 300_000, max_audio_bytes: 1_500_000,
 }
 let wrappers: VueWrapper[] = []
-
 function create(props: { workspaceId: string; contextKey?: string; disabled?: boolean } = { workspaceId: 'workspace-1' }) {
-  const wrapper = mount(VoiceInputControl, {
-    props, attachTo: document.body,
-    global: { stubs: {
-      ModelPicker: {
-        props: ['model'], emits: ['update:model'],
-        template: '<input aria-label="Speech model" :value="model" @input="$emit(\'update:model\', $event.target.value)" />',
-      },
-      Checkbox: {
-        props: ['modelValue'], emits: ['update:modelValue'],
-        template: '<button role="checkbox" :aria-checked="modelValue" @click="$emit(\'update:modelValue\', !modelValue)" />',
-      },
-    } },
-  })
+  const wrapper = mount(VoiceInputControl, { props, attachTo: document.body })
   wrappers.push(wrapper)
   return wrapper
 }
@@ -59,12 +43,10 @@ function namedButton(text: string) {
   expect(result, `button ${text}`).toBeDefined()
   return result!
 }
-async function open(wrapper: VueWrapper) {
+async function record(wrapper: VueWrapper) {
   await wrapper.get('[data-testid="composer-voice"]').trigger('click')
   await flushPromises()
-  await nextTick()
 }
-
 beforeEach(() => {
   vi.clearAllMocks()
   voice = makeVoice()
@@ -72,7 +54,6 @@ beforeEach(() => {
   vi.mocked(voiceSupported).mockReturnValue(true)
   vi.mocked(voiceUnavailableReason).mockReturnValue('')
   vi.mocked(getVoiceConfig).mockResolvedValue(config)
-  vi.stubGlobal('ResizeObserver', class { observe = vi.fn(); unobserve = vi.fn(); disconnect = vi.fn() })
 })
 afterEach(() => {
   wrappers.forEach((wrapper) => wrapper.unmount())
@@ -83,151 +64,136 @@ afterEach(() => {
 })
 
 describe('VoiceInputControl', () => {
-  it('loads voice settings on demand and starts ordinary dictation by default', async () => {
+  it('starts with one click using server settings and has no model controls in chat', async () => {
     const wrapper = create()
     expect(getVoiceConfig).not.toHaveBeenCalled()
-    await open(wrapper)
+    expect(wrapper.findAll('button')).toHaveLength(2)
+    await record(wrapper)
     expect(getVoiceConfig).toHaveBeenCalledWith('workspace-1', expect.any(AbortSignal))
-    expect(document.body.textContent).toContain('Filler words are removed')
-    expect(document.body.querySelector('[data-testid="voice-cleanup-model"]')?.textContent).toContain(config.cleanup_model)
-    expect(document.querySelector('[role="checkbox"]')?.getAttribute('aria-checked')).toBe('false')
-    namedButton('Start dictating').click()
-    await flushPromises()
     expect(voice.start).toHaveBeenCalledExactlyOnceWith({
       workspaceId: 'workspace-1', model: config.default_model, pointing: false,
       maxDurationMs: config.max_duration_ms, maxAudioBytes: config.max_audio_bytes,
     })
     expect(wrapper.emitted('busy')?.slice(-1)[0]).toEqual([true])
+    expect(wrapper.text()).not.toContain('openrouter')
+    expect(wrapper.find('input, [role="combobox"]').exists()).toBe(false)
   })
 
-  it('requires an explicit choice to record pointing and explains workspace capture', async () => {
+  it('offers a direct pointing toggle before recording and keeps it locked during capture', async () => {
     const wrapper = create()
-    await open(wrapper)
-    document.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click()
-    await nextTick()
-    expect(document.body.textContent).toContain('Pointer positions and desktop snapshots are saved in this workspace')
-    namedButton('Start dictating').click()
-    await flushPromises()
+    const toggle = wrapper.get<HTMLButtonElement>('[data-testid="composer-voice-pointing"]')
+    expect(toggle.attributes('aria-pressed')).toBe('false')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-pressed')).toBe('true')
+    await record(wrapper)
     expect(voice.start).toHaveBeenCalledWith(expect.objectContaining({ pointing: true }))
+    expect(toggle.element.disabled).toBe(true)
     expect(voiceCaptureControls.value?.pointing).toBe(true)
   })
 
-  it('starts configured dictation with one microphone click and keeps settings separately available', async () => {
+  it('finishes via the same microphone control and refreshes saved models for the next recording', async () => {
     const wrapper = create()
-    await open(wrapper)
-    namedButton('Start dictating').click()
-    await flushPromises()
-    voice.state.value = 'idle'
-    await nextTick()
+    await record(wrapper)
+    expect(wrapper.get('[data-testid="composer-voice"]').attributes('aria-label')).toBe('Finish dictation')
     await wrapper.get('[data-testid="composer-voice"]').trigger('click')
-    expect(voice.start).toHaveBeenCalledTimes(2)
-    expect(getVoiceConfig).toHaveBeenCalledOnce()
+    expect(voice.stop).toHaveBeenCalledOnce()
     voice.state.value = 'idle'
+    vi.mocked(getVoiceConfig).mockResolvedValueOnce({ ...config, default_model: 'openrouter/new-saved-model' })
     await nextTick()
-    await wrapper.get('[aria-label="Voice input settings"]').trigger('click')
-    await flushPromises()
-    expect(getVoiceConfig).toHaveBeenCalledTimes(2)
-    expect(document.body.textContent).toContain('Start dictating')
+    await record(wrapper)
+    expect(voice.start).toHaveBeenLastCalledWith(expect.objectContaining({ model: 'openrouter/new-saved-model' }))
   })
 
-  it('forwards a reviewed transcript and artifact reference to the composer', () => {
+  it('forwards cleaned dictation and the recording reference', () => {
     const wrapper = create()
-    deliverResult('Please change this button.', '/workspace/.opencuria/recordings/id/manifest.json')
-    expect(wrapper.emitted('result')).toEqual([
-      ['Please change this button.', '/workspace/.opencuria/recordings/id/manifest.json'],
-    ])
+    deliverResult('Change this button.', '/workspace/.opencuria/recordings/id/metadata.json')
+    expect(wrapper.emitted('result')).toEqual([['Change this button.', '/workspace/.opencuria/recordings/id/metadata.json']])
   })
 
-  it('shows provider setup failures and supports reloading settings', async () => {
+  it('opens existing provider settings for missing setup rather than showing a model picker', async () => {
+    vi.mocked(getVoiceConfig).mockResolvedValue({ ...config, available: false })
+    const listener = vi.fn()
+    window.addEventListener(OPEN_SETTINGS_EVENT, listener)
+    const wrapper = create()
+    await record(wrapper)
+    expect(wrapper.text()).toContain('Set up voice input in Settings')
+    expect(voice.start).not.toHaveBeenCalled()
+    namedButton('Open Settings').click()
+    expect(listener).toHaveBeenCalledOnce()
+    expect((listener.mock.calls[0]![0] as CustomEvent).detail).toEqual({ tab: 'provider' })
+    window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
+  })
+
+  it('reports a settings load failure and allows the next microphone click to retry', async () => {
     vi.mocked(getVoiceConfig).mockRejectedValueOnce(new Error('Connection unavailable'))
     const wrapper = create()
-    await open(wrapper)
-    expect(document.body.textContent).toContain('Connection unavailable')
-    expect(document.body.textContent).not.toContain('Start dictating')
-    namedButton('Reload settings').click()
-    await flushPromises()
-    expect(getVoiceConfig).toHaveBeenCalledTimes(2)
-    expect(document.body.textContent).toContain('Start dictating')
-  })
-
-  it('shows a provider configuration reason without allowing microphone capture', async () => {
-    vi.mocked(getVoiceConfig).mockResolvedValue({ ...config, available: false, reason: 'Connect an OpenRouter account.' })
-    const wrapper = create()
-    await open(wrapper)
-    expect(document.body.textContent).toContain('Connect an OpenRouter account.')
-    expect(document.body.textContent).not.toContain('Start dictating')
+    await record(wrapper)
+    expect(wrapper.get('[role="alert"]').text()).toContain('Connection unavailable')
     expect(voice.start).not.toHaveBeenCalled()
+    await record(wrapper)
+    expect(voice.start).toHaveBeenCalledOnce()
   })
 
-  it('keeps model settings visible when this browser blocks microphone access', async () => {
+  it('explains unavailable browser microphone access without fetching models', async () => {
     vi.mocked(voiceSupported).mockReturnValue(false)
-    vi.mocked(voiceUnavailableReason).mockReturnValue('Your browser blocks microphone access at this HTTP address. Open via http://localhost.')
+    vi.mocked(voiceUnavailableReason).mockReturnValue('Your browser blocks microphone access. Open via http://localhost.')
     const wrapper = create()
-    await open(wrapper)
-    expect(document.body.textContent).toContain('http://localhost')
-    expect(document.body.querySelector('[aria-label="Speech model"]')).not.toBeNull()
-    expect(document.body.querySelector('[data-testid="voice-cleanup-model"]')?.textContent).toContain(config.cleanup_model)
-    const button = namedButton('Start dictating')
-    expect(button.disabled).toBe(true)
-    button.click()
+    await record(wrapper)
+    expect(wrapper.get('[role="alert"]').text()).toContain('http://localhost')
+    expect(getVoiceConfig).not.toHaveBeenCalled()
     expect(voice.start).not.toHaveBeenCalled()
   })
 
-  it('cancels on workspace or chat navigation and ignores stale settings', async () => {
+  it('cancels pending settings and ignores a response after navigating to another chat', async () => {
     let resolve!: (result: VoiceConfig) => void
     vi.mocked(getVoiceConfig).mockReturnValueOnce(new Promise((res) => { resolve = res }))
     const wrapper = create({ workspaceId: 'workspace-1', contextKey: 'chat-1' })
-    await open(wrapper)
+    await wrapper.get('[data-testid="composer-voice"]').trigger('click')
     const signal = vi.mocked(getVoiceConfig).mock.calls[0]![1]!
     await wrapper.setProps({ workspaceId: 'workspace-2', contextKey: 'chat-2' })
-    expect(voice.cancel).toHaveBeenCalledOnce()
     expect(signal.aborted).toBe(true)
-    resolve({ ...config, default_model: 'old-model', models: [{ id: 'old-model', name: 'Old' }] })
+    resolve(config)
     await flushPromises()
-    await open(wrapper)
-    namedButton('Start dictating').click()
-    await flushPromises()
-    expect(voice.start).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'workspace-2', model: config.default_model }))
+    expect(voice.start).not.toHaveBeenCalled()
+    await record(wrapper)
+    expect(voice.start).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'workspace-2' }))
   })
 
-  it('cancels recording if the composer becomes disabled', async () => {
+  it('cancels recording when the composer becomes disabled', async () => {
     const wrapper = create()
-    voice.state.value = 'recording'
-    await nextTick()
+    await record(wrapper)
     await wrapper.setProps({ disabled: true })
     expect(voice.cancel).toHaveBeenCalledOnce()
     expect(voiceCaptureControls.value).toBeNull()
     expect(wrapper.get<HTMLButtonElement>('[data-testid="composer-voice"]').element.disabled).toBe(true)
   })
 
-  it('offers retry and discard for processing failure while preserving the recording', async () => {
+  it('preserves retry and discard controls after processing errors', async () => {
     const wrapper = create()
     voice.error.value = 'Provider unavailable'
     voice.state.value = 'error'
     await nextTick()
-    expect(wrapper.get('[role="alert"]').text()).toContain('Provider unavailable')
     namedButton('Retry').click()
-    await nextTick()
     expect(voice.retry).toHaveBeenCalledOnce()
     namedButton('Discard').click()
+    await nextTick()
     expect(voice.cancel).toHaveBeenCalledOnce()
+    expect(wrapper.emitted('busy')?.slice(-1)[0]).toEqual([false])
   })
 
-  it('offers an explicit dictation-only choice after a failed visual recording', async () => {
+  it('can explicitly keep dictation after visual capture fails', async () => {
     create()
     voice.error.value = 'Desktop disconnected'
     voice.state.value = 'error'
     voice.pointingFailed.value = true
     await nextTick()
-    expect(document.body.textContent).not.toContain('Retry')
     namedButton('Use dictation only').click()
     expect(voice.useDictationOnly).toHaveBeenCalledOnce()
   })
 
-  it('removes global viewer controls on unmount', async () => {
+  it('removes global viewer controls and pending requests on unmount', async () => {
     const wrapper = create()
-    voice.state.value = 'recording'
-    await nextTick()
+    await record(wrapper)
     expect(voiceCaptureControls.value?.workspaceId).toBe('workspace-1')
     wrapper.unmount()
     expect(voiceCaptureControls.value).toBeNull()

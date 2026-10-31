@@ -19,10 +19,19 @@ export interface VoiceSegment {
 }
 export interface VoiceTranscript {
   text: string
+  raw_text?: string
   segments: VoiceSegment[]
   timing: 'provider' | 'approximate'
+  segments_kind?: 'source'
   cleanup_warning?: string
+  speech_model?: string
+  cleanup_model?: string
 }
+/** Organization voice capabilities for provider settings, without a workspace. */
+export function getVoiceSettings(signal?: AbortSignal): Promise<VoiceConfig> {
+  return get('/voice/config/', signal)
+}
+
 export function getVoiceConfig(workspaceId: string, signal?: AbortSignal): Promise<VoiceConfig> {
   return get(`/workspaces/${workspaceId}/voice/config/`, signal)
 }

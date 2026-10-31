@@ -60,11 +60,13 @@ ORG_URL = "/api/v1/provider-config/"
 DEFAULT_FIELDS = {
     "small_model",
     "small_effort",
+    "speech_model",
+    "voice_cleanup_model",
 }
 
 
 @pytest.mark.django_db(transaction=True)
-def test_provider_defaults_roundtrip_has_only_small_model_fields(provider_setup):
+def test_provider_defaults_roundtrip_has_only_model_fields(provider_setup):
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
@@ -89,9 +91,47 @@ def test_provider_defaults_roundtrip_has_only_small_model_fields(provider_setup)
     assert put.json() == {
         "small_model": "model-b",
         "small_effort": "low",
+        "speech_model": "",
+        "voice_cleanup_model": "",
     }
     assert client.get(ORG_URL).json() == put.json()
     assert ProviderConfig.objects.filter(organization=provider_setup["org"]).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_voice_defaults_roundtrip_and_legacy_save_preserves_choices(provider_setup):
+    """Org settings persist and old clients cannot clear voice choices."""
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
+    )
+    saved = client.put(
+        ORG_URL,
+        data=json.dumps(
+            {
+                "speech_model": "openrouter/openai/whisper-large-v3",
+                "voice_cleanup_model": "openrouter/acme/editor",
+            }
+        ),
+        content_type="application/json",
+    )
+    assert saved.status_code == 200
+    assert saved.json()["speech_model"] == "openrouter/openai/whisper-large-v3"
+    legacy = client.put(
+        ORG_URL,
+        data=json.dumps({"small_model": "new-small"}),
+        content_type="application/json",
+    )
+    assert legacy.status_code == 200
+    assert legacy.json()["speech_model"] == saved.json()["speech_model"]
+    assert legacy.json()["voice_cleanup_model"] == "openrouter/acme/editor"
+    cleared = client.put(
+        ORG_URL,
+        data=json.dumps({"speech_model": "", "voice_cleanup_model": ""}),
+        content_type="application/json",
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["speech_model"] == ""
+    assert cleared.json()["voice_cleanup_model"] == ""
 
 
 def test_provider_config_schema_has_no_connection_fields():

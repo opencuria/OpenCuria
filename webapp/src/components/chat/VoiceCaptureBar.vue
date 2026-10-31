@@ -24,12 +24,30 @@ const elapsed = computed(() => {
       >{{ controls.pointing ? 'Dictating + pointing' : 'Dictating'
       }}<span aria-hidden="true"> · {{ elapsed }}</span></span
     >
-    <span v-else-if="controls.state === 'error'">Voice input needs attention. Review it in the composer.</span>
+    <span v-else-if="controls.state === 'error'"
+      >Voice input needs attention. Review it in the composer.</span
+    >
     <span v-else>{{
       controls.state === 'requesting' ? 'Waiting for microphone…' : 'Preparing your text…'
     }}</span>
     <MousePointer2 v-if="controls.pointing" :size="14" />
-    <span v-if="controls.state === 'recording' && controls.pointing && pointingError" class="text-destructive"
+    <span
+      v-if="controls.state === 'recording' && controls.audioLevel !== undefined"
+      class="h-1.5 w-10 overflow-hidden rounded-full bg-foreground/10"
+      role="meter"
+      aria-label="Microphone level"
+      :aria-valuenow="Math.round(controls.audioLevel * 100)"
+      aria-valuemin="0"
+      aria-valuemax="100"
+    >
+      <span
+        class="block h-full bg-primary transition-[width] duration-100"
+        :style="{ width: `${controls.audioLevel * 100}%` }"
+      />
+    </span>
+    <span
+      v-if="controls.state === 'recording' && controls.pointing && pointingError"
+      class="text-destructive"
       >Visual capture failed. Finish to keep your dictation.</span
     >
     <Button

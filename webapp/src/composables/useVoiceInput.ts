@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 import { fileToBase64 } from '@/lib/chatUpload'
 import { createSecureUuid } from '@/lib/secureUuid'
+import { monitorVoiceAudio, type VoiceAudioMonitor } from '@/lib/voiceAudio'
 import { startPointing, type PointingResult } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
@@ -33,6 +34,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   const error = ref('')
   const warning = ref('')
   const elapsedMs = ref(0)
+  const audioLevel = ref(0)
   const audio = shallowRef<Blob | null>(null)
   const pointingFailed = ref(false)
   let visualError: Error | null = null
@@ -40,6 +42,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   const owner = Symbol('voice')
   let generation = 0
   let stream: MediaStream | null = null
+  let audioMonitor: VoiceAudioMonitor | null = null
   let recorder: MediaRecorder | null = null
   let timer: ReturnType<typeof setInterval> | null = null
   let controller: AbortController | null = null
@@ -67,6 +70,9 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       track.stop()
     })
     stream = null
+    audioMonitor?.close()
+    audioMonitor = null
+    audioLevel.value = 0
   }
 
   function cancel(): void {
@@ -133,12 +139,20 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     limitBytes = Math.min(options.maxAudioBytes || MAX_BYTES, MAX_BYTES)
     state.value = 'requesting'
     try {
-      const acquired = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const acquired = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
       if (current !== generation) {
         acquired.getTracks().forEach((track) => track.stop())
         return
       }
       stream = acquired
+      audioMonitor = monitorVoiceAudio(acquired)
       const mimeType = [
         'audio/webm;codecs=opus',
         'audio/mp4',
@@ -147,7 +161,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       ].find((mime) => MediaRecorder.isTypeSupported(mime))
       recorder = new MediaRecorder(acquired, {
         ...(mimeType ? { mimeType } : {}),
-        audioBitsPerSecond: 24_000,
+        audioBitsPerSecond: 64_000,
       })
       recordingId = id
       origin = performance.now()
@@ -186,6 +200,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       })
       document.addEventListener('visibilitychange', onVisibility)
       timer = setInterval(() => {
+        audioLevel.value = audioMonitor?.sample() ?? 0
         elapsedMs.value = Math.min(Math.round(performance.now() - origin), limitDuration)
         if (elapsedMs.value >= limitDuration) void stop()
       }, 100)
@@ -272,6 +287,8 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     if (state.value !== 'recording' || !recorder) return
     const current = generation
     state.value = 'processing'
+    audioMonitor?.sample()
+    const hasAudioSignal = audioMonitor?.hasSignal()
     const mime = recorder.mimeType
     // Freeze visual input before waiting for MediaRecorder's final asynchronous data.
     const visual = pointing
@@ -310,6 +327,11 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
         error.value = 'The recording was too short. Please try again.'
         return
       }
+      if (hasAudioSignal === false) {
+        cancel()
+        error.value = 'No microphone audio was detected. Check your input device and try again.'
+        return
+      }
       await process()
     } catch (cause) {
       if (current !== generation) return
@@ -343,6 +365,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     error,
     warning,
     elapsedMs,
+    audioLevel,
     audio,
     busy,
     pointingFailed,

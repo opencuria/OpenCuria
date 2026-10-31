@@ -1,204 +1,170 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Mic, ChevronDown, Loader2, RotateCcw, X } from '@lucide/vue'
+import { Mic, MousePointer2, Loader2, RotateCcw, Square, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Checkbox } from '@/components/ui/checkbox'
-import ModelPicker from '@/components/common/ModelPicker.vue'
-import { getVoiceConfig, type VoiceConfig } from '@/services/voice.api'
+import { getVoiceConfig } from '@/services/voice.api'
 import { useVoiceInput, voiceSupported, voiceUnavailableReason } from '@/composables/useVoiceInput'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
-import type { ProviderModel } from '@/lib/harnessModels'
+import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 
 const props = defineProps<{ workspaceId: string; contextKey?: string; disabled?: boolean }>()
 const emit = defineEmits<{ result: [text: string, path?: string]; busy: [value: boolean] }>()
-const open = ref(false)
-const config = ref<VoiceConfig | null>(null)
-const configError = ref('')
-const loading = ref(false)
-const model = ref('')
 const pointing = ref(false)
-const supported = voiceSupported()
-const unavailableReason = voiceUnavailableReason()
+const loading = ref(false)
+const configError = ref('')
+const setupMissing = ref(false)
 const voice = useVoiceInput((text, path) => emit('result', text, path))
-const { state, error, warning, elapsedMs, busy, pointingFailed } = voice
-const models = computed<ProviderModel[]>(() =>
-  (config.value?.models ?? []).map((item) => ({
-    ...item,
-    provider: item.id.split('/')[0] || 'openrouter',
-    reasoning_efforts: [],
-    default_effort: '',
-    supports_tools: false,
-    context_length: 0,
-    max_output_tokens: 0,
-  })),
+const { state, error, warning, elapsedMs, pointingFailed, audioLevel } = voice
+const busy = computed(() => voice.busy.value || loading.value)
+const notice = computed(() => error.value || configError.value || warning.value)
+const microphoneLabel = computed(() =>
+  state.value === 'recording' ? 'Finish dictation' : 'Dictate a message',
 )
 let configGeneration = 0
 let configAbort: AbortController | null = null
 
-async function loadConfig(): Promise<void> {
+function invalidateConfig(): void {
+  configGeneration++
+  configAbort?.abort()
+  configAbort = null
+  loading.value = false
+}
+function dismiss(): void {
+  invalidateConfig()
+  configError.value = ''
+  setupMissing.value = false
+  voice.cancel()
+}
+function openSettings(): void {
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
+}
+async function start(): Promise<void> {
+  if (props.disabled || busy.value) return
+  if (!voiceSupported()) {
+    configError.value = voiceUnavailableReason()
+    return
+  }
   const generation = ++configGeneration
   configAbort?.abort()
-  configAbort = new AbortController()
+  const request = new AbortController()
+  configAbort = request
+  const timeout = setTimeout(() => request.abort(), 20_000)
   loading.value = true
   configError.value = ''
+  setupMissing.value = false
   try {
-    const result = await getVoiceConfig(props.workspaceId, configAbort.signal)
-    if (generation !== configGeneration) return
-    config.value = result
-    if (!model.value) model.value = result.default_model
+    const config = await getVoiceConfig(props.workspaceId, request.signal)
+    if (generation !== configGeneration || props.disabled) return
+    if (!config.available || !config.default_model) {
+      setupMissing.value = true
+      configError.value = 'Set up voice input in Settings.'
+      return
+    }
+    await voice.start({
+      workspaceId: props.workspaceId,
+      model: config.default_model,
+      pointing: pointing.value,
+      maxDurationMs: config.max_duration_ms,
+      maxAudioBytes: config.max_audio_bytes,
+    })
   } catch (cause) {
     if (generation !== configGeneration) return
-    configError.value =
-      cause instanceof Error ? cause.message : 'Voice settings could not be loaded.'
+    configError.value = request.signal.aborted
+      ? 'Voice settings could not be loaded. Please try again.'
+      : cause instanceof Error
+        ? cause.message
+        : 'Voice input could not be started.'
   } finally {
-    if (generation === configGeneration) loading.value = false
+    clearTimeout(timeout)
+    if (generation === configGeneration) {
+      loading.value = false
+      configAbort = null
+    }
   }
 }
-watch(open, (value) => {
-  if (value && state.value === 'idle') void loadConfig()
-})
-watch(
-  () => [props.workspaceId, props.contextKey],
-  () => {
-    voice.cancel()
-    configGeneration++
-    configAbort?.abort()
-    config.value = null
-    model.value = ''
-    open.value = false
-  },
-)
+function toggleRecording(): void {
+  if (state.value === 'recording') void voice.stop()
+  else void start()
+}
+watch(() => [props.workspaceId, props.contextKey], dismiss)
 watch(
   () => props.disabled,
   (value) => {
-    if (value) voice.cancel()
+    if (value) dismiss()
   },
 )
-watch([state, elapsedMs, pointing], () => {
+watch([busy, state, elapsedMs, pointing, audioLevel], () => {
   emit('busy', busy.value)
-  if (busy.value)
+  if (voice.busy.value)
     voiceCaptureControls.value = {
       workspaceId: props.workspaceId,
       state: state.value as 'requesting' | 'recording' | 'processing' | 'error',
       elapsedMs: elapsedMs.value,
+      audioLevel: audioLevel.value,
       pointing: pointing.value,
       stop: () => {
         void voice.stop()
       },
-      cancel: voice.cancel,
+      cancel: dismiss,
     }
-  else if (voiceCaptureControls.value?.cancel === voice.cancel) voiceCaptureControls.value = null
+  else if (voiceCaptureControls.value?.cancel === dismiss) voiceCaptureControls.value = null
 })
 onBeforeUnmount(() => {
+  invalidateConfig()
   emit('busy', false)
-  configGeneration++
-  configAbort?.abort()
-  if (voiceCaptureControls.value?.cancel === voice.cancel) voiceCaptureControls.value = null
+  if (voiceCaptureControls.value?.cancel === dismiss) voiceCaptureControls.value = null
 })
-async function start(): Promise<void> {
-  if (!supported || props.disabled || !config.value?.available || !model.value.trim()) return
-  open.value = false
-  await voice.start({
-    workspaceId: props.workspaceId,
-    model: model.value.trim(),
-    pointing: pointing.value,
-    maxDurationMs: config.value.max_duration_ms,
-    maxAudioBytes: config.value.max_audio_bytes,
-  })
-}
 </script>
 
 <template>
-  <div class="flex items-center">
+  <div class="flex items-center gap-0.5">
     <Button
       type="button"
       variant="ghost"
       size="icon"
-      class="h-8 w-8 text-muted-foreground"
-      :disabled="disabled || busy"
-      title="Dictate a message"
-      aria-label="Dictate a message"
+      class="h-8 w-8"
+      :class="state === 'recording' ? 'text-destructive' : 'text-muted-foreground'"
+      :disabled="disabled || (busy && state !== 'recording')"
+      :title="microphoneLabel"
+      :aria-label="microphoneLabel"
+      :aria-busy="loading || state === 'processing'"
       data-testid="composer-voice"
-      @click="config?.available ? start() : (open = true)"
+      @click="toggleRecording"
     >
-      <Mic :size="16" />
+      <Loader2
+        v-if="loading || state === 'requesting' || state === 'processing'"
+        :size="16"
+        class="animate-spin"
+      />
+      <Square v-else-if="state === 'recording'" :size="14" />
+      <Mic v-else :size="16" />
     </Button>
-    <Popover v-model:open="open">
-      <PopoverTrigger as-child>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          class="h-8 w-4 text-muted-foreground"
-          :disabled="disabled || busy"
-          title="Voice input settings"
-          aria-label="Voice input settings"
-        >
-          <ChevronDown :size="12" />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" side="top" class="w-80 space-y-3" @open-auto-focus.prevent>
-        <div class="text-sm font-medium">Voice input</div>
-        <p v-if="!supported" class="text-xs text-muted-foreground">
-          {{ unavailableReason }}
-        </p>
-        <div v-if="loading" class="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 :size="14" class="animate-spin" /> Loading voice settings…
-        </div>
-        <template v-else>
-          <p v-if="configError || !config?.available" class="text-xs text-muted-foreground">
-            {{ configError || config?.reason || 'Configure a speech provider in Settings.' }}
-          </p>
-          <template v-if="config?.available">
-            <ModelPicker
-              v-model:model="model"
-              effort=""
-              :models="models"
-              :show-effort="false"
-              manual-fallback
-              variant="field"
-              default-model-label="Speech model"
-            />
-            <p
-              v-if="config.cleanup_model"
-              class="break-all text-xs text-muted-foreground"
-              data-testid="voice-cleanup-model"
-            >
-              Text cleanup: {{ config.cleanup_model }} · Settings → Provider &amp; Models → Small Model (Build
-              default if unset).
-            </p>
-            <label class="flex cursor-pointer items-center gap-2 text-sm">
-              <Checkbox :model-value="pointing" @update:model-value="pointing = $event === true" />
-              Record pointing too
-            </label>
-            <p class="text-xs text-muted-foreground">
-              {{
-                pointing
-                  ? 'Show images or the workspace desktop while speaking. Pointer positions and desktop snapshots are saved in this workspace. Desktop clicks only point.'
-                  : 'Filler words are removed and punctuation is added. Review the text before sending.'
-              }}
-            </p>
-            <Button class="w-full" size="sm" :disabled="!supported || !model.trim()" @click="start"
-              ><Mic :size="14" /> Start dictating</Button
-            >
-            <p class="text-xs text-muted-foreground">
-              Microphone audio goes to your configured model provider. Up to 5 minutes.
-            </p>
-          </template>
-          <Button v-else size="sm" variant="secondary" @click="loadConfig">Reload settings</Button>
-        </template>
-      </PopoverContent>
-    </Popover>
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      class="h-8 w-8"
+      :class="pointing ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground'"
+      :disabled="disabled || busy"
+      :aria-pressed="pointing"
+      title="Record pointing too"
+      aria-label="Record pointing too"
+      data-testid="composer-voice-pointing"
+      @click="pointing = !pointing"
+      ><MousePointer2 :size="15"
+    /></Button>
     <div
-      v-if="error || warning"
+      v-if="notice"
       class="absolute bottom-full left-4 right-4 mb-2 rounded-lg border bg-popover px-3 py-2 text-xs shadow-md"
-      :role="error ? 'alert' : 'status'"
+      :role="error || configError ? 'alert' : 'status'"
     >
-      <p>{{ error || warning }}</p>
+      <p>{{ notice }}</p>
       <div class="mt-2 flex gap-2">
+        <Button v-if="setupMissing" variant="secondary" size="sm" class="h-7" @click="openSettings"
+          >Open Settings</Button
+        >
         <Button
-          v-if="state === 'error' && !pointingFailed"
+          v-else-if="state === 'error' && !pointingFailed"
           variant="secondary"
           size="sm"
           class="h-7"
@@ -213,7 +179,7 @@ async function start(): Promise<void> {
           @click="voice.useDictationOnly"
           >Use dictation only</Button
         >
-        <Button variant="ghost" size="sm" class="h-7" @click="voice.cancel"
+        <Button variant="ghost" size="sm" class="h-7" @click="dismiss"
           ><X :size="12" /> {{ state === 'error' ? 'Discard' : 'Dismiss' }}</Button
         >
       </div>

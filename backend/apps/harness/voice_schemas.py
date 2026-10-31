@@ -37,7 +37,8 @@ class VoiceTranscribeIn(Schema):
 
     audio_base64: str = Field(min_length=1, max_length=2_000_000)
     mime_type: str = Field(max_length=100)
-    model: str = Field(min_length=1, max_length=255)
+    # Accepted for older clients; model selection is resolved from saved settings.
+    model: str = Field(default="", max_length=255)
     duration_ms: int = Field(ge=1, le=MAX_DURATION_MS)
 
 
@@ -58,12 +59,16 @@ class VoiceSegment(Schema):
 
 
 class VoiceTranscript(Schema):
-    """Cleaned text with original phrase boundaries, or explicit coarse timing."""
+    """Global edited text with independently timed ASR source phrases."""
 
     text: str
     segments: list[VoiceSegment]
     timing: Literal["provider", "approximate"]
+    segments_kind: Literal["source"] = "source"
     cleanup_warning: str = ""
+    raw_text: str = ""
+    speech_model: str = ""
+    cleanup_model: str = ""
 
 
 class VoiceTarget(Schema):
@@ -98,6 +103,10 @@ class VoiceRecordingIn(Schema):
     recording_id: uuid.UUID
     duration_ms: int = Field(ge=1, le=MAX_DURATION_MS)
     text: str = Field(max_length=100_000)
+    speech_model: str = Field(default="", max_length=255)
+    cleanup_model: str = Field(default="", max_length=255)
+    cleanup_warning: str = Field(default="", max_length=1000)
+    raw_text: str = Field(default="", max_length=100_000)
     timing: Literal["provider", "approximate"]
     segments: list[VoiceSegment] = Field(max_length=3000)
     pointers: list[VoicePointer] = Field(max_length=12_000)

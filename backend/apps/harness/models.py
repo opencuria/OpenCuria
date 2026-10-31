@@ -113,11 +113,11 @@ class AgentConfig(models.Model):
 
 class ProviderConfig(models.Model):
     """
-    Org-wide small-model defaults for title and compaction tasks.
+    Org-wide helper-model defaults for metadata and voice input.
 
     Exactly one record per organization (OneToOne). Provider credentials
     and per-provider settings live in ``ProviderConnection``; this record
-    holds the small model and effort. Agent defaults live in ``AgentConfig``.
+    holds helper-model choices and effort. Agent defaults live in ``AgentConfig``.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -138,6 +138,18 @@ class ProviderConfig(models.Model):
         default="",
         blank=True,
         help_text="Default reasoning effort for small model.",
+    )
+    speech_model = models.CharField(
+        max_length=255,
+        default="",
+        blank=True,
+        help_text="Speech-to-text model; empty uses the speech default.",
+    )
+    voice_cleanup_model = models.CharField(
+        max_length=255,
+        default="",
+        blank=True,
+        help_text="Dictation cleanup model; empty inherits the small or Build model.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
