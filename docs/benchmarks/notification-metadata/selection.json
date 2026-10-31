@@ -1,0 +1,10 @@
+{
+  "ranked_top_three": [
+    "pending-question lookup scans retained question history",
+    "notification repair scans retained assistant-message history",
+    "notification metadata loads full assistant bodies"
+  ],
+  "selected_index": 2,
+  "selected": "notification metadata loads full assistant bodies",
+  "method": "secrets.randbelow(3)"
+}

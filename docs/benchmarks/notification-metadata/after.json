@@ -1,0 +1,89 @@
+{
+  "benchmark": "notification activity services, disposable file-backed SQLite",
+  "python": "3.12.3",
+  "django": "5.2.17",
+  "sqlite": "3.45.1",
+  "roots": 50,
+  "samples": 31,
+  "results": [
+    {
+      "answer_kib": 0,
+      "active_rows": {
+        "p50_ms": 5.925,
+        "p95_ms": 6.273,
+        "query_count": 3,
+        "peak_python_allocated_bytes": 146438,
+        "output_sha256": "f1e90c5895f8696fd95ec0b9d60cf9e0601ed5c858e5c083911ea8b002f8c5a7"
+      },
+      "single_source": {
+        "p50_ms": 1.341,
+        "p95_ms": 1.461,
+        "query_count": 2,
+        "peak_python_allocated_bytes": 27463,
+        "output_sha256": "b7159ca316dc417baf3db971ce4f5f194b4cc1a6768d9c156b9c2e79a04247f4"
+      },
+      "completion_sources": {
+        "p50_ms": 56.826,
+        "p95_ms": 59.274,
+        "query_count": 50,
+        "peak_python_allocated_bytes": 181181,
+        "output_sha256": "44d615071fc63bba1d7aa48946479873db396b13b826a8a6441a40c0d1de4a9d"
+      }
+    },
+    {
+      "answer_kib": 16,
+      "active_rows": {
+        "p50_ms": 6.178,
+        "p95_ms": 9.825,
+        "query_count": 3,
+        "peak_python_allocated_bytes": 146438,
+        "output_sha256": "f1e90c5895f8696fd95ec0b9d60cf9e0601ed5c858e5c083911ea8b002f8c5a7"
+      },
+      "single_source": {
+        "p50_ms": 1.369,
+        "p95_ms": 1.475,
+        "query_count": 2,
+        "peak_python_allocated_bytes": 27513,
+        "output_sha256": "b7159ca316dc417baf3db971ce4f5f194b4cc1a6768d9c156b9c2e79a04247f4"
+      },
+      "completion_sources": {
+        "p50_ms": 58.278,
+        "p95_ms": 62.721,
+        "query_count": 50,
+        "peak_python_allocated_bytes": 183679,
+        "output_sha256": "44d615071fc63bba1d7aa48946479873db396b13b826a8a6441a40c0d1de4a9d"
+      }
+    },
+    {
+      "answer_kib": 512,
+      "active_rows": {
+        "p50_ms": 5.92,
+        "p95_ms": 6.351,
+        "query_count": 3,
+        "peak_python_allocated_bytes": 146438,
+        "output_sha256": "f1e90c5895f8696fd95ec0b9d60cf9e0601ed5c858e5c083911ea8b002f8c5a7"
+      },
+      "single_source": {
+        "p50_ms": 1.364,
+        "p95_ms": 1.557,
+        "query_count": 2,
+        "peak_python_allocated_bytes": 27413,
+        "output_sha256": "b7159ca316dc417baf3db971ce4f5f194b4cc1a6768d9c156b9c2e79a04247f4"
+      },
+      "completion_sources": {
+        "p50_ms": 67.202,
+        "p95_ms": 82.256,
+        "query_count": 50,
+        "peak_python_allocated_bytes": 184217,
+        "output_sha256": "44d615071fc63bba1d7aa48946479873db396b13b826a8a6441a40c0d1de4a9d"
+      }
+    }
+  ],
+  "notes": [
+    "Includes repository queries and immutable activity DTO construction.",
+    "Five warmups; query counts and tracemalloc peaks measured separately.",
+    "Bodies model empty, ordinary and long coding-agent responses.",
+    "Local warm timings are not production or network latency claims.",
+    "Python allocation peaks are not process RSS."
+  ]
+}

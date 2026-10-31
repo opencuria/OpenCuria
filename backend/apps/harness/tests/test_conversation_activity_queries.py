@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import asdict
 from datetime import timedelta
 
 import pytest
@@ -192,3 +193,90 @@ def test_activity_empty_or_foreign_scope_stops_after_root_read(
     HarnessSession.objects.filter(workspace=harness_workspace).update(status="idle")
     with django_assert_num_queries(1):
         assert activity.active_rows(org_id, harness_workspace.created_by_id) == []
+
+
+@pytest.mark.parametrize(
+    "path,query_count", [("source", 2), ("message", 1), ("active", 3)]
+)
+@pytest.mark.parametrize("body_size", [0, 512 * 1024])
+def test_activity_reads_only_metadata_without_deferred_queries(
+    harness_workspace: Workspace, path: str, query_count: int, body_size: int
+) -> None:
+    """Answer and runtime payload sizes must not affect metadata materialization."""
+    org_id = harness_workspace.runner.organization_id
+    session = HarnessSession.objects.create(
+        workspace=harness_workspace,
+        organization_id=org_id,
+        title="Review changes",
+        status="busy",
+        engine_state={"private": "x" * body_size},
+    )
+    message = HarnessMessage.objects.create(
+        session=session,
+        role="assistant",
+        content="x" * body_size,
+        engine_meta={"private": "x" * body_size},
+    )
+    activity = ConversationActivityService()
+    with CaptureQueriesContext(connection) as queries:
+        if path == "active":
+            rows = activity.active_rows(org_id, harness_workspace.created_by_id)
+            conversation, phase = rows[0]
+            assert phase == "running"
+        else:
+            conversation, assistant = (
+                activity.source(session.id)
+                if path == "source"
+                else activity.message_source(message.id)
+            )
+            assert asdict(assistant) == {
+                "id": message.id,
+                "completed_at": None,
+                "phase": "completed",
+            }
+        assert asdict(conversation) == {
+            "id": session.id,
+            "organization_id": org_id,
+            "workspace_id": harness_workspace.id,
+            "workspace_owner_id": harness_workspace.created_by_id,
+            "workspace_name": harness_workspace.name,
+            "title": "Review changes",
+            "status": "busy",
+        }
+    assert len(queries) == query_count
+    for query in queries:
+        for field in ("content", "engine_meta", "engine_state", "repos", "tokens"):
+            assert f'"{field}"' not in query["sql"], query["sql"]
+
+
+def test_activity_metadata_revalidates_ownership_and_outcome(
+    harness_workspace: Workspace,
+) -> None:
+    """Narrow projections still observe completion and workspace reassignment."""
+    from apps.organizations.models import Organization
+    from apps.runners.models import Runner
+
+    org_id = harness_workspace.runner.organization_id
+    session = HarnessSession.objects.create(
+        workspace=harness_workspace, organization_id=org_id, status="busy"
+    )
+    message = HarnessMessage.objects.create(session=session, role="assistant")
+    activity = ConversationActivityService()
+    assert activity.source(session.id)[1].completed_at is None
+    completed = timezone.now()
+    HarnessMessage.objects.filter(pk=message.id).update(
+        completed_at=completed, finish="error", error="Provider failed"
+    )
+    for result in (activity.source(session.id), activity.message_source(message.id)):
+        assert result[1].completed_at == completed
+        assert result[1].phase == "error"
+    assert activity.active_rows(org_id, harness_workspace.created_by_id) == []
+
+    foreign_org = Organization.objects.create(name="Foreign", slug="foreign-activity")
+    foreign_runner = Runner.objects.create(
+        organization=foreign_org, api_token_hash=uuid.uuid4().hex
+    )
+    Workspace.objects.filter(pk=harness_workspace.id).update(runner=foreign_runner)
+    assert activity.source(session.id) is None
+    assert activity.message_source(message.id) is None
+    assert activity.active_rows(org_id, harness_workspace.created_by_id) == []

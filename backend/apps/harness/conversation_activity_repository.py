@@ -10,6 +10,18 @@ from django.db.models import F, OuterRef, Subquery
 from .models import HarnessMessage, HarnessSession, QuestionRequest
 from .permissions.models import PermissionRequest
 
+# Match the activity service's immutable DTOs, excluding answer/runtime payloads.
+_SESSION_FIELDS = (
+    "id",
+    "organization_id",
+    "workspace_id",
+    "title",
+    "status",
+    "workspace__name",
+    "workspace__created_by_id",
+)
+_ASSISTANT_FIELDS = ("id", "completed_at", "finish", "error")
+
 
 class ConversationActivityRepository:
     """Load activity state without exposing queries to consuming contexts."""
@@ -19,6 +31,7 @@ class ConversationActivityRepository:
         """Load a root whose workspace still belongs to its organization."""
         return (
             HarnessSession.objects.select_related("workspace")
+            .only(*_SESSION_FIELDS)
             .filter(
                 id=session_id,
                 parent__isnull=True,
@@ -32,6 +45,7 @@ class ConversationActivityRepository:
         """Load the most recent assistant turn, including unfinished turns."""
         return (
             HarnessMessage.objects.filter(session_id=session_id, role="assistant")
+            .only(*_ASSISTANT_FIELDS)
             .order_by("-position")
             .first()
         )
@@ -41,6 +55,11 @@ class ConversationActivityRepository:
         """Load an assistant turn with its root and current workspace scope."""
         return (
             HarnessMessage.objects.select_related("session__workspace")
+            .only(
+                *_ASSISTANT_FIELDS,
+                "session_id",
+                *(f"session__{field}" for field in _SESSION_FIELDS),
+            )
             .filter(
                 id=message_id,
                 role="assistant",
@@ -73,6 +92,7 @@ class ConversationActivityRepository:
         )
         return list(
             HarnessSession.objects.select_related("workspace")
+            .only(*_SESSION_FIELDS)
             .filter(
                 organization_id=org_id,
                 workspace__runner__organization_id=org_id,

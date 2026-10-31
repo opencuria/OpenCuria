@@ -1,0 +1,74 @@
+{
+  "baseline_ref": "8659647",
+  "database": "sqlite",
+  "results": [
+    {
+      "roots": 1,
+      "depth": 0,
+      "samples": 40,
+      "before": {
+        "queries": 6,
+        "p50_ms": 6.088,
+        "p95_ms": 10.695,
+        "peak_python_kib": 84.3
+      },
+      "after": {
+        "queries": 6,
+        "p50_ms": 5.97,
+        "p95_ms": 9.572,
+        "peak_python_kib": 55.1
+      }
+    },
+    {
+      "roots": 20,
+      "depth": 0,
+      "samples": 40,
+      "before": {
+        "queries": 6,
+        "p50_ms": 6.41,
+        "p95_ms": 6.562,
+        "peak_python_kib": 149.6
+      },
+      "after": {
+        "queries": 6,
+        "p50_ms": 5.409,
+        "p95_ms": 5.679,
+        "peak_python_kib": 92.8
+      }
+    },
+    {
+      "roots": 20,
+      "depth": 1,
+      "samples": 40,
+      "before": {
+        "queries": 8,
+        "p50_ms": 8.174,
+        "p95_ms": 8.73,
+        "peak_python_kib": 149.0
+      },
+      "after": {
+        "queries": 8,
+        "p50_ms": 7.078,
+        "p95_ms": 8.231,
+        "peak_python_kib": 102.5
+      }
+    },
+    {
+      "roots": 100,
+      "depth": 3,
+      "samples": 40,
+      "before": {
+        "queries": 10,
+        "p50_ms": 20.027,
+        "p95_ms": 26.205,
+        "peak_python_kib": 487.5
+      },
+      "after": {
+        "queries": 10,
+        "p50_ms": 15.942,
+        "p95_ms": 21.28,
+        "peak_python_kib": 400.2
+      }
+    }
+  ]
+}
