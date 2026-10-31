@@ -68,11 +68,13 @@ import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import { useChromeTopInset } from "../ui/chromeInset";
 import { useChatLayout } from "./ChatLayout";
 import {
+  END_SLOP,
   EndPullArea,
   EndPullHint,
+  distanceFromEnd,
   useEndPull,
   useEndPullState,
-  type EndPullState,
+  type EndPullScrollHandlers,
 } from "./EndPull";
 import { NativeMenu } from "../ui/NativeMenu";
 import { useTheme } from "../ui/theme";
@@ -270,6 +272,16 @@ export function ChatMessages({
   // "Scroll to latest" follows the list's own end tracking, which includes the
   // keyboard and composer insets and also reacts to content growing below.
   const hasMessages = !loading && ordered.length > 0;
+  /**
+   * The pull arms at the end with a little slack: the list's own flag is
+   * exact to a point, while insets and fractional offsets keep a resting list
+   * a few points short of it.
+   */
+  const updateAtEnd = useCallback(() => {
+    const state = listRef.current?.getState();
+    pullState.atEnd.value =
+      !state || state.isAtEnd || state.distanceFromEnd <= END_SLOP;
+  }, [pullState]);
   useEffect(() => {
     const state = hasMessages ? listRef.current?.getState() : undefined;
     if (!state) {
@@ -278,30 +290,38 @@ export function ChatMessages({
       return;
     }
     setShowJumpToLatest(!state.isNearEnd);
-    pullState.atEnd.value = state.isAtEnd;
-    const stopNearEnd = state.listen("isNearEnd", (nearEnd) =>
-      setShowJumpToLatest(!nearEnd),
-    );
-    const stopAtEnd = state.listen("isAtEnd", (atEnd) => {
-      pullState.atEnd.value = atEnd;
+    updateAtEnd();
+    const stopNearEnd = state.listen("isNearEnd", (nearEnd) => {
+      setShowJumpToLatest(!nearEnd);
+      updateAtEnd();
     });
+    const stopAtEnd = state.listen("isAtEnd", updateAtEnd);
     return () => {
       stopNearEnd();
       stopAtEnd();
     };
-  }, [hasMessages, pullState]);
-  const onScroll = useCallback(() => {
-    pullState.lastScrollAt.value = Date.now();
-  }, [pullState]);
-  const pullHint =
-    !loading && onPullUpAtEnd ? (
-      <EndPullHint
-        progress={pull.progress}
-        ready={pull.ready}
-        label={pullUpLabel}
-        bottom={layout.dockOffset + 12}
-      />
-    ) : null;
+  }, [hasMessages, pullState, updateAtEnd]);
+  const pullScroll = pull.scroll;
+  const scrollHandlers = useMemo<EndPullScrollHandlers>(
+    () => ({
+      ...pullScroll,
+      onScroll: (event) => {
+        pullState.atEnd.value =
+          distanceFromEnd(event) <= END_SLOP ||
+          Boolean(listRef.current?.getState().isAtEnd);
+        pullScroll.onScroll(event);
+      },
+    }),
+    [pullScroll, pullState],
+  );
+  const pullHint = !loading && onPullUpAtEnd ? (
+    <EndPullHint
+      progress={pull.progress}
+      ready={pull.ready}
+      label={pullUpLabel}
+      bottom={layout.dockOffset + 12}
+    />
+  ) : null;
   const jumpToLatest = useCallback(() => {
     setShowJumpToLatest(false);
     void listRef.current?.scrollToEnd({ animated: true });
@@ -316,7 +336,7 @@ export function ChatMessages({
               loading={loading}
               topInset={topInset}
               testID={testID}
-              pullState={pullState}
+              scrollHandlers={pullScroll}
             />
           </View>
         </EndPullArea>
@@ -360,8 +380,8 @@ export function ChatMessages({
               { paddingTop: styles.listContent.paddingTop + topInset },
             ]}
             style={{ backgroundColor: theme.background }}
-            onScroll={onScroll}
-            scrollEventThrottle={32}
+            {...scrollHandlers}
+            scrollEventThrottle={16}
           />
         </View>
       </EndPullArea>
@@ -435,12 +455,12 @@ function EmptyTranscript({
   loading,
   topInset,
   testID,
-  pullState,
+  scrollHandlers,
 }: {
   loading: boolean;
   topInset: number;
   testID: string;
-  pullState: EndPullState;
+  scrollHandlers: EndPullScrollHandlers;
 }): React.JSX.Element {
   const { theme } = useTheme();
   const { dockOffset, dockTranslateY, keyboardDismissMode } = useChatLayout();
@@ -466,10 +486,8 @@ function EmptyTranscript({
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
       alwaysBounceVertical
-      scrollEventThrottle={32}
-      onScroll={() => {
-        pullState.lastScrollAt.value = Date.now();
-      }}
+      scrollEventThrottle={16}
+      {...scrollHandlers}
     >
       <Animated.View style={centered}>
         {loading ? (

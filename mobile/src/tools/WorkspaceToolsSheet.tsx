@@ -6,6 +6,7 @@ import { X } from "lucide-react-native";
 import type { OpenCuriaClient } from "@opencuria/client";
 import type { MediaCache } from "../platform";
 import { IconButton } from "../ui/controls";
+import { ToastHost } from "../ui/ToastHost";
 import { useTheme } from "../ui/theme";
 import { TOOL_PANELS } from "./panels";
 import type { WorkspaceToolId, WorkspaceToolProps } from "./types";
@@ -137,6 +138,7 @@ export function WorkspaceToolsSheet({
             );
           })}
         </View>
+        <ToastHost />
       </View>
     </Modal>
   );

@@ -11,6 +11,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ThemeProvider, useTheme } from "../src/ui/theme";
 import { SessionProvider } from "../src/screens/SessionContext";
 import { NotificationProvider } from "../src/notifications/NotificationContext";
+import { ToastHost } from "../src/ui/ToastHost";
 
 export default function RootLayout(): React.JSX.Element {
   return (
@@ -26,6 +27,7 @@ export default function RootLayout(): React.JSX.Element {
                 >
                   <Stack.Screen name="index" />
                 </Stack>
+                <ToastHost />
               </NotificationProvider>
             </SessionProvider>
           </ThemeProvider>

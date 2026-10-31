@@ -1104,9 +1104,6 @@ export function MainScreen(): React.JSX.Element {
       title: "Switch workspace",
       symbol: "square.stack.3d.up",
     },
-    ...(toolsAvailable
-      ? [{ id: "tools", title: "Git, Terminal & Files", symbol: "terminal" }]
-      : []),
     ...(chat.activeSession && !activeIsSubtask
       ? [
           {
@@ -1135,9 +1132,7 @@ export function MainScreen(): React.JSX.Element {
     setSheet(name);
   };
   const chatMenuAction = (id: string) => {
-    if (id === "tools") {
-      openSheet("tools");
-    } else if (id === "workspace") {
+    if (id === "workspace") {
       setSearch("");
       openSheet("workspaces");
     } else if (id === "rename" && chat.activeSession) {
@@ -1165,6 +1160,8 @@ export function MainScreen(): React.JSX.Element {
         title={workspace?.name ?? "OpenCuria"}
         onCreate={newChat}
         canCreate={ready}
+        onTools={() => openSheet("tools")}
+        canOpenTools={toolsAvailable}
         menuActions={chatMenuActions}
         onMenuAction={chatMenuAction}
         navigation={

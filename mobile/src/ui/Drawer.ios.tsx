@@ -68,6 +68,13 @@ function ChatStack(props: DrawerProps): React.JSX.Element {
       onPress: () => latest.current.onCreate(),
     },
     {
+      type: "button",
+      label: "Git, Terminal & Files",
+      icon: { type: "sfSymbol", name: "terminal" },
+      disabled: !props.canOpenTools,
+      onPress: () => latest.current.onTools(),
+    },
+    {
       type: "menu",
       label: "More",
       icon: { type: "sfSymbol", name: "ellipsis" },
@@ -192,6 +199,18 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
                   modifiers={[
                     labelStyle("iconOnly"),
                     disabled(!props.canCreate),
+                  ]}
+                />
+              </ToolbarItem>
+              <ToolbarItem placement="topBarTrailing">
+                <SwiftButton
+                  label="Git, Terminal & Files"
+                  systemImage="terminal"
+                  onPress={props.onTools}
+                  testID="workspace-tools"
+                  modifiers={[
+                    labelStyle("iconOnly"),
+                    disabled(!props.canOpenTools),
                   ]}
                 />
               </ToolbarItem>

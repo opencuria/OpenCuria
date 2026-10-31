@@ -1,6 +1,11 @@
 import React from "react";
 import { StyleSheet, View } from "react-native";
-import { Ellipsis, Menu, MessageCirclePlus } from "lucide-react-native";
+import {
+  Ellipsis,
+  Menu,
+  MessageCirclePlus,
+  SquareTerminal,
+} from "lucide-react-native";
 import type { DrawerProps } from "./Drawer.types";
 import { IconButton } from "./controls";
 import { NativeMenu } from "./NativeMenu";
@@ -40,6 +45,13 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
               onPress={props.onCreate}
               disabled={!props.canCreate}
               testID="new-chat"
+            />
+            <IconButton
+              label="Git, Terminal & Files"
+              icon={<SquareTerminal color={theme.text} size={22} />}
+              onPress={props.onTools}
+              disabled={!props.canOpenTools}
+              testID="workspace-tools"
             />
             <NativeMenu
               label="More"

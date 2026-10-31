@@ -22,13 +22,17 @@ export interface NativeMenuAction {
 export function NativeMenu({
   children,
   label,
+  accessibilityLabel,
   actions,
   onSelect,
   longPress = false,
   style,
   testID,
 }: React.PropsWithChildren<{
+  /** Menu title; also the trigger's accessibility label by default. */
   label: string;
+  /** Spoken trigger label when it should say more than the menu title. */
+  accessibilityLabel?: string;
   actions: NativeMenuAction[];
   onSelect: (id: string) => void;
   longPress?: boolean;
@@ -59,7 +63,7 @@ export function NativeMenu({
       <View
         accessible
         accessibilityRole="button"
-        accessibilityLabel={label}
+        accessibilityLabel={accessibilityLabel ?? label}
         style={Platform.OS === "android" ? { flex: 1 } : undefined}
         accessibilityActions={[{ name: "activate" }]}
         onAccessibilityAction={() => menuRef.current?.show?.()}

@@ -9,7 +9,6 @@ import { Image } from "expo-image";
 import {
   AtSign,
   ArrowUp,
-  ChevronDown,
   FileText,
   Plus,
   Sparkles,
@@ -37,6 +36,7 @@ import {
 } from "@opencuria/chat-core/harnessMentions";
 import { Banner, NativeAction } from "../ui/primitives";
 import { NativeMenu } from "../ui/NativeMenu";
+import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerEditor } from "./ComposerEditor";
 import {
@@ -551,9 +551,12 @@ export function ChatComposer({
   ) : null;
   const settingsButton =
     settings && onSettings ? (
-      <NativeAction
-        fitContent
-        accessibilityRole="button"
+      <PickerPill
+        value={settings.model || "Choose model"}
+        detail={settings.effort || undefined}
+        prefix={settings.mode === "plan" ? "Plan · " : undefined}
+        // Bound the native label beside the attachment and send targets.
+        maxWidth={Math.max(64, windowWidth - 186)}
         accessibilityLabel={`Chat settings: ${[
           settings.harness,
           settings.mode,
@@ -565,28 +568,7 @@ export function ChatComposer({
         accessibilityHint="Choose model, effort and agent"
         onPress={onSettings}
         testID="chat-composer-settings"
-        style={styles.modelControl}
-      >
-        <Text
-          numberOfLines={1}
-          // Bound the native label beside the attachment and send targets.
-          style={[
-            styles.modelText,
-            { maxWidth: Math.max(64, windowWidth - 186) },
-          ]}
-        >
-          {settings.mode === "plan" ? (
-            <Text style={{ color: theme.mutedText }}>Plan · </Text>
-          ) : null}
-          <Text style={{ color: theme.text }}>
-            {settings.model || "Choose model"}
-          </Text>
-          {settings.effort ? (
-            <Text style={{ color: theme.mutedText }}> {settings.effort}</Text>
-          ) : null}
-        </Text>
-        <ChevronDown size={14} color={theme.mutedText} />
-      </NativeAction>
+      />
     ) : null;
   const sendDisabled = busy ? !onStop || stopping : !canSubmit || sending;
   const actionForeground = sendDisabled ? theme.subtleText : theme.background;
@@ -886,15 +868,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   settings: { flex: 1, flexDirection: "row", minWidth: 0 },
-  modelControl: {
-    maxWidth: "100%",
-    minHeight: 44,
-    paddingHorizontal: 4,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  modelText: { flexShrink: 1, fontSize: 15, fontWeight: "500" },
   chips: {
     alignItems: "center",
     gap: 7,

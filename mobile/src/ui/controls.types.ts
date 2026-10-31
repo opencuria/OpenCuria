@@ -24,6 +24,8 @@ export interface ButtonProps extends Omit<
   variant?: "primary" | "secondary" | "outline" | "danger" | "ghost";
   busy?: boolean;
   compact?: boolean;
+  /** Fully rounded ends, e.g. inside a rounded surface (Material's default). */
+  shape?: "capsule";
 }
 
 export interface IconButtonProps extends Omit<

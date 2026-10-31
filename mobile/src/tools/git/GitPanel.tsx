@@ -2,6 +2,7 @@ import React, {
   memo,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -14,8 +15,9 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
-  TextInput,
   View,
+  useWindowDimensions,
+  type TextInput,
 } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 import * as Clipboard from "expo-clipboard";
@@ -46,7 +48,6 @@ import {
   currentGitBranch,
   gitRefTagsByHash,
   stagedGitChanges,
-  suggestRemoteAction,
   unstagedGitChanges,
 } from "@opencuria/chat-core/gitModel";
 import {
@@ -59,13 +60,17 @@ import type {
   GitCommitFile,
   GitFileChange,
 } from "@opencuria/chat-core/gitTypes";
+import { ComposerEditor } from "../../components/ComposerEditor";
+import { ComposerSurface } from "../../ui/ComposerSurface";
 import { NativeContextMenu } from "../../ui/ContextMenu";
 import { Banner, Button, IconButton } from "../../ui/primitives";
 import { NativeMenu, type NativeMenuAction } from "../../ui/NativeMenu";
+import { PickerPill } from "../../ui/PickerPill";
 import { useTheme, type OpenCuriaTheme } from "../../ui/theme";
 import { WorkspaceFileIcon } from "../files/WorkspaceFileIcon";
 import type { WorkspaceToolProps } from "../types";
 import { GitBranchSheet, type GitBranchForm } from "./GitBranchSheet";
+import { gitActionButton } from "./gitActionButton";
 import { GitCommitSheet } from "./GitCommitSheet";
 import { GitController, selectedGitRepo } from "./gitController";
 import { GitDiffSheet, type GitDiffTarget } from "./GitDiffSheet";
@@ -83,7 +88,7 @@ import {
   type GraphRow,
 } from "./graphRows";
 
-const ROW_HEIGHT = 44;
+const ROW_HEIGHT = 36;
 const GRAPH_GRID_X = 14;
 const GRAPH_OFFSET_X = 14;
 const GRAPH_MIN_GRID_X = 8;
@@ -181,9 +186,13 @@ export function GitPanel({
   const [changesOpen, setChangesOpen] = useState(true);
   const [filter, setFilter] = useState<string | null>(null);
   const [diff, setDiff] = useState<GitDiffTarget | null>(null);
-  const [commitHash, setCommitHash] = useState<string | null>(null);
   const [branchForm, setBranchForm] = useState<GitBranchForm | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const messageInput = useRef<TextInput>(null);
+  // Rows size to the list explicitly: native context-menu hosts must never
+  // let a long path or message push the row's trailing actions off screen.
+  const { width: windowWidth } = useWindowDimensions();
+  const [listWidth, setListWidth] = useState(windowWidth);
 
   // -- graph ------------------------------------------------------------------
   const activeFilter = repo?.branches.some((b) => b.name === filter)
@@ -303,40 +312,101 @@ export function GitPanel({
     );
   };
 
-  const canCommit = message.trim().length > 0 && staged.length > 0 && !busy;
-  const commit = async (andPush: boolean) => {
+  // -- source control action (VS Code's single button + more actions) -----------
+  const merging = Boolean(repo?.mergeState.merging);
+  const action = gitActionButton(repo, state.busyOperation);
+  const ahead = branch?.ahead ?? 0;
+  const behind = branch?.behind ?? 0;
+  const hasUpstream = branch?.upstream != null;
+  const canCommit =
+    !busy &&
+    !repo?.changes.some((change) => change.conflict !== null) &&
+    (staged.length > 0 || bulkPaths.length > 0 || merging);
+  const canPush = !busy && !isDetached && (ahead > 0 || !hasUpstream);
+  const canTrack = !busy && !isDetached && hasUpstream;
+
+  /**
+   * Commit as VS Code does: an empty message asks for one; with nothing
+   * staged it offers to stage every change first. Afterwards it optionally
+   * pushes or syncs.
+   */
+  const commit = (then: "none" | "push" | "sync" = "none") => {
     if (!canCommit) return;
-    if (await controller.commit(message, andPush)) setMessage("");
+    if (!message.trim()) {
+      messageInput.current?.focus();
+      return;
+    }
+    const run = async () => {
+      if (!staged.length && !merging && !(await controller.stageAll())) return;
+      if (!(await controller.commit(message, then === "push"))) return;
+      setMessage("");
+      if (then === "sync") void controller.sync();
+    };
+    if (staged.length || merging) void run();
+    else
+      Alert.alert(
+        "There are no staged changes to commit.",
+        "Would you like to stage all your changes and commit them directly?",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Stage All & Commit", onPress: () => void run() },
+        ],
+      );
+  };
+  const runAction = () => {
+    if (action.kind === "publish") void controller.push();
+    else if (action.kind === "sync") void controller.sync();
+    else commit();
+  };
+  const moreActions: NativeMenuAction[] = [
+    {
+      id: "commit",
+      title: merging ? "Continue Merge" : "Commit",
+      symbol: "checkmark",
+      disabled: !canCommit,
+    },
+    {
+      id: "commit-push",
+      title: "Commit & Push",
+      symbol: "arrow.up.circle",
+      disabled: !canCommit || isDetached,
+    },
+    {
+      id: "commit-sync",
+      title: "Commit & Sync",
+      symbol: "arrow.triangle.2.circlepath.circle",
+      disabled: !canCommit || isDetached || !hasUpstream,
+    },
+    {
+      id: "push",
+      title: hasUpstream ? `Push${ahead ? ` (${ahead})` : ""}` : "Publish Branch",
+      symbol: hasUpstream ? "arrow.up" : "icloud.and.arrow.up",
+      disabled: !canPush,
+    },
+    {
+      id: "pull",
+      title: `Pull${behind ? ` (${behind})` : ""}`,
+      symbol: "arrow.down",
+      disabled: !canTrack,
+    },
+    {
+      id: "sync",
+      title: "Sync",
+      symbol: "arrow.triangle.2.circlepath",
+      disabled: !canTrack,
+    },
+  ];
+  const onMoreAction = (id: string) => {
+    if (id === "commit") commit();
+    else if (id === "commit-push") commit("push");
+    else if (id === "commit-sync") commit("sync");
+    else if (id === "push") void controller.push();
+    else if (id === "pull") void controller.pull();
+    else if (id === "sync") void controller.sync();
   };
   const generate = async () => {
     const generated = await controller.generateCommitMessage();
     if (generated) setMessage(generated);
-  };
-
-  const ahead = branch?.ahead ?? 0;
-  const behind = branch?.behind ?? 0;
-  const hasUpstream = branch?.upstream != null;
-  const primary = suggestRemoteAction(repo, busy);
-  const canPush = !busy && !isDetached && (ahead > 0 || !hasUpstream);
-  const canTrack = !busy && !isDetached && hasUpstream;
-  const canPrimary =
-    primary === "publish" || primary === "push"
-      ? canPush
-      : primary === "pull" || primary === "sync"
-        ? canTrack
-        : false;
-  const primaryLabel =
-    primary === "publish"
-      ? "Publish"
-      : primary === "pull"
-        ? `Pull${behind ? ` ${behind}` : ""}`
-        : primary === "sync"
-          ? `Sync ↓${behind} ↑${ahead}`
-          : `Push${primary === "push" && ahead ? ` ${ahead}` : ""}`;
-  const runPrimary = () => {
-    if (primary === "publish" || primary === "push") void controller.push();
-    else if (primary === "pull") void controller.pull();
-    else if (primary === "sync") void controller.sync();
   };
 
   const refresh = async () => {
@@ -539,13 +609,17 @@ export function GitPanel({
       );
   };
 
-  const openCommit = (hash: string) => {
-    setCommitHash(hash);
-    void controller.ensureCommitDetails(hash);
-  };
+  const commitHash = state.expandedCommitHash;
+  const openCommit = (hash: string) => void controller.openCommitDetails(hash);
+  // Keep the open commit even if a reload drops it from the visible history.
+  const lastSheetCommit = useRef<GitCommit | null>(null);
   const sheetCommit = commitHash
-    ? (commits.find((c) => c.hash === commitHash) ?? null)
+    ? (commits.find((c) => c.hash === commitHash) ??
+      (lastSheetCommit.current?.hash === commitHash
+        ? lastSheetCommit.current
+        : null))
     : null;
+  if (sheetCommit) lastSheetCommit.current = sheetCommit;
   const sheetKey =
     repo && commitHash ? commitDetailsKey(repo.path, commitHash) : "";
 
@@ -677,6 +751,7 @@ export function GitPanel({
           <ChangeRow
             change={item.change}
             side={item.side}
+            width={listWidth}
             busy={busy}
             onOpen={() => openWorkingDiff(item.change, item.side)}
             onStage={() => void controller.stage(item.change.path)}
@@ -757,6 +832,7 @@ export function GitPanel({
         return (
           <CommitRow
             commit={row}
+            width={listWidth}
             graph={graphRows[item.index]}
             graphWidth={graphWidth}
             groups={
@@ -820,109 +896,108 @@ export function GitPanel({
     );
   }
 
+  const loadingIndicator = refreshing || busy;
   const header = (
     <View>
       <View style={styles.repoRow}>
-        <NativeMenu
-          label="Repository"
-          actions={state.repos.map((item) => ({
-            id: item.id,
-            title: item.currentBranch
-              ? `${item.name} (${item.currentBranch})`
-              : item.name,
-            selected: item.id === state.selectedRepoId,
-          }))}
-          onSelect={(id) => controller.selectRepo(id)}
-          style={styles.repoMenu}
+        <GitBranch size={16} color={theme.mutedText} />
+        <PickerPill
+          value={repo?.name ?? ""}
+          detail={
+            repo?.currentBranch ??
+            (repo?.headHash ? repo.headHash.slice(0, 7) : undefined)
+          }
+          accessibilityLabel={`Repository ${repo?.name ?? ""}, ${
+            repo?.currentBranch
+              ? `branch ${repo.currentBranch}`
+              : "detached HEAD"
+          }`}
+          menu={{
+            title: "Repository",
+            actions: state.repos.map((item) => ({
+              id: item.id,
+              title: item.currentBranch
+                ? `${item.name} (${item.currentBranch})`
+                : item.name,
+              selected: item.id === state.selectedRepoId,
+            })),
+            onSelect: (id) => controller.selectRepo(id),
+          }}
+          style={styles.repoPicker}
           testID="git-repo-select"
-        >
-          <View
-            style={[styles.repoPill, { backgroundColor: theme.surfaceMuted }]}
-          >
-            <Text
-              numberOfLines={1}
-              style={[styles.repoName, { color: theme.text }]}
-            >
-              {repo?.name}
-            </Text>
-            <ChevronDown size={16} color={theme.mutedText} />
-          </View>
-        </NativeMenu>
-        <IconButton
-          label="Fetch and refresh"
-          symbol="arrow.clockwise"
-          icon={<RefreshCw size={18} color={theme.text} />}
-          tone="quiet"
-          disabled={busy || refreshing}
-          onPress={() => void refresh()}
-          testID="git-refresh"
         />
-      </View>
-      <View style={styles.branchRow}>
-        <GitBranch size={14} color={theme.mutedText} />
-        <Text
-          numberOfLines={1}
-          style={[styles.branchName, { color: theme.text }]}
-          testID="git-current-branch"
-        >
-          {repo?.currentBranch ?? "DETACHED HEAD"}
-        </Text>
         {ahead > 0 ? (
           <View
             style={styles.counter}
-            accessibilityLabel={`${ahead} commits ahead`}
+            accessible
+            accessibilityLabel={`${ahead} ${ahead === 1 ? "commit" : "commits"} to push`}
+            testID="git-ahead"
           >
-            <ArrowUp size={12} color={theme.mutedText} />
             <Text style={[styles.counterText, { color: theme.mutedText }]}>
               {ahead}
             </Text>
+            <ArrowUp size={13} color={theme.mutedText} />
           </View>
         ) : null}
         {behind > 0 ? (
           <View
             style={styles.counter}
-            accessibilityLabel={`${behind} commits behind`}
+            accessible
+            accessibilityLabel={`${behind} ${behind === 1 ? "commit" : "commits"} to pull`}
+            testID="git-behind"
           >
-            <ArrowDown size={12} color={theme.mutedText} />
             <Text style={[styles.counterText, { color: theme.mutedText }]}>
               {behind}
             </Text>
+            <ArrowDown size={13} color={theme.mutedText} />
           </View>
         ) : null}
-        {state.busyOperation ? (
-          <ActivityIndicator size="small" color={theme.subtleText} />
-        ) : null}
-        <Text
-          numberOfLines={1}
-          ellipsizeMode="head"
-          style={[styles.repoPath, { color: theme.subtleText }]}
-        >
-          {repo?.path}
-        </Text>
+        <View style={styles.flex} />
+        {loadingIndicator ? (
+          <View
+            style={styles.reload}
+            accessible
+            accessibilityLabel={
+              state.busyOperation ? `Running ${state.busyOperation}` : "Loading"
+            }
+            testID="git-loading-indicator"
+          >
+            <ActivityIndicator size="small" color={theme.mutedText} />
+          </View>
+        ) : (
+          <IconButton
+            label="Fetch and refresh"
+            symbol="arrow.clockwise"
+            icon={<RefreshCw size={18} color={theme.mutedText} />}
+            tone="quiet"
+            onPress={() => void refresh()}
+            testID="git-refresh"
+          />
+        )}
       </View>
 
       {detailsPending ? null : (
         <View style={styles.commitBox}>
-          <View>
-            <TextInput
-              value={message}
-              onChangeText={setMessage}
-              multiline
-              placeholder={`Message (commit on ${repo?.currentBranch ? `'${repo.currentBranch}'` : "detached HEAD"})`}
-              placeholderTextColor={theme.subtleText}
-              style={[
-                styles.message,
-                { color: theme.text, backgroundColor: theme.surfaceMuted },
-              ]}
-              testID="git-commit-message"
-            />
-            <View style={styles.generate}>
+          <ComposerSurface>
+            <View style={styles.editorRow}>
+              <ComposerEditor
+                ref={messageInput}
+                value={message}
+                onChangeText={setMessage}
+                placeholder={
+                  repo?.currentBranch
+                    ? `Message (commit on '${repo.currentBranch}')`
+                    : "Message (detached HEAD)"
+                }
+                placeholderTextColor={theme.subtleText}
+                accessibilityLabel="Commit message"
+                style={[styles.messageInput, { color: theme.text }]}
+                testID="git-commit-message"
+              />
               {state.generatingCommitMessage ? (
-                <ActivityIndicator
-                  size="small"
-                  color={theme.mutedText}
-                  style={styles.generateSpinner}
-                />
+                <View style={styles.generate}>
+                  <ActivityIndicator size="small" color={theme.mutedText} />
+                </View>
               ) : (
                 <IconButton
                   label="Generate commit message"
@@ -935,86 +1010,38 @@ export function GitPanel({
                 />
               )}
             </View>
-          </View>
-          <View style={styles.buttons}>
-            <View style={styles.split}>
+            <View style={styles.actionRow}>
               <Button
-                title="Commit"
-                symbol="checkmark"
+                title={action.title}
+                symbol={action.symbol as never}
                 variant="primary"
-                disabled={!canCommit}
-                onPress={() => void commit(false)}
+                shape="capsule"
+                busy={action.running}
+                disabled={!action.enabled}
+                onPress={runAction}
                 style={styles.flex}
-                testID="git-commit"
+                testID="git-action"
               />
               <NativeMenu
-                label="More commit actions"
-                actions={[
-                  {
-                    id: "commit",
-                    title: "Commit",
-                    symbol: "checkmark",
-                    disabled: !canCommit,
-                  },
-                  {
-                    id: "commit-push",
-                    title: "Commit & Push",
-                    symbol: "arrow.up.circle",
-                    disabled: !canCommit,
-                  },
-                ]}
-                onSelect={(id) => void commit(id === "commit-push")}
-                style={styles.chevronMenu}
-                testID="git-commit-more"
+                label="More actions"
+                actions={moreActions}
+                onSelect={onMoreAction}
+                style={styles.moreMenu}
+                testID="git-more-actions"
               >
-                <MenuChevron disabled={!canCommit} />
+                <View style={styles.moreTarget}>
+                  <View
+                    style={[
+                      styles.moreCircle,
+                      { backgroundColor: theme.controlFill },
+                    ]}
+                  >
+                    <ChevronDown size={20} color={theme.mutedText} />
+                  </View>
+                </View>
               </NativeMenu>
             </View>
-            <View style={styles.split}>
-              <Button
-                title={primaryLabel}
-                variant="outline"
-                style={styles.flex}
-                disabled={!canPrimary}
-                onPress={runPrimary}
-                testID="git-remote-primary"
-              />
-              <NativeMenu
-                label="Remote actions"
-                actions={[
-                  {
-                    id: "push",
-                    title: hasUpstream
-                      ? `Push${ahead ? ` (${ahead})` : ""}`
-                      : "Publish",
-                    symbol: "arrow.up",
-                    disabled: !canPush,
-                  },
-                  {
-                    id: "pull",
-                    title: `Pull${behind ? ` (${behind})` : ""}`,
-                    symbol: "arrow.down",
-                    disabled: !canTrack,
-                  },
-                  {
-                    id: "sync",
-                    title: "Sync",
-                    symbol: "arrow.triangle.2.circlepath",
-                    disabled: !canTrack,
-                  },
-                ]}
-                onSelect={(id) => {
-                  if (id === "push") void controller.push();
-                  else if (id === "pull") void controller.pull();
-                  else void controller.sync();
-                }}
-                style={styles.chevronMenu}
-                testID="git-remote-actions"
-              >
-                <MenuChevron disabled={busy || isDetached} />
-              </NativeMenu>
-            </View>
-          </View>
+          </ComposerSurface>
           {repo?.mergeState.merging ? (
             <Banner
               tone="warning"
@@ -1036,7 +1063,11 @@ export function GitPanel({
   );
 
   return (
-    <View style={styles.root} testID="side-panel-git">
+    <View
+      style={styles.root}
+      onLayout={({ nativeEvent }) => setListWidth(nativeEvent.layout.width)}
+      testID="side-panel-git"
+    >
       <FlatList
         data={items}
         keyExtractor={(item) => item.key}
@@ -1065,20 +1096,6 @@ export function GitPanel({
         windowSize={11}
         testID="git-list"
       />
-      {state.notice ? (
-        <View
-          style={[styles.notice, { bottom: bottomInset + 12 }]}
-          pointerEvents="box-none"
-        >
-          <Banner
-            tone={state.notice.tone}
-            title={state.notice.title}
-            message={state.notice.message ?? ""}
-            onDismiss={() => controller.dismissNotice()}
-            testID="git-notice"
-          />
-        </View>
-      ) : null}
       <GitDiffSheet target={diff} onClose={() => setDiff(null)} />
       <GitCommitSheet
         commit={sheetCommit}
@@ -1089,26 +1106,19 @@ export function GitPanel({
         onAction={(id) => {
           if (!sheetCommit) return;
           if (id === "branch-here" || id === "stash-branch")
-            setCommitHash(null);
+            controller.closeCommitDetails();
           onCommitAction(sheetCommit, id);
         }}
         onRetry={() =>
           commitHash && void controller.ensureCommitDetails(commitHash)
         }
-        onOpenFile={(file: GitCommitFile) =>
-          sheetCommit &&
-          setDiff({
-            path: file.newPath,
-            label: sheetCommit.hash.slice(0, 8),
-            load: () =>
-              controller.commitDiff(
-                sheetCommit.hash,
-                file.newPath,
-                file.oldPath,
-              ),
-          })
-        }
-        onClose={() => setCommitHash(null)}
+        fileDiff={(row: GitCommit, file: GitCommitFile) => ({
+          path: file.newPath,
+          label: row.hash.slice(0, 8),
+          load: () =>
+            controller.commitDiff(row.hash, file.newPath, file.oldPath),
+        })}
+        onClose={() => controller.closeCommitDetails()}
       />
       <GitBranchSheet
         form={branchForm}
@@ -1131,21 +1141,6 @@ export function GitPanel({
 function conflictCount(changes: GitFileChange[]): string {
   const count = changes.filter((change) => change.conflict !== null).length;
   return count === 1 ? "1 conflict" : `${count} conflicts`;
-}
-
-/** Chevron half of a split button; the native menu opens on tap. */
-function MenuChevron({ disabled }: { disabled: boolean }) {
-  const { theme } = useTheme();
-  return (
-    <View
-      style={[
-        styles.chevron,
-        { backgroundColor: theme.surfaceMuted, opacity: disabled ? 0.5 : 1 },
-      ]}
-    >
-      <ChevronDown size={18} color={theme.text} />
-    </View>
-  );
 }
 
 /** Compact inline action in a list row (stage, unstage, discard). */
@@ -1189,6 +1184,7 @@ function RowAction({
 const ChangeRow = memo(function ChangeRow({
   change,
   side,
+  width,
   busy,
   onOpen,
   onStage,
@@ -1197,6 +1193,7 @@ const ChangeRow = memo(function ChangeRow({
 }: {
   change: GitFileChange;
   side: "staged" | "unstaged";
+  width: number;
   busy: boolean;
   onOpen: () => void;
   onStage: () => void;
@@ -1255,6 +1252,7 @@ const ChangeRow = memo(function ChangeRow({
           android_ripple={{ color: theme.controlFill }}
           style={({ pressed }) => [
             styles.changeRow,
+            { width },
             pressed && Platform.OS === "ios"
               ? { backgroundColor: theme.controlFill }
               : null,
@@ -1264,6 +1262,7 @@ const ChangeRow = memo(function ChangeRow({
           <WorkspaceFileIcon path={change.path} size={18} />
           <Text
             numberOfLines={1}
+            ellipsizeMode="tail"
             style={[styles.changeName, { color: theme.text }]}
           >
             {fileName(change.path)}
@@ -1367,6 +1366,7 @@ const GraphCell = memo(function GraphCell({
 
 const CommitRow = memo(function CommitRow({
   commit,
+  width,
   graph,
   graphWidth,
   groups,
@@ -1378,6 +1378,7 @@ const CommitRow = memo(function CommitRow({
   onPress,
 }: {
   commit: GitCommit;
+  width: number;
   graph: GraphRow | undefined;
   graphWidth: number;
   groups: GitRefGroup[];
@@ -1403,7 +1404,7 @@ const CommitRow = memo(function CommitRow({
       {(showMenu) => (
         // Badges open their own menus, so the row press sits behind the
         // content instead of wrapping it.
-        <View style={styles.commitRow}>
+        <View style={[styles.commitRow, { width }]}>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`${commit.message}, ${commit.author}, ${formatTimeAgo(commit.timestamp)}`}
@@ -1450,6 +1451,7 @@ const CommitRow = memo(function CommitRow({
             <View style={styles.commitMessageBox} pointerEvents="none">
               <Text
                 numberOfLines={1}
+                ellipsizeMode="tail"
                 style={[
                   styles.commitMessage,
                   { color: theme.text },
@@ -1460,8 +1462,11 @@ const CommitRow = memo(function CommitRow({
               </Text>
             </View>
           </View>
-          <View pointerEvents="none">
-            <Text style={[styles.date, { color: theme.subtleText }]}>
+          <View pointerEvents="none" style={styles.dateBox}>
+            <Text
+              numberOfLines={1}
+              style={[styles.date, { color: theme.subtleText }]}
+            >
               {formatTimeAgo(commit.timestamp)}
             </Text>
           </View>
@@ -1567,68 +1572,63 @@ const styles = StyleSheet.create({
   repoRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    paddingLeft: 16,
+    gap: 4,
+    minHeight: 48,
+    paddingLeft: 18,
     paddingRight: 8,
-    paddingTop: 4,
   },
-  repoMenu: { flex: 1, minHeight: 40 },
-  repoPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    alignSelf: "flex-start",
-    gap: 6,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    minHeight: 36,
-    maxWidth: "100%",
-  },
-  repoName: { fontSize: 17, fontWeight: "600", flexShrink: 1 },
-  branchRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 18,
-    paddingTop: 6,
-  },
-  branchName: { fontSize: 14, fontWeight: "600", flexShrink: 1 },
-  counter: { flexDirection: "row", alignItems: "center" },
-  counterText: { fontSize: 13, fontVariant: ["tabular-nums"] },
-  repoPath: { flex: 1, textAlign: "right", fontSize: 12, marginLeft: 8 },
-  commitBox: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 6,
-    gap: 10,
-  },
-  message: {
-    minHeight: 64,
-    maxHeight: 140,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 12,
-    paddingRight: 48,
-    fontSize: 15,
-    textAlignVertical: "top",
-  },
-  generate: {
-    position: "absolute",
-    top: 0,
-    right: 0,
+  repoPicker: { marginLeft: 2 },
+  counter: { flexDirection: "row", alignItems: "center", marginLeft: 4 },
+  counterText: { fontSize: 14, fontVariant: ["tabular-nums"] },
+  reload: {
     width: 44,
     height: 44,
     alignItems: "center",
     justifyContent: "center",
   },
-  generateSpinner: { margin: 12 },
-  buttons: { flexDirection: "row", gap: 10 },
-  split: { flex: 1, flexDirection: "row", alignItems: "center", gap: 4 },
-  chevronMenu: { width: 36, height: 44 },
-  chevron: {
-    width: 36,
+  commitBox: {
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    paddingBottom: 6,
+    gap: 10,
+  },
+  // The editor matches the chat composer's; its glass surface holds the action.
+  editorRow: { flexDirection: "row", alignItems: "flex-start" },
+  messageInput: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 36,
+    maxHeight: 150,
+    paddingHorizontal: 0,
+    paddingVertical: 6,
+    marginLeft: 12,
+    marginTop: 6,
+    fontSize: 17,
+    lineHeight: 24,
+  },
+  generate: {
+    width: 44,
     height: 44,
-    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  actionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingTop: 6,
+  },
+  moreMenu: { width: 44, height: 44 },
+  moreTarget: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  moreCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1664,7 +1664,7 @@ const styles = StyleSheet.create({
     paddingLeft: 18,
     paddingRight: 12,
   },
-  changeName: { flex: 1, fontSize: 15 },
+  changeName: { flex: 1, flexShrink: 1, minWidth: 0, fontSize: 15 },
   status: { width: 16, textAlign: "center", fontSize: 12, fontWeight: "700" },
   emptyRow: { paddingHorizontal: 40, paddingVertical: 8, fontSize: 13 },
   graphHeader: {
@@ -1705,7 +1705,8 @@ const styles = StyleSheet.create({
   },
   commitMessageBox: { flex: 1, minWidth: 40 },
   commitMessage: { fontSize: 14 },
-  date: { fontSize: 12, marginLeft: 8, fontVariant: ["tabular-nums"] },
+  dateBox: { flexShrink: 0, marginLeft: 8 },
+  date: { fontSize: 12, fontVariant: ["tabular-nums"] },
   badge: {
     flexDirection: "row",
     alignItems: "center",
@@ -1729,5 +1730,4 @@ const styles = StyleSheet.create({
   },
   badgeMenu: { flexShrink: 1 },
   footer: { padding: 16 },
-  notice: { position: "absolute", left: 12, right: 12 },
 });

@@ -100,6 +100,7 @@ exports.NativeOption = ({
 exports.NativeMenu = ({
   children,
   label,
+  accessibilityLabel,
   actions,
   onSelect,
   longPress,
@@ -115,7 +116,7 @@ exports.NativeMenu = ({
       {
         testID,
         accessibilityRole: 'button',
-        accessibilityLabel: label,
+        accessibilityLabel: accessibilityLabel ?? label,
         [longPress ? 'onLongPress' : 'onPress']: () => setOpen(true),
       },
       children,
@@ -236,6 +237,8 @@ exports.Drawer = ({
   onOpen,
   onCreate,
   canCreate,
+  onTools,
+  canOpenTools,
   menuActions,
   onMenuAction,
 }) =>
@@ -252,6 +255,12 @@ exports.Drawer = ({
       onPress: onCreate,
       disabled: !canCreate,
       testID: 'new-chat',
+    }),
+    h(exports.IconButton, {
+      label: 'Git, Terminal & Files',
+      onPress: onTools,
+      disabled: !canOpenTools,
+      testID: 'workspace-tools',
     }),
     h(
       exports.NativeMenu,
@@ -289,3 +298,4 @@ exports.ModalFrame = ({ title, onClose, children }) =>
       : null,
     children,
   )
+exports.ToastSurface = ({ children }) => h(View, null, children)

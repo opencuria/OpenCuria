@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -19,6 +19,7 @@ import type { NativeMenuAction } from "../../ui/NativeMenu";
 import { useTheme } from "../../ui/theme";
 import { WorkspaceFileIcon } from "../files/WorkspaceFileIcon";
 import { ToolDetailSheet } from "../ToolDetailSheet";
+import { GitDiffSheet, type GitDiffTarget } from "./GitDiffSheet";
 import { dirName, fileName, statusColor } from "./gitStyle";
 
 function formatDate(iso: string | undefined): string {
@@ -32,16 +33,20 @@ function formatDate(iso: string | undefined): string {
       });
 }
 
-/** Commit summary and changed files (tap a file for its diff). */
+/**
+ * Commit summary and changed files. Tapping a file opens its diff above this
+ * sheet (presented from it, as iOS presents one sheet per presenter). While
+ * the details reload, e.g. after a checkout, the last ones stay visible.
+ */
 export function GitCommitSheet({
   commit,
-  details,
+  details: loadedDetails,
   loading,
   error,
   actions,
   onAction,
   onRetry,
-  onOpenFile,
+  fileDiff,
   onClose,
 }: {
   commit: GitCommit | null;
@@ -51,10 +56,19 @@ export function GitCommitSheet({
   actions: NativeMenuAction[];
   onAction: (id: string) => void;
   onRetry: () => void;
-  onOpenFile: (file: GitCommitFile) => void;
+  /** Diff of one changed file of this commit. */
+  fileDiff: (commit: GitCommit, file: GitCommitFile) => GitDiffTarget;
   onClose: () => void;
 }): React.JSX.Element | null {
   const { theme } = useTheme();
+  const [diff, setDiff] = useState<GitDiffTarget | null>(null);
+  const hash = commit?.hash;
+  useEffect(() => setDiff(null), [hash]);
+  const last = useRef<GitCommitDetails | null>(null);
+  if (loadedDetails) last.current = loadedDetails;
+  const details =
+    loadedDetails ??
+    (commit && last.current?.hash === commit.hash ? last.current : null);
   if (!commit) return null;
   const subject = details?.message || commit.message;
   const body = (details?.body ?? commit.body ?? "").trim();
@@ -112,9 +126,11 @@ export function GitCommitSheet({
         </View>
         <View style={styles.filesHeader}>
           <Text style={[styles.section, { color: theme.mutedText }]}>
-            {files.length === 1
-              ? "1 FILE CHANGED"
-              : `${files.length} FILES CHANGED`}
+            {!details
+              ? "FILES CHANGED"
+              : files.length === 1
+                ? "1 FILE CHANGED"
+                : `${files.length} FILES CHANGED`}
           </Text>
           {files.length ? (
             <Text style={styles.stats}>
@@ -148,7 +164,7 @@ export function GitCommitSheet({
               key={`${file.oldPath}->${file.newPath}`}
               accessibilityRole="button"
               accessibilityLabel={`Show changes in ${file.newPath}`}
-              onPress={() => onOpenFile(file)}
+              onPress={() => setDiff(fileDiff(commit, file))}
               android_ripple={{ color: theme.controlFill }}
               style={({ pressed }) => [
                 styles.file,
@@ -195,6 +211,7 @@ export function GitCommitSheet({
           ))
         )}
       </ScrollView>
+      <GitDiffSheet target={diff} onClose={() => setDiff(null)} />
     </ToolDetailSheet>
   );
 }

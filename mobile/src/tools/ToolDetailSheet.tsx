@@ -2,6 +2,7 @@ import React from "react";
 import { Modal, Platform, View } from "react-native";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { ModalFrame } from "../ui/ModalFrame";
+import { ToastHost } from "../ui/ToastHost";
 import { useTheme } from "../ui/theme";
 
 export interface ToolDetailSheetProps {
@@ -44,23 +45,26 @@ export function ToolDetailSheet({
       presentationStyle={Platform.OS === "ios" ? "pageSheet" : undefined}
       onRequestClose={onClose}
     >
-      <ModalFrame
-        title={title}
-        subtitle={subtitle}
-        onClose={onClose}
-        closePlacement="leading"
-        actions={actions}
-        onAction={onAction}
-      >
-        <View
-          testID={testID}
-          accessibilityViewIsModal
-          onAccessibilityEscape={onClose}
-          style={{ flex: 1, backgroundColor: theme.background }}
+      <View style={{ flex: 1 }}>
+        <ModalFrame
+          title={title}
+          subtitle={subtitle}
+          onClose={onClose}
+          closePlacement="leading"
+          actions={actions}
+          onAction={onAction}
         >
-          {children}
-        </View>
-      </ModalFrame>
+          <View
+            testID={testID}
+            accessibilityViewIsModal
+            onAccessibilityEscape={onClose}
+            style={{ flex: 1, backgroundColor: theme.background }}
+          >
+            {children}
+          </View>
+        </ModalFrame>
+        <ToastHost />
+      </View>
     </Modal>
   );
 }

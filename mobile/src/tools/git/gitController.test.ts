@@ -72,7 +72,8 @@ describe("GitController", () => {
 
   it("commits staged changes and pushes the new commit", async () => {
     const { client, git } = fakeClient();
-    const controller = new GitController(client, "ws");
+    const notify = vi.fn();
+    const controller = new GitController(client, "ws", notify);
     await controller.refresh();
     await expect(controller.commit("  Ship it  ", true)).resolves.toBe(true);
     expect(git.operation).toHaveBeenNthCalledWith(1, "ws", {
@@ -85,7 +86,9 @@ describe("GitController", () => {
       remote: "origin",
       repo_path: "/workspace/app",
     });
-    expect(controller.getSnapshot().notice?.title).toBe("Pushed to origin/main");
+    expect(notify).toHaveBeenLastCalledWith(
+      expect.objectContaining({ tone: "success", title: "Pushed to origin/main" }),
+    );
   });
 
   it("publishes a branch without upstream", async () => {
@@ -114,7 +117,8 @@ describe("GitController", () => {
 
   it("applies the snapshot of a 409 merge conflict and warns", async () => {
     const { client, git } = fakeClient();
-    const controller = new GitController(client, "ws");
+    const notify = vi.fn();
+    const controller = new GitController(client, "ws", notify);
     await controller.refresh();
     git.operation.mockRejectedValueOnce(
       new ApiRequestError(409, "Merge conflict in a.ts", "conflict", {
@@ -124,17 +128,55 @@ describe("GitController", () => {
     await expect(controller.pull()).resolves.toBe(false);
     const state = controller.getSnapshot();
     expect(selectedGitRepo(state)?.mergeState.merging).toBe(true);
-    expect(state.notice).toMatchObject({ tone: "warning", title: "Merge conflict" });
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "warning", title: "Merge conflict" }),
+    );
     expect(state.busyOperation).toBeNull();
   });
 
   it("reports a failed operation without throwing", async () => {
     const { client, git } = fakeClient();
-    const controller = new GitController(client, "ws");
+    const notify = vi.fn();
+    const controller = new GitController(client, "ws", notify);
     await controller.refresh();
     git.operation.mockRejectedValueOnce(new ApiRequestError(400, "rejected", "error"));
     await expect(controller.stage("a.ts")).resolves.toBe(false);
-    expect(controller.getSnapshot().notice).toMatchObject({ tone: "error", title: "Stage failed" });
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: "error", title: "Stage failed", message: "rejected" }),
+    );
+  });
+
+  it("reloads the open commit's details after an operation", async () => {
+    const { client, git } = fakeClient();
+    git.commitDetails.mockResolvedValue({
+      ok: true,
+      details: {
+        hash: "aaa",
+        message: "Initial",
+        body: "",
+        author: "Ada",
+        author_email: "ada@example.com",
+        author_date: "2026-10-31T10:00:00Z",
+        committer: "Ada",
+        committer_email: "ada@example.com",
+        committer_date: "2026-10-31T10:00:00Z",
+        parents: [],
+        file_changes: [
+          { old_path: "a.ts", new_path: "a.ts", status: "M", additions: 1, deletions: 0 },
+        ],
+      },
+    });
+    const controller = new GitController(client, "ws", vi.fn());
+    await controller.refresh();
+    await controller.openCommitDetails("aaa");
+    const key = "/workspace/app::aaa";
+    expect(controller.getSnapshot().commitDetails[key]?.fileChanges).toHaveLength(1);
+
+    await controller.checkoutCommit("aaa");
+    await vi.waitFor(() =>
+      expect(controller.getSnapshot().commitDetails[key]?.fileChanges).toHaveLength(1),
+    );
+    expect(git.commitDetails).toHaveBeenCalledTimes(2);
   });
 
   it("trims a generated commit subject", async () => {

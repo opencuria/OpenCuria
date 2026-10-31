@@ -47,6 +47,8 @@ function setup() {
     onClose: jest.fn(),
     onCreate: jest.fn(),
     canCreate: true,
+    onTools: jest.fn(),
+    canOpenTools: true,
     title: "Workspace",
     navigation: <Text>Sidebar</Text>,
     children: <Text>Chat</Text>,

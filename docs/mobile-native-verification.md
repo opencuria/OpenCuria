@@ -74,6 +74,25 @@ Checked in a rebuilt Android development client (API 35, 720×1600, x86_64) with
 
 iOS: the Android and iOS Hermes exports pass. The iOS terminal (GhosttyKit/Metal), the SwiftUI headers and the highlighter's Swift bridge are not compiled here; build the development client on a Mac before relying on them.
 
+## Git panel rework, header button and toasts (2026-10-31)
+
+Checked in a rebuilt Android development client (API 35, 720×1600, x86_64, now including `expo-haptics`) against the same kind of disposable fixture: REST/Socket.IO stubs plus the runner's `GitService` on a sample repository with a bare remote, a merged branch, staged/unstaged/untracked changes, long paths and commit subjects.
+
+- Chat header: Git, Terminal & Files between New chat and "…" opens the sheet.
+- Pull up at the end of a chat (hint, "Release to open", sheet opens); flicking down to the end, repeated flicks and scrolling back do not open it.
+- Git header in one row (branch symbol, repository/branch picker opening the repository menu, 2↑ 1↓, refresh turning into a spinner while Git works), commit message in the composer surface with the generator.
+- VS Code action button: Commit (empty message focuses the field; nothing staged asks to stage all first), Sync Changes 1↓ 4↑ once clean, disabled Commit when in sync or detached; the chevron's Commit & Sync staged, committed and synced (merge commit, `main` = `origin/main`).
+- Changes and graph rows truncate long paths and subjects; actions, status letters and commit ages stay visible; denser graph rows.
+- Commit details: a file opens its diff above the sheet; Checkout Commit keeps the files listed while the details reload.
+- Toasts at the top of the sheet in front (success and error), shown for their full time from the first frame.
+- Light and dark appearance.
+
+| Git | Light | More actions | Commit file diff | Toast |
+| --- | --- | --- | --- | --- |
+| ![Git panel](images/mobile/tools-git.png) | ![Git panel, light](images/mobile/tools-git-light.png) | ![Action menu](images/mobile/tools-git-actions.png) | ![Diff above commit details](images/mobile/tools-commit-diff.png) | ![Error toast](images/mobile/tools-toast.png) |
+
+iOS still needs a Mac: the rubber-band pull, haptics, liquid-glass commit surface and toasts, capsule button and the nested diff presentation were checked through unit tests and the iOS Hermes export only.
+
 ## Remaining platform validation
 
 iOS JavaScript/Hermes export passed. Native iOS compilation, device appearance, split-view behavior and keyboard acceptance require macOS/Xcode and have not been verified here. Native release signing and store submission were not part of this change. Rebuild the development client to include the new native dependencies and local Android module.

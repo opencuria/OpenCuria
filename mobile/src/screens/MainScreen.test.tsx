@@ -1151,7 +1151,7 @@ it("puts workspace and chat actions in the header menu", async () => {
   tree.unmount();
 });
 
-it("opens Git, Terminal and Files by pulling up at the end or from the header menu", async () => {
+it("opens Git, Terminal and Files by pulling up at the end or from the header button", async () => {
   const client = mockClient();
   mockUseSession.mockReturnValue(sessionValue(client) as never);
   const tree = render(
@@ -1176,10 +1176,7 @@ it("opens Git, Terminal and Files by pulling up at the end or from the header me
       "Ask OpenCuria|ready",
     ),
   );
-  fireEvent.press(screen.getByTestId("chat-menu"));
-  fireEvent.press(
-    screen.getByRole("button", { name: "Git, Terminal & Files" }),
-  );
+  fireEvent.press(screen.getByTestId("workspace-tools"));
   expect(screen.getByTestId("workspace-tools-sheet")).toBeTruthy();
   reopened.unmount();
 });

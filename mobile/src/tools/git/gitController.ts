@@ -25,16 +25,10 @@ import type {
   GitRepo,
   GitRepoSummary,
 } from "@opencuria/chat-core/gitTypes";
+import { showToast, type ToastOptions } from "../../ui/toast";
 
-export type GitNoticeTone = "success" | "info" | "warning" | "error";
-
-/** Feedback for a finished action, shown briefly above the panel's end. */
-export interface GitNotice {
-  id: number;
-  tone: GitNoticeTone;
-  title: string;
-  message?: string;
-}
+/** Feedback for a finished action; the app shows it as a toast. */
+export type GitNotify = (notice: ToastOptions) => void;
 
 /** Immutable state published to the Git panel. */
 export interface GitSnapshot {
@@ -55,7 +49,6 @@ export interface GitSnapshot {
   commitDetails: Readonly<Record<string, GitCommitDetails>>;
   commitDetailsLoading: Readonly<Record<string, boolean>>;
   commitDetailsError: Readonly<Record<string, string | null>>;
-  notice: GitNotice | null;
 }
 
 interface OperationFeedback {
@@ -78,7 +71,6 @@ const INITIAL: GitSnapshot = {
   commitDetails: {},
   commitDetailsLoading: {},
   commitDetailsError: {},
-  notice: null,
 };
 
 /** Last selected repository per workspace for this app session. */
@@ -117,12 +109,11 @@ export class GitController {
   private readonly detailsInFlight = new Set<string>();
   private opQueue: Promise<void> = Promise.resolve();
   private lastAutoFetch: { key: string; at: number } | null = null;
-  private noticeId = 0;
-  private noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly client: OpenCuriaClient,
     readonly workspaceId: string,
+    private readonly notifier: GitNotify = showToast,
   ) {}
 
   readonly getSnapshot = (): GitSnapshot => this.snapshot;
@@ -136,7 +127,6 @@ export class GitController {
     this.disposed = true;
     this.generation += 1;
     this.stopPolling();
-    if (this.noticeTimer) clearTimeout(this.noticeTimer);
     this.listeners.clear();
   }
 
@@ -156,19 +146,12 @@ export class GitController {
     return selectedGitRepo(this.snapshot);
   }
 
-  private notify(tone: GitNoticeTone, title: string, message?: string): void {
-    if (this.noticeTimer) clearTimeout(this.noticeTimer);
-    const id = ++this.noticeId;
-    this.set({ notice: { id, tone, title, message } });
-    // Errors stay until dismissed; confirmations fade on their own.
-    if (tone !== "error" && tone !== "warning") {
-      this.noticeTimer = setTimeout(() => this.dismissNotice(id), 2800);
-    }
-  }
-
-  dismissNotice(id?: number): void {
-    if (id !== undefined && this.snapshot.notice?.id !== id) return;
-    this.set({ notice: null });
+  private notify(
+    tone: NonNullable<ToastOptions["tone"]>,
+    title: string,
+    message?: string,
+  ): void {
+    if (!this.disposed) this.notifier({ tone, title, message });
   }
 
   private applySummaries(next: GitRepoSummary[]): void {
@@ -416,6 +399,12 @@ export class GitController {
       this.set({ expandedCommitHash: null });
       return;
     }
+    this.set({ expandedCommitHash: hash });
+    await this.ensureCommitDetails(hash);
+  }
+
+  /** Show one commit's details; they reload after an operation. */
+  async openCommitDetails(hash: string): Promise<void> {
     this.set({ expandedCommitHash: hash });
     await this.ensureCommitDetails(hash);
   }
@@ -686,11 +675,19 @@ export class GitController {
     }
   }
 
-  /** Commit staged changes; with `andPush` the push runs after a commit. */
+  /**
+   * Commit staged changes (or conclude a merge); with `andPush` the push runs
+   * after a commit.
+   */
   async commit(message: string, andPush = false): Promise<boolean> {
     const repo = this.repo;
     const trimmed = message.trim();
-    if (!repo || !trimmed || !stagedGitChanges(repo).length) return false;
+    if (
+      !repo ||
+      !trimmed ||
+      (!stagedGitChanges(repo).length && !repo.mergeState.merging)
+    )
+      return false;
     const ok = await this.runOperation(
       "commit",
       () => ({ operation: "commit", message: trimmed }),
