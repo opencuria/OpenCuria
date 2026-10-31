@@ -57,7 +57,12 @@ async def test_capture_blocks_interactive_dispatch(
     service, workspace = interaction_service
     workspace_id = str(workspace.id) if method.startswith("forward") else workspace.id
     kwargs = {}
-    if method in {"start_desktop", "stop_desktop"}:
+    if method in {
+        "start_desktop",
+        "stop_desktop",
+        "write_desktop_clipboard",
+        "read_desktop_clipboard",
+    }:
         # Supply authenticated ownership without bypassing the real capture guard.
         user = SimpleNamespace(id=uuid.uuid4())
         org_id = uuid.uuid4()
@@ -75,9 +80,9 @@ async def test_capture_blocks_interactive_dispatch(
         kwargs = {
             "user": user,
             "organization_id": org_id,
-            "viewer_client_id": uuid.uuid4(),
-            "intent_revision": 1,
         }
+        if method in {"start_desktop", "stop_desktop"}:
+            kwargs.update(viewer_client_id=uuid.uuid4(), intent_revision=1)
     with pytest.raises(ConflictError):
         await getattr(service, method)(workspace_id, *args, **kwargs)
     if kwargs:

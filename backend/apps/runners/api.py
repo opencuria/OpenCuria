@@ -112,14 +112,6 @@ def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
 
-async def _get_org_admin_flag_async(request: HttpRequest, org_id: uuid.UUID) -> bool:
-    """Validate membership and return whether the user is an org admin."""
-    org_service = _get_org_service()
-    await sync_to_async(org_service.require_membership)(request.user, org_id)
-    role = await sync_to_async(org_service.get_user_role)(request.user, org_id)
-    return role == "admin"
-
-
 async def _require_org_membership_async(
     request: HttpRequest, org_id: uuid.UUID
 ) -> None:
@@ -541,17 +533,13 @@ async def take_desktop_control(
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     org_id = get_organization_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        aborted_ids = await service.take_desktop_control(workspace)
+        aborted_ids = await service.take_desktop_control(
+            workspace_id, user=request.user, organization_id=org_id
+        )
         return 200, DesktopTakeControlOut(aborted_session_ids=aborted_ids)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -605,18 +593,16 @@ async def desktop_clipboard_write(
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = get_organization_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        await service.write_desktop_clipboard(workspace_id, payload.text)
-        text = await service.read_desktop_clipboard(workspace_id)
+        await service.write_desktop_clipboard(
+            workspace_id, payload.text, user=request.user, organization_id=org_id
+        )
+        text = await service.read_desktop_clipboard(
+            workspace_id, user=request.user, organization_id=org_id
+        )
         return 200, DesktopClipboardReadOut(text=text)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -645,25 +631,23 @@ async def desktop_clipboard_read(
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = get_organization_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     options = payload or DesktopClipboardReadIn()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
         if options.copy_selection:
             text = await service.read_desktop_clipboard(
                 workspace_id,
+                user=request.user,
+                organization_id=org_id,
                 copy_selection=True,
                 shift=options.shift,
             )
         else:
-            text = await service.read_desktop_clipboard(workspace_id)
+            text = await service.read_desktop_clipboard(
+                workspace_id, user=request.user, organization_id=org_id
+            )
         return 200, DesktopClipboardReadOut(text=text)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)

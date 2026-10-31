@@ -37,6 +37,8 @@ from ...exceptions import (
 from ..infra import realtime
 
 if TYPE_CHECKING:
+    from apps.accounts.models import User
+
     from ...models import Task, Workspace
 
 logger = logging.getLogger(__name__)
@@ -310,18 +312,11 @@ class InteractiveSessionsMixin:
 
     async def _viewer_workspace(
         self, workspace_id: uuid.UUID, *, user, organization_id: uuid.UUID
-    ):
+    ) -> Workspace:
         """Apply shared REST and proxy workspace authorization."""
-        from apps.organizations.services import OrganizationService
-
-        orgs = OrganizationService()
-        await sync_to_async(orgs.require_membership)(user, organization_id)
-        role = await sync_to_async(orgs.get_user_role)(user, organization_id)
-        workspace = await sync_to_async(self.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != organization_id or (
-            role != "admin" and workspace.created_by_id != user.id
-        ):
-            raise WorkspaceNotFoundError(str(workspace_id))
+        workspace = await sync_to_async(self.get_workspace_for_desktop_user)(
+            workspace_id, user=user, organization_id=organization_id
+        )
         self._ensure_workspace_available(workspace)
         if not workspace.runner.is_online:
             raise RunnerOfflineError(str(workspace.runner.id))
@@ -340,11 +335,20 @@ class InteractiveSessionsMixin:
                 "Viewer desktop operation could not be confirmed"
             ) from exc
 
-    async def take_desktop_control(self, workspace: Workspace) -> list[uuid.UUID]:
+    async def take_desktop_control(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user: User,
+        organization_id: uuid.UUID,
+    ) -> list[uuid.UUID]:
         """Abort busy computer-use sessions so a viewer can drive the desktop.
 
         Returns the ids of the aborted agent sessions.
         """
+        workspace = await sync_to_async(self.get_workspace_for_desktop_user)(
+            workspace_id, user=user, organization_id=organization_id
+        )
         await sync_to_async(self._ensure_workspace_available)(workspace)
         return await self._harness().abort_busy_computeruse(workspace.id)
 
@@ -540,16 +544,15 @@ class InteractiveSessionsMixin:
         self,
         workspace_id: uuid.UUID,
         text: str,
+        *,
+        user: User,
+        organization_id: uuid.UUID,
     ) -> None:
         """Write plain text into a running desktop session clipboard."""
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
+        workspace = await self._viewer_workspace(
+            workspace_id, user=user, organization_id=organization_id
+        )
         runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
 
         if not self.is_desktop_active(str(workspace_id)):
             raise ConflictError(
@@ -573,6 +576,8 @@ class InteractiveSessionsMixin:
         self,
         workspace_id: uuid.UUID,
         *,
+        user: User,
+        organization_id: uuid.UUID,
         copy_selection: bool = False,
         shift: bool = False,
     ) -> str:
@@ -585,14 +590,10 @@ class InteractiveSessionsMixin:
             raise ValueError("shift requires copy_selection")
 
         async def _read() -> str:
-            workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-            if workspace is None:
-                raise WorkspaceNotFoundError(str(workspace_id))
-
-            self._ensure_workspace_available(workspace)
+            workspace = await self._viewer_workspace(
+                workspace_id, user=user, organization_id=organization_id
+            )
             runner = workspace.runner
-            if not runner.is_online:
-                raise RunnerOfflineError(str(runner.id))
 
             if not self.is_desktop_active(str(workspace_id)):
                 raise ConflictError(

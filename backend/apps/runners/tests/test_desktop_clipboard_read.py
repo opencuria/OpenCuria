@@ -24,11 +24,16 @@ from common.utils import generate_api_token, hash_token
 
 @pytest.fixture
 def clipboard_api(capture_workspace, monkeypatch):
-    """Authorized clipboard endpoint with an isolated RunnerService mock."""
+    """Exercise real service authorization with an isolated runner transport."""
     user, org, workspace = capture_workspace
-    service = Mock()
-    service.get_workspace.return_value = workspace
-    service.read_desktop_clipboard = AsyncMock(return_value="clipboard text")
+    service = RunnerService()
+    service._call_runner = AsyncMock(
+        return_value={"ok": True, "text": "clipboard text"}
+    )
+    service.read_desktop_clipboard = AsyncMock(wraps=service.read_desktop_clipboard)
+    monkeypatch.setitem(
+        service._active_desktops, str(workspace.id), {"computer_use": False}
+    )
     monkeypatch.setattr("apps.runners.api._get_service", lambda: service)
 
     def headers(*, identity=user, organization=org):
@@ -86,7 +91,9 @@ def test_read_clipboard_preserves_bodyless_path_for_authorized_admin_and_member(
 
     assert response.status_code == 200, response.content
     assert response.json() == {"text": "clipboard text"}
-    service.read_desktop_clipboard.assert_awaited_once_with(workspace.id)
+    service.read_desktop_clipboard.assert_awaited_once_with(
+        workspace.id, user=user, organization_id=org.id
+    )
 
 
 @pytest.mark.django_db
@@ -122,7 +129,7 @@ def test_same_org_member_cannot_read_another_owners_clipboard(clipboard_api):
     )
 
     assert response.status_code == 404, response.content
-    service.read_desktop_clipboard.assert_not_awaited()
+    service._call_runner.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -165,7 +172,7 @@ def test_other_org_cannot_read_clipboard(clipboard_api):
     )
 
     assert response.status_code == 404, response.content
-    service.read_desktop_clipboard.assert_not_awaited()
+    service._call_runner.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -212,12 +219,14 @@ def test_clipboard_read_options_schema_is_strict():
     ],
 )
 def test_selection_options_forward_to_service(clipboard_api, payload, expected):
-    client, headers, service, _, _, workspace = clipboard_api
+    client, headers, service, user, org, workspace = clipboard_api
 
     response = _post(client, workspace.id, headers(), payload)
 
     assert response.status_code == 200, response.content
-    service.read_desktop_clipboard.assert_awaited_once_with(workspace.id, **expected)
+    service.read_desktop_clipboard.assert_awaited_once_with(
+        workspace.id, user=user, organization_id=org.id, **expected
+    )
 
 
 @pytest.fixture
@@ -227,9 +236,20 @@ def selection_service(monkeypatch):
     workspace_id = uuid.uuid4()
     workspace = SimpleNamespace(
         id=workspace_id,
+        created_by_id=1,
         active_operation="",
         current_task_id=None,
-        runner=SimpleNamespace(id=uuid.uuid4(), is_online=True),
+        runner=SimpleNamespace(
+            id=uuid.uuid4(), organization_id=uuid.uuid4(), is_online=True
+        ),
+    )
+    service.get_workspace = Mock(return_value=workspace)
+    monkeypatch.setattr(
+        "apps.organizations.services.OrganizationService.require_membership", Mock()
+    )
+    monkeypatch.setattr(
+        "apps.organizations.services.OrganizationService.get_user_role",
+        Mock(return_value="member"),
     )
     service.workspaces = Mock()
     service.workspaces.get_by_id.return_value = workspace
@@ -242,7 +262,14 @@ def selection_service(monkeypatch):
         "list_busy_computeruse_for_workspace",
         Mock(return_value=[]),
     )
-    yield service, workspace
+    yield (
+        service,
+        workspace,
+        {
+            "user": SimpleNamespace(id=workspace.created_by_id),
+            "organization_id": workspace.runner.organization_id,
+        },
+    )
     service._active_desktops.pop(str(workspace_id), None)
 
 
@@ -250,9 +277,11 @@ def selection_service(monkeypatch):
 async def test_selection_rpc_uses_finite_timeout_and_omits_false_options(
     selection_service,
 ):
-    service, workspace = selection_service
+    service, workspace, context = selection_service
 
-    result = await service.read_desktop_clipboard(workspace.id, copy_selection=True)
+    result = await service.read_desktop_clipboard(
+        workspace.id, copy_selection=True, **context
+    )
 
     assert result == "selected"
     service._call_runner.assert_awaited_once_with(
@@ -278,11 +307,13 @@ async def test_selection_rpc_uses_finite_timeout_and_omits_false_options(
 async def test_selection_rejects_malformed_rpc_responses_without_details(
     selection_service, response
 ):
-    service, workspace = selection_service
+    service, workspace, context = selection_service
     service._call_runner.return_value = response
 
     with pytest.raises(ConflictError) as error:
-        await service.read_desktop_clipboard(workspace.id, copy_selection=True)
+        await service.read_desktop_clipboard(
+            workspace.id, copy_selection=True, **context
+        )
 
     assert str(error.value) == "Unable to copy the desktop selection. Try again."
     assert "sensitive secret" not in str(error.value)
@@ -292,11 +323,13 @@ async def test_selection_rejects_malformed_rpc_responses_without_details(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError("sensitive secret"), TimeoutError()])
 async def test_selection_rpc_failures_are_sanitized(selection_service, failure):
-    service, workspace = selection_service
+    service, workspace, context = selection_service
     service._call_runner.side_effect = failure
 
     with pytest.raises(ConflictError) as error:
-        await service.read_desktop_clipboard(workspace.id, copy_selection=True)
+        await service.read_desktop_clipboard(
+            workspace.id, copy_selection=True, **context
+        )
 
     assert str(error.value) == "Unable to copy the desktop selection. Try again."
     assert "sensitive secret" not in str(error.value)
@@ -310,7 +343,7 @@ async def test_selection_rpc_failures_are_sanitized(selection_service, failure):
 async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse(
     selection_service, busy_kind, monkeypatch
 ):
-    service, workspace = selection_service
+    service, workspace, context = selection_service
     if busy_kind == "capture":
         workspace.active_operation = "capturing_image"
         service._ensure_workspace_available.side_effect = ConflictError("capture lock")
@@ -324,7 +357,9 @@ async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse
         )
 
     with pytest.raises(ConflictError):
-        await service.read_desktop_clipboard(workspace.id, copy_selection=True)
+        await service.read_desktop_clipboard(
+            workspace.id, copy_selection=True, **context
+        )
 
     service._call_runner.assert_not_awaited()
 
@@ -347,7 +382,7 @@ def test_selection_rpc_error_does_not_expose_runner_detail(clipboard_api):
 
 @pytest.mark.asyncio
 async def test_selection_timeout_bounds_full_operation(selection_service):
-    service, workspace = selection_service
+    service, workspace, context = selection_service
     entered_rpc = asyncio.Event()
 
     async def wait_forever(*args, **kwargs):
@@ -357,7 +392,9 @@ async def test_selection_timeout_bounds_full_operation(selection_service):
     service._call_runner.side_effect = wait_forever
     start = time.monotonic()
     with pytest.raises(ConflictError) as error:
-        await service.read_desktop_clipboard(workspace.id, copy_selection=True)
+        await service.read_desktop_clipboard(
+            workspace.id, copy_selection=True, **context
+        )
 
     assert entered_rpc.is_set()
     assert time.monotonic() - start < 4.5

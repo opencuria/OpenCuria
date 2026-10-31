@@ -1,6 +1,7 @@
 """Who may reach a workspace, shared by RunnerService and every adapter.
 
-REST resolves workspaces through :meth:`get_workspace_for_user`; the
+REST resolves owner-only workspaces through :meth:`get_workspace_for_user`
+and desktops through :meth:`get_workspace_for_desktop_user`; the
 realtime adapters (Socket.IO frontend namespace and the desktop proxy) only
 know the authenticated user ID and use the boolean predicates. Owners must
 be members of the workspace runner's organization; organization admins may
@@ -72,9 +73,38 @@ class WorkspaceAccessMixin:
         if found is None:
             return False
         workspace, membership = found
-        return (
-            membership.role == "admin" or workspace.created_by_id == membership.user_id
+        return self._is_desktop_viewer(
+            workspace, user_id=membership.user_id, role=membership.role
         )
+
+    def get_workspace_for_desktop_user(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user: User,
+        organization_id: uuid.UUID,
+    ) -> Workspace:
+        """Require org membership and owner/admin access to a desktop workspace.
+
+        Authorization is independent of runner availability: taking control
+        can abort backend computer-use work even when the runner is offline.
+        """
+        organizations = OrganizationService()
+        organizations.require_membership(user, organization_id)
+        role = organizations.get_user_role(user, organization_id)
+        workspace = self.get_workspace(workspace_id)
+        if workspace.runner.organization_id != organization_id or not (
+            self._is_desktop_viewer(workspace, user_id=user.id, role=role)
+        ):
+            raise WorkspaceNotFoundError(str(workspace_id))
+        return workspace
+
+    @staticmethod
+    def _is_desktop_viewer(
+        workspace: Workspace, *, user_id: int, role: str | None
+    ) -> bool:
+        """Apply the owner/admin rule within the workspace's organization."""
+        return role == "admin" or workspace.created_by_id == user_id
 
     def resolve_desktop_viewer(
         self, user_id: int | str, workspace_id: str

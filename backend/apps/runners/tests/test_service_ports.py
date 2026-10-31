@@ -173,13 +173,18 @@ def test_take_desktop_control_checks_availability_before_gateway():
     workspace = types.SimpleNamespace(
         id=uuid.uuid4(), status="running", active_operation=None, current_task_id=None
     )
-    assert asyncio.run(svc.take_desktop_control(workspace)) == [uuid.UUID(int=1)]
+    svc.get_workspace_for_desktop_user = MagicMock(return_value=workspace)
+    context = {"user": types.SimpleNamespace(id=1), "organization_id": uuid.uuid4()}
+    assert asyncio.run(svc.take_desktop_control(workspace.id, **context)) == [
+        uuid.UUID(int=1)
+    ]
+    svc.get_workspace_for_desktop_user.assert_called_once_with(workspace.id, **context)
     assert gateway.calls == [("abort_computeruse", workspace.id)]
 
     gateway.calls.clear()
     workspace.active_operation = "stopping"
     with pytest.raises(ConflictError):
-        asyncio.run(svc.take_desktop_control(workspace))
+        asyncio.run(svc.take_desktop_control(workspace.id, **context))
     assert gateway.calls == []
 
 
