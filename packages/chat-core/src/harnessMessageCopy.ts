@@ -15,15 +15,7 @@ export function getMessageCopyText(
   if (message.role === "user") return message.content;
   if (streaming) return null;
 
-  // Old snapshots could lack parts entirely. Once a part timeline exists,
-  // never substitute the aggregate content field for missing final prose.
-  const parts = Array.isArray(message.parts) ? message.parts : [];
-  if (parts.length === 0) {
-    return message.content.trim() ? message.content : null;
-  }
-  if (!parts.some((part) => part.type === "text")) return null;
-
-  const blocks = buildMessageBlocks(parts, { finished: true });
+  const blocks = buildMessageBlocks(message.parts, { finished: true });
   const answerParts = trailingTextParts(blocks);
   if (answerParts.length === 0) return null;
 

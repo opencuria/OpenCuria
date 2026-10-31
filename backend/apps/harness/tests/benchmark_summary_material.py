@@ -68,14 +68,13 @@ def _baseline_service(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "turns,body_bytes,legacy",
-    [(1, 4096, False), (10, 4096, False), (50, 131072, False), (10, 4096, True)],
+    "turns,body_bytes",
+    [(1, 4096), (10, 4096), (50, 131072)],
 )
 def test_summary_material_benchmark(
     harness_workspace: Any,
     turns: int,
     body_bytes: int,
-    legacy: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Read full user requests and closing replies from a representative history."""
@@ -92,8 +91,6 @@ def test_summary_material_benchmark(
                 content=(
                     "Fix the login."
                     if index % 2 == 0
-                    else "Fixed login."
-                    if legacy
                     else "progress " * (body_bytes // 8)
                 ),
                 engine_meta={"provider_metadata": "x" * 4096},
@@ -101,26 +98,25 @@ def test_summary_material_benchmark(
             for index in range(turns * 2)
         ]
     )
-    if not legacy:
-        HarnessPart.objects.bulk_create(
-            [
-                HarnessPart(
-                    message=message,
-                    position=index,
-                    type=kind,
-                    state="completed",
-                    output=output,
-                )
-                for message in messages[1::2]
-                for index, (kind, output) in enumerate(
-                    [
-                        ("text", "progress " * (body_bytes // 8)),
-                        ("tool", "private " * (body_bytes // 8)),
-                        ("text", "Fixed login."),
-                    ]
-                )
-            ]
-        )
+    HarnessPart.objects.bulk_create(
+        [
+            HarnessPart(
+                message=message,
+                position=index,
+                type=kind,
+                state="completed",
+                output=output,
+            )
+            for message in messages[1::2]
+            for index, (kind, output) in enumerate(
+                [
+                    ("text", "progress " * (body_bytes // 8)),
+                    ("tool", "private " * (body_bytes // 8)),
+                    ("text", "Fixed login."),
+                ]
+            )
+        ]
+    )
     ref = os.getenv("SUMMARY_BASELINE_REF", "535185f")
     services = [
         _baseline_service(ref, monkeypatch),
@@ -170,7 +166,6 @@ def test_summary_material_benchmark(
         baseline_ref=ref,
         turns=turns,
         body_bytes=body_bytes,
-        legacy=legacy,
         samples=samples,
         baseline=metrics[0],
         optimized=metrics[1],

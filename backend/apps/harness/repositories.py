@@ -26,7 +26,6 @@ from django.db.models import (
     When,
 )
 from django.db.models.functions import Coalesce, Concat
-from django.db.utils import NotSupportedError
 from django.utils import timezone
 
 from .models import (
@@ -877,31 +876,17 @@ class HarnessMessageRepository:
 
     @staticmethod
     def list_timeline_for_session(session_id: uuid.UUID) -> list[HarnessMessage]:
-        """Load timeline metadata and only content lacking text-part backing."""
-        has_text = Exists(
-            HarnessPart.objects.filter(message_id=OuterRef("pk"), type="text")
-        )
-        try:
-            queryset = HarnessMessage.objects.filter(session_id=session_id).annotate(
-                has_text_parts=has_text,
+        """Load timeline metadata and user text; assistant text lives in parts."""
+        return list(
+            HarnessMessage.objects.filter(session_id=session_id)
+            .annotate(
                 timeline_content=Case(
-                    When(
-                        role=HarnessMessageRole.ASSISTANT,
-                        has_text_parts=True,
-                        then=Value(""),
-                    ),
-                    default=F("content"),
+                    When(role=HarnessMessageRole.USER, then=F("content")),
+                    default=Value(""),
                     output_field=TextField(),
                 ),
             )
-        except NotSupportedError:
-            # Test repositories such as SQLite may lack correlated subqueries
-            # for the project backend. Keep a one-query safe fallback there.
-            queryset = HarnessMessage.objects.filter(session_id=session_id).annotate(
-                timeline_content=F("content")
-            )
-        return list(
-            queryset.defer("content")
+            .defer("content")
             .only(
                 "id",
                 "session_id",
@@ -969,8 +954,8 @@ class HarnessMessageRepository:
     ) -> list[HarnessMessage]:
         """Load summary fields through a session-scoped assistant anchor.
 
-        Missing, foreign or user anchors yield no rows. Aggregate assistant
-        content is only needed for legacy messages without any parts.
+        Missing, foreign or user anchors yield no rows. Assistant text is read
+        exclusively from the ordered parts.
         """
         anchor = (
             HarnessMessage.objects.filter(
@@ -981,7 +966,6 @@ class HarnessMessageRepository:
             .order_by()
             .values("position")[:1]
         )
-        has_parts = Exists(HarnessPart.objects.filter(message_id=OuterRef("pk")))
         parts = (
             HarnessPart.objects.annotate(
                 summary_text=Case(
@@ -1001,11 +985,8 @@ class HarnessMessageRepository:
             )
             .annotate(
                 summary_content=Case(
-                    When(
-                        Q(role=HarnessMessageRole.ASSISTANT) & has_parts,
-                        then=Value(""),
-                    ),
-                    default=F("content"),
+                    When(role=HarnessMessageRole.USER, then=F("content")),
+                    default=Value(""),
                     output_field=TextField(),
                 )
             )

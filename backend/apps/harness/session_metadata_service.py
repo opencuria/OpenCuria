@@ -78,7 +78,7 @@ class SessionMetadataService:
                 if part.type == "steer" and part.summary_text.strip():
                     sections.append(f"User:\n{part.summary_text.strip()}")
                     has_request = True
-            answer = _assistant_summary_content(row.summary_content, parts)
+            answer = _assistant_summary_content(parts)
             if answer:
                 sections.append(f"Agent's final reply:\n{answer}")
         return "\n\n".join(sections) if has_request else ""
@@ -245,15 +245,13 @@ def _normalize_generated_summary(text: str) -> str:
     return summary
 
 
-def _assistant_summary_content(fallback_content: str, parts: list[HarnessPart]) -> str:
+def _assistant_summary_content(parts: list[HarnessPart]) -> str:
     """Select closing prose outside Worked, like chat-core's message-copy rule.
 
     Summary rows project only text/steer output into ``summary_text``. Walk
     backwards through visible text; work, plans, compaction, and steers end the
-    final answer. Never fall back to aggregate content when parts exist.
+    final answer.
     """
-    if not parts:
-        return (fallback_content or "").strip()
     has_subtask = any(part.type == "subtask" for part in parts)
     patched_calls = {
         part.call_id for part in parts if part.type == "patch" and part.call_id
