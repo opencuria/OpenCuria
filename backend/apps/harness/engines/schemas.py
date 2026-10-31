@@ -15,8 +15,8 @@ class HarnessEngineOut(Schema):
     name: str
     modes: list[str]
     connected: bool
-    default_model: str | None = None
-    default_effort: str | None = None
+    default_model: str | None
+    default_effort: str | None
 
 
 class EngineModelOut(Schema):

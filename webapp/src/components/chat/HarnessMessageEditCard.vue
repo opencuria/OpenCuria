@@ -14,7 +14,6 @@ import {
 } from '@/components/ui/dialog'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import {
-  harnessEngineDefaults,
   harnessSessionModels,
   type ProviderModel,
 } from '@/lib/harnessModels'
@@ -40,9 +39,8 @@ const harnessId = computed(() => session.value?.harness_id ?? 'native')
 
 const draft = ref(props.text)
 // Start from the session binding, like the composer does for this session.
-const defaults = harnessEngineDefaults(harnessId.value)
-const model = ref(session.value?.model || defaults.model)
-const effort = ref(session.value?.reasoning_effort ?? defaults.effort)
+const model = ref(session.value?.model ?? '')
+const effort = ref(session.value?.reasoning_effort ?? '')
 
 const engineCatalog = ref<ProviderModel[]>([])
 const modelLoading = ref(true)

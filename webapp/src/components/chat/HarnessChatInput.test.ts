@@ -9,7 +9,7 @@ import HarnessMentionSheet from './HarnessMentionSheet.vue'
 import type { VueWrapper } from '@vue/test-utils'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { HarnessEngine, ProviderModel } from '@/lib/harnessModels'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { recordRecentModelUsage, resetRecentModelsCache } from '@/lib/recentModels'
 import { resetAgentConfigsCache } from '@/lib/agentConfigs'
@@ -55,6 +55,15 @@ const claudeModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
 const codexModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
 const listHarnessEnginesMock = vi.mocked(harnessApi.listHarnessEngines)
 const listAgentConfigsMock = vi.mocked(harnessApi.listAgentConfigs)
+
+const nativeEngine: HarnessEngine = {
+  id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true,
+  default_model: null, default_effort: null,
+}
+const claudeEngine: HarnessEngine = {
+  id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true,
+  default_model: 'sonnet', default_effort: 'high',
+}
 
 const catalog: ProviderModel[] = [
   {
@@ -186,8 +195,8 @@ describe('HarnessChatInput', () => {
     })
     nativeModelsMock.mockResolvedValue(catalog)
     listHarnessEnginesMock.mockResolvedValue([
-      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
-      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true },
+      nativeEngine,
+      claudeEngine,
     ])
     claudeModelsMock.mockResolvedValue([
       {
@@ -214,16 +223,16 @@ describe('HarnessChatInput', () => {
     },
     { ...catalog[0]!, id: 'openrouter/vendor/codex', name: 'Router Codex' },
   ]
-  function enableCodex() {
+  function enableCodex(defaultModel = 'chatgpt/gpt-6.1-sol') {
     listHarnessEnginesMock.mockResolvedValue([
-      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
-      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true },
+      nativeEngine,
+      claudeEngine,
       {
         id: 'codex',
         name: 'Codex',
         modes: ['build', 'plan'],
         connected: true,
-        default_model: 'chatgpt/gpt-6.1-sol',
+        default_model: defaultModel,
         default_effort: 'high',
       },
     ])
@@ -231,14 +240,14 @@ describe('HarnessChatInput', () => {
   }
 
   it('creates a Codex chat with backend defaults through the existing mode/model menus', async () => {
-    enableCodex()
+    enableCodex('openrouter/vendor/codex')
     const wrapper = mountInput()
     await flushPromises()
     await wrapper.get('[data-testid="composer-mode-codex-plan"]').trigger('click')
     await flushPromises()
     expect(harnessApi.listEngineModels).toHaveBeenCalledWith('codex')
     expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Plan')
-    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Codex Sol')
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Router Codex')
     expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(
       true,
     )
@@ -247,7 +256,7 @@ describe('HarnessChatInput', () => {
     expect(wrapper.emitted('send')?.slice(-1)[0]).toEqual([
       'Use Codex',
       'plan',
-      'chatgpt/gpt-6.1-sol',
+      'openrouter/vendor/codex',
       [],
       'high',
       'codex',
@@ -432,13 +441,16 @@ describe('HarnessChatInput', () => {
     expect(wrapper.find('[data-testid="composer-mode-claude-build"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-mode-claude-plan"]').exists()).toBe(true)
 
+    expect(wrapper.find('[data-testid="composer-mode-codex-build"]').exists()).toBe(false)
+
     await wrapper.find('[data-testid="composer-mode-claude-build"]').trigger('click')
-    await vi.waitFor(() => expect(claudeModelsMock).toHaveBeenCalled())
+    await vi.waitFor(() =>
+      expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Claude Sonnet'),
+    )
     expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['claude'])
     expect(wrapper.find('[data-testid="composer-mode-trigger"]').text()).toContain(
       'Claude Agent Build',
     )
-    expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain('Claude Sonnet')
 
     await setEditorText(wrapper, 'Use Claude')
     await wrapper.find('[data-testid="composer-send"]').trigger('click')
@@ -450,6 +462,17 @@ describe('HarnessChatInput', () => {
       'high',
       'claude',
     ])
+  })
+
+  it.each([[], null])('does not invent engine choices when discovery returns %s', async (engines) => {
+    if (engines) listHarnessEnginesMock.mockResolvedValue(engines)
+    else listHarnessEnginesMock.mockRejectedValue(new Error('Unavailable'))
+    const wrapper = mountInput()
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid^="composer-mode-native-"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid^="composer-mode-claude-"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid^="composer-mode-codex-"]')).toHaveLength(0)
+    wrapper.unmount()
   })
 
   it('locks the selected engine in an existing Claude session while keeping its modes available', async () => {
@@ -469,8 +492,8 @@ describe('HarnessChatInput', () => {
 
   it('keeps Claude modes selectable in an existing session after its connection is removed', async () => {
     listHarnessEnginesMock.mockResolvedValue([
-      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
-      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: false },
+      nativeEngine,
+      { ...claudeEngine, connected: false },
     ])
     const wrapper = mountInput({ harnessId: 'claude', engineLocked: true, model: 'sonnet' })
     await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
@@ -482,8 +505,8 @@ describe('HarnessChatInput', () => {
 
   it('disables Claude choices when the engine connection is unavailable', async () => {
     listHarnessEnginesMock.mockResolvedValue([
-      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
-      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: false },
+      nativeEngine,
+      { ...claudeEngine, connected: false },
     ])
     const wrapper = mountInput()
     await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
@@ -518,8 +541,8 @@ describe('HarnessChatInput', () => {
     ).toBeUndefined()
 
     listHarnessEnginesMock.mockResolvedValue([
-      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
-      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: false },
+      nativeEngine,
+      { ...claudeEngine, connected: false },
     ])
     window.dispatchEvent(new Event(harnessApi.HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
     await vi.waitFor(() =>

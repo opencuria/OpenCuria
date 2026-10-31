@@ -109,74 +109,34 @@ export function formatHarnessModelEffort(
   return effortLabel ? `${modelName} ${effortLabel}` : modelName;
 }
 
-/** Engine discovery DTO shared by web and mobile; defaults are nullable on older servers. */
+/** Engine discovery DTO shared by web and mobile. Native uses agent defaults. */
 export interface HarnessEngine {
-  id: string;
+  id: HarnessId;
   name: string;
   modes: string[];
   connected: boolean;
-  default_model?: string | null;
-  default_effort?: string | null;
-}
-
-/** Compatibility labels/defaults, not a model catalog or availability claim. */
-export const HARNESS_ENGINES: ReadonlyArray<HarnessEngine & { id: HarnessId }> =
-  [
-    {
-      id: "native",
-      name: "OpenCuria",
-      modes: ["build", "plan"],
-      connected: true,
-    },
-    {
-      id: "claude",
-      name: "Claude Agent",
-      modes: ["build", "plan"],
-      connected: false,
-      default_model: "sonnet",
-      default_effort: "high",
-    },
-    {
-      id: "codex",
-      name: "Codex",
-      modes: ["build", "plan"],
-      connected: false,
-      default_model: "chatgpt/gpt-6.1-sol",
-      default_effort: "high",
-    },
-  ];
-
-export function harnessEngineChoices(engines: HarnessEngine[]) {
-  return HARNESS_ENGINES.map((fallback) => ({
-    ...fallback,
-    ...engines.find((engine) => engine.id === fallback.id),
-    id: fallback.id,
-  }));
+  default_model: string | null;
+  default_effort: string | null;
 }
 
 export function harnessEngineLabel(
   id: string,
-  engines: HarnessEngine[] = [],
+  engines: HarnessEngine[],
 ): string {
-  return (
-    engines.find((engine) => engine.id === id)?.name ??
-    HARNESS_ENGINES.find((engine) => engine.id === id)?.name ??
-    id
-  );
+  return engines.find((engine) => engine.id === id)?.name ?? id;
 }
 
 /** Native defaults always come from the current mode's agent config. */
 export function harnessEngineDefaults(
   id: HarnessId,
-  engines: HarnessEngine[] = [],
+  engines: HarnessEngine[],
   native: { model: string; effort: string } = { model: "", effort: "" },
 ): { model: string; effort: string } {
   if (id === "native") return native;
-  const fallback = HARNESS_ENGINES.find((engine) => engine.id === id);
   const engine = engines.find((engine) => engine.id === id);
   return {
-    model: engine?.default_model ?? fallback?.default_model ?? "",
-    effort: engine?.default_effort ?? fallback?.default_effort ?? "",
+    model: engine?.default_model ?? "",
+    effort: engine?.default_effort ?? "",
   };
 }
 

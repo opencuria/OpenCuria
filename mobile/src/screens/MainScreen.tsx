@@ -30,7 +30,6 @@ import {
   formatEffort,
   resolveCatalogModel,
   snapEffort,
-  harnessEngineChoices,
   harnessEngineLabel,
   harnessEngineDefaults,
   harnessSessionModels,
@@ -376,12 +375,7 @@ export function MainScreen(): React.JSX.Element {
       engineRequest,
       client.harness.listEngineModels("native"),
       engineRequest.then(async (rows) => {
-        const external = harnessEngineChoices(rows).filter(
-          (engine) =>
-            engine.id !== "native" &&
-            (engine.id === "claude" ||
-              rows.some((row) => row.id === engine.id)),
-        );
+        const external = rows.filter((engine) => engine.id !== "native");
         const results = await Promise.allSettled(
           external.map(async (engine) => {
             const entries = await client.harness.listEngineModels(engine.id);
@@ -1075,7 +1069,7 @@ export function MainScreen(): React.JSX.Element {
     item.name.toLowerCase().includes(search.toLowerCase()),
   );
   // A chat keeps its engine; only a new chat offers every engine's modes.
-  const agentOptions: ModelSheetAgent[] = harnessEngineChoices(engines)
+  const agentOptions: ModelSheetAgent[] = engines
     .filter((item) => !chat.activeSessionId || item.id === harness)
     .flatMap((item) =>
       (["build", "plan"] as const)

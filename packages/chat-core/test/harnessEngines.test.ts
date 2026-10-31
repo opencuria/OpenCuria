@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  harnessEngineChoices,
   harnessEngineDefaults,
   harnessEngineLabel,
   harnessSessionModels,
   formatEffort,
   snapEffort,
+  type HarnessEngine,
   type ProviderModel,
 } from "../src/harnessModels";
 
@@ -33,8 +33,8 @@ const models: ProviderModel[] = [
 ];
 
 describe("shared engine policy", () => {
-  it("uses backend labels/defaults and native agent defaults, retaining legacy Claude fixtures", () => {
-    const engines = [
+  it("uses only backend engine defaults and native agent configuration", () => {
+    const engines: HarnessEngine[] = [
       {
         id: "codex",
         name: "Codex Runtime",
@@ -45,9 +45,6 @@ describe("shared engine policy", () => {
       },
     ];
     expect(harnessEngineLabel("codex", engines)).toBe("Codex Runtime");
-    expect(
-      harnessEngineChoices(engines).find((e) => e.id === "codex")?.modes,
-    ).toEqual(["plan"]);
     expect(harnessEngineDefaults("codex", engines)).toEqual({
       model: "openrouter/vendor/model",
       effort: "high",
@@ -58,17 +55,9 @@ describe("shared engine policy", () => {
         effort: "medium",
       }),
     ).toEqual({ model: "agent/model", effort: "medium" });
-    expect(harnessEngineDefaults("claude")).toEqual({
-      model: "sonnet",
-      effort: "high",
-    });
-    expect(harnessEngineDefaults("codex")).toEqual({
-      model: "chatgpt/gpt-6.1-sol",
-      effort: "high",
-    });
-    expect(
-      harnessEngineChoices([]).find((e) => e.id === "codex")?.connected,
-    ).toBe(false);
+    expect(harnessEngineDefaults("claude", engines)).toEqual({ model: "", effort: "" });
+    expect(harnessEngineDefaults("codex", [])).toEqual({ model: "", effort: "" });
+    expect(harnessEngineLabel("codex", [])).toBe("codex");
   });
 
   it("allows both backend-supplied providers in new chats but locks an existing Codex provider", () => {

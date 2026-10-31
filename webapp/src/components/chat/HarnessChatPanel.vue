@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { harnessEngineDefaults } from '@/lib/harnessModels'
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { pinHarnessPartDetailKey, requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
@@ -570,11 +569,7 @@ function syncSessionComposer(sessionId: string): void {
   composerMode.value = session.mode
   const harnessId = session.harness_id ?? 'native'
   composerHarnessId.value = harnessId
-  const defaults = harnessEngineDefaults(harnessId)
-  harness.loadSessionIntoComposer(
-    session.model || defaults.model,
-    session.reasoning_effort ?? defaults.effort,
-  )
+  harness.loadSessionIntoComposer(session.model, session.reasoning_effort ?? '')
 }
 
 function handleActiveSessionChanged(sessionId: string | null): void {

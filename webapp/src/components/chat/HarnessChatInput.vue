@@ -34,7 +34,6 @@ import { sendFilesUpload, subscribeToWorkspace } from '@/services/socket'
 import {
   resolveCatalogModel,
   snapEffort,
-  harnessEngineChoices,
   harnessEngineLabel,
   harnessEngineDefaults,
   harnessSessionModels,
@@ -208,7 +207,6 @@ const catalog = computed(() =>
   ),
 )
 const engines = ref<HarnessEngine[]>([])
-const engineChoices = computed(() => harnessEngineChoices(engines.value))
 function engineUnavailable(id: HarnessId): boolean {
   return id !== 'native' && !engines.value.find((engine) => engine.id === id)?.connected
 }
@@ -480,14 +478,15 @@ async function loadProviderModels(): Promise<void> {
     engineId === localHarnessId.value &&
     context === currentContext()
   try {
-    const [models, availableEngines] = await Promise.all([
+    const [models] = await Promise.all([
       loadEngineModelsCached(engineId),
-      listHarnessEngines().catch(() => []),
+      listHarnessEngines().catch(() => []).then((rows) => {
+        if (isCurrent()) engines.value = rows
+      }),
       engineId !== 'claude' ? loadRecentModels() : Promise.resolve([]),
     ])
     if (!isCurrent()) return
     engineCatalog.value = models
-    engines.value = availableEngines
     providerMissing.value = engineUnavailable(engineId) || catalog.value.length === 0
     if (
       engineId !== 'native' &&
@@ -1498,7 +1497,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent side="top" align="start" class="min-w-48">
-                  <template v-for="(engine, index) in engineChoices" :key="engine.id">
+                  <template v-for="(engine, index) in engines" :key="engine.id">
                     <DropdownMenuSeparator v-if="index" />
                     <DropdownMenuLabel class="px-2 pb-1 pt-2">{{ engine.name }} Build/Plan</DropdownMenuLabel>
                     <DropdownMenuItem

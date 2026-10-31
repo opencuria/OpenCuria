@@ -272,6 +272,8 @@ function mockClient() {
       {
         id: "native",
         name: "OpenCuria",
+        default_model: null,
+        default_effort: null,
         connected: true,
         modes: ["build", "plan"],
       },
@@ -393,7 +395,7 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
     expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
   );
   expect(screen.queryByTestId("composer-workspace")).toBeNull();
-  expect(client.harness.listEngineModels).toHaveBeenCalledWith("claude");
+  expect(client.harness.listEngineModels).not.toHaveBeenCalledWith("claude");
   expect(client.harness.listEngineModels).toHaveBeenCalledWith("native");
   expect(client.harness.listAgentConfigs).toHaveBeenCalled();
   await waitFor(() =>
@@ -961,6 +963,8 @@ it("selects Codex defaults, preserves explicit effort across catalog refresh and
     {
       id: "native",
       name: "OpenCuria",
+      default_model: null,
+      default_effort: null,
       connected: true,
       modes: ["build", "plan"],
     },
@@ -1022,7 +1026,10 @@ it("selects Codex defaults, preserves explicit effort across catalog refresh and
 it("resumes a Codex session with an immutable engine/provider and no native-model fallback", async () => {
   const client = mockClient();
   client.harness.listEngines.mockResolvedValue([
-    { id: "codex", name: "Codex", connected: true, modes: ["build", "plan"] },
+    {
+      id: "codex", name: "Codex", connected: true, modes: ["build", "plan"],
+      default_model: codexModel.id, default_effort: "low",
+    },
   ]);
   Object.assign(client.harness, {
     listEngineModels: jest.fn().mockResolvedValue([codexModel, routerModel]),
@@ -1093,8 +1100,8 @@ it("offers model, effort and agent in one sheet and applies a new agent's defaul
   expect(sheet.getByText("Native model")).toBeTruthy();
   expect(sheet.getByText("Medium")).toBeTruthy();
   expect(
-    sheet.getByRole("button", { name: "Claude Agent Build, Not connected" }),
-  ).toBeDisabled();
+    sheet.queryByRole("button", { name: "Claude Agent Build, Not connected" }),
+  ).toBeNull();
 
   fireEvent.press(sheet.getByText("OpenCuria Plan"));
   await waitFor(() =>
