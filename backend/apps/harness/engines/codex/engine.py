@@ -29,7 +29,12 @@ from .errors import CodexRecoveryError
 from .events import CodexEventProjector
 from .mcp_bridge import ManagedMcpBridge
 from .media import image_attachments, user_input
-from .protocol import CodexProtocol, CodexProtocolError, CodexRPCError
+from .protocol import (
+    CodexEventBufferError,
+    CodexProtocol,
+    CodexProtocolError,
+    CodexRPCError,
+)
 from .session_store import (
     CodexSessionStore,
     capture,
@@ -649,8 +654,13 @@ class CodexEngine:
 
                 await _finish_cleanup(interrupt())
             if isinstance(exc, CodexProtocolError):
+                detail = (
+                    " (event buffer limit exceeded)"
+                    if isinstance(exc, CodexEventBufferError)
+                    else ""
+                )
                 raise CodexRecoveryError(
-                    "Codex protocol failed; execution was not checkpointed. "
+                    f"Codex protocol failed{detail}; execution was not checkpointed. "
                     "Workspace effects may remain; fork or start a new conversation."
                 ) from None
             raise
@@ -810,8 +820,7 @@ class CodexEngine:
                     ),
                     completion_tokens=max(
                         0,
-                        total.completion_tokens
-                        - self.usage_baseline.completion_tokens,
+                        total.completion_tokens - self.usage_baseline.completion_tokens,
                     ),
                     total_tokens=max(
                         0,

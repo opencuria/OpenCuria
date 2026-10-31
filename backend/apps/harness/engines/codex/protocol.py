@@ -13,13 +13,17 @@ from typing import Any
 
 MAX_FRAME = 16 * 1024 * 1024
 MAX_PENDING = 64
-MAX_EVENTS = 128
+MAX_EVENTS = 4096
 MAX_QUEUE_BYTES = 32 * 1024 * 1024
 MAX_SERVER_REQUESTS = 32
 
 
 class CodexProtocolError(RuntimeError):
     """A transport failure, not evidence that an upstream action was rejected."""
+
+
+class CodexEventBufferError(CodexProtocolError):
+    """A bounded notification queue could not retain the next event."""
 
 
 class CodexRPCError(CodexProtocolError):
@@ -183,11 +187,11 @@ class CodexProtocol:
                 try:
                     size = len(json.dumps(message).encode())
                     if self.queued_bytes + size > MAX_QUEUE_BYTES:
-                        raise CodexProtocolError("Codex notification byte limit")
+                        raise CodexEventBufferError("Codex notification byte limit")
                     self.events.put_nowait((message, size))
                     self.queued_bytes += size
                 except asyncio.QueueFull:
-                    raise CodexProtocolError(
+                    raise CodexEventBufferError(
                         "Codex notification queue overflow"
                     ) from None
         elif isinstance(key, int) and not isinstance(key, bool):
@@ -221,6 +225,8 @@ class CodexProtocol:
                     raise CodexProtocolError("Codex frame exceeds limit")
         except asyncio.CancelledError:
             raise
+        except CodexProtocolError as exc:
+            self._fail(exc)
         except Exception:
             self._fail(
                 CodexProtocolError("Codex stream failed or contained invalid NDJSON")

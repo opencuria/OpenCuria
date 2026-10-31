@@ -119,12 +119,17 @@ message prefix, not a native Codex thread/fork. Neither a fork nor checkpoint
 restore rolls back workspace files or other tool effects.
 
 Each session has one encrypted, owner-fenced replacement checkpoint: at most
-256 allowlisted durable files, 24 MiB raw and 34 MiB encoded. Auth, generated
+256 allowlisted durable files, 50 MiB raw and 68 MiB encoded. Auth, generated
 config, logs and caches are excluded; opaque history/tool output can still
 contain user data. Restore requires the same absolute workspace and `CODEX_HOME`
 (`/workspace/.opencuria/harness/codex/<session-uuid>/config`). Transfers use 4 MiB
 pieces below the shared 10 MiB file-write cap. Keep backend encryption keys and
 persistent database storage backed up.
+
+The protocol buffers up to 4,096 notifications within a 32 MiB byte ceiling, so
+short output bursts can settle while tool and authorization RPCs remain live.
+Exceeding either ceiling fails explicitly with an event-buffer recovery error;
+notifications are never silently dropped.
 
 ## Authentication and trust boundary
 

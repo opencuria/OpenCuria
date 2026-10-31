@@ -623,9 +623,10 @@ async def test_managed_write_usage_encrypted_checkpoint_and_cold_followup(runtim
     assert session.engine_state["codex_generation"] != old_generation
     assert session.tokens["total"] == first_tokens + second.tokens["total"]
     assert second.tokens == {"prompt": 10, "completion": 5, "total": 15}
-    assert HarnessPart.objects.get(message=second, type="step-finish").display[
-        "context"
-    ] == context
+    assert (
+        HarnessPart.objects.get(message=second, type="step-finish").display["context"]
+        == context
+    )
     assert HarnessTranscriptBatch.objects.filter(session=session).count() == 1
     assert len(data.accessor.opened) == 2
     assert "function_call_output" in json.dumps(data.provider.requests[1])
@@ -991,7 +992,14 @@ async def test_revoke_captured_account_does_not_fall_back_to_new_selection(runti
     assert not turn.active
 
 
-async def test_malformed_process_protocol_retains_dirty_and_public_recovery(runtime):
+@pytest.mark.parametrize("failure", ["malformed", "count", "bytes"])
+async def test_failed_process_protocol_retains_dirty_and_public_recovery(
+    runtime: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from apps.harness.engines.codex import protocol
+
+    monkeypatch.setattr(protocol, "MAX_EVENTS", 2)
+    monkeypatch.setattr(protocol, "MAX_QUEUE_BYTES", 256)
     data = runtime
     data.provider.script = []
     open_process = data.accessor.open_process
@@ -1002,7 +1010,17 @@ async def test_malformed_process_protocol_retains_dirty_and_public_recovery(runt
 
         async def broken_receive():
             await receive()
-            return b"not-json local-secret-key\n"
+            if failure == "malformed":
+                return b"not-json local-secret-key\n"
+            event = {
+                "method": "item/agentMessage/delta",
+                "params": {
+                    "delta": "local-secret-key" * (32 if failure == "bytes" else 1)
+                },
+            }
+            return (json.dumps(event).encode() + b"\n") * (
+                3 if failure == "count" else 1
+            )
 
         # Real CLI launched normally; corrupt only its byte transport.
         stream.receive = broken_receive
@@ -1014,6 +1032,9 @@ async def test_malformed_process_protocol_retains_dirty_and_public_recovery(runt
     assert_settled(data, session, assistant, "error")
     assert "fork or start a new conversation" in assistant.error
     assert "protocol failed" in assistant.error
+    assert ("event buffer limit exceeded" in assistant.error) is (
+        failure != "malformed"
+    )
     assert session.engine_state["codex_dirty"]
     assert not HarnessTranscriptBatch.objects.filter(session=session).exists()
     assert "local-secret-key" not in json.dumps(data.events)

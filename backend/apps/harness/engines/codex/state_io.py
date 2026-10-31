@@ -7,13 +7,26 @@ is performed only after confirmed process/lease shutdown, including its WAL.
 
 from __future__ import annotations
 
+MAX_STATE_BYTES = 50 * 1024 * 1024
+MAX_SNAPSHOT = 68 * 1024 * 1024
+SNAPSHOT_CHUNK_SIZE = 4 * 1024 * 1024
+MAX_SNAPSHOT_CHUNKS = (MAX_SNAPSHOT + SNAPSHOT_CHUNK_SIZE - 1) // SNAPSHOT_CHUNK_SIZE
+MAX_STATE_FILES = 256
+
 # Kept standalone so the exact reviewed program can run with python3 -I -c.
-STATE_PROGRAM = r"""
+STATE_PROGRAM = (
+    f"""\
+MAX={MAX_STATE_BYTES}
+MAX_ENCODED={MAX_SNAPSHOT}
+CHUNK_SIZE={SNAPSHOT_CHUNK_SIZE}
+MAX_CHUNKS={MAX_SNAPSHOT_CHUNKS}
+MAX_FILES={MAX_STATE_FILES}
+"""
+    + r"""
 import base64,hashlib,json,os,pathlib,re,shutil,sqlite3,stat,sys,tempfile
 root=pathlib.Path(sys.argv[2])
 pattern=r'/workspace/\.opencuria/harness/codex/[0-9a-f-]{36}/config'
 assert re.fullmatch(pattern,str(root))
-MAX=24*1024*1024
 DB=re.compile(r'(?:state|thread_history|queue|goals|memories(?:_v2)?)_\d+\.sqlite')
 def dirs(p):
     cur=pathlib.Path('/')
@@ -54,7 +67,7 @@ if action=='prepare':
         target.unlink()
 elif action=='assemble':
     count=int(sys.argv[3]);digest=sys.argv[4]
-    assert 1<=count<=9 and re.fullmatch(r'[a-f0-9]{64}',digest)
+    assert 1<=count<=MAX_CHUNKS and re.fullmatch(r'[a-f0-9]{64}',digest)
     target=root.parent/'restore.json'
     fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     hasher=hashlib.sha256();total=0
@@ -62,17 +75,17 @@ elif action=='assemble':
         with os.fdopen(fd,'wb') as output:
             for index in range(count):
                 part=root.parent/('restore-'+str(index)+'.part')
-                data=read(part,4*1024*1024);total+=len(data)
-                assert total<=34*1024*1024
+                data=read(part,CHUNK_SIZE);total+=len(data)
+                assert total<=MAX_ENCODED
                 hasher.update(data);output.write(data);part.unlink()
             output.flush();os.fsync(output.fileno())
         assert hasher.hexdigest()==digest
     except BaseException:
         target.unlink();raise
 elif action=='restore':
-    record=json.loads(read(root.parent/'restore.json',34*1024*1024))
+    record=json.loads(read(root.parent/'restore.json',MAX_ENCODED))
     assert record['home']==str(root) and record['version']==1
-    files=record['files'];assert isinstance(files,list) and 0<len(files)<=256
+    files=record['files'];assert isinstance(files,list) and 0<len(files)<=MAX_FILES
     stage=pathlib.Path(tempfile.mkdtemp(prefix='.restore-',dir=root.parent))
     total=0;seen=set()
     try:
@@ -122,23 +135,24 @@ elif action=='snapshot':
                 data=read(pathlib.Path(tmp))
             finally: os.unlink(tmp)
         else: data=read(p)
-        total+=len(data);assert total<=MAX and len(files)<256
+        total+=len(data);assert total<=MAX and len(files)<MAX_FILES
         files.append({'path':name,'data':base64.b64encode(data).decode(),'sha256':hashlib.sha256(data).hexdigest()})
     assert any(x['path'].startswith('sessions/') for x in files)
     payload=json.dumps({'version':1,'home':str(root),'files':files},separators=(',',':')).encode()
+    assert len(payload)<=MAX_ENCODED
     target=root.parent/'snapshot.json'
     if target.exists() or target.is_symlink():
-        regular(target);target.unlink()
+        regular(target,MAX_ENCODED);target.unlink()
     fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
     with os.fdopen(fd,'wb') as f: f.write(payload)
     # Chunk reads stay within the shared no-follow media reader's 10 MiB cap.
     chunks=[]
-    for index,offset in enumerate(range(0,len(payload),4*1024*1024)):
+    for index,offset in enumerate(range(0,len(payload),CHUNK_SIZE)):
         chunk=root.parent/('snapshot-'+str(index)+'.part')
         if chunk.exists() or chunk.is_symlink():
             regular(chunk);chunk.unlink()
         fd=os.open(chunk,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-        with os.fdopen(fd,'wb') as f:f.write(payload[offset:offset+4*1024*1024])
+        with os.fdopen(fd,'wb') as f:f.write(payload[offset:offset+CHUNK_SIZE])
         chunks.append(str(index))
     target.unlink()
     print(hashlib.sha256(payload).hexdigest()+':'+str(len(chunks)))
@@ -176,3 +190,4 @@ elif action=='config':
     with os.fdopen(fd,'wb') as f:f.write(data)
 else: raise ValueError('Unknown state action')
 """
+)

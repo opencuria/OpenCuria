@@ -14,9 +14,15 @@ from asgiref.sync import sync_to_async
 from ...access.base import WorkspaceAccessor
 from ..repositories import HarnessEngineRepository
 from .errors import CodexRecoveryError
-from .state_io import STATE_PROGRAM
+from .state_io import (
+    MAX_SNAPSHOT,
+    MAX_SNAPSHOT_CHUNKS,
+    MAX_STATE_BYTES,
+    MAX_STATE_FILES,
+    SNAPSHOT_CHUNK_SIZE,
+    STATE_PROGRAM,
+)
 
-MAX_SNAPSHOT = 34 * 1024 * 1024
 SUBPATH = "codex/checkpoint-v1"
 
 
@@ -32,7 +38,7 @@ def validate_snapshot(record: dict[str, Any], home: str) -> None:
     if record["version"] != 1 or record["home"] != home:
         raise ValueError("Codex checkpoint belongs to a different managed home")
     files = record["files"]
-    if not isinstance(files, list) or not 0 < len(files) <= 256:
+    if not isinstance(files, list) or not 0 < len(files) <= MAX_STATE_FILES:
         raise ValueError("Invalid Codex checkpoint file count")
     seen = set()
     total = 0
@@ -58,7 +64,7 @@ def validate_snapshot(record: dict[str, Any], home: str) -> None:
         data = base64.b64decode(item["data"], validate=True)
         total += len(data)
         if (
-            total > 24 * 1024 * 1024
+            total > MAX_STATE_BYTES
             or hashlib.sha256(data).hexdigest() != item["sha256"]
         ):
             raise ValueError("Corrupt or oversized Codex checkpoint")
@@ -163,12 +169,11 @@ async def restore_snapshot(
         raise ValueError("Oversized Codex restore")
     await state_action(accessor, "prepare", home)
     parent = home.rsplit("/", 1)[0]
-    chunk_size = 4 * 1024 * 1024
     count = 0
-    for index, offset in enumerate(range(0, len(payload), chunk_size)):
+    for index, offset in enumerate(range(0, len(payload), SNAPSHOT_CHUNK_SIZE)):
         await accessor.write_file(
             f"{parent}/restore-{index}.part",
-            payload[offset : offset + chunk_size],
+            payload[offset : offset + SNAPSHOT_CHUNK_SIZE],
             mode=0o600,
         )
         count += 1
@@ -182,14 +187,14 @@ async def capture(accessor: WorkspaceAccessor, home: str) -> dict[str, Any]:
     """Read checked no-follow snapshot chunks and validate their total digest."""
     checksum = await state_action(accessor, "snapshot", home)
     digest, count = checksum.split(":")
-    if not count.isdigit() or not 1 <= int(count) <= 9:
+    if not count.isdigit() or not 1 <= int(count) <= MAX_SNAPSHOT_CHUNKS:
         raise ValueError("Invalid Codex snapshot chunks")
     payload = bytearray()
     try:
         for index in range(int(count)):
             stored = await accessor.read_file_no_follow(
                 home.rsplit("/", 1)[0] + f"/snapshot-{index}.part",
-                max_size=4 * 1024 * 1024,
+                max_size=SNAPSHOT_CHUNK_SIZE,
             )
             if stored.truncated or len(payload) + len(stored.content) > MAX_SNAPSHOT:
                 raise ValueError("Codex checkpoint read was incomplete")
@@ -215,8 +220,8 @@ async def materialize_skills(
     await state_action(accessor, "prepare", home)
     parent = home.rsplit("/", 1)[0]
     chunks = [
-        payload[i : i + 4 * 1024 * 1024]
-        for i in range(0, len(payload), 4 * 1024 * 1024)
+        payload[i : i + SNAPSHOT_CHUNK_SIZE]
+        for i in range(0, len(payload), SNAPSHOT_CHUNK_SIZE)
     ]
     for i, chunk in enumerate(chunks):
         await accessor.write_file(f"{parent}/restore-{i}.part", chunk, mode=0o600)

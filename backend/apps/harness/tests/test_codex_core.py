@@ -142,7 +142,10 @@ class LocalAccessor:
             import hashlib
 
             parent = self.path(command[-1]).parent
-            chunks = sorted(parent.glob("snapshot-*.part"))
+            chunks = sorted(
+                parent.glob("snapshot-*.part"),
+                key=lambda path: int(path.stem.split("-")[-1]),
+            )
             data = b"".join(p.read_bytes() for p in chunks)
             record = json.loads(data)
             record["home"] = command[-1]
@@ -409,8 +412,11 @@ async def fixture_run(
                 "openrouter/test/model",
                 mode,
                 RunOptions(
-                    session_id=session, on_permission=permission, skills=list(skills),
-                    history=history or [], steering=steering,
+                    session_id=session,
+                    on_permission=permission,
+                    skills=list(skills),
+                    history=history or [],
+                    steering=steering,
                 ),
             )
         )
@@ -452,7 +458,8 @@ async def fixture_run(
                         on_permission=permission,
                         skills=list(skills),
                         history=[
-                            *(history or []), LLMMessage(role="user", content=prompt)
+                            *(history or []),
+                            LLMMessage(role="user", content=prompt),
                         ],
                     ),
                 ),
