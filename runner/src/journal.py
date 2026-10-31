@@ -540,7 +540,6 @@ class OperationExecutor:
             return {"status": "unknown", "execution_finished": False}
         response = {
             "instance_id": self.journal.instance_id,
-            "durable_credentials": True,
             "status": "unknown",
             "execution_finished": False,
             "outcome_known": False,
@@ -563,8 +562,7 @@ class OperationExecutor:
             "failure_event"
         ) in {"image:build_failed", "image_artifact:failed"}
         needs_recovery = row and (
-            data.get("legacy_credential_sync") is True
-            or unfinished_publication
+            unfinished_publication
             or (
                 row[2] and row[2].get("outcome_known") is False
                 and identity.get("failure_event") is not None
@@ -576,24 +574,6 @@ class OperationExecutor:
                 "identity": {k: v for k, v in identity.items() if k != "failure_event"},
                 "diagnostic_code": "disk_helpers_active",
             }
-        if data.get("legacy_credential_sync") is True and row and row[2]:
-            # New runners reject legacy credential packets without envelopes.
-            # Seal that delayed-delivery identity first, then stop the exact
-            # guest so a previous runner's remote credential shell cannot keep
-            # writing after the backend releases the old reservation.
-            recover = getattr(self.observer, "recover_interrupted_operation", None)
-            if recover is not None:
-                try:
-                    state = await recover({
-                        **identity,
-                        "workspace_id": identity.get("target"),
-                        "failure_event": "workspace:error",
-                    })
-                except RecoveryConflict as error:
-                    return self._recovery_blocked(response, identity, error)
-                response["legacy_credential_quiesced"] = state in {
-                    "stopped", "absent", "partial",
-                }
         if (
             row and (
                 unfinished_publication

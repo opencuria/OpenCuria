@@ -44,7 +44,6 @@ class DispositionState:
     workspace_owner_id: int | None
     workspace_status: str | None
     current_task_id: uuid.UUID | None
-    legacy_credentials: bool = False
 
 
 def _snapshot(command: LifecycleCommand) -> DispositionState:
@@ -64,7 +63,6 @@ def _snapshot(command: LifecycleCommand) -> DispositionState:
         workspace_owner_id=workspace.created_by_id if workspace else None,
         workspace_status=workspace.status if workspace else None,
         current_task_id=workspace.current_task_id if workspace else None,
-        legacy_credentials=command.payload.get("_legacy_credential_sync") is True,
     )
 
 

@@ -85,13 +85,6 @@ class DispositionService:
         if (
             evidence.get("status") != "terminal"
             or evidence.get("execution_finished") is not True
-            or (
-                row.legacy_credentials
-                and (
-                    evidence.get("durable_credentials") is not True
-                    or evidence.get("legacy_credential_quiesced") is not True
-                )
-            )
         ):
             return False
         if evidence.get("outcome_known") is True:
@@ -195,11 +188,6 @@ class DispositionService:
     @staticmethod
     def _dispose(state: DispositionState, evidence: dict, action: str) -> dict:
         """Revalidate a preauthorized disposition and apply it atomically."""
-        if state.legacy_credentials and (
-            evidence.get("durable_credentials") is not True
-            or evidence.get("legacy_credential_quiesced") is not True
-        ):
-            raise ConflictError("Credential recovery requires an upgraded runner")
         if (
             not evidence.get("instance_id")
             or not evidence.get("execution_finished")
@@ -287,10 +275,6 @@ class DispositionService:
                     "create_workspace_from_image_artifact",
                 }:
                     workspace_status = "failed"
-                elif (
-                    current.legacy_credentials and current.workspace_status == "deleted"
-                ):
-                    workspace_status = "deleted"
                 elif current.task_type == "remove_workspace":
                     workspace_status = (
                         "failed"
@@ -357,14 +341,7 @@ class DispositionService:
             evidence = await transport._call_runner(
                 row.runner,
                 "operation:inspect",
-                {
-                    **row.identity,
-                    **(
-                        {"legacy_credential_sync": True}
-                        if row.legacy_credentials
-                        else {}
-                    ),
-                },
+                row.identity,
                 timeout=60,
             )
             # Recheck connection binding after RPC: old SID responses cannot resolve.
@@ -450,14 +427,7 @@ class DispositionService:
             evidence = await transport._call_runner(
                 row.runner,
                 "operation:seal",
-                {
-                    **row.identity,
-                    **(
-                        {"legacy_credential_sync": True}
-                        if row.legacy_credentials
-                        else {}
-                    ),
-                },
+                row.identity,
                 timeout=60,
             )
             if evidence.get("status") != "terminal":

@@ -61,7 +61,6 @@ than offer an administrator acknowledgement as the normal path. Credential synch
 | Interrupted capture with unknown outcome | Do not replay capture/init or blindly restart; settle after proof, retain resources and unlock normal actions |
 | Ordinary publication error before manifest commit | Remove only this invocation's exclusively owned unpublished files; keep previous publications |
 | Publication committed before runner crash or final durability error | Retain and verify exact manifest/digest; recover the committed result rather than rebuilding |
-| Missing legacy credential lifecycle identity | Adopt an inspection-only command; require upgraded-runner sealing and proven guest quiescence; close conservatively without replaying secrets |
 | Credential IO or repository clone hangs | Bound physical execution/waiting; retain unknown credential/effect state; settle through normal lifecycle recovery |
 | Image recipe exceeds execution limit | Fail build, dispose its temporary VM, release slot; previous current generation remains usable |
 | Native backend process dies | On exclusive backend startup, abort lost turns, error unfinished parts, reject dead input gates and release dead provider holders |
@@ -115,11 +114,10 @@ failure or arbitrary database corruption.
    backend restart could leave a plain task open forever, blocking capture/reset.
    Injection now uses the same durable identity, sanitized outbox, journal,
    result validation and recovery as other lifecycle commands. A timed-out RPC
-   does not discard the fence. Legacy tasks are adopted for inspection only;
-   an upgraded runner must seal delayed plain delivery and prove that the exact
-   guest has been quiesced. Missing credential proof stays conservatively dirty.
-   Recovery never replays the old secrets. Duplicate unknown results no longer
-   emit the same frontend error repeatedly.
+   does not discard the fence. Missing credential proof stays conservatively
+   dirty. Backend and runner require the current durable protocol; non-journaled
+   credential tasks are unsupported. Duplicate unknown results no longer emit
+   the same frontend error repeatedly.
 7. **Unbounded workspace bootstrap IO.** Credential upload/replacement/scrub is
    bounded by `RUNNER_CREDENTIAL_SYNC_TIMEOUT` (120 seconds). Repository cloning
    is noninteractive and has a guest-side process deadline and kill grace,

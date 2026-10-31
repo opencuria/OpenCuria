@@ -27,42 +27,10 @@ async def test_credential_replay_returns_ack_without_repeating_secret_write(tmp_
     service.lifecycle.inject_credentials.assert_awaited_once()
     for file in tmp_path.glob("operations.sqlite3*"):
         assert b"NEVER_PERSIST_SECRET" not in file.read_bytes()
-    # Late unbound legacy delivery cannot write after the upgrade adapter seals.
-    assert await handler({"task_id": "legacy", "workspace_id": workspace_id}) is None
+    # Every credential write requires a durable operation identity.
+    assert await handler({"task_id": "unbound", "workspace_id": workspace_id}) is None
     service.lifecycle.inject_credentials.assert_awaited_once()
     interface._operations.journal.close()
-
-
-async def test_legacy_inspection_seals_then_quiesces_before_releasing(tmp_path):
-    executor, _, observer = executor_for(tmp_path, snapshot("running"))
-    observer.recover_interrupted_operation = AsyncMock()
-
-    async def stop(identity):
-        assert executor.journal.lookup(identity["operation_id"]) is not None
-        observer.inventory_for_runner.return_value = snapshot("stopped")
-        return "stopped"
-
-    observer.recover_interrupted_operation.side_effect = stop
-    data = {**command(), "legacy_credential_sync": True}
-    await executor.inspect_request(data)
-    event, evidence = executor.emit.await_args.args
-    assert event == "operation:inspection"
-    assert evidence["status"] == "terminal"
-    assert evidence["durable_credentials"] is True
-    assert evidence["legacy_credential_quiesced"] is True
-    assert evidence["quiescent"] is True
-    observer.recover_interrupted_operation.assert_awaited_once()
-    executor.journal.close()
-
-
-async def test_noop_recovery_cannot_attest_legacy_credential_quiescence(tmp_path):
-    executor, _, observer = executor_for(tmp_path, snapshot("running"))
-    observer.recover_interrupted_operation = AsyncMock(return_value=None)
-    await executor.inspect_request({**command(), "legacy_credential_sync": True})
-    evidence = executor.emit.await_args.args[1]
-    assert evidence["status"] == "terminal"
-    assert evidence["legacy_credential_quiesced"] is False
-    executor.journal.close()
 
 
 async def test_inspection_does_not_recover_while_disk_helpers_are_active(
