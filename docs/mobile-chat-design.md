@@ -1,6 +1,6 @@
 # Native chat design
 
-The native-control reference is `t3code/apps/mobile/` in the workspace. OpenCuria keeps its chat, workspace and account structure while using actual platform controls for interaction. Reference code is read-only; no t3code assets or business logic are copied.
+The native-control reference is `t3code/apps/mobile/` in the workspace. OpenCuria keeps its chat, workspace and account structure while using actual platform controls for interaction. The reference stays read-only; the workspace tools' terminal surface, syntax highlighter and file browser are adapted from it under its MIT license (see [Workspace tools](#workspace-tools) and `THIRD_PARTY_NOTICES.md`).
 
 ## Platform mapping
 
@@ -53,6 +53,16 @@ Layout, top to bottom: the OpenCuria mark and name with a round search button, a
 Web and mobile import the same eligibility, sorting and inbox helpers from `packages/chat-core/src/conversationGroups.ts`. Scheduled tasks remain outside mobile.
 
 Running and lifecycle-reserved workspaces are grouped, online first. Each group shows four newest chats by default, and Show more adds four independently. Opening an older active chat reveals its page. Closing navigation preserves group/page state; switching server or organization resets it. Stopped history remains reachable through All workspaces and eligible Inbox entries. Transitioning workspaces retain readable history with their mutation menus disabled.
+
+## Workspace tools
+
+Git, Terminal and Files of the chat's workspace open as one full-screen sheet: a UIKit full-screen presentation on iOS and a system dialog on Android. Pull up past the newest message to open it; the pull only arms when the finger lands while the transcript already rests at its end, so scrolling down to the end, momentum and reversing direction never open it. A quiet hint follows the pull and says "Release to open" once it would open; a quick flick opens with less travel. The chat's "…" menu offers the same sheet ("Git, Terminal & Files") for assistive technologies. The sheet needs a running workspace with an online runner.
+
+The header holds Close leading and the sections trailing (native segmented control: SwiftUI picker / Material segmented buttons); Git opens first. Sections mount on first use and stay alive while the sheet is open. Viewers (diffs, commit details, files) open as page sheets above it with a native bar: close leading, title and subtitle, and an overflow menu.
+
+- **Git** mirrors the webapp panel and shares its rules (`packages/chat-core/src/gitModel.ts`, `gitGraph.ts`, `gitRefGroups.ts`, `gitStash.ts`) and REST contract (`client.git`): repository menu and Fetch, branch with ahead/behind, commit message with the small-model generator, Commit / Commit & Push, the suggested remote action (Publish, Push, Pull, Sync) with its menu, the merge banner, Staged Changes and Changes with stage/unstage/discard (row buttons, long-press menu, confirmations), and the commit graph. The graph uses the webapp's vscode-git-graph layout; each row draws its own lane segments (cut at the row boundary) so the native list stays virtualized. Branch, remote and stash badges and long-pressed commits offer the webapp's actions. Tapping a change or a commit file opens a unified diff (jsdiff); a commit opens its details. Summaries poll every 4 s and details every 15 s only while Git is visible.
+- **Terminal** uses t3code's native terminal surface (libghostty with Metal on iOS, libghostty-vt with a Canvas renderer on Android) on OpenCuria's terminal protocol: REST start plus Socket.IO input/resize/output, base64 bytes decoded as a UTF-8 stream. A key row rides above the keyboard (arrows, esc, ctrl/alt, tab, paste, clear, ~ | / -); the panel menu changes text size, clears, restarts, and adds the visible output to the chat. The shell outlives the sheet (bounded retained output is replayed) and restarts after a socket reconnect.
+- **Files** follows t3code's browser: a search field (runner file search), the lazily listed `/workspace` tree with the webapp's file icons, and a viewer with native syntax highlighting (@pierre/highlights lexers compiled to C), Markdown, CSV/TSV table, SVG and image previews, Preview/Source, word wrap, copy path/contents, share and "Mention in chat".
 
 ## Verification
 

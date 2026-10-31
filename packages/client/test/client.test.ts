@@ -1156,3 +1156,72 @@ describe("engine catalog API", () => {
     ).toBe("org-a");
   });
 });
+
+describe("workspace tools", () => {
+  it("calls the git REST contract with encoded paths and typed operations", async () => {
+    const urls: string[] = [];
+    const bodies: unknown[] = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      urls.push(String(input));
+      if (init?.body) bodies.push(JSON.parse(String(init.body)));
+      return jsonResponse({ ok: true, repos: [], snapshot: { path: "/workspace/r" } });
+    }) as unknown as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch);
+
+    await client.git.repos("ws 1");
+    await client.git.repo("ws", "/workspace/my repo");
+    await client.git.history("ws", "/workspace/r", { skip: 50, branch: "feat/x" });
+    await client.git.commitDetails("ws", "/workspace/r", "abc123");
+    await client.git.fileContent("ws", "/workspace/r", "src/a.ts", "abc^");
+    await client.git.operation("ws", { operation: "stage", repo_path: "/workspace/r", paths: ["a"] });
+    await client.git.commitMessage("ws", "/workspace/r");
+
+    expect(urls).toEqual([
+      "https://api.example/api/v1/workspaces/ws%201/git/repos/",
+      "https://api.example/api/v1/workspaces/ws/git/repo/?repo_path=%2Fworkspace%2Fmy+repo",
+      "https://api.example/api/v1/workspaces/ws/git/history/?repo_path=%2Fworkspace%2Fr&history_limit=50&history_skip=50&branch=feat%2Fx",
+      "https://api.example/api/v1/workspaces/ws/git/commits/abc123/?repo_path=%2Fworkspace%2Fr",
+      "https://api.example/api/v1/workspaces/ws/git/file-content/?repo_path=%2Fworkspace%2Fr&path=src%2Fa.ts&revision=abc%5E",
+      "https://api.example/api/v1/workspaces/ws/git/operation/",
+      "https://api.example/api/v1/workspaces/ws/git/commit-message/",
+    ]);
+    expect(bodies).toEqual([
+      { operation: "stage", repo_path: "/workspace/r", paths: ["a"] },
+      { repo_path: "/workspace/r" },
+    ]);
+  });
+
+  it("surfaces a 409 merge conflict with its snapshot payload", async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse(
+        { ok: false, code: "conflict", detail: "Merge conflict", snapshot: { path: "/workspace/r" } },
+        409,
+      ),
+    ) as unknown as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch);
+    const error = await client.git
+      .operation("ws", { operation: "pull", repo_path: "/workspace/r" })
+      .catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ApiRequestError);
+    expect((error as ApiRequestError).status).toBe(409);
+  });
+
+  it("starts a terminal over REST and sends input, resize and close on the socket", async () => {
+    const sockets: MockSocket[] = [];
+    const fetch = vi.fn(async () => jsonResponse({ task_id: "task-1" })) as unknown as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch, { socketFactory: mockSocketFactory(sockets) });
+    await expect(client.terminal.start("ws", 100, 30)).resolves.toEqual({ task_id: "task-1" });
+    expect(JSON.parse(String((fetch as any).mock.calls[0][1].body))).toEqual({ cols: 100, rows: 30 });
+
+    client.realtime.connect();
+    sockets[0]!.connect();
+    client.terminal.input("ws", "t1", "bHM=");
+    client.terminal.resize("ws", "t1", 90, 20);
+    client.terminal.close("ws", "t1");
+    expect(sockets[0]!.emitted.filter((item) => item.event.startsWith("frontend:terminal"))).toEqual([
+      { event: "frontend:terminal_input", data: { workspace_id: "ws", terminal_id: "t1", data: "bHM=" } },
+      { event: "frontend:terminal_resize", data: { workspace_id: "ws", terminal_id: "t1", cols: 90, rows: 20 } },
+      { event: "frontend:terminal_close", data: { workspace_id: "ws", terminal_id: "t1" } },
+    ]);
+  });
+});

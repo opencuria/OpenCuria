@@ -54,6 +54,26 @@ Unedited captures from the Android development client with sample data:
 | --- | --- | --- |
 | ![Native editor above keyboard](images/mobile/native-keyboard.png) | ![Native settings](images/mobile/native-settings.png) | ![Native question selection](images/mobile/native-question.png) |
 
+## Workspace tools (2026-10-31)
+
+Checked in a rebuilt Android development client (API 35, 720×1600, x86_64) with the local `opencuria-terminal` (libghostty-vt) and `opencuria-highlights` modules. A disposable local fixture served the mobile REST/Socket.IO contract; Git and file requests ran through the runner's own `GitService` and `FileManager` against a sample repository bind-mounted at `/workspace`, and the terminal was a real PTY shell. No provider runs, VMs or production data were used.
+
+- Pull up at the end of a chat (also an empty chat) shows the hint, then "Release to open"; scrolling up and back down to the end in one drag, momentum and short drags do not open the sheet. The chat menu's "Git, Terminal & Files" opens it as well.
+- Git: repository/branch header with ahead count, stage from the diff menu, generated commit message, Commit & Push (commit appears on `main` and `origin/main`), branch badge menu with a confirmed merge, long-press commit menu, Create Branch Here (checked out), commit details and per-file diffs with syntax highlighting.
+- Terminal: native surface with colours, key row above the keyboard (history ↑, CTRL+C), dismiss/show keyboard.
+- Files: lazy tree with the webapp icons, search, highlighted source, Markdown, CSV table and image previews.
+- Light and dark appearance.
+
+| Pull up | Git | Graph | Diff |
+| --- | --- | --- | --- |
+| ![Pull hint above the composer](images/mobile/tools-pull.png) | ![Git panel](images/mobile/tools-git.png) | ![Commit graph after a merge](images/mobile/tools-git-graph.png) | ![Working-tree diff](images/mobile/tools-diff.png) |
+
+| Terminal | Files | Viewer | Light |
+| --- | --- | --- | --- |
+| ![Native terminal with key row](images/mobile/tools-terminal.png) | ![File tree](images/mobile/tools-files.png) | ![Highlighted source](images/mobile/tools-source.png) | ![Git panel, light](images/mobile/tools-git-light.png) |
+
+iOS: the Android and iOS Hermes exports pass. The iOS terminal (GhosttyKit/Metal), the SwiftUI headers and the highlighter's Swift bridge are not compiled here; build the development client on a Mac before relying on them.
+
 ## Remaining platform validation
 
 iOS JavaScript/Hermes export passed. Native iOS compilation, device appearance, split-view behavior and keyboard acceptance require macOS/Xcode and have not been verified here. Native release signing and store submission were not part of this change. Rebuild the development client to include the new native dependencies and local Android module.

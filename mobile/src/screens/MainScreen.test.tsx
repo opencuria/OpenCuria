@@ -185,9 +185,35 @@ jest.mock("../components", () => {
         composer,
         overlay,
       ),
-    ChatMessages: () => ReactRuntime.createElement(View),
+    ChatMessages: (props: { onPullUpAtEnd?: () => void }) =>
+      ReactRuntime.createElement(
+        View,
+        null,
+        props.onPullUpAtEnd
+          ? ReactRuntime.createElement(Pressable, {
+              testID: "test-pull-up",
+              onPress: props.onPullUpAtEnd,
+            })
+          : null,
+      ),
   };
 });
+jest.mock("../tools/WorkspaceToolsSheet", () => {
+  const ReactRuntime = require("react") as typeof React;
+  const { Text } = require("react-native") as typeof import("react-native");
+  return {
+    WorkspaceToolsSheet: (props: { visible: boolean; workspaceName: string }) =>
+      props.visible
+        ? ReactRuntime.createElement(
+            Text,
+            { testID: "workspace-tools-sheet" },
+            props.workspaceName,
+          )
+        : null,
+  };
+});
+jest.mock("../tools/git", () => ({ releaseGitControllers: jest.fn() }));
+jest.mock("../tools/terminal", () => ({ releaseTerminalSessions: jest.fn() }));
 jest.mock("../platform", () => ({
   MediaCache: jest.fn().mockImplementation(() => ({
     dispose: jest.fn(),
@@ -951,4 +977,30 @@ it("puts workspace and chat actions in the header menu", async () => {
   expect(screen.getByTestId("rename-session-sheet")).toBeTruthy();
   expect(screen.getByDisplayValue("Release notes")).toBeTruthy();
   tree.unmount();
+});
+
+it("opens Git, Terminal and Files by pulling up at the end or from the header menu", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  expect(screen.queryByTestId("workspace-tools-sheet")).toBeNull();
+
+  fireEvent.press(screen.getByTestId("test-pull-up"));
+  expect(screen.getByTestId("workspace-tools-sheet")).toBeTruthy();
+
+  tree.unmount();
+  render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  fireEvent.press(screen.getByTestId("chat-menu"));
+  fireEvent.press(screen.getByRole("button", { name: "Git, Terminal & Files" }));
+  expect(screen.getByTestId("workspace-tools-sheet")).toBeTruthy();
 });

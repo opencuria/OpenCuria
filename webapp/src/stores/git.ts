@@ -34,24 +34,38 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type {
   GitBranch,
-  GitCommit,
   GitCommitDetails,
   GitCommitFile,
-  GitCommitFileStatus,
-  GitFileChange,
-  GitFileStatus,
-  GitMergeState,
-  GitRemoteRef,
   GitRepo,
   GitRepoSummary,
-  GitStagedKind,
   GitStashInfo,
-  GitUnstagedKind,
 } from '@/types/git'
 import { ApiRequestError } from '@/services/api'
 import { groupRefTags, type GitRefGroup } from '@/lib/gitRefGroups'
 import {
+  GIT_DETAILS_POLL_MS,
+  GIT_HISTORY_LIMIT,
+  GIT_POLL_INTERVAL_MS,
+  bulkUnstagedGitPaths,
+  chunkGitPaths,
+  commitDetailsKey,
   conflictSnapshotOf,
+  currentGitBranch,
+  gitPushRemote,
+  gitRefTagsByHash,
+  isValidStashSelector,
+  mergeGitHistoryPage,
+  normalizeCommitDetails,
+  normalizeRepoSnapshot,
+  normalizeRepoSummary,
+  remoteBranchLocalName,
+  shallowGitRepo,
+  stagedGitChanges,
+  suggestRemoteAction,
+  unstagedGitChanges,
+  type SuggestedRemoteAction,
+} from '@opencuria/chat-core/gitModel'
+import {
   generateGitCommitMessage,
   getGitCommitDetails,
   getGitHistory,
@@ -59,13 +73,6 @@ import {
   getGitRepos,
   runGitOperation,
   type GitOperationRequest,
-  type RawGitChange,
-  type RawGitCommit,
-  type RawGitCommitDetails,
-  type RawGitCommitFile,
-  type RawGitRepoSnapshot,
-  type RawGitRepoSummary,
-  type RawGitStash,
 } from '@/services/git.api'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
@@ -78,28 +85,22 @@ const CDV_HEIGHT_DEFAULT = 250
 const CDV_HEIGHT_MIN = 120
 const CDV_HEIGHT_MAX = 600
 
-/** Silent summaries polling interval (ms). */
-export const GIT_POLL_INTERVAL_MS = 4000
-/** Silent selected-details polling interval (ms). */
-export const GIT_DETAILS_POLL_MS = 15000
-/** Page size for per-repo history requests. */
-export const GIT_HISTORY_LIMIT = 50
-/** Backend cap for `paths` in one typed operation (bulk actions batch). */
-export const GIT_MAX_PATHS_PER_OPERATION = 256
-
-/** Suggested remote action for the changes-section primary button. */
-export type SuggestedRemoteAction = 'publish' | 'push' | 'pull' | 'sync' | 'none'
-
-export function normalizeRepoSummary(raw: RawGitRepoSummary): GitRepoSummary {
-  const path = raw.path
-  return {
-    id: raw.id || path,
-    name: raw.name || path.split('/').filter(Boolean).pop() || path,
-    path,
-    currentBranch: raw.current_branch ?? null,
-    headHash: raw.head_hash ?? null,
-  }
-}
+// Rules and normalizers are shared with the mobile Git panel.
+export {
+  GIT_DETAILS_POLL_MS,
+  GIT_HISTORY_LIMIT,
+  GIT_MAX_PATHS_PER_OPERATION,
+  GIT_POLL_INTERVAL_MS,
+  commitDetailsKey,
+  normalizeChange,
+  normalizeCommit,
+  normalizeCommitDetails,
+  normalizeCommitFile,
+  normalizeRepoSnapshot,
+  normalizeRepoSummary,
+  normalizeStash,
+} from '@opencuria/chat-core/gitModel'
+export type { SuggestedRemoteAction } from '@opencuria/chat-core/gitModel'
 
 function loadCdvHeight(): number {
   try {
@@ -146,165 +147,6 @@ function errorMessage(e: unknown): string {
   if (e instanceof ApiRequestError) return e.message || 'Unknown error'
   if (e instanceof Error) return e.message || 'Unknown error'
   return typeof e === 'string' && e ? e : 'Unknown error'
-}
-
-// ---------------------------------------------------------------------------
-// Normalization (snake_case wire -> camelCase domain)
-// ---------------------------------------------------------------------------
-
-function asFileStatus(value: unknown): GitFileStatus {
-  return value === 'A' ||
-    value === 'D' ||
-    value === 'R' ||
-    value === 'C' ||
-    value === 'U'
-    ? value
-    : 'M'
-}
-
-function asCommitFileStatus(value: unknown): GitCommitFileStatus {
-  return value === 'A' ||
-    value === 'M' ||
-    value === 'D' ||
-    value === 'R' ||
-    value === 'C' ||
-    value === 'U'
-    ? value
-    : 'M'
-}
-
-function asStagedKind(value: unknown): GitStagedKind {
-  return value === 'M' ||
-    value === 'A' ||
-    value === 'D' ||
-    value === 'R' ||
-    value === 'C' ||
-    value === 'U'
-    ? value
-    : null
-}
-
-function asUnstagedKind(value: unknown): GitUnstagedKind {
-  return value === 'M' ||
-    value === 'D' ||
-    value === 'R' ||
-    value === 'C' ||
-    value === 'U' ||
-    value === 'untracked'
-    ? value
-    : null
-}
-
-export function normalizeCommitFile(raw: RawGitCommitFile): GitCommitFile {
-  return {
-    oldPath: raw.old_path,
-    newPath: raw.new_path,
-    status: asCommitFileStatus(raw.status),
-    additions: raw.additions ?? 0,
-    deletions: raw.deletions ?? 0,
-  }
-}
-
-export function normalizeChange(raw: RawGitChange): GitFileChange {
-  return {
-    path: raw.path,
-    oldPath: raw.old_path ?? null,
-    status: asFileStatus(raw.status),
-    staged: raw.staged === true,
-    stagedKind: asStagedKind(raw.staged_kind),
-    unstaged: asUnstagedKind(raw.unstaged),
-    conflict: typeof raw.conflict === 'string' && raw.conflict ? raw.conflict : null,
-  }
-}
-
-export function normalizeCommit(raw: RawGitCommit): GitCommit {
-  return {
-    hash: raw.hash,
-    message: raw.message ?? '',
-    body: raw.body ?? '',
-    author: raw.author ?? '',
-    email: raw.author_email ?? '',
-    authorEmail: raw.author_email ?? '',
-    timestamp: raw.timestamp || raw.author_date || '',
-    authorDate: raw.author_date ?? '',
-    committer: raw.committer ?? '',
-    committerEmail: raw.committer_email ?? '',
-    committerDate: raw.committer_date ?? '',
-    parents: [...(raw.parents ?? [])],
-  }
-}
-
-export function normalizeStash(raw: RawGitStash): GitStashInfo {
-  return {
-    selector: raw.selector,
-    hash: raw.hash,
-    baseHash: raw.base_hash ?? null,
-    message: raw.message ?? '',
-    author: raw.author ?? '',
-    authorEmail: raw.author_email ?? '',
-    timestamp: raw.timestamp || raw.author_date || '',
-  }
-}
-
-export function normalizeCommitDetails(raw: RawGitCommitDetails): GitCommitDetails {
-  return {
-    hash: raw.hash,
-    message: raw.message ?? '',
-    parents: [...(raw.parents ?? [])],
-    author: raw.author ?? '',
-    authorEmail: raw.author_email ?? '',
-    authorDate: raw.author_date ?? '',
-    committer: raw.committer ?? '',
-    committerEmail: raw.committer_email ?? '',
-    committerDate: raw.committer_date ?? '',
-    body: raw.body ?? '',
-    fileChanges: (raw.file_changes ?? []).map(normalizeCommitFile),
-  }
-}
-
-export function normalizeRepoSnapshot(raw: RawGitRepoSnapshot): GitRepo {
-  const mergeState: GitMergeState = {
-    merging: raw.merge_state?.merging === true,
-    rebasing: raw.merge_state?.rebasing === true,
-    cherryPicking: raw.merge_state?.cherry_picking === true,
-  }
-  const branches: GitBranch[] = (raw.branches ?? []).map((b) => ({
-    name: b.name,
-    tipHash: b.tip_hash,
-    upstream: b.upstream ?? null,
-    ahead: b.ahead ?? 0,
-    behind: b.behind ?? 0,
-  }))
-  const remoteRefs: GitRemoteRef[] = (raw.remote_refs ?? []).map((r) => ({
-    name: r.name,
-    tipHash: r.tip_hash,
-  }))
-  return {
-    id: raw.id || raw.path,
-    name: raw.name || raw.path.split('/').filter(Boolean).pop() || raw.path,
-    path: raw.path,
-    currentBranch: raw.current_branch ?? null,
-    headHash: raw.head_hash ?? null,
-    branches,
-    remoteRefs,
-    remotes: [...(raw.remotes ?? [])],
-    defaultRemote: raw.default_remote ?? null,
-    upstream: raw.upstream ?? null,
-    ahead: raw.ahead ?? 0,
-    behind: raw.behind ?? 0,
-    mergeState,
-    commits: (raw.commits ?? []).map(normalizeCommit),
-    stashes: (raw.stashes ?? []).map(normalizeStash),
-    hasMore: raw.has_more === true,
-    historySkip: raw.history_skip ?? 0,
-    historyLimit: raw.history_limit ?? GIT_HISTORY_LIMIT,
-    changes: (raw.changes ?? []).map(normalizeChange),
-  }
-}
-
-/** Cache key for per-repo commit details. */
-export function commitDetailsKey(repoPath: string, hash: string): string {
-  return `${repoPath}::${hash}`
 }
 
 export const useGitStore = defineStore('git', () => {
@@ -406,116 +248,41 @@ export const useGitStore = defineStore('git', () => {
     return summaryForId(selectedRepoId.value)
   }
 
-  /** Shallow fallback projection until details are loaded. */
-  function shallowRepo(summary: GitRepoSummary): GitRepo {
-    return {
-      id: summary.id,
-      name: summary.name,
-      path: summary.path,
-      currentBranch: summary.currentBranch,
-      headHash: summary.headHash,
-      branches: [],
-      remoteRefs: [],
-      remotes: [],
-      defaultRemote: null,
-      upstream: null,
-      ahead: 0,
-      behind: 0,
-      mergeState: { merging: false, rebasing: false, cherryPicking: false },
-      commits: [],
-      stashes: [],
-      hasMore: true,
-      historySkip: 0,
-      historyLimit: GIT_HISTORY_LIMIT,
-      changes: [],
-    }
-  }
-
   const currentRepo = computed<GitRepo | null>(() => {
     const summary = summaryForId(selectedRepoId.value)
     if (!summary) return null
-    return repoDetails.value[summary.path] ?? shallowRepo(summary)
+    return repoDetails.value[summary.path] ?? shallowGitRepo(summary)
   })
 
-  const currentBranch = computed<GitBranch | null>(() => {
-    const repo = currentRepo.value
-    if (!repo || repo.currentBranch === null) return null
-    return repo.branches.find((b) => b.name === repo.currentBranch) ?? null
-  })
+  const currentBranch = computed<GitBranch | null>(() => currentGitBranch(currentRepo.value))
 
   /**
    * Suggested remote action for the changes-section primary button: always
    * propose whatever makes most sense right now (publish > sync > push >
    * pull, none when up to date / detached / busy).
    */
-  const suggestedRemoteAction = computed<SuggestedRemoteAction>(() => {
-    if (busyOperation.value !== null) return 'none'
-    const repo = currentRepo.value
-    if (!repo || repo.currentBranch === null) return 'none'
-    const branch = currentBranch.value
-    if (!branch) return 'none'
-    if (branch.upstream == null) return 'publish'
-    const ahead = branch.ahead ?? 0
-    const behind = branch.behind ?? 0
-    if (ahead > 0 && behind > 0) return 'sync'
-    if (ahead > 0) return 'push'
-    if (behind > 0) return 'pull'
-    return 'none'
-  })
+  const suggestedRemoteAction = computed<SuggestedRemoteAction>(() =>
+    suggestRemoteAction(currentRepo.value, busyOperation.value !== null),
+  )
 
   /**
    * Staged working-tree changes. Conflicted (`U`) rows are excluded — they
    * are unresolved and must never look committable.
    */
-  const stagedChanges = computed(
-    () =>
-      currentRepo.value?.changes.filter(
-        (c) => c.stagedKind !== null && c.conflict === null,
-      ) ?? [],
-  )
+  const stagedChanges = computed(() => stagedGitChanges(currentRepo.value))
 
   /**
    * Unstaged working-tree changes. A path with both sides appears here AND
    * in `stagedChanges` (one row per side); conflicts appear exactly once,
    * here.
    */
-  const unstagedChanges = computed(
-    () => currentRepo.value?.changes.filter((c) => c.unstaged !== null) ?? [],
-  )
+  const unstagedChanges = computed(() => unstagedGitChanges(currentRepo.value))
 
   /** Unstaged paths that stage/discard all may touch (conflicts excluded). */
-  const bulkUnstagedPaths = computed(() =>
-    unstagedChanges.value.filter((c) => c.conflict === null).map((c) => c.path),
-  )
+  const bulkUnstagedPaths = computed(() => bulkUnstagedGitPaths(currentRepo.value))
 
   /** Branch / remote-ref tags keyed by the commit hash they point at. */
-  const tagsByHash = computed(() => {
-    const map = new Map<
-      string,
-      { name: string; remote: boolean; current: boolean }[]
-    >()
-    const repo = currentRepo.value
-    if (!repo) return map
-    const add = (
-      hash: string,
-      tag: { name: string; remote: boolean; current: boolean },
-    ): void => {
-      const list = map.get(hash) ?? []
-      list.push(tag)
-      map.set(hash, list)
-    }
-    for (const branch of repo.branches) {
-      add(branch.tipHash, {
-        name: branch.name,
-        remote: false,
-        current: branch.name === repo.currentBranch,
-      })
-    }
-    for (const ref of repo.remoteRefs) {
-      add(ref.tipHash, { name: ref.name, remote: true, current: false })
-    }
-    return map
-  })
+  const tagsByHash = computed(() => gitRefTagsByHash(currentRepo.value))
 
   /**
    * Grouped local + remote ref badges keyed by commit hash (vscode-git-graph
@@ -1239,9 +1006,9 @@ export const useGitStore = defineStore('git', () => {
     paths: string[],
     callbacks: OperationCallbacks,
   ): Promise<boolean> {
-    for (let start = 0; start < paths.length; start += GIT_MAX_PATHS_PER_OPERATION) {
-      const batch = paths.slice(start, start + GIT_MAX_PATHS_PER_OPERATION)
-      const last = start + GIT_MAX_PATHS_PER_OPERATION >= paths.length
+    const batches = chunkGitPaths(paths)
+    for (const [index, batch] of batches.entries()) {
+      const last = index === batches.length - 1
       const ok = await runOperation(
         operation,
         () => ({ operation, paths: batch }),
@@ -1371,10 +1138,7 @@ export const useGitStore = defineStore('git', () => {
     // First-publish remote: prefer the snapshot defaultRemote, then
     // `origin` when configured, then the first remote; undefined when
     // the repo has no remotes (runner falls back to `origin`).
-    const repo = currentRepo.value
-    const defaultName = repo.defaultRemote?.replace('refs/remotes/', '').split('/')[0]
-    const fallbackRemote =
-      defaultName ?? (repo.remotes.includes('origin') ? 'origin' : repo.remotes[0])
+    const fallbackRemote = gitPushRemote(currentRepo.value)
     if (!branch.upstream) {
       // First publish: set the upstream. The backend falls back to
       // `origin` when no explicit remote is sent.
@@ -1477,10 +1241,7 @@ export const useGitStore = defineStore('git', () => {
   function checkoutRemoteBranch(remoteRef: string, localName?: string): Promise<boolean> {
     const trimmed = localName?.trim() ? localName.trim() : undefined
     // Default local name: strip only the remote prefix ("origin/feat/x" -> "feat/x").
-    const withoutRemote = remoteRef.includes('/')
-      ? remoteRef.slice(remoteRef.indexOf('/') + 1)
-      : remoteRef
-    const local = trimmed ?? withoutRemote
+    const local = trimmed ?? remoteBranchLocalName(remoteRef)
     return runOperation(
       'checkout_remote_branch',
       () => ({
@@ -1596,11 +1357,6 @@ export const useGitStore = defineStore('git', () => {
   /** Stash entries of the current repo (newest first). */
   const stashes = computed<GitStashInfo[]>(() => currentRepo.value?.stashes ?? [])
 
-  /** Strict `stash@{n}` selector check (client-side guard only). */
-  function isValidStashSelector(selector: string): boolean {
-    return /^stash@\{\d{1,9}\}$/.test(selector.trim())
-  }
-
   function applyStash(selector: string): Promise<boolean> {
     const trimmed = selector.trim()
     if (!isValidStashSelector(trimmed)) {
@@ -1700,33 +1456,11 @@ export const useGitStore = defineStore('git', () => {
       if (!isCurrentWorkspaceRequest(wsId, gen)) return false
       const current = repoDetails.value[repoPath]
       if (!current || currentRepo.value?.path !== repoPath) return false
-      const seen = new Set(current.commits.map((c) => c.hash))
-      const merged = [...current.commits]
-      for (const raw of res.commits ?? []) {
-        const commit = normalizeCommit(raw)
-        if (!seen.has(commit.hash)) {
-          seen.add(commit.hash)
-          merged.push(commit)
-        }
-      }
-      // Stash list is unpaginated (first page only): merge it in, keyed by
-      // selector (selectors shift on drop, hashes are stable per entry).
-      let stashes = current.stashes
-      if (skip === 0 && res.stashes) {
-        stashes = res.stashes.map(normalizeStash)
-      }
       // Merge ONLY history fields into the live detail row; every other
       // field (changes, branches, mergeState, …) stays untouched.
       repoDetails.value = {
         ...repoDetails.value,
-        [repoPath]: {
-          ...current,
-          commits: merged,
-          stashes,
-          hasMore: res.has_more === true,
-          historySkip: res.history_skip ?? skip,
-          historyLimit: res.history_limit ?? pageSize,
-        },
+        [repoPath]: mergeGitHistoryPage(current, res, skip, pageSize),
       }
       return true
     } catch (e: unknown) {

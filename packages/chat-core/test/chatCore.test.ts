@@ -182,10 +182,12 @@ describe("framework-neutral source portability", () => {
     const sourceFiles = (await readdir(sourceRoot)).filter((file) =>
       file.endsWith(".ts"),
     );
-    const forbiddenPatterns = [
+    const forbiddenImports = [
       /from\s+['\"]vue(?:\/|['\"])/,
       /from\s+['\"]@lucide\//,
       /from\s+['\"]@\//,
+    ];
+    const forbiddenGlobals = [
       /\b(?:window|document|navigator|localStorage|sessionStorage|DragEvent|DataTransfer)\b/,
       /\b(?:File|Blob|btoa|atob)\b/,
     ];
@@ -195,15 +197,22 @@ describe("framework-neutral source portability", () => {
       const executableSource = source
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/^[ \t]*\/\/.*$/gm, "");
+      // Plain string literals (e.g. an icon named "document") are no globals.
+      const codeOnly = executableSource.replace(/"(?:[^"\\\n]|\\.)*"/g, '""');
       expect(
         source,
         `${file} must not use Unicode property escapes`,
       ).not.toMatch(/\\p\{/);
-      for (const pattern of forbiddenPatterns) {
+      for (const pattern of forbiddenImports) {
         expect(
           executableSource,
           `${file} must not include ${pattern}`,
         ).not.toMatch(pattern);
+      }
+      for (const pattern of forbiddenGlobals) {
+        expect(codeOnly, `${file} must not include ${pattern}`).not.toMatch(
+          pattern,
+        );
       }
     }
   });

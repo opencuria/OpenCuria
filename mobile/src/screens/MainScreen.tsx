@@ -82,6 +82,9 @@ import { useSession } from "./SessionContext";
 import { useNotifications } from "../notifications/NotificationContext";
 import { NotificationSettings } from "../notifications/NotificationSettings";
 import { setViewedNotificationSession } from "../notifications/native";
+import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
+import { releaseGitControllers } from "../tools/git";
+import { releaseTerminalSessions } from "../tools/terminal";
 
 const HIDDEN = new Set(["removed", "deleted", "deleting", "pending_deletion"]);
 const EMPTY: ChatControllerSnapshot = {
@@ -104,6 +107,7 @@ const emptySnapshot = () => EMPTY;
 
 type SheetName =
   | "drawer"
+  | "tools"
   | "workspaces"
   | "profile"
   | "settings"
@@ -227,6 +231,20 @@ export function MainScreen(): React.JSX.Element {
     skillIds,
   });
 
+  // Terminal shells and Git state outlive the tools sheet, not the client.
+  useEffect(() => {
+    if (!client) return;
+    const dispose = () => {
+      releaseTerminalSessions(client);
+      releaseGitControllers(client);
+    };
+    const unregister = registerResource(dispose);
+    return () => {
+      unregister();
+      dispose();
+    };
+  }, [client, registerResource]);
+
   useEffect(() => {
     if (!controller) return;
     const dispose = () => controller.dispose();
@@ -312,14 +330,13 @@ export function MainScreen(): React.JSX.Element {
             setNavigation({
               revision,
               workspaceId: nextId,
-              newChat:
-                isWorkspaceReadyForChat(
-                  selectedWorkspace,
-                  Boolean(
-                    selectedWorkspace.active_operation ||
-                    selectedWorkspace.intervention_required,
-                  ),
+              newChat: isWorkspaceReadyForChat(
+                selectedWorkspace,
+                Boolean(
+                  selectedWorkspace.active_operation ||
+                  selectedWorkspace.intervention_required,
                 ),
+              ),
             });
           } else {
             navigationRevision.current += 1;
@@ -1037,12 +1054,22 @@ export function MainScreen(): React.JSX.Element {
   const activeConversation =
     conversations.find((row) => row.session_id === chat.activeSessionId) ??
     null;
+  /** Git, Terminal and Files need the workspace's VM and runner. */
+  const toolsAvailable = Boolean(
+    workspace &&
+    workspace.status === "running" &&
+    workspace.runner_online &&
+    !isTransitioning,
+  );
   const chatMenuActions: NativeMenuAction[] = [
     {
       id: "workspace",
       title: "Switch workspace",
       symbol: "square.stack.3d.up",
     },
+    ...(toolsAvailable
+      ? [{ id: "tools", title: "Git, Terminal & Files", symbol: "terminal" }]
+      : []),
     ...(chat.activeSession && !activeIsSubtask
       ? [
           {
@@ -1071,7 +1098,9 @@ export function MainScreen(): React.JSX.Element {
     setSheet(name);
   };
   const chatMenuAction = (id: string) => {
-    if (id === "workspace") {
+    if (id === "tools") {
+      openSheet("tools");
+    } else if (id === "workspace") {
       setSearch("");
       openSheet("workspaces");
     } else if (id === "rename" && chat.activeSession) {
@@ -1353,6 +1382,10 @@ export function MainScreen(): React.JSX.Element {
             onOpenAttachment={(attachment) => {
               void viewAttachment(attachment);
             }}
+            onPullUpAtEnd={
+              toolsAvailable ? () => openSheet("tools") : undefined
+            }
+            pullUpLabel="Git, Terminal & Files"
             testID="chat-transcript"
           />
         </ChatLayout>
@@ -1376,6 +1409,31 @@ export function MainScreen(): React.JSX.Element {
           gateAction(id, () => controller!.resolveQuestion(id, [], true))
         }
       />
+
+      {workspace && (toolsAvailable || sheet === "tools") ? (
+        <WorkspaceToolsSheet
+          visible={sheet === "tools"}
+          onClose={() =>
+            setSheet((current) => (current === "tools" ? null : current))
+          }
+          client={client}
+          workspaceId={workspace.id}
+          workspaceName={workspace.name}
+          media={media}
+          onInsertIntoChat={
+            chatUnavailable
+              ? undefined
+              : (text) => {
+                  setDraft((current) =>
+                    !current || /\s$/.test(current)
+                      ? `${current}${text}`
+                      : `${current} ${text}`,
+                  );
+                  setSheet(null);
+                }
+          }
+        />
+      ) : null}
 
       <NativeModal
         visible={sheet === "workspaces"}

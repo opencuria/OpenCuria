@@ -65,6 +65,13 @@ import {
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import { useChromeTopInset } from "../ui/chromeInset";
 import { useChatLayout } from "./ChatLayout";
+import {
+  EndPullArea,
+  EndPullHint,
+  useEndPull,
+  useEndPullState,
+  type EndPullState,
+} from "./EndPull";
 import { NativeMenu } from "../ui/NativeMenu";
 import { useTheme } from "../ui/theme";
 import {
@@ -103,6 +110,14 @@ export interface ChatMessagesProps {
   mediaScopeKey?: string | number;
   /** Extra top padding for host overlays such as status banners. */
   contentInsetTop?: number;
+  /**
+   * Pulling up past the newest message calls this (e.g. to open workspace
+   * tools). Only a touch that starts while the transcript rests at its end
+   * arms the pull; scrolling to the end never opens it.
+   */
+  onPullUpAtEnd?: () => void;
+  /** Hint shown while pulling, such as "Git, Terminal & Files". */
+  pullUpLabel?: string;
   testID?: string;
 }
 
@@ -139,10 +154,14 @@ export function ChatMessages({
   onOpenAttachment,
   mediaScopeKey,
   contentInsetTop = 0,
+  onPullUpAtEnd,
+  pullUpLabel = "Workspace tools",
   testID = "chat-messages",
 }: ChatMessagesProps): React.JSX.Element {
   const { theme } = useTheme();
   const layout = useChatLayout();
+  const pullState = useEndPullState();
+  const pull = useEndPull(pullState, onPullUpAtEnd);
   // Messages scroll beneath translucent navigation chrome and host overlays.
   const topInset = useChromeTopInset() + contentInsetTop;
   const listRef = useRef<LegendListRef>(null);
@@ -269,57 +288,99 @@ export function ChatMessages({
   const hasMessages = ordered.length > 0;
   useEffect(() => {
     const state = hasMessages ? listRef.current?.getState() : undefined;
-    if (!state) return;
+    if (!state) {
+      pullState.atEnd.value = true;
+      return;
+    }
     setShowJumpToLatest(!state.isNearEnd);
-    return state.listen("isNearEnd", (nearEnd) =>
+    pullState.atEnd.value = state.isAtEnd;
+    const stopNearEnd = state.listen("isNearEnd", (nearEnd) =>
       setShowJumpToLatest(!nearEnd),
     );
-  }, [hasMessages]);
+    const stopAtEnd = state.listen("isAtEnd", (atEnd) => {
+      pullState.atEnd.value = atEnd;
+    });
+    return () => {
+      stopNearEnd();
+      stopAtEnd();
+    };
+  }, [hasMessages, pullState]);
+  const onScroll = useCallback(() => {
+    pullState.lastScrollAt.value = Date.now();
+  }, [pullState]);
+  const pullHint = onPullUpAtEnd ? (
+    <EndPullHint
+      progress={pull.progress}
+      ready={pull.ready}
+      label={pullUpLabel}
+      bottom={layout.dockOffset + 12}
+    />
+  ) : null;
   const jumpToLatest = useCallback(() => {
     setShowJumpToLatest(false);
     void listRef.current?.scrollToEnd({ animated: true });
   }, []);
 
   if (ordered.length === 0) {
-    return <EmptyTranscript topInset={topInset} testID={testID} />;
+    return (
+      <View style={styles.listRoot}>
+        <EndPullArea gesture={pull.gesture}>
+          <View style={styles.listRoot} collapsable={false}>
+            <EmptyTranscript
+              topInset={topInset}
+              testID={testID}
+              pullState={pullState}
+            />
+          </View>
+        </EndPullArea>
+        {pullHint}
+      </View>
+    );
   }
 
   return (
     <View style={styles.listRoot}>
-      <KeyboardAwareLegendList
-        ref={listRef}
-        testID={testID}
-        data={ordered}
-        renderItem={renderItem}
-        keyExtractor={keyExtractor}
-        ListHeaderComponent={header}
-        estimatedItemSize={220}
-        drawDistance={600}
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={VIEWABILITY}
-        initialScrollAtEnd
-        maintainScrollAtEnd={FOLLOW_END}
-        maintainVisibleContentPosition
-        recycleItems={false}
-        contentInsetEndAdjustment={layout.dockHeight}
-        keyboardOffset={layout.keyboardOffset}
-        keyboardLiftBehavior="whenAtEnd"
-        // Short transcripts must stay draggable in the inset area, so the
-        // keyboard can be pulled down from anywhere (facebook/react-native#54123).
-        applyWorkaroundForContentInsetHitTestBug={Platform.OS === "ios"}
-        keyboardDismissMode={layout.keyboardDismissMode}
-        keyboardShouldPersistTaps="handled"
-        // Insets are owned by the keyboard-aware list, never by UIKit.
-        automaticallyAdjustContentInsets={false}
-        contentInsetAdjustmentBehavior="never"
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingTop: styles.listContent.paddingTop + topInset },
-        ]}
-        style={{ backgroundColor: theme.background }}
-      />
+      <EndPullArea gesture={pull.gesture}>
+        <View style={styles.listRoot} collapsable={false}>
+          <KeyboardAwareLegendList
+            ref={listRef}
+            testID={testID}
+            data={ordered}
+            renderItem={renderItem}
+            keyExtractor={keyExtractor}
+            ListHeaderComponent={header}
+            estimatedItemSize={220}
+            drawDistance={600}
+            onViewableItemsChanged={onViewableItemsChanged}
+            viewabilityConfig={VIEWABILITY}
+            initialScrollAtEnd
+            maintainScrollAtEnd={FOLLOW_END}
+            maintainVisibleContentPosition
+            recycleItems={false}
+            contentInsetEndAdjustment={layout.dockHeight}
+            keyboardOffset={layout.keyboardOffset}
+            keyboardLiftBehavior="whenAtEnd"
+            // Short transcripts must stay draggable in the inset area, so the
+            // keyboard can be pulled down from anywhere (facebook/react-native#54123).
+            applyWorkaroundForContentInsetHitTestBug={Platform.OS === "ios"}
+            keyboardDismissMode={layout.keyboardDismissMode}
+            keyboardShouldPersistTaps="handled"
+            // Insets are owned by the keyboard-aware list, never by UIKit.
+            automaticallyAdjustContentInsets={false}
+            contentInsetAdjustmentBehavior="never"
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingTop: styles.listContent.paddingTop + topInset },
+            ]}
+            style={{ backgroundColor: theme.background }}
+            onScroll={onScroll}
+            scrollEventThrottle={32}
+          />
+        </View>
+      </EndPullArea>
       <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
+      {pullHint}
     </View>
   );
 }
@@ -387,9 +448,11 @@ function JumpToLatest({
 function EmptyTranscript({
   topInset,
   testID,
+  pullState,
 }: {
   topInset: number;
   testID: string;
+  pullState: EndPullState;
 }): React.JSX.Element {
   const { theme } = useTheme();
   const { dockOffset, dockTranslateY, keyboardDismissMode } = useChatLayout();
@@ -415,6 +478,10 @@ function EmptyTranscript({
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
       alwaysBounceVertical
+      scrollEventThrottle={32}
+      onScroll={() => {
+        pullState.lastScrollAt.value = Date.now();
+      }}
     >
       <Animated.View style={centered}>
         <Text style={[styles.emptyTitle, { color: theme.text }]}>

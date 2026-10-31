@@ -1,0 +1,31 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.opencuriahighlights'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.opencuriahighlights"
+  ndkVersion rootProject.ext.ndkVersion
+
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+
+    def requestedArchitectures = project.findProperty('reactNativeArchitectures')
+    if (requestedArchitectures) {
+      ndk {
+        abiFilters(*requestedArchitectures.split(','))
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path 'src/main/cpp/CMakeLists.txt'
+      version '3.22.1'
+    }
+  }
+}

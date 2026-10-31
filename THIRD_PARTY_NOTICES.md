@@ -71,9 +71,10 @@ SOFTWARE.
 ## material-icon-theme (VS Code file/folder icons)
 
 The webapp bundles a small curated subset of colored file/folder SVGs
-(~147 icons under `webapp/src/assets/file-icons/`, resolved by
-`webapp/src/lib/fileIcons.ts` and rendered by
-`webapp/src/components/files/WorkspaceFileIcon.vue`) copied from:
+(~147 icons under `webapp/src/assets/file-icons/`, resolved by the shared
+`packages/chat-core/src/fileIcons.ts` and rendered by
+`webapp/src/components/files/WorkspaceFileIcon.vue` and the mobile
+`WorkspaceFileIcon`) copied from:
 
 - **Project:** Material Icon Theme (`material-icon-theme` on npm —
   Material Design Icons for Visual Studio Code)
@@ -255,6 +256,34 @@ DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
+
+## Mobile workspace tools (t3code, Ghostty, Pierre Highlights)
+
+The mobile Git/Terminal/Files sheet adapts code from **t3code**
+([pingdotgg/t3code](https://github.com/pingdotgg/t3code), MIT License,
+Copyright (c) 2026 T3 Tools Inc.): the native terminal surface
+(`mobile/modules/opencuria-terminal/`), the native syntax highlighter
+(`mobile/modules/opencuria-highlights/`) and parts of the terminal and file
+browser UI under `mobile/src/tools/`. Each module ships the t3code MIT
+license as `LICENSE`; adapted source files carry an attribution header.
+
+Vendored components (details and pinned revisions in each module's
+`THIRD_PARTY_NOTICES.md` / `NOTICE.md`):
+
+- **Ghostty / libghostty** (`GhosttyKit.xcframework`, iOS) and
+  **libghostty-vt** (Android shared libraries and C headers),
+  [ghostty-org/ghostty](https://github.com/ghostty-org/ghostty): MIT.
+- **MesloLGS NF** terminal font (Android): Apache-2.0.
+- **@pierre/highlights** 0.2.0 lexers compiled to C with wasm2c: Apache-2.0.
+- **wasm2c runtime** ([WebAssembly/wabt](https://github.com/WebAssembly/wabt)):
+  Apache-2.0 (text in `mobile/modules/opencuria-highlights/Vendor/wasm2c/LICENSE`).
+- **SIMDe** ([simd-everywhere/simde](https://github.com/simd-everywhere/simde)): MIT.
+- **jsdiff** (`diff` 9.0.0, [kpdecker/jsdiff](https://github.com/kpdecker/jsdiff)):
+  BSD-3-Clause, used for Git diffs on mobile.
+
+The mobile file icons are the material-icon-theme SVGs listed above,
+inlined by `mobile/scripts/generate-file-icons.mjs` into
+`mobile/src/tools/files/fileIconSvgs.generated.ts`.
 
 ## OpenAI Codex
 

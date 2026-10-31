@@ -61,6 +61,18 @@ export interface RealtimeEventMap {
   "files:upload_result": FileUploadResult;
   "files:download_result": FileDownloadResult;
   "files:download_chunk": FileChunkEvent;
+  "terminal:started": {
+    workspace_id: string;
+    terminal_id: string;
+    task_id?: string;
+  };
+  /** `data` is base64 encoded PTY output. */
+  "terminal:output": {
+    workspace_id: string;
+    terminal_id: string;
+    data: string;
+  };
+  "terminal:closed": { workspace_id: string; terminal_id: string };
 }
 
 export type RealtimeEventName = keyof RealtimeEventMap | (string & {});

@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["OpenCuriaHighlightsModule"],
+    "podspecPath": "OpenCuriaHighlights.podspec"
+  },
+  "android": {
+    "modules": ["expo.modules.opencuriahighlights.OpenCuriaHighlightsModule"]
+  }
+}

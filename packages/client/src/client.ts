@@ -1,5 +1,6 @@
 import { ApiClient, type ApiClientOptions, type FetchLike } from "./api";
 import { createHarnessApi } from "./harness";
+import { createGitApi, createTerminalApi } from "./workspaceTools";
 import {
   RealtimeClient,
   type RealtimeOptions,
@@ -84,6 +85,10 @@ export interface OpenCuriaClient {
     list(signal?: AbortSignal): Promise<HarnessConversation[]>;
   };
   harness: ReturnType<typeof createHarnessApi>;
+  /** Workspace git integration (repos, history, typed mutations, file sides). */
+  git: ReturnType<typeof createGitApi>;
+  /** Workspace PTY: REST start plus Socket.IO input/resize/close. */
+  terminal: ReturnType<typeof createTerminalApi>;
   skills: {
     list(signal?: AbortSignal): Promise<Skill[]>;
     create(data: SkillCreateInput, signal?: AbortSignal): Promise<Skill>;
@@ -219,6 +224,8 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
       list: harness.listConversations,
     },
     harness,
+    git: createGitApi(() => api),
+    terminal: createTerminalApi(() => api, realtime),
     skills: {
       list: (signal) => api.get<Skill[]>("/skills/", signal),
       create: (data, signal) => api.post<Skill>("/skills/", data, signal),
