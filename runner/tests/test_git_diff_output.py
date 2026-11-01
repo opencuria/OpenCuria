@@ -48,16 +48,23 @@ def service(tmp_path: Path) -> tuple[Path, GitService, FakeGitRuntime, uuid.UUID
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_combined_diff_preserves_paths_and_metadata(service, cached: bool) -> None:
+@pytest.mark.parametrize("quote_paths", ["true", "false"])
+@pytest.mark.parametrize("include_patch", [False, True])
+def test_combined_diff_preserves_paths_and_metadata(
+    service, cached: bool, quote_paths: str, include_patch: bool
+) -> None:
     """Renames, binary/mode changes, deletes and metadata-like paths stay intact."""
     repo, _, _, _ = service
+    _git(repo, "config", "core.quotepath", quote_paths)
     names = [
         "old name.txt",
-        "delete.txt",
+        "delete with spaces.txt",
         "mode.py",
         ":100644 100644 x y M",
         "1\t2\tname\nwith newline",
         'quote"\\ä.txt',
+        "a file with spaces.txt",
+        "another file with spaces.txt",
     ]
     for name in names:
         (repo / name).write_text(f"before {name!r}\n" * 20)
@@ -68,30 +75,134 @@ def test_combined_diff_preserves_paths_and_metadata(service, cached: bool) -> No
     (repo / names[0]).rename(repo / "new\tname\nwith spaces.txt")
     (repo / names[1]).unlink()
     (repo / names[2]).chmod(0o755)
-    for name in names[3:]:
-        (repo / name).write_text(f"before {name!r}\n" * 20 + "after\n")
+    for index, name in enumerate(names[3:]):
+        (repo / name).write_text(f"before {name!r}\n" * 20 + f"after-{index}\n")
     (repo / "binary.bin").write_bytes(bytes(range(255, -1, -1)))
-    (repo / "empty.txt").touch()
+    for name in ("empty1.txt", "empty2.txt"):
+        (repo / name).touch()
     (repo / "link").symlink_to("README.md")
     if cached:
         _git(repo, "add", "-A")
-    args = ["--cached"] if cached else []
-    output = _git(repo, "diff", "--raw", "--numstat", "--patch", "-z", *args)
+    args = (["--cached"] if cached else []) + (["--patch"] if include_patch else [])
+    output = _git(repo, "diff", "--raw", "--numstat", "-z", *args)
 
     actual = git_ops.parse_diff_z(output)
 
     by_path = {row["new_path"]: row for row in actual}
-    assert by_path["delete.txt"]["status"] == "D"
-    assert by_path["delete.txt"]["deletions"] == 20
-    for name in names[3:]:
+    assert by_path[names[1]]["status"] == "D"
+    assert by_path[names[1]]["deletions"] == 20
+    if include_patch:
+        assert "-before" in by_path[names[1]]["patch"]
+    else:
+        assert all("patch" not in row for row in actual)
+    assert by_path[names[2]]["additions"] == 0
+    assert by_path[names[2]]["deletions"] == 0
+    for index, name in enumerate(names[3:]):
         assert by_path[name]["additions"] == 1
-        assert "+after" in by_path[name]["patch"]
+        if include_patch:
+            assert [
+                line
+                for line in by_path[name]["patch"].splitlines()
+                if line.startswith("+after")
+            ] == [f"+after-{index}"]
     assert {row["new_path"] for row in actual} >= set(names[3:])
     if cached:
         renamed = next(row for row in actual if row["status"] == "R")
         assert renamed["old_path"] == names[0]
         assert renamed["new_path"] == "new\tname\nwith spaces.txt"
+        if include_patch:
+            assert "rename to" in renamed["patch"]
+        for name in ("empty1.txt", "empty2.txt"):
+            assert by_path[name]["status"] == "A"
+            assert by_path[name]["additions"] == by_path[name]["deletions"] == 0
     assert next(row for row in actual if row["new_path"] == "binary.bin")["binary"]
+
+
+@pytest.mark.parametrize("copy", [False, True])
+@pytest.mark.parametrize("changed", [False, True])
+def test_combined_diff_renames_and_copies(service, copy: bool, changed: bool) -> None:
+    """Pure and edited renames/copies retain exact paths, counts and patch text."""
+    repo, _, _, _ = service
+    old, new = "old short.txt", "new name with many words.txt"
+    original = "same content\n" * 20
+    (repo / old).write_text(original)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "original")
+    (repo / new).write_text(original + ("more\n" if changed else ""))
+    if not copy:
+        (repo / old).unlink()
+    _git(repo, "add", "-A")
+
+    rows = git_ops.parse_diff_z(
+        _git(
+            repo,
+            "diff",
+            "--cached",
+            "--raw",
+            "--numstat",
+            "--patch",
+            "-z",
+            "-C",
+            "--find-copies-harder",
+        )
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["old_path"], row["new_path"]) == (old, new)
+    assert row["status"] == ("C" if copy else "R")
+    assert row["additions"] == int(changed)
+    assert row["deletions"] == 0
+    assert ("+more" in row["patch"]) == changed
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "bogus\x00",
+        "x\ty\tbad.txt\x00",
+        "1\t0\t\x00only-old\x00",
+        "1\t0\t\x00\x00new.txt\x00",
+    ],
+)
+def test_malformed_statistics_do_not_replace_raw_metadata(malformed: str) -> None:
+    """Incomplete or invalid statistics never create a file or lose raw status."""
+    rows = git_ops.parse_diff_z(":100644 100644 a b M\x00real.txt\x00" + malformed)
+    assert rows == [
+        {
+            "old_path": "real.txt",
+            "new_path": "real.txt",
+            "status": "M",
+            "additions": 0,
+            "deletions": 0,
+            "binary": False,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        "diff --git a/a b c d/e\nold mode 100644\nnew mode 100755\n",
+        'diff --git "a/broken "b/fixed"\nindex 123..456 100644\n'
+        '--- "a/broken\n+++ "b/fixed"\n@@ -1 +1 @@\n-a\n+b\n',
+    ],
+)
+def test_ambiguous_patch_paths_keep_metadata_without_misattribution(patch: str) -> None:
+    """Unparseable patches cannot invent paths or hide valid file statistics."""
+    rows = git_ops.parse_diff_z(
+        ":100644 100644 a b M\x00real.txt\x001\t1\treal.txt\x00\x00" + patch
+    )
+    assert rows == [
+        {
+            "old_path": "real.txt",
+            "new_path": "real.txt",
+            "status": "M",
+            "additions": 1,
+            "deletions": 1,
+            "binary": False,
+        }
+    ]
 
 
 def test_combined_diff_preserves_limits(service) -> None:
@@ -107,7 +218,9 @@ def test_combined_diff_preserves_limits(service) -> None:
 
     assert actual[0]["patch"].endswith("…[truncated]")
     assert len(actual[0]["patch"].encode()) < git_ops.GIT_MAX_DIFF_BYTES + 32
-    assert sum("patch" in row for row in actual) == git_ops.GIT_MAX_DIFF_FILES_WITH_PATCH
+    assert (
+        sum("patch" in row for row in actual) == git_ops.GIT_MAX_DIFF_FILES_WITH_PATCH
+    )
     assert "patch" not in actual[-1]
     assert actual[-1]["additions"] == 1
 
@@ -173,7 +286,9 @@ async def test_commit_details_use_one_diff(service, kind: str) -> None:
 
     assert result["ok"], result
     expected_path = {
-        "root": "README.md", "regular": "second.txt", "merge": "feature.txt"
+        "root": "README.md",
+        "regular": "second.txt",
+        "merge": "feature.txt",
     }[kind]
     rows = result["details"]["file_changes"]
     assert rows == [

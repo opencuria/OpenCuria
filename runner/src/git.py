@@ -971,130 +971,85 @@ def _iter_nul_fields(output: str) -> list[str]:
     return fields
 
 
-def parse_numstat_z(output: str) -> dict[str, dict[str, Any]]:
-    """Parse ``git diff --numstat -z`` output keyed by new path.
-
-    Exact ``-z`` record format (no guessing):
-
-    * normal file: ``<added>\\t<deleted>\\t<path>\\0``
-    * rename/copy: ``<added>\\t<deleted>\\t\\0<old>\\0<new>\\0``
-      (empty third column anchors two extra NUL fields).
-
-    Tabs inside filenames survive via ``split('\\t', 2)``.  A bare NUL
-    field without tabs is never consumed as a rename target — it is
-    skipped fail-safe on the next iteration.  Malformed records
-    (missing tabs, non-numeric counts other than ``-``, missing
-    rename fields, empty keys) are skipped; a malformed rename anchor
-    also drops its two trailing fields to stay in sync.
-    """
-    stats: dict[str, dict[str, Any]] = {}
-    fields = _iter_nul_fields(output)
-    index = 0
-    while index < len(fields):
-        record = fields[index]
-        index += 1
-        if not record or "\t" not in record:
-            continue
-        parts = record.split("\t", 2)
-        if len(parts) != 3:
-            continue
-        added_raw, deleted_raw, path_part = parts[0].strip(), parts[1].strip(), parts[2]
-        if path_part == "":
-            # Rename/copy anchor: exactly two more NUL fields follow.
-            if index + 1 >= len(fields):
-                continue
-            old_path = fields[index]
-            new_path = fields[index + 1]
-            index += 2
-            # Counts must still be valid; otherwise drop the whole record.
-            if not _is_numstat_count(added_raw) or not _is_numstat_count(deleted_raw):
-                continue
-            if not old_path or not new_path:
-                continue
-            binary = added_raw == "-" or deleted_raw == "-"
-            stats[new_path] = {
-                "additions": 0 if binary else int(added_raw),
-                "deletions": 0 if binary else int(deleted_raw),
-                "binary": binary,
-                "old_path": old_path,
-            }
-            continue
-        # Normal record: path_part is the full path (may contain tabs).
-        if not path_part:
-            continue
-        if not _is_numstat_count(added_raw) or not _is_numstat_count(deleted_raw):
-            continue
-        binary = added_raw == "-" or deleted_raw == "-"
-        stats[path_part] = {
-            "additions": 0 if binary else int(added_raw),
-            "deletions": 0 if binary else int(deleted_raw),
-            "binary": binary,
-            "old_path": None,
-        }
-    return stats
-
-
-def _is_numstat_count(token: str) -> bool:
-    """Return True for valid numstat count tokens (digits or ``-``)."""
-    if token == "-":
-        return True
-    return token.isdigit()
-
-
-def parse_raw_z(output: str) -> dict[str, dict[str, Any]]:
-    """Parse ``git diff --raw -z`` output keyed by new path."""
-    infos: dict[str, dict[str, Any]] = {}
-    fields = _iter_nul_fields(output)
-    index = 0
-    while index < len(fields):
-        record = fields[index]
-        index += 1
-        if not record.startswith(":"):
-            continue
-        meta = record[1:].split(" ")
-        if len(meta) < 5:
-            continue
-        _old_mode, _new_mode, _old_hash, _new_hash, status_token = meta[:5]
-        status = status_token[0] if status_token else "M"
-        score = status_token[1:] if len(status_token) > 1 else ""
-        if index >= len(fields):
-            break
-        first = fields[index]
-        index += 1
-        old_path: str | None = None
-        new_path = first
-        if status in {"R", "C"}:
-            if index >= len(fields):
-                break
-            old_path, new_path = first, fields[index]
-            index += 1
-        infos[new_path] = {
-            "status": status,
-            "score": score,
-            "old_path": old_path,
-        }
-    return infos
-
-
 def parse_diff_z(output: str) -> list[dict[str, Any]]:
-    """Read ``--raw --numstat -z`` and optional patch text in one traversal.
+    """Parse the runner's combined ``--raw --numstat -z`` diff response.
 
-    Git emits raw records, numstat records, then an extra NUL before the
-    patch. Consume whole raw records to find the numstat boundary: paths
-    can themselves look like raw headers or tab-separated statistics.
-    Commit details need only metadata; commit suggestions also request patches.
+    Consume raw records before statistics, preserving paths that themselves
+    resemble metadata. An optional patch follows an extra NUL; commit details
+    omit it, while commit suggestions receive bounded per-file patches.
     """
     metadata, _, patch = output.partition("\x00\x00")
     fields = _iter_nul_fields(metadata)
-    end = 0
-    while end < len(fields) and fields[end].startswith(":"):
-        status = fields[end].rsplit(" ", 1)[-1]
-        end += 3 if status.startswith(("R", "C")) else 2
-    return build_file_changes(
-        raw=parse_raw_z("\x00".join(fields[:end])),
-        numstat=parse_numstat_z("\x00".join(fields[end:])),
-        patches=split_patch_per_file(patch),
-    )
+    entries: dict[str, dict[str, Any]] = {}
+
+    def entry_for(path: str) -> dict[str, Any]:
+        """Return the shared file entry for metadata, statistics and patch text."""
+        return entries.setdefault(
+            path,
+            {
+                "old_path": path,
+                "new_path": path,
+                "status": "M",
+                "additions": 0,
+                "deletions": 0,
+                "binary": False,
+            },
+        )
+
+    index = 0
+    while index < len(fields) and fields[index].startswith(":"):
+        meta = fields[index][1:].split(" ")
+        index += 1
+        if len(meta) < 5 or index >= len(fields):
+            break
+        status = meta[4][:1] or "M"
+        old_path = path = fields[index]
+        index += 1
+        if status in {"R", "C"}:
+            if index >= len(fields):
+                break
+            path = fields[index]
+            index += 1
+        entry_for(path).update(status=status, old_path=old_path)
+
+    while index < len(fields):
+        record = fields[index].split("\t", 2)
+        index += 1
+        if len(record) != 3:
+            continue
+        added, deleted, path = record
+        added, deleted = added.strip(), deleted.strip()
+        old_path = None
+        if not path:
+            # Rename/copy statistics carry two additional NUL-delimited paths.
+            if index + 1 >= len(fields):
+                break
+            old_path, path = fields[index : index + 2]
+            index += 2
+            if not old_path:
+                continue
+        if not path or not all(
+            count == "-" or count.isdecimal() for count in (added, deleted)
+        ):
+            continue
+        entry = entry_for(path)
+        binary = added == "-" or deleted == "-"
+        entry.update(
+            additions=0 if binary else int(added),
+            deletions=0 if binary else int(deleted),
+            binary=binary,
+        )
+        if old_path and entry["old_path"] == path:
+            entry["old_path"] = old_path
+
+    patches = split_patch_per_file(patch)
+    with_patch = 0
+    for path in sorted(patches):
+        entry = entry_for(path)
+        if patches[path] and with_patch < GIT_MAX_DIFF_FILES_WITH_PATCH:
+            entry["patch"] = _truncate_text(patches[path])
+            with_patch += 1
+    return [entries[path] for path in sorted(entries)]
 
 
 # --- unified patch parsing ----------------------------------------------------
@@ -1398,44 +1353,6 @@ def _resolve_section_path(header_rest: str, section: list[str]) -> str | None:
     return _fallback_from_diff_git_header(header_rest)
 
 
-# --- file entry assembly ------------------------------------------------------
-
-
-def build_file_changes(
-    *,
-    raw: dict[str, dict[str, Any]],
-    numstat: dict[str, dict[str, Any]],
-    patches: dict[str, str],
-) -> list[dict[str, Any]]:
-    """Assemble file metadata and bounded patches for commit suggestions.
-
-    ``raw`` comes from :func:`parse_raw_z`, ``numstat`` from
-    :func:`parse_numstat_z`, ``patches`` from :func:`split_patch_per_file`.
-    """
-    entries: list[dict[str, Any]] = []
-    paths = sorted(set(raw) | set(numstat) | set(patches))
-    with_patch = 0
-    for path in paths:
-        info = raw.get(path, {})
-        stat = numstat.get(path, {})
-        status = info.get("status") or "M"
-        old_path = info.get("old_path") or stat.get("old_path")
-        patch_text = patches.get(path, "")
-        entry = {
-            "old_path": old_path or path,
-            "new_path": path,
-            "status": status,
-            "additions": int(stat.get("additions", 0)),
-            "deletions": int(stat.get("deletions", 0)),
-            "binary": bool(stat.get("binary")),
-        }
-        if patch_text and with_patch < GIT_MAX_DIFF_FILES_WITH_PATCH:
-            entry["patch"] = _truncate_text(patch_text)
-            with_patch += 1
-        entries.append(entry)
-    return entries
-
-
 # --- discovery helpers (pure, testable) ---------------------------------------
 
 
@@ -1497,7 +1414,6 @@ __all__ = [
     "GIT_OPERATIONS",
     "GIT_PERSISTENT_ENV_FILE",
     "GitError",
-    "build_file_changes",
     "build_git_env",
     "changes_from_status_v2",
     "check_git_args_allowed",
@@ -1517,8 +1433,6 @@ __all__ = [
     "parse_diff_z",
     "parse_for_each_ref",
     "parse_log_us_rs",
-    "parse_numstat_z",
-    "parse_raw_z",
     "parse_status_v2",
     "split_patch_per_file",
     "unwrap_git_exec_argv",
