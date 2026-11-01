@@ -546,6 +546,7 @@ def test_user_interactions_are_independent_of_run_orchestration(
     assert not violations, "\n".join(sorted(violations))
 
     moved_operations = {
+        "list_pending_interactions",
         "list_pending_permissions",
         "list_pending_questions",
         "resolve_permission",

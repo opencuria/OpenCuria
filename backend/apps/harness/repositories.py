@@ -485,6 +485,17 @@ class HarnessSessionRepository:
         return list(HarnessSession.objects.filter(id__in=session_ids))
 
     @staticmethod
+    def agent_names_by_ids(session_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """Read gate attribution without loading resumable session state."""
+        if not session_ids:
+            return {}
+        return dict(
+            HarnessSession.objects.filter(id__in=session_ids)
+            .order_by()
+            .values_list("id", "agent_name")
+        )
+
+    @staticmethod
     def has_busy_for_workspace(workspace_id: uuid.UUID) -> bool:
         """Return True when any session in *workspace_id* is busy."""
         return bool(HarnessSessionRepository.busy_workspace_ids([workspace_id]))

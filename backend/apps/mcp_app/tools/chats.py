@@ -114,10 +114,11 @@ def _is_running(session: Any) -> bool:
 def _pending_inputs(session: Any) -> list[dict[str, Any]]:
     """Questions and permission requests the agent (or a subagent) waits on."""
     service = get_harness_service()
-    pending: list[dict[str, Any]] = []
-    for request in service.interactions.list_pending_permissions(
+    interactions = service.interactions.list_pending_interactions(
         session.id, include_descendants=True
-    ):
+    )
+    pending: list[dict[str, Any]] = []
+    for request in interactions.permissions:
         pending.append(
             compact(
                 {
@@ -134,9 +135,7 @@ def _pending_inputs(session: Any) -> list[dict[str, Any]]:
                 }
             )
         )
-    for request in service.interactions.list_pending_questions(
-        session.id, include_descendants=True
-    ):
+    for request in interactions.questions:
         pending.append(
             compact(
                 {

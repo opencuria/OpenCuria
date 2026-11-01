@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -19,8 +20,9 @@ from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from common.exceptions import NotFoundError
 
 from .agents.definitions import get_agent
-from .models import HarnessMessage, HarnessSession
+from .models import HarnessMessage, HarnessSession, QuestionRequest
 from .permissions.evaluator import ASK, DENY, PermissionEvaluator
+from .permissions.models import PermissionRequest
 from .permissions.scopes import (
     is_permission_scope,
     permission_display_action,
@@ -36,6 +38,14 @@ FRONTEND_EVENT_PERMISSION = "harness.permission_required"
 FRONTEND_EVENT_QUESTION = "harness.question_required"
 
 EmitFn = Callable[[str, dict[str, Any], str], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class PendingInteractions:
+    """Pending gates read over one shared session scope."""
+
+    permissions: list[dict[str, Any]]
+    questions: list[dict[str, Any]]
 
 
 def _normalize_question_answers(answers: list[Any]) -> list[Any]:
@@ -100,60 +110,54 @@ class InteractionService:
                 if future is not None and not future.done():
                     future.cancel()
 
-    def list_pending_permissions(
+    def list_pending_interactions(
         self, session_id: uuid.UUID, *, include_descendants: bool = False
-    ) -> list[dict[str, Any]]:
-        """Return pending permission gates for *session_id* as dicts.
+    ) -> PendingInteractions:
+        """Read both gate types with one tree walk and one name projection.
 
-        When *include_descendants* is true, also include pending gates of
-        child (and nested) sessions so a parent parts fetch can surface
-        subagent asks.
+        Scope and attribution are local to this read; subsequent requests
+        always observe newly spawned sessions, gates and agent names.
         """
         session_ids = self._session_ids(session_id, include_descendants)
-        rows = self.permissions.requests.list_pending_for_sessions(session_ids)
-        names = {
-            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
-        }
-        return [
-            {
-                "request_id": str(row.id),
-                "session_id": str(row.session_id),
-                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
-                "tool": row.tool,
-                "pattern": permission_display_action(row.pattern),
-                "title": row.title or "",
-                "call_id": row.call_id or "",
-                "status": "pending",
-                "agent_name": names.get(row.session_id, ""),
-            }
-            for row in rows
-        ]
+        permissions = self.permissions.requests.list_pending_for_sessions(session_ids)
+        questions = self.questions.list_pending_for_sessions(session_ids)
+        names = self.sessions.agent_names_by_ids(
+            list({row.session_id for row in [*permissions, *questions]})
+        )
+        return PendingInteractions(
+            permissions=[self._permission_payload(row, names) for row in permissions],
+            questions=[self._question_payload(row, names) for row in questions],
+        )
 
-    def list_pending_questions(
-        self, session_id: uuid.UUID, *, include_descendants: bool = False
-    ) -> list[dict[str, Any]]:
-        """Return pending question gates for *session_id* as dicts.
-
-        When *include_descendants* is true, also include pending gates of
-        child (and nested) sessions.
-        """
-        session_ids = self._session_ids(session_id, include_descendants)
-        rows = self.questions.list_pending_for_sessions(session_ids)
-        names = {
-            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
+    @staticmethod
+    def _permission_payload(
+        row: PermissionRequest, names: dict[uuid.UUID, str]
+    ) -> dict[str, Any]:
+        return {
+            "request_id": str(row.id),
+            "session_id": str(row.session_id),
+            "workspace_id": str(row.workspace_id) if row.workspace_id else "",
+            "tool": row.tool,
+            "pattern": permission_display_action(row.pattern),
+            "title": row.title or "",
+            "call_id": row.call_id or "",
+            "status": "pending",
+            "agent_name": names.get(row.session_id, ""),
         }
-        return [
-            {
-                "request_id": str(row.id),
-                "session_id": str(row.session_id),
-                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
-                "questions": list(row.questions or []),
-                "call_id": row.call_id or "",
-                "status": "pending",
-                "agent_name": names.get(row.session_id, ""),
-            }
-            for row in rows
-        ]
+
+    @staticmethod
+    def _question_payload(
+        row: QuestionRequest, names: dict[uuid.UUID, str]
+    ) -> dict[str, Any]:
+        return {
+            "request_id": str(row.id),
+            "session_id": str(row.session_id),
+            "workspace_id": str(row.workspace_id) if row.workspace_id else "",
+            "questions": list(row.questions or []),
+            "call_id": row.call_id or "",
+            "status": "pending",
+            "agent_name": names.get(row.session_id, ""),
+        }
 
     async def resolve_permission(
         self, *, session: HarnessSession, request_id: uuid.UUID, response: str

@@ -85,7 +85,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from django.test.utils import CaptureQueriesContext
 
     from apps.accounts.models import APIKey, APIKeyPermission
-    from apps.harness.models import HarnessMessage, HarnessSession
+    from apps.harness.models import HarnessMessage, HarnessSession, QuestionRequest
     from apps.harness.permissions.models import PermissionRequest
     from apps.harness.permissions.repositories import PermissionRequestRepository
     from apps.organizations.models import Membership, Organization
@@ -115,16 +115,22 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
         )
     root = sessions[0]
-    for index in range(4):
-        sessions.append(
-            HarnessSession.objects.create(
-                id=_identity(f"child/{index}"),
-                workspace_id=root.workspace_id,
-                organization_id=org.id,
-                parent=root,
-                agent_name="explore",
-            )
-        )
+    level = [root]
+    for depth in range(args.tree_depth):
+        children = []
+        for parent in level:
+            for index in range(args.tree_width):
+                children.append(
+                    HarnessSession.objects.create(
+                        id=_identity(f"child/{depth}/{parent.id}/{index}"),
+                        workspace_id=root.workspace_id,
+                        organization_id=org.id,
+                        parent=parent,
+                        agent_name="explore",
+                    )
+                )
+        sessions.extend(children)
+        level = children
     HarnessSession.objects.update(created_at=FIXTURE_TIME, updated_at=FIXTURE_TIME)
     for index in range(20):
         HarnessMessage.objects.create(
@@ -169,6 +175,14 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     for index in range(len(sessions)):
         PermissionRequest.objects.filter(id=_identity(f"pending/{index}")).update(
             created_at=FIXTURE_TIME + timedelta(seconds=index)
+        )
+    for index, session in enumerate([root, sessions[-1]]):
+        QuestionRequest.objects.create(
+            id=_identity(f"question/{index}"),
+            organization_id=org.id,
+            workspace_id=session.workspace_id,
+            session_id=session.id,
+            questions=[{"question": "Continue synthetic work?"}],
         )
     with connection.cursor() as cursor:
         cursor.execute("ANALYZE")
@@ -251,6 +265,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "database": connection.vendor,
         "history_rows": args.history,
         "pending_rows": len(sessions),
+        "tree_depth": args.tree_depth,
+        "tree_sessions": 1 + len(sessions[50:]),
         "samples": args.samples,
         "lookup_index": index,
         "results": results,
@@ -267,12 +283,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history", type=int, default=100_000)
     parser.add_argument("--samples", type=int, default=51)
+    parser.add_argument("--tree-depth", type=int, default=1)
+    parser.add_argument("--tree-width", type=int, default=4)
     parser.add_argument("--backend-root", type=Path, default=BACKEND)
     parser.add_argument("--postgres-socket", type=Path)
     parser.add_argument("--postgres-port", type=int, default=5432)
     args = parser.parse_args()
     if args.history < 0 or args.samples < 2:
         parser.error("history >= 0 and samples >= 2 are required")
+    if args.tree_depth < 0 or args.tree_width < 1:
+        parser.error("tree-depth >= 0 and tree-width >= 1 are required")
     sys.path.insert(0, str(args.backend_root.resolve()))
     with tempfile.TemporaryDirectory(prefix="oc-permission-bench-") as directory:
         os.environ.update(

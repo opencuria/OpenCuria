@@ -16,6 +16,7 @@ from apps.harness.models import (
     HarnessSession,
     QuestionRequest,
 )
+from apps.harness.permissions.repositories import PermissionRequestRepository
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.mcp_app.tools import chats
 from apps.organizations.models import Membership, MembershipRole
@@ -172,6 +173,45 @@ async def test_pending_question_is_answered_with_chat_respond(world):
         answers=["Postgres"],
     )
     assert "No pending request" in stale
+
+
+async def test_chat_read_keeps_mixed_child_gates_ordered_and_scoped(world):
+    """Combined reads keep MCP's permission-first contract and child identity."""
+    root = await sync_to_async(_chat)(world, status="busy")
+    sibling = await sync_to_async(_chat)(world, status="busy")
+    child = await sync_to_async(HarnessSession.objects.create)(
+        workspace=world.workspace,
+        organization_id=world.org.id,
+        parent=root,
+        agent_name="explore",
+    )
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=world.org.id,
+        workspace_id=world.workspace.id,
+        session_id=child.id,
+        tool="bash",
+        pattern="pwd",
+    )
+    questions = []
+    for session in [child, sibling]:
+        questions.append(
+            await sync_to_async(QuestionRequest.objects.create)(
+                organization_id=world.org.id,
+                workspace_id=world.workspace.id,
+                session_id=session.id,
+                questions=[{"question": "Continue?"}],
+            )
+        )
+
+    page = await ok(world.ctx(), "chat_read", chat_id=str(root.id))
+    gates = page["waiting_for_input"]
+    assert [row["type"] for row in gates] == ["permission", "question"]
+    assert [row["request_id"] for row in gates] == [
+        str(permission.id),
+        str(questions[0].id),
+    ]
+    assert all(row["agent"] == "explore" for row in gates)
+    assert all(row["subagent_chat_id"] == str(child.id) for row in gates)
 
 
 async def test_chat_send_steers_a_running_agent(world, monkeypatch):

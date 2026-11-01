@@ -470,7 +470,7 @@ def timeline_to_out(
             else None,
         )
         parts_by_message.setdefault(str(part.message_id), []).append(payload)
-    pending_questions = interactions.list_pending_questions(
+    pending = interactions.list_pending_interactions(
         session.id, include_descendants=True
     )
     pending_questions = [
@@ -478,7 +478,7 @@ def timeline_to_out(
             **question,
             "questions": project_question_definitions(question.get("questions")),
         }
-        for question in pending_questions
+        for question in pending.questions
     ]
     return {
         "session": session_to_out_with_unread(conversations, session).model_dump(
@@ -509,9 +509,7 @@ def timeline_to_out(
             }
             for message in messages
         ],
-        "permissions": interactions.list_pending_permissions(
-            session.id, include_descendants=True
-        ),
+        "permissions": pending.permissions,
         "questions": pending_questions,
         "steers": [
             entry.to_payload() for entry in pending_steers(session.id)
