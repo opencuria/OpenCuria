@@ -195,6 +195,35 @@ def test_dependency_guard_reports_direct_and_transitive_edges_through_cycles() -
     ) == {"root -> blocked.Direct", "helper -> blocked.Indirect"}
 
 
+def test_mcp_scope_lifetimes_are_independent_of_runtime_composition(
+    dependencies,
+) -> None:
+    """Scope actors own lifetimes; runtime composition owns plugins and transports."""
+    violations = _dependency_violations(
+        dependencies,
+        {"apps.harness.mcp_client.scopes"},
+        lambda name: _within(
+            name,
+            {
+                "apps.harness.mcp_client.runtime",
+                "apps.harness.mcp_client.connection",
+                "apps.plugins",
+            },
+        ),
+    )
+    assert not violations, "\n".join(sorted(violations))
+    modules = {
+        module
+        for module in dependencies
+        if module.startswith("apps.harness.mcp_client.")
+    }
+    tuple(
+        TopologicalSorter(
+            {module: dependencies[module] & modules for module in modules}
+        ).static_order()
+    )
+
+
 def test_notifications_reach_harness_only_through_activity_service_and_events(
     trees, dependencies
 ) -> None:

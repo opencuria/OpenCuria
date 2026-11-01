@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
+from functools import partial
 from typing import Any
 from uuid import uuid4
 
+import anyio
 import structlog
 
 from apps.plugins import runtime as plugin_runtime
@@ -22,7 +26,7 @@ from .connection import (
     McpTool,
     check_name_collisions,
 )
-from .scopes import DesktopAgentScopes, ScopedDesktopTool
+from .scopes import DesktopAgentScopes, DesktopScopeResources, ScopedDesktopTool
 
 log = structlog.get_logger(__name__)
 
@@ -104,14 +108,15 @@ class McpRuntime:
         )
         if self._scope_enabled:
             self.agent_scopes = DesktopAgentScopes(
-                {
-                    "prepared": prepared,
-                    "accessor": accessor,
-                    "core_tool_names": core_tool_names,
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "runtime_options": runtime_options,
-                }
+                partial(
+                    _open_desktop_scope,
+                    prepared=_desktop_only(prepared),
+                    accessor=accessor,
+                    core_tool_names=core_tool_names,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    runtime_options=runtime_options,
+                )
             )
         if not snapshot.plugins:
             return
@@ -396,3 +401,53 @@ class McpRuntime:
             log.warning("mcp_runtime_close_failed")
         finally:
             self.connections = []
+
+
+def _desktop_only(prepared: PreparedPluginRuntime) -> PreparedPluginRuntime:
+    """Select child desktop servers while retaining the resolved credential snapshot."""
+    plugins = tuple(
+        replace(
+            plugin,
+            mcp_servers=tuple(
+                server
+                for server in plugin.mcp_servers
+                if server.resources.desktop is not None
+            ),
+        )
+        for plugin in prepared.snapshot.plugins
+        if any(server.resources.desktop is not None for server in plugin.mcp_servers)
+    )
+    return replace(prepared, snapshot=replace(prepared.snapshot, plugins=plugins))
+
+
+@asynccontextmanager
+async def _open_desktop_scope(
+    *,
+    prepared: PreparedPluginRuntime,
+    accessor: Any,
+    core_tool_names: list[str] | None,
+    session_id: str,
+    turn_id: str,
+    runtime_options: dict[str, Any] | None,
+) -> AsyncIterator[DesktopScopeResources]:
+    """Compose one child runtime, including same-task, shielded MCP teardown."""
+    runtime = McpRuntime(scope_enabled=False)
+    resources = DesktopScopeResources(ToolRegistry())
+    try:
+        await runtime.setup(
+            prepared=prepared,
+            accessor=accessor,
+            core_tool_names=core_tool_names,
+            owner_id=str(uuid4()),
+            session_id=session_id,
+            turn_id=turn_id,
+            runtime_options=runtime_options,
+        )
+        runtime.register_tools(resources.tools)
+        yield resources
+    finally:
+        with anyio.CancelScope(shield=True):
+            try:
+                resources.recordings.extend(await runtime.finish())
+            finally:
+                await runtime.aclose()

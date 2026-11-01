@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from apps.plugins.runtime_snapshot import (
     DesktopResourceSnapshot,
     EffectivePluginSnapshot,
     PluginMcpServerSnapshot,
+    PluginRequirementSnapshot,
     PluginResourcesSnapshot,
     PreparedPluginRuntime,
     WorkspacePluginSnapshot,
@@ -525,30 +527,8 @@ def test_desktop_tool_uses_shared_role_and_permission_gates(fake_accessor):
 
 
 @pytest.fixture
-async def scoped_desktop_runtime(desktop_workspace, monkeypatch):
-    from apps.harness.mcp_client.connection import DiscoveredMcpTool
-    from apps.harness.mcp_client.naming import mcp_tool_name
-
+def scoped_desktop_prepared(desktop_workspace):
     world = desktop_workspace
-
-    async def open_connection(conn, accessor):
-        conn._accessor = accessor
-        conn._session = AsyncMock()
-        conn._session.call_tool.return_value = CallToolResult(
-            content=[TextContent(type="text", text="ok")]
-        )
-        conn.tools = [
-            DiscoveredMcpTool(
-                "operate",
-                mcp_tool_name(conn.plugin_slug, conn.server_slug, "operate"),
-                "Desktop operation",
-                {"type": "object"},
-                "Operate",
-            )
-        ]
-        return conn.tools
-
-    monkeypatch.setattr(McpServerConnection, "open", open_connection)
     plugins = tuple(
         EffectivePluginSnapshot(
             id=uuid4(),
@@ -573,17 +553,44 @@ async def scoped_desktop_runtime(desktop_workspace, monkeypatch):
         )
         for slug in ("computer-use", "playwright")
     )
-    runtime = McpRuntime()
-    await runtime.setup(
-        prepared=PreparedPluginRuntime(
-            WorkspacePluginSnapshot(
-                workspace_id=world.workspace,
-                organization_id=uuid4(),
-                plugins=plugins,
-            )
-        ),
-        accessor=world.accessor,
+    return PreparedPluginRuntime(
+        WorkspacePluginSnapshot(
+            workspace_id=world.workspace,
+            organization_id=uuid4(),
+            plugins=plugins,
+        )
     )
+
+
+@pytest.fixture
+async def scoped_desktop_runtime(
+    desktop_workspace, scoped_desktop_prepared, monkeypatch
+):
+    from apps.harness.mcp_client.connection import DiscoveredMcpTool
+    from apps.harness.mcp_client.naming import mcp_tool_name
+
+    world = desktop_workspace
+
+    async def open_connection(conn, accessor):
+        conn._accessor = accessor
+        conn._session = AsyncMock()
+        conn._session.call_tool.return_value = CallToolResult(
+            content=[TextContent(type="text", text="ok")]
+        )
+        conn.tools = [
+            DiscoveredMcpTool(
+                "operate",
+                mcp_tool_name(conn.plugin_slug, conn.server_slug, "operate"),
+                "Desktop operation",
+                {"type": "object"},
+                "Operate",
+            )
+        ]
+        return conn.tools
+
+    monkeypatch.setattr(McpServerConnection, "open", open_connection)
+    runtime = McpRuntime()
+    await runtime.setup(prepared=scoped_desktop_prepared, accessor=world.accessor)
     registry = ToolRegistry()
     runtime.register_tools(registry)
     yield runtime, registry
@@ -812,12 +819,9 @@ async def test_backend_desktop_tool_respects_plugin_exposure(
 
 
 async def test_playwright_only_preserves_generic_mcp_status(
-    desktop_workspace, scoped_desktop_runtime
+    desktop_workspace, scoped_desktop_prepared, scoped_desktop_runtime
 ):
-    from dataclasses import replace
-
-    existing, _ = scoped_desktop_runtime
-    prepared = existing.agent_scopes._setup["prepared"]
+    prepared = scoped_desktop_prepared
     prepared = replace(
         prepared,
         snapshot=replace(
@@ -860,4 +864,130 @@ async def test_parent_cancellation_still_joins_child_desktop_cleanup(
         await runtime.agent_scopes.aclose()
     status = await runtime.desktop.action("status")
     assert not status["active"] and status["other_claim_count"] == 0
+    assert (await runtime.desktop.action("start"))["own_claim"]
+
+
+async def test_child_scope_opens_only_desktop_servers_with_frozen_config(
+    desktop_workspace, scoped_desktop_prepared, scoped_desktop_runtime, monkeypatch
+):
+    original_open = McpServerConnection.open
+    opened = []
+
+    async def track_open(connection, accessor):
+        opened.append(connection)
+        return await original_open(connection, accessor)
+
+    monkeypatch.setattr(McpServerConnection, "open", track_open)
+    desktop_plugin = scoped_desktop_prepared.snapshot.plugins[1]
+    desktop_server = replace(
+        desktop_plugin.mcp_servers[0], env={"TOKEN": "{{credential.token}}"}
+    )
+    ordinary_server = replace(
+        desktop_server, id=uuid4(), slug="ordinary", resources=PluginResourcesSnapshot()
+    )
+    mixed_plugin = replace(
+        desktop_plugin,
+        mcp_servers=(desktop_server, ordinary_server),
+        requirements=(
+            PluginRequirementSnapshot(
+                id=uuid4(),
+                key="token",
+                required=True,
+                description="",
+                service_id=uuid4(),
+                service_slug="token",
+                service_name="Token",
+            ),
+        ),
+    )
+    ordinary_plugin = replace(
+        mixed_plugin, id=uuid4(), slug="ordinary", mcp_servers=(ordinary_server,)
+    )
+    prepared = replace(
+        scoped_desktop_prepared,
+        snapshot=replace(
+            scoped_desktop_prepared.snapshot, plugins=(mixed_plugin, ordinary_plugin)
+        ),
+        plaintexts={
+            mixed_plugin.id: {"token": "frozen-token"},
+            ordinary_plugin.id: {"token": "frozen-token"},
+        },
+    )
+    runtime = McpRuntime()
+    try:
+        await runtime.setup(
+            prepared=prepared,
+            accessor=desktop_workspace.accessor,
+            session_id="session",
+            turn_id="turn",
+            runtime_options={"option": "value"},
+        )
+        assert len(opened) == 3
+        opened.clear()
+        first = await runtime.agent_scopes.tools("child-one")
+        assert await runtime.agent_scopes.tools("child-one") is first
+        second = await runtime.agent_scopes.tools("child-two")
+        assert first is not second
+        assert first.names() == second.names() == ["mcp_playwright_browser_operate"]
+        assert len(opened) == 2
+        assert len({conn.agent_desktop.lease.owner_id for conn in opened}) == 2
+        for conn in opened:
+            assert conn.env == {"TOKEN": "frozen-token"}
+            assert conn.run_context == {
+                "session_id": "session",
+                "turn_id": "turn",
+                "option": "value",
+            }
+        assert prepared.snapshot.plugins == (mixed_plugin, ordinary_plugin)
+    finally:
+        await runtime.aclose()
+    assert all(conn._closed for conn in opened)
+
+
+async def test_child_recordings_are_collected_before_connections_close(
+    scoped_desktop_runtime, monkeypatch
+):
+    runtime, _ = scoped_desktop_runtime
+    await runtime.agent_scopes.tools("child")
+    finished = []
+
+    async def finish(connection):
+        assert not connection._closed
+        if not connection.recording_path:
+            owner = connection.agent_desktop.lease.owner_id
+            connection.recording_path = f"/workspace/{owner}-{connection.server_id}.mp4"
+            finished.append(connection.recording_path)
+
+    monkeypatch.setattr(McpServerConnection, "finish", finish)
+    await runtime.agent_scopes.close("child")
+    child_paths = list(finished)
+    assert len(child_paths) == 2
+    assert runtime.agent_scopes.recordings == child_paths
+    paths = await runtime.finish()
+    assert len(paths) == 4 and set(paths) == set(finished)
+    assert set(child_paths) <= set(paths)
+    assert await runtime.finish() == paths
+
+
+async def test_failed_child_registration_closes_resources_and_preserves_parent(
+    scoped_desktop_runtime, monkeypatch
+):
+    runtime, registry = scoped_desktop_runtime
+    original_register = McpRuntime.register_tools
+    child_connections = []
+
+    def fail_registration(child, tools):
+        child_connections.extend(child.connections)
+        original_register(child, tools)
+        raise RuntimeError("registration failed")
+
+    monkeypatch.setattr(McpRuntime, "register_tools", fail_registration)
+    with pytest.raises(RuntimeError, match="registration failed"):
+        await runtime.agent_scopes.tools("failed-child")
+    with pytest.raises(RuntimeError, match="registration failed"):
+        await runtime.agent_scopes.close("failed-child")
+    assert len(child_connections) == 2
+    assert all(connection._closed for connection in child_connections)
+    assert all(not connection._closed for connection in runtime.connections)
+    assert registry.get(DesktopTool.name)
     assert (await runtime.desktop.action("start"))["own_claim"]

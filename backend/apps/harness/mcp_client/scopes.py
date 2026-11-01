@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
 
 import anyio
 from pydantic import BaseModel
 
 from ..desktop_leases import cleanup_rpc
 from ..tools.base import Tool, ToolContext, ToolError, ToolRegistry, ToolResult
+
+
+@dataclass
+class DesktopScopeResources:
+    """Tools available while open and recordings populated during teardown."""
+
+    tools: ToolRegistry
+    recordings: list[str] = field(default_factory=list)
+
+
+DesktopScopeFactory = Callable[[], AbstractAsyncContextManager[DesktopScopeResources]]
 
 
 @dataclass
@@ -25,28 +37,13 @@ class _Scope:
 class DesktopAgentScopes:
     """Each actor owns its SDK scopes in the task that also tears them down."""
 
-    def __init__(self, setup: dict[str, Any]) -> None:
-        prepared = setup["prepared"]
-        plugins = tuple(
-            replace(
-                plugin,
-                mcp_servers=tuple(
-                    server
-                    for server in plugin.mcp_servers
-                    if server.resources.desktop is not None
-                ),
-            )
-            for plugin in prepared.snapshot.plugins
-            if any(
-                server.resources.desktop is not None for server in plugin.mcp_servers
-            )
-        )
-        self._setup = {
-            **setup,
-            "prepared": replace(
-                prepared, snapshot=replace(prepared.snapshot, plugins=plugins)
-            ),
-        }
+    def __init__(self, open_runtime: DesktopScopeFactory) -> None:
+        """Bind a factory that owns cancellation-safe resource teardown.
+
+        Each actor enters and exits the factory's context manager in one task;
+        the factory publishes recordings on the resources before it exits.
+        """
+        self._open_runtime = open_runtime
         self._scopes: dict[str, _Scope] = {}
         self._ended: set[str] = set()
         self._closed = False
@@ -68,15 +65,15 @@ class DesktopAgentScopes:
         return await asyncio.shield(scope.ready)
 
     async def _own(self, scope: _Scope) -> None:
-        from .runtime import McpRuntime
-
-        runtime = McpRuntime(scope_enabled=False)
+        resources = None
         try:
-            await runtime.setup(**{**self._setup, "owner_id": str(uuid4())})
-            registry = ToolRegistry()
-            runtime.register_tools(registry)
-            scope.ready.set_result(registry)
-            await scope.stop.wait()
+            async with self._open_runtime() as resources:
+                scope.ready.set_result(resources.tools)
+                try:
+                    await scope.stop.wait()
+                finally:
+                    for caller in list(scope.callers):
+                        caller.cancel()
         except BaseException as exc:
             if not scope.ready.done():
                 scope.ready.set_exception(exc)
@@ -84,13 +81,8 @@ class DesktopAgentScopes:
                 scope.ready.exception()
             raise
         finally:
-            with anyio.CancelScope(shield=True):
-                for caller in list(scope.callers):
-                    caller.cancel()
-                try:
-                    self.recordings.extend(await runtime.finish())
-                finally:
-                    await runtime.aclose()
+            if resources is not None:
+                self.recordings.extend(resources.recordings)
 
     async def execute(
         self, identity: str, name: str, args: Any, ctx: ToolContext
