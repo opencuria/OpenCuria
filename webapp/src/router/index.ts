@@ -55,12 +55,6 @@ const router = createRouter({
           component: () => import('@/views/WorkspaceDetailView.vue'),
           meta: { title: 'Workspace', hideTopBar: true, fullBleed: true },
         },
-        {
-          path: 'docs/:slug(.*)*',
-          name: 'docs-detail',
-          component: () => import('@/views/DocsView.vue'),
-          meta: { title: 'Docs', fullBleed: true },
-        },
       ],
     },
   ],

@@ -3,8 +3,7 @@
  * Account row with a live/offline dot on the avatar and the user menu.
  */
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
-import { BookOpen, Check, LogOut, Monitor, Moon, Settings, Sun } from '@lucide/vue'
+import { Check, LogOut, Monitor, Moon, Settings, Sun } from '@lucide/vue'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import {
   DropdownMenu,
@@ -21,7 +20,6 @@ import { isConnected } from '@/services/socket'
 const emit = defineEmits<{
   settings: []
   logout: []
-  navigate: []
 }>()
 
 const authStore = useAuthStore()
@@ -76,12 +74,6 @@ const userInitials = computed(() => {
             <Check v-if="mode === 'auto'" class="size-4" />
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem as-child>
-            <RouterLink to="/docs" class="flex items-center gap-2" @click="emit('navigate')">
-              <BookOpen class="size-4" />
-              Docs
-            </RouterLink>
-          </DropdownMenuItem>
           <DropdownMenuItem @click="emit('logout')">
             <LogOut class="size-4" />
             Log out

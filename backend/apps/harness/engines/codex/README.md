@@ -2,8 +2,8 @@
 
 The pinned **0.166.0** standalone app-server runs inside the workspace over private
 stdio. This package adapts its experimental internal API to OpenCuria's existing
-harness contracts; it is not a stable public SDK integration. User setup,
-operations, limitations and reproducible tests: [Codex guide](../../../../../docs/codex.md).
+harness contracts; it is not a stable public SDK integration. See the
+[backend README](../../../../README.md#codex-harness) for setup and runtime tests.
 
 ## Architecture map
 
@@ -57,7 +57,7 @@ it does not decide model, prompt, tool or permission policy.
   the shared external-child timeline adapter and share the root owner/account
   and checkpoint. OpenCuria does not advertise its `task` dispatcher to Codex.
 - Native base instructions remain untouched; `developerInstructions` contains
-  only the [shared product context](../../../../../docs/harness-prompts.md)
+  only the shared product context
   (workspace boundaries, permitted local setup, and chat file/media rendering).
   Native workspace configuration,
   AGENTS and skill discovery remain enabled. Selected skills use native files.
@@ -99,5 +99,6 @@ replies or server requests. Overflow retains its specific cause and surfaces
 fixed recovery guidance without including protocol payloads.
 Runtime token totals supply usage; unknown billed cost is zero, not an invoice.
 ChatGPT metadata is not an entitlement list; OpenRouter catalog tool support does
-not guarantee real Responses/tool compatibility. See the guide for deployment,
-architecture coverage and licensing, rather than relying on system CLI defaults.
+not guarantee real Responses/tool compatibility. See the
+[backend README](../../../../README.md#codex-harness) for deployment and
+[third-party notices](../../../../../THIRD_PARTY_NOTICES.md#openai-codex) for licensing.

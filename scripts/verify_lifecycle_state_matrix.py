@@ -1,4 +1,4 @@
-"""Opt-in real KVM state matrix; see docs/testing/lifecycle-vm-cases.md.
+"""Opt-in real KVM state matrix.
 
 Use the runner virtualenv. A fresh --output directory isolates every resource.
 The compact report records assertions individually, never inferring PASS from

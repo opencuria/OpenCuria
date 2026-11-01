@@ -1,7 +1,6 @@
 # Workspace tools sheet
 
-`WorkspaceToolsSheet` presents Git, Terminal and Files of the chat's workspace
-(see [Native chat design](../../../docs/mobile-chat-design.md#workspace-tools)).
+`WorkspaceToolsSheet` presents Git, Terminal and Files of the chat's workspace.
 `MainScreen` opens it from the chat header's branch button or the transcript's pull-up
 (`ChatMessages.onPullUpAtEnd`).
 

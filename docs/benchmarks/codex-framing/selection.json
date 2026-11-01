@@ -1,9 +1,0 @@
-{
-  "ranked_top_three": [
-    "claude_ndjson",
-    "codex_text",
-    "codex_ndjson"
-  ],
-  "selected": "codex_ndjson",
-  "method": "secrets.choice using OS randomness"
-}

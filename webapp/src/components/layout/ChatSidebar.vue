@@ -424,11 +424,7 @@ watch(
     </SidebarContent>
 
     <SidebarFooter>
-      <SidebarUserFooter
-        @settings="handleOpenSettings"
-        @logout="handleLogout"
-        @navigate="closeMobileSidebar"
-      />
+      <SidebarUserFooter @settings="handleOpenSettings" @logout="handleLogout" />
     </SidebarFooter>
 
     <SidebarRail />

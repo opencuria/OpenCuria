@@ -67,8 +67,7 @@ the upstream source and license are available at
 [anthropics/claude-agent-sdk-python](https://github.com/anthropics/claude-agent-sdk-python).
 The SDK package bundles the separate Claude Code CLI binary; that binary is
 Anthropic software, is not licensed by the SDK's MIT license, and is governed by
-Anthropic's applicable terms. The pinned CLI artifact and runtime details are
-documented in the [Claude Agent guide](./docs/claude-agent.md).
+Anthropic's applicable terms.
 
 The OpenCuria Claude transport and harness integration are independently written
 project code. No SDK source files are vendored into this repository.
@@ -323,8 +322,8 @@ app-server package, released by **OpenAI**, **Copyright 2025 OpenAI**, under the
 **Apache License, Version 2.0**. Source and release:
 https://github.com/openai/codex/releases/tag/rust-v0.166.0.
 
-- Full upstream license: [codex-0.166.0-LICENSE.txt](docs/licenses/codex-0.166.0-LICENSE.txt).
-- Upstream attribution notice: [codex-0.166.0-NOTICE.txt](docs/licenses/codex-0.166.0-NOTICE.txt).
+- Full upstream license: [codex-0.166.0-LICENSE.txt](licenses/codex-0.166.0-LICENSE.txt).
+- Upstream attribution notice: [codex-0.166.0-NOTICE.txt](licenses/codex-0.166.0-NOTICE.txt).
 - The notice identifies code derived from **Ratatui** (MIT): Copyright (c)
   2016–2022 Florian Dehau; Copyright (c) 2023–2025 The Ratatui Developers.
 
@@ -345,8 +344,7 @@ for every dependency/helper. Consult and preserve the release and corresponding
 source dependency notices/licenses (including ripgrep's MIT/Unlicense and
 bubblewrap's LGPL-2.0-or-later obligations, with corresponding source as required).
 The two upstream Codex files copied here are not a complete third-party license
-bundle for a redistributed runtime image. See the [Codex guide](docs/codex.md)
-for exact pins and runtime boundaries. OpenCuria's AGPL-3.0-only license is unchanged.
+bundle for a redistributed runtime image. OpenCuria's AGPL-3.0-only license is unchanged.
 
 ## pypdf
 
@@ -355,6 +353,6 @@ bounded PDF text extraction. Upstream: https://github.com/py-pdf/pypdf. It uses
 the **BSD 3-Clause License**, with copyright notices for Mathieu Fenniak, Ashish
 Kulkarni and Steve Witham. The full license, copied from the installed pinned
 distribution's `pypdf-6.21.1.dist-info/licenses/LICENSE`, is retained in
-[pypdf-6.21.1-LICENSE.txt](docs/licenses/pypdf-6.21.1-LICENSE.txt). Retain it when
+[pypdf-6.21.1-LICENSE.txt](licenses/pypdf-6.21.1-LICENSE.txt). Retain it when
 redistributing source or binaries as required by that license. No pypdf source
 is vendored; the dependency does not change OpenCuria's project license.

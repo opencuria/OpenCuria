@@ -1,4 +1,4 @@
-"""Local subprocess runtime shared by status integration tests and benchmarks."""
+"""Local subprocess runtime for status integration tests."""
 
 from __future__ import annotations
 

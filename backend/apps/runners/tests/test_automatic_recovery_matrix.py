@@ -1,4 +1,4 @@
-"""Exercise combinations planned in docs/testing/lifecycle-backend-cases.md."""
+"""Exercise combinations of automatic lifecycle recovery states."""
 
 from __future__ import annotations
 

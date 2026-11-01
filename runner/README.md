@@ -8,11 +8,6 @@ for local development.
 
 ## Operations
 
-- [Managed desktop resources](../docs/managed-desktop-resources.md): generic
-  leases, persistent SQLite ownership stores, guest control directories,
-  process-group cleanup limits, epoch recovery, and coordinated rollout.
-- [Lifecycle recovery](../docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).
-
 Desktop startup and cleanup use the runner-owned `desktop_stop.sh`, including
 for existing workspace images. Process matching is anchored to desktop
 executables and display `:1`; arbitrary argv text such as the agent wrapper's
@@ -233,6 +228,5 @@ remain outside the runner.
 ## Computer Use
 
 The product-owned Computer Use stdio runtime is installed through
-`ensure_runtime_artifact("computer-use", "0.1.0")`. See the
-[Computer Use guide](../docs/computer-use.md) for architecture, dependencies,
-rollout, immutable bundle builds and real desktop verification.
+`ensure_runtime_artifact("computer-use", "0.1.0")`. Its source lives in
+[`packages/computer-use`](../packages/computer-use/).

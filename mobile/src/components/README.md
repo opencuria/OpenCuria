@@ -43,7 +43,7 @@ User message `@file:`/`@agent:` context tokens are parsed by the shared `compose
 </ChatLayout>
 ```
 
-`ChatLayout` owns the keyboard choreography. The transcript fills the screen; the composer floats in a dock that follows the keyboard through natively driven `Animated` values. `useChatLayout()` shares the dock geometry with the transcript (its end inset, the jump button and the empty state) and `dismissKeyboard({ revealLatest })`, which closes the keyboard and then scrolls to the newest message. See [Native chat design](../../../docs/mobile-chat-design.md#keyboard) for the gestures.
+`ChatLayout` owns the keyboard choreography. The transcript fills the screen; the composer floats in a dock that follows the keyboard through natively driven `Animated` values. `useChatLayout()` shares the dock geometry with the transcript (its end inset, the jump button and the empty state) and `dismissKeyboard({ revealLatest })`, which closes the keyboard and then scrolls to the newest message.
 
 ## Composer
 

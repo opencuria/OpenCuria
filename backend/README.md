@@ -4,14 +4,6 @@ The Django backend owns the control plane, agent harness, plugin policy, and
 server-side credentials. See the root [source setup](../README.md)
 for installation, migrations, API startup and the independent execution worker.
 
-## Operations
-
-- [Managed desktop resources](../docs/managed-desktop-resources.md): stdio plugin
-  declarations, guarded migration/manual adoption, authenticated viewer intents,
-  and coordinated rollout with backend, runner, and webapp.
-- [MCP OAuth setup and operations](../docs/mcp-oauth.md).
-- [Lifecycle recovery](../docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).
-
 ## Image attachments
 
 Native, Claude and Codex runs share image preparation for `@file:` mentions and
@@ -26,9 +18,7 @@ count previously referenced images toward the same limit without replaying them.
 
 ## Codex harness
 
-See the [Codex guide](../docs/codex.md) for supported ChatGPT/OpenRouter accounts,
-permission semantics, trust boundaries, recovery and reproducible runtime tests;
-the [engine README](apps/harness/engines/codex/README.md) maps internal contracts.
+The [engine README](apps/harness/engines/codex/README.md) maps internal contracts.
 Deploy matching backend and runner versions. Install `requirements.txt` (including
 the mandatory `pypdf==6.21.1` isolated PDF parser), then run migrations, including
 `0037_provider_refresh_lease`, before starting ASGI. ChatGPT refresh is centralized

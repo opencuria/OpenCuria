@@ -1,6 +1,5 @@
 """Real KVM process crashes at initialization/publication boundaries.
 
-V066, V069 and V073 are declared in docs/testing/lifecycle-vm-cases.md.
 Only resources belonging to a fresh output directory are changed. The test
 uses a real durable journal and the production Socket.IO lifecycle handlers;
 transport emission is captured locally, without contacting a deployed backend.

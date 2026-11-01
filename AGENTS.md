@@ -19,7 +19,7 @@ OpenCuria centrally provisions, manages, and monitors AI coding agents.
 Flow: web/mobile → REST + Socket.IO `/frontend` → `backend` → Socket.IO
 `harness:*` RPC → `runner` → workspace. Mobile feature screens live in
 `mobile/src/screens/`; `mobile/app/` is Expo Router routes only. See
-`docs/mobile-app.md` for setup, mobile boundaries and platform limitations.
+`mobile/README.md` for setup, mobile boundaries and platform limitations.
 
 ## 2. Goal: modular and extensible
 
@@ -107,7 +107,7 @@ npm run test
 
 Install npm workspace dependencies with `npm ci` from the repository root; do not
 use a component-local npm lockfile. Mobile-specific Expo/device checks are in
-`docs/mobile-app.md`.
+`mobile/README.md`.
 
 For a fresh clone, run `./scripts/setup-dev.sh`. After implementing, verify for
 real and embed a workspace screenshot as `![label](path)` when it shows the

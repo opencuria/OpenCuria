@@ -5,7 +5,6 @@
 import { computed, nextTick, ref, watch, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  BookOpen,
   CircleAlert,
   Layers,
   MessageSquare,
@@ -92,17 +91,6 @@ const actionItems: PaletteItem[] = [
     run: () => {
       closeAndRun(() => {
         window.dispatchEvent(new CustomEvent('opencuria:open-settings'))
-      })
-    },
-  },
-  {
-    id: 'action-docs',
-    group: 'Actions',
-    label: 'Docs',
-    icon: BookOpen,
-    run: () => {
-      closeAndRun(() => {
-        void router.push('/docs')
       })
     },
   },

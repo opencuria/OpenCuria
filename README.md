@@ -195,15 +195,12 @@ cloud image into `RUNNER_QEMU_IMAGE_CACHE_DIR` on first use.
 
 A native Expo/React Native iOS and Android client for existing OpenCuria chats
 is under [`mobile/`](./mobile/). It reuses the shared API/chat packages and the
-root npm workspace. Start with the [mobile developer guide](./mobile/README.md);
-architecture, security and device-network setup are in
-[docs/mobile-app.md](./docs/mobile-app.md).
+root npm workspace. Start with the [mobile developer guide](./mobile/README.md).
 
 Native push providers are hosting settings shared by every organization. Configure
 `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE` and/or
 `FCM_SERVICE_ACCOUNT_FILE` in the backend environment. Keys are read from files at
-startup; Compose mounts `./secrets/push/` read-only at `/run/secrets/`. See
-[mobile notification setup](./docs/mobile-notifications.md).
+startup; Compose mounts `./secrets/push/` read-only at `/run/secrets/`.
 
 ## 📦 Images
 
@@ -246,7 +243,7 @@ The webapp and mobile app are npm workspaces in this repository. Install their
 dependencies once at the repository root with `npm ci` (the root
 `package-lock.json` is authoritative), then use `npm run dev:web` or
 `npm run dev:mobile`. Mobile build and local API/device networking notes are in
-the [mobile app guide](./docs/mobile-app.md).
+the [mobile developer guide](./mobile/README.md).
 
 The Docker backend entrypoint runs migrations and starts the API. Compose runs
 `execute_harness` as the separate `execution` service. API restarts leave native
@@ -260,9 +257,7 @@ A process-lifetime file lock excludes another live execution owner; SQLite place
 it next to its database. PostgreSQL deployments with multiple hosts must set
 `EXECUTION_PROCESS_LOCK_PATH` on shared execution storage. The scheduler also holds
 a database lease. A worker restart settles interrupted native work and recovers
-external engines through their existing runner ownership fences. See the
-[execution architecture](docs/execution-architecture.md) for ownership, command
-recovery and deployment details.
+external engines through their existing runner ownership fences.
 Scheduled tasks are personal
 prompts in an IANA timezone: `recurrence: "once"` runs a single time on `run_date`
 (`YYYY-MM-DD`) at a local `HH:MM` and then disables itself; daily or selected weekdays
@@ -321,16 +316,15 @@ Agents manage OpenCuria through the built-in **OpenCuria** plugin, enabled per
 organization and workspace. Its MCP server runs in-process as the workspace owner,
 within that owner's organization role, without API keys or credentials. About 30
 task-oriented tools cover workspaces, chats, skills, plugins and scheduled tasks.
-The tool list is in [webapp/src/docs/mcp.md](./webapp/src/docs/mcp.md); the
-implementation lives in `backend/apps/mcp_app/`.
+The implementation lives in `backend/apps/mcp_app/`.
 
 ## MCP OAuth integrations
 
-OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect named personal or organization accounts from **Settings → Credentials**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production. See [MCP OAuth setup and operations](./docs/mcp-oauth.md) for required environment configuration, workspace attachment, security notes, and provider requirements.
+OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect named personal or organization accounts from **Settings → Credentials**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production.
 
 ## Claude Agent
 
-OpenCuria can run the pinned Claude Code CLI as a separate harness inside a workspace, using your own Anthropic API or authorized subscription token. See the [Claude Agent guide](./docs/claude-agent.md) for setup, runtime details, data handling, and test coverage.
+OpenCuria can run the pinned Claude Code CLI as a separate harness inside a workspace, using your own Anthropic API or authorized subscription token.
 
 ## Codex
 
@@ -338,12 +332,12 @@ Run the pinned Codex app-server inside a workspace with a **ChatGPT subscription
 or **OpenRouter** account. Engine and provider stay fixed per chat; OpenCuria
 manages permissions, account refresh, tools, subagents and encrypted checkpoints.
 Direct OpenAI API keys and generic compatible providers are not in the initial
-scope. See the [Codex guide](./docs/codex.md) for setup, Plan/Build behavior,
-trust boundaries, matching backend/runner deployment and optional real-runtime tests.
+scope. See the [backend guide](./backend/README.md#codex-harness) for matching
+backend/runner deployment and optional real-runtime tests.
 
 ## Managed desktop resources
 
-See [Managed desktop resources](./docs/managed-desktop-resources.md) for plugin policy and rollout, and the [backend](./backend/README.md) and [runner](./runner/README.md) component guides.
+See the [backend](./backend/README.md) and [runner](./runner/README.md) component guides.
 
 ## License
 
@@ -395,5 +389,3 @@ and requiring fresh resource evidence. Organization admins can explicitly
 complete current-session runtime scan. Acknowledgment preserves all resources;
 partial creation stays failed, with disks intact. Removal is a separate explicit
 request. No full create/build/capture rerun or external-stop auto-start occurs.
-Details, authorization and return shapes are in
-[Lifecycle implementation](docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).

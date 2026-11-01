@@ -6,7 +6,7 @@ Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.
 
 - Browse existing workspaces and conversations, read history, and start or continue harness chats; follow live output, tasks/subtasks, permission and question gates, Markdown, mentions, model choices and skills.
 - Attach photos, camera images and documents; preview supported workspace files. Chat and workspace data remain on the server.
-- Receive optional native push notifications for finished/failed runs and pending approvals/questions. On iOS, follow running agents on the Lock Screen and Dynamic Island with Live Activities. See [Mobile notification setup](../docs/mobile-notifications.md) for Apple/Firebase credentials and native build requirements.
+- Receive optional native push notifications for finished/failed runs and pending approvals/questions. On iOS, follow running agents on the Lock Screen and Dynamic Island with Live Activities.
 - Sign in to an existing server. The app does **not** create/delete workspaces or provide workspace CRUD or offline chat/queue/replay. Chat refreshes from REST when brought back to the foreground; push delivery does not replay missed chat events.
 
 ## Native interface
@@ -42,7 +42,7 @@ cd /path/to/OpenCuria
 APP_VARIANT=development EXPO_PUBLIC_DEFAULT_SERVER_URL=http://10.0.2.2:8000 npm run dev:mobile
 ```
 
-`EXPO_PUBLIC_DEFAULT_SERVER_URL` is only an optional, build-time default for the editable server URL on the sign-in screen. It is public app configuration—never put passwords, API keys or tokens in it. For an Android emulator, `10.0.2.2` reaches the host machine; a physical phone needs a LAN-reachable host name/IP, an accessible firewall port and Metro reachable over the LAN. For a USB-connected Android device, `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081` can forward the API and Metro ports from the host; use `http://127.0.0.1:8000` as the server URL. `localhost` on a phone without forwarding means the phone. Plain `http://` is accepted in every build, but only for local-network servers (private/loopback IPs, `localhost`, `.local` and single-label host names); public hosts need `https://`. See [Mobile app architecture, security and testing](../docs/mobile-app.md) for proxy paths, iOS and server setup.
+`EXPO_PUBLIC_DEFAULT_SERVER_URL` is only an optional, build-time default for the editable server URL on the sign-in screen. It is public app configuration—never put passwords, API keys or tokens in it. For an Android emulator, `10.0.2.2` reaches the host machine; a physical phone needs a LAN-reachable host name/IP, an accessible firewall port and Metro reachable over the LAN. For a USB-connected Android device, `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081` can forward the API and Metro ports from the host; use `http://127.0.0.1:8000` as the server URL. `localhost` on a phone without forwarding means the phone. Plain `http://` is accepted in every build, but only for local-network servers (private/loopback IPs, `localhost`, `.local` and single-label host names); public hosts need `https://`.
 
 For an iOS simulator on a Mac, from `mobile/` run `APP_VARIANT=development EXPO_PUBLIC_DEFAULT_SERVER_URL=https://curia.example npx expo run:ios`. A physical iPhone additionally needs suitable Apple development signing/provisioning and network access to both the server and Metro. No iOS build is claimed for this workspace.
 
@@ -66,4 +66,4 @@ npm run test
 npm run export -w mobile
 ```
 
-`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. An Android debug APK was built. See the [native UI verification report](../docs/mobile-native-verification.md) for current checks and screenshots, and the [initial mobile verification](../docs/mobile-verification.md) for earlier transport/platform coverage. This is not a claim of iOS native build, production-signing or store acceptance.
+`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. An Android debug APK was built. This is not a claim of iOS native build, production-signing or store acceptance.

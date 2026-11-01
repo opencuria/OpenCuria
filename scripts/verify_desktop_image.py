@@ -1,8 +1,7 @@
 """Build and boot the complete standard desktop recipe on an isolated real VM.
 
-V074/V075 expectations live in docs/testing/lifecycle-vm-cases.md. Every
-allocated guest and image is removed after testing; screenshots and small JSON
-evidence remain in the output directory. No deployed service is contacted.
+Every allocated guest and image is removed after testing; screenshots and small
+JSON evidence remain in the output directory. No deployed service is contacted.
 """
 
 from __future__ import annotations

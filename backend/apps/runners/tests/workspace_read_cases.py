@@ -1,4 +1,4 @@
-"""Representative workspace list data shared by query tests and benchmarks."""
+"""Representative workspace list data for query tests."""
 
 from __future__ import annotations
 
