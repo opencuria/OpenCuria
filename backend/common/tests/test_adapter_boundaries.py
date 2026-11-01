@@ -516,6 +516,24 @@ def test_transitive_import_boundaries(
             True,
         ),
         ("adapters", "repositories", False),
+        (
+            ("apps.runners.services.domains.runner_lifecycle",),
+            ("apps.runners.services.domains.workspace_lifecycle",),
+            False,
+        ),
+        (
+            ("apps.runners.services.infra.task_dispatch",),
+            (
+                "apps.runners.services.qemu_resources",
+                "apps.runners.services.workspace_capacity",
+            ),
+            False,
+        ),
+        (
+            ("apps.runners.services.qemu_resources",),
+            ("django", "apps.runners.services", "apps.runners.repositories"),
+            False,
+        ),
         (("apps.runners.services",), ("apps.harness",), False),
         (("apps.harness",), ("apps.scheduled_tasks", "apps.mcp_app"), False),
         (("apps.harness.engines",), ("apps.harness.tools.files",), True),

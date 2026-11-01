@@ -33,6 +33,7 @@ from ...exceptions import (
 )
 from ...provisioning import disk_size_for, provisioning_command, uses_artifact_clone
 from ...workspace_operation_repository import WorkspaceOperationRepository
+from ..qemu_resources import resolve_qemu_resources, validate_runner_qemu_limits
 from ..recreate import RecreateService
 from ..workspace_capacity import WorkspaceCapacityService
 
@@ -122,56 +123,6 @@ class WorkspaceLifecycleService:
                 return cleaned
 
         return f"workspace-{str(workspace_id)[:8]}"
-
-    @staticmethod
-    def validate_runner_qemu_limits(runner: Runner) -> None:
-        """Validate min/max/default and total limits for a runner's QEMU config."""
-        if runner.qemu_min_vcpus > runner.qemu_max_vcpus:
-            raise ConflictError("Runner vCPU minimum cannot exceed maximum")
-        if not (
-            runner.qemu_min_vcpus <= runner.qemu_default_vcpus <= runner.qemu_max_vcpus
-        ):
-            raise ConflictError("Runner default vCPU must be within min/max range")
-
-        if runner.qemu_min_memory_mb > runner.qemu_max_memory_mb:
-            raise ConflictError("Runner RAM minimum cannot exceed maximum")
-        if not (
-            runner.qemu_min_memory_mb
-            <= runner.qemu_default_memory_mb
-            <= runner.qemu_max_memory_mb
-        ):
-            raise ConflictError("Runner default RAM must be within min/max range")
-
-        if runner.qemu_min_disk_size_gb > runner.qemu_max_disk_size_gb:
-            raise ConflictError("Runner disk minimum cannot exceed maximum")
-        if not (
-            runner.qemu_min_disk_size_gb
-            <= runner.qemu_default_disk_size_gb
-            <= runner.qemu_max_disk_size_gb
-        ):
-            raise ConflictError("Runner default disk must be within min/max range")
-
-        if (
-            runner.qemu_max_active_vcpus is not None
-            and runner.qemu_max_active_vcpus < runner.qemu_default_vcpus
-        ):
-            raise ConflictError(
-                "Runner total active vCPU limit cannot be smaller than default vCPU"
-            )
-        if (
-            runner.qemu_max_active_memory_mb is not None
-            and runner.qemu_max_active_memory_mb < runner.qemu_default_memory_mb
-        ):
-            raise ConflictError(
-                "Runner total active RAM limit cannot be smaller than default RAM"
-            )
-        if (
-            runner.qemu_max_active_disk_size_gb is not None
-            and runner.qemu_max_active_disk_size_gb < runner.qemu_default_disk_size_gb
-        ):
-            raise ConflictError(
-                "Runner total active disk limit cannot be smaller than default disk"
-            )
 
     @staticmethod
     def _task_workspace_operation(task_type: TaskType) -> WorkspaceOperation | None:
@@ -290,7 +241,7 @@ class WorkspaceLifecycleService:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        self.validate_runner_qemu_limits(runner)
+        validate_runner_qemu_limits(runner)
         resolved_qemu_vcpus: int | None = None
         resolved_qemu_memory_mb: int | None = None
         resolved_qemu_disk_size_gb: int | None = None
@@ -298,17 +249,17 @@ class WorkspaceLifecycleService:
             resolved_qemu_vcpus,
             resolved_qemu_memory_mb,
             resolved_qemu_disk_size_gb,
-        ) = self.task_dispatch.resolve_qemu_resources(
+        ) = resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        await self.task_dispatch.ensure_qemu_active_capacity(
-            runner=runner,
-            requested_vcpus=resolved_qemu_vcpus,
-            requested_memory_mb=resolved_qemu_memory_mb,
-            requested_disk_size_gb=resolved_qemu_disk_size_gb,
+        await sync_to_async(WorkspaceCapacityService.ensure)(
+            runner.id,
+            vcpus=resolved_qemu_vcpus,
+            memory_mb=resolved_qemu_memory_mb,
+            disk_size_gb=resolved_qemu_disk_size_gb,
         )
 
         resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
@@ -462,13 +413,13 @@ class WorkspaceLifecycleService:
                     "must be running or stopped to reconfigure resources"
                 )
             runner = workspace.runner
-            self.validate_runner_qemu_limits(runner)
+            validate_runner_qemu_limits(runner)
             current = (
                 workspace.qemu_vcpus or runner.qemu_default_vcpus,
                 workspace.qemu_memory_mb or runner.qemu_default_memory_mb,
                 workspace.qemu_disk_size_gb or runner.qemu_default_disk_size_gb,
             )
-            qemu_values = self.task_dispatch.resolve_qemu_resources(
+            qemu_values = resolve_qemu_resources(
                 runner=runner,
                 qemu_vcpus=qemu_vcpus,
                 qemu_memory_mb=qemu_memory_mb,
@@ -479,11 +430,11 @@ class WorkspaceLifecycleService:
             if qemu_changed and workspace.status == WorkspaceStatus.RUNNING:
                 if not workspace.runner.is_online:
                     raise RunnerOfflineError(str(workspace.runner_id))
-                await self.task_dispatch.ensure_qemu_active_capacity(
-                    runner=runner,
-                    requested_vcpus=qemu_values[0],
-                    requested_memory_mb=qemu_values[1],
-                    requested_disk_size_gb=qemu_values[2],
+                await sync_to_async(WorkspaceCapacityService.ensure)(
+                    runner.id,
+                    vcpus=qemu_values[0],
+                    memory_mb=qemu_values[1],
+                    disk_size_gb=qemu_values[2],
                     exclude_workspace_id=workspace.id,
                 )
 
@@ -679,22 +630,22 @@ class WorkspaceLifecycleService:
         qemu_vcpus = effective["vcpus"]
         qemu_memory_mb = effective["memory_mb"]
         qemu_disk_size_gb = effective["disk_size_gb"]
-        self.validate_runner_qemu_limits(runner)
+        validate_runner_qemu_limits(runner)
         (
             qemu_vcpus,
             qemu_memory_mb,
             qemu_disk_size_gb,
-        ) = self.task_dispatch.resolve_qemu_resources(
+        ) = resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        await self.task_dispatch.ensure_qemu_active_capacity(
-            runner=runner,
-            requested_vcpus=qemu_vcpus,
-            requested_memory_mb=qemu_memory_mb,
-            requested_disk_size_gb=qemu_disk_size_gb,
+        await sync_to_async(WorkspaceCapacityService.ensure)(
+            runner.id,
+            vcpus=qemu_vcpus,
+            memory_mb=qemu_memory_mb,
+            disk_size_gb=qemu_disk_size_gb,
             exclude_workspace_id=workspace.id,
         )
 
@@ -754,18 +705,18 @@ class WorkspaceLifecycleService:
 
         disk_size_gb = workspace.qemu_disk_size_gb
         disk_size_gb = disk_size_for(workspace.qemu_disk_size_gb, target)
-        vcpus, memory_mb, disk_size_gb = self.task_dispatch.resolve_qemu_resources(
+        vcpus, memory_mb, disk_size_gb = resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=disk_size_gb,
         )
         if workspace.status != WorkspaceStatus.RUNNING:
-            await self.task_dispatch.ensure_qemu_active_capacity(
-                runner=runner,
-                requested_vcpus=vcpus,
-                requested_memory_mb=memory_mb,
-                requested_disk_size_gb=disk_size_gb,
+            await sync_to_async(WorkspaceCapacityService.ensure)(
+                runner.id,
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_size_gb=disk_size_gb,
                 exclude_workspace_id=workspace.id,
             )
 
@@ -1290,22 +1241,22 @@ class WorkspaceLifecycleService:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        self.validate_runner_qemu_limits(runner)
+        validate_runner_qemu_limits(runner)
         (
             qemu_vcpus,
             qemu_memory_mb,
             qemu_disk_size_gb,
-        ) = self.task_dispatch.resolve_qemu_resources(
+        ) = resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        await self.task_dispatch.ensure_qemu_active_capacity(
-            runner=runner,
-            requested_vcpus=qemu_vcpus,
-            requested_memory_mb=qemu_memory_mb,
-            requested_disk_size_gb=qemu_disk_size_gb,
+        await sync_to_async(WorkspaceCapacityService.ensure)(
+            runner.id,
+            vcpus=qemu_vcpus,
+            memory_mb=qemu_memory_mb,
+            disk_size_gb=qemu_disk_size_gb,
         )
 
         workspace_id = generate_uuid()

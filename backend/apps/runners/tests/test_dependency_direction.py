@@ -438,3 +438,24 @@ def test_workspace_configuration_repository_never_imports_services() -> None:
         "Keep configuration authorization and selection policy in services; "
         "repositories only load, lock and persist:\n" + "\n".join(violations)
     )
+
+
+def test_resource_policy_is_not_reintroduced_as_lifecycle_or_dispatch_facades() -> None:
+    """Settings and workflows call sizing policy and capacity admission directly."""
+    paths = [
+        RUNNERS_DIR / "services" / "domains" / "workspace_lifecycle.py",
+        RUNNERS_DIR / "services" / "infra" / "task_dispatch.py",
+    ]
+    extracted = {
+        "validate_runner_qemu_limits",
+        "resolve_qemu_resources",
+        "ensure_qemu_active_capacity",
+    }
+    violations = [
+        f"{path.name}:{node.lineno} defines {node.name}"
+        for path in paths
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in extracted
+    ]
+    assert not violations, "\n".join(violations)

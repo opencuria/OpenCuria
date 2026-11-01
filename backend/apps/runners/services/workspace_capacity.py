@@ -11,6 +11,7 @@ from ..enums import TaskType, WorkspaceStatus
 from ..exceptions import RunnerOfflineError, WorkspaceStateError
 from ..repositories import RunnerRepository, TaskRepository, WorkspaceRepository
 from ..workspace_configuration_repository import WorkspaceConfigurationRepository
+from .qemu_resources import resolve_qemu_resources
 
 if TYPE_CHECKING:
     from ..models import Runner, Task, Workspace
@@ -70,24 +71,17 @@ class WorkspaceCapacityService:
         allocation transaction authorizes consuming additional capacity.
         """
         runner = RunnerRepository.get_by_id(runner_id)
+        vcpus, memory_mb, disk_size_gb = resolve_qemu_resources(
+            runner=runner,
+            qemu_vcpus=vcpus,
+            qemu_memory_mb=memory_mb,
+            qemu_disk_size_gb=disk_size_gb,
+        )
         dimensions = (
             ("vcpus", vcpus, "vCPU", ""),
             ("memory_mb", memory_mb, "RAM", " MiB"),
             ("disk_size_gb", disk_size_gb, "disk", " GiB"),
         )
-        for name, requested, label, unit in dimensions:
-            effective = (
-                requested
-                if requested is not None
-                else getattr(runner, f"qemu_default_{name}")
-            )
-            minimum = getattr(runner, f"qemu_min_{name}")
-            maximum = getattr(runner, f"qemu_max_{name}")
-            if not minimum <= effective <= maximum:
-                label = "Disk" if name == "disk_size_gb" else label
-                raise ConflictError(
-                    f"{label} value must be between {minimum} and {maximum}{unit}"
-                )
         if all(
             getattr(runner, f"qemu_max_active_{name}") is None
             for name, *_ in dimensions
@@ -102,8 +96,7 @@ class WorkspaceCapacityService:
             workspaces = WorkspaceRepository.list_reserved_qemu_by_runner(
                 runner_id, include_retained_disk=name == "disk_size_gb"
             )
-            default = getattr(runner, f"qemu_default_{name}")
-            total = (requested if requested is not None else default) + sum(
+            total = requested + sum(
                 WorkspaceCapacityService._reserved_value(
                     workspace,
                     runner,

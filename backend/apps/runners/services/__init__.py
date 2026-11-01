@@ -189,7 +189,6 @@ class RunnerService:
             harness=self._harness,
             session_store=self.session_store,
             stream_transport=self.stream_transport,
-            workspace_lifecycle=self.workspace_lifecycle,
         )
         self.workspace_access = WorkspaceAccessService(
             workspaces=repositories.workspaces,

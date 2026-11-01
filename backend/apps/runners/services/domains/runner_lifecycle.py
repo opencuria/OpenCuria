@@ -15,6 +15,7 @@ from common.utils import generate_api_token, hash_token
 
 from ...disk_usage import parse_vm_disk_usage
 from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
+from ..qemu_resources import validate_runner_qemu_limits
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import Runner, RunnerSystemMetrics, Workspace
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
         WorkspaceRepository,
     )
     from ..domains.stream_transport import StreamTransportService
-    from ..domains.workspace_lifecycle import WorkspaceLifecycleService
     from ..infra.frontend_bus import FrontendBusService
     from ..infra.session_store import SessionStoreService
     from ..ports import HarnessGateway
@@ -47,7 +47,6 @@ class RunnerLifecycleService:
         harness: Callable[[], HarnessGateway],
         session_store: SessionStoreService,
         stream_transport: StreamTransportService,
-        workspace_lifecycle: WorkspaceLifecycleService,
     ) -> None:
         """Compose this service without inheriting sibling behavior or state."""
         self.runner_metrics = runner_metrics
@@ -57,7 +56,6 @@ class RunnerLifecycleService:
         self.harness = harness
         self.session_store = session_store
         self.stream_transport = stream_transport
-        self.workspace_lifecycle = workspace_lifecycle
 
     def create_runner(self, *, name: str, organization) -> tuple[Runner, str]:
         """Create a runner and return it with its one-time plaintext API token."""
@@ -215,7 +213,7 @@ class RunnerLifecycleService:
             return runner
         for key, value in updated_fields.items():
             setattr(runner, key, value)
-        self.workspace_lifecycle.validate_runner_qemu_limits(runner)
+        validate_runner_qemu_limits(runner)
         return self.runners.update_qemu_settings(runner, **updated_fields)
 
     def list_runners(self, organization_id: uuid.UUID | None = None) -> list[Runner]:
