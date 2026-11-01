@@ -84,10 +84,15 @@ unlinked images keep their normal cursor. Stopping, discarding or a capture
 failure restores the normal cursor immediately.
 
 Pointer sampling targets 100 ms, with separate down/up/leave events. Desktop
-snapshots target 500 ms once the desktop was pointed at. Actual observation times use the recording's monotonic
-clock; browser delays are not disguised as exact sampling intervals. Capture
-and uploads run independently with one capture and at most eight uploads in
-flight. A full queue or failed upload surfaces an error rather than producing a
+snapshots start at 500 ms once the desktop was pointed at. Exact framebuffer
+pixel comparison skips unchanged images before JPEG encoding or upload. Without
+microphone activity or mouse movement/clicks, the interval doubles for every five
+seconds of inactivity, capped at 30 seconds. Activity restores the 500 ms cadence;
+stationary pointer heartbeats and desktop animations do not count as activity.
+An unavailable microphone meter keeps the fast cadence. Actual observation times
+use the recording's monotonic clock; browser delays are not disguised as exact
+sampling intervals. Capture and uploads run independently with one capture and
+at most eight uploads in flight. A full queue or failed upload surfaces an error rather than producing a
 successful partial recording.
 
 ## Stored recordings and limits

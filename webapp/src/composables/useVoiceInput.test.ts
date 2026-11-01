@@ -100,7 +100,7 @@ beforeEach(() => {
   vi.mocked(saveVoiceRecording).mockResolvedValue({ path: '/workspace/.opencuria/recordings/id/manifest.json' })
   // Plain dictation by default: the passive observer saw no pointing.
   vi.mocked(startPointing).mockReturnValue({
-    stop: vi.fn().mockResolvedValue(null), cancel: vi.fn(),
+    stop: vi.fn().mockResolvedValue(null), cancel: vi.fn(), audioActivity: vi.fn(),
   } as unknown as ReturnType<typeof startPointing>)
 })
 afterEach(() => {
@@ -157,6 +157,37 @@ describe('voice browser capabilities', () => {
 })
 
 describe('useVoiceInput microphone lifecycle', () => {
+  it('reports microphone activity for visuals while letting silence and low noise back off', async () => {
+    const sample = vi.fn().mockReturnValue(0)
+    vi.mocked(monitorVoiceAudio).mockReturnValue({ sample, hasSignal: () => true, close: vi.fn() })
+    const { voice } = create()
+    await voice.start(options)
+    const observer = vi.mocked(startPointing).mock.results[0]!.value
+    await vi.advanceTimersByTimeAsync(100)
+    sample.mockReturnValue(0.01)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(observer.audioActivity).not.toHaveBeenCalled()
+    sample.mockReturnValue(0.03)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(observer.audioActivity).toHaveBeenCalledOnce()
+    sample.mockReturnValue(0.2)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(observer.audioActivity).toHaveBeenCalledTimes(2)
+    voice.cancel()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(observer.audioActivity).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['unavailable', 'unmeasured'])('keeps visual cadence active when microphone energy is %s', async (status) => {
+    if (status === 'unmeasured')
+      vi.mocked(monitorVoiceAudio).mockReturnValue({ sample: () => 0, hasSignal: () => null, close: vi.fn() })
+    const { voice } = create()
+    await voice.start(options)
+    const observer = vi.mocked(startPointing).mock.results[0]!.value
+    await vi.advanceTimersByTimeAsync(100)
+    expect(observer.audioActivity).toHaveBeenCalledOnce()
+  })
+
   it('rejects microphone silence without sending audio to the model', async () => {
     const close = vi.fn()
     vi.mocked(monitorVoiceAudio).mockReturnValue({ sample: () => 0, hasSignal: () => false, close })
@@ -387,7 +418,7 @@ describe('useVoiceInput microphone lifecycle', () => {
   it.each([true, false])('reports missing phrase timing only for pointing recordings (pointed=%s)', async (didPoint) => {
     vi.mocked(transcribeVoice).mockResolvedValueOnce({ ...transcript, timing: 'approximate' })
     vi.mocked(startPointing).mockReturnValueOnce({
-      stop: vi.fn().mockResolvedValue(didPoint ? pointed : null), cancel: vi.fn(),
+      stop: vi.fn().mockResolvedValue(didPoint ? pointed : null), cancel: vi.fn(), audioActivity: vi.fn(),
     })
     const { voice, onResult } = create()
     await voice.start(options)
@@ -424,7 +455,7 @@ describe('useVoiceInput microphone lifecycle', () => {
   it('retries pointing persistence using the cached transcript', async () => {
     vi.mocked(saveVoiceRecording).mockRejectedValueOnce(new Error('Workspace offline'))
     vi.mocked(startPointing).mockReturnValueOnce({
-      stop: vi.fn().mockResolvedValue(pointed), cancel: vi.fn(),
+      stop: vi.fn().mockResolvedValue(pointed), cancel: vi.fn(), audioActivity: vi.fn(),
     })
     const { voice, onResult } = create()
     await voice.start(options)
@@ -446,7 +477,7 @@ describe('useVoiceInput microphone lifecycle', () => {
     const pending = deferred<{ pointers: []; frames: [] }>()
     const cancelPointing = vi.fn(() => pending.reject(new Error('Cancelled')))
     vi.mocked(startPointing).mockReturnValueOnce({
-      stop: vi.fn(() => pending.promise), cancel: cancelPointing,
+      stop: vi.fn(() => pending.promise), cancel: cancelPointing, audioActivity: vi.fn(),
     })
     const { voice, onResult } = create()
     await voice.start(options)
@@ -463,7 +494,7 @@ describe('useVoiceInput microphone lifecycle', () => {
 
   it('preserves dictation after visual failure and only inserts it after an explicit fallback choice', async () => {
     vi.mocked(startPointing).mockReturnValueOnce({
-      stop: vi.fn().mockRejectedValue(new Error('Desktop disconnected')), cancel: vi.fn(),
+      stop: vi.fn().mockRejectedValue(new Error('Desktop disconnected')), cancel: vi.fn(), audioActivity: vi.fn(),
     })
     const { voice, onResult } = create()
     await voice.start(options)

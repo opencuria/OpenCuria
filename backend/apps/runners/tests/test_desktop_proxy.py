@@ -35,6 +35,7 @@ from apps.runners.services.infra.desktop_tunnels import (
     register_ws_tunnel,
     unregister_ws_tunnel,
 )
+from apps.runners.voice_viewer_bridge import VOICE_VIEWER_BRIDGE
 from common.utils import hash_token
 
 
@@ -735,7 +736,8 @@ const document = { referrer: 'https://app.example/chat',
     }
     assert.equal(tag, 'canvas');
     return { getContext: () => ({
-        drawImage: (source) => assert.equal(source, framebuffer) }),
+        drawImage: (source) => assert.equal(source, framebuffer),
+        getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }) }),
       toBlob: (reply) => { captures++; reply('jpeg'); } };
   }
 };
@@ -774,7 +776,7 @@ assert.equal(replies[1][0].y, 200);
 assert.equal(replies[1][0].event, 'down');
 assert.equal(replies[1][0].observed_at, 1000);
 assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
-// Cursor feedback requires a captured frame of the same dimensions and a trusted parent.
+// Cursor feedback requires a same-size captured frame and a trusted parent.
 const laser = { ...observe, cursor: 'url("data:image/svg+xml,laser") 12 12, crosshair',
   frameWidth: 1920, frameHeight: 1080 };
 message({ source: parent, origin: 'https://evil.example', data: laser });
@@ -858,6 +860,128 @@ assert.equal(cursorStyle, null);
 """
     subprocess.run(
         [node, "-e", "const SCRIPT=" + json.dumps(script) + ";" + check],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+
+def test_voice_frame_bridge_encodes_only_changed_accepted_framebuffer_pixels():
+    """Unchanged frames skip JPEG work without suppressing retries or new sessions."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to execute the browser bridge")
+    check = r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+let message;
+let time = 0;
+let captures = 0;
+let failEncoding = false;
+let failRead = false;
+let deferEncoding = false;
+let finishEncoding;
+let pixels = new Uint8ClampedArray([0, 0, 0, 255, 0, 0, 0, 255]);
+const replies = [];
+const parent = { postMessage: (data) => replies.push(data) };
+const framebuffer = { width: 2, height: 1 };
+const window = { parent,
+  addEventListener: (type, handler) => { if (type === 'message') message = handler; },
+  setInterval: () => 1, clearInterval() {} };
+const document = { referrer: 'https://app.example/chat',
+  documentElement: { removeAttribute() {}, style: { removeProperty() {} } },
+  addEventListener() {}, querySelector: () => framebuffer,
+  createElement: () => {
+    let frozen;
+    return { getContext: () => ({
+      drawImage: () => { frozen = pixels.slice(); },
+      getImageData: () => {
+        if (failRead) throw Error('unreadable canvas');
+        return { data: frozen };
+      }
+    }), toBlob: (reply) => {
+      captures++;
+      const finish = () => reply(failEncoding ? null : 'jpeg');
+      if (deferEncoding) finishEncoding = finish;
+      else finish();
+    } };
+  } };
+vm.runInNewContext(SCRIPT, { window, document, URL,
+  performance: { timeOrigin: 1000, now: () => time } });
+const send = (data) => message({ source: parent, origin: 'https://app.example', data });
+const capture = (previousFrameId) => {
+  send({ type: 'opencuria:voice-frame', requestId: 'request', previousFrameId });
+  return replies[replies.length - 1];
+};
+let first = capture();
+assert.equal(captures, 1);
+assert.equal(typeof first.frameId, 'string');
+time = 500;
+let same = capture(first.frameId);
+assert.equal(captures, 1);
+assert.equal(same.unchanged, true);
+assert.equal(same.captured_at, 1500);
+assert.equal(same.blob, undefined);
+// One changed channel is enough, even if JPEG compression could hide it.
+pixels[0] = 1;
+let changed = capture(first.frameId);
+assert.equal(captures, 2);
+assert.notEqual(changed.frameId, first.frameId);
+assert.equal(changed.blob, 'jpeg');
+assert.equal(capture(changed.frameId).unchanged, true);
+assert.equal(captures, 2);
+// A stale/lost reply cannot falsely acknowledge the parent's older frame.
+changed = capture(first.frameId);
+assert.equal(captures, 3);
+framebuffer.width = 3;
+let resized = capture(changed.frameId);
+assert.equal(captures, 4);
+assert.equal(resized.width, 3);
+// Failed reads/encoding preserve the last successful baseline for a retry.
+pixels[1] = 2;
+failEncoding = true;
+assert.equal(capture(resized.frameId).blob, null);
+assert.equal(captures, 5);
+failEncoding = false;
+failRead = true;
+assert.equal(capture(resized.frameId).blob, null);
+assert.equal(captures, 5);
+failRead = false;
+pixels[1] = 0;
+assert.equal(capture(resized.frameId).unchanged, true);
+assert.equal(captures, 5);
+const observe = { type: 'opencuria:voice-observe',
+  sessionId: '11111111-1111-4111-8111-111111111111', enabled: true };
+send(observe);
+let sessionFrame = capture(resized.frameId);
+assert.equal(captures, 6); // entering a recording resets comparison state
+send(observe);
+assert.equal(capture(sessionFrame.frameId).unchanged, true);
+assert.equal(captures, 6); // observation keepalives retain it
+send({ ...observe, enabled: false });
+send(observe);
+sessionFrame = capture(sessionFrame.frameId);
+assert.equal(captures, 7);
+// An encoding that finishes after a session boundary cannot restore old pixels.
+deferEncoding = true;
+pixels[2] = 3;
+capture(sessionFrame.frameId);
+assert.equal(captures, 8);
+send({ ...observe, enabled: false });
+send(observe);
+finishEncoding();
+assert.equal(replies[replies.length - 1].frameId, undefined);
+deferEncoding = false;
+sessionFrame = capture(sessionFrame.frameId);
+assert.equal(captures, 9);
+assert.equal(capture(sessionFrame.frameId).unchanged, true);
+"""
+    subprocess.run(
+        [
+            node,
+            "-e",
+            "const SCRIPT=" + json.dumps(VOICE_VIEWER_BRIDGE.decode()) + ";" + check,
+        ],
         check=True,
         capture_output=True,
         timeout=10,

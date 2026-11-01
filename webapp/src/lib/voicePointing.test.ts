@@ -74,6 +74,7 @@ function frameReply(iframe: HTMLIFrameElement, requestId: string, overrides = {}
       data: {
         type: 'opencuria:voice-frame',
         requestId,
+        frameId: requestId,
         blob: new Blob(['jpeg'], { type: 'image/jpeg' }),
         width: 1920,
         height: 1080,
@@ -276,7 +277,7 @@ describe('voice pointing', () => {
     await Promise.resolve()
     expect(settled).toBe(false)
     frameReply(iframe, requestId)
-    expect((await promise).blob.type).toBe('image/jpeg')
+    expect(await promise).toMatchObject({ blob: expect.any(Blob), frameId: requestId })
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -299,7 +300,7 @@ describe('voice pointing', () => {
     const requestId = send.mock.calls[0]![0].requestId as string
     expect(requestId).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff')
     frameReply(iframe, requestId)
-    expect((await promise).blob.type).toBe('image/jpeg')
+    expect(await promise).toMatchObject({ blob: expect.any(Blob), frameId: requestId })
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -468,6 +469,169 @@ describe('voice pointing', () => {
     expect((await recording.stop())!.frames).toHaveLength(1)
   })
 
+  it('retains the previous frame and pointer target when the desktop is unchanged', async () => {
+    const { iframe, send } = viewer()
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    const firstId = frameRequests(send)[0]!.requestId
+    frameReply(iframe, firstId)
+    await vi.advanceTimersByTimeAsync(500)
+    const request = frameRequests(send)[1]!
+    expect(request.previousFrameId).toBe(firstId)
+    frameReply(iframe, request.requestId, {
+      data: {
+        type: 'opencuria:voice-frame',
+        requestId: request.requestId,
+        unchanged: true,
+        captured_at: performance.timeOrigin + performance.now(),
+      },
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    pointAt(iframe, { event: 'down' })
+    const result = (await recording.stop())!
+    expect(result.frames).toHaveLength(1)
+    expect(transport.send).toHaveBeenCalledOnce()
+    expect(result.pointers.find((point) => point.event === 'down')?.target?.path).toBe(
+      result.frames[0]!.path,
+    )
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('rejects an unchanged reply without an accepted baseline', async () => {
+    const { iframe, send } = viewer()
+    const promise = captureDesktopFrame(iframe, new AbortController().signal)
+    const rejected = expect(promise).rejects.toThrow('could not be captured')
+    frameReply(iframe, frameRequests(send)[0]!.requestId, {
+      data: {
+        type: 'opencuria:voice-frame',
+        requestId: frameRequests(send)[0]!.requestId,
+        unchanged: true,
+        captured_at: performance.timeOrigin + performance.now(),
+      },
+    })
+    await rejected
+  })
+
+  for (const resume of ['speech', 'desktop movement', 'parent movement', 'click'] as const) {
+    it(`backs off changing frames to 30s despite stationary heartbeats and resumes on ${resume}`, async () => {
+      const { iframe, send } = viewer()
+      const times: number[] = []
+      send.mockImplementation((data) => {
+        if (data.type !== 'opencuria:voice-frame') return
+        times.push(performance.now())
+        // Asynchronous replies match the real postMessage boundary.
+        queueMicrotask(() => frameReply(iframe, data.requestId))
+      })
+      unregister = registerPointingDesktop('workspace-a', () => iframe)
+      recording = startPointing('workspace-a', recordingId, performance.now())
+      await vi.advanceTimersByTimeAsync(0)
+      pointAt(iframe)
+      const heartbeat = setInterval(() => pointAt(iframe), 100)
+      await vi.advanceTimersByTimeAsync(120_000)
+      clearInterval(heartbeat)
+      const gaps = times.slice(1).map((time, index) => time - times[index]!)
+      expect(gaps.slice(0, 8)).toEqual(Array(8).fill(500))
+      expect(gaps).toContain(1000)
+      expect(gaps).toContain(2000)
+      expect(gaps).toContain(4000)
+      expect(gaps).toContain(8000)
+      expect(gaps).toContain(16000)
+      expect(gaps.slice(-2)).toEqual([30_000, 30_000])
+      expect(transport.send).toHaveBeenCalledTimes(times.length)
+      const beforeResume = times.length
+      if (resume === 'speech') recording.audioActivity()
+      else if (resume === 'desktop movement') pointAt(iframe, { x: 1000 })
+      else if (resume === 'click') pointAt(iframe, { event: 'down' })
+      else move('pointermove')
+      await vi.advanceTimersByTimeAsync(500)
+      expect(times).toHaveLength(beforeResume + 1)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(times).toHaveLength(beforeResume + 2)
+      expect(pointingError.value).toBeNull()
+      const result = (await recording.stop())!
+      expect(result.frames).toHaveLength(times.length)
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  }
+
+  it('keeps the fast cadence during speech even with a stationary mouse', async () => {
+    const { iframe, send } = viewer()
+    send.mockImplementation((data) => {
+      if (data.type === 'opencuria:voice-frame')
+        queueMicrotask(() => frameReply(iframe, data.requestId))
+    })
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    const speech = setInterval(() => recording!.audioActivity(), 100)
+    await vi.advanceTimersByTimeAsync(40_000)
+    clearInterval(speech)
+    expect(frameRequests(send)).toHaveLength(81)
+    expect((await recording.stop())!.frames).toHaveLength(81)
+  })
+
+  it('aborts an in-flight capture on stop without corrupting the accepted recording', async () => {
+    const { iframe, send } = viewer()
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(frameRequests(send)).toHaveLength(2)
+    const result = (await recording.stop())!
+    // A late encoder callback from the disabled observer must have no effect.
+    frameReply(iframe, frameRequests(send)[1]!.requestId, { data: {} })
+    expect(result.frames).toHaveLength(1)
+    expect(pointingError.value).toBeNull()
+    expect(transport.send).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('forces a fresh baseline when the observed desktop viewer reconnects', async () => {
+    const { iframe, send } = viewer()
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(100)
+    iframe.removeAttribute('data-voice-desktop')
+    await vi.advanceTimersByTimeAsync(500)
+    iframe.dataset.voiceDesktop = ''
+    await vi.advanceTimersByTimeAsync(500)
+    expect(frameRequests(send)).toHaveLength(2)
+    expect(frameRequests(send)[1]!.previousFrameId).toBeUndefined()
+    frameReply(iframe, frameRequests(send)[1]!.requestId)
+    await vi.advanceTimersByTimeAsync(0)
+    expect((await recording.stop())!.frames).toHaveLength(2)
+  })
+
+  it('still reports failed uploads of accepted frames when stopping', async () => {
+    const { iframe, send } = viewer()
+    let rejectUpload!: (error: Error) => void
+    transport.track.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejectUpload = reject
+        }),
+    )
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(100)
+    const stopped = recording.stop()
+    const rejected = expect(stopped).rejects.toThrow('upload failed')
+    rejectUpload(new Error('upload failed'))
+    await rejected
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('rejects malformed framebuffer dimensions instead of assigning workspace display dimensions', async () => {
     const { iframe, send } = viewer()
     const promise = captureDesktopFrame(iframe, new AbortController().signal)
@@ -486,7 +650,9 @@ describe('voice pointing', () => {
   })
 })
 
-function frameRequests(send: ReturnType<typeof vi.fn>): { requestId: string }[] {
+function frameRequests(
+  send: ReturnType<typeof vi.fn>,
+): { requestId: string; previousFrameId?: string }[] {
   return send.mock.calls
     .map((call) => call[0])
     .filter((data) => data.type === 'opencuria:voice-frame')

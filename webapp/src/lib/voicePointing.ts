@@ -41,6 +41,9 @@ let activeOwner: symbol | null = null
 const MAX_DURATION_MS = 5 * 60 * 1000
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024
+const FRAME_INTERVAL_MS = 500
+const MAX_FRAME_INTERVAL_MS = 30_000
+const IDLE_BACKOFF_STEP_MS = 5000
 // The centered hotspot keeps recorded coordinates at the laser's bright core.
 const LASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
@@ -93,20 +96,27 @@ export interface DesktopFrame {
   width: number
   height: number
   capturedAt: number
+  frameId: string
 }
 
-/** Request a JPEG from the authenticated viewer, accepting only this frame and origin. */
+interface UnchangedDesktopFrame {
+  unchanged: true
+  capturedAt: number
+}
+
+/** Request changed pixels as JPEG, accepting only this viewer, origin and request. */
 export function captureDesktopFrame(
   iframe: HTMLIFrameElement,
   signal: AbortSignal,
-): Promise<DesktopFrame> {
+  previousFrameId?: string,
+): Promise<DesktopFrame | UnchangedDesktopFrame> {
   return new Promise((resolve, reject) => {
     const requestId = createSecureUuid()
     if (!requestId) {
       reject(new Error('Secure desktop capture IDs are unavailable in this browser.'))
       return
     }
-    const finish = (error?: Error, frame?: DesktopFrame): void => {
+    const finish = (error?: Error, frame?: DesktopFrame | UnchangedDesktopFrame): void => {
       clearTimeout(timer)
       window.removeEventListener('message', onMessage)
       signal.removeEventListener('abort', onAbort)
@@ -118,7 +128,16 @@ export function captureDesktopFrame(
       if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return
       const data = event.data
       if (data?.type !== 'opencuria:voice-frame' || data.requestId !== requestId) return
+      if (data.unchanged === true) {
+        if (!previousFrameId || !Number.isFinite(data.captured_at))
+          finish(new Error('The desktop frame could not be captured.'))
+        else finish(undefined, { unchanged: true, capturedAt: data.captured_at })
+        return
+      }
       if (
+        typeof data.frameId !== 'string' ||
+        !data.frameId ||
+        data.frameId.length > 80 ||
         !(data.blob instanceof Blob) ||
         data.blob.type !== 'image/jpeg' ||
         data.blob.size === 0 ||
@@ -134,6 +153,7 @@ export function captureDesktopFrame(
         finish(new Error('The desktop frame could not be captured.'))
       } else
         finish(undefined, {
+          frameId: data.frameId,
           blob: data.blob,
           width: data.width,
           height: data.height,
@@ -153,7 +173,10 @@ export function captureDesktopFrame(
     try {
       const origin = new URL(iframe.src, window.location.href).origin
       if (!iframe.contentWindow) throw new Error('Desktop viewer is unavailable.')
-      iframe.contentWindow.postMessage({ type: 'opencuria:voice-frame', requestId }, origin)
+      iframe.contentWindow.postMessage(
+        { type: 'opencuria:voice-frame', requestId, previousFrameId },
+        origin,
+      )
     } catch {
       finish(new Error('Desktop viewer is unavailable.'))
     }
@@ -171,6 +194,7 @@ export function startPointing(
 ): {
   stop(): Promise<PointingResult | null>
   cancel(): void
+  audioActivity(): void
 } {
   if (activePointingWorkspace.value) throw new Error('A pointing recording is already active.')
   if (!workspaceId || !/^[0-9a-f-]{36}$/i.test(recordingId)) throw new Error('Invalid recording.')
@@ -196,6 +220,15 @@ export function startPointing(
   const pendingUploads = new Set<Promise<void>>()
   const uploadIds = new Set<string>()
   let totalBytes = 0
+  let lastActivityMs = originMs
+  let nextCaptureMs = -Infinity
+  let previousFrameId: string | undefined
+  let lastDesktopPosition: { x: number; y: number } | null = null
+  const activity = (): void => {
+    if (stopped || failure) return
+    lastActivityMs = performance.now()
+    nextCaptureMs = Math.min(nextCaptureMs, lastActivityMs + FRAME_INTERVAL_MS)
+  }
   let cursorImage: HTMLImageElement | null = null
   const cursorStyle = document.createElement('style')
   cursorStyle.textContent = `[data-voice-pointing-cursor] { cursor: ${LASER_CURSOR} !important; }`
@@ -261,6 +294,9 @@ export function startPointing(
     if (observedViewer && observedViewer !== iframe) {
       observe(observedViewer, false)
       desktopPoint = null
+      lastDesktopPosition = null
+      previousFrameId = undefined
+      nextCaptureMs = -Infinity
     }
     observedViewer = iframe
     if (iframe) observe(iframe, true)
@@ -336,6 +372,13 @@ export function startPointing(
     pointers.push({ t_ms, event, ...point })
   }
   const pointer = (event: PointerEvent): void => {
+    if (
+      event.type !== 'pointermove' ||
+      !lastPoint ||
+      lastPoint.x !== event.clientX ||
+      lastPoint.y !== event.clientY
+    )
+      activity()
     desktopPoint = null
     lastPoint = { x: event.clientX, y: event.clientY }
     if (event.type === 'pointerdown') sample('down')
@@ -345,6 +388,7 @@ export function startPointing(
   const leave = (): void => {
     lastPoint = null
     desktopPoint = null
+    lastDesktopPosition = null
     showImageCursor(null)
     sample('leave')
   }
@@ -390,6 +434,15 @@ export function startPointing(
       data.y >= data.height
     )
       return
+    // Viewer heartbeats repeat the same point even when the mouse is still.
+    if (
+      data.event !== 'move' ||
+      !lastDesktopPosition ||
+      lastDesktopPosition.x !== data.x ||
+      lastDesktopPosition.y !== data.y
+    )
+      activity()
+    lastDesktopPosition = { x: data.x, y: data.y }
     lastPoint = null
     desktopPoint = { x: data.x, y: data.y, width: data.width, height: data.height }
     // The parent supplies regular 100 ms move samples; retain discrete clicks.
@@ -405,16 +458,21 @@ export function startPointing(
       return
     const iframe = syncViewer()
     if (!desktopRequested || pendingCapture || !iframe) return
-    if (pendingUploads.size >= 8) {
-      fail(new Error('Desktop uploads are too slow to keep recording.'))
-      return
-    }
+    // Observation stays live at 500 ms, independently of the capture cadence.
+    // Every five seconds without speech or mouse activity doubles the interval.
+    const idleSteps = Math.floor((performance.now() - lastActivityMs) / IDLE_BACKOFF_STEP_MS)
+    const interval = Math.min(MAX_FRAME_INTERVAL_MS, FRAME_INTERVAL_MS * 2 ** idleSteps)
+    if (performance.now() < nextCaptureMs) return
+    nextCaptureMs = performance.now() + interval
     pendingCapture = (async () => {
-      const frame = await captureDesktopFrame(iframe, abort.signal)
+      const frame = await captureDesktopFrame(iframe, abort.signal, previousFrameId)
       const t_ms = Math.round(frame.capturedAt - originEpoch)
       if (stopped || cancelled || iframe !== observedViewer || t_ms > MAX_DURATION_MS) return
       if (t_ms < 0 || t_ms > elapsed() + 100)
         throw new Error('The desktop returned an invalid frame timestamp.')
+      if ('unchanged' in frame) return
+      if (pendingUploads.size >= 8)
+        throw new Error('Desktop uploads are too slow to keep recording.')
       totalBytes += frame.blob.size
       if (totalBytes > MAX_TOTAL_BYTES)
         throw new Error('The visual recording reached its size limit.')
@@ -426,6 +484,7 @@ export function startPointing(
       const path = `${directory}/${filename}`
       frameSizes.set(path, { width: frame.width, height: frame.height })
       frames.push({ t_ms, path })
+      previousFrameId = frame.frameId
       engage()
       observe(iframe, !failure)
       const store = useFileExplorerStore()
@@ -456,7 +515,7 @@ export function startPointing(
       }
     })()
       .catch((error: unknown) => {
-        if (!cancelled)
+        if (!cancelled && !stopped)
           fail(error instanceof Error ? error : new Error('Desktop recording failed.'))
       })
       .finally(() => {
@@ -464,7 +523,7 @@ export function startPointing(
       })
   }
   const sampleTimer = setInterval(() => sample('move'), 100)
-  const frameTimer = setInterval(capture, 500)
+  const frameTimer = setInterval(capture, FRAME_INTERVAL_MS)
   const listeners = ['pointermove', 'pointerdown', 'pointerup'] as const
   for (const name of listeners) document.addEventListener(name, pointer, true)
   document.addEventListener('pointerout', onOut, true)
@@ -475,6 +534,7 @@ export function startPointing(
 
   const cleanup = (): void => {
     stopped = true
+    abort.abort()
     showImageCursor(null)
     cursorStyle.remove()
     clearInterval(sampleTimer)
@@ -492,6 +552,7 @@ export function startPointing(
     }
   }
   return {
+    audioActivity: activity,
     async stop() {
       if (!stopped) leave()
       cleanup()

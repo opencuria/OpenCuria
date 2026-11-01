@@ -9,6 +9,8 @@ import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/ser
 
 const MAX_DURATION = 300_000
 const MAX_BYTES = 1_500_000
+// The meter scales RMS by 12; ignore low background energy when pacing visuals.
+const VISUAL_AUDIO_ACTIVITY_LEVEL = 0.03
 let microphoneOwner: symbol | null = null
 
 export function voiceSupported(): boolean {
@@ -80,6 +82,14 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   function sampleAudio(): void {
     audioLevel.value = audioMonitor?.sample() ?? 0
     audioLevels.value = [...audioLevels.value.slice(1 - VOICE_LEVEL_HISTORY), audioLevel.value]
+    // Unknown audio must not be interpreted as silence. This only controls
+    // screenshot cadence; the complete microphone waveform is always retained.
+    if (
+      !audioMonitor ||
+      audioMonitor.hasSignal() === null ||
+      audioLevel.value >= VISUAL_AUDIO_ACTIVITY_LEVEL
+    )
+      pointing?.audioActivity()
   }
 
   function cancel(): void {

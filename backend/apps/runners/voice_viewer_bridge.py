@@ -14,6 +14,9 @@ VOICE_VIEWER_BRIDGE = b"""
   var cursorTarget = null;
   var frameWidth = 0;
   var frameHeight = 0;
+  var previousFrame = null;
+  var frameSequence = 0;
+  var observationGeneration = 0;
   var now = function () { return performance.timeOrigin + performance.now(); };
   var canvas = function () {
     // KasmVNC creates auxiliary cursor canvases before the RFB framebuffer.
@@ -82,7 +85,8 @@ VOICE_VIEWER_BRIDGE = b"""
     var inside = lastPoint.x >= rect.left && lastPoint.x < rect.left + rect.width &&
       lastPoint.y >= rect.top && lastPoint.y < rect.top + rect.height;
     showCursor(cursorStyle && inside && document.visibilityState !== 'hidden' &&
-      frameWidth === target.width && frameHeight === target.height ? event.target : null);
+      frameWidth === target.width && frameHeight === target.height ?
+        event.target : null);
     var kind = event.type === 'pointerdown' ? 'down' :
       event.type === 'pointerup' ? 'up' : 'move';
     var observed = now();
@@ -91,6 +95,8 @@ VOICE_VIEWER_BRIDGE = b"""
     sendPoint(kind);
   };
   var stopObserver = function () {
+    previousFrame = null;
+    observationGeneration++;
     showCursor(null);
     if (cursorStyle) { cursorStyle.remove(); cursorStyle = null; }
     document.documentElement.style.removeProperty('--voice-pointing-cursor');
@@ -104,7 +110,8 @@ VOICE_VIEWER_BRIDGE = b"""
     sessionId = id; expiresAt = now() + 3000;
     frameWidth = data.frameWidth; frameHeight = data.frameHeight;
     if (typeof data.cursor === 'string' && data.cursor.length < 4096) {
-      document.documentElement.style.setProperty('--voice-pointing-cursor', data.cursor);
+      document.documentElement.style.setProperty(
+        '--voice-pointing-cursor', data.cursor);
       if (!cursorStyle) {
         cursorStyle = document.createElement('style');
         cursorStyle.textContent = '[data-voice-pointing-cursor] {' +
@@ -143,10 +150,18 @@ VOICE_VIEWER_BRIDGE = b"""
     var observed = now();
     var width = target ? target.width : 0;
     var height = target ? target.height : 0;
+    var generation = observationGeneration;
+    var pixels = null;
     var reply = function (blob) {
       busy = false;
+      var frameId;
+      if (blob && generation === observationGeneration) {
+        frameId = String(++frameSequence);
+        previousFrame = { id: frameId, width: width, height: height, pixels: pixels };
+      }
       post({ type: 'opencuria:voice-frame', requestId: data.requestId,
-        blob: blob, width: width, height: height, captured_at: observed });
+        blob: blob, width: width, height: height, captured_at: observed,
+        frameId: frameId });
     };
     if (!target || !width || !height || width > 32768 || height > 32768) {
       reply(null); return;
@@ -156,7 +171,25 @@ VOICE_VIEWER_BRIDGE = b"""
       // Freeze pixels now. Encoding may run later while the live desktop changes.
       var snapshot = document.createElement('canvas');
       snapshot.width = width; snapshot.height = height;
-      snapshot.getContext('2d').drawImage(target, 0, 0);
+      var context = snapshot.getContext('2d', { willReadFrequently: true });
+      context.drawImage(target, 0, 0);
+      pixels = context.getImageData(0, 0, width, height).data;
+      // Compare framebuffer pixels, excluding the separate CSS/auxiliary cursor.
+      // Only acknowledge the parent's last accepted frame, never a lost reply.
+      if (previousFrame && data.previousFrameId === previousFrame.id &&
+          width === previousFrame.width && height === previousFrame.height &&
+          pixels.length === previousFrame.pixels.length) {
+        var unchanged = true;
+        for (var i = 0; i < pixels.length; i++) {
+          if (pixels[i] !== previousFrame.pixels[i]) { unchanged = false; break; }
+        }
+        if (unchanged) {
+          busy = false;
+          post({ type: 'opencuria:voice-frame', requestId: data.requestId,
+            unchanged: true, captured_at: observed });
+          return;
+        }
+      }
       snapshot.toBlob(reply, 'image/jpeg', 0.85);
     } catch (error) { reply(null); }
   });
