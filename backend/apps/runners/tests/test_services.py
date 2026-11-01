@@ -1261,7 +1261,7 @@ class TestForwardFilesFind:
         )
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         await service.forward_files_event(
             workspace_id=str(workspace.id),
@@ -2554,7 +2554,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         payload = {
             "workspace_id": str(workspace.id),
@@ -2575,7 +2575,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         payload = {
             "workspace_id": str(workspace.id),
@@ -2598,7 +2598,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         await service.handle_files_result(
             "files:content_chunk",
@@ -2620,7 +2620,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
@@ -2647,7 +2647,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
@@ -2701,7 +2701,7 @@ class TestChunkedFileTransferOwnership:
         )
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
         start = {
@@ -2749,7 +2749,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
@@ -2775,7 +2775,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
@@ -2825,7 +2825,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         for total in (0, 561, "bad"):
             await service.handle_files_result(
@@ -2848,7 +2848,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         await service.handle_files_result(
             "files:content_chunk",
@@ -2870,7 +2870,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         exact = {
             "workspace_id": str(workspace.id),
@@ -2898,7 +2898,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         for content in ("", "   \n ", "A" * (256 * 1024 + 1)):
             await service.handle_files_result(
@@ -2921,7 +2921,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         payload = {
             "workspace_id": str(workspace.id),
@@ -2942,7 +2942,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         await service.handle_files_result(
             "files:content_chunk",
@@ -2963,7 +2963,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         await service.handle_files_result(
             "files:content_chunk",
@@ -2985,7 +2985,7 @@ class TestChunkedFileTransferOwnership:
     ):
         emit = AsyncMock()
         monkeypatch.setattr(
-            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+            "common.realtime.emit_to_frontend", emit
         )
         await service.handle_files_result(
             "files:download_chunk",

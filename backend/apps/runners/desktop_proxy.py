@@ -28,6 +28,8 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
+from common import realtime
+
 from .services import get_runner_service
 from .services.infra.desktop_tunnels import register_ws_tunnel, unregister_ws_tunnel
 from .voice_viewer_bridge import VOICE_VIEWER_BRIDGE
@@ -383,9 +385,7 @@ async def _proxy_http(
         return
 
     try:
-        from .services.infra.realtime import get_sio_server
-
-        response = await get_sio_server().call(
+        response = await realtime.get_sio_server().call(
             "desktop:proxy_http_request",
             {
                 "workspace_id": workspace_id,
@@ -462,9 +462,7 @@ async def _proxy_websocket(
     loop_owns_cleanup = False
 
     try:
-        from .services.infra.realtime import get_sio_server
-
-        response = await get_sio_server().call(
+        response = await realtime.get_sio_server().call(
             "desktop:proxy_ws_open",
             {
                 "workspace_id": workspace_id,
@@ -523,10 +521,8 @@ async def _proxy_websocket(
 
 async def _close_runner_tunnel(runner_sid: str, tunnel_id: str) -> None:
     """Retire a runner tunnel without exposing upstream request details."""
-    from .services.infra.realtime import get_sio_server
-
     try:
-        await get_sio_server().emit(
+        await realtime.get_sio_server().emit(
             "desktop:proxy_ws_close",
             {"tunnel_id": tunnel_id},
             to=runner_sid,
@@ -558,8 +554,6 @@ async def _ws_proxy_loop(
     user_id=None,
 ):
     """Bidirectional proxy between client ASGI WebSocket and the runner tunnel."""
-
-    from .services.infra.realtime import get_sio_server
 
     runner_close_task: asyncio.Task | None = None
     unavailable_close_sent = False
@@ -594,7 +588,7 @@ async def _ws_proxy_loop(
                         await close_unavailable_client()
                         return
                     if "bytes" in message and message["bytes"]:
-                        await get_sio_server().emit(
+                        await realtime.get_sio_server().emit(
                             "desktop:proxy_ws_send",
                             {
                                 "tunnel_id": tunnel_id,
@@ -606,7 +600,7 @@ async def _ws_proxy_loop(
                             to=runner_sid,
                         )
                     elif "text" in message and message["text"]:
-                        await get_sio_server().emit(
+                        await realtime.get_sio_server().emit(
                             "desktop:proxy_ws_send",
                             {
                                 "tunnel_id": tunnel_id,

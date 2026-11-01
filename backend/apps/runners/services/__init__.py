@@ -18,7 +18,7 @@ singleton every adapter (REST, Socket.IO) and other app resolves.
 
 Optional credential resolvers and harness gateways can be injected; otherwise
 services resolve their registered application adapters. Frontend events always
-use ``infra.realtime.emit_to_frontend``. Pending RPC registries are plain
+use ``common.realtime.emit_to_frontend``. Pending RPC registries are plain
 per-instance dictionaries; terminal/desktop maps remain shared class attributes.
 """
 
@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+from common.realtime import get_sio_server
 
 from ..process_repository import WorkspaceProcessRepository
 from ..repositories import (
@@ -54,7 +56,6 @@ from .domains.workspace_lifecycle import WorkspaceLifecycleMixin
 from .infra.frontend_bus import FrontendBusMixin
 from .infra.harness_gateway import get_harness_gateway
 from .infra.ownership import OwnershipMixin
-from .infra.realtime import get_sio_server
 from .infra.rpc_registry import PendingGitRequest, RpcRegistryMixin
 from .infra.runner_transport import RunnerTransportMixin
 from .infra.session_store import SessionStoreMixin

@@ -13,7 +13,7 @@ import socketio
 from apps.runners import sio_server
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.services import RunnerService
-from apps.runners.services.infra import realtime
+from common import realtime
 
 # These are the completion events consumed by useWorkspaceFileEvents. In
 # particular, reads return content_result and upload chunks fail upload_result.

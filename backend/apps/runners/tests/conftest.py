@@ -34,7 +34,7 @@ def frontend(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Observe the production frontend transport without sending Socket.IO events."""
     emit = AsyncMock()
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        "common.realtime.emit_to_frontend", emit
     )
     return emit
 

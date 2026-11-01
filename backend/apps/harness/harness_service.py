@@ -32,12 +32,12 @@ import structlog
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
 
 from apps.runners.services import get_runner_service
-from apps.runners.services.infra import realtime
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from apps.runners.services.workspace_plugin_runtime import (
     WorkspacePluginRuntimeService,
 )
 from apps.skills.services import SkillService
+from common import realtime
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent

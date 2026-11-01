@@ -11,7 +11,7 @@ relies on the facade providing ``self.tasks`` / ``self.workspaces``,
 ``_forward_*`` (``FrontendBusMixin``), ``_desktop_event_owned_by_runner``
 (``OwnershipMixin``) and ``_record_active_desktop`` et al.
 (``SessionStoreMixin``). Frontend fan-out goes through
-``infra.realtime.emit_to_frontend``; lazy ``common.utils`` imports keep
+``common.realtime.emit_to_frontend``; lazy ``common.utils`` imports keep
 their semantics.
 """
 
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from asgiref.sync import sync_to_async
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
+from common import realtime
 from common.exceptions import ConflictError
 
 from ...enums import TaskType, WorkspaceStatus
@@ -34,7 +35,6 @@ from ...exceptions import (
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
-from ..infra import realtime
 
 if TYPE_CHECKING:
     from apps.accounts.models import User

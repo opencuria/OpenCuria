@@ -10,7 +10,7 @@ from typing import Any
 import structlog
 from asgiref.sync import async_to_sync
 
-from apps.runners.services.infra import realtime
+from common import realtime
 
 FRONTEND_EVENT_CONVERSATIONS_CHANGED = "harness.conversations_changed"
 

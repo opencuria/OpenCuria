@@ -39,7 +39,7 @@ def service(runner, monkeypatch):
 @pytest.fixture
 def emit(monkeypatch):
     emit = AsyncMock()
-    monkeypatch.setattr("apps.runners.services.infra.realtime.emit_to_frontend", emit)
+    monkeypatch.setattr("common.realtime.emit_to_frontend", emit)
     return emit
 
 

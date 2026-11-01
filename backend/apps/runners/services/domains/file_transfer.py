@@ -5,7 +5,7 @@ Byte-identical method bodies extracted from the former monolithic
 on the facade (``RunnerService``) providing ``self.workspaces`` plus
 sibling helpers (``_emit_to_runner`` / ``_route_harness_reply`` via
 ``RunnerTransportMixin``). Frontend fan-out goes through
-``infra.realtime.emit_to_frontend``.
+``common.realtime.emit_to_frontend``.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import uuid
 
 from asgiref.sync import sync_to_async
 
-from ..infra import realtime
+from common import realtime
 
 logger = logging.getLogger(__name__)
 

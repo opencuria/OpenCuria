@@ -209,7 +209,7 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._validate_token",
@@ -403,7 +403,7 @@ async def test_upstream_close_closes_runner_tunnel_and_sanitizes_code(
 ):
     sio = AsyncMock()
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     tunnel_id = uuid.uuid4().hex
     queue = asyncio.Queue()
@@ -441,7 +441,7 @@ async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_cod
 ):
     sio = AsyncMock()
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     tunnel_id = uuid.uuid4().hex
     queue = asyncio.Queue()
@@ -482,7 +482,7 @@ async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_cod
 async def test_client_disconnect_closes_runner_tunnel(monkeypatch):
     sio = AsyncMock()
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     tunnel_id = uuid.uuid4().hex
 
@@ -512,7 +512,7 @@ async def test_proxy_websocket_unregisters_tunnel_after_loop(monkeypatch):
     sio = AsyncMock()
     sio.call = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._ws_proxy_loop",
@@ -545,7 +545,7 @@ async def test_runner_rejected_handshake_never_accepts_browser(monkeypatch, resp
     sio = AsyncMock()
     sio.call.return_value = response
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     send = AsyncMock()
     await _proxy_websocket(
@@ -580,7 +580,7 @@ async def test_incomplete_websocket_handshake_closes_runner_tunnel(
     else:
         sio.call.return_value = {"ok": True}
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     sent = []
     registered_before = set(_WS_TUNNELS)
@@ -867,7 +867,7 @@ async def test_proxy_vnc_html_injects_idle_guard(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._validate_token",
@@ -934,7 +934,7 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
     monkeypatch.setattr(service, "resolve_desktop_viewer", resolve)
     sio = SimpleNamespace(emit=AsyncMock())
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
 
     async def receive():
@@ -975,7 +975,7 @@ async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch):
     )
     sio = SimpleNamespace(emit=AsyncMock())
     monkeypatch.setattr(
-        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+        "common.realtime.get_sio_server", lambda: sio
     )
     send = AsyncMock()
 

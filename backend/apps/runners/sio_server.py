@@ -3,7 +3,7 @@ Socket.IO server for runner and frontend communication.
 
 This module registers the event handlers that serve WebSocket connections
 from runners and frontend clients on the shared AsyncServer (owned by
-``apps.runners.services.infra.realtime``). It is the thin adapter between
+``common.realtime``). It is the thin adapter between
 the Socket.IO protocol and the RunnerService business logic; no other
 module may import it except the ASGI entry point.
 
@@ -21,18 +21,18 @@ import socketio
 from asgiref.sync import sync_to_async
 
 from common.exceptions import ConflictError
+from common.realtime import (
+    drop_frontend,
+    get_sio_server,
+    subscribe_frontend,
+    unsubscribe_frontend,
+)
 
 from .services import get_runner_service
 from .services.infra.desktop_tunnels import (
     close_runner_ws_tunnels,
     push_runner_ws_closed,
     push_runner_ws_frame,
-)
-from .services.infra.realtime import (
-    drop_frontend,
-    get_sio_server,
-    subscribe_frontend,
-    unsubscribe_frontend,
 )
 from .services.storage import StorageService
 

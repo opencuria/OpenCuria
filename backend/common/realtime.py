@@ -4,9 +4,9 @@ Owns the process-wide python-socketio ``AsyncServer`` and the in-process
 registry of frontend workspace subscriptions, plus ``emit_to_frontend``
 which fans events out to subscribed frontend clients.
 
-Event handlers are *not* registered here: the Socket.IO adapter
-(``apps.runners.sio_server``) attaches them when it builds the ASGI app.
-Services depend on this module only, never on the adapter.
+Feature services and protocol adapters use this shared transport without
+importing another feature context. The ASGI Socket.IO adapter registers event
+handlers when it builds the app; this module owns no application policy.
 """
 
 from __future__ import annotations
@@ -90,8 +90,8 @@ async def emit_to_frontend(
     """
     Emit an event to all frontend clients subscribed to a workspace.
 
-    This is called by the RunnerService when processing runner events
-    to forward real-time updates to the frontend.
+    Feature services publish workspace events here; protocol adapters own
+    authentication and authorize subscriptions before registering them.
     """
     sio = get_sio_server()
     sids = _frontend_subscriptions.get(workspace_id, set())

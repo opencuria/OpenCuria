@@ -14,7 +14,7 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessSessionRepository,
 )
-from apps.runners.services.infra import realtime
+from common import realtime
 from common.exceptions import NotFoundError
 
 

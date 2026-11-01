@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
 
+from common import realtime
+
 from ...enums import WorkspaceStatus
 from ...workspace_operation_repository import WorkspaceOperationRepository
-from . import realtime
 
 if TYPE_CHECKING:
     from ...models import Runner, Workspace
