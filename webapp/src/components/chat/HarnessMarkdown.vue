@@ -38,6 +38,8 @@ const emit = defineEmits<{ 'mention-images': [tokens: ComposerFileToken[]] }>()
 const props = withDefaults(
   defineProps<{
     text: string
+    /** Resolve local file links and images relative to this workspace directory. */
+    baseDirectory?: string
     compact?: boolean
     /** White text for dark primary backgrounds (user prompt bubble). */
     onPrimary?: boolean
@@ -104,6 +106,17 @@ const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)
 const imageStore = useWorkspaceImageStore()
 
+function localLinkPath(href: string): string | null {
+  return resolveWorkspaceLinkPath(href, props.baseDirectory)
+}
+
+function localMediaPath(src: string): string | null {
+  // Document URLs are already parsed by marked/the HTML parser, including spaces.
+  return props.baseDirectory === undefined
+    ? resolveWorkspaceMediaPath(src)
+    : localLinkPath(src)
+}
+
 type HtmlSegment = {
   kind: 'html'
   html: string
@@ -132,7 +145,7 @@ function parseMarkdownRoot(text: string): { html: string; root: HTMLElement | nu
   if (!root) return { html: sanitized, root: null }
 
   for (const link of Array.from(root.querySelectorAll('a[href]'))) {
-    if (workspaceId.value && resolveWorkspaceLinkPath(link.getAttribute('href') ?? '')) {
+    if (workspaceId.value && localLinkPath(link.getAttribute('href') ?? '')) {
       link.removeAttribute('target')
     } else {
       link.setAttribute('target', '_blank')
@@ -295,7 +308,7 @@ function renderMarkdownNode(
   }
 
   if (tag === 'img' && !element.closest('button')) {
-    const path = resolveWorkspaceMediaPath(element.getAttribute('src') ?? '')
+    const path = localMediaPath(element.getAttribute('src') ?? '')
     if (path) {
       const kind = classifyWorkspaceFile(path)
       if (kind === 'image' || kind === 'video') {
@@ -335,7 +348,7 @@ function buildSegments(text: string): MarkdownSegment[] {
     if (node.nodeType !== Node.ELEMENT_NODE) return
     const element = node as Element
     if (element.localName === 'img' && !element.closest('button')) {
-      const path = resolveWorkspaceMediaPath(element.getAttribute('src') ?? '')
+      const path = localMediaPath(element.getAttribute('src') ?? '')
       const kind = path ? classifyWorkspaceFile(path) : null
       if (path && (kind === 'image' || kind === 'video')) {
         media.push({ kind, path, label: (element.getAttribute('alt') ?? '').trim() })
@@ -451,7 +464,7 @@ function syncVisibleMedia(): void {
 }
 
 watch(
-  () => [renderedText.value, workspaceId.value, imageStore.mediaGeneration] as const,
+  () => [renderedText.value, props.baseDirectory, workspaceId.value, imageStore.mediaGeneration] as const,
   syncVisibleMedia,
   {
     immediate: true,
@@ -494,7 +507,7 @@ function onHtmlClick(event: MouseEvent): void {
   if (!(target instanceof Element)) return
   const link = target.closest('a[href]')
   if (!link?.closest('[data-md-html]') || !rootEl.value?.contains(link)) return
-  const path = resolveWorkspaceLinkPath(link.getAttribute('href') ?? '')
+  const path = localLinkPath(link.getAttribute('href') ?? '')
   if (!path) return
   event.preventDefault()
   void useFileExplorerStore().openPath(workspaceId.value, path, { revealInExplorer: false })

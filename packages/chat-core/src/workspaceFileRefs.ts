@@ -193,25 +193,31 @@ export function resolveWorkspaceMediaPath(rawDest: string): string | null {
   return resolveWorkspacePath(parseMarkdownLinkDest(rawDest));
 }
 
-/** Resolve a sanitized anchor href, decoding its path exactly once. */
-export function resolveWorkspaceLinkPath(href: string): string | null {
+/** Resolve a sanitized href relative to a workspace directory, decoding once. */
+export function resolveWorkspaceLinkPath(
+  href: string,
+  baseDirectory = WORKSPACE_ROOT,
+): string | null {
   const dest = href.trim();
   if (!dest || REMOTE_DEST_RE.test(dest)) return null;
   // Query/fragment syntax is not part of a filename; encoded %3F/%23 is.
   const path = dest.replace(/[?#].*$/, "");
   if (!path) return null;
   try {
-    return resolveWorkspacePath(decodeURIComponent(path));
+    return resolveWorkspacePath(decodeURIComponent(path), baseDirectory);
   } catch {
     return null;
   }
 }
 
-function resolveWorkspacePath(dest: string): string | null {
+function resolveWorkspacePath(
+  dest: string,
+  baseDirectory = WORKSPACE_ROOT,
+): string | null {
   // Avoid Unicode property escapes here: this parser also runs in Hermes/RN.
   if (!dest || REMOTE_DEST_RE.test(dest) || /[\\\x00-\x1f\x7f-\x9f]/.test(dest))
     return null;
-  const candidate = dest.startsWith("/") ? dest : `${WORKSPACE_ROOT}/${dest}`;
+  const candidate = dest.startsWith("/") ? dest : `${baseDirectory}/${dest}`;
   const normalized = posixNormalize(candidate);
   if (
     normalized !== WORKSPACE_ROOT &&

@@ -60,6 +60,21 @@ describe('workspaceFileRefs', () => {
   })
 
   it.each([
+    ['images/photo.png', '/workspace/repo/docs/images/photo.png'],
+    ['./images/photo.png', '/workspace/repo/docs/images/photo.png'],
+    ['../assets/photo.png', '/workspace/repo/assets/photo.png'],
+    ['/workspace/assets/photo.png', '/workspace/assets/photo.png'],
+    ['../assets/Photo%20%C3%A4%23final.png?v=1#preview', '/workspace/repo/assets/Photo ä#final.png'],
+    ['../../../etc/passwd.png', null],
+    ['%2e%2e/%2e%2e/%2e%2e/etc/passwd.png', null],
+    ['https://example.com/photo.png', null],
+    ['//example.com/photo.png', null],
+    ['javascript:alert(1)', null],
+  ])('resolves document URL %s within the workspace', (href, path) => {
+    expect(resolveWorkspaceLinkPath(href, '/workspace/repo/docs')).toBe(path)
+  })
+
+  it.each([
     '',
     '#section',
     '?query=only',

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
-import { AlertTriangle } from '@lucide/vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, provide, ref } from 'vue'
+import { AlertTriangle, Code, Eye } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -11,16 +11,32 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import HarnessMarkdown from '@/components/chat/HarnessMarkdown.vue'
 import { useEditorStore } from '@/stores/editor'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useGitStore } from '@/stores/git'
 import type { MonacoChangeRange } from '@/lib/monacoChanges'
+import { getWorkspaceFileExtension } from '@/lib/workspaceFileRefs'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 
 const MonacoEditor = defineAsyncComponent(() => import('./MonacoEditor.vue'))
 const store = useEditorStore()
 const files = useFileExplorerStore()
 const git = useGitStore()
 const tab = computed(() => store.activeTab)
+const isMarkdown = computed(
+  () =>
+    tab.value?.kind === 'file' &&
+    tab.value.mediaType === 'text' &&
+    ['md', 'markdown'].includes(getWorkspaceFileExtension(tab.value.path)),
+)
+const showMarkdownPreview = computed(() => isMarkdown.value && tab.value?.markdownPreview)
+const baseDirectory = computed(() => {
+  const path = tab.value?.path ?? ''
+  const absolute = path.startsWith('/') ? path : `/workspace/${path}`
+  return absolute.slice(0, absolute.lastIndexOf('/')) || '/'
+})
+provide(harnessWorkspaceIdKey, computed(() => tab.value?.workspaceId ?? ''))
 const pendingReload = ref<string | null>(null)
 const pendingTab = computed(() =>
   store.tabs.find((item) => item.id === (pendingReload.value ?? store.pendingCloseId)),
@@ -159,7 +175,7 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
         {{ files.formatBytes(tab.size) }}
       </div>
       <MonacoEditor
-        v-if="tab.mediaType === 'text'"
+        v-if="tab.mediaType === 'text' && !showMarkdownPreview"
         :key="tab.id"
         :model-key="tab.id"
         :path="tab.path"
@@ -177,14 +193,47 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
         @discard="applyChange('revert', $event)"
       />
       <div
+        v-else-if="showMarkdownPreview"
+        :key="tab.id"
+        class="min-h-0 flex-1 overflow-auto p-6 sm:p-8"
+        data-testid="editor-markdown-preview"
+      >
+        <div class="mx-auto max-w-3xl">
+          <HarnessMarkdown :text="tab.content" :base-directory="baseDirectory" />
+        </div>
+      </div>
+      <div
         class="flex h-6 shrink-0 items-center gap-3 border-t border-border px-3 text-[10px] text-muted-foreground"
+        data-testid="editor-status-bar"
       >
         <span v-if="tab.saving">Saving…</span>
         <span v-else-if="tab.dirty">Unsaved changes</span>
         <span v-else-if="tab.readOnly">Read-only</span>
         <span v-else>Saved</span>
         <span v-if="tab.kind === 'diff' && tab.dirty">Save to stage or revert changes</span>
-        <span class="ml-auto">{{ tab.mediaType === 'text' ? 'UTF-8' : tab.mimeType }}</span>
+        <div v-if="isMarkdown" role="group" aria-label="Markdown view" class="ml-auto flex gap-0.5">
+          <Button
+            variant="ghost"
+            class="h-5 gap-1 rounded-sm px-1.5 text-[10px] aria-pressed:bg-muted aria-pressed:text-foreground"
+            :aria-pressed="tab.markdownPreview"
+            @click="store.setMarkdownPreview(tab.id, true)"
+          >
+            <Eye class="size-3" />
+            Preview
+          </Button>
+          <Button
+            variant="ghost"
+            class="h-5 gap-1 rounded-sm px-1.5 text-[10px] aria-pressed:bg-muted aria-pressed:text-foreground"
+            :aria-pressed="!tab.markdownPreview"
+            @click="store.setMarkdownPreview(tab.id, false)"
+          >
+            <Code class="size-3" />
+            Source
+          </Button>
+        </div>
+        <span :class="{ 'ml-auto': !isMarkdown }">{{
+          tab.mediaType === 'text' ? 'UTF-8' : tab.mimeType
+        }}</span>
         <span v-if="tab.mediaType === 'text'">{{
           tab.content.includes('\r\n') ? 'CRLF' : 'LF'
         }}</span>

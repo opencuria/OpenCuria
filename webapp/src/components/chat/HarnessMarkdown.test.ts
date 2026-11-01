@@ -33,7 +33,7 @@ vi.mock('@/components/editor/MonacoEditor.vue', () => ({
 function mountMarkdown(
   text: string,
   workspaceId = 'ws-1',
-  extra: { compact?: boolean; onPrimary?: boolean; streaming?: boolean } = {},
+  extra: { compact?: boolean; onPrimary?: boolean; streaming?: boolean; baseDirectory?: string } = {},
 ) {
   return mount(HarnessMarkdown, {
     props: { text, ...extra },
@@ -181,6 +181,61 @@ describe('HarnessMarkdown', () => {
     expect(image.exists()).toBe(true)
     expect(image.attributes('src')).toBe('https://example.com/a.png')
     expect(readWorkspaceFile).not.toHaveBeenCalled()
+  })
+
+  it('resolves document images, HTML images and reference images from their directory', async () => {
+    const store = useWorkspaceImageStore()
+    store.imageCache['/workspace/repo/docs/images/photo.png'] = 'data:image/png;base64,relative'
+    store.imageCache['/workspace/repo/assets/Photo ä.png'] = 'data:image/png;base64,parent'
+    store.imageCache['/workspace/shared.svg'] = 'data:image/svg+xml;base64,absolute'
+    const wrapper = mountMarkdown(
+      '![Relative](./images/photo.png)\n\n![Reference][photo]\n\n' +
+      '[photo]: ../assets/Photo%20%C3%A4.png?v=1#preview\n\n' +
+      '<img src="/workspace/shared.svg" alt="Absolute">',
+      'ws-1',
+      { baseDirectory: '/workspace/repo/docs' },
+    )
+    await flushPromises()
+    expect(wrapper.findAll('img').map((img) => img.attributes('src'))).toEqual([
+      'data:image/png;base64,relative',
+      'data:image/png;base64,parent',
+      'data:image/svg+xml;base64,absolute',
+    ])
+    wrapper.unmount()
+  })
+
+  it('opens document links relative to their directory and updates media when the directory changes', async () => {
+    const files = useFileExplorerStore()
+    const openPath = vi.spyOn(files, 'openPath').mockResolvedValue(undefined)
+    const images = useWorkspaceImageStore()
+    const release = vi.spyOn(images, 'releaseMedia')
+    const wrapper = mountMarkdown('![Local](photo.png)\n\n[Guide](../guide.md)', 'ws-1', {
+      baseDirectory: '/workspace/repo/docs',
+    })
+    expect(wrapper.get('a').attributes('target')).toBeUndefined()
+    click(wrapper.get('a').element)
+    expect(openPath).toHaveBeenCalledWith('ws-1', '/workspace/repo/guide.md', { revealInExplorer: false })
+    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/repo/docs/photo.png', undefined, expect.any(AbortSignal))
+
+    await wrapper.setProps({ baseDirectory: '/workspace/other' })
+    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/other/photo.png', undefined, expect.any(AbortSignal))
+    expect(release).toHaveBeenCalledWith(['/workspace/repo/docs/photo.png'])
+    wrapper.unmount()
+  })
+
+  it('keeps document media sanitized and never fetches paths outside the workspace', async () => {
+    const wrapper = mountMarkdown(
+      '![Escape](../../../private.png)\n\n![Remote](https://example.com/photo.png)\n\n' +
+      '<img src="javascript:alert(1)" onerror="alert(1)" alt="Unsafe">',
+      'ws-1',
+      { baseDirectory: '/workspace/repo/docs' },
+    )
+    await flushPromises()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(wrapper.html()).not.toContain('javascript:')
+    expect(wrapper.html()).not.toContain('onerror')
+    expect(wrapper.get('img[alt="Remote"]').attributes('src')).toBe('https://example.com/photo.png')
+    wrapper.unmount()
   })
 
   it('still renders non-media markdown', () => {

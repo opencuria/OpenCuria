@@ -35,6 +35,7 @@ interface EditorTabState {
   id: string
   workspaceId: string
   kind: EditorTabKind
+  markdownPreview: boolean
   path: string
   name: string
   repoPath: string | null
@@ -191,6 +192,11 @@ export const useEditorStore = defineStore('editor', () => {
     if (workspaceId.value) visible.value[workspaceId.value] = false
   }
 
+  function setMarkdownPreview(id: string, preview: boolean): void {
+    const tab = stateFor(id)
+    if (tab) tab.markdownPreview = preview
+  }
+
   function getDocument(id: string, path: string): { key: string; document: EditorDocument } {
     const key = documentKey(id, path)
     if (!documents.value[key]) {
@@ -336,6 +342,7 @@ export const useEditorStore = defineStore('editor', () => {
       id,
       workspaceId: wsId,
       kind,
+      markdownPreview: true,
       path,
       name: path.split('/').pop() || path,
       repoPath,
@@ -711,6 +718,7 @@ export const useEditorStore = defineStore('editor', () => {
     setWorkspace,
     activateTab,
     showChat,
+    setMarkdownPreview,
     openFile,
     openDiff,
     openCommitDiff,

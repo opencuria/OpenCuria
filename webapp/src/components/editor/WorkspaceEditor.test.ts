@@ -225,6 +225,104 @@ describe('editor tabs and unsaved-close dialog', () => {
 })
 
 describe('workspace editor content states and commands', () => {
+  it.each(['README.md', 'guide.MD', 'notes.markdown'])(
+    'opens %s in Markdown preview with the view controls in the status bar',
+    async (filename) => {
+      vi.mocked(readEditorFile).mockResolvedValueOnce({
+        path: `/workspace/repo/docs/${filename}`,
+        content: '# Hello\n\n**Markdown** preview',
+        revision: 'markdown-1',
+      })
+      const store = useEditorStore()
+      await store.openFile(WS, `/workspace/repo/docs/${filename}`)
+      const wrapper = mount(frame)
+      await flushPromises()
+      expect(wrapper.get('[data-testid="editor-markdown-preview"] h1').text()).toBe('Hello')
+      expect(wrapper.get('strong').text()).toBe('Markdown')
+      expect(wrapper.findComponent({ name: 'MonacoEditor' }).exists()).toBe(false)
+      const status = wrapper.get('[data-testid="editor-status-bar"]')
+      expect(status.find('[aria-label="Markdown view"]').exists()).toBe(true)
+      const [preview, source] = status.findAll('button')
+      expect(preview!.attributes('aria-pressed')).toBe('true')
+      expect(source!.attributes('aria-pressed')).toBe('false')
+    },
+  )
+
+  it('previews the latest draft and retains the view per tab, including after remounting', async () => {
+    const store = useEditorStore()
+    await store.openFile(WS, '/workspace/repo/README.md')
+    const first = store.activeTab!.id
+    const wrapper = mount(frame)
+    await flushPromises()
+    await buttons(wrapper, 'Source').trigger('click')
+    await flushPromises()
+    const monaco = wrapper.findComponent({ name: 'MonacoEditor' })
+    expect(monaco.props('readOnly')).toBe(false)
+    monaco.vm.$emit('update:modelValue', '# Unsaved draft\n')
+    await buttons(wrapper, 'Preview').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="editor-markdown-preview"] h1').text()).toBe('Unsaved draft')
+    expect(store.activeTab).toMatchObject({ dirty: true, content: '# Unsaved draft\n' })
+    expect(saveEditorFile).not.toHaveBeenCalled()
+
+    await buttons(wrapper, 'Source').trigger('click')
+    await store.openFile(WS, '/workspace/repo/other.md')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="editor-markdown-preview"]').exists()).toBe(true)
+    store.activateTab(first)
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('modelValue')).toBe('# Unsaved draft\n')
+    wrapper.unmount()
+    const reopened = mount(frame)
+    await flushPromises()
+    expect(buttons(reopened, 'Source').attributes('aria-pressed')).toBe('true')
+    expect(reopened.findComponent({ name: 'MonacoEditor' }).props('modelValue')).toBe('# Unsaved draft\n')
+  })
+
+  it('loads images using the Markdown document’s workspace and directory', async () => {
+    vi.mocked(readEditorFile).mockResolvedValueOnce({
+      path: '/workspace/repo/docs/README.md',
+      content: '![Screenshot](../assets/screen%20shot.png)\n\n![Logo](/workspace/logo.png)',
+      revision: 'markdown-1',
+    })
+    const store = useEditorStore()
+    await store.openFile(WS, '/workspace/repo/docs/README.md')
+    const wrapper = mount(frame)
+    await flushPromises()
+    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/repo/assets/screen shot.png', undefined, expect.any(AbortSignal))
+    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/logo.png', undefined, expect.any(AbortSignal))
+    expect(wrapper.findAll('[data-testid="editor-markdown-preview"] img')).toHaveLength(2)
+  })
+
+  it('keeps source access when a Markdown image cannot be loaded', async () => {
+    vi.mocked(readEditorFile).mockResolvedValueOnce({
+      path: '/workspace/README.md', content: '# Guide\n\n![Missing](missing.png)', revision: 'markdown-1',
+    })
+    vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error('File not found'))
+    const store = useEditorStore()
+    await store.openFile(WS, '/workspace/README.md')
+    const wrapper = mount(frame)
+    await flushPromises()
+    expect(wrapper.get('h1').text()).toBe('Guide')
+    expect(wrapper.get('[data-testid="harness-markdown-media-fallback"]').text()).toBe('Missing')
+    await buttons(wrapper, 'Source').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('modelValue')).toContain('missing.png')
+  })
+
+  it('keeps Markdown diffs and ordinary text in Monaco without preview controls', async () => {
+    const store = useEditorStore()
+    await store.openFile(WS, FILE)
+    const wrapper = mount(frame)
+    await flushPromises()
+    expect(wrapper.find('[aria-label="Markdown view"]').exists()).toBe(false)
+    await store.openDiff(WS, '/workspace/repo', 'README.md')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('diff')).toBe(true)
+    expect(wrapper.find('[aria-label="Markdown view"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="editor-markdown-preview"]').exists()).toBe(false)
+  })
+
   it('keeps file commands in the tab strip and runs them against the active tab', async () => {
     const store = useEditorStore()
     await store.openFile(WS, FILE)
