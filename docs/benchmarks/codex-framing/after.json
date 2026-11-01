@@ -1,0 +1,134 @@
+{
+  "source_ref": "working-tree",
+  "source_sha256": "29d98515adeab16448fb400cd0c20e35454bba1ff75d6d6977b8e94186a44b56",
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "samples": 31,
+  "results": [
+    {
+      "case": "ascii-65536",
+      "wire_bytes": 65589,
+      "chunk_bytes": 4096,
+      "messages": 1,
+      "p50_ms": 0.354,
+      "p95_ms": 0.484,
+      "cpu_p50_ms": 0.352,
+      "peak_python_allocated_bytes": 287663,
+      "max_heartbeat_gap_ms": 0.198,
+      "result_sha256": "8c8223dc2591739d0a0c5d31a68c07326227c39ebac02ca396635f9de1b1808a"
+    },
+    {
+      "case": "ascii-65536",
+      "wire_bytes": 65589,
+      "chunk_bytes": 65536,
+      "messages": 1,
+      "p50_ms": 0.259,
+      "p95_ms": 0.331,
+      "cpu_p50_ms": 0.257,
+      "peak_python_allocated_bytes": 287663,
+      "max_heartbeat_gap_ms": 0.191,
+      "result_sha256": "8c8223dc2591739d0a0c5d31a68c07326227c39ebac02ca396635f9de1b1808a"
+    },
+    {
+      "case": "ascii-1048576",
+      "wire_bytes": 1048629,
+      "chunk_bytes": 4096,
+      "messages": 1,
+      "p50_ms": 4.836,
+      "p95_ms": 6.385,
+      "cpu_p50_ms": 4.831,
+      "peak_python_allocated_bytes": 4465583,
+      "max_heartbeat_gap_ms": 2.726,
+      "result_sha256": "b4376ae570f4cba8ff32eb27ddd574796e53860ea9100344be203480189a8e5f"
+    },
+    {
+      "case": "ascii-1048576",
+      "wire_bytes": 1048629,
+      "chunk_bytes": 65536,
+      "messages": 1,
+      "p50_ms": 3.199,
+      "p95_ms": 4.363,
+      "cpu_p50_ms": 3.195,
+      "peak_python_allocated_bytes": 4465583,
+      "max_heartbeat_gap_ms": 3.215,
+      "result_sha256": "b4376ae570f4cba8ff32eb27ddd574796e53860ea9100344be203480189a8e5f"
+    },
+    {
+      "case": "ascii-4194304",
+      "wire_bytes": 4194357,
+      "chunk_bytes": 4096,
+      "messages": 1,
+      "p50_ms": 20.178,
+      "p95_ms": 21.733,
+      "cpu_p50_ms": 20.138,
+      "peak_python_allocated_bytes": 17834927,
+      "max_heartbeat_gap_ms": 35.315,
+      "result_sha256": "949ab874cc0a60c677b00e126fc005211bf2578679c1cd9cc9d0db1992b81a30"
+    },
+    {
+      "case": "ascii-4194304",
+      "wire_bytes": 4194357,
+      "chunk_bytes": 65536,
+      "messages": 1,
+      "p50_ms": 18.053,
+      "p95_ms": 19.054,
+      "cpu_p50_ms": 17.799,
+      "peak_python_allocated_bytes": 17834927,
+      "max_heartbeat_gap_ms": 14.386,
+      "result_sha256": "949ab874cc0a60c677b00e126fc005211bf2578679c1cd9cc9d0db1992b81a30"
+    },
+    {
+      "case": "ascii-12582912",
+      "wire_bytes": 12582965,
+      "chunk_bytes": 4096,
+      "messages": 1,
+      "p50_ms": 69.107,
+      "p95_ms": 71.933,
+      "cpu_p50_ms": 69.073,
+      "peak_python_allocated_bytes": 53486511,
+      "max_heartbeat_gap_ms": 39.332,
+      "result_sha256": "d325f4bada568b4760034fc57b0028af0ee4b396eb6b2ca62832e875e139028c"
+    },
+    {
+      "case": "ascii-12582912",
+      "wire_bytes": 12582965,
+      "chunk_bytes": 65536,
+      "messages": 1,
+      "p50_ms": 46.883,
+      "p95_ms": 58.132,
+      "cpu_p50_ms": 46.877,
+      "peak_python_allocated_bytes": 53486539,
+      "max_heartbeat_gap_ms": 36.67,
+      "result_sha256": "d325f4bada568b4760034fc57b0028af0ee4b396eb6b2ca62832e875e139028c"
+    },
+    {
+      "case": "utf8",
+      "wire_bytes": 1020053,
+      "chunk_bytes": 4093,
+      "messages": 1,
+      "p50_ms": 5.441,
+      "p95_ms": 5.749,
+      "cpu_p50_ms": 5.436,
+      "peak_python_allocated_bytes": 9274182,
+      "max_heartbeat_gap_ms": 3.992,
+      "result_sha256": "1a890ff2b5191eb8e92e8054f59b31df05bb8e1b092634f3f9ad11f91d51d78f"
+    },
+    {
+      "case": "coalesced-deltas",
+      "wire_bytes": 52370,
+      "chunk_bytes": 65536,
+      "messages": 256,
+      "p50_ms": 1.695,
+      "p95_ms": 1.778,
+      "cpu_p50_ms": 1.693,
+      "peak_python_allocated_bytes": 231338,
+      "max_heartbeat_gap_ms": 1.54,
+      "result_sha256": "7b4756cd302c8b2b83ce430e89b1386a58b05ffcf595ddc713bc3203ca6b46d5"
+    }
+  ],
+  "notes": [
+    "Actual reader, JSON parser, validation, queue accounting and dispatch.",
+    "Prebuilt synthetic chunks; one scheduling point per receive.",
+    "Allocation peak and heartbeat gap are separate untimed observations.",
+    "No network/provider time; allocations are not process RSS."
+  ]
+}

@@ -203,6 +203,7 @@ class CodexProtocol:
 
     async def _read(self) -> None:
         pending = bytearray()
+        search_start = 0
         try:
             while True:
                 chunk = await self.stream.receive()
@@ -212,17 +213,21 @@ class CodexProtocol:
                     raise CodexProtocolError("Invalid Codex stream chunk")
                 pending.extend(chunk)
                 while True:
-                    index = pending.find(b"\n")
+                    index = pending.find(b"\n", search_start)
                     if index < 0:
                         break
                     if index > MAX_FRAME:
                         raise CodexProtocolError("Codex frame exceeds limit")
                     line = bytes(pending[:index])
                     del pending[: index + 1]
+                    search_start = 0
                     if line.strip():
                         self._dispatch(json.loads(line.decode("utf-8", "strict")))
                 if len(pending) > MAX_FRAME:
                     raise CodexProtocolError("Codex frame exceeds limit")
+                # The retained partial record contains no LF. Search only newly
+                # received bytes instead of rescanning it for every chunk.
+                search_start = len(pending)
         except asyncio.CancelledError:
             raise
         except CodexProtocolError as exc:
