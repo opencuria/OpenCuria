@@ -12,7 +12,7 @@ import pytest
 from apps.runners import desktop_proxy
 from apps.runners.enums import ProcessStatus, WorkspaceStatus
 from apps.runners.exceptions import RunnerOfflineError, WorkspaceStateError
-from apps.runners.services import RunnerService
+from apps.runners.services import RunnerRepositories, RunnerService
 from common.exceptions import ConflictError
 
 
@@ -21,6 +21,7 @@ def interaction_service():
     service = RunnerService(
         sio_server=AsyncMock(),
         harness_gateway=Mock(busy_workspace_ids=Mock(return_value=set())),
+        repositories=RunnerRepositories(workspaces=Mock(), tasks=Mock()),
     )
     workspace = SimpleNamespace(
         id=uuid.uuid4(),
@@ -29,11 +30,9 @@ def interaction_service():
         current_task_id=uuid.uuid4(),
         runner=SimpleNamespace(id=uuid.uuid4(), is_online=True),
     )
-    service.workspaces = Mock()
     service.workspaces.get_by_id.return_value = workspace
-    service._emit_to_runner = AsyncMock()
-    service._call_runner = AsyncMock()
-    service.tasks = Mock()
+    service.runner_transport.emit_to_runner = AsyncMock()
+    service.runner_transport.call_runner = AsyncMock()
     return service, workspace
 
 
@@ -76,7 +75,7 @@ async def test_capture_blocks_interactive_dispatch(
             "apps.organizations.services.OrganizationService.get_user_role",
             lambda self, user, organization_id: "member",
         )
-        service._viewer_rpc = AsyncMock()
+        service.interactive_sessions._viewer_rpc = AsyncMock()
         kwargs = {
             "user": user,
             "organization_id": org_id,
@@ -86,9 +85,9 @@ async def test_capture_blocks_interactive_dispatch(
     with pytest.raises(ConflictError):
         await getattr(service, method)(workspace_id, *args, **kwargs)
     if kwargs:
-        service._viewer_rpc.assert_not_awaited()
-    service._emit_to_runner.assert_not_awaited()
-    service._call_runner.assert_not_awaited()
+        service.interactive_sessions._viewer_rpc.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
+    service.runner_transport.call_runner.assert_not_awaited()
     service.tasks.create.assert_not_called()
 
 
@@ -109,7 +108,7 @@ async def test_capture_blocks_every_file_dispatch(interaction_service, event):
     service, workspace = interaction_service
     with pytest.raises(ConflictError):
         await service.forward_files_event(str(workspace.id), event, {})
-    service._emit_to_runner.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -133,8 +132,8 @@ async def test_capture_blocks_live_processes(interaction_service, method):
         workspace=workspace,
         pid=123,
     )
-    service._resolve_process = AsyncMock(return_value=process)
-    service._await_process_result = AsyncMock()
+    service.process_manager._resolve_process = AsyncMock(return_value=process)
+    service.process_manager._await_process_result = AsyncMock()
     args = (
         (workspace.id,)
         if method == "list_processes"
@@ -143,14 +142,15 @@ async def test_capture_blocks_live_processes(interaction_service, method):
     kwargs = {"name": "test"} if method == "start_process" else {}
     with pytest.raises(ConflictError):
         await getattr(service, method)(*args, **kwargs)
-    service._await_process_result.assert_not_awaited()
-    service._emit_to_runner.assert_not_awaited()
+    service.process_manager._await_process_result.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_saved_process_history_is_allowed(interaction_service):
     service, workspace = interaction_service
     service.processes = Mock()
+    service.process_manager.processes = service.processes
     service.processes.list_by_workspace.return_value = []
     assert await service.list_processes(workspace.id, live=False) == []
 
@@ -177,7 +177,7 @@ async def test_normal_terminal_input_dispatches(interaction_service):
     workspace.active_operation = ""
     workspace.current_task_id = None
     await service.forward_terminal_input(str(workspace.id), "term", "ok")
-    service._emit_to_runner.assert_awaited_once()
+    service.runner_transport.emit_to_runner.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -267,10 +267,13 @@ async def test_internal_session_cleanup_can_settle_during_capture(interaction_se
     service, workspace = interaction_service
     row = SimpleNamespace(id=uuid.uuid4())
     service.processes = Mock()
+    service.process_manager.processes = service.processes
     service.processes.list_running_session_processes.return_value = [row]
-    service._stop_running_process = AsyncMock(return_value=row)
+    service.process_manager._stop_running_process = AsyncMock(return_value=row)
     assert await service.stop_session_processes(workspace.id, uuid.uuid4()) == [row]
-    service._stop_running_process.assert_awaited_once_with(workspace, row)
+    service.process_manager._stop_running_process.assert_awaited_once_with(
+        workspace, row
+    )
 
 
 @pytest.mark.asyncio
@@ -309,7 +312,7 @@ async def test_file_runner_results_not_blocked_during_capture(
     interaction_service, monkeypatch
 ):
     service, workspace = interaction_service
-    service._route_harness_reply = Mock(return_value=None)
+    service.runner_transport.route_harness_reply = Mock(return_value=None)
     emit = AsyncMock()
     monkeypatch.setattr("common.realtime.emit_to_frontend", emit)
     payload = {"workspace_id": str(workspace.id), "entries": []}
@@ -332,9 +335,9 @@ async def test_file_normal_dispatch_and_offline_error(
         str(workspace.id), "files:download", {"request_id": "read", "path": "/x"}
     )
     if online:
-        service._emit_to_runner.assert_awaited_once()
+        service.runner_transport.emit_to_runner.assert_awaited_once()
         emit.assert_not_awaited()
     else:
-        service._emit_to_runner.assert_not_awaited()
+        service.runner_transport.emit_to_runner.assert_not_awaited()
         assert emit.await_args.args[0] == "files:download_result"
         assert emit.await_args.args[1]["error"] == "Runner is offline"

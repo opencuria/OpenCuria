@@ -1,10 +1,4 @@
-"""Workspace task-dispatch helpers (Phase 1 infra mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services.py``. No logic changes; the mixin relies on the
-facade (``RunnerService``) providing ``self.workspaces``, ``self.tasks``
-and ``_emit_to_runner`` / ``_forward_workspace_operation``.
-"""
+"""Dispatch reserved workspace operations with validated QEMU resources."""
 
 from __future__ import annotations
 
@@ -21,11 +15,30 @@ from ...enums import WorkspaceOperation
 if TYPE_CHECKING:
     from ...models import Runner, Task, Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import TaskRepository, WorkspaceRepository
+    from ..infra.frontend_bus import FrontendBusService
+    from ..ports import RunnerTransport
+
 logger = logging.getLogger(__name__)
 
 
-class TaskDispatchMixin:
-    """Workspace task dispatch helpers shared by RunnerService."""
+class TaskDispatchService:
+    """Workspace task dispatch helpers with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        tasks: type[TaskRepository],
+        workspaces: type[WorkspaceRepository],
+        frontend_bus: FrontendBusService,
+        runner_transport: RunnerTransport,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.tasks = tasks
+        self.workspaces = workspaces
+        self.frontend_bus = frontend_bus
+        self.runner_transport = runner_transport
 
     async def _set_workspace_operation(
         self,
@@ -37,10 +50,12 @@ class TaskDispatchMixin:
             workspace,
             operation,
         )
-        self._forward_workspace_operation(str(workspace.id), workspace.active_operation)
+        self.frontend_bus.forward_workspace_operation(
+            str(workspace.id), workspace.active_operation
+        )
         return workspace
 
-    async def _dispatch_workspace_task(
+    async def dispatch_workspace_task(
         self,
         *,
         runner: Runner,
@@ -53,12 +68,12 @@ class TaskDispatchMixin:
         """Broadcast the reserved operation and deliver its durable command."""
         if workspace is not None and operation is not None:
             workspace.active_operation = operation
-            self._forward_workspace_operation(str(workspace.id), operation)
-        await self._emit_to_runner(runner, event, payload)
+            self.frontend_bus.forward_workspace_operation(str(workspace.id), operation)
+        await self.runner_transport.emit_to_runner(runner, event, payload)
         await sync_to_async(self.tasks.mark_in_progress)(task)
 
     @staticmethod
-    def _resolve_qemu_resources(
+    def resolve_qemu_resources(
         *,
         runner: Runner,
         qemu_vcpus: int | None,
@@ -104,7 +119,7 @@ class TaskDispatchMixin:
             )
         return resolved_vcpus, resolved_memory_mb, resolved_disk_size_gb
 
-    async def _ensure_qemu_active_capacity(
+    async def ensure_qemu_active_capacity(
         self,
         *,
         runner: Runner,

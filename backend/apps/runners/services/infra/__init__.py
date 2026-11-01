@@ -1,1 +1,1 @@
-"""Infrastructure mixins for the runners service (Phase 1)."""
+"""Infrastructure services for the runners service."""

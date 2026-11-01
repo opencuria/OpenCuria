@@ -55,8 +55,8 @@ def test_redirect_preserves_viewer_in_nested_websocket_path():
 @pytest.mark.parametrize("state", ["unknown", "expired", "released", "closing"])
 async def test_renew_does_not_recreate_ended_intent(state):
     service = RunnerService(sio_server=Mock())
-    service._viewer_workspace = AsyncMock()
-    service._viewer_rpc = AsyncMock(
+    service.interactive_sessions._viewer_workspace = AsyncMock()
+    service.interactive_sessions._viewer_rpc = AsyncMock(
         return_value={"lease_state": state, "revision": 3, "epoch": "epoch"}
     )
     with pytest.raises(ConflictError):
@@ -67,16 +67,17 @@ async def test_renew_does_not_recreate_ended_intent(state):
             viewer_client_id=uuid.uuid4(),
             intent_revision=3,
         )
-    assert [call.args[1] for call in service._viewer_rpc.await_args_list] == [
-        "lease_status"
-    ]
+    assert [
+        call.args[1]
+        for call in service.interactive_sessions._viewer_rpc.await_args_list
+    ] == ["lease_status"]
 
 
 @pytest.mark.asyncio
 async def test_renew_only_existing_matching_revision_and_status_is_private():
     service = RunnerService(sio_server=Mock())
-    service._viewer_workspace = AsyncMock()
-    service._viewer_rpc = AsyncMock(
+    service.interactive_sessions._viewer_workspace = AsyncMock()
+    service.interactive_sessions._viewer_rpc = AsyncMock(
         side_effect=[
             {"lease_state": "held", "revision": 4, "epoch": "e"},
             {"lease_state": "held", "revision": 4, "epoch": "e"},
@@ -89,12 +90,17 @@ async def test_renew_only_existing_matching_revision_and_status_is_private():
     )
     result = await service.renew_desktop(workspace, **kwargs, intent_revision=4)
     assert result == {"viewer_lease_state": "held", "revision": 4, "epoch": "e"}
-    assert service._viewer_rpc.await_args_list[1].args[1] == "renew"
-    assert service._viewer_rpc.await_args_list[1].args[2]["epoch"] == "e"
+    assert (
+        service.interactive_sessions._viewer_rpc.await_args_list[1].args[1] == "renew"
+    )
+    assert (
+        service.interactive_sessions._viewer_rpc.await_args_list[1].args[2]["epoch"]
+        == "e"
+    )
     result = await service.viewer_desktop_status(workspace, **kwargs)
     assert result["viewer_lease_state"] == "held"
     assert "owner_id" not in result and "lease_id" not in result
-    service._viewer_workspace.assert_awaited()
+    service.interactive_sessions._viewer_workspace.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -107,20 +113,24 @@ async def test_service_auth_rejects_other_owner_and_org(monkeypatch):
         created_by_id=2, runner=SimpleNamespace(organization_id=org, is_online=True)
     )
     service = RunnerService(sio_server=Mock())
-    service.get_workspace = Mock(return_value=workspace)
-    service._ensure_workspace_available = Mock()
+    service.runner_lifecycle.get_workspace = Mock(return_value=workspace)
+    service.ownership.ensure_workspace_available = Mock()
     monkeypatch.setattr(OrganizationService, "require_membership", Mock())
     role = Mock(return_value="member")
     monkeypatch.setattr(OrganizationService, "get_user_role", role)
     user = SimpleNamespace(id=1)
     with pytest.raises(WorkspaceNotFoundError):
-        await service._viewer_workspace(uuid.uuid4(), user=user, organization_id=org)
+        await service.interactive_sessions._viewer_workspace(
+            uuid.uuid4(), user=user, organization_id=org
+        )
     role.return_value = "admin"
     assert (
-        await service._viewer_workspace(uuid.uuid4(), user=user, organization_id=org)
+        await service.interactive_sessions._viewer_workspace(
+            uuid.uuid4(), user=user, organization_id=org
+        )
         is workspace
     )
     with pytest.raises(WorkspaceNotFoundError):
-        await service._viewer_workspace(
+        await service.interactive_sessions._viewer_workspace(
             uuid.uuid4(), user=user, organization_id=uuid.uuid4()
         )

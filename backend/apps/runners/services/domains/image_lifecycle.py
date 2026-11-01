@@ -1,22 +1,10 @@
-"""Image definitions, builds and artifacts (Phase 3 domain mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.image_definitions``,
-``self.build_jobs``, ``self.image_instances``, ``self.workspaces``,
-``self.tasks`` plus sibling helpers (``_emit_to_runner`` via
-``RunnerTransportMixin``, ``_forward_*`` via ``FrontendBusMixin``,
-``_dispatch_workspace_task`` via ``TaskDispatchMixin``). Lazy
-``from ...models`` / ``django`` imports keep their semantics; the
-``Path(__file__)`` lookup in ``_desktop_session_init_script_block`` uses
-one extra ``.parent`` for the deeper ``domains/`` location (same
-``runners/scripts/`` target).
-"""
+"""Manage image definitions, builds and artifact lifecycle results."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,11 +18,44 @@ from ..capture import CaptureService
 if TYPE_CHECKING:
     from ...models import Task, Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import (
+        ImageBuildJobRepository,
+        ImageDefinitionRepository,
+        ImageInstanceRepository,
+        TaskRepository,
+        WorkspaceRepository,
+    )
+    from ..infra.frontend_bus import FrontendBusService
+    from ..ports import HarnessGateway, RunnerTransport
+
 logger = logging.getLogger(__name__)
 
 
-class ImageLifecycleMixin:
-    """Image definition/build/artifact flows shared by RunnerService."""
+class ImageLifecycleService:
+    """Image definition/build/artifact flows with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        build_jobs: type[ImageBuildJobRepository],
+        image_definitions: type[ImageDefinitionRepository],
+        image_instances: type[ImageInstanceRepository],
+        tasks: type[TaskRepository],
+        workspaces: type[WorkspaceRepository],
+        frontend_bus: FrontendBusService,
+        harness: Callable[[], HarnessGateway],
+        runner_transport: RunnerTransport,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.build_jobs = build_jobs
+        self.image_definitions = image_definitions
+        self.image_instances = image_instances
+        self.tasks = tasks
+        self.workspaces = workspaces
+        self.frontend_bus = frontend_bus
+        self.harness = harness
+        self.runner_transport = runner_transport
 
     @staticmethod
     def _validate_qemu_base_distro(base_distro: str) -> None:
@@ -194,7 +215,7 @@ class ImageLifecycleMixin:
             "image_instance_id": str(image.id),
         }
         payload["image_path"] = image.runner_ref
-        await self._emit_to_runner(runner, "task:build_image", payload)
+        await self.runner_transport.emit_to_runner(runner, "task:build_image", payload)
         if runner.sid:
             await sync_to_async(self.tasks.mark_in_progress)(task)
         return build
@@ -292,11 +313,11 @@ class ImageLifecycleMixin:
         workspace, task = await sync_to_async(CaptureService.allocate)(
             workspace_id,
             name,
-            has_busy_agent=self._harness().has_busy_session,
+            has_busy_agent=self.harness().has_busy_session,
             captured_image_id=captured_image_id,
             message=message,
         )
-        await sync_to_async(self._forward_workspace_operation)(
+        await sync_to_async(self.frontend_bus.forward_workspace_operation)(
             str(workspace_id), "capturing_image"
         )
         return workspace, task
@@ -330,7 +351,7 @@ class ImageLifecycleMixin:
             artifact_id,
         )
 
-        self._forward_to_frontend(
+        self.frontend_bus.forward_to_frontend(
             "image_artifact:created",
             {
                 "workspace_id": workspace_id,
@@ -340,7 +361,7 @@ class ImageLifecycleMixin:
             },
             workspace_id,
         )
-        self._forward_workspace_operation(workspace_id, None)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     def handle_image_artifact_failed(
         self,
@@ -367,12 +388,12 @@ class ImageLifecycleMixin:
             error,
         )
 
-        self._forward_to_frontend(
+        self.frontend_bus.forward_to_frontend(
             "image_artifact:failed",
             {"workspace_id": workspace_id, "task_id": task_id, "error": error},
             workspace_id,
         )
-        self._forward_workspace_operation(workspace_id, None)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     def handle_image_artifact_deleted(
         self,

@@ -141,7 +141,7 @@ def test_repeated_unknown_result_cannot_downgrade_or_spam_repair_blocker(
     )
     task.refresh_from_db()
     error = task.error
-    with patch.object(service, "_forward_to_frontend", Mock()) as frontend:
+    with patch.object(service.frontend_bus, 'forward_to_frontend', Mock()) as frontend:
         assert not DispositionService.recover_inspection(
             service, str(runner.id), runner.sid, proof
         )

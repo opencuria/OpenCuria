@@ -1,33 +1,48 @@
-"""Runner Socket.IO transport and ownership-checked harness reply routing.
-
-Request/response calls use Socket.IO ACKs. Durable lifecycle commands are
-delivered from the operation journal, and their heartbeats and results are
-accepted only for the bound attempt. Harness reply events are validated
-fail-closed and dispatched through the HarnessGateway port.
-"""
+"""Deliver runner commands and route validated harness responses."""
 
 from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from ...exceptions import RunnerOfflineError
 from ...operations import LIFECYCLE_TYPES, OperationRepository
-from ..operation_results import apply_result
 
 if TYPE_CHECKING:
     from ...models import Runner
 
+if TYPE_CHECKING:
+    from ...repositories import RunnerRepository
+    from ..infra.ownership import OwnershipService
+    from ..ports import HarnessGateway
+
 logger = logging.getLogger(__name__)
 
 
-class RunnerTransportMixin:
-    """Runner Socket.IO transport shared by RunnerService."""
+class RunnerTransportService:
+    """Runner Socket.IO transport with explicitly supplied collaborators."""
 
-    async def _emit_to_runner(
+    def __init__(
+        self,
+        *,
+        runners: type[RunnerRepository],
+        harness: Callable[[], HarnessGateway],
+        ownership: OwnershipService,
+        validate_file_chunk: Callable[[str, dict], bool],
+        sio_server: Any,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.runners = runners
+        self.harness = harness
+        self.ownership = ownership
+        self.validate_file_chunk = validate_file_chunk
+        self.sio = sio_server
+
+    async def emit_to_runner(
         self,
         runner: Runner,
         event: str,
@@ -86,11 +101,7 @@ class RunnerTransportMixin:
         """Record that the runner is executing the bound lifecycle attempt."""
         OperationRepository.record_heartbeat(runner_id, data)
 
-    def apply_operation_result(self, runner_id: str, event: str, data: dict) -> bool:
-        """Apply a runner's journaled lifecycle result; True when ACK-eligible."""
-        return apply_result(self, runner_id, event, data)
-
-    async def _call_runner(
+    async def call_runner(
         self,
         runner: Runner,
         event: str,
@@ -130,7 +141,7 @@ class RunnerTransportMixin:
             response = {**response, "_operation_identity": identity}
         return response
 
-    def _route_harness_reply(
+    def route_harness_reply(
         self,
         event: str,
         data: dict,
@@ -138,9 +149,9 @@ class RunnerTransportMixin:
     ) -> bool | None:
         """Route harness reply events to the owning accessor.
 
-        Returns None when *event* is not a harness reply, True when the
-        payload was routed to an accessor (or dropped after validation),
-        in which case callers must not forward it to the frontend.
+        Return None for unrelated events and a boolean acceptance result for
+        harness replies. A False reply is consumed but rejected; callers must
+        not forward harness replies to the frontend.
         """
         harness_events = {
             "harness:exec_wait_result",
@@ -166,12 +177,12 @@ class RunnerTransportMixin:
                     event,
                     workspace_id,
                 )
-                return True
-            if not self._validate_harness_workspace_runner(
+                return False
+            if not self.ownership.validate_harness_workspace_runner(
                 workspace_id_uuid, runner_id
             ):
-                return True
-        if event == "harness:read_file_chunk" and not self._validate_runner_file_chunk(
+                return False
+        if event == "harness:read_file_chunk" and not self.validate_file_chunk(
             event, data if isinstance(data, dict) else {}
         ):
             logger.warning(
@@ -179,13 +190,12 @@ class RunnerTransportMixin:
                 event,
                 workspace_id,
             )
-            return True
-        harness = self._harness()
+            return False
+        harness = self.harness()
         if event == "harness:read_file_chunk":
-            harness.route_harness_file_chunk(data)
+            return bool(harness.route_harness_file_chunk(data))
         else:
-            harness.route_harness_result(data)
-        return True
+            return bool(harness.route_harness_result(data))
 
     async def emit_harness_event(
         self,
@@ -194,17 +204,17 @@ class RunnerTransportMixin:
         payload: dict,
     ) -> None:
         """Emit a harness RPC event to the runner owning a workspace."""
-        await self._emit_to_runner(runner, event, payload)
+        await self.emit_to_runner(runner, event, payload)
 
     def handle_harness_reply(
         self,
         event: str,
         data: dict,
         runner_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Route a harness reply from a runner to its accessor (sync).
 
         Called from Socket.IO handlers via ``sync_to_async``. Harness
         operations never touch the frontend event bus.
         """
-        self._route_harness_reply(event, data, runner_id=runner_id)
+        return bool(self.route_harness_reply(event, data, runner_id=runner_id))

@@ -1,15 +1,11 @@
-"""Reply-event correlation for process and git RPCs.
-
-The pending git request contract lives here with reply resolution. RunnerService
-allocates the per-instance registries; domains use this infrastructure directly.
-Socket.IO ACK-based control calls need no additional reply registry.
-"""
+"""Own pending process and Git waiters and resolve replies safely."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +25,35 @@ class PendingGitRequest:
     operation: str
 
 
-class RpcRegistryMixin:
-    """Pending-RPC registries shared by RunnerService."""
+class RpcRegistryService:
+    """Pending-RPC registries with explicitly supplied collaborators."""
 
-    def _resolve_process_future(self, request_id: str, payload: dict) -> bool:
+    def __init__(
+        self,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.process_pending: dict[str, asyncio.Future] = {}
+        self.git_pending: dict[str, PendingGitRequest] = {}
+
+    def owns_request(self, kind: Literal["git", "process"], request_id: str) -> bool:
+        """Return whether this registry has a live waiter for a reply."""
+        if kind == "git":
+            pending = self.git_pending.get(request_id)
+            return pending is not None and not pending.future.done()
+        if kind == "process":
+            future = self.process_pending.get(request_id)
+            return future is not None and not future.done()
+        return False
+
+    def resolve_process_future(self, request_id: str, payload: dict) -> bool:
         """Resolve the pending process RPC future for *request_id* (sync).
 
         Thread-safe: Socket.IO replies arrive via ``sync_to_async`` worker
         threads while waiters live on the main event loop.
         """
-        future = self._process_pending.get(request_id)
+        future = self.process_pending.get(request_id)
         if future is None or future.done():
-            logger.warning(
-                "process reply for unknown request_id %s", request_id
-            )
+            logger.warning("process reply for unknown request_id %s", request_id)
             return False
 
         def _set() -> None:
@@ -63,7 +74,7 @@ class RpcRegistryMixin:
             _set()
         return True
 
-    def _resolve_git_future(self, request_id: str, payload: dict) -> bool:
+    def resolve_git_future(self, request_id: str, payload: dict) -> bool:
         """Resolve the pending git RPC future for *request_id* (sync).
 
         Thread-safe: Socket.IO replies arrive via ``sync_to_async``
@@ -76,7 +87,7 @@ class RpcRegistryMixin:
         pending entry up beforehand and drop unknown replies without
         calling this method a second time (avoids duplicate logs).
         """
-        pending = self._git_pending.get(request_id)
+        pending = self.git_pending.get(request_id)
         if pending is None:
             logger.warning("git reply for unknown request_id %s", request_id)
             return False

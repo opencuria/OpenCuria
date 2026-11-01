@@ -11,7 +11,7 @@ import pytest
 from apps.credentials.services import CredentialSvc, ResolvedCredentials
 from apps.runners import workspace_configuration_repository
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.services import RunnerService
+from apps.runners.services import RunnerRepositories, RunnerService
 from apps.runners.services.workspace_configuration import WorkspaceConfigurationService
 from common.exceptions import ConflictError, NotFoundError
 
@@ -97,7 +97,12 @@ def test_configuration_updates_after_capture_releases_hold(workspace, user):
 
 @pytest.fixture
 def credential_service(monkeypatch):
-    service = RunnerService(sio_server=AsyncMock())
+    service = RunnerService(
+        sio_server=AsyncMock(),
+        repositories=RunnerRepositories(
+            workspaces=Mock(), runners=Mock(), tasks=Mock()
+        ),
+    )
     runner = SimpleNamespace(id=uuid.uuid4(), is_online=True)
     workspace = SimpleNamespace(
         id=uuid.uuid4(),
@@ -107,13 +112,12 @@ def credential_service(monkeypatch):
         current_task_id=None,
         credentials_present=False,
     )
-    service.workspaces = Mock()
     service.workspaces.list_by_runner.return_value = [workspace]
     service.workspaces.get_by_id.return_value = workspace
-    service.runners = Mock()
-    service.tasks = Mock()
-    service._emit_to_runner = AsyncMock()
-    service.auto_stop_inactive_workspaces = AsyncMock(return_value=[])
+    service.runner_transport.emit_to_runner = AsyncMock()
+    service.heartbeat_reconciler.auto_stop_inactive_workspaces = AsyncMock(
+        return_value=[]
+    )
     monkeypatch.setattr(
         CredentialSvc,
         "resolve_workspace_credentials",
@@ -132,7 +136,7 @@ def test_heartbeat_defers_credentials_until_capture_parent_settles(credential_se
     workspace.current_task_id = None
     assert service.handle_heartbeat(workspace.runner, report) == [workspace.id]
     service.tasks.create.assert_not_called()
-    service._emit_to_runner.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -149,7 +153,7 @@ async def test_queued_reconciliation_rechecks_fresh_state(credential_service, ho
     service.workspaces.get_by_id.side_effect = [idle, workspace]
     await service.dispatch_credential_reconcile([workspace.id])
     service.tasks.create.assert_not_called()
-    service._emit_to_runner.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
     assert service._pending_credential_inject == set()
 
 
@@ -163,24 +167,30 @@ async def test_ordinary_reconciliation_resumes_including_removal(
     resolved = ResolvedCredentials(
         env_vars={"TOKEN": "test-secret"} if material else {}
     )
-    service._credential_resolver = Mock()
-    service._credential_resolver.resolve_workspace_credentials.return_value = resolved
+    service.credential_sync._credential_resolver = Mock()
+    resolver = service.credential_sync._credential_resolver
+    resolver.resolve_workspace_credentials.return_value = resolved
     await service.dispatch_credential_reconcile([workspace.id])
-    service._emit_to_runner.assert_awaited_once()
-    assert service._emit_to_runner.await_args.args[2]["env_vars"] == resolved.env_vars
+    service.runner_transport.emit_to_runner.assert_awaited_once()
+    assert (
+        service.runner_transport.emit_to_runner.await_args.args[2]["env_vars"]
+        == resolved.env_vars
+    )
     service.tasks.create.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_explicit_lifecycle_credential_delivery_is_not_fenced(credential_service):
     service, workspace = credential_service
-    service._call_runner = AsyncMock(
+    service.runner_transport.call_runner = AsyncMock(
         return_value={
-            "ok": True, "credentials_present": True, "_operation_identity": {},
+            "ok": True,
+            "credentials_present": True,
+            "_operation_identity": {},
         }
     )
-    service.apply_operation_result = Mock(return_value=True)
-    service._forward_workspace_status = Mock()
+    service.credential_sync.apply_operation_result = Mock(return_value=True)
+    service.frontend_bus.forward_workspace_status = Mock()
     service.workspaces.update_credentials_present.return_value = workspace
     assert (
         await service._dispatch_credential_inject(
@@ -190,6 +200,6 @@ async def test_explicit_lifecycle_credential_delivery_is_not_fenced(credential_s
         )
         is True
     )
-    service._call_runner.assert_awaited_once()
-    service.apply_operation_result.assert_called_once()
+    service.runner_transport.call_runner.assert_awaited_once()
+    service.credential_sync.apply_operation_result.assert_called_once()
     service.tasks.complete.assert_not_called()

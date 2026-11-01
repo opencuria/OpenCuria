@@ -116,7 +116,7 @@ def test_desktop_routes_reject_capture_fence(capture_setup, action, monkeypatch)
     def forbidden(*args, **kwargs):
         raise AssertionError("Desktop side effects must not run during capture")
 
-    monkeypatch.setattr(service, "get_desktop_info", forbidden)
+    monkeypatch.setattr(service.session_store, "get_desktop_info", forbidden)
     from apps.harness.harness_service import get_harness_service
 
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ def test_desktop_checks_ownership_before_availability(
     def forbidden(*args, **kwargs):
         raise AssertionError("Availability must not be disclosed to another owner")
 
-    monkeypatch.setattr(get_runner_service(), "_ensure_workspace_available", forbidden)
+    monkeypatch.setattr(get_runner_service().ownership, "ensure_workspace_available", forbidden)
     headers = _headers(
         other, org, [APIKeyPermission.TERMINAL_ACCESS, APIKeyPermission.HARNESS_RUN]
     )

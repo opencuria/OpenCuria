@@ -1,25 +1,11 @@
-"""Interactive sessions: terminal PTY + desktop (Phase 3 domain mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes. The backing dicts
-``_active_terminals`` / ``_terminal_workspace_runner`` /
-``_active_desktops`` / ``_desktop_workspace_runner`` intentionally remain
-class attributes on the ``RunnerService`` facade (tests read and write them
-directly); this mixin only accesses them via ``self``. The mixin further
-relies on the facade providing ``self.tasks`` / ``self.workspaces``,
-``_emit_to_runner`` / ``_call_runner`` (``RunnerTransportMixin``),
-``_forward_*`` (``FrontendBusMixin``), ``_desktop_event_owned_by_runner``
-(``OwnershipMixin``) and ``_record_active_desktop`` et al.
-(``SessionStoreMixin``). Frontend fan-out goes through
-``common.realtime.emit_to_frontend``; lazy ``common.utils`` imports keep
-their semantics.
-"""
+"""Coordinate terminal sessions and authorized desktop interactions."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
@@ -41,11 +27,43 @@ if TYPE_CHECKING:
 
     from ...models import Task, Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import TaskRepository, WorkspaceRepository
+    from ..domains.workspace_access import WorkspaceAccessService
+    from ..infra.ownership import OwnershipService
+    from ..infra.session_store import SessionStoreService
+    from ..ports import HarnessGateway, RunnerTransport
+    from ..session_state import InteractiveSessionState
+
 logger = logging.getLogger(__name__)
 
 
-class InteractiveSessionsMixin:
-    """Terminal and desktop session flows shared by RunnerService."""
+class InteractiveSessionsService:
+    """Terminal and desktop session flows with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        tasks: type[TaskRepository],
+        workspaces: type[WorkspaceRepository],
+        state: InteractiveSessionState,
+        desktop_action: Callable[[str, str, dict], Awaitable[dict]],
+        harness: Callable[[], HarnessGateway],
+        ownership: OwnershipService,
+        runner_transport: RunnerTransport,
+        session_store: SessionStoreService,
+        workspace_access: WorkspaceAccessService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.tasks = tasks
+        self.workspaces = workspaces
+        self.state = state
+        self.desktop_action = desktop_action
+        self.harness = harness
+        self.ownership = ownership
+        self.runner_transport = runner_transport
+        self.session_store = session_store
+        self.workspace_access = workspace_access
 
     async def start_terminal(
         self,
@@ -61,7 +79,7 @@ class InteractiveSessionsMixin:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
 
         if workspace.status != WorkspaceStatus.RUNNING:
             raise WorkspaceStateError(
@@ -83,7 +101,7 @@ class InteractiveSessionsMixin:
             workspace=workspace,
         )
 
-        await self._emit_to_runner(
+        await self.runner_transport.emit_to_runner(
             runner,
             "task:start_terminal",
             {
@@ -114,14 +132,14 @@ class InteractiveSessionsMixin:
         """Handle terminal:started event from a runner."""
         task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
         if task:
-            if not self._validate_task_runner(task, runner_id):
+            if not self.ownership.validate_task_runner(task, runner_id):
                 return
             await sync_to_async(self.tasks.complete)(task)
 
-        self._active_terminals[workspace_id] = terminal_id
+        self.state.terminals[workspace_id] = terminal_id
         # Cache runner ownership so terminal:output validation is O(1)
         if runner_id:
-            self._terminal_workspace_runner[workspace_id] = runner_id
+            self.state.terminal_runners[workspace_id] = runner_id
         logger.info(
             "Terminal started: workspace=%s, terminal=%s",
             workspace_id,
@@ -152,7 +170,7 @@ class InteractiveSessionsMixin:
         on the hot path.
         """
         if runner_id:
-            cached = self._terminal_workspace_runner.get(workspace_id)
+            cached = self.state.terminal_runners.get(workspace_id)
             if cached is not None and cached != runner_id:
                 logger.warning(
                     "terminal:output rejected: workspace %s is owned by "
@@ -181,7 +199,7 @@ class InteractiveSessionsMixin:
     ) -> None:
         """Handle terminal:closed from runner."""
         if runner_id:
-            cached = self._terminal_workspace_runner.get(workspace_id)
+            cached = self.state.terminal_runners.get(workspace_id)
             if cached is not None and cached != runner_id:
                 logger.warning(
                     "terminal:closed rejected: workspace %s is owned by "
@@ -192,8 +210,8 @@ class InteractiveSessionsMixin:
                 )
                 return
 
-        self._active_terminals.pop(workspace_id, None)
-        self._terminal_workspace_runner.pop(workspace_id, None)
+        self.state.terminals.pop(workspace_id, None)
+        self.state.terminal_runners.pop(workspace_id, None)
         logger.info(
             "Terminal closed: workspace=%s, terminal=%s",
             workspace_id,
@@ -221,12 +239,12 @@ class InteractiveSessionsMixin:
         if workspace is None:
             return
 
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             return
 
-        await self._emit_to_runner(
+        await self.runner_transport.emit_to_runner(
             runner,
             "terminal:input",
             {
@@ -251,12 +269,12 @@ class InteractiveSessionsMixin:
         if workspace is None:
             return
 
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             return
 
-        await self._emit_to_runner(
+        await self.runner_transport.emit_to_runner(
             runner,
             "terminal:resize",
             {
@@ -279,12 +297,12 @@ class InteractiveSessionsMixin:
         if workspace is None:
             return
 
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             return
 
-        await self._emit_to_runner(
+        await self.runner_transport.emit_to_runner(
             runner,
             "terminal:close",
             {
@@ -314,10 +332,10 @@ class InteractiveSessionsMixin:
         self, workspace_id: uuid.UUID, *, user, organization_id: uuid.UUID
     ) -> Workspace:
         """Apply shared REST and proxy workspace authorization."""
-        workspace = await sync_to_async(self.get_workspace_for_desktop_user)(
-            workspace_id, user=user, organization_id=organization_id
-        )
-        self._ensure_workspace_available(workspace)
+        workspace = await sync_to_async(
+            self.workspace_access.get_workspace_for_desktop_user
+        )(workspace_id, user=user, organization_id=organization_id)
+        self.ownership.ensure_workspace_available(workspace)
         if not workspace.runner.is_online:
             raise RunnerOfflineError(str(workspace.runner.id))
         return workspace
@@ -327,9 +345,7 @@ class InteractiveSessionsMixin:
     ) -> dict:
         """Use the existing correlated desktop_action transport."""
         try:
-            return await self._harness().desktop_action(
-                self, str(workspace_id), action, args
-            )
+            return await self.desktop_action(str(workspace_id), action, args)
         except (HarnessActionError, TimeoutError) as exc:
             raise ConflictError(
                 "Viewer desktop operation could not be confirmed"
@@ -346,11 +362,11 @@ class InteractiveSessionsMixin:
 
         Returns the ids of the aborted agent sessions.
         """
-        workspace = await sync_to_async(self.get_workspace_for_desktop_user)(
-            workspace_id, user=user, organization_id=organization_id
-        )
-        await sync_to_async(self._ensure_workspace_available)(workspace)
-        return await self._harness().abort_busy_computeruse(workspace.id)
+        workspace = await sync_to_async(
+            self.workspace_access.get_workspace_for_desktop_user
+        )(workspace_id, user=user, organization_id=organization_id)
+        await sync_to_async(self.ownership.ensure_workspace_available)(workspace)
+        return await self.harness().abort_busy_computeruse(workspace.id)
 
     async def viewer_desktop_status(
         self,
@@ -364,7 +380,7 @@ class InteractiveSessionsMixin:
         await self._viewer_workspace(
             workspace_id, user=user, organization_id=organization_id
         )
-        info = self.get_desktop_info(str(workspace_id)) or {}
+        info = self.session_store.get_desktop_info(str(workspace_id)) or {}
         result = {
             "active": bool(info),
             "proxy_url": f"/ws/desktop/{workspace_id}/" if info else None,
@@ -390,7 +406,7 @@ class InteractiveSessionsMixin:
 
     def get_desktop_proxy_target(self, workspace_id: str) -> dict | None:
         """Return the connected runner serving the workspace's active desktop."""
-        desktop_info = self.get_desktop_info(workspace_id)
+        desktop_info = self.session_store.get_desktop_info(workspace_id)
         if desktop_info is None:
             return None
         workspace = self.workspaces.get_by_id(uuid.UUID(workspace_id))
@@ -469,7 +485,7 @@ class InteractiveSessionsMixin:
             workspace=workspace,
         )
 
-        await self._emit_to_runner(
+        await self.runner_transport.emit_to_runner(
             runner,
             "task:start_desktop",
             {
@@ -521,7 +537,7 @@ class InteractiveSessionsMixin:
             workspace=workspace,
         )
 
-        await self._emit_to_runner(
+        await self.runner_transport.emit_to_runner(
             runner,
             "task:stop_desktop",
             {
@@ -554,12 +570,12 @@ class InteractiveSessionsMixin:
         )
         runner = workspace.runner
 
-        if not self.is_desktop_active(str(workspace_id)):
+        if not self.session_store.is_desktop_active(str(workspace_id)):
             raise ConflictError(
                 "Desktop session is not active. Start the desktop first."
             )
 
-        response = await self._call_runner(
+        response = await self.runner_transport.call_runner(
             runner,
             "desktop:clipboard_write",
             {
@@ -595,20 +611,20 @@ class InteractiveSessionsMixin:
             )
             runner = workspace.runner
 
-            if not self.is_desktop_active(str(workspace_id)):
+            if not self.session_store.is_desktop_active(str(workspace_id)):
                 raise ConflictError(
                     "Desktop session is not active. Start the desktop first."
                 )
 
             if copy_selection:
-                info = self.get_desktop_info(str(workspace_id)) or {}
+                info = self.session_store.get_desktop_info(str(workspace_id)) or {}
                 if info.get("computer_use"):
                     raise ConflictError(
                         "Unable to copy the desktop selection. Try again."
                     )
-                busy = await sync_to_async(
-                    self._harness().has_busy_computeruse_session
-                )(workspace_id)
+                busy = await sync_to_async(self.harness().has_busy_computeruse_session)(
+                    workspace_id
+                )
                 if busy:
                     raise ConflictError(
                         "Unable to copy the desktop selection. Try again."
@@ -619,7 +635,7 @@ class InteractiveSessionsMixin:
                 args["copy_selection"] = True
                 if shift:
                     args["shift"] = True
-            response = await self._call_runner(
+            response = await self.runner_transport.call_runner(
                 runner,
                 "desktop:clipboard_read",
                 args,
@@ -671,7 +687,7 @@ class InteractiveSessionsMixin:
         epoch: str,
     ) -> None:
         """Handle desktop:started after a viewer lease is acquired."""
-        if self._desktop_state_is_stale(
+        if self.session_store.desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
             generation=generation,
@@ -682,10 +698,10 @@ class InteractiveSessionsMixin:
         task = None
         if task_id:
             task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
-            if task and not self._validate_task_runner(task, runner_id):
+            if task and not self.ownership.validate_task_runner(task, runner_id):
                 return
 
-        recorded = self._record_active_desktop(
+        recorded = self.session_store.record_active_desktop(
             workspace_id,
             {
                 "mcp": mcp,
@@ -722,9 +738,11 @@ class InteractiveSessionsMixin:
                 "task_id": task_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
                 "computer_use_active": bool(
-                    (self.get_desktop_info(workspace_id) or {}).get("computer_use")
+                    (self.session_store.get_desktop_info(workspace_id) or {}).get(
+                        "computer_use"
+                    )
                 ),
-                **self._desktop_public_summary(workspace_id),
+                **self.session_store.desktop_public_summary(workspace_id),
             },
             workspace_id,
         )
@@ -752,9 +770,11 @@ class InteractiveSessionsMixin:
         workspace owner (not just the in-memory cache) so a stray runner
         cannot hijack another runner's desktop even with an empty cache.
         """
-        if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+        if not await self.ownership.desktop_event_owned_by_runner(
+            workspace_id, runner_id
+        ):
             return
-        if self._desktop_state_is_stale(
+        if self.session_store.desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
             generation=generation,
@@ -762,7 +782,7 @@ class InteractiveSessionsMixin:
         ):
             return
 
-        recorded = self._record_active_desktop(
+        recorded = self.session_store.record_active_desktop(
             workspace_id,
             {
                 "mcp": mcp,
@@ -778,7 +798,7 @@ class InteractiveSessionsMixin:
         )
         if not recorded:
             return
-        updated = self.get_desktop_info(workspace_id) or {}
+        updated = self.session_store.get_desktop_info(workspace_id) or {}
         logger.info(
             "Desktop process announced: workspace=%s, viewer=%s, computer_use=%s",
             workspace_id,
@@ -791,7 +811,7 @@ class InteractiveSessionsMixin:
                 "workspace_id": workspace_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
                 "computer_use_active": bool(updated.get("computer_use")),
-                **self._desktop_public_summary(workspace_id),
+                **self.session_store.desktop_public_summary(workspace_id),
             },
             workspace_id,
         )
@@ -815,9 +835,11 @@ class InteractiveSessionsMixin:
         the in-memory cache) so a foreign runner can never clear another
         runner's desktop state, even with an empty cache.
         """
-        if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+        if not await self.ownership.desktop_event_owned_by_runner(
+            workspace_id, runner_id
+        ):
             return
-        if self._desktop_state_is_stale(
+        if self.session_store.desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
             generation=generation,
@@ -827,11 +849,11 @@ class InteractiveSessionsMixin:
 
         task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
         if task:
-            if not self._validate_task_runner(task, runner_id):
+            if not self.ownership.validate_task_runner(task, runner_id):
                 return
             await sync_to_async(self.tasks.complete)(task)
 
-        if self._desktop_state_is_stale(
+        if self.session_store.desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
             generation=generation,
@@ -839,7 +861,7 @@ class InteractiveSessionsMixin:
         ):
             return
 
-        current = self._active_desktops.get(workspace_id)
+        current = self.state.desktops.get(workspace_id)
         if current is not None:
             updated = dict(current)
             updated.update(
@@ -850,7 +872,7 @@ class InteractiveSessionsMixin:
                 generation=generation,
                 epoch=epoch,
             )
-            if not self._record_active_desktop(
+            if not self.session_store.record_active_desktop(
                 workspace_id,
                 updated,
                 runner_id=runner_id,
@@ -868,11 +890,11 @@ class InteractiveSessionsMixin:
                 "workspace_id": workspace_id,
                 "task_id": task_id,
                 "computer_use_active": bool(
-                    (self.get_desktop_info(workspace_id) or {}).get(
+                    (self.session_store.get_desktop_info(workspace_id) or {}).get(
                         "computer_use", False
                     )
                 ),
-                **self._desktop_public_summary(workspace_id),
+                **self.session_store.desktop_public_summary(workspace_id),
             },
             workspace_id,
         )
@@ -894,10 +916,12 @@ class InteractiveSessionsMixin:
         the in-memory cache) so a foreign runner can never clear another
         runner's desktop state, even with an empty cache.
         """
-        if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+        if not await self.ownership.desktop_event_owned_by_runner(
+            workspace_id, runner_id
+        ):
             return
 
-        if self._desktop_state_is_stale(
+        if self.session_store.desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
             generation=generation,
@@ -924,13 +948,13 @@ class InteractiveSessionsMixin:
                 return
             task = await sync_to_async(self.tasks.get_by_id)(task_uuid)
             if task:
-                if not self._validate_task_runner(task, runner_id):
+                if not self.ownership.validate_task_runner(task, runner_id):
                     return
                 await sync_to_async(self.tasks.complete)(task)
 
         # Task lookup/completion above can yield to newer process announcements.
         # Recheck immediately before cache removal so delayed stops cannot win.
-        if self._desktop_state_is_stale(
+        if self.session_store.desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
             generation=generation,
@@ -939,15 +963,15 @@ class InteractiveSessionsMixin:
         ):
             return
 
-        self._remember_desktop_state(
+        self.session_store.remember_desktop_state(
             workspace_id,
             epoch=epoch,
             generation=generation,
             runner_id=runner_id,
             active=False,
         )
-        self._active_desktops.pop(workspace_id, None)
-        self._desktop_workspace_runner.pop(workspace_id, None)
+        self.state.desktops.pop(workspace_id, None)
+        self.state.desktop_runners.pop(workspace_id, None)
 
         logger.info("Desktop stopped: workspace=%s", workspace_id)
 

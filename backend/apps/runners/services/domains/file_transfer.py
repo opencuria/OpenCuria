@@ -1,30 +1,46 @@
-"""File explorer passthrough (Phase 3 domain mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces`` plus
-sibling helpers (``_emit_to_runner`` / ``_route_harness_reply`` via
-``RunnerTransportMixin``). Frontend fan-out goes through
-``common.realtime.emit_to_frontend``.
-"""
+"""Validate and relay editor and file-transfer operations."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 
 from common import realtime
 
+if TYPE_CHECKING:
+    from ...repositories import WorkspaceRepository
+    from ..domains.workspace_lifecycle import WorkspaceLifecycleService
+    from ..infra.ownership import OwnershipService
+    from ..ports import RunnerTransport
+
 logger = logging.getLogger(__name__)
 
 
-class FileTransferMixin:
-    """Stateless file-explorer relay shared by RunnerService."""
+class FileTransferService:
+    """Stateless file-explorer relay with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+        ownership: OwnershipService,
+        runner_transport: RunnerTransport,
+        workspace_lifecycle: WorkspaceLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+        self.ownership = ownership
+        self.runner_transport = runner_transport
+        self.workspace_lifecycle = workspace_lifecycle
 
     async def editor_file_operation(
-        self, workspace_id: uuid.UUID, operation: str, payload: dict,
+        self,
+        workspace_id: uuid.UUID,
+        operation: str,
+        payload: dict,
     ) -> dict:
         """Relay an owned editor read/save through the existing runner channel."""
         if operation not in {"read", "write"}:
@@ -34,12 +50,14 @@ class FileTransferMixin:
             from ...exceptions import WorkspaceNotFoundError
 
             raise WorkspaceNotFoundError(str(workspace_id))
-        runner = self._ensure_git_dispatchable(workspace)
-        result = await self._call_runner(
-            runner, f"files:editor_{operation}",
-            {**payload, "workspace_id": str(workspace_id)}, timeout=60,
+        runner = self.ownership.ensure_git_dispatchable(workspace)
+        result = await self.runner_transport.call_runner(
+            runner,
+            f"files:editor_{operation}",
+            {**payload, "workspace_id": str(workspace_id)},
+            timeout=60,
         )
-        await self.touch_workspace_activity(workspace_id)
+        await self.workspace_lifecycle.touch_workspace_activity(workspace_id)
         return result
 
     async def forward_files_event(
@@ -71,7 +89,7 @@ class FileTransferMixin:
         if workspace is None:
             return
 
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
         runner = workspace.runner
         if event in ("files:upload_chunk", "files:upload_finish"):
             if not runner.is_online:
@@ -137,7 +155,7 @@ class FileTransferMixin:
                 )
             return
 
-        await self._emit_to_runner(runner, event, data)
+        await self.runner_transport.emit_to_runner(runner, event, data)
         await sync_to_async(self.workspaces.touch_activity)(workspace)
 
     @staticmethod
@@ -196,7 +214,7 @@ class FileTransferMixin:
     _FRONTEND_READ_MAX_CHUNKS = 560
 
     @classmethod
-    def _validate_runner_file_chunk(cls, event: str, data: dict) -> bool:
+    def validate_runner_file_chunk(cls, event: str, data: dict) -> bool:
         """Validate a runner-originated file/harness chunk reply.
 
         Applies to ``files:content_chunk``, ``files:download_chunk`` and
@@ -256,7 +274,9 @@ class FileTransferMixin:
         ownership stays fail-closed: a missing/invalid ``workspace_id``
         never bypasses the owner check, it drops the payload.
         """
-        routed = self._route_harness_reply(event, data, runner_id=runner_id)
+        routed = self.runner_transport.route_harness_reply(
+            event, data, runner_id=runner_id
+        )
         if routed is not None:
             return
         workspace_id = data.get("workspace_id", "") if isinstance(data, dict) else ""
@@ -288,7 +308,7 @@ class FileTransferMixin:
                     "%s rejected: invalid workspace_id %s", event, workspace_id
                 )
                 return
-        if not self._validate_runner_file_chunk(event, data):
+        if not self.validate_runner_file_chunk(event, data):
             logger.warning(
                 "%s rejected: invalid chunk payload for workspace %s",
                 event,

@@ -51,15 +51,19 @@ def runner_websocket_interface(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     runner_root = Path(__file__).resolve().parents[4] / "runner"
     monkeypatch.syspath_prepend(str(runner_root))
+    from src.application import RunnerApplication
     from src.config import RunnerSettings
-    from src.interfaces.websocket import WebSocketInterface
 
     service = _WorkspaceService()
-    interface = WebSocketInterface(
+    application = RunnerApplication(
         service, RunnerSettings(state_dir=str(tmp_path / "runner-state"))
     )
+    interface = application.interface
     interface._sio.emit = AsyncMock()
-    return interface, service
+    try:
+        yield interface, service
+    finally:
+        application.journal.close()
 
 
 @pytest.fixture
@@ -133,7 +137,7 @@ async def test_runner_handler_reply_routes_through_owned_backend_to_accessor(
         assert runner_reply["ok"] is True
         workspace_service.runtime_artifacts.ensure_runtime_artifact.assert_awaited_once()
 
-    backend["service"].sio = AsyncMock()
+    backend["service"].runner_transport.sio = AsyncMock()
     backend["service"].sio.emit = AsyncMock(side_effect=backend_emit)
     accessor = await create_harness_accessor(backend["service"], str(workspace.id))
     result = await accessor.ensure_runtime_artifact("claude-agent", "2.1.316")

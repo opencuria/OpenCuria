@@ -61,7 +61,9 @@ def client(api_key, organization) -> Client:
 def service(monkeypatch) -> RunnerService:
     """Exercise the real service and repositories, replacing only runner I/O."""
     service = RunnerService()
-    service._await_process_result = AsyncMock(return_value={"pid": 4242})
+    service.process_manager._await_process_result = AsyncMock(
+        return_value={"pid": 4242}
+    )
     monkeypatch.setattr(runners_api, "_get_service", lambda: service)
     return service
 
@@ -94,14 +96,14 @@ def test_list_start_restart_stop_delete(client, service, workspace, process):
     assert row["run_count"] == 0
     assert row["status"] == ProcessStatus.EXITED
     assert row["pid"] is None and row["log_path"] == ""
-    service._await_process_result.assert_not_awaited()
+    service.process_manager._await_process_result.assert_not_awaited()
 
     live_listing = client.get(_url(workspace, "?live=true"))
     assert live_listing.status_code == 200
-    assert service._await_process_result.await_args.kwargs["event"] == (
+    assert service.process_manager._await_process_result.await_args.kwargs["event"] == (
         "harness:process_list"
     )
-    service._await_process_result.reset_mock()
+    service.process_manager._await_process_result.reset_mock()
 
     for run_count in (1, 2):
         started = client.post(_url(workspace, "{process_id}/restart/", process.id))
@@ -110,7 +112,9 @@ def test_list_start_restart_stop_delete(client, service, workspace, process):
         assert body["id"] == str(process.id)
         assert body["run_count"] == run_count
         assert body["status"] == ProcessStatus.RUNNING
-        payload = service._await_process_result.await_args.kwargs["payload"]
+        payload = service.process_manager._await_process_result.await_args.kwargs[
+            "payload"
+        ]
         assert payload["process_id"] == str(process.id)
         assert payload["command"] == process.command
         assert payload["workdir"] == process.workdir
@@ -120,7 +124,8 @@ def test_list_start_restart_stop_delete(client, service, workspace, process):
             f"/workspace/.opencuria/processes/{process.id}{suffix}.log"
         )
     events = [
-        call.kwargs["event"] for call in service._await_process_result.await_args_list
+        call.kwargs["event"]
+        for call in service.process_manager._await_process_result.await_args_list
     ]
     assert events == [
         "harness:process_start",
@@ -142,7 +147,7 @@ def test_list_start_restart_stop_delete(client, service, workspace, process):
 def test_list_hides_finished_temporary_processes(client, service, workspace, live):
     """Finished temps stay in agent history while running temps remain visible."""
     running_id = uuid.uuid4()
-    service._await_process_result.return_value = {
+    service.process_manager._await_process_result.return_value = {
         "processes": [{"process_id": str(running_id), "pid": 4242}]
     }
     for status, process_id in (
@@ -186,7 +191,7 @@ def test_controls_hide_another_owners_workspace(
     workspace.save(update_fields=["created_by"])
     response = getattr(client, method)(_url(workspace, suffix, process.id))
     assert response.status_code == 404
-    service._await_process_result.assert_not_awaited()
+    service.process_manager._await_process_result.assert_not_awaited()
     process.refresh_from_db()
     assert process.run_count == 0
 
@@ -196,12 +201,14 @@ def test_mutations_reject_unknown_process(client, service, workspace, method, su
     """A missing process returns 404 without contacting the runner."""
     response = getattr(client, method)(_url(workspace, suffix, uuid.uuid4()))
     assert response.status_code == 404
-    service._await_process_result.assert_not_awaited()
+    service.process_manager._await_process_result.assert_not_awaited()
 
 
 def test_restart_reports_runner_failure(client, service, workspace, process):
     """A failed start is reported to the UI and persisted on the existing row."""
-    service._await_process_result.return_value = {"error": "spawn failed"}
+    service.process_manager._await_process_result.return_value = {
+        "error": "spawn failed"
+    }
     response = client.post(_url(workspace, "{process_id}/restart/", process.id))
     assert response.status_code == 409
     process.refresh_from_db()
@@ -250,7 +257,8 @@ async def test_temp_controls_reject_without_mutating_history(
     assert process.status == status
     assert process.run_count == 0
     events = [
-        call.kwargs["event"] for call in service._await_process_result.await_args_list
+        call.kwargs["event"]
+        for call in service.process_manager._await_process_result.await_args_list
     ]
     assert events == (
         ["harness:process_get"] if status == ProcessStatus.RUNNING else []

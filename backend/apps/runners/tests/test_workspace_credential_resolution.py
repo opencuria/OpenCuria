@@ -99,7 +99,7 @@ async def test_update_workspace_resolves_requested_credential_ids(workspace, use
         org_id=workspace.runner.organization_id,
     )
     workspace.credentials.set([])
-    service._call_runner = AsyncMock(return_value={"ok": True})
+    service.runner_transport.call_runner = AsyncMock(return_value={"ok": True})
 
     await service.update_workspace(
         workspace.id,
@@ -112,8 +112,8 @@ async def test_update_workspace_resolves_requested_credential_ids(workspace, use
     assert list(workspace.credentials.values_list("id", flat=True)) == [credential.id]
     # A successful fake call without the runner ACK does not change disk state.
     assert workspace.credentials_present is False
-    assert service._call_runner.called
-    call_args = service._call_runner.await_args
+    assert service.runner_transport.call_runner.called
+    call_args = service.runner_transport.call_runner.await_args
     payload = next(arg for arg in call_args.args if isinstance(arg, dict))
     assert payload["env_vars"] == {"UPDATE_TOKEN": "new-workspace-secret"}
 

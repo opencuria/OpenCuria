@@ -15,6 +15,7 @@ from apps.runners.exceptions import (
     WorkspaceStateError,
 )
 from apps.runners.services import RunnerService
+from apps.runners.services.domains.git_operations import GitOperationsService
 from apps.runners.services.infra.rpc_registry import PendingGitRequest
 from common.exceptions import NotFoundError
 
@@ -69,7 +70,7 @@ def _emit_ok(service: RunnerService, runner, workspace, payload_extra=None):
             service, runner_arg, workspace.id, payload["request_id"], result
         )
 
-    service._emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+    service.runner_transport.emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
     return seen
 
 
@@ -202,7 +203,7 @@ class TestRunGitOperationHappyPath:
                 },
             )
 
-        service._emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
 
         result = await service.run_git_operation(
             workspace.id, "push", repo_path="/workspace/repo", args={}
@@ -274,10 +275,10 @@ class TestStrictGitArgs:
     @pytest.mark.asyncio
     async def test_unknown_operation_rejected(self, service, workspace):
         """Unknown operations fail before any runner dispatch."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         with pytest.raises(ValueError, match="Unknown git operation"):
             await service.run_git_operation(workspace.id, "rm_rf_everything")
-        service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
+        service.runner_transport.emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -299,12 +300,12 @@ class TestStrictGitArgs:
         self, service, runner, workspace, operation, args
     ):
         """env/author/args/argv/aliases never reach the runner."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         with pytest.raises(ValueError, match="Unknown argument|env|author"):
             await service.run_git_operation(
                 workspace.id, operation, repo_path="/workspace/repo", args=args
             )
-        service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
+        service.runner_transport.emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -348,7 +349,7 @@ class TestStrictGitArgs:
         self, service, runner, workspace, operation, args
     ):
         """Per-operation required fields fail fast with ValueError."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         with pytest.raises(ValueError):
             await service.run_git_operation(
                 workspace.id,
@@ -356,7 +357,7 @@ class TestStrictGitArgs:
                 repo_path="/workspace/repo",
                 args=args,
             )
-        service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
+        service.runner_transport.emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("repo_path", [None, "", "   ", 123, "/etc/passwd"])
@@ -364,25 +365,23 @@ class TestStrictGitArgs:
         self, service, runner, workspace, repo_path
     ):
         """Missing, malformed or external repo paths fail before dispatch."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         with pytest.raises(ValueError, match="repo_path|Repo path"):
             await service.run_git_operation(
                 workspace.id, "stage", repo_path=repo_path, args={"paths": ["a"]}
             )
-        service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
+        service.runner_transport.emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
-    async def test_git_timeout_budgets_exceed_runner_outer(
-        self, service
-    ):
+    async def test_git_timeout_budgets_exceed_runner_outer(self, service):
         """Backend waits longer than runner outer budgets (60s/150s)."""
-        assert service.git_timeout_for("list_repos") == 75
-        assert service.git_timeout_for("repo_snapshot") == 75
-        assert service.git_timeout_for("repo_history") == 75
-        assert service.git_timeout_for("working_diff") == 75
-        assert service.git_timeout_for("fetch") == 180
-        assert service.git_timeout_for("pull") == 180
-        assert service.git_timeout_for("checkout_remote_branch") == 180
+        assert service.git_operations.git_timeout_for("list_repos") == 75
+        assert service.git_operations.git_timeout_for("repo_snapshot") == 75
+        assert service.git_operations.git_timeout_for("repo_history") == 75
+        assert service.git_operations.git_timeout_for("working_diff") == 75
+        assert service.git_operations.git_timeout_for("fetch") == 180
+        assert service.git_operations.git_timeout_for("pull") == 180
+        assert service.git_operations.git_timeout_for("checkout_remote_branch") == 180
 
 
 @pytest.mark.django_db(transaction=True)
@@ -437,21 +436,21 @@ class TestGitDispatchGuards:
         self, service, runner, workspace, monkeypatch
     ):
         """No runner reply within budget raises RunnerTimeoutError."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
-        monkeypatch.setattr(RunnerService, "git_timeout_for", classmethod(lambda cls, op: 0.02))
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            GitOperationsService, "git_timeout_for", classmethod(lambda cls, op: 0.02)
+        )
         with pytest.raises(RunnerTimeoutError):
             await service.run_git_operation(workspace.id, "list_repos")
 
     @pytest.mark.asyncio
-    async def test_emit_failure_propagates(
-        self, service, runner, workspace
-    ):
+    async def test_emit_failure_propagates(self, service, runner, workspace):
         """Transport errors during emit propagate (RuntimeError, not swallowed)."""
 
         async def _boom(runner_arg, event, payload):
             raise RuntimeError("socket down")
 
-        service._emit_to_runner = _boom  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = _boom  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="socket down"):
             await service.run_git_operation(workspace.id, "list_repos")
 
@@ -767,7 +766,7 @@ class TestHandleGitReply:
         async def _never_emit(runner_arg, event, payload):
             return None
 
-        service._emit_to_runner = AsyncMock(side_effect=_never_emit)  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock(side_effect=_never_emit)  # type: ignore[method-assign]
         with pytest.raises(RunnerTimeoutError):
             await service._await_git_result(
                 request_id=request_id,
@@ -804,7 +803,7 @@ class TestHandleGitReply:
                 runner_id=str(runner.id),
             )
 
-        monkeypatch.setattr(service, "_emit_to_runner", _capture)
+        monkeypatch.setattr(service.runner_transport, 'emit_to_runner', _capture)
         result = await service._await_git_result(
             request_id="req-register-check",
             workspace_id=workspace.id,

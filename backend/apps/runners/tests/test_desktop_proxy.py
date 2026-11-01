@@ -184,7 +184,9 @@ async def test_proxy_target_needs_an_active_desktop_and_a_connected_runner(
 
     desktops = dict(get_runner_service()._active_desktops)
     desktops[workspace_id] = {"port": 6901}
-    monkeypatch.setattr(get_runner_service(), "_active_desktops", desktops)
+    monkeypatch.setattr(
+        get_runner_service().session_store.state, "desktops", desktops
+    )
     assert await _get_desktop_proxy_target(workspace_id) == {
         "runner_id": str(workspace.runner_id),
         "runner_sid": workspace.runner.sid,
@@ -927,15 +929,13 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
         renewed.set()
         return {"viewer_lease_state": "held"}
 
-    monkeypatch.setattr(service, "renew_desktop", renew)
+    monkeypatch.setattr(service.interactive_sessions, "renew_desktop", renew)
     stop = AsyncMock()
-    monkeypatch.setattr(service, "stop_desktop", stop)
+    monkeypatch.setattr(service.interactive_sessions, "stop_desktop", stop)
     resolve = Mock(return_value=(viewer, organization_id))
-    monkeypatch.setattr(service, "resolve_desktop_viewer", resolve)
+    monkeypatch.setattr(service.workspace_access, "resolve_desktop_viewer", resolve)
     sio = SimpleNamespace(emit=AsyncMock())
-    monkeypatch.setattr(
-        "common.realtime.get_sio_server", lambda: sio
-    )
+    monkeypatch.setattr("common.realtime.get_sio_server", lambda: sio)
 
     async def receive():
         await renewed.wait()
@@ -967,16 +967,14 @@ async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch):
 
     service = get_runner_service()
     renew = AsyncMock()
-    monkeypatch.setattr(service, "renew_desktop", renew)
+    monkeypatch.setattr(service.interactive_sessions, "renew_desktop", renew)
     monkeypatch.setattr(
-        service,
+        service.workspace_access,
         "resolve_desktop_viewer",
         Mock(side_effect=WorkspaceNotFoundError("gone")),
     )
     sio = SimpleNamespace(emit=AsyncMock())
-    monkeypatch.setattr(
-        "common.realtime.get_sio_server", lambda: sio
-    )
+    monkeypatch.setattr("common.realtime.get_sio_server", lambda: sio)
     send = AsyncMock()
 
     async def receive():

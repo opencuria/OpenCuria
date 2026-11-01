@@ -1,12 +1,4 @@
-"""Who may reach a workspace, shared by RunnerService and every adapter.
-
-REST resolves owner-only workspaces through :meth:`get_workspace_for_user`
-and desktops through :meth:`get_workspace_for_desktop_user`; the
-realtime adapters (Socket.IO frontend namespace and the desktop proxy) only
-know the authenticated user ID and use the boolean predicates. Owners must
-be members of the workspace runner's organization; organization admins may
-additionally reach the desktop of any workspace in their organization.
-"""
+"""Authorize workspace access and desktop viewing."""
 
 from __future__ import annotations
 
@@ -24,8 +16,23 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import Workspace
 
 
-class WorkspaceAccessMixin:
-    """Workspace authorization rules shared by RunnerService."""
+if TYPE_CHECKING:
+    from ...repositories import WorkspaceRepository
+    from ..domains.runner_lifecycle import RunnerLifecycleService
+
+
+class WorkspaceAccessService:
+    """Workspace authorization rules with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+        runner_lifecycle: RunnerLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+        self.runner_lifecycle = runner_lifecycle
 
     def get_workspace_for_user(
         self,
@@ -35,7 +42,7 @@ class WorkspaceAccessMixin:
         organization_id: uuid.UUID,
     ) -> Workspace:
         """Return a workspace only when it belongs to the active org and owner."""
-        workspace = self.get_workspace(workspace_id)
+        workspace = self.runner_lifecycle.get_workspace(workspace_id)
         if workspace.runner.organization_id != organization_id:
             raise WorkspaceNotFoundError(str(workspace_id))
         if workspace.created_by_id != user.id:
@@ -92,7 +99,7 @@ class WorkspaceAccessMixin:
         organizations = OrganizationService()
         organizations.require_membership(user, organization_id)
         role = organizations.get_user_role(user, organization_id)
-        workspace = self.get_workspace(workspace_id)
+        workspace = self.runner_lifecycle.get_workspace(workspace_id)
         if workspace.runner.organization_id != organization_id or not (
             self._is_desktop_viewer(workspace, user_id=user.id, role=role)
         ):

@@ -1,27 +1,38 @@
-"""Generation-fenced desktop routing shared by lifecycle events and heartbeats."""
+"""Store generation-fenced terminal and desktop observations."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-class SessionStoreMixin:
-    """Desktop session cache shared by RunnerService."""
+if TYPE_CHECKING:
+    from ..session_state import InteractiveSessionState
 
-    def _set_runner_desktop_epoch(self, runner_id: str, epoch: str | None) -> None:
+
+class SessionStoreService:
+    """Desktop session cache with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        state: InteractiveSessionState,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.state = state
+
+    def set_runner_desktop_epoch(self, runner_id: str, epoch: str | None) -> None:
         """Set the active desktop epoch advertised by an authenticated runner."""
         if not runner_id or not epoch:
             return
-        epochs = getattr(self, "_runner_desktop_epochs", None)
-        if epochs is None:
-            self._runner_desktop_epochs = epochs = {}
+        epochs = self.state.runner_epochs
         epochs[runner_id] = epoch
 
     def is_desktop_active(self, workspace_id: str) -> bool:
         """Check if a desktop session is active for a workspace."""
-        return workspace_id in self._active_desktops
+        return workspace_id in self.state.desktops
 
     def get_desktop_info(self, workspace_id: str) -> dict | None:
         """Get cached desktop session info if the runner reported one active."""
-        return self._active_desktops.get(workspace_id)
+        return self.state.desktops.get(workspace_id)
 
     @staticmethod
     def _normalize_desktop_state(desktop_state: dict) -> dict:
@@ -40,7 +51,7 @@ class SessionStoreMixin:
             )
         }
 
-    def _desktop_public_summary(self, workspace_id: str) -> dict:
+    def desktop_public_summary(self, workspace_id: str) -> dict:
         """Expose aggregate process state, never individual lease identities."""
         state = self.get_desktop_info(workspace_id) or {}
         return {
@@ -50,7 +61,7 @@ class SessionStoreMixin:
             **{key: state[key] for key in ("generation", "epoch") if key in state},
         }
 
-    def _record_active_desktop(
+    def record_active_desktop(
         self,
         workspace_id: str,
         desktop_state: dict,
@@ -59,16 +70,16 @@ class SessionStoreMixin:
     ) -> bool:
         """Persist backend desktop state unless it predates a fenced update."""
         normalized = self._normalize_desktop_state(desktop_state)
-        if self._desktop_state_is_stale(
+        if self.desktop_state_is_stale(
             workspace_id,
             epoch=normalized["epoch"],
             generation=normalized["generation"],
             runner_id=runner_id,
         ):
             return False
-        self._active_desktops[workspace_id] = normalized
-        self._desktop_workspace_runner[workspace_id] = runner_id
-        self._remember_desktop_state(
+        self.state.desktops[workspace_id] = normalized
+        self.state.desktop_runners[workspace_id] = runner_id
+        self.remember_desktop_state(
             workspace_id,
             epoch=normalized["epoch"],
             generation=normalized["generation"],
@@ -77,7 +88,7 @@ class SessionStoreMixin:
         )
         return True
 
-    def _desktop_state_is_stale(
+    def desktop_state_is_stale(
         self,
         workspace_id: str,
         *,
@@ -87,7 +98,7 @@ class SessionStoreMixin:
         active: bool = True,
     ) -> bool:
         """Fence stale updates by runner epoch, generation, and stopped state."""
-        expected_epoch = getattr(self, "_runner_desktop_epochs", {}).get(runner_id)
+        expected_epoch = self.state.runner_epochs.get(runner_id)
         if (
             not epoch
             or epoch != expected_epoch
@@ -95,7 +106,7 @@ class SessionStoreMixin:
             or generation < 0
         ):
             return True
-        known = getattr(self, "_desktop_state_versions", {}).get(workspace_id)
+        known = self.state.desktop_versions.get(workspace_id)
         if known is None:
             return False
         known_runner, known_epoch, known_generation, known_active = known
@@ -109,7 +120,7 @@ class SessionStoreMixin:
         # a late active announcement must never resurrect a stopped tombstone.
         return generation == known_generation and active and not known_active
 
-    def _remember_desktop_state(
+    def remember_desktop_state(
         self,
         workspace_id: str,
         *,
@@ -119,9 +130,7 @@ class SessionStoreMixin:
         active: bool,
     ) -> None:
         """Remember the latest desktop incarnation, including stopped tombstones."""
-        versions = getattr(self, "_desktop_state_versions", None)
-        if versions is None:
-            self._desktop_state_versions = versions = {}
+        versions = self.state.desktop_versions
         current = versions.get(workspace_id)
         if current is None or current[0] != runner_id or current[1] != epoch:
             versions[workspace_id] = (runner_id, epoch, generation, active)
@@ -130,7 +139,7 @@ class SessionStoreMixin:
         elif generation == current[2] and active:
             versions[workspace_id] = (runner_id, epoch, generation, True)
 
-    def _sync_desktop_state_from_heartbeat(
+    def sync_desktop_state_from_heartbeat(
         self,
         workspace_id: str,
         desktop_state: dict | None,
@@ -144,7 +153,7 @@ class SessionStoreMixin:
         if not desktop_state and desktop_session_tracked:
             # A failed liveness probe cannot prove that a tracked desktop stopped.
             return
-        if self._desktop_state_is_stale(
+        if self.desktop_state_is_stale(
             workspace_id,
             epoch=desktop_epoch,
             generation=desktop_generation,
@@ -153,23 +162,23 @@ class SessionStoreMixin:
         ):
             return
         if not desktop_state:
-            self._remember_desktop_state(
+            self.remember_desktop_state(
                 workspace_id,
                 epoch=desktop_epoch,
                 generation=desktop_generation,
                 runner_id=runner_id,
                 active=False,
             )
-            self._cleanup_desktop_state(workspace_id)
+            self.cleanup_desktop_state(workspace_id)
             return
 
-        self._record_active_desktop(
+        self.record_active_desktop(
             workspace_id,
             desktop_state,
             runner_id=runner_id,
         )
 
-    def _cleanup_desktop_state(self, workspace_id: str) -> None:
+    def cleanup_desktop_state(self, workspace_id: str) -> None:
         """Remove in-memory desktop state for a workspace."""
-        self._active_desktops.pop(workspace_id, None)
-        self._desktop_workspace_runner.pop(workspace_id, None)
+        self.state.desktops.pop(workspace_id, None)
+        self.state.desktop_runners.pop(workspace_id, None)

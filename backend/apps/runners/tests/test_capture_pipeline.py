@@ -1,5 +1,8 @@
 """Durable explicit stop/capture/replace (or resume) child progression."""
 
+from apps.runners.services.infra.frontend_bus import FrontendBusService
+
+
 import pytest
 
 from apps.runners.models import (
@@ -232,13 +235,12 @@ def test_full_success_holds_parent_until_recovery(
 
     from apps.runners.models import ImageInstance, Task
     from apps.runners.repositories import TaskRepository, WorkspaceRepository
-    from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
 
     workspace.credentials_present = True
     workspace.save()
     frontend = Mock()
-    monkeypatch.setattr(RunnerService, "_forward_to_frontend", frontend)
+    monkeypatch.setattr(FrontendBusService, 'forward_to_frontend', frontend)
     with django_capture_on_commit_callbacks(execute=True):
         _, stop = async_to_sync(service.create_image_artifact)(workspace.id, "capture")
     request = CaptureRequest.objects.get(workspace=workspace)
@@ -407,7 +409,6 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
 
     from asgiref.sync import async_to_sync
 
-    from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
 
     workspace.save()
@@ -452,7 +453,7 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
     assert workspace.current_task_id is None
     assert workspace.active_operation == "capturing_image"
     frontend = Mock()
-    monkeypatch.setattr(RunnerService, "_forward_to_frontend", frontend)
+    monkeypatch.setattr(FrontendBusService, 'forward_to_frontend', frontend)
     with django_capture_on_commit_callbacks(execute=True):
         async_to_sync(RecoveryService().tick)(sio_mock)
     request.refresh_from_db()

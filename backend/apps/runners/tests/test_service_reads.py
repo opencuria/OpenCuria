@@ -42,8 +42,12 @@ def test_disconnect_only_affects_the_current_online_session(
     service = RunnerService()
     fail_streams = Mock()
     notify = Mock()
-    monkeypatch.setattr(service, "fail_streams_for_runner", fail_streams)
-    monkeypatch.setattr(service, "_forward_runner_status_to_frontend", notify)
+    monkeypatch.setattr(
+        service.stream_transport, "fail_streams_for_runner", fail_streams
+    )
+    monkeypatch.setattr(
+        service.frontend_bus, 'forward_runner_status_to_frontend', notify
+    )
 
     service.unregister_runner(sid)
 
@@ -119,9 +123,9 @@ def test_runner_status_events_preserve_workspace_recipients(
     )
     forwarded = Mock()
     service = RunnerService()
-    monkeypatch.setattr(service, "_forward_to_frontend", forwarded)
+    monkeypatch.setattr(service.frontend_bus, 'forward_to_frontend', forwarded)
 
-    service._forward_runner_status_to_frontend(runner, status)
+    service.frontend_bus.forward_runner_status_to_frontend(runner, status)
 
     assert [call.args for call in forwarded.call_args_list] == [
         (

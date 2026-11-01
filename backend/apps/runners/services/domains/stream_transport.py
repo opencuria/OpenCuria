@@ -1,20 +1,37 @@
-"""Workspace byte streams for RunnerService.
-
-Control calls use Socket.IO ACKs. Output chunks and EOF notices are validated
-against workspace ownership and routed through the HarnessGateway, never to
-frontend clients.
-"""
+"""Validate workspace byte streams and route their runner responses."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...models import Runner
+    from ...repositories import WorkspaceRepository
+    from ..infra.ownership import OwnershipService
+    from ..ports import HarnessGateway, RunnerTransport
 
 logger = logging.getLogger(__name__)
 
 
-class StreamTransportMixin:
+class StreamTransportService:
     """Generic workspace:stream_* byte-stream transport for RunnerService."""
+
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+        harness: Callable[[], HarnessGateway],
+        ownership: OwnershipService,
+        runner_transport: RunnerTransport,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+        self.harness = harness
+        self.ownership = ownership
+        self.runner_transport = runner_transport
 
     # ------------------------------------------------------------------
     # Generic byte streams (workspace:stream_* transport, no plugin/MCP
@@ -115,7 +132,7 @@ class StreamTransportMixin:
                 workspace_uuid = uuid.UUID(workspace_id)
             except (ValueError, TypeError):
                 return False
-            if not self._validate_harness_workspace_runner(
+            if not self.ownership.validate_harness_workspace_runner(
                 workspace_uuid, runner_id
             ):
                 logger.warning(
@@ -147,20 +164,20 @@ class StreamTransportMixin:
                     connection_id,
                 )
                 return False
-        harness = self._harness()
+        harness = self.harness()
         if event == "workspace:stream_output":
             return harness.route_stream_output(data)
         return harness.route_stream_closed(data)
 
     async def call_stream_event(
         self,
-        runner: "Runner",
+        runner: Runner,
         event: str,
         payload: dict,
         timeout: float | None = None,
     ) -> dict:
         """ACKed call for stream control events (start/input/close)."""
-        return await self._call_runner(
+        return await self.runner_transport.call_runner(
             runner,
             event,
             payload,
@@ -172,9 +189,7 @@ class StreamTransportMixin:
         try:
             claimed = uuid.UUID(str(runner_id))
         except (ValueError, TypeError, AttributeError):
-            logger.warning(
-                "stream fail rejected: invalid runner_id %s", runner_id
-            )
+            logger.warning("stream fail rejected: invalid runner_id %s", runner_id)
             return
 
         def owned_by_runner(workspace_id: str) -> bool:
@@ -184,6 +199,4 @@ class StreamTransportMixin:
                 return False
             return owner_id == claimed
 
-        self._harness().fail_streams(
-            owned_by_runner, f"runner {runner_id} disconnected"
-        )
+        self.harness().fail_streams(owned_by_runner, f"runner {runner_id} disconnected")

@@ -190,9 +190,9 @@ def test_duplicate_interruption_does_not_repeat_notifications(
             "outcome_known": False,
         },
     )
-    service._forward_to_frontend = Mock()
-    service._forward_workspace_operation = Mock()
+    service.frontend_bus.forward_to_frontend = Mock()
+    service.frontend_bus.forward_workspace_operation = Mock()
     assert not service.apply_operation_result(str(runner.id), "workspace:error", data)
     assert not service.apply_operation_result(str(runner.id), "workspace:error", data)
-    service._forward_to_frontend.assert_called_once()
-    service._forward_workspace_operation.assert_called_once()
+    service.frontend_bus.forward_to_frontend.assert_called_once()
+    service.frontend_bus.forward_workspace_operation.assert_called_once()

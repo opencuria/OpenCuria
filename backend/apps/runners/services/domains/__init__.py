@@ -1,31 +1,31 @@
-"""Domain mixins for the runners service (Phase 3).
+"""Domain services for the runners service.
 
-Re-exports the domain mixins so the facade (``services/__init__.py``)
+Re-exports the domain services so the facade (``services/__init__.py``)
 can import them from a single place. No logic lives here.
 """
 
-from .credential_sync import CredentialSyncMixin
-from .file_transfer import FileTransferMixin
-from .git_operations import GitOperationsMixin
-from .heartbeat_reconciler import HeartbeatReconcilerMixin
-from .image_lifecycle import ImageLifecycleMixin
-from .interactive_sessions import InteractiveSessionsMixin
-from .process_manager import ProcessManagerMixin
-from .runner_lifecycle import RunnerLifecycleMixin
-from .stream_transport import StreamTransportMixin
-from .workspace_access import WorkspaceAccessMixin
-from .workspace_lifecycle import WorkspaceLifecycleMixin
+from .credential_sync import CredentialSyncService
+from .file_transfer import FileTransferService
+from .git_operations import GitOperationsService
+from .heartbeat_reconciler import HeartbeatReconcilerService
+from .image_lifecycle import ImageLifecycleService
+from .interactive_sessions import InteractiveSessionsService
+from .process_manager import ProcessManagerService
+from .runner_lifecycle import RunnerLifecycleService
+from .stream_transport import StreamTransportService
+from .workspace_access import WorkspaceAccessService
+from .workspace_lifecycle import WorkspaceLifecycleService
 
 __all__ = [
-    "CredentialSyncMixin",
-    "FileTransferMixin",
-    "GitOperationsMixin",
-    "HeartbeatReconcilerMixin",
-    "ImageLifecycleMixin",
-    "InteractiveSessionsMixin",
-    "ProcessManagerMixin",
-    "RunnerLifecycleMixin",
-    "StreamTransportMixin",
-    "WorkspaceAccessMixin",
-    "WorkspaceLifecycleMixin",
+    "CredentialSyncService",
+    "FileTransferService",
+    "GitOperationsService",
+    "HeartbeatReconcilerService",
+    "ImageLifecycleService",
+    "InteractiveSessionsService",
+    "ProcessManagerService",
+    "RunnerLifecycleService",
+    "StreamTransportService",
+    "WorkspaceAccessService",
+    "WorkspaceLifecycleService",
 ]

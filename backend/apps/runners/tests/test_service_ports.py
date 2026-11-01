@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from apps.runners.services import RunnerService
+from apps.runners.services import RunnerRepositories, RunnerService
 from apps.runners.services.infra.harness_gateway import get_harness_gateway
 
 
@@ -109,7 +109,7 @@ def test_harness_reply_and_stream_routing_use_gateway():
     result = {"request_id": "r1", "workspace_id": "w"}
     chunk = {"request_id": "r2", "workspace_id": "w"}
     assert svc._route_harness_reply("harness:list_result", result) is True
-    svc._validate_runner_file_chunk = MagicMock(return_value=True)
+    svc.runner_transport.validate_file_chunk = MagicMock(return_value=True)
     assert svc._route_harness_reply("harness:read_file_chunk", chunk) is True
     assert svc._route_harness_reply("terminal:output", {}) is None
     assert gateway.calls == [("result", result), ("chunk", chunk)]
@@ -117,10 +117,11 @@ def test_harness_reply_and_stream_routing_use_gateway():
 
 def test_fail_streams_for_runner_matches_owned_workspaces():
     gateway = _FakeHarnessGateway()
-    svc = RunnerService(harness_gateway=gateway)
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
     runner_id = uuid.uuid4()
     owned, foreign = uuid.uuid4(), uuid.uuid4()
-    svc.workspaces = MagicMock()
     svc.workspaces.get_runner_id.side_effect = lambda ws: (
         runner_id if ws == owned else uuid.uuid4()
     )
@@ -166,12 +167,16 @@ def test_take_desktop_control_checks_availability_before_gateway():
     workspace = types.SimpleNamespace(
         id=uuid.uuid4(), status="running", active_operation=None, current_task_id=None
     )
-    svc.get_workspace_for_desktop_user = MagicMock(return_value=workspace)
+    svc.workspace_access.get_workspace_for_desktop_user = MagicMock(
+        return_value=workspace
+    )
     context = {"user": types.SimpleNamespace(id=1), "organization_id": uuid.uuid4()}
     assert asyncio.run(svc.take_desktop_control(workspace.id, **context)) == [
         uuid.UUID(int=1)
     ]
-    svc.get_workspace_for_desktop_user.assert_called_once_with(workspace.id, **context)
+    svc.workspace_access.get_workspace_for_desktop_user.assert_called_once_with(
+        workspace.id, **context
+    )
     assert gateway.calls == [("abort_computeruse", workspace.id)]
 
     gateway.calls.clear()
@@ -244,9 +249,11 @@ def test_ensure_definition_mutable_rejects_frozen_definition():
 
 
 def test_repository_delegation_methods_mocked():
-    svc = RunnerService(harness_gateway=_FakeHarnessGateway())
+    svc = RunnerService(
+        harness_gateway=_FakeHarnessGateway(),
+        repositories=RunnerRepositories(workspaces=MagicMock()),
+    )
     artifact_id = uuid.uuid4()
-    svc.workspaces = MagicMock()
     workspace = types.SimpleNamespace(id=artifact_id)
     svc.workspaces.get_by_id.return_value = workspace
 
@@ -258,9 +265,10 @@ def test_repository_delegation_methods_mocked():
 def test_workspace_list_reads_activity_in_one_gateway_batch(busy):
     """A workspace list must never perform a harness query per workspace."""
     gateway = _FakeHarnessGateway(busy=busy)
-    svc = RunnerService(harness_gateway=gateway)
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
     workspaces = [types.SimpleNamespace(id=uuid.uuid4()) for _ in range(3)]
-    svc.workspaces = MagicMock()
     svc.workspaces.list_for_scope.return_value = workspaces
 
     assert svc.list_workspaces() == workspaces
@@ -271,8 +279,9 @@ def test_workspace_list_reads_activity_in_one_gateway_batch(busy):
 def test_missing_workspace_and_empty_list_do_not_query_harness():
     """There is no harness activity to resolve when no workspace was found."""
     gateway = _FakeHarnessGateway()
-    svc = RunnerService(harness_gateway=gateway)
-    svc.workspaces = MagicMock()
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
     svc.workspaces.get_by_id.return_value = None
     svc.workspaces.list_for_scope.return_value = []
 
@@ -285,8 +294,9 @@ def test_workspace_read_propagates_activity_lookup_failure():
     """A failed activity read must never silently report an idle workspace."""
     gateway = _FakeHarnessGateway()
     gateway.busy_workspace_ids = MagicMock(side_effect=RuntimeError("unavailable"))
-    svc = RunnerService(harness_gateway=gateway)
-    svc.workspaces = MagicMock()
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
     svc.workspaces.get_by_id.return_value = types.SimpleNamespace(id=uuid.uuid4())
 
     with pytest.raises(RuntimeError, match="unavailable"):
@@ -307,5 +317,5 @@ def test_facade_constants_reachable():
     assert svc.BUILD_LOG_MAX_CHARS == 200_000
     assert svc._PROCESS_RPC_TIMEOUT_SECONDS == 30
     assert svc._STREAM_CHUNK_SIZE == 64 * 1024
-    assert isinstance(RunnerService._active_terminals, dict)
-    assert isinstance(RunnerService._active_desktops, dict)
+    assert isinstance(svc._active_terminals, dict)
+    assert isinstance(svc._active_desktops, dict)

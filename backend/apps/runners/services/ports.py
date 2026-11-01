@@ -8,10 +8,10 @@ via structural typing so tests can inject fakes.
 Wiring status (what ``RunnerService`` consumes):
 
 - ``CredentialResolver``: resolves the credentials attached to a workspace
-  (``credential_sync._dispatch_credential_inject`` and the ``resume`` /
+  (``credential_sync.dispatch_credential_inject`` and the ``resume`` /
   ``recreate`` lifecycle paths). Credential selections requested by callers
   (create / update / clone by ``credential_ids``) always resolve through
-  ``CredentialSyncMixin._resolve_credential_selection``.
+  ``CredentialSyncService.resolve_credential_selection``.
 - ``HarnessGateway``: the only way the runners app reaches the agent
   harness (reply/stream routing, stream failure, viewer desktop actions,
   busy agent checks, workspace activity reads, desktop take-over).
@@ -23,8 +23,7 @@ Wiring status (what ``RunnerService`` consumes):
   under their row lock.
 
 Everything else in ``workspace_lifecycle`` / ``interactive_sessions`` /
-``file_transfer`` keeps its lazy ``emit_to_frontend`` import (documented
-Phase-5 remainder).
+``file_transfer`` use the shared ``emit_to_frontend`` transport adapter.
 """
 
 from __future__ import annotations
@@ -52,6 +51,12 @@ class RunnerTransport(Protocol):
         """Send a request/response call to *runner* and return the reply."""
         ...
 
+    def route_harness_reply(
+        self, event: str, data: dict, runner_id: str | None = None
+    ) -> bool | None:
+        """Return None for unrelated events, otherwise reply acceptance."""
+        ...
+
 
 class CredentialResolver(Protocol):
     """Resolve the credentials attached to a workspace.
@@ -74,6 +79,10 @@ class HarnessGateway(Protocol):
     runner service never imports harness internals. Routing methods return
     True when the payload reached a live harness waiter.
     """
+
+    def owns_runner_reply(self, event: str, data: dict) -> bool:
+        """Return whether this process owns the live request or stream."""
+        ...
 
     def route_harness_result(self, data: dict) -> bool:
         """Route a ``harness:*_result`` payload to its waiting accessor."""

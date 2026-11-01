@@ -1,26 +1,10 @@
-"""Workspace credential resolution and sync onto running workspaces.
-
-This mixin is the runner service's only path into the credentials context:
-lifecycle flows resolve a requested credential selection through
-:meth:`CredentialSyncMixin._resolve_credential_selection` and the
-credentials attached to a workspace through
-:meth:`CredentialSyncMixin._credential_resolve_call`. Adapters (REST, MCP)
-pass credential IDs only and never handle resolved secrets.
-
-The mixin relies on the facade (``RunnerService``) providing
-``self.workspaces``, ``self.tasks``, ``self._pending_credential_inject``
-plus sibling helpers (``_call_runner`` / ``_emit_to_runner`` via
-``RunnerTransportMixin``, ``_forward_workspace_status`` via
-``FrontendBusMixin``, ``_validate_task_runner`` via ``OwnershipMixin``).
-Attached-credential resolution goes through ``self._credential_resolver``
-when the facade was constructed with one (injected port, see
-``services/ports.py``); otherwise ``CredentialSvc`` is used.
-"""
+"""Resolve selected credentials and reconcile their delivery to workspaces."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
@@ -35,16 +19,43 @@ from ...exceptions import RunnerOfflineError
 if TYPE_CHECKING:
     from ...models import Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import TaskRepository, WorkspaceRepository
+    from ..infra.frontend_bus import FrontendBusService
+    from ..infra.ownership import OwnershipService
+    from ..ports import CredentialResolver, RunnerTransport
+
 logger = logging.getLogger(__name__)
 
 #: ACK timeout for blocking credential-inject calls (seconds).
 _CREDENTIAL_INJECT_TIMEOUT_SECONDS = 30
 
 
-class CredentialSyncMixin:
-    """Credential inject/reconcile flows shared by RunnerService."""
+class CredentialSyncService:
+    """Credential inject/reconcile flows with explicitly supplied collaborators."""
 
-    async def _resolve_credential_selection(
+    def __init__(
+        self,
+        *,
+        tasks: type[TaskRepository],
+        workspaces: type[WorkspaceRepository],
+        apply_operation_result: Callable[[str, str, dict], bool],
+        frontend_bus: FrontendBusService,
+        ownership: OwnershipService,
+        runner_transport: RunnerTransport,
+        credential_resolver: CredentialResolver | None = None,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.tasks = tasks
+        self.workspaces = workspaces
+        self.apply_operation_result = apply_operation_result
+        self.frontend_bus = frontend_bus
+        self.ownership = ownership
+        self.runner_transport = runner_transport
+        self._credential_resolver = credential_resolver
+        self.pending_inject: set[tuple[str, str]] = set()
+
+    async def resolve_credential_selection(
         self,
         credential_ids: list[uuid.UUID],
         *,
@@ -69,7 +80,7 @@ class CredentialSyncMixin:
             list(credential_ids), org_id=organization_id, user=user
         )
 
-    def _credential_resolve_call(self, workspace):
+    def credential_resolve_call(self, workspace):
         """Return the sync ``resolve_workspace_credentials`` callable to use.
 
         When the facade was constructed with ``credential_resolver=...``,
@@ -77,20 +88,20 @@ class CredentialSyncMixin:
         otherwise ``CredentialSvc``'s. Callers wrap the result with
         ``sync_to_async``.
         """
-        resolver = getattr(self, "_credential_resolver", None)
+        resolver = self._credential_resolver
         if resolver is not None:
             return resolver.resolve_workspace_credentials
         return CredentialSvc().resolve_workspace_credentials
 
     @staticmethod
-    def _has_credential_material(resolved: ResolvedCredentials | None) -> bool:
+    def has_credential_material(resolved: ResolvedCredentials | None) -> bool:
         """Return whether resolved credentials write anything into a workspace."""
         return resolved is not None and bool(
             resolved.env_vars or resolved.files or resolved.ssh_keys
         )
 
     @staticmethod
-    def _resolved_credentials_payload(resolved) -> dict:
+    def resolved_credentials_payload(resolved) -> dict:
         """Serialize resolved credentials for a runner task payload."""
         return {
             "env_vars": dict(getattr(resolved, "env_vars", None) or {}),
@@ -105,7 +116,7 @@ class CredentialSyncMixin:
             "ssh_keys": list(getattr(resolved, "ssh_keys", None) or []),
         }
 
-    async def _dispatch_credential_inject(
+    async def dispatch_credential_inject(
         self,
         workspace: Workspace,
         *,
@@ -139,7 +150,7 @@ class CredentialSyncMixin:
                 return None
             workspace = fresh
             runner = workspace.runner
-            resolved = await sync_to_async(self._credential_resolve_call(workspace))(
+            resolved = await sync_to_async(self.credential_resolve_call(workspace))(
                 workspace
             )
 
@@ -153,12 +164,12 @@ class CredentialSyncMixin:
         payload = {
             "task_id": str(task_id),
             "workspace_id": str(workspace.id),
-            **self._resolved_credentials_payload(resolved),
+            **self.resolved_credentials_payload(resolved),
         }
         try:
             if wait:
                 await sync_to_async(self.tasks.mark_in_progress)(task)
-                response = await self._call_runner(
+                response = await self.runner_transport.call_runner(
                     runner,
                     "task:inject_credentials",
                     payload,
@@ -201,7 +212,9 @@ class CredentialSyncMixin:
                     return acknowledged_present
                 return None
 
-            await self._emit_to_runner(runner, "task:inject_credentials", payload)
+            await self.runner_transport.emit_to_runner(
+                runner, "task:inject_credentials", payload
+            )
             await sync_to_async(self.tasks.mark_in_progress)(task)
             return None
         except Exception as exc:
@@ -225,7 +238,7 @@ class CredentialSyncMixin:
                     continue
                 if workspace.status != WorkspaceStatus.RUNNING:
                     continue
-                await self._dispatch_credential_inject(workspace, wait=False)
+                await self.dispatch_credential_inject(workspace, wait=False)
             except Exception:
                 logger.exception(
                     "Failed to reconcile credentials for workspace %s",
@@ -248,7 +261,7 @@ class CredentialSyncMixin:
             )
             return
 
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         workspace = task.workspace
@@ -266,10 +279,8 @@ class CredentialSyncMixin:
             self.workspaces.update_credentials_present(
                 workspace, bool(credentials_present)
             )
-            self._pending_credential_inject.discard(
-                (str(workspace.runner_id), str(workspace.id))
-            )
-            self._forward_workspace_status(workspace, task_id=task_id)
+            self.pending_inject.discard((str(workspace.runner_id), str(workspace.id)))
+            self.frontend_bus.forward_workspace_status(workspace, task_id=task_id)
         self.tasks.complete(task)
         logger.info(
             "Workspace credentials injected: %s present=%s",

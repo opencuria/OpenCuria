@@ -1,19 +1,4 @@
-"""Heartbeat reconciliation and auto-stop (Phase 3 domain mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.runners``,
-``self.workspaces``, ``self.processes``,
-``self._pending_process_verify`` plus sibling helpers (``stop_workspace``
-via :class:`WorkspaceLifecycleMixin`, ``_cleanup_desktop_state`` /
-``_sync_desktop_state_from_heartbeat`` via ``SessionStoreMixin``,
-``_forward_workspace_status`` via ``FrontendBusMixin``,
-``reconcile_workspace_processes`` / ``sweep_unconfirmed_processes`` /
-``mark_processes_killed`` / ``reverify_vanished_processes`` via
-:class:`ProcessManagerMixin`). The top-level ``django.utils.timezone``
-import serves the ``auto_stop`` helpers; ``handle_heartbeat`` needs no
-clock import (it never calls ``now()``).
-"""
+"""Reconcile runner observations and apply workspace inactivity policy."""
 
 from __future__ import annotations
 
@@ -35,11 +20,40 @@ from ...exceptions import RunnerOfflineError, WorkspaceStateError
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import Runner, Task, WorkspaceProcess
 
+if TYPE_CHECKING:
+    from ...repositories import RunnerRepository, WorkspaceRepository
+    from ..domains.process_manager import ProcessManagerService
+    from ..domains.runner_lifecycle import RunnerLifecycleService
+    from ..domains.workspace_lifecycle import WorkspaceLifecycleService
+    from ..infra.frontend_bus import FrontendBusService
+    from ..infra.session_store import SessionStoreService
+
 logger = logging.getLogger(__name__)
 
 
-class HeartbeatReconcilerMixin:
-    """Heartbeat handling and auto-stop shared by RunnerService."""
+class HeartbeatReconcilerService:
+    """Heartbeat handling and auto-stop with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        runners: type[RunnerRepository],
+        workspaces: type[WorkspaceRepository],
+        frontend_bus: FrontendBusService,
+        process_manager: ProcessManagerService,
+        runner_lifecycle: RunnerLifecycleService,
+        session_store: SessionStoreService,
+        workspace_lifecycle: WorkspaceLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.runners = runners
+        self.workspaces = workspaces
+        self.frontend_bus = frontend_bus
+        self.process_manager = process_manager
+        self.runner_lifecycle = runner_lifecycle
+        self.session_store = session_store
+        self.workspace_lifecycle = workspace_lifecycle
+        self.pending_process_verify: dict[str, list] = {}
 
     def _get_workspace_auto_stop_deadline(self, workspace) -> datetime | None:
         """Return the inactivity deadline for a workspace, or None when disabled."""
@@ -142,12 +156,16 @@ class HeartbeatReconcilerMixin:
         # scheduled/manual harness run started. Refresh its busy-session
         # state through the gateway at the auto-stop decision boundary.
         # Manual stops keep their existing behavior in stop_workspace().
-        workspace = await sync_to_async(self.get_workspace_or_none)(workspace_id)
+        workspace = await sync_to_async(self.runner_lifecycle.get_workspace_or_none)(
+            workspace_id
+        )
         if workspace is None or not self._should_auto_stop_workspace(
             workspace, now=now
         ):
             return None
-        return await self.stop_workspace(workspace.id, auto_stop=True)
+        return await self.workspace_lifecycle.stop_workspace(
+            workspace.id, auto_stop=True
+        )
 
     def handle_heartbeat(
         self,
@@ -202,7 +220,7 @@ class HeartbeatReconcilerMixin:
                 WorkspaceStatus.DELETE_FAILED,
                 WorkspaceStatus.DELETED,
             ):
-                self._cleanup_desktop_state(ws_id_str)
+                self.session_store.cleanup_desktop_state(ws_id_str)
                 continue
             if ws.current_task_id or ws.active_operation:
                 # Observations may arrive before guest preparation/scrubbing is
@@ -236,14 +254,14 @@ class HeartbeatReconcilerMixin:
                         # A newer result/admission/tombstone won since the list
                         # query; do not apply any cleanup from this old snapshot.
                         continue
-                    self._forward_workspace_status(ws, status=new_status)
+                    self.frontend_bus.forward_workspace_status(ws, status=new_status)
 
                 if new_status != WorkspaceStatus.RUNNING:
-                    self._cleanup_desktop_state(ws_id_str)
+                    self.session_store.cleanup_desktop_state(ws_id_str)
                     effective = new_status
                     if effective == WorkspaceStatus.STOPPED:
                         try:
-                            self.mark_processes_killed(
+                            self.process_manager.mark_processes_killed(
                                 ws_id_str, reason="workspace_stopped"
                             )
                         except Exception:
@@ -292,10 +310,12 @@ class HeartbeatReconcilerMixin:
                     and new_status == WorkspaceStatus.RUNNING
                 ):
                     try:
-                        _, vanished = self.reconcile_workspace_processes(
-                            ws_id_str, reported_processes
+                        _, vanished = (
+                            self.process_manager.reconcile_workspace_processes(
+                                ws_id_str, reported_processes
+                            )
                         )
-                        self.sweep_unconfirmed_processes(ws_id_str)
+                        self.process_manager.sweep_unconfirmed_processes(ws_id_str)
                         if vanished:
                             pending_vanished.setdefault(ws_id_str, []).extend(vanished)
                     except Exception:
@@ -305,7 +325,7 @@ class HeartbeatReconcilerMixin:
                         )
 
                 if "desktop" in runner_payload:
-                    self._sync_desktop_state_from_heartbeat(
+                    self.session_store.sync_desktop_state_from_heartbeat(
                         ws_id_str,
                         runner_payload["desktop"],
                         runner_id=runner_id_str,
@@ -328,9 +348,9 @@ class HeartbeatReconcilerMixin:
         for ws_id_str, rows in pending_vanished.items():
             known = {
                 str(process.id)
-                for process in self._pending_process_verify.get(ws_id_str, [])
+                for process in self.pending_process_verify.get(ws_id_str, [])
             }
-            bucket = self._pending_process_verify.setdefault(ws_id_str, [])
+            bucket = self.pending_process_verify.setdefault(ws_id_str, [])
             for process in rows:
                 if str(process.id) not in known:
                     bucket.append(process)
@@ -351,8 +371,8 @@ class HeartbeatReconcilerMixin:
         failure, so one bad workspace cannot wedge later heartbeats.
         Returns IDs of changed processes.
         """
-        pending = self._pending_process_verify
-        self._pending_process_verify = {}
+        pending = self.pending_process_verify
+        self.pending_process_verify = {}
         changed: list[uuid.UUID] = []
         for ws_id_str, rows in pending.items():
             try:
@@ -377,7 +397,9 @@ class HeartbeatReconcilerMixin:
                 continue
             try:
                 changed.extend(
-                    await self.reverify_vanished_processes(workspace_uuid, rows)
+                    await self.process_manager.reverify_vanished_processes(
+                        workspace_uuid, rows
+                    )
                 )
             except Exception:
                 logger.exception(

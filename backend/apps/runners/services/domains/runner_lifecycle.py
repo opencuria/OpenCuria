@@ -1,13 +1,10 @@
-"""Runner presence and workspace queries shared by RunnerService.
-
-Lifecycle delivery belongs to the independent durable recovery worker,
-not runner registration.
-"""
+"""Manage runner registration, metrics and activity-enriched workspace reads."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -22,11 +19,45 @@ from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import Runner, RunnerSystemMetrics, Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import (
+        RunnerRepository,
+        RunnerSystemMetricsRepository,
+        WorkspaceRepository,
+    )
+    from ..domains.stream_transport import StreamTransportService
+    from ..domains.workspace_lifecycle import WorkspaceLifecycleService
+    from ..infra.frontend_bus import FrontendBusService
+    from ..infra.session_store import SessionStoreService
+    from ..ports import HarnessGateway
+
 logger = logging.getLogger(__name__)
 
 
-class RunnerLifecycleMixin:
-    """Runner lifecycle and read queries shared by RunnerService."""
+class RunnerLifecycleService:
+    """Runner lifecycle and read queries with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        runner_metrics: type[RunnerSystemMetricsRepository],
+        runners: type[RunnerRepository],
+        workspaces: type[WorkspaceRepository],
+        frontend_bus: FrontendBusService,
+        harness: Callable[[], HarnessGateway],
+        session_store: SessionStoreService,
+        stream_transport: StreamTransportService,
+        workspace_lifecycle: WorkspaceLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.runner_metrics = runner_metrics
+        self.runners = runners
+        self.workspaces = workspaces
+        self.frontend_bus = frontend_bus
+        self.harness = harness
+        self.session_store = session_store
+        self.stream_transport = stream_transport
+        self.workspace_lifecycle = workspace_lifecycle
 
     def create_runner(self, *, name: str, organization) -> tuple[Runner, str]:
         """Create a runner and return it with its one-time plaintext API token."""
@@ -38,7 +69,7 @@ class RunnerLifecycleMixin:
         )
         return runner, token
 
-    def authenticate_runner(self, token: str) -> "Runner":
+    def authenticate_runner(self, token: str) -> Runner:
         """
         Authenticate a runner by its API token.
 
@@ -52,11 +83,11 @@ class RunnerLifecycleMixin:
 
     def register_runner(
         self,
-        runner: "Runner",
+        runner: Runner,
         *,
         sid: str,
         desktop_epoch: str | None = None,
-    ) -> "Runner":
+    ) -> Runner:
         """
         Mark a runner as online after it connects and sends runner:register.
 
@@ -68,14 +99,14 @@ class RunnerLifecycleMixin:
             runner,
             sid=sid,
         )
-        self._set_runner_desktop_epoch(str(runner.id), desktop_epoch)
+        self.session_store.set_runner_desktop_epoch(str(runner.id), desktop_epoch)
         logger.info(
             "Runner registered: %s",
             runner.id,
         )
         return runner
 
-    def unregister_runner(self, sid: str) -> None:
+    def unregister_runner(self, sid: str) -> str | None:
         """
         Mark a runner as offline when it disconnects.
 
@@ -91,12 +122,13 @@ class RunnerLifecycleMixin:
         # Fail any open byte streams so harness waiters surface offline
         # instead of hanging until their timeout.
         try:
-            self.fail_streams_for_runner(str(runner.id))
+            self.stream_transport.fail_streams_for_runner(str(runner.id))
         except Exception:
             logger.exception("Failed failing streams for runner %s", runner.id)
 
         # Notify frontend about runner going offline so it can update display.
-        self._forward_runner_status_to_frontend(runner, "offline")
+        self.frontend_bus.forward_runner_status_to_frontend(runner, "offline")
+        return str(runner.id)
 
     def is_current_runner_session(
         self, runner_id: str, sid: str, *, require_online: bool = True
@@ -149,7 +181,7 @@ class RunnerLifecycleMixin:
         if not usages:
             return
         for workspace_id in self.workspaces.update_disk_usage(runner.id, usages):
-            self._forward_to_frontend(
+            self.frontend_bus.forward_to_frontend(
                 "workspace:disk_usage_changed",
                 {
                     "workspace_id": str(workspace_id),
@@ -175,7 +207,7 @@ class RunnerLifecycleMixin:
         self,
         runner_id: uuid.UUID,
         **fields,
-    ) -> "Runner":
+    ) -> Runner:
         """Update per-runner QEMU resource limits/defaults."""
         runner = self.get_runner(runner_id)
         updated_fields = dict(fields)
@@ -183,16 +215,16 @@ class RunnerLifecycleMixin:
             return runner
         for key, value in updated_fields.items():
             setattr(runner, key, value)
-        self._validate_runner_qemu_limits(runner)
+        self.workspace_lifecycle.validate_runner_qemu_limits(runner)
         return self.runners.update_qemu_settings(runner, **updated_fields)
 
-    def list_runners(self, organization_id: uuid.UUID | None = None) -> list["Runner"]:
+    def list_runners(self, organization_id: uuid.UUID | None = None) -> list[Runner]:
         """Return all registered runners, optionally filtered by organization."""
         if organization_id:
             return list(self.runners.list_by_organization(organization_id))
         return list(self.runners.list_all())
 
-    def get_runner(self, runner_id: uuid.UUID) -> "Runner":
+    def get_runner(self, runner_id: uuid.UUID) -> Runner:
         """Return a runner by ID or raise RunnerNotFoundError."""
         runner = self.runners.get_by_id(runner_id)
         if runner is None:
@@ -208,7 +240,7 @@ class RunnerLifecycleMixin:
         runner_id: uuid.UUID | None = None,
         organization_id: uuid.UUID | None = None,
         user=None,
-    ) -> list["Workspace"]:
+    ) -> list[Workspace]:
         """Return workspaces filtered by org and owner."""
         workspaces = self.workspaces.list_for_scope(
             runner_id=runner_id, organization_id=organization_id, user=user
@@ -216,7 +248,7 @@ class RunnerLifecycleMixin:
         self._populate_workspace_activity(workspaces)
         return workspaces
 
-    def get_workspace(self, workspace_id: uuid.UUID) -> "Workspace":
+    def get_workspace(self, workspace_id: uuid.UUID) -> Workspace:
         """Return a workspace by ID or raise WorkspaceNotFoundError."""
         workspace = self.get_workspace_or_none(workspace_id)
         if workspace is None:
@@ -234,7 +266,7 @@ class RunnerLifecycleMixin:
         """Compose workspace reads with harness activity through its port."""
         if not workspaces:
             return
-        busy_ids = self._harness().busy_workspace_ids(
+        busy_ids = self.harness().busy_workspace_ids(
             [workspace.id for workspace in workspaces]
         )
         for workspace in workspaces:

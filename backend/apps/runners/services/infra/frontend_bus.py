@@ -1,4 +1,4 @@
-"""Publish runner and workspace events through the frontend Socket.IO transport."""
+"""Project workspace and process changes onto the frontend event bus."""
 
 from __future__ import annotations
 
@@ -17,13 +17,24 @@ from ...workspace_operation_repository import WorkspaceOperationRepository
 if TYPE_CHECKING:
     from ...models import Runner, Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import WorkspaceRepository
+
 logger = logging.getLogger(__name__)
 
 
-class FrontendBusMixin:
-    """Frontend event fan-out shared by RunnerService."""
+class FrontendBusService:
+    """Frontend event fan-out with explicitly supplied collaborators."""
 
-    def _forward_to_frontend(
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+
+    def forward_to_frontend(
         self,
         event: str,
         data: dict,
@@ -62,7 +73,7 @@ class FrontendBusMixin:
                 },
             )
 
-    def _forward_runner_status_to_frontend(
+    def forward_runner_status_to_frontend(
         self,
         runner: Runner,
         status: str,
@@ -80,13 +91,13 @@ class FrontendBusMixin:
         event = "runner:offline" if status == "offline" else "runner:online"
         for ws in workspaces:
             ws_id = str(ws.id)
-            self._forward_to_frontend(
+            self.forward_to_frontend(
                 event,
                 {"workspace_id": ws_id, "runner_id": str(runner.id)},
                 ws_id,
             )
 
-    def _forward_workspace_operation(
+    def forward_workspace_operation(
         self,
         workspace_id: str,
         active_operation: str | None,
@@ -100,7 +111,7 @@ class FrontendBusMixin:
                 payload = self._project_workspace_operation(
                     workspace_id, active_operation
                 )
-                self._forward_to_frontend(
+                self.forward_to_frontend(
                     "workspace:operation_changed", payload, workspace_id
                 )
 
@@ -134,7 +145,7 @@ class FrontendBusMixin:
             payload = await sync_to_async(self._project_workspace_operation)(
                 workspace_id, active_operation
             )
-            self._forward_to_frontend(
+            self.forward_to_frontend(
                 "workspace:operation_changed", payload, workspace_id
             )
         except Exception:
@@ -143,7 +154,7 @@ class FrontendBusMixin:
                 extra={"workspace_id": workspace_id},
             )
 
-    def _forward_workspace_status(
+    def forward_workspace_status(
         self,
         workspace: Workspace,
         *,
@@ -158,13 +169,13 @@ class FrontendBusMixin:
         }
         if task_id:
             payload["task_id"] = task_id
-        self._forward_to_frontend(
+        self.forward_to_frontend(
             "workspace:status_changed",
             payload,
             str(workspace.id),
         )
 
-    def _push_process_status(
+    def push_process_status(
         self,
         *,
         workspace_id: str,
@@ -187,20 +198,20 @@ class FrontendBusMixin:
             payload["log_path"] = log_path
         if run_count is not None:
             payload["run_count"] = run_count
-        self._forward_to_frontend(
+        self.forward_to_frontend(
             "process:status_changed",
             payload,
             workspace_id,
         )
 
-    def _push_process_removed(
+    def push_process_removed(
         self,
         *,
         workspace_id: str,
         process_id: str,
     ) -> None:
         """Forward a background-process removal to the frontend."""
-        self._forward_to_frontend(
+        self.forward_to_frontend(
             "process:removed",
             {
                 "workspace_id": workspace_id,

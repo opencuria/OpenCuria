@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from django.utils import timezone
 
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.services.domains.heartbeat_reconciler import HeartbeatReconcilerMixin
+from apps.runners.services import RunnerService
 
 
 def test_workspace_auto_stop_never_stops_a_busy_harness_session():
@@ -20,7 +20,9 @@ def test_workspace_auto_stop_never_stops_a_busy_harness_session():
         ),
     )
 
-    assert not HeartbeatReconcilerMixin()._should_auto_stop_workspace(workspace)
+    assert not RunnerService().heartbeat_reconciler._should_auto_stop_workspace(
+        workspace
+    )
 
 
 def test_workspace_auto_stop_still_stops_idle_workspace():
@@ -36,7 +38,7 @@ def test_workspace_auto_stop_still_stops_idle_workspace():
         ),
     )
 
-    assert HeartbeatReconcilerMixin()._should_auto_stop_workspace(workspace)
+    assert RunnerService().heartbeat_reconciler._should_auto_stop_workspace(workspace)
 
 
 def test_intervention_fence_prevents_idle_stop():
@@ -45,4 +47,6 @@ def test_intervention_fence_prevents_idle_stop():
         active_operation=None,
         current_task_id="failed-intervention-task",
     )
-    assert not HeartbeatReconcilerMixin()._should_auto_stop_workspace(workspace)
+    assert not RunnerService().heartbeat_reconciler._should_auto_stop_workspace(
+        workspace
+    )
