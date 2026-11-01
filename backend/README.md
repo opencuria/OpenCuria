@@ -2,7 +2,7 @@
 
 The Django backend owns the control plane, agent harness, plugin policy, and
 server-side credentials. See the root [source setup](../README.md)
-for installation, migrations, and the single-worker ASGI startup command.
+for installation, migrations, API startup and the independent execution worker.
 
 ## Operations
 

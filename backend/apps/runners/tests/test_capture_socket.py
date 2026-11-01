@@ -36,6 +36,8 @@ def capture_socket(monkeypatch):
     server = socketio.AsyncServer(async_mode="asgi")
     sio_server._register_frontend_handlers(server)
     server.emit = AsyncMock()
+    server.enter_room = AsyncMock()
+    server.leave_room = AsyncMock()
     server.get_session = AsyncMock(return_value={"user_id": "123"})
     access = AsyncMock(return_value=True)
     monkeypatch.setattr(sio_server, "_frontend_user_can_access_workspace", access)
@@ -166,6 +168,9 @@ async def test_capture_allows_subscriptions_and_status_delivery(capture_socket):
     data = {"workspace_id": workspace_id}
     handlers = server.handlers["/frontend"]
     await handlers["frontend:subscribe_workspace"]("caller", data)
+    server.enter_room.assert_awaited_once_with(
+        "caller", f"workspace:{workspace_id}", namespace="/frontend"
+    )
     assert realtime._frontend_subscriptions[workspace_id] == {"caller"}
     assert realtime._frontend_sid_workspaces["caller"] == {workspace_id}
     status = {**data, "status": "running", "active_operation": "capturing_image"}
@@ -173,10 +178,13 @@ async def test_capture_allows_subscriptions_and_status_delivery(capture_socket):
     server.emit.assert_awaited_once_with(
         "workspace:status_changed",
         status,
-        to="caller",
+        to=f"workspace:{workspace_id}",
         namespace="/frontend",
     )
     await handlers["frontend:unsubscribe_workspace"]("caller", data)
+    server.leave_room.assert_awaited_once_with(
+        "caller", f"workspace:{workspace_id}", namespace="/frontend"
+    )
     assert workspace_id not in realtime._frontend_subscriptions
     assert not realtime._frontend_sid_workspaces["caller"]
     service.runner_transport.emit_to_runner.assert_not_awaited()
@@ -194,3 +202,14 @@ async def test_unrelated_service_errors_are_not_swallowed(capture_socket):
         )
     server.emit.assert_not_awaited()
 
+
+@pytest.mark.asyncio
+async def test_unauthorized_subscription_cannot_join_workspace_room(capture_socket):
+    server, _, workspace, access = capture_socket
+    access.return_value = False
+    await server.handlers["/frontend"]["frontend:subscribe_workspace"](
+        "caller", {"workspace_id": str(workspace.id)}
+    )
+    server.enter_room.assert_not_awaited()
+    server.leave_room.assert_not_awaited()
+    assert not realtime._frontend_sid_workspaces["caller"]

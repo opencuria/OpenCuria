@@ -102,7 +102,7 @@ admins cannot configure signing keys or select providers in the webapp.
    the credential catalog, attached to workspaces, rendered in plugins or sent
    to clients. Do not include them in app bundles or `EXPO_PUBLIC_*` variables.
 
-2. Update backend dependencies, apply migrations and restart the ASGI backend:
+2. Update backend dependencies, apply migrations and restart API/execution services:
 
    ```sh
    cd backend
@@ -115,16 +115,15 @@ admins cannot configure signing keys or select providers in the webapp.
    hosting files or provide a fallback. Configure hosting settings explicitly.
 
    APNs requires HTTP/2; `httpx[http2]` installs its transport. The notification
-   worker starts/stops with the existing ASGI lifespan alongside the scheduler.
-   Use the project's normal single-worker Uvicorn command with `--lifespan on`.
-   A WSGI server or ASGI server with lifespan disabled does not run this worker.
-   Partial configuration, invalid keys and missing or unreadable files prevent
-   backend startup with a bounded error that identifies the affected settings.
-   Files are loaded once at startup; restart the backend and recovery processes
-   after replacing them. Recreate Compose containers after changing `.env`:
+   worker belongs to `python manage.py execute_harness` alongside the scheduler.
+   API restarts leave notification delivery running. Partial configuration,
+   invalid keys and missing or unreadable files prevent execution-worker startup
+   with a bounded error that identifies the affected settings. Files are loaded
+   once at execution startup; restart execution after replacing them. Recreate
+   Compose containers after changing `.env`:
 
    ```sh
-   docker compose -f compose.server.yml up -d --force-recreate backend recovery
+   docker compose -f compose.server.yml up -d --force-recreate backend execution recovery
    ```
 
    Omit `-f compose.server.yml` for the local Compose deployment.

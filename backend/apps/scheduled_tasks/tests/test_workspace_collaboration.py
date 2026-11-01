@@ -112,12 +112,14 @@ def test_completed_run_applies_workspace_auto_stop_policy(
         completion_check_pending=True,
     )
     runner = RunnerService()
-    runner.stop_workspace = AsyncMock()
+    runner.workspace_lifecycle.stop_workspace = AsyncMock()
 
     asyncio.run(ScheduledTaskService(runner=runner).reconcile_runs())
 
     if stops:
-        runner.stop_workspace.assert_awaited_once_with(workspace.id, auto_stop=True)
+        runner.workspace_lifecycle.stop_workspace.assert_awaited_once_with(
+            workspace.id, auto_stop=True
+        )
     else:
-        runner.stop_workspace.assert_not_awaited()
+        runner.workspace_lifecycle.stop_workspace.assert_not_awaited()
     assert not ScheduledTaskRun.objects.filter(completion_check_pending=True).exists()

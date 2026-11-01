@@ -46,6 +46,60 @@ class RunCancellation:
     def __init__(self, ports: RunCancellationPorts) -> None:
         self.ports = ports
 
+    async def shutdown(self) -> None:
+        """Cancel and join every core owner without recording a user abort.
+
+        Finalization is a cancellation fence. A pre-entry cancellation can
+        install a replacement cleanup task, so repeat until callbacks and
+        admissions have relinquished every live owner.
+        """
+        current = asyncio.current_task()
+        while True:
+            pending: dict[asyncio.Task, str] = {}
+            for key, run in tuple(self.ports.run_registry.records.items()):
+                self._cancel_owned_task(key)
+                for task in (run.task, run.admission):
+                    if task is not None and task is not current and not task.done():
+                        pending[task] = key
+            if not pending:
+                await asyncio.sleep(0)
+                if any(
+                    task is not None and task is not current and not task.done()
+                    for run in self.ports.run_registry.records.values()
+                    for task in (run.task, run.admission)
+                ):
+                    continue
+                return
+            for task, key in pending.items():
+                await self._join_owned_task(key, task)
+
+    def reconcile_recovered_run(
+        self, session_id: uuid.UUID | str, assistant_message_id: uuid.UUID | str
+    ) -> None:
+        """Release only bookkeeping owned by the durably recovered attempt.
+
+        A recovery callback can race a newer admission. Assistant identity and
+        the absence of task/admission references fence every local mutation;
+        ancestry alone never authorizes dropping an independent child run.
+        """
+        root_key, message_id = str(session_id), str(assistant_message_id)
+        for key, run in tuple(self.ports.run_registry.records.items()):
+            context = run.context or {}
+            root_match = key == root_key and run.assistant_message_id == message_id
+            projection_match = (
+                context.get("external_projection") is True
+                and str(context.get("external_parent_session_id", "")) == root_key
+                and str(context.get("external_parent_message_id", "")) == message_id
+            )
+            if not (root_match or projection_match):
+                continue
+            # Retained references also protect the pre-entry cancellation gap:
+            # a done callback may still install its replacement cleanup owner.
+            if run.task is not None or run.admission is not None:
+                continue
+            self.ports.run_registry.clear_abort(key)
+            self._drop_run_tracking(key)
+
     def _remember_run(self, session: HarnessSession) -> None:
         """Index a live session under its parent before the next await."""
         key = str(session.id)
@@ -84,7 +138,11 @@ class RunCancellation:
                 pass
         self.ports.run_registry.release_context(key)
         self.ports.run_registry.release_event_lock(key)
-        if self.ports.run_registry.tasks.get(key) is asyncio.current_task():
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if current is not None and self.ports.run_registry.tasks.get(key) is current:
             self.ports.run_registry.release_task(key)
         self._forget_run(key)
 

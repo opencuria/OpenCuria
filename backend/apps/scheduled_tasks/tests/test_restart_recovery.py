@@ -185,7 +185,7 @@ def test_restart_finds_first_assistant_and_preserves_followup_inputs(recovery_sc
     assert run.status == "interrupted"
     assert run.reason == "backend_restart"
     assert run.finished_at == assistant.completed_at
-    assert run.error == assistant.error == "Backend restarted before the run completed"
+    assert run.error == assistant.error == "Execution worker restarted before the run completed"
     assert session.status == "busy"
     assert followup.completed_at is None
     for pair, expected in zip(requests, ("rejected", "pending"), strict=True):

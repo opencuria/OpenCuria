@@ -23,9 +23,9 @@ class RunRecoveryService:
         self.repository = repository or RunRecoveryRepository
 
     def recover_backend_restart(self) -> int:
-        """Recover unowned turns once the ASGI singleton lease is held."""
+        """Recover unowned turns once the execution singleton lease is held."""
         return self.repository.recover_backend_restart(
-            at=timezone.now(), error="Backend restarted before the run completed"
+            at=timezone.now(), error="Execution worker restarted before the run completed"
         )
 
     def find_assistant(

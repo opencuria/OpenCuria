@@ -29,6 +29,7 @@ class ActiveRun:
 
     session_id: str
     parent_id: str | None = None
+    assistant_message_id: str | None = None
     phase: RunPhase = RunPhase.ADMITTING
     task: asyncio.Task | None = None
     admission: asyncio.Task | None = None
@@ -90,6 +91,8 @@ class _FieldView(MutableMapping):
         record = self.registry.ensure(key)
         if self.field_name == "task":
             record.begin_execution(value)
+        elif self.field_name == "context" and value is not None:
+            self.registry.attach_context(key, value)
         else:
             setattr(record, self.field_name, value)
             if self.field_name == "admission":
@@ -186,7 +189,10 @@ class RunRegistry:
 
     def attach_context(self, key: str, context: dict[str, Any]) -> None:
         """Attach engine/timeline data to the existing typed ownership record."""
-        self.ensure(key).context = context
+        run = self.ensure(key)
+        run.context = context
+        message_id = context.get("message_id")
+        run.assistant_message_id = str(message_id) if message_id is not None else None
 
     def release_context(self, key: str) -> None:
         """Release execution data after its persistence/teardown consumers finish."""

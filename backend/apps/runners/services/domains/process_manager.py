@@ -16,6 +16,7 @@ from common.utils import generate_uuid
 
 from ...enums import ProcessStatus, WorkspaceStatus
 from ...exceptions import RunnerOfflineError, WorkspaceNotFoundError
+from ..infra.rpc_registry import PendingProcessRequest
 from ..process_lookup import ProcessLookupService
 
 if TYPE_CHECKING:
@@ -102,6 +103,16 @@ class ProcessManagerService:
         if not request_id:
             logger.warning("%s rejected: missing request_id", event)
             return False
+        pending = self.rpc_registry.process_pending.get(request_id)
+        if pending is None or pending.future.done():
+            return False
+        if (
+            workspace_id != pending.workspace_id
+            or event != pending.result_event
+            or (runner_id is not None and runner_id != pending.runner_id)
+        ):
+            logger.warning("%s rejected: process request context mismatch", event)
+            return False
         if runner_id:
             try:
                 workspace_uuid = uuid.UUID(workspace_id)
@@ -130,7 +141,12 @@ class ProcessManagerService:
         """Emit a process RPC and wait for its correlated result."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self.rpc_registry.process_pending[request_id] = future
+        self.rpc_registry.process_pending[request_id] = PendingProcessRequest(
+            future=future,
+            workspace_id=str(payload["workspace_id"]),
+            result_event=f"{event}_result",
+            runner_id=str(runner.id),
+        )
         try:
             await self.runner_transport.emit_to_runner(runner, event, payload)
             return await asyncio.wait_for(future, timeout)

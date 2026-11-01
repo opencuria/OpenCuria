@@ -14,7 +14,10 @@ from apps.runners.enums import WorkspaceStatus
 from apps.runners.services import RunnerRepositories, RunnerService
 from apps.runners.services.domains.process_manager import ProcessManagerService
 from apps.runners.services.infra.ownership import OwnershipService
-from apps.runners.services.infra.rpc_registry import RpcRegistryService
+from apps.runners.services.infra.rpc_registry import (
+    PendingProcessRequest,
+    RpcRegistryService,
+)
 from apps.runners.services.session_state import InteractiveSessionState
 from common.exceptions import ConflictError
 
@@ -37,20 +40,21 @@ async def test_process_rpc_composes_transport_and_reply_registry() -> None:
     """A transport sends the request; a separately owned registry resolves it."""
     transport = AsyncMock()
     service = process_service(transport)
-    runner = object()
+    runner = SimpleNamespace(id=uuid.uuid4())
+    workspace_id = str(uuid.uuid4())
     received = {"pid": 123}
 
     async def deliver(actual_runner, event, payload):
         assert actual_runner is runner
         assert event == "harness:process_start"
-        assert payload == {"request_id": "request"}
+        assert payload == {"request_id": "request", "workspace_id": workspace_id}
         service.rpc_registry.resolve_process_future("request", received)
 
     transport.emit_to_runner.side_effect = deliver
     result = await service._await_process_result(
         request_id="request",
         event="harness:process_start",
-        payload={"request_id": "request"},
+        payload={"request_id": "request", "workspace_id": workspace_id},
         runner=runner,
         timeout=1,
     )
@@ -68,7 +72,7 @@ async def test_process_rpc_cleans_registry_on_unsuccessful_delivery(failure) -> 
     pending = []
 
     async def deliver(*_args):
-        pending.append(service.rpc_registry.process_pending["request"])
+        pending.append(service.rpc_registry.process_pending["request"].future)
         if failure == "transport":
             raise RuntimeError("connection lost")
         if failure == "cancel":
@@ -84,8 +88,8 @@ async def test_process_rpc_cleans_registry_on_unsuccessful_delivery(failure) -> 
         await service._await_process_result(
             request_id="request",
             event="harness:process_start",
-            payload={},
-            runner=object(),
+            payload={"workspace_id": str(uuid.uuid4())},
+            runner=SimpleNamespace(id=uuid.uuid4()),
             timeout=0.001,
         )
 
@@ -169,18 +173,21 @@ async def test_reply_acceptance_tracks_live_registry_ownership() -> None:
     """Only a validated reply that reaches a live waiter is acknowledged."""
     service = process_service(AsyncMock())
     future = asyncio.get_running_loop().create_future()
-    service.rpc_registry.process_pending["request"] = future
-    payload = {"request_id": "request", "workspace_id": str(uuid.uuid4())}
+    workspace_id, runner_id = str(uuid.uuid4()), str(uuid.uuid4())
+    service.rpc_registry.process_pending["request"] = PendingProcessRequest(
+        future, workspace_id, "harness:process_start_result", runner_id
+    )
+    payload = {"request_id": "request", "workspace_id": workspace_id}
     service.ownership.validate_harness_workspace_runner.return_value = False
 
     assert service.rpc_registry.owns_request("process", "request")
     assert not service.handle_process_reply(
-        "harness:process_start_result", payload, runner_id=str(uuid.uuid4())
+        "harness:process_start_result", payload, runner_id=runner_id
     )
     assert not future.done()
     service.ownership.validate_harness_workspace_runner.return_value = True
     assert service.handle_process_reply(
-        "harness:process_start_result", payload, runner_id=str(uuid.uuid4())
+        "harness:process_start_result", payload, runner_id=runner_id
     )
     assert future.result() is payload
     assert not service.rpc_registry.owns_request("process", "request")
@@ -194,7 +201,9 @@ async def test_authenticated_process_reply_requires_workspace(workspace_id) -> N
     """An authenticated sender cannot skip ownership by omitting its workspace."""
     service = process_service(AsyncMock())
     future = asyncio.get_running_loop().create_future()
-    service.rpc_registry.process_pending["request"] = future
+    service.rpc_registry.process_pending["request"] = PendingProcessRequest(
+        future, str(uuid.uuid4()), "harness:process_start_result", str(uuid.uuid4())
+    )
     assert not service.handle_process_reply(
         "harness:process_start_result",
         {"request_id": "request", "workspace_id": workspace_id},
@@ -203,3 +212,35 @@ async def test_authenticated_process_reply_requires_workspace(workspace_id) -> N
     service.ownership.validate_harness_workspace_runner.assert_not_called()
     assert not future.done()
     future.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["workspace", "operation", "runner"])
+async def test_process_reply_must_match_original_request_context(mismatch) -> None:
+    """Another valid reply on the same runner cannot settle the wrong operation."""
+    service = process_service(AsyncMock())
+    runner_id, workspace_id = str(uuid.uuid4()), str(uuid.uuid4())
+    future = asyncio.get_running_loop().create_future()
+    service.rpc_registry.process_pending["request"] = PendingProcessRequest(
+        future, workspace_id, "harness:process_start_result", runner_id
+    )
+    payload = {"request_id": "request", "workspace_id": workspace_id, "pid": 123}
+    event = "harness:process_start_result"
+    sender = runner_id
+    if mismatch == "workspace":
+        payload["workspace_id"] = str(uuid.uuid4())
+    elif mismatch == "operation":
+        event = "harness:process_stop_result"
+    else:
+        sender = str(uuid.uuid4())
+    service.ownership.validate_harness_workspace_runner.return_value = True
+
+    assert not service.handle_process_reply(event, payload, runner_id=sender)
+    assert not future.done()
+    service.ownership.validate_harness_workspace_runner.assert_not_called()
+
+    payload["workspace_id"] = workspace_id
+    assert service.handle_process_reply(
+        "harness:process_start_result", payload, runner_id=runner_id
+    )
+    assert future.result()["pid"] == 123

@@ -266,7 +266,7 @@ Plan a maintenance window; this is **not a zero-downtime upgrade**.
 
    This is the same command documented in the root README's source setup.
    The Docker backend entrypoint runs migrations automatically. Keep the existing
-   single-worker ASGI and independent lifecycle recovery worker setup; this
+   single realtime API gateway, independent harness execution and lifecycle recovery workers; this
    feature does not replace lifecycle recovery.
 5. Audit customized plugins for manual adoption, then restart backend, runner,
    and webapp as one coordinated release. Check runner connectivity and recovery

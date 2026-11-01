@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenCuria independent agent execution worker
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKING_DIR__
+EnvironmentFile=__ENV_FILE__
+ExecStart="__BACKEND_DIR__/.venv/bin/python" manage.py execute_harness
+KillMode=mixed
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

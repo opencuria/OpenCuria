@@ -21,6 +21,7 @@ from .models import (
 )
 from .providers.model_ref import parse_model_ref
 from .repositories import HarnessSessionRepository
+from .run_settings_snapshot import RunSettingsSnapshot
 from .session_access_service import SessionAccessService
 from .session_settings_service import SessionSettingsService
 
@@ -43,6 +44,7 @@ class RunPreparationPorts:
     forget_run: Callable[..., Any]
     provider_turn_context: Callable[..., Any]
     remember_run: Callable[..., Any]
+    reconcile_recovered_run: Callable[[uuid.UUID | str, uuid.UUID | str], None]
     resolve_engine_auth: Callable[..., Any]
     run_service_for_engine: Callable[..., Any]
     session_settings: SessionSettingsService
@@ -100,6 +102,7 @@ class RunPreparation:
         """Validate the request and capture its execution dependencies."""
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        captured_settings = RunSettingsSnapshot.capture(session)
         engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         run_user_id = user_id
         inherited_context = self.ports.provider_turn_context(session)
@@ -150,6 +153,9 @@ class RunPreparation:
                     # Let RunOwnership apply its persisted staleness window; do
                     # not create runner connectivity for a healthy unresolved run.
                     await run_service.prepare_session(session.id, None)
+                self.ports.reconcile_recovered_run(
+                    session.id, open_attempt.assistant_message_id
+                )
         if str(session.status) != HarnessSessionStatus.IDLE:
             # Self-heal a stale busy flag: no live task exists, so a
             # previous run died without reaching its finally block
@@ -195,6 +201,7 @@ class RunPreparation:
                     session = await sync_to_async(self.ports.sessions.set_skill_ids)(
                         session, available
                     )
+        captured_settings.retain_execution_settings(session)
         if engine_id == "claude":
             effective_skill_ids = (
                 SkillService.normalize_ids(skill_ids)
@@ -237,6 +244,7 @@ class RunPreparation:
                     user_id=user_id,
                     organization_id=org_id,
                 )
+        captured_settings.retain_execution_settings(session)
         skill_bodies: list[str] = []
         if session.skill_ids:
             if user_id is None:

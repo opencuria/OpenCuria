@@ -213,7 +213,7 @@ def test_eager_completion_defers_one_shot_auto_stop_and_retries_errors(
         side_effect=[RuntimeError("runner unavailable"), None] if retry else None
     )
     runner = RunnerService()
-    runner.stop_workspace = stop
+    runner.workspace_lifecycle.stop_workspace = stop
     service = ScheduledTaskService(runner=runner)
     service.complete_assistant_run(run.assistant_message_id)
     run.refresh_from_db()
@@ -241,7 +241,7 @@ def test_pending_auto_stop_noop_is_consumed_not_replayed_later(completed_run):
     org.save(update_fields=["workspace_auto_stop_timeout_minutes"])
     stop = AsyncMock()
     runner = RunnerService()
-    runner.stop_workspace = stop
+    runner.workspace_lifecycle.stop_workspace = stop
     service = ScheduledTaskService(runner=runner)
     service.list_runs(run.scheduled_task)
     asyncio.run(service.reconcile_runs())

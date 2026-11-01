@@ -25,6 +25,16 @@ class PendingGitRequest:
     operation: str
 
 
+@dataclass(frozen=True)
+class PendingProcessRequest:
+    """Pin each process reply to its original runner, workspace and operation."""
+
+    future: asyncio.Future
+    workspace_id: str
+    result_event: str
+    runner_id: str
+
+
 class RpcRegistryService:
     """Pending-RPC registries with explicitly supplied collaborators."""
 
@@ -32,7 +42,7 @@ class RpcRegistryService:
         self,
     ) -> None:
         """Compose this service without inheriting sibling behavior or state."""
-        self.process_pending: dict[str, asyncio.Future] = {}
+        self.process_pending: dict[str, PendingProcessRequest] = {}
         self.git_pending: dict[str, PendingGitRequest] = {}
 
     def owns_request(self, kind: Literal["git", "process"], request_id: str) -> bool:
@@ -41,8 +51,8 @@ class RpcRegistryService:
             pending = self.git_pending.get(request_id)
             return pending is not None and not pending.future.done()
         if kind == "process":
-            future = self.process_pending.get(request_id)
-            return future is not None and not future.done()
+            pending = self.process_pending.get(request_id)
+            return pending is not None and not pending.future.done()
         return False
 
     def resolve_process_future(self, request_id: str, payload: dict) -> bool:
@@ -51,10 +61,11 @@ class RpcRegistryService:
         Thread-safe: Socket.IO replies arrive via ``sync_to_async`` worker
         threads while waiters live on the main event loop.
         """
-        future = self.process_pending.get(request_id)
-        if future is None or future.done():
+        pending = self.process_pending.get(request_id)
+        if pending is None or pending.future.done():
             logger.warning("process reply for unknown request_id %s", request_id)
             return False
+        future = pending.future
 
         def _set() -> None:
             if not future.done():

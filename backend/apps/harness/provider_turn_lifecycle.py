@@ -44,6 +44,76 @@ class ProviderTurnLifecycle:
     def __init__(self, ports: ProviderTurnLifecyclePorts) -> None:
         self.ports = ports
 
+    def _background_contexts(self) -> tuple[dict[str, Any], ...]:
+        """Include detached metadata roots and still-admitting child contexts."""
+        contexts = list(self.ports.provider_turn_roots.values())
+        contexts.extend(
+            run.context
+            for run in self.ports.run_registry.records.values()
+            if run.context is not None
+        )
+        return tuple({id(context): context for context in contexts}.values())
+
+    def cancel_background_work(self) -> tuple[dict[str, Any], ...]:
+        """Stop metadata/monitors before core teardown can publish new results."""
+        contexts = self._background_contexts()
+        for context in contexts:
+            tasks = [context.get("provider_monitor_task")]
+            tasks.extend(context.get("provider_followup_tasks", {}).values())
+            for task in tasks:
+                if task is not None and not task.done() and not task.cancelling():
+                    task.cancel()
+        return contexts
+
+    async def shutdown(self, contexts: tuple[dict[str, Any], ...]) -> None:
+        """Join provider tasks and release each named holder after core teardown."""
+        current = self.cancel_background_work()
+        contexts = tuple({id(item): item for item in (*contexts, *current)}.values())
+        followers = [
+            (context, token, task)
+            for context in contexts
+            for token, task in tuple(context.get("provider_followup_tasks", {}).items())
+        ]
+        tasks = {task for _, _, task in followers}
+        tasks.update(
+            context["provider_monitor_task"]
+            for context in contexts
+            if context.get("provider_monitor_task") is not None
+        )
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # Registration precedes monitor task entry. Even a never-started monitor
+        # has a subscription that this process must explicitly relinquish.
+        for context in contexts:
+            watched = context.get("provider_revocation_accounts")
+            event = context.get("provider_revocation_event")
+            if watched and event is not None:
+                unregister_revocation_listener(watched, event=event)
+        # Callbacks may release the same holder concurrently. finish_once is
+        # intentionally the single idempotent persistence boundary for both.
+        for context, holder, _ in followers:
+            turn_id = context.get("provider_turn_id")
+            if turn_id:
+                await self._finish_provider_hold(turn_id, holder)
+        for context in contexts:
+            # An external process whose cleanup is unconfirmed still owns its
+            # durable answer snapshot. Recovery, not process shutdown, releases
+            # that holder after the runner confirms the lease is closed.
+            if context.get("cleanup_confirmed", True):
+                await self._finish_provider_turn(context)
+            turn_id = context.get("provider_turn_id")
+            if not turn_id:
+                continue
+            state = await sync_to_async(self.ports.provider_turn_service.get)(turn_id)
+            if state is not None and state.active and not state.holds:
+                await sync_to_async(
+                    self.ports.provider_turn_service.clear_monitor_required
+                )(turn_id)
+            await self._maybe_finish_provider_monitor(context)
+
     def _provider_turn_context(self, session: HarnessSession) -> dict[str, Any]:
         """Find the snapshot context at this session or its live ancestor."""
         key = str(session.id)

@@ -12,7 +12,7 @@ import contextvars
 import uuid
 from collections.abc import Awaitable, Callable, MutableMapping, MutableSet
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import structlog
@@ -62,6 +62,9 @@ from .session_settings_service import SessionSettingsService
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
 from .tools.subagents import TaskArgs
+
+if TYPE_CHECKING:
+    from .command_service import RemoteHarnessService
 
 log = structlog.get_logger(__name__)
 
@@ -148,6 +151,9 @@ class HarnessService:
         from .run_state import RunRegistry
 
         self.run_registry = RunRegistry()
+        from .background_tasks import BackgroundTaskSupervisor
+
+        self._background = BackgroundTaskSupervisor()
         self._process_cleanup = process_cleanup
         self._engine_registry = engine_registry
         self._engine_connections = engine_connections
@@ -592,6 +598,8 @@ class HarnessService:
         # A closing attempt with unconfirmed runner cleanup must survive deletion.
         await self._ensure_external_attempt_reconciled(session, force=True)
         await sync_to_async(self.sessions.delete)(session)
+        self.run_registry.clear_abort(str(session.id))
+        self._forget_run(str(session.id))
         if session.parent_id is None:
             await self.conversation_events.emit(session.workspace_id)
 
@@ -616,6 +624,7 @@ class HarnessService:
                 accessor = await accessor
         if force or attempt.status == HarnessRunStatus.CLOSING:
             await run_service.prepare_session(session.id, accessor)
+            self.reconcile_recovered_run(session.id, attempt.assistant_message_id)
             return True
         raise ConflictError("Harness session already has an active run")
 
@@ -947,6 +956,8 @@ class HarnessService:
         _edit_message_id: uuid.UUID | None = None,
     ) -> HarnessMessage:
         """Compose the RunAdmission boundary with its explicit ports."""
+        if self._background.closing:
+            raise ConflictError("Agent execution worker is stopping")
         from .run_admission import RunAdmission, RunAdmissionPorts
         from .run_preparation import RunPreparation, RunPreparationPorts
 
@@ -958,6 +969,7 @@ class HarnessService:
                 forget_run=self._forget_run,
                 provider_turn_context=self._provider_turn_context,
                 remember_run=self._remember_run,
+                reconcile_recovered_run=self.reconcile_recovered_run,
                 resolve_engine_auth=self._resolve_engine_auth,
                 run_service_for_engine=self._run_service_for_engine,
                 session_settings=self.session_settings,
@@ -1005,6 +1017,40 @@ class HarnessService:
             max_depth=max_depth,
             _edit_message_id=_edit_message_id,
         )
+
+    def reconcile_recovered_run(
+        self, session_id: uuid.UUID | str, assistant_message_id: uuid.UUID | str
+    ) -> None:
+        """Reconcile local stop/projection state after confirmed durable recovery."""
+        self._run_cancellation().reconcile_recovered_run(
+            session_id, assistant_message_id
+        )
+
+    async def shutdown_runs(self) -> None:
+        """Close worker admission and settle owned runs without user-stop intent."""
+        await self._background.shutdown(self._shutdown_owned_work)
+
+    async def _shutdown_owned_work(self) -> None:
+        """Stop provider producers, join executions, then release their holders."""
+        providers = self._provider_turn_lifecycle()
+        contexts = providers.cancel_background_work()
+        try:
+            await self._run_cancellation().shutdown()
+        finally:
+            await providers.shutdown(contexts)
+
+    async def request_stop(self, session_id: uuid.UUID) -> None:
+        """Fence an older claimed admission before its worker waiter is cancelled.
+
+        The command supervisor calls this before joining startup waiters; normal
+        abort then joins execution and releases the stop intent. Validate the
+        workspace interaction fence before mutating or cancelling local work.
+        """
+        session = await sync_to_async(self.conversations.get_session)(session_id)
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
+            session.workspace_id
+        )
+        self.run_registry.request_abort(str(session_id))
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run tree, reject pending user gates, and mark aborted."""
@@ -1054,7 +1100,8 @@ class HarnessService:
         SessionAccessService.require_user_promptable(session.parent_id)
         channel = self._steering_channel(session.id)
         if (
-            channel is None
+            self._background.closing
+            or channel is None
             or channel.closed
             or not self.is_running(session.id)
             or self._user_abort_requested(session)
@@ -1086,21 +1133,26 @@ class HarnessService:
             await self._emit_steer_queue(session)
 
     async def _emit_steer_queue(self, session: HarnessSession) -> None:
-        """Publish the full queue snapshot (replace semantics for clients)."""
+        """Commit and publish the owner's replaceable reconnect projection."""
+        from .command_repository import SteeringSnapshotRepository
+
+        entries = [entry.to_payload() for entry in self.list_pending_steers(session.id)]
+        await sync_to_async(SteeringSnapshotRepository.set)(session.id, entries)
         await self._emit_frontend(
             FRONTEND_EVENT_STEER_QUEUE,
             {
                 "workspace_id": str(session.workspace_id),
                 "session_id": str(session.id),
-                "steers": [
-                    entry.to_payload() for entry in self.list_pending_steers(session.id)
-                ],
+                "steers": entries,
             },
             str(session.workspace_id),
         )
 
     async def _emit_empty_steer_queue(self, session_id: str, workspace_id: str) -> None:
-        """Tell clients that no steer is queued for *session_id* anymore."""
+        """Clear the saved queue before telling connected clients it is empty."""
+        from .command_repository import SteeringSnapshotRepository
+
+        await sync_to_async(SteeringSnapshotRepository.set)(uuid.UUID(session_id), [])
         await self._emit_frontend(
             FRONTEND_EVENT_STEER_QUEUE,
             {"workspace_id": workspace_id, "session_id": session_id, "steers": []},
@@ -1154,7 +1206,7 @@ class HarnessService:
         self, session: HarnessSession, entries: list[SteerEntry]
     ) -> None:
         """Turn steers left over after a settled run into the next run."""
-        if not entries:
+        if not entries or self._background.closing:
             return
         self._spawn_background(self._start_steer_followup(session, entries))
 
@@ -1317,6 +1369,7 @@ class HarnessService:
                 coro.close()
 
         task.add_done_callback(close_unstarted)
+        self._background.track(task)
         return task
 
     def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
@@ -1566,6 +1619,8 @@ class HarnessService:
                     "subtask_parts": {},
                     "skill_bodies": [],
                     "external_projection": True,
+                    "external_parent_session_id": str(session.id),
+                    "external_parent_message_id": str(assistant.id),
                 },
             )
             await sync_to_async(self.sessions.mark_status)(
@@ -2017,6 +2072,8 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Reserve the answer snapshot before spawning its summary follower."""
+        if self._background.closing:
+            return
         context = self.run_registry.contexts.get(str(session.id), {})
         turn_id = context.get("provider_turn_id")
         if context.get("provider_revocation_message"):
@@ -2119,14 +2176,14 @@ class HarnessService:
         return await self._subagent_coordinator()._resolve_resume_child(parent, task_id)
 
 
-_default_harness_service: HarnessService | None = None
+_default_harness_service: HarnessService | RemoteHarnessService | None = None
 
 
 def create_default_harness_service() -> HarnessService:
     """Build the production service with runner-backed workspace access.
 
-    REST uses :func:`get_harness_service` so abort, permissions,
-    and in-flight runs share one task registry.
+    Only the execution process installs this live service. API adapters use
+    the remote facade and persist commands instead of creating local tasks.
     """
     from .access.runner_accessor import create_harness_accessor
 
@@ -2147,12 +2204,24 @@ def create_default_harness_service() -> HarnessService:
     )
 
 
-def get_harness_service() -> HarnessService:
-    """Return the process-wide HarnessService singleton."""
+def get_harness_service() -> HarnessService | RemoteHarnessService:
+    """Resolve API command submission or the explicitly installed execution owner."""
     global _default_harness_service
     if _default_harness_service is None:
-        _default_harness_service = create_default_harness_service()
+        from .command_service import RemoteHarnessService
+
+        _default_harness_service = RemoteHarnessService(
+            create_default_harness_service()
+        )
     return _default_harness_service
+
+
+def configure_execution_service(service: HarnessService) -> None:
+    """Install live orchestration only in the independent execution process."""
+    global _default_harness_service
+    if _default_harness_service is not None and _default_harness_service is not service:
+        raise RuntimeError("Harness service already configured in this process")
+    _default_harness_service = service
 
 
 def reset_default_harness_service() -> None:

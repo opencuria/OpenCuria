@@ -59,95 +59,42 @@ def test_server_is_lazy_shared_and_preserves_transport_settings(
 
 
 @pytest.mark.asyncio
-async def test_fanout_is_scoped_and_duplicate_subscriptions_are_idempotent(
-    transport: SimpleNamespace,
-) -> None:
-    """Deliver the unchanged event once per subscribed sid and workspace."""
-    realtime.subscribe_frontend("first", "workspace")
-    realtime.subscribe_frontend("first", "workspace")
-    realtime.subscribe_frontend("second", "workspace")
-    realtime.subscribe_frontend("outsider", "other")
+async def test_workspace_room_publication_does_not_require_local_subscriptions(
+    transport,
+):
+    """An execution process can reach authorized API rooms without local sids."""
     payload = {"workspace_id": "workspace", "status": "running"}
-
     await realtime.emit_to_frontend("workspace:status_changed", payload, "workspace")
-
-    assert transport.emit.await_count == 2
-    assert {call.kwargs["to"] for call in transport.emit.await_args_list} == {
-        "first", "second"
-    }
-    for call in transport.emit.await_args_list:
-        assert call.args == ("workspace:status_changed", payload)
-        assert call.kwargs["namespace"] == "/frontend"
+    transport.emit.assert_awaited_once_with(
+        "workspace:status_changed",
+        payload,
+        to="workspace:workspace",
+        namespace="/frontend",
+    )
 
 
-@pytest.mark.asyncio
-async def test_unsubscribe_preserves_other_clients_and_workspaces(
-    transport: SimpleNamespace,
-) -> None:
-    """Removing one subscription cannot drop unrelated subscriptions."""
+def test_subscription_indexes_are_idempotent_and_workspace_scoped(transport):
+    realtime.subscribe_frontend("first", "workspace")
     realtime.subscribe_frontend("first", "workspace")
     realtime.subscribe_frontend("first", "other")
     realtime.subscribe_frontend("second", "workspace")
+    assert realtime._frontend_subscriptions["workspace"] == {"first", "second"}
     realtime.unsubscribe_frontend("first", "workspace")
     realtime.unsubscribe_frontend("first", "workspace")
-
-    await realtime.emit_to_frontend("event", {}, "workspace")
-    transport.emit.assert_awaited_once_with(
-        "event", {}, to="second", namespace="/frontend"
-    )
+    assert realtime._frontend_subscriptions["workspace"] == {"second"}
     assert realtime._frontend_sid_workspaces["first"] == {"other"}
-
-
-@pytest.mark.asyncio
-async def test_disconnect_removes_all_client_subscriptions(
-    transport: SimpleNamespace,
-) -> None:
-    """Drop the disconnected sid from both indexes, retaining other clients."""
-    realtime.subscribe_frontend("first", "workspace")
-    realtime.subscribe_frontend("first", "other")
-    realtime.subscribe_frontend("second", "workspace")
     realtime.drop_frontend("first")
     realtime.drop_frontend("first")
-    assert "first" not in realtime._frontend_sid_workspaces
     assert "other" not in realtime._frontend_subscriptions
-
-    await realtime.emit_to_frontend("event", {}, "other")
-    transport.emit.assert_not_awaited()
-    await realtime.emit_to_frontend("event", {}, "workspace")
-    transport.emit.assert_awaited_once_with(
-        "event", {}, to="second", namespace="/frontend"
-    )
+    assert realtime._frontend_subscriptions["workspace"] == {"second"}
 
 
 @pytest.mark.asyncio
-async def test_failed_client_does_not_interrupt_fanout(
-    transport: SimpleNamespace,
-) -> None:
-    """A delivery failure is contained so remaining subscribers get the event."""
-    realtime.subscribe_frontend("first", "workspace")
-    realtime.subscribe_frontend("second", "workspace")
+async def test_room_delivery_failure_does_not_abort_later_publication(transport):
     transport.emit.side_effect = [RuntimeError("connection lost"), None]
-
-    await realtime.emit_to_frontend("event", {}, "workspace")
-
-    assert transport.emit.await_count == 2
-    assert {call.kwargs["to"] for call in transport.emit.await_args_list} == {
-        "first", "second"
-    }
-
-
-@pytest.mark.asyncio
-async def test_subscription_changes_during_delivery_do_not_break_iteration(
-    transport: SimpleNamespace,
-) -> None:
-    """Use a snapshot when an awaited emit lets a client disconnect."""
-    realtime.subscribe_frontend("first", "workspace")
-    realtime.subscribe_frontend("second", "workspace")
-
-    async def disconnect(*args: object, **kwargs: object) -> None:
-        realtime.drop_frontend(str(kwargs["to"]))
-
-    transport.emit.side_effect = disconnect
-    await realtime.emit_to_frontend("event", {}, "workspace")
-    assert transport.emit.await_count == 2
-    assert not realtime._frontend_subscriptions
+    await realtime.emit_to_frontend("event", {}, "one")
+    await realtime.emit_to_frontend("event", {}, "two")
+    assert [call.kwargs["to"] for call in transport.emit.await_args_list] == [
+        "workspace:one",
+        "workspace:two",
+    ]

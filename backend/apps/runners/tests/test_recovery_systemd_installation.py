@@ -43,5 +43,40 @@ def test_installer_preview_renders_watchdog_and_backend_dependency(tmp_path):
     assert "__" not in unit
     dependency = output / "opencuria-backend.service.d/20-lifecycle-recovery.conf"
     assert (
-        dependency.read_text() == "[Unit]\nWants=opencuria-recover-lifecycle.service\n"
+        dependency.read_text()
+        == "[Unit]\nWants=opencuria-recover-lifecycle.service opencuria-execution.service\n"
     )
+
+    execution = (output / "opencuria-execution.service").read_text()
+    assert "manage.py execute_harness" in execution
+    assert "PartOf=" not in execution
+    assert "Requires=" not in execution
+    assert "Restart=on-failure" in execution
+    assert f"WorkingDirectory={backend}" in execution
+    assert f"EnvironmentFile={str(env_file).replace('%', '%%')}" in execution
+    assert "__" not in execution
+
+
+def test_installer_rejects_execution_unit_collisions_and_invalid_names(tmp_path):
+    backend = Path(__file__).resolve().parents[3]
+    for name, expected in (
+        ("opencuria-backend.service", "distinct units"),
+        ("../outside.service", "Invalid systemd service name"),
+    ):
+        result = subprocess.run(
+            [
+                "bash",
+                str(backend / "systemd/install-recovery-service.sh"),
+                "--no-activate",
+                "--execution-service",
+                name,
+                "--output-dir",
+                str(tmp_path / "units"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert expected in result.stderr
+        assert not (tmp_path / "units").exists()

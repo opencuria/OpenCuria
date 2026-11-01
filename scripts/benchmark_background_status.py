@@ -26,8 +26,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
+from src.application import RunnerApplication  # noqa: E402
 from src.config import RunnerSettings  # noqa: E402
-from src.interfaces.websocket import WebSocketInterface  # noqa: E402
 from src.models import WorkspaceInfo  # noqa: E402
 from src.service import WorkspaceService  # noqa: E402
 from src.services.sessions.background import BackgroundProcess  # noqa: E402
@@ -77,7 +77,8 @@ async def _run(args: argparse.Namespace, directory: str) -> dict[str, Any]:
     runtime = LocalRuntime(directory)
     settings = RunnerSettings(state_dir=directory, _env_file=None)
     service = WorkspaceService(runtime, settings)
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(service, settings)
+    interface = application.interface
     workspace_id = uuid.UUID(int=1)
     service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id, "synthetic-instance", "running"
@@ -99,7 +100,7 @@ async def _run(args: argparse.Namespace, directory: str) -> dict[str, Any]:
         return emitted[0]["processes"]
 
     async def heartbeat() -> list[dict[str, Any]]:
-        payload = await service.get_workspace_heartbeat_statuses()
+        payload = await service.registry.get_workspace_heartbeat_statuses()
         return json.loads(json.dumps(payload[0]["processes"]))
 
     sleepers: list[asyncio.subprocess.Process] = []

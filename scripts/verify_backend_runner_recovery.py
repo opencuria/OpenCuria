@@ -98,7 +98,7 @@ def seed(root: Path) -> None:
 
 async def runner(root: Path) -> None:
     """Run the production service with a labelled capture fault boundary."""
-    from src.interfaces.websocket import WebSocketInterface
+    from src.application import RunnerApplication
     from src.service import WorkspaceService
     from verify_workspace_lifecycle import runtime_at
 
@@ -110,7 +110,8 @@ async def runner(root: Path) -> None:
     settings.inventory_interval = 15
     service = WorkspaceService(runtime, settings)
     await service.registry.sync_from_runtime()
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(service, settings)
+    interface = application.interface
     interface._sio.reconnection_delay = 0.2
     interface._sio.reconnection_delay_max = 1
     interface._sio.randomization_factor = 0
@@ -131,10 +132,9 @@ async def runner(root: Path) -> None:
 
     runtime.create_image_artifact = injected
     try:
-        await interface.start()
+        await application.start()
     finally:
-        await interface.stop()
-        interface._operations.journal.close()
+        await application.stop()
 
 
 def free_port() -> int:
@@ -271,6 +271,7 @@ async def verify(root: Path, cloud: Path) -> None:
         assert await asyncio.wait_for(proc.wait(), 30) == 0, "seed failed"
         config = json.loads((root / "config.json").read_text())
         await backend()
+        await spawn("execution", backend_python, "manage.py", "execute_harness")
         await spawn("recovery", backend_python, "manage.py", "recover_lifecycle")
         await spawn(
             "runner",
