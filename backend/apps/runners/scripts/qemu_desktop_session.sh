@@ -605,67 +605,6 @@ exec dbus-launch --exit-with-session startxfce4
 XSTARTUP
 chmod +x /root/.vnc/xstartup
 
-cat >/usr/local/bin/opencuria-desktop-start <<'DESKSTART'
-#!/bin/bash
-set -e
-export DISPLAY=:1
-export HOME=/root
-/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
-mkdir -p /root/.vnc
-rm -f /root/.vnc/.xstartup-started
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-
-# Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
-GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
-/usr/bin/Xvnc :1 \
-    -geometry "$GEOMETRY" \
-    -depth 24 \
-    -rfbport 5901 \
-    -SecurityTypes None \
-    -disableBasicAuth \
-    -websocketPort 6901 \
-    -PublicIP 127.0.0.1 \
-    -httpd /usr/share/kasmvnc/www \
-    -interface 0.0.0.0 \
-    -AlwaysShared \
-    -AcceptKeyEvents \
-    -AcceptPointerEvents \
-    -SendCutText \
-    -AcceptCutText \
-    -AcceptSetDesktopSize=0 \
-    >>/root/.vnc/server.log 2>&1 &
-
-for _ in $(seq 1 120); do
-    if [ -e /tmp/.X11-unix/X1 ] && [ ! -f /root/.vnc/.xstartup-started ]; then
-        touch /root/.vnc/.xstartup-started
-        /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &
-    fi
-    if [ -e /tmp/.X11-unix/X1 ] && (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then
-        echo "Desktop session started on :1 (ws port 6901)"
-        exit 0
-    fi
-    sleep 0.25
-done
-echo "Desktop session failed to start" >&2
-exit 1
-DESKSTART
-
-# Generated copy of runner/src/services/sessions/desktop_stop.sh; tested for parity.
-cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
-#!/bin/bash
-# Stop only desktop executable names; agent argv can contain words like profile.
-for pattern in \
-    '^(/[^[:space:]]*/)?(Xvnc|Xtigervnc) :1([[:space:]]|$)' \
-    '^(/[^[:space:]]*/)?(xfce4-session|xfwm4|xfce4-panel|xfdesktop|plank|skippy-xd|rofi|openbox)([[:space:]]|$)'
-do
-    for pid in $(pgrep -f -- "$pattern" 2>/dev/null); do
-        kill "$pid" 2>/dev/null || true
-    done
-done
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-DESKSTOP
-
-chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 

@@ -21,6 +21,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
 from src.runtime.base import WorkspaceConfig
+from src.services.sessions.desktop import DESKTOP_STOP_COMMAND, DesktopManager
 from verify_workspace_lifecycle import runtime_at
 
 
@@ -116,8 +117,9 @@ test -s /usr/share/backgrounds/opencuria/Ventura-light.jpg
 if ldd "$(command -v Xvnc)" | grep 'not found'; then exit 1; fi
 """)
         passed("published image boots with native desktop dependencies", output=native)
+        await guest(DESKTOP_STOP_COMMAND)
+        await guest(DesktopManager._desktop_start_command(1280, 720))
         desktop = await guest("""set -euo pipefail
-OPENCURIA_DESKTOP_GEOMETRY=1280x720 /usr/local/bin/opencuria-desktop-start
 export DISPLAY=:1
 for _ in $(seq 1 120); do
  if pgrep -x xfce4-session >/dev/null && wmctrl -m | grep -qi xfwm; then break; fi

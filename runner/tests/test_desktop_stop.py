@@ -14,15 +14,6 @@ import pytest
 from src.runtime.managed_process import MANAGED_CODE
 from src.services.sessions.desktop import DESKTOP_STOP_COMMAND, DESKTOP_STOPPED_PROBE
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
-def test_provisioned_stop_script_matches_runner() -> None:
-    """Generated image helpers retain the runner's canonical stop implementation."""
-    source = (ROOT / "backend/apps/runners/scripts/qemu_desktop_session.sh").read_text()
-    script = source.split("<<'DESKSTOP'\n", 1)[1].split("\nDESKSTOP\n", 1)[0] + "\n"
-    assert script == DESKTOP_STOP_COMMAND
-
 
 async def named_process(name: str) -> asyncio.subprocess.Process:
     """Launch a harmless process with the argv used by a desktop executable."""
