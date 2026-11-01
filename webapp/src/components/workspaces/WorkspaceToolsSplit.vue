@@ -5,7 +5,18 @@
  * retaining its mounted instance. Owns file-socket routing and tool-store
  * reset when the workspace changes or this host unmounts.
  */
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, toRef, watch } from 'vue'
+import {
+  computed,
+  defineAsyncComponent,
+  inject,
+  onBeforeUnmount,
+  onMounted,
+  onUnmounted,
+  ref,
+  toRef,
+  watch,
+  watchEffect,
+} from 'vue'
 import DesktopSurface from '@/components/workspaces/DesktopSurface.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
 import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
@@ -17,6 +28,7 @@ import { useSidePanelStore } from '@/stores/sidePanel'
 import { useTerminalStore } from '@/stores/terminal'
 import { useEditorStore } from '@/stores/editor'
 import EditorTabs from '@/components/editor/EditorTabs.vue'
+import { sidebarChatTargetKey, useWorkspaceLayoutStore } from '@/stores/workspaceLayout'
 
 const WorkspaceEditor = defineAsyncComponent(
   () => import('@/components/editor/WorkspaceEditor.vue'),
@@ -35,6 +47,8 @@ const props = defineProps<{
 }>()
 
 const sidePanelStore = useSidePanelStore()
+const layout = useWorkspaceLayoutStore()
+const leftChatTarget = inject(sidebarChatTargetKey, ref<HTMLElement | null>(null))
 const desktopStore = useDesktopStore()
 const fileExplorerStore = useFileExplorerStore()
 const workspaceImageStore = useWorkspaceImageStore()
@@ -98,19 +112,26 @@ useWorkspaceFileEvents(toRef(props, 'workspaceId'))
 
 const showingEditor = computed(() => props.canPrompt && editorStore.isOpen)
 const showingSidebarChat = computed(() => showingEditor.value && sidebarChatOpen.value)
+const chatOnLeft = computed(() => layout.leftChatDocked && Boolean(leftChatTarget.value))
+const showingRightSidebarChat = computed(() => showingSidebarChat.value && !chatOnLeft.value)
 const hasWorkspace = computed(() => props.workspaceId.length > 0)
 const showSidePanel = computed(
   () =>
     props.canPrompt && hasWorkspace.value && (sidePanelStore.hasOpened || showingSidebarChat.value),
 )
-const sidePanelVisible = computed(() => sidePanelStore.isOpen || showingSidebarChat.value)
+const sidePanelVisible = computed(() => sidePanelStore.isOpen || showingRightSidebarChat.value)
+
+watchEffect(() => {
+  layout.sidebarChatOpen = showingSidebarChat.value
+  layout.rightPanelVisible = showSidePanel.value && sidePanelVisible.value
+})
 
 function toggleSidebarChat(): void {
   if (showingEditor.value) sidebarChatOpen.value = !sidebarChatOpen.value
 }
 
 function toggleSidePanel(): void {
-  if (showingSidebarChat.value) {
+  if (showingRightSidebarChat.value) {
     sidebarChatOpen.value = false
     sidePanelStore.close()
   } else sidePanelStore.toggle()
@@ -155,6 +176,12 @@ watch(
   },
 )
 
+// Release layout flags before the next route's host sets up its own layout.
+onBeforeUnmount(() => {
+  layout.sidebarChatOpen = false
+  layout.rightPanelVisible = false
+})
+
 onUnmounted(() => {
   stopGitActions()
   window.removeEventListener('focus', refreshActiveFile)
@@ -164,7 +191,7 @@ onUnmounted(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-1 flex-col">
-    <div class="flex min-h-0 flex-1" :class="{ 'max-lg:flex-col': showingSidebarChat }">
+    <div class="flex min-h-0 min-w-0 flex-1" :class="{ 'max-lg:flex-col': showingSidebarChat }">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <EditorTabs
           v-if="showingEditor"
@@ -200,7 +227,10 @@ onUnmounted(() => {
         :key="workspaceId"
         :workspace-id="workspaceId"
         :chat-open="showingSidebarChat"
+        :chat-on-left="chatOnLeft"
+        :left-chat-target="leftChatTarget"
         @close-chat="sidebarChatOpen = false"
+        @move-chat="layout.moveChat()"
       >
         <template #chat-header><slot name="chat-header">Chat</slot></template>
         <template #chat>

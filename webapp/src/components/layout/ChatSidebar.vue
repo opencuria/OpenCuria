@@ -427,7 +427,8 @@ watch(
       <SidebarUserFooter @settings="handleOpenSettings" @logout="handleLogout" />
     </SidebarFooter>
 
-    <SidebarRail />
+    <slot v-if="$slots.rail" name="rail" />
+    <SidebarRail v-else />
   </Sidebar>
 
   <CommandPalette v-model:open="searchOpen" />

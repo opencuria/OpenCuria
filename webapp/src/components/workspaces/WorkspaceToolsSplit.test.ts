@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, onMounted, onUnmounted, ref } from 'vue'
+import { defineComponent, onMounted, onUnmounted, provide, ref } from 'vue'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import WorkspaceToolsSplit from './WorkspaceToolsSplit.vue'
 import { useEditorStore } from '@/stores/editor'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { readEditorFile, saveEditorFile } from '@/services/editor.api'
+import AppSidebar from '@/components/layout/AppSidebar.vue'
+import { SidebarProvider } from '@/components/ui/sidebar'
+import { sidebarChatTargetKey, useWorkspaceLayoutStore } from '@/stores/workspaceLayout'
+import { CHAT_SIDE_STORAGE_KEY, MIN_WORKSPACE_CONTENT_WIDTH } from '@/lib/workspaceLayout'
 
 enableAutoUnmount(afterEach)
 
@@ -49,8 +53,12 @@ vi.mock('@/stores/workspaceImages', () => ({
   useWorkspaceImageStore: () => ({ reset: mocks.reset }),
 }))
 vi.mock('@/composables/useWorkspaceFileEvents', () => ({ useWorkspaceFileEvents: vi.fn() }))
-vi.mock('@/components/ui/sidebar', () => ({
+vi.mock('@/components/ui/sidebar', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/ui/sidebar')>()),
   SidebarTrigger: { template: '<button aria-label="Toggle sidebar" />' },
+}))
+vi.mock('@/components/layout/ChatSidebar.vue', () => ({
+  default: { template: '<nav data-testid="navigation"><slot name="rail" /></nav>' },
 }))
 vi.mock('@/components/files/WorkspaceFileIcon.vue', () => ({ default: { template: '<span />' } }))
 vi.mock('@/components/editor/MonacoEditor.vue', () => ({
@@ -98,8 +106,37 @@ function mountSplit() {
   })
 }
 
+function mountLayout() {
+  return mount(
+    defineComponent({
+      components: { AppSidebar, SidebarProvider, WorkspaceToolsSplit, Chat },
+      setup() {
+        provide(sidebarChatTargetKey, ref<HTMLElement | null>(null))
+        return { workspaceId: ref('ws-1'), canPrompt: ref(true), hostKey: ref(0) }
+      },
+      template: `<SidebarProvider>
+      <AppSidebar />
+      <WorkspaceToolsSplit :key="hostKey" :workspace-id="workspaceId" :can-prompt="canPrompt">
+        <Chat />
+      </WorkspaceToolsSplit>
+    </SidebarProvider>`,
+    }),
+    {
+      attachTo: document.body,
+      global: {
+        stubs: {
+          FileExplorerPanel: { template: '<div data-testid="files-tool" />' },
+          WorkspaceTerminal: { template: '<div data-testid="terminal-tool" />' },
+        },
+      },
+    },
+  )
+}
+
 beforeEach(() => {
   localStorage.clear()
+  document.cookie = 'sidebar_state=true'
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true })
   setActivePinia(createPinia())
   vi.clearAllMocks()
   mocks.chatMounts = 0
@@ -126,6 +163,120 @@ afterEach(() => {
 })
 
 describe('editor and sidebar chat layout', () => {
+  it('keeps the new layout active when the previous workspace host unmounts', async () => {
+    useSidePanelStore().open('files')
+    const wrapper = mountLayout()
+    await settle()
+    expect(useWorkspaceLayoutStore().rightPanelVisible).toBe(true)
+    wrapper.vm.hostKey += 1
+    await settle()
+    expect(wrapper.get('[data-testid="workspace-side-panel"]').isVisible()).toBe(true)
+    expect(useWorkspaceLayoutStore().rightPanelVisible).toBe(true)
+  })
+
+  it.each(['workspace', 'unavailable', 'close-file'] as const)(
+    'restores navigation and the main chat after %s while docked on the left',
+    async (change) => {
+      localStorage.setItem(CHAT_SIDE_STORAGE_KEY, 'left')
+      const editor = useEditorStore()
+      const wrapper = mountLayout()
+      await editor.openFile('ws-1', '/workspace/a.ts')
+      await settle()
+      await wrapper.get('[aria-label="Open chat"]').trigger('click')
+      await settle()
+      const chat = wrapper.get('textarea')
+      if (change === 'workspace') wrapper.vm.workspaceId = 'ws-2'
+      else if (change === 'unavailable') wrapper.vm.canPrompt = false
+      else editor.closeTab(editor.activeTab!.id)
+      await settle()
+      expect(wrapper.get('[data-testid="navigation"]').isVisible()).toBe(true)
+      expect(wrapper.get('[data-testid="workspace-left-sidebar"]').isVisible()).toBe(false)
+      expect(wrapper.get('[data-testid="workspace-chat-content"] textarea').element).toBe(
+        chat.element,
+      )
+      expect(useWorkspaceLayoutStore().sidebarChatOpen).toBe(false)
+      expect(localStorage.getItem(CHAT_SIDE_STORAGE_KEY)).toBe('left')
+      expect(mocks.chatMounts).toBe(1)
+      expect(mocks.chatUnmounts).toBe(0)
+    },
+  )
+
+  it('docks the same chat over navigation and back, retaining drafts, edits and tools', async () => {
+    const sidePanel = useSidePanelStore()
+    sidePanel.open('files')
+    const editor = useEditorStore()
+    const wrapper = mountLayout()
+    await settle()
+    const chat = wrapper.get('textarea')
+    await chat.setValue('Keep my draft')
+    const tool = wrapper.get('[data-testid="files-tool"]').element
+    await editor.openFile('ws-1', '/workspace/a.ts')
+    editor.updateContent(editor.activeTab!.id, 'Unsaved file')
+    await settle()
+    await wrapper.get('[aria-label="Open chat"]').trigger('click')
+    await settle()
+    await wrapper.get('[aria-label="Move chat to left"]').trigger('click')
+    await settle()
+    expect(wrapper.get('[data-testid="workspace-left-chat-target"] textarea').element).toBe(
+      chat.element,
+    )
+    expect(wrapper.get('[data-testid="navigation"]').isVisible()).toBe(false)
+    expect(wrapper.get('[data-testid="files-tool"]').isVisible()).toBe(true)
+    expect(localStorage.getItem(CHAT_SIDE_STORAGE_KEY)).toBe('left')
+    expect(editor.activeTab).toMatchObject({ content: 'Unsaved file', dirty: true })
+    expect((chat.element as HTMLTextAreaElement).value).toBe('Keep my draft')
+
+    await wrapper.get('[aria-label="Move chat to right"]').trigger('click')
+    await settle()
+    expect(wrapper.get('[data-testid="workspace-side-panel"] textarea').element).toBe(chat.element)
+    expect(wrapper.get('[data-testid="navigation"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="files-tool"]').element).toBe(tool)
+    expect(mocks.chatMounts).toBe(1)
+    expect(mocks.chatUnmounts).toBe(0)
+  })
+
+  it('opens at the saved left position, resizes both sides, and restores navigation on close', async () => {
+    localStorage.setItem(CHAT_SIDE_STORAGE_KEY, 'left')
+    const editor = useEditorStore()
+    const sidePanel = useSidePanelStore()
+    const wrapper = mountLayout()
+    await editor.openFile('ws-1', '/workspace/a.ts')
+    await settle()
+    await wrapper.get('[aria-label="Open chat"]').trigger('click')
+    await settle()
+    expect(wrapper.get('[data-testid="workspace-left-chat-target"] textarea').isVisible()).toBe(
+      true,
+    )
+    expect(wrapper.get('[data-testid="workspace-side-panel"]').isVisible()).toBe(false)
+    expect(wrapper.find('[data-testid="terminal-tool"]').exists()).toBe(false)
+
+    sidePanel.open('files')
+    await settle()
+    const handle = wrapper.get('[data-testid="left-sidebar-resize-handle"]')
+    handle.element.dispatchEvent(new PointerEvent('pointerdown', { clientX: 400, button: 0 }))
+    handle.element.dispatchEvent(new PointerEvent('pointermove', { clientX: 2000 }))
+    handle.element.dispatchEvent(new PointerEvent('pointerup'))
+    await settle()
+    const layout = useWorkspaceLayoutStore()
+    expect(1440 - layout.leftWidth - layout.rightWidth).toBe(MIN_WORKSPACE_CONTENT_WIDTH)
+    await handle.trigger('keydown', { key: 'ArrowLeft' })
+    expect(layout.leftWidth).toBe(624)
+    const rightHandle = wrapper.get('[data-testid="side-panel-resize-handle"]')
+    await rightHandle.trigger('keydown', { key: 'ArrowLeft' })
+    expect(layout.rightWidth).toBe(416)
+    expect(1440 - layout.leftWidth - layout.rightWidth).toBe(MIN_WORKSPACE_CONTENT_WIDTH)
+    await wrapper.get('[data-testid="sidebar-chat-close"]').trigger('click')
+    await settle()
+    expect(wrapper.get('[data-testid="navigation"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="workspace-left-sidebar"]').isVisible()).toBe(false)
+    await wrapper.get('[aria-label="Open chat"]').trigger('click')
+    await settle()
+    expect(layout.leftWidth).toBe(624)
+    expect(wrapper.get('[data-testid="workspace-left-chat-target"] textarea').isVisible()).toBe(
+      true,
+    )
+  })
+
   it('moves the same chat into the sidebar while retaining the editor, drafts and tool state', async () => {
     const sidePanel = useSidePanelStore()
     sidePanel.open('files')
