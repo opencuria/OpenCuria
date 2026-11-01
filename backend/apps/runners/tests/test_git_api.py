@@ -411,6 +411,7 @@ def test_git_commit_happy_uses_authenticated_user(client: Client, monkeypatch):
         {"argv": ["git", "status"]},
         {"message_b64": "aGVsbG8="},
         {"unknown_field": "x"},
+        {"branch": "main"},
         {"hash": "abc123"},
         {"history_limit": 10},
         {"history_skip": 0},

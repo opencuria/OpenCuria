@@ -303,9 +303,7 @@ def test_pending_registries_are_instance_local():
 
 def test_facade_constants_reachable():
     svc = RunnerService()
-    assert "list_repos" in svc.GIT_OPERATIONS
     assert "list_repos" in svc.GIT_READ_OPERATIONS
-    assert isinstance(svc._GIT_ALLOWED_ARGS, dict)
     assert svc.BUILD_LOG_MAX_CHARS == 200_000
     assert svc._PROCESS_RPC_TIMEOUT_SECONDS == 30
     assert svc._STREAM_CHUNK_SIZE == 64 * 1024

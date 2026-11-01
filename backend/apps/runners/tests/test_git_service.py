@@ -73,10 +73,6 @@ def _emit_ok(service: RunnerService, runner, workspace, payload_extra=None):
     return seen
 
 
-# Back-compat alias for the ok-reply emit helper.
-_emit_ok_snapshot = _emit_ok
-
-
 @pytest.mark.django_db(transaction=True)
 class TestRunGitOperationHappyPath:
     @pytest.mark.asyncio
@@ -172,7 +168,7 @@ class TestRunGitOperationHappyPath:
     @pytest.mark.asyncio
     async def test_stage_includes_repo_path(self, service, runner, workspace):
         """Mutations forward repo_path plus typed args."""
-        seen = _emit_ok_snapshot(service, runner, workspace)
+        seen = _emit_ok(service, runner, workspace)
 
         await service.run_git_operation(
             workspace.id,
@@ -238,7 +234,7 @@ class TestCommitIdentityFallback:
         """Commit args gain author_name/email from the account user."""
         user.first_name = "Ada"
         user.last_name = "Lovelace"
-        seen = _emit_ok_snapshot(service, runner, workspace)
+        seen = _emit_ok(service, runner, workspace)
 
         await service.run_git_operation(
             workspace.id,
@@ -304,17 +300,10 @@ class TestStrictGitArgs:
     ):
         """env/author/args/argv/aliases never reach the runner."""
         service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
-        kwargs: dict = {"args": args}
-        if operation in {
-            "stage",
-            "commit",
-            "repo_snapshot",
-            "repo_history",
-            "checkout_remote_branch",
-        }:
-            kwargs["repo_path"] = "/workspace/repo"
         with pytest.raises(ValueError, match="Unknown argument|env|author"):
-            await service.run_git_operation(workspace.id, operation, **kwargs)
+            await service.run_git_operation(
+                workspace.id, operation, repo_path="/workspace/repo", args=args
+            )
         service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
@@ -322,10 +311,15 @@ class TestStrictGitArgs:
         "operation,args",
         [
             ("stage", {}),
+            ("stage", {"paths": "a.txt"}),
+            ("stage", {"paths": [123]}),
             ("commit", {}),
             ("commit_details", {}),
             ("commit_details", {"commit": "zzz"}),
             ("checkout_branch", {}),
+            ("checkout_branch", {"branch": ""}),
+            ("fetch", {"remote": "   "}),
+            ("pull", {"branch": "main"}),
             ("checkout_commit", {"commit": "nope"}),
             ("checkout_remote_branch", {}),
             ("checkout_remote_branch", {"remote_ref": ""}),
@@ -374,50 +368,6 @@ class TestStrictGitArgs:
         with pytest.raises(ValueError, match="repo_path|Repo path"):
             await service.run_git_operation(
                 workspace.id, "stage", repo_path=repo_path, args={"paths": ["a"]}
-            )
-        service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_branch_and_hash_and_remote_validated(
-        self, service, runner, workspace
-    ):
-        """Branch/hash/remote typos are rejected with clear errors."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
-        with pytest.raises(ValueError, match="branch is required"):
-            await service.run_git_operation(
-                workspace.id,
-                "checkout_branch",
-                repo_path="/workspace/repo",
-                args={"branch": ""},
-            )
-        with pytest.raises(ValueError, match="Invalid commit hash"):
-            await service.run_git_operation(
-                workspace.id,
-                "checkout_commit",
-                repo_path="/workspace/repo",
-                args={"commit": "xyz!"},
-            )
-        with pytest.raises(ValueError, match="Invalid remote"):
-            await service.run_git_operation(
-                workspace.id,
-                "fetch",
-                repo_path="/workspace/repo",
-                args={"remote": "   "},
-            )
-        service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_pull_branch_without_remote_rejected(
-        self, service, runner, workspace
-    ):
-        """pull with branch but no remote is a strict ValueError (no silent drop)."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
-        with pytest.raises(ValueError, match="remote is required"):
-            await service.run_git_operation(
-                workspace.id,
-                "pull",
-                repo_path="/workspace/repo",
-                args={"branch": "main"},
             )
         service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 

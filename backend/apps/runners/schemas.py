@@ -6,8 +6,6 @@ Separated into input (In) and output (Out) schemas for clarity.
 
 from __future__ import annotations
 
-import os
-import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal
@@ -19,6 +17,11 @@ from .desktop import (
     DEFAULT_DESKTOP_HEIGHT,
     DEFAULT_DESKTOP_WIDTH,
     validate_desktop_dimension,
+)
+from .git_validation import (
+    validate_branch,
+    validate_git_args,
+    validate_repo_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -667,77 +670,6 @@ GitOperation = Literal[
     "stash_branch",
 ]
 
-_HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
-
-
-def _validate_repo_path(value: str) -> str:
-    """Basic backend check for absolute repo paths (runner re-validates)."""
-    cleaned = value.strip()
-    if not cleaned:
-        raise ValueError("repo_path must be a non-empty string")
-    if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
-        raise ValueError("Invalid repo_path")
-    normalized = os.path.normpath(cleaned)
-    if normalized != "/workspace" and not normalized.startswith("/workspace/"):
-        raise ValueError("repo_path must be under /workspace")
-    if len(cleaned) > 512:
-        raise ValueError("repo_path too long (max 512 chars)")
-    return cleaned
-
-
-def _validate_file_paths(value: list[str]) -> list[str]:
-    """Validate repo-relative file paths (runner re-validates fail-closed)."""
-    if not value:
-        raise ValueError("paths must not be empty")
-    if len(value) > 256:
-        raise ValueError("Too many paths (max 256)")
-    cleaned: list[str] = []
-    for item in value:
-        text = str(item)
-        if not text:
-            raise ValueError("paths must not contain empty entries")
-        if len(text) > 256:
-            raise ValueError("path too long (max 256 chars)")
-        if "\x00" in text or "\n" in text or "\r" in text:
-            raise ValueError(f"Invalid path: {item!r}")
-        cleaned.append(text)
-    return cleaned
-
-
-def _validate_branch(value: str, *, field: str = "branch") -> str:
-    """Lightweight backend branch check (runner validates strictly)."""
-    cleaned = str(value or "").strip()
-    if not cleaned or len(cleaned) > 255:
-        raise ValueError(f"Invalid {field}")
-    if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
-        raise ValueError(f"Invalid {field}")
-    return cleaned
-
-
-def _validate_commit_hash(value: str) -> str:
-    """Validate a hex commit hash (full or abbreviated, min 4 chars)."""
-    cleaned = str(value or "").strip().lower()
-    if not _HASH_RE.match(cleaned):
-        raise ValueError("Invalid commit hash (must be 4-64 hex chars)")
-    return cleaned
-
-
-_STASH_SELECTOR_RE = re.compile(r"^stash@\{\d{1,9}\}$")
-
-
-def _validate_stash_selector(value: str, *, field: str = "stash") -> str:
-    """Validate a stash selector (``stash@{n}``; runner re-validates strictly)."""
-    cleaned = str(value or "").strip()
-    if not _STASH_SELECTOR_RE.match(cleaned):
-        raise ValueError(f"Invalid {field} (must be stash@{{n}})")
-    return cleaned
-
-
-def validate_commit_hash(value: str) -> str:
-    """Public commit-hash validator shared by REST schemas and views."""
-    return _validate_commit_hash(value)
-
-
 class GitRepoQuery(Schema):
     """Validated repository path shared by Git reads and mutations."""
 
@@ -748,7 +680,7 @@ class GitRepoQuery(Schema):
     @field_validator("repo_path")
     @classmethod
     def _check_repo_path(cls, value: str) -> str:
-        return _validate_repo_path(value)
+        return validate_repo_path(value)
 
 
 class EditorFileWriteIn(Schema):
@@ -773,7 +705,7 @@ class GitHistoryQuery(GitRepoQuery):
     def _check_branch(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        return _validate_branch(value)
+        return validate_branch(value)
 
 
 class GitOperationIn(GitRepoQuery):
@@ -809,124 +741,12 @@ class GitOperationIn(GitRepoQuery):
     set_upstream: bool | None = None
     stash: str | None = Field(default=None, max_length=32)
 
-    @field_validator("paths")
-    @classmethod
-    def _check_paths(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        return _validate_file_paths(value)
-
-    @field_validator(
-        "branch", "target", "new_branch", "old_branch", "start_point", "local_name"
-    )
-    @classmethod
-    def _check_branch(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _validate_branch(value)
-
-    @field_validator("remote_ref")
-    @classmethod
-    def _check_remote_ref(cls, value: str | None) -> str | None:
-        """Lightweight backend check for ``remote/branch`` refs (runner validates strictly)."""
-        if value is None:
-            return None
-        cleaned = str(value).strip()
-        if not cleaned or len(cleaned) > 255:
-            raise ValueError("Invalid remote_ref")
-        if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
-            raise ValueError("Invalid remote_ref")
-        remote, sep, branch_part = cleaned.partition("/")
-        if not sep or not remote or not branch_part:
-            raise ValueError("Invalid remote_ref")
-        return cleaned
-
-    @field_validator("commit")
-    @classmethod
-    def _check_commit(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _validate_commit_hash(value)
-
-    @field_validator("stash")
-    @classmethod
-    def _check_stash(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _validate_stash_selector(value)
-
-    @field_validator("message")
-    @classmethod
-    def _check_message(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if len(value) > 10000:
-            raise ValueError("message too long (max 10000 chars)")
-        return value
-
-    @field_validator("remote")
-    @classmethod
-    def _check_remote(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        cleaned = value.strip()
-        if not cleaned or len(cleaned) > 255:
-            raise ValueError("Invalid remote")
-        if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
-            raise ValueError("Invalid remote")
-        return cleaned
-
     @model_validator(mode="after")
     def _check_operation_fields(self) -> GitOperationIn:
-        """Require the fields each operation needs (fail fast, 422)."""
-        op = self.operation
-        if op in {"stage_patch", "unstage_patch", "discard_patch"}:
-            if not self.path or not self.patch:
-                raise ValueError("path and patch are required")
-            if not self.expected_index_revision or not self.expected_worktree_revision:
-                raise ValueError("Expected file and index revisions are required")
-            if op == "unstage_patch" and not self.expected_head_revision:
-                raise ValueError("Expected HEAD revision is required")
-        if op in {"stage", "unstage", "discard"} and not self.paths:
-            raise ValueError(f"paths is required for operation {op!r}")
-        if op == "commit" and not (self.message or "").strip():
-            raise ValueError("message is required for commit")
-        if op == "checkout_branch" and not (self.branch or "").strip():
-            raise ValueError("branch is required for checkout_branch")
-        if op == "checkout_commit" and not (self.commit or "").strip():
-            raise ValueError("commit is required for checkout_commit")
-        if op == "checkout_remote_branch" and not (self.remote_ref or "").strip():
-            raise ValueError("remote_ref is required for checkout_remote_branch")
-        if op == "create_branch" and not (self.branch or "").strip():
-            raise ValueError("branch is required for create_branch")
-        if op == "rename_branch" and not (self.new_branch or "").strip():
-            raise ValueError("new_branch is required for rename_branch")
-        if op == "delete_branch" and not (self.branch or "").strip():
-            raise ValueError("branch is required for delete_branch")
-        if op == "merge_into_current" and not (self.branch or "").strip():
-            raise ValueError("branch is required for merge_into_current")
-        if op == "merge_current_into" and not (self.target or "").strip():
-            raise ValueError("target is required for merge_current_into")
-        if (
-            op == "pull"
-            and (self.branch or "").strip()
-            and not (self.remote or "").strip()
-        ):
-            raise ValueError("remote is required when branch is set for pull")
-        if (
-            op in {"stash_apply", "stash_pop", "stash_drop"}
-            and not (self.stash or "").strip()
-        ):
-            raise ValueError(f"stash is required for {op}")
-        if op == "stash_branch":
-            if not (self.stash or "").strip():
-                raise ValueError("stash is required for stash_branch")
-            if not (self.branch or "").strip():
-                raise ValueError("branch is required for stash_branch")
-        if (
-            op in {"merge_into_current", "merge_current_into"}
-            and self.message is not None
-            and len(self.message) > 4096
-        ):
-            raise ValueError("message too long (max 4096 chars)")
+        """Apply the same operation rules as internal runner dispatch."""
+        args = self.model_dump(
+            exclude={"operation", "repo_path"}, exclude_unset=True, exclude_none=True
+        )
+        for key, value in validate_git_args(self.operation, args).items():
+            setattr(self, key, value)
         return self

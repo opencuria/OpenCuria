@@ -10,6 +10,8 @@ import pytest
 from django.test import Client
 
 from apps.accounts.models import APIKeyPermission
+from apps.runners.git_validation import validate_git_args
+from apps.runners.schemas import GitOperationIn
 from apps.runners.services import RunnerService
 from apps.runners.tests.test_git_api import (
     _auth_headers,
@@ -151,19 +153,17 @@ def test_editor_git_arguments_reject_paths_patch_headers_and_free_environment(
     operation, args
 ):
     with pytest.raises(ValueError):
-        RunnerService._sanitize_git_args(operation, args)
+        validate_git_args(operation, args)
 
 
 def test_git_paths_preserve_filename_whitespace_across_validation_layers():
     """A path from Git status must address that exact file in every operation."""
-    from apps.runners.schemas import GitOperationIn
-
     path = " leading and trailing "
     validated = GitOperationIn(
         operation="stage", repo_path="/workspace/repo", paths=[path]
     )
     assert validated.paths == [path]
-    assert RunnerService._sanitize_git_args("stage", {"paths": [path]}) == {
+    assert validate_git_args("stage", {"paths": [path]}) == {
         "paths": [path]
     }
 
@@ -178,11 +178,22 @@ def test_unstage_requires_head_token_and_validates_rename_source():
         "expected_worktree_revision": "b" * 64,
         "expected_head_revision": "c" * 64,
     }
-    assert RunnerService._sanitize_git_args("unstage_patch", payload) == payload
+    assert validate_git_args("unstage_patch", payload) == payload
+    validated = GitOperationIn(
+        operation="unstage_patch", repo_path="/workspace/repo", **payload
+    )
+    assert validated.model_dump(
+        exclude={"operation", "repo_path"}, exclude_none=True
+    ) == payload
     for changes in (
         {"expected_head_revision": None},
         {"old_path": "../outside"},
         {"old_path": ".git/config"},
     ):
         with pytest.raises(ValueError):
-            RunnerService._sanitize_git_args("unstage_patch", {**payload, **changes})
+            validate_git_args("unstage_patch", {**payload, **changes})
+        with pytest.raises(ValueError):
+            GitOperationIn(
+                operation="unstage_patch", repo_path="/workspace/repo",
+                **{**payload, **changes},
+            )

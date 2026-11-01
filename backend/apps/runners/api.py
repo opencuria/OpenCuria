@@ -38,6 +38,7 @@ from .exceptions import (
     RunnerOfflineError,
 )
 from .git_presenters import git_error_to_response
+from .git_validation import validate_commit_hash
 from .image_presenters import (
     captured_image_to_out,
     image_artifacts_to_out,
@@ -87,7 +88,6 @@ from .schemas import (
     WorkspaceRecreateOut,
     WorkspaceUpdateIn,
     WorkspaceUpdateOut,
-    validate_commit_hash,
 )
 from .services import get_runner_service
 from .services.image_definitions import ImageDefinitionService
