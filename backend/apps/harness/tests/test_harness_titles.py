@@ -221,7 +221,7 @@ async def test_fast_answer_cannot_release_title_snapshot_before_reservation(
 
     async def immediate_answer(**kwargs):
         context = service._runs[str(session.id)]
-        context["execution_started"] = True
+        service.run_registry.ensure(str(session.id)).execution_started = True
         turn = await sync_to_async(service._provider_turn_service.get)(
             context["provider_turn_id"]
         )

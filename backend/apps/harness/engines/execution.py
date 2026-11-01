@@ -1,10 +1,12 @@
-"""External engine run execution under durable ownership."""
+"""External engine execution with explicit runtime and lifecycle ports."""
 
 from __future__ import annotations
 
 import asyncio
 import math
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -19,8 +21,13 @@ from ..run_timeline import tail_remainder
 from .base import RunOptions
 
 if TYPE_CHECKING:
-    from ..harness_service import HarnessService
     from ..models import HarnessMessage, HarnessSession
+
+from apps.runners.services.workspace_plugin_runtime import WorkspacePluginRuntimeService
+
+from ..interaction_service import InteractionService
+from ..permissions.service import PermissionService
+from ..repositories import HarnessMessageRepository
 
 log = structlog.get_logger("apps.harness.harness_service")
 
@@ -38,9 +45,37 @@ def _cli_total_cost_update(result: Any) -> dict[str, float] | None:
     return {CLI_TOTAL_COST_KEY: float(value)}
 
 
+@dataclass(frozen=True)
+class ExternalExecutionPorts:
+    """Runtime dependencies; no access to orchestrator internals."""
+
+    begin_finalization: Callable[..., Any]
+    accessor_factory: Callable[..., Any] | None
+    cancel_owned_task: Callable[..., Any]
+    cleanup_session_processes: Callable[..., Any]
+    drop_run_tracking: Callable[..., Any]
+    engine_registry_for_run: Callable[..., Any]
+    finalize_external_children: Callable[..., Any]
+    finalize_owned_claude_error: Callable[..., Any]
+    finalize_run: Callable[..., Any]
+    finish_mcp_recordings: Callable[..., Any]
+    on_external_child_event: Callable[..., Any]
+    on_external_root_event: Callable[..., Any]
+    provider_turn_revocation_message: Callable[..., Any]
+    run_subagent_tool: Callable[..., Any]
+    user_abort_requested: Callable[..., Any]
+    interactions: InteractionService
+    messages: type[HarnessMessageRepository]
+    permissions: PermissionService
+    plugin_runtime: WorkspacePluginRuntimeService
+    register_provider_use: Callable[..., Any]
+    resolve_engine_auth: Callable[..., Any]
+
+
 async def execute_external_run(
-    service: HarnessService,
+    ports: ExternalExecutionPorts,
     *,
+    context: dict[str, Any],
     engine_id: str,
     session: HarnessSession,
     prompt: str,
@@ -57,7 +92,6 @@ async def execute_external_run(
 
     label = "Codex" if engine_id == "codex" else "Claude"
     key = str(session.id)
-    context = service._runs.get(key, {})
     ownership = context.get("ownership")
     mcp_runtime = None
     accessor = None
@@ -90,14 +124,14 @@ async def execute_external_run(
         if not await ownership.start():
             raise ConflictError(f"{label} run ownership was superseded")
 
-        ownership.start_heartbeat(on_lost=lambda: service._cancel_owned_task(key))
+        ownership.start_heartbeat(on_lost=lambda: ports.cancel_owned_task(key))
         context["cleanup_confirmed"] = True
         await ensure_current()
-        if service._accessor_factory is None:
+        if ports.accessor_factory is None:
             raise RuntimeError(f"{label} engine requires a workspace accessor")
-        accessor = await service._accessor_factory(str(session.workspace_id))
+        accessor = await ports.accessor_factory(str(session.workspace_id))
         # The same credential snapshot is fail-closed for native and SDK tools.
-        mcp_snapshot = await sync_to_async(service.plugin_runtime.prepare)(
+        mcp_snapshot = await sync_to_async(ports.plugin_runtime.prepare)(
             session.workspace_id, organization_id
         )
         tools = default_tool_registry()
@@ -134,7 +168,8 @@ async def execute_external_run(
                     skipped=mcp_runtime.skipped,
                 )
         runtime = await prepare_external_runtime(
-            service=service,
+            register_provider_use=ports.register_provider_use,
+            resolve_engine_auth=ports.resolve_engine_auth,
             engine_id=engine_id,
             session=session,
             organization_id=organization_id,
@@ -157,14 +192,14 @@ async def execute_external_run(
                 context.get("skill_bodies", []),
                 mcp_snapshot.snapshot.plugin_skills if mcp_snapshot else [],
             ),
-            on_permission=lambda **kw: service.interactions.request_permission(
+            on_permission=lambda **kw: ports.interactions.request_permission(
                 session, assistant, **kw
             ),
-            on_question=lambda **kw: service.interactions.ask_question(
+            on_question=lambda **kw: ports.interactions.ask_question(
                 session, assistant, **kw
             ),
             steering=context.get("steering"),
-            run_subagent=lambda args, ctx, subtask_id: service._run_subagent_tool(
+            run_subagent=lambda args, ctx, subtask_id: ports.run_subagent_tool(
                 parent=session,
                 args=args,
                 ctx=ctx,
@@ -173,7 +208,7 @@ async def execute_external_run(
             ),
         )
         run_options.authorize_file_read = lambda path: (
-            service.interactions.authorize_file_read(session, assistant, path)
+            ports.interactions.authorize_file_read(session, assistant, path)
         )
         run_options.reasoning_effort = session.reasoning_effort or (
             "" if engine_id == "codex" else "high"
@@ -204,7 +239,7 @@ async def execute_external_run(
                         f"{label} runner lease ownership was superseded"
                     )
                 if engine_id == "codex" and (
-                    await service._provider_turn_revocation_message(session)
+                    await ports.provider_turn_revocation_message(session)
                 ):
                     raise ConflictError("Codex checkpoint authorization was revoked")
             elif owner_phase == "released":
@@ -217,7 +252,7 @@ async def execute_external_run(
             if (
                 engine_id == "codex"
                 and metadata.get("codex_dirty") is False
-                and (await service._provider_turn_revocation_message(session))
+                and (await ports.provider_turn_revocation_message(session))
             ):
                 raise ConflictError("Codex checkpoint authorization was revoked")
             bound = await sync_to_async(
@@ -238,13 +273,13 @@ async def execute_external_run(
 
         async def emit(event: dict[str, Any]) -> None:
             await ensure_current()
-            await service._on_external_root_event(session, assistant, event)
+            await ports.on_external_root_event(session, assistant, event)
 
         async def on_child_event(parent_call_id: str, event: dict[str, Any]) -> None:
             await ensure_current()
-            await service._on_external_child_event(key, parent_call_id, event)
+            await ports.on_external_child_event(key, parent_call_id, event)
 
-        engine = service._engine_registry_for_run().create(
+        engine = ports.engine_registry_for_run().create(
             engine_id,
             tools=tools,
             accessor=accessor,
@@ -256,7 +291,7 @@ async def execute_external_run(
             on_binding=on_binding,
             on_child_event=on_child_event,
             on_owner=on_owner,
-            evaluator=service.permissions.evaluator,
+            evaluator=ports.permissions.evaluator,
             effort=session.reasoning_effort or ("" if engine_id == "codex" else "high"),
         )
         await ensure_current()
@@ -269,9 +304,7 @@ async def execute_external_run(
                 run_options,
             )
         except Exception:
-            revocation_message = await service._provider_turn_revocation_message(
-                session
-            )
+            revocation_message = await ports.provider_turn_revocation_message(session)
             if revocation_message:
                 context["provider_revocation_message"] = revocation_message
                 raise asyncio.CancelledError() from None
@@ -281,7 +314,7 @@ async def execute_external_run(
 
             for path in await mcp_runtime.finish():
                 result.output = append_video_to_output(result.output or "", path)
-        await sync_to_async(service.messages.refresh, thread_sensitive=True)(assistant)
+        await sync_to_async(ports.messages.refresh, thread_sensitive=True)(assistant)
         remainder = tail_remainder(assistant.content or "", result.output or "")
         usage = result.usage or Usage()
         metadata = dict(getattr(result, "metadata", {}) or {})
@@ -305,7 +338,7 @@ async def execute_external_run(
             if result.finish_reason == "aborted"
             else HarnessRunStatus.COMPLETED
         )
-        revocation_message = await service._provider_turn_revocation_message(session)
+        revocation_message = await ports.provider_turn_revocation_message(session)
         if revocation_message:
             status = HarnessRunStatus.INTERRUPTED
             context["provider_revocation_message"] = revocation_message
@@ -314,26 +347,26 @@ async def execute_external_run(
             if context.get("provider_revocation_message")
             else "aborted by user"
             if status == HarnessRunStatus.INTERRUPTED
-            and service._user_abort_requested(session)
+            and ports.user_abort_requested(session)
             else f"{label} run was aborted"
             if status == HarnessRunStatus.INTERRUPTED
             else ""
         )
     except asyncio.CancelledError:
         status = HarnessRunStatus.INTERRUPTED
-        revocation_message = await service._provider_turn_revocation_message(session)
+        revocation_message = await ports.provider_turn_revocation_message(session)
         if revocation_message:
             context["provider_revocation_message"] = revocation_message
             safe_error = revocation_message
             public_error = revocation_message
         else:
-            user_abort = service._user_abort_requested(session)
+            user_abort = ports.user_abort_requested(session)
             safe_error = (
                 "aborted by user" if user_abort else "Run interrupted unexpectedly"
             )
             public_error = safe_error
         if ownership is not None and await ownership.is_owner_for_finalization():
-            await sync_to_async(service.messages.refresh, thread_sensitive=True)(
+            await sync_to_async(ports.messages.refresh, thread_sensitive=True)(
                 assistant
             )
             context["pending_assistant_content"] = assistant.content or ""
@@ -347,7 +380,7 @@ async def execute_external_run(
             safe_error = runtime.redact_error(exc) if runtime else f"{label} run failed"
         except Exception:
             safe_error = f"{label} run failed"
-        revocation_message = await service._provider_turn_revocation_message(session)
+        revocation_message = await ports.provider_turn_revocation_message(session)
         if revocation_message:
             context["provider_revocation_message"] = revocation_message
             status = HarnessRunStatus.INTERRUPTED
@@ -362,7 +395,7 @@ async def execute_external_run(
         if not current_owner:
             cleanup_confirmed = False
         else:
-            await sync_to_async(service.messages.refresh, thread_sensitive=True)(
+            await sync_to_async(ports.messages.refresh, thread_sensitive=True)(
                 assistant
             )
             context["pending_assistant_content"] = assistant.content or ""
@@ -375,12 +408,12 @@ async def execute_external_run(
             error=safe_error,
         )
     finally:
-        context["finalizing"] = True
+        ports.begin_finalization()
         try:
             if mcp_runtime is not None:
                 try:
                     try:
-                        await service._finish_mcp_recordings(
+                        await ports.finish_mcp_recordings(
                             mcp_runtime, session, assistant
                         )
                     finally:
@@ -394,7 +427,7 @@ async def execute_external_run(
                 except Exception:
                     log.warning("mcp_runtime_close_failed", session_id=key)
                     cleanup_confirmed = False
-            await service._cleanup_session_processes(
+            await ports.cleanup_session_processes(
                 workspace_id=str(session.workspace_id),
                 session_id=key,
                 reason="run_finished",
@@ -418,7 +451,7 @@ async def execute_external_run(
                 if cleanup_confirmed and await ownership.is_owner_for_finalization():
                     if result is not None:
                         await sync_to_async(
-                            service.messages.refresh, thread_sensitive=True
+                            ports.messages.refresh, thread_sensitive=True
                         )(assistant)
                         assistant_content = assistant.content or ""
                         if remainder:
@@ -440,7 +473,7 @@ async def execute_external_run(
                         if context.get("provider_revocation_message")
                         else "aborted by user"
                         if status == HarnessRunStatus.INTERRUPTED
-                        and service._user_abort_requested(session)
+                        and ports.user_abort_requested(session)
                         else "Run interrupted unexpectedly"
                         if status == HarnessRunStatus.INTERRUPTED
                         else public_recovery_error
@@ -487,9 +520,9 @@ async def execute_external_run(
                     )
                 if finalized:
                     session.status = HarnessSessionStatus.IDLE
-                    await sync_to_async(
-                        service.messages.refresh, thread_sensitive=True
-                    )(assistant)
+                    await sync_to_async(ports.messages.refresh, thread_sensitive=True)(
+                        assistant
+                    )
                 else:
                     # A replaced owner or unconfirmed process cleanup must
                     # not release durable admission or publish terminal UI.
@@ -497,7 +530,7 @@ async def execute_external_run(
                     if await ownership.is_owner_for_finalization():
                         if result is not None:
                             await sync_to_async(
-                                service.messages.refresh, thread_sensitive=True
+                                ports.messages.refresh, thread_sensitive=True
                             )(assistant)
                             assistant_content = assistant.content or ""
                             if remainder:
@@ -524,13 +557,13 @@ async def execute_external_run(
                             engine_meta=allowed_metadata or None,
                         )
             if context.get("cleanup_confirmed", True):
-                await service._finalize_external_children(session, assistant)
+                await ports.finalize_external_children(session, assistant)
                 if status != HarnessRunStatus.ERROR:
-                    await service._finalize_run(session, assistant)
+                    await ports.finalize_run(session, assistant)
                 else:
-                    await service._finalize_owned_claude_error(session, assistant)
+                    await ports.finalize_owned_claude_error(session, assistant)
             else:
                 # Tracking may be released locally, but the durable busy
                 # state and unresolved CLOSING attempt remain the admission
                 # fence for the next worker.
-                service._drop_run_tracking(key)
+                ports.drop_run_tracking(key)

@@ -39,7 +39,8 @@ class ExternalRuntime:
 
 async def prepare_external_runtime(
     *,
-    service: Any,
+    register_provider_use: Callable[..., Awaitable[None]],
+    resolve_engine_auth: Callable[..., Any],
     engine_id: str,
     session: Any,
     organization_id: uuid.UUID,
@@ -55,8 +56,8 @@ async def prepare_external_runtime(
         from .session_store import HarnessClaudeSessionStore
 
         account_id = accounts.get("claude-agent")
-        await service._register_provider_use(turn_id, account_id)
-        auth = await sync_to_async(service._resolve_engine_auth)(
+        await register_provider_use(turn_id, account_id)
+        auth = await sync_to_async(resolve_engine_auth)(
             organization_id, user_id, account_id
         )
         return ExternalRuntime(
@@ -78,7 +79,7 @@ async def prepare_external_runtime(
     from .codex.session_store import CodexSessionStore
 
     provider_id = codex_provider(session.model, session.engine_state)
-    await service._register_provider_use(turn_id, accounts.get(provider_id))
+    await register_provider_use(turn_id, accounts.get(provider_id))
     auth = await sync_to_async(resolve_codex_auth)(
         organization_id, user_id, accounts, session.model
     )
@@ -105,7 +106,7 @@ async def prepare_external_runtime(
         """Refresh only this answer's captured account, never a new selection."""
         nonlocal auth
         await ensure_current()
-        await service._register_provider_use(turn_id, str(auth.connection_id))
+        await register_provider_use(turn_id, str(auth.connection_id))
         credentials = await get_fresh_chatgpt_credentials(
             organization_id,
             user_id,

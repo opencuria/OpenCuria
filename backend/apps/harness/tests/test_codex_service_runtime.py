@@ -1218,7 +1218,8 @@ async def test_chatgpt_runtime_preflight_refresh_exact_account_and_protocol_priv
     )
     data.service._register_provider_use = use
     runtime = await prepare_external_runtime(
-        service=data.service,
+        register_provider_use=data.service._register_provider_use,
+        resolve_engine_auth=data.service._resolve_engine_auth,
         engine_id="codex",
         session=session,
         organization_id=session.organization_id,

@@ -1,21 +1,8 @@
-"""
-Harness session lifecycle service (M6, additive).
+"""Application facade for saved conversations and composed run services.
 
-``HarnessService`` owns the persistent side of agent runs while
-``HarnessRunner`` (M4/M5) owns the streaming loop. The service:
-
-- creates ``HarnessSession`` rows and reads saved state via ``ConversationService``,
-- persists a user message + assistant message shell on run start,
-- delegates persisted provider-history replay to ``ProviderHistoryService``,
-- starts ``HarnessRunner.run`` as an ``asyncio.Task`` tracked per
-  session (one active run per session; a second start is rejected
-  with :class:`ConflictError`, surfaced as HTTP 409),
-- serializes runner events per session and delegates their timeline
-  persistence and live deltas to ``RunTimeline``,
-- aborts runs by cancelling the task and marking message/parts aborted,
-- delegates user permission and question gates to ``InteractionService``.
-
-No ORM outside repositories. No real LLM calls (provider injected).
+Preparation, admission, execution, provider scopes, subagents and cancellation
+have independent collaborators. RunRegistry is the single local ownership model;
+repositories remain the authority for cross-process admission and recovery.
 """
 
 from __future__ import annotations
@@ -23,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping, MutableSet
 from functools import partial
 from typing import Any
 
@@ -43,7 +30,6 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from .agents.definitions import get_agent
 from .conversation_events import ConversationEvents
 from .conversation_service import ConversationService
-from .engines.base import RunOptions
 from .interaction_service import InteractionService
 from .models import (
     HarnessMessage,
@@ -52,13 +38,9 @@ from .models import (
     HarnessSessionStatus,
 )
 from .permissions.service import PermissionService
-from .provider_account_events import (
-    register_revocation_listener,
-    unregister_revocation_listener,
-)
 from .provider_history_service import ProviderHistoryService
-from .providers.base import ChatOptions, LLMMessage, ProviderAdapter
-from .providers.model_ref import namespaced_model_id, parse_model_ref
+from .providers.base import LLMMessage, ProviderAdapter
+from .providers.model_ref import namespaced_model_id
 from .providers.models_catalog import normalize_reasoning_effort
 from .redaction import redact_text
 from .repositories import (
@@ -79,7 +61,7 @@ from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .session_settings_service import SessionSettingsService
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
-from .tools.subagents import TaskArgs, validate_subagent_delegation
+from .tools.subagents import TaskArgs
 
 log = structlog.get_logger(__name__)
 
@@ -155,35 +137,117 @@ class HarnessService:
         self.timeline = RunTimeline(
             messages=self.messages,
             parts=self.parts,
-            run_context=lambda session_id: self._runs.get(session_id, {}),
+            run_context=lambda session_id: self.run_registry.contexts.get(
+                session_id, {}
+            ),
             emit=self._emit_frontend,
         )
         self._runner_factory = runner_factory
         self._provider_factory = provider_factory
         self._accessor_factory = accessor_factory
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._admissions: dict[str, asyncio.Task] = {}
-        # session id -> parent session id for live runs. Abort walks this
-        # instead of waiting for a descendant to notice a shielded cancel.
-        self._run_parents: dict[str, str | None] = {}
-        # Cancellation is not proof of user intent (e.g. an MCP deadline).
-        self._abort_requested: set[str] = set()
-        self._event_locks: dict[str, asyncio.Lock] = {}
-        # run context kept in memory: session_id -> dict
-        self._runs: dict[str, dict[str, Any]] = {}
+        from .run_state import RunRegistry
+
+        self.run_registry = RunRegistry()
         self._process_cleanup = process_cleanup
         self._engine_registry = engine_registry
         self._engine_connections = engine_connections
         self._run_service = run_service
         self._provider_turns = None
         self._provider_turn_roots: dict[str, dict[str, Any]] = {}
-        self._claude_child_contexts: dict[str, dict[str, Any]] = {}
         self.metadata = SessionMetadataService(
             sessions=self.sessions,
             messages=self.messages,
             provider_factory=provider_factory,
             emit=self._emit_frontend,
             conversations_changed=self.conversation_events.emit,
+        )
+
+    @property
+    def _tasks(self) -> MutableMapping[str, asyncio.Task]:
+        """Compatibility projection of the authoritative run registry."""
+        return self.run_registry.tasks
+
+    @property
+    def _admissions(self) -> MutableMapping[str, asyncio.Task]:
+        """Compatibility projection of the authoritative run registry."""
+        return self.run_registry.admissions
+
+    @property
+    def _runs(self) -> MutableMapping[str, dict[str, Any]]:
+        """Compatibility projection of the authoritative run registry."""
+        return self.run_registry.contexts
+
+    @property
+    def _run_parents(self) -> MutableMapping[str, str | None]:
+        """Compatibility projection of the authoritative run registry."""
+        return self.run_registry.parents
+
+    @property
+    def _abort_requested(self) -> MutableSet[str]:
+        """Compatibility projection of the authoritative run registry."""
+        return self.run_registry.aborts
+
+    @property
+    def _event_locks(self) -> MutableMapping[str, asyncio.Lock]:
+        """Compatibility projection of the authoritative run registry."""
+        return self.run_registry.event_locks
+
+    def _run_cancellation(self) -> Any:
+        """Compose RunCancellation with the current application ports."""
+        from .run_cancellation import RunCancellation, RunCancellationPorts
+
+        return RunCancellation(
+            RunCancellationPorts(
+                close_steering=self._close_steering,
+                emit_empty_steer_queue=self._emit_empty_steer_queue,
+                ensure_external_attempt_reconciled=self._ensure_external_attempt_reconciled,
+                run_service_for_engine=self._run_service_for_engine,
+                spawn_background=self._spawn_background,
+                conversations=self.conversations,
+                interactions=self.interactions,
+                run_registry=self.run_registry,
+                sessions=self.sessions,
+            )
+        )
+
+    def _provider_turn_lifecycle(self) -> Any:
+        """Compose ProviderTurnLifecycle with the current application ports."""
+        from .provider_turn_lifecycle import (
+            ProviderTurnLifecycle,
+            ProviderTurnLifecyclePorts,
+        )
+
+        return ProviderTurnLifecycle(
+            ProviderTurnLifecyclePorts(
+                cancel_owned_task=self._cancel_owned_task,
+                descendant_keys=self._descendant_keys,
+                owned_run_task=self._owned_run_task,
+                provider_turn_roots=self._provider_turn_roots,
+                provider_turn_service=self._provider_turn_service,
+                interactions=self.interactions,
+                run_registry=self.run_registry,
+            )
+        )
+
+    def _subagent_coordinator(self) -> Any:
+        """Compose SubagentCoordinator with the current application ports."""
+        from .subagent_coordinator import SubagentCoordinator, SubagentCoordinatorPorts
+
+        return SubagentCoordinator(
+            SubagentCoordinatorPorts(
+                agent_configs_map=self._agent_configs_map,
+                catalog_efforts_for_model=self._catalog_efforts_for_model,
+                on_runner_event=self._on_runner_event,
+                parent_stop_in_progress=self._parent_stop_in_progress,
+                provider_turn_context=self._provider_turn_context,
+                create_session=self.create_session,
+                is_running=self.is_running,
+                messages=self.messages,
+                run_registry=self.run_registry,
+                session_settings=self.session_settings,
+                sessions=self.sessions,
+                start_run=self.start_run,
+            )
         )
 
     def _engine_registry_for_run(self) -> Any:
@@ -235,112 +299,48 @@ class HarnessService:
         return self._provider_turn_service.capture_account_ids(organization_id, user_id)
 
     def _provider_turn_context(self, session: HarnessSession) -> dict[str, Any]:
-        """Find the snapshot context at this session or its live ancestor."""
-        key = str(session.id)
-        seen: set[str] = set()
-        parent = str(session.parent_id) if session.parent_id else None
-        while key and key not in seen:
-            seen.add(key)
-            context = self._runs.get(key, {})
-            if context.get("provider_turn_id"):
-                return context
-            parent = self._run_parents.get(key, parent)
-            if parent is None:
-                return {}
-            key, parent = parent, self._run_parents.get(parent)
-        return {}
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return self._provider_turn_lifecycle()._provider_turn_context(session)
 
     async def _register_provider_use(
         self, turn_id: uuid.UUID | str | None, account_id: uuid.UUID | str | None
     ) -> None:
-        """Fence a provider request just before its async network operation."""
-        if turn_id is not None and account_id is not None:
-            await sync_to_async(self._provider_turn_service.register_use)(
-                turn_id, account_id
-            )
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._register_provider_use(
+            turn_id, account_id
+        )
 
     async def _provider_turn_revocation_message(self, session: HarnessSession) -> str:
-        """Read durable revocation only at run control/terminal boundaries."""
-        with anyio.CancelScope(shield=True):
-            context = self._provider_turn_context(session)
-            if context.get("provider_revocation_message"):
-                return str(context["provider_revocation_message"])
-            turn_id = context.get("provider_turn_id")
-            if turn_id and await sync_to_async(
-                self._provider_turn_service.cancellation_reason
-            )(turn_id):
-                return (
-                    "This response was stopped because its selected provider account "
-                    "was removed or is no longer shared."
-                )
-            return ""
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._provider_turn_revocation_message(
+            session
+        )
 
     async def _finish_provider_turn(self, context: dict[str, Any]) -> None:
-        """Idempotently release this run's named answer holder."""
-        turn_id = context.get("provider_turn_id")
-        holder = context.get("provider_turn_holder")
-        if turn_id and context.get("provider_revocation_message"):
-            root = self._provider_turn_roots.get(str(turn_id), context)
-            followers = tuple(root.get("provider_followup_tasks", {}).items())
-            for _, task in followers:
-                if not task.done() and task is not asyncio.current_task():
-                    task.cancel()
-            for token, task in followers:
-                if task is asyncio.current_task():
-                    continue
-                try:
-                    await asyncio.shield(task)
-                except (asyncio.CancelledError, Exception):
-                    pass
-                await sync_to_async(self._provider_turn_service.finish_once)(
-                    turn_id, token
-                )
-        if turn_id and holder and not context.get("provider_turn_finished"):
-            context["provider_turn_finished"] = True
-            await sync_to_async(self._provider_turn_service.finish_once)(
-                turn_id, holder
-            )
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._finish_provider_turn(context)
 
     async def _finish_provider_hold(
         self, turn_id: uuid.UUID | str, holder: str
     ) -> None:
-        """Idempotently release a named title/summary holder."""
-        await sync_to_async(self._provider_turn_service.finish_once)(turn_id, holder)
-        root = self._provider_turn_roots.get(str(turn_id))
-        if root is not None:
-            root.setdefault("provider_followup_tasks", {}).pop(holder, None)
-            await self._maybe_finish_provider_monitor(root)
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._finish_provider_hold(
+            turn_id, holder
+        )
 
     async def _maybe_finish_provider_monitor(self, root: dict[str, Any]) -> None:
-        """Stop the root monitor only after the durable answer has no holders."""
-        turn_id = root.get("provider_turn_id")
-        if not turn_id:
-            return
-        state = await sync_to_async(self._provider_turn_service.get)(turn_id)
-        if (
-            state is None
-            or not state.active
-            or (not state.monitor_required and not state.holds)
-        ):
-            monitor = root.get("provider_monitor_task")
-            if (
-                monitor is not None
-                and not monitor.done()
-                and monitor is not asyncio.current_task()
-            ):
-                monitor.cancel()
-            watched = root.get("provider_revocation_accounts")
-            event = root.get("provider_revocation_event")
-            if watched and event is not None:
-                unregister_revocation_listener(watched, event=event)
-            self._provider_turn_roots.pop(str(turn_id), None)
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._maybe_finish_provider_monitor(
+            root
+        )
 
     def _watch_provider_followup(
         self, context: dict[str, Any], task: asyncio.Task, holder: str
     ) -> None:
-        """Keep follow-up tasks visible to revocation after root cleanup."""
-        tasks = context.setdefault("provider_followup_tasks", {})
-        tasks[holder] = task
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return self._provider_turn_lifecycle()._watch_provider_followup(
+            context, task, holder
+        )
 
     async def _monitor_provider_turn(
         self,
@@ -350,90 +350,13 @@ class HarnessService:
         event: asyncio.Event,
         watched_accounts: set[uuid.UUID],
     ) -> None:
-        """Poll revocation and abort the root tree, then cancel its followers."""
-        turn_id = context.get("provider_turn_id")
-        try:
-            while turn_id:
-                state = await sync_to_async(self._provider_turn_service.get)(turn_id)
-                if state is None or not state.active:
-                    return
-                if await sync_to_async(self._provider_turn_service.cancellation_reason)(
-                    turn_id
-                ):
-                    message = (
-                        "This response was stopped because its selected provider "
-                        "account was removed or is no longer shared."
-                    )
-                    context["provider_revocation_message"] = message
-                    await sync_to_async(
-                        self._provider_turn_service.set_monitor_required
-                    )(turn_id)
-                    for key in self._descendant_keys(str(session.id)):
-                        child = self._runs.get(key)
-                        if child is None or child.get("provider_turn_id") != turn_id:
-                            continue
-                        if child is not None:
-                            child["provider_revocation_message"] = message
-                        task = self._owned_run_task(key)
-                        if (
-                            task is not None
-                            and not task.done()
-                            and not task.cancelling()
-                        ):
-                            task.cancel()
-                    await self.interactions.reject_sessions(
-                        {
-                            key
-                            for key in self._descendant_keys(str(session.id))
-                            if self._runs.get(key, {}).get("provider_turn_id")
-                            == turn_id
-                        }
-                    )
-                    root = self._provider_turn_roots.get(str(turn_id), context)
-                    root["provider_revocation_message"] = message
-                    await sync_to_async(
-                        self._provider_turn_service.set_monitor_required
-                    )(turn_id)
-                    followers = tuple(root.get("provider_followup_tasks", {}).values())
-                    for task in followers:
-                        if not task.done() and not task.cancelling():
-                            task.cancel()
-                    for task in followers:
-                        if task is asyncio.current_task() or task.done():
-                            continue
-                        try:
-                            await asyncio.shield(task)
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    while True:
-                        state = await sync_to_async(self._provider_turn_service.get)(
-                            turn_id
-                        )
-                        if state is None or not state.active or not state.holds:
-                            await sync_to_async(
-                                self._provider_turn_service.clear_monitor_required
-                            )(turn_id)
-                            return
-                        await asyncio.sleep(0.1)
-                event.clear()
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    continue
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("provider_turn_monitor_failed", session_id=str(session.id))
-            for key, live in tuple(self._runs.items()):
-                if live.get("provider_turn_id") == turn_id:
-                    self._cancel_owned_task(key)
-        finally:
-            unregister_revocation_listener(watched_accounts, event=event)
-            if turn_id:
-                await self._maybe_finish_provider_monitor(context)
-                state = await sync_to_async(self._provider_turn_service.get)(turn_id)
-                if state is None or not state.active:
-                    self._provider_turn_roots.pop(str(turn_id), None)
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._monitor_provider_turn(
+            session=session,
+            context=context,
+            event=event,
+            watched_accounts=watched_accounts,
+        )
 
     # -- session lifecycle ------------------------------------------------
 
@@ -994,8 +917,8 @@ class HarnessService:
     def is_running(self, session_id: uuid.UUID) -> bool:
         """Return True when a run task is active for *session_id*."""
         key = str(session_id)
-        task = self._tasks.get(key) or self._admissions.get(key)
-        return task is not None and not task.done()
+        record = self.run_registry.get(key)
+        return record is not None and record.is_running
 
     def reserve_run(self, session: HarnessSession, *, scheduled: bool = False) -> bool:
         """Mark *session* busy under the workspace admission locks and fence (sync).
@@ -1023,548 +946,65 @@ class HarnessService:
         max_depth: int | None = None,
         _edit_message_id: uuid.UUID | None = None,
     ) -> HarnessMessage:
-        """Persist user+assistant messages and start the runner task.
+        """Compose the RunAdmission boundary with its explicit ports."""
+        from .run_admission import RunAdmission, RunAdmissionPorts
+        from .run_preparation import RunPreparation, RunPreparationPorts
 
-        Depth comes from persisted ancestry, including resumed children.
-        Child runs inherit the root run's maximum; root runs read org settings.
-
-        Raises:
-            ConflictError: When a run is already active for the session.
-        """
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt must not be empty")
-        engine_id = (getattr(session, "harness_id", "native") or "native").strip()
-        run_user_id = user_id
-        inherited_context = self._provider_turn_context(session)
-        if inherited_context.get("provider_turn_id"):
-            snapshot_owner = inherited_context.get("initiated_by_id")
-            if (
-                run_user_id is not None
-                and snapshot_owner is not None
-                and str(run_user_id) != str(snapshot_owner)
-            ):
-                raise AuthenticationError(
-                    "Subagent provider accounts inherit their owner's snapshot"
-                )
-            run_user_id = snapshot_owner
-        SessionAccessService.require_external_owner(
-            engine_id=engine_id,
-            owner_id=getattr(session, "created_by_id", None),
-            user_id=run_user_id,
+        preparation = RunPreparation(
+            RunPreparationPorts(
+                accessor_factory=self._accessor_factory,
+                available_session_skill_ids=self._available_session_skill_ids,
+                capture_provider_account_ids=self._capture_provider_account_ids,
+                forget_run=self._forget_run,
+                provider_turn_context=self._provider_turn_context,
+                remember_run=self._remember_run,
+                resolve_engine_auth=self._resolve_engine_auth,
+                run_service_for_engine=self._run_service_for_engine,
+                session_settings=self.session_settings,
+                sessions=self.sessions,
+                skills=self.skills,
+                user_abort_requested=self._user_abort_requested,
+                validate_provider_for_run=self.validate_provider_for_run,
+                workspace_admission=self.workspace_admission,
+            )
         )
-        if engine_id == "codex":
-            user_id = run_user_id
-        self._remember_run(session)
-        # Parent stop already covers this session: do not spawn another run.
-        if self._user_abort_requested(session):
-            self._forget_run(str(session.id))
-            raise asyncio.CancelledError()
-        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
-            session.workspace_id
+        ports = RunAdmissionPorts(
+            run_registry=self.run_registry,
+            cancel_owned_task=self._cancel_owned_task,
+            commit_message_edit=self._commit_message_edit,
+            deliver_steers=self._deliver_steers,
+            emit_frontend=self._emit_frontend,
+            execute_run=self._execute_run,
+            finalize_unstarted_run=self._finalize_unstarted_run,
+            finish_provider_hold=self._finish_provider_hold,
+            forget_run=self._forget_run,
+            monitor_provider_turn=self._monitor_provider_turn,
+            on_run_task_done=self._on_run_task_done,
+            provider_turn_roots=self._provider_turn_roots,
+            provider_turn_service=self._provider_turn_service,
+            run_service_for_engine=self._run_service_for_engine,
+            session_status_payload=self._session_status_payload,
+            spawn_background=self._spawn_background,
+            user_abort_requested=self._user_abort_requested,
+            watch_provider_followup=self._watch_provider_followup,
+            history=self.history,
+            messages=self.messages,
+            metadata=self.metadata,
+            reserve_run=self.reserve_run,
+            sessions=self.sessions,
         )
-        key = str(session.id)
-        if self.is_running(session.id):
-            raise ConflictError(
-                f"Harness session '{session.id}' already has an active run"
-            )
-        engine_id = (getattr(session, "harness_id", "native") or "native").strip()
-        recovery_accessor = None
-        if engine_id != "native":
-            run_service = self._run_service_for_engine()
-            open_attempt = await sync_to_async(
-                run_service.repository.get_open_for_session, thread_sensitive=True
-            )(session.id)
-            if open_attempt is not None:
-                if open_attempt.lease_id is not None:
-                    if self._accessor_factory is None:
-                        await run_service.prepare_session(session.id, None)
-                    else:
-                        recovery_accessor = await self._accessor_factory(
-                            str(session.workspace_id)
-                        )
-                        await run_service.prepare_session(session.id, recovery_accessor)
-                else:
-                    # Let RunOwnership apply its persisted staleness window; do
-                    # not create runner connectivity for a healthy unresolved run.
-                    await run_service.prepare_session(session.id, None)
-        if str(session.status) != HarnessSessionStatus.IDLE:
-            # Self-heal a stale busy flag: no live task exists, so a
-            # previous run died without reaching its finally block
-            # (e.g. question answered after the waiter was gone) and the
-            # session would otherwise reject every new prompt with 409.
-            log.warning(
-                "harness_stale_busy_reset",
-                session_id=key,
-                status=str(session.status),
-            )
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.IDLE
-            )
-            session.status = HarnessSessionStatus.IDLE
-        org_id = organization_id or session.organization_id
-        if account_ids is None:
-            inherited_ids = inherited_context.get("account_ids")
-            account_ids = dict(inherited_ids) if inherited_ids is not None else None
-        if account_ids is None and run_user_id is not None:
-            account_ids = await sync_to_async(self._capture_provider_account_ids)(
-                org_id, run_user_id
-            )
-        if account_ids is None:
-            account_ids = {}
-        if engine_id == "claude":
-            selected_claude = account_ids.get("claude-agent")
-            if not selected_claude:
-                raise AuthenticationError(
-                    "No Claude Agent account is selected for this organization"
-                )
-            await sync_to_async(self._resolve_engine_auth)(
-                org_id, run_user_id, selected_claude
-            )
-        if skill_ids is None and session.skill_ids:
-            available = await sync_to_async(self._available_session_skill_ids)(
-                session, user_id=user_id, organization_id=org_id
-            )
-            if available != list(session.skill_ids):
-                if _edit_message_id is not None:
-                    # Edits commit session options only once admitted.
-                    session.skill_ids = available
-                else:
-                    session = await sync_to_async(self.sessions.set_skill_ids)(
-                        session, available
-                    )
-        if engine_id == "claude":
-            effective_skill_ids = (
-                SkillService.normalize_ids(skill_ids)
-                if skill_ids is not None
-                else SkillService.normalize_ids(list(session.skill_ids or []))
-            )
-            from .engines.claude.runtime_state import validate_claude_skills
-
-            bodies = (
-                await sync_to_async(self.skills.resolve_bodies)(
-                    effective_skill_ids,
-                    user_id=run_user_id,
-                    organization_id=org_id,
-                )
-                if effective_skill_ids
-                else []
-            )
-            validate_claude_skills(bodies)
-        from .services import SubagentConfigService
-
-        depth = await sync_to_async(self.sessions.get_depth)(session.id)
-        if max_depth is None:
-            config = await sync_to_async(SubagentConfigService().get_or_default)(org_id)
-            max_depth = config["max_depth"]
-        if depth > max_depth:
-            raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
-        if skill_ids is not None:
-            if user_id is None:
-                raise AuthenticationError(
-                    "A user is required to validate selected skills"
-                )
-            if _edit_message_id is not None:
-                session.skill_ids = SkillService.normalize_ids(skill_ids)
-            else:
-                session = await sync_to_async(self.session_settings.update_skill_ids)(
-                    session.id,
-                    skill_ids,
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
-        skill_bodies: list[str] = []
-        if session.skill_ids:
-            if user_id is None:
-                raise AuthenticationError(
-                    "A user is required to validate selected skills"
-                )
-            skill_bodies = await sync_to_async(self.skills.resolve_bodies)(
-                list(session.skill_ids or []),
-                user_id=user_id,
-                organization_id=org_id,
-            )
-        # Provider validation may fill per-turn defaults in memory. Do not
-        # turn Auto selections into persisted edit overrides.
-        edit_model, edit_effort = session.model, session.reasoning_effort
-        resolved_model = await sync_to_async(self.validate_provider_for_run)(
-            org_id,
-            session,
-            user_id=run_user_id,
+        return await RunAdmission(ports, preparation).start(
+            session=session,
+            prompt=prompt,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            skill_ids=skill_ids,
+            scheduled=scheduled,
             account_ids=account_ids,
+            max_depth=max_depth,
+            _edit_message_id=_edit_message_id,
         )
-        resolved_provider, _ = parse_model_ref(resolved_model)
-        admitted = await sync_to_async(self.reserve_run)(session, scheduled=scheduled)
-        if not admitted:
-            detail = (
-                "Another chat is already active in this workspace"
-                if scheduled
-                else f"Harness session '{session.id}' already has an active run"
-            )
-            raise ConflictError(detail)
-
-        assistant: HarnessMessage | None = None
-        user_message: HarnessMessage | None = None
-        edit_suffix_ids: list[uuid.UUID] = []
-        edit_committed = False
-        edit_commit_task: asyncio.Task[None] | None = None
-        original_last_message_at = session.last_message_at
-        original_updated_at = session.updated_at
-        spawned_task: asyncio.Task | None = None
-        provider_turn_id: uuid.UUID | None = None
-        provider_turn_holder: str | None = None
-        title_holder: str | None = None
-        inherited_turn_hold = False
-        owner = asyncio.current_task()
-        if owner is not None:
-            self._admissions[key] = owner
-        try:
-            if _edit_message_id is not None:
-                # Read the suffix under the same reservation as normal sends;
-                # never delete the provisional messages used for admission.
-                stored = await sync_to_async(self.messages.list_for_session)(session.id)
-                index = next(
-                    (i for i, row in enumerate(stored) if row.id == _edit_message_id),
-                    None,
-                )
-                if index is None:
-                    raise NotFoundError("HarnessMessage", str(_edit_message_id))
-                edit_suffix_ids = [row.id for row in stored[index:]]
-            prior_user_messages = await sync_to_async(self.messages.count_for_session)(
-                session.id, role="user"
-            )
-            user_message = await sync_to_async(self.messages.create)(
-                session_id=session.id,
-                role="user",
-                content=prompt.strip(),
-                skill_ids=list(session.skill_ids or []),
-                harness_id=engine_id,
-            )
-            assistant = await sync_to_async(self.messages.create)(
-                session_id=session.id,
-                role="assistant",
-                content="",
-                model=resolved_model,
-                reasoning_effort=session.reasoning_effort or "",
-                provider=("claude" if engine_id == "claude" else resolved_provider),
-                harness_id=engine_id,
-            )
-            if _edit_message_id is None:
-                if session.parent_id is None:
-                    await sync_to_async(self.sessions.clear_summary)(session.id)
-                # Edits defer changes to the existing timeline until admission.
-                await sync_to_async(self.messages.dismiss_prior_notices)(
-                    session.id, exclude_ids=[assistant.id]
-                )
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.BUSY
-            )
-            session.status = HarnessSessionStatus.BUSY
-            history = await self.history.build(
-                session,
-                exclude_message_id=assistant.id,
-                exclude_user_message_id=user_message.id,
-                exclude_message_ids=edit_suffix_ids,
-            )
-            run_context = {
-                "session_id": key,
-                "workspace_id": workspace_id or str(session.workspace_id),
-                "organization_id": str(org_id),
-                "message_id": str(assistant.id),
-                "user_message_id": str(user_message.id),
-                "text_part_id": None,
-                "reasoning_part_id": None,
-                "tool_parts": {},
-                "step_parts": {},
-                "subtask_parts": {},
-                "skill_bodies": skill_bodies,
-                "initiated_by_id": run_user_id,
-                "account_ids": dict(account_ids),
-            }
-            if session.parent_id is None:
-                run_context["steering"] = SteeringChannel(
-                    deliver=lambda entries: self._deliver_steers(
-                        session, assistant, entries
-                    )
-                )
-            self._runs[key] = run_context
-            inherited_turn_id = inherited_context.get("provider_turn_id")
-            if inherited_turn_id:
-                turn = await sync_to_async(self._provider_turn_service.get)(
-                    inherited_turn_id
-                )
-                if turn is None or not turn.active or turn.cancel_requested:
-                    raise ValueError(
-                        "The provider account for this answer is no longer available"
-                    )
-                provider_turn_id = inherited_turn_id
-                provider_turn_holder = str(uuid.uuid4())
-                inherited_turn_hold = await sync_to_async(
-                    self._provider_turn_service.add_hold
-                )(provider_turn_id, provider_turn_holder)
-                if not inherited_turn_hold:
-                    raise ValueError(
-                        "The provider account for this answer is no longer available"
-                    )
-                account_ids = dict(inherited_context.get("account_ids") or {})
-                run_context["account_ids"] = account_ids
-                run_context["provider_turn_id"] = provider_turn_id
-                run_context["provider_turn_holder"] = provider_turn_holder
-                # Root monitor already watches the complete answer tree.
-                run_context["provider_monitor_task"] = None
-            elif run_user_id is not None:
-                sidecar = await sync_to_async(self._provider_turn_service.admit)(
-                    assistant_message_id=assistant.id,
-                    organization_id=org_id,
-                    user_id=run_user_id,
-                    account_ids=account_ids,
-                )
-                provider_turn_id = sidecar.id
-                provider_turn_holder = str(sidecar.holder_tokens[0])
-                revocation_event = asyncio.Event()
-                watched_accounts = register_revocation_listener(
-                    account_ids.values(),
-                    loop=asyncio.get_running_loop(),
-                    event=revocation_event,
-                )
-                run_context.update(
-                    provider_turn_id=provider_turn_id,
-                    provider_turn_holder=provider_turn_holder,
-                    provider_revocation_event=revocation_event,
-                    provider_revocation_accounts=watched_accounts,
-                    provider_session=session,
-                    provider_followup_tasks={},
-                )
-                self._provider_turn_roots[str(provider_turn_id)] = run_context
-                monitor_task = self._spawn_background(
-                    self._monitor_provider_turn(
-                        session=session,
-                        context=run_context,
-                        event=revocation_event,
-                        watched_accounts=watched_accounts,
-                    )
-                )
-                run_context["provider_monitor_task"] = monitor_task
-            if engine_id != "native":
-                run_context["initiated_by_id"] = run_user_id
-                run_context["engine_id"] = engine_id
-                run_context["cleanup_confirmed"] = True
-                run_context["ownership"] = await sync_to_async(
-                    self._run_service_for_engine().create_attempt,
-                    thread_sensitive=True,
-                )(
-                    session_id=session.id,
-                    assistant_message_id=assistant.id,
-                    user_id=run_user_id,
-                    harness_id=engine_id,
-                )
-            if self._user_abort_requested(session):
-                raise asyncio.CancelledError()
-            if _edit_message_id is not None:
-                # A cancelled sync_to_async waiter does not roll back its DB
-                # thread. Keep ownership until the commit outcome is known.
-                edit_commit_task = asyncio.create_task(
-                    self._commit_message_edit(
-                        session,
-                        edit_suffix_ids,
-                        model=edit_model,
-                        reasoning_effort=edit_effort,
-                    )
-                )
-                await asyncio.shield(edit_commit_task)
-                edit_committed = True
-            if (
-                _edit_message_id is None
-                and session.parent_id is None
-                and prior_user_messages == 0
-                and provider_turn_id
-                and not scheduled
-            ):
-                # Reserve before spawning: a fast answer may release its last
-                # holder before the title task gets a chance to start.
-                title_holder = f"title:{uuid.uuid4()}"
-                if not await sync_to_async(self._provider_turn_service.add_hold)(
-                    provider_turn_id, title_holder
-                ):
-                    title_holder = None
-            run_coro = self._execute_run(
-                session=session,
-                prompt=prompt.strip(),
-                history=history,
-                assistant=assistant,
-                organization_id=org_id,
-                depth=depth,
-                max_depth=max_depth,
-            )
-            spawned_task = self._spawn_background(run_coro)
-            self._tasks[key] = spawned_task
-            self._admissions.pop(key, None)
-
-            def run_done(task: asyncio.Task) -> None:
-                # A cancelled task may never execute its first instruction, so
-                # neither the run's except nor finally would finalize its shell.
-                if task.cancelled() and not run_context.get("execution_started"):
-                    run_coro.close()
-                    run_context["finalizing"] = True
-                    finalizer = self._spawn_background(
-                        self._finalize_unstarted_run(session, assistant)
-                    )
-                    self._tasks[key] = finalizer
-                    finalizer.add_done_callback(
-                        lambda done: self._on_run_task_done(done, key)
-                    )
-                self._on_run_task_done(task, key)
-
-            spawned_task.add_done_callback(run_done)
-            if title_holder is not None:
-                title_task = self._spawn_background(
-                    self.metadata.generate_title(
-                        session_id=session.id,
-                        prompt=prompt.strip(),
-                        organization_id=org_id,
-                        provider_turn_id=provider_turn_id,
-                        account_ids=dict(account_ids),
-                        initiated_by_id=run_user_id,
-                    )
-                )
-                self._watch_provider_followup(run_context, title_task, title_holder)
-                title_task.add_done_callback(
-                    lambda _task, turn_id=provider_turn_id, holder=title_holder: (
-                        self._spawn_background(
-                            self._finish_provider_hold(turn_id, holder)
-                        )
-                    )
-                )
-            if self._user_abort_requested(session):
-                # Stop arrived while this run was being admitted. Cancel a
-                # still-running owner. A task already cancelled before its
-                # callback was installed must keep settling and return.
-                already_stopping = spawned_task.done() or bool(
-                    spawned_task.cancelling()
-                )
-                self._cancel_owned_task(key)
-                if not already_stopping and (
-                    spawned_task.cancelling() or spawned_task.done()
-                ):
-                    raise asyncio.CancelledError()
-            await self._emit_frontend(
-                FRONTEND_EVENT_STATUS,
-                self._session_status_payload(
-                    session,
-                    "busy",
-                    model=resolved_model,
-                    assistant=assistant,
-                    user_message_id=str(user_message.id),
-                ),
-                str(session.workspace_id),
-            )
-            log.info(
-                "harness_run_started",
-                session_id=key,
-                user_message_id=str(user_message.id),
-            )
-            return assistant
-        except BaseException as exc:
-            if spawned_task is not None:
-                # A dropped HTTP caller must not erase a live background turn.
-                # User stop cancels that owner instead of leaving it running.
-                if isinstance(exc, asyncio.CancelledError):
-                    if self._user_abort_requested(session):
-                        self._cancel_owned_task(key)
-                    else:
-                        log.exception("harness_run_admitted_with_caller_error")
-                    raise
-                log.exception("harness_run_admitted_with_caller_error")
-                return assistant
-            if edit_commit_task is not None:
-                while not edit_commit_task.done():
-                    try:
-                        await asyncio.shield(edit_commit_task)
-                    except asyncio.CancelledError:
-                        continue
-                    except Exception:
-                        break
-                edit_committed = (
-                    not edit_commit_task.cancelled()
-                    and edit_commit_task.exception() is None
-                )
-            user_abort = self._user_abort_requested(session)
-            # sync_to_async re-raises CancelledError after a shielded write
-            # when this task is already stopping. Retry until the shell is
-            # durable, then propagate the original cancellation.
-            with anyio.CancelScope(shield=True):
-                for _ in range(4):
-                    try:
-                        await sync_to_async(self.sessions.mark_status)(
-                            session, HarnessSessionStatus.IDLE
-                        )
-                        session.status = HarnessSessionStatus.IDLE
-                        if assistant is not None:
-                            await sync_to_async(self.messages.complete)(
-                                assistant,
-                                finish="aborted" if user_abort else "error",
-                                error=(
-                                    "aborted by user"
-                                    if user_abort
-                                    else "Run admission failed before the "
-                                    "harness started: "
-                                    + (str(exc) or type(exc).__name__)
-                                ),
-                            )
-                        break
-                    except asyncio.CancelledError:
-                        continue
-            run_context = self._runs.get(key, {})
-            if provider_turn_id and provider_turn_holder and spawned_task is None:
-                await sync_to_async(self._provider_turn_service.finish_once)(
-                    provider_turn_id, provider_turn_holder
-                )
-            if provider_turn_id and title_holder and spawned_task is None:
-                await self._finish_provider_hold(provider_turn_id, title_holder)
-            monitor_task = run_context.get("provider_monitor_task")
-            if monitor_task is not None and not monitor_task.done():
-                monitor_task.cancel()
-                watched = run_context.get("provider_revocation_accounts")
-                event = run_context.get("provider_revocation_event")
-                if watched and event is not None:
-                    unregister_revocation_listener(watched, event=event)
-            durable_owner = run_context.get("ownership")
-            if durable_owner is not None:
-                try:
-                    await durable_owner.stop_heartbeat()
-                    await durable_owner.begin_close()
-                    await durable_owner.finalize_turn(
-                        status=(
-                            HarnessRunStatus.INTERRUPTED
-                            if user_abort
-                            else HarnessRunStatus.ERROR
-                        ),
-                        finish="aborted" if user_abort else "error",
-                        error=(
-                            "aborted by user" if user_abort else "Run admission failed"
-                        ),
-                    )
-                except Exception:
-                    log.warning("harness_run_attempt_finalize_failed", session_id=key)
-            if _edit_message_id is not None and not edit_committed:
-                # Failed admission must not leave a replacement turn or alter
-                # the original timeline's activity timestamp.
-                with anyio.CancelScope(shield=True):
-                    await sync_to_async(self.messages.discard_edit_run)(
-                        session.id,
-                        message_ids=[
-                            row.id
-                            for row in (user_message, assistant)
-                            if row is not None
-                        ],
-                        last_message_at=original_last_message_at,
-                        updated_at=original_updated_at,
-                    )
-                self._runs.pop(key, None)
-            self._forget_run(key)
-            raise
-        finally:
-            if self._admissions.get(key) is owner:
-                self._admissions.pop(key, None)
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run tree, reject pending user gates, and mark aborted."""
@@ -1579,7 +1019,7 @@ class HarnessService:
             await self._ensure_external_attempt_reconciled(session, force=True)
             session = await sync_to_async(self.conversations.get_session)(session.id)
         if session.parent_id is not None:
-            child_context = self._runs.get(str(session.id), {})
+            child_context = self.run_registry.contexts.get(str(session.id), {})
             if child_context.get("external_projection"):
                 # The native runtime owns the child internally and has no
                 # separately addressable OpenCuria task handle. Stop the
@@ -1593,7 +1033,7 @@ class HarnessService:
 
     def _steering_channel(self, session_id: uuid.UUID | str) -> SteeringChannel | None:
         """Return the open steering channel of an active run, if any."""
-        channel = self._runs.get(str(session_id), {}).get("steering")
+        channel = self.run_registry.contexts.get(str(session_id), {}).get("steering")
         return channel if isinstance(channel, SteeringChannel) else None
 
     def list_pending_steers(self, session_id: uuid.UUID) -> list[SteerEntry]:
@@ -1707,7 +1147,7 @@ class HarnessService:
 
     def _close_steering(self, key: str) -> list[SteerEntry]:
         """Close the run's channel; return entries nobody consumed."""
-        channel = self._runs.get(key, {}).pop("steering", None)
+        channel = self.run_registry.contexts.get(key, {}).pop("steering", None)
         return channel.close() if isinstance(channel, SteeringChannel) else []
 
     def _schedule_steer_followup(
@@ -1737,241 +1177,54 @@ class HarnessService:
             await self._emit_steer_queue(session)
 
     def _remember_run(self, session: HarnessSession) -> None:
-        """Index a live session under its parent before the next await."""
-        key = str(session.id)
-        parent = str(session.parent_id) if session.parent_id else None
-        self._run_parents[key] = parent
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._remember_run(session)
 
     def _forget_run(self, key: str) -> None:
-        """Drop a finished session once nothing still points at it."""
-        parent = self._run_parents.get(key)
-        if any(owner == key for owner in self._run_parents.values()):
-            return
-        self._run_parents.pop(key, None)
-        if (
-            parent
-            and parent not in self._tasks
-            and parent not in self._runs
-            and parent not in self._admissions
-        ):
-            self._forget_run(parent)
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._forget_run(key)
 
     def _drop_run_tracking(self, key: str) -> None:
-        """Release local task bookkeeping without publishing a terminal status."""
-        workspace_id = str(self._runs.get(key, {}).get("workspace_id") or "")
-        dropped = self._close_steering(key)
-        if dropped and workspace_id:
-            # No follow-up here (the run's cleanup is unconfirmed), but clients
-            # must not keep showing messages that will never be delivered.
-            log.warning("harness_steers_discarded", session_id=key, count=len(dropped))
-            try:
-                self._spawn_background(self._emit_empty_steer_queue(key, workspace_id))
-            except RuntimeError:  # pragma: no cover - no running loop
-                pass
-        self._runs.pop(key, None)
-        self._event_locks.pop(key, None)
-        if self._tasks.get(key) is asyncio.current_task():
-            self._tasks.pop(key, None)
-        self._forget_run(key)
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._drop_run_tracking(key)
 
     def _descendant_keys(self, root: str) -> set[str]:
-        """Return *root* and in-memory descendant session ids."""
-        keys = {root}
-        changed = True
-        while changed:
-            changed = False
-            for key, parent in self._run_parents.items():
-                if parent in keys and key not in keys:
-                    keys.add(key)
-                    changed = True
-        return keys
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._descendant_keys(root)
 
     def _owned_run_task(self, key: str) -> asyncio.Task | None:
-        """Return the run owner for *key*.
-
-        Child admissions are the parent tool task (``harness-tool-*``).
-        Cancelling those would abort the parent, so only a dedicated run
-        task or a non-tool admission (root startup) is owned here.
-        """
-        task = self._tasks.get(key)
-        if task is not None:
-            return task
-        admission = self._admissions.get(key)
-        if admission is None or admission.done():
-            return None
-        if admission.get_name().startswith("harness-tool-"):
-            return None
-        return admission
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._owned_run_task(key)
 
     def _startup_admission(self, key: str) -> asyncio.Task | None:
-        """Return an in-flight ``start_run`` when no background owner exists yet."""
-        task = self._tasks.get(key)
-        if task is not None and not task.done():
-            return None
-        admission = self._admissions.get(key)
-        if admission is None or admission.done() or admission is asyncio.current_task():
-            return None
-        return admission
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._startup_admission(key)
 
     def _cancel_owned_task(self, key: str) -> None:
-        """Cancel *key*'s run unless it is already stopping or finalizing."""
-        task = self._owned_run_task(key)
-        if task is None or task.done():
-            task = None
-        elif not task.cancelling() and not self._runs.get(key, {}).get("finalizing"):
-            task.cancel()
-        # A start_run blocked before its background task exists is the
-        # admission (often the parent tool task). Cancel that waiter too
-        # when this session has no live owner yet.
-        admission = self._startup_admission(key)
-        if (
-            admission is None
-            or admission is task
-            or admission.cancelling()
-            or self._runs.get(key, {}).get("finalizing")
-        ):
-            return
-        admission.cancel()
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._cancel_owned_task(key)
 
     def _arm_abort_keys(self, keys: set[str]) -> None:
-        """Mark user-stop intent and cancel every owned run in *keys*."""
-        for key in keys:
-            self._abort_requested.add(key)
-            self._cancel_owned_task(key)
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._arm_abort_keys(keys)
 
     async def _join_owned_task(self, key: str, task: asyncio.Task) -> None:
-        """Wait for *task* without abandoning it if this stop is cancelled."""
-        if task.done() or task is asyncio.current_task():
-            return
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if not task.done():
-                raise
-        except Exception:  # pragma: no cover - abort must not raise
-            log.exception("harness_abort_run_error", session_id=key)
-        # The done callback may have replaced a pre-entry task. Join that
-        # owner too, without cancelling it: it is already settling.
-        finalizer = self._tasks.get(key)
-        if finalizer is not None and finalizer is not task and not finalizer.done():
-            await self._join_owned_task(key, finalizer)
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._join_owned_task(key, task)
 
     async def _join_abort_tree(self, root: str, closure: set[str]) -> None:
-        """Cancel and join every live owner in *closure* until it is stable."""
-        while True:
-            closure.update(self._descendant_keys(root))
-            self._arm_abort_keys(closure)
-            pending: list[tuple[str, asyncio.Task]] = []
-            seen: set[int] = set()
-            for key in closure:
-                candidates = (
-                    self._owned_run_task(key),
-                    self._startup_admission(key),
-                )
-                for task in candidates:
-                    if task is None or task.done() or task is asyncio.current_task():
-                        continue
-                    if id(task) in seen:
-                        continue
-                    seen.add(id(task))
-                    pending.append((key, task))
-            if not pending:
-                return
-            key, task = pending[0]
-            await self._join_owned_task(key, task)
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._join_abort_tree(root, closure)
 
     async def _settle_abort_tree(
         self, session: HarnessSession, closure: set[str]
     ) -> HarnessSession:
-        """Mark leftover busy rows idle and drop stop intent for *closure*."""
-        ids: list[uuid.UUID] = []
-        for key in closure:
-            try:
-                ids.append(uuid.UUID(key))
-            except ValueError:
-                continue
-        rows = await sync_to_async(self.sessions.list_by_ids)(ids)
-        fresh = session
-        unresolved = (
-            await sync_to_async(
-                self._run_service_for_engine().repository.list_open_for_sessions,
-                thread_sensitive=True,
-            )(ids)
-            if ids
-            else []
-        )
-        unresolved_ids = {str(item.session_id) for item in unresolved}
-        for row in rows:
-            key = str(row.id)
-            task = self._owned_run_task(key)
-            if key in unresolved_ids or (task is not None and not task.done()):
-                continue
-            if row.status != HarnessSessionStatus.IDLE:
-                await sync_to_async(self.sessions.mark_status)(
-                    row, HarnessSessionStatus.IDLE
-                )
-                row.status = HarnessSessionStatus.IDLE
-            self._abort_requested.discard(key)
-            if row.id == session.id:
-                fresh = row
-        return fresh
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._settle_abort_tree(session, closure)
 
     async def _abort_run_tree(self, session: HarnessSession) -> HarnessSession:
-        """Cancel and join an authorized stop tree, including descendants.
-
-        Intent is published and every registered run is cancelled before
-        any join. ``asyncio.shield`` around a child therefore cannot keep
-        that child alive until the root happens to unwind.
-        """
-        root = str(session.id)
-        # Read descendants before publishing intent. A leaf admitted during
-        # this query is then in the memory index and is armed with the rest,
-        # instead of being cancelled before it can be registered.
-        descendant_ids = await sync_to_async(self.sessions.list_descendant_ids)(
-            session.id
-        )
-        closure = {str(child_id) for child_id in descendant_ids}
-        closure.update(self._descendant_keys(root))
-        durable_attempts = await sync_to_async(
-            self._run_service_for_engine().repository.list_open_for_sessions,
-            thread_sensitive=True,
-        )(list(uuid.UUID(key) for key in closure))
-        for attempt in durable_attempts:
-            attempt_key = str(attempt.session_id)
-            if (
-                self._tasks.get(attempt_key) is None
-                and self._admissions.get(attempt_key) is None
-            ):
-                # Retry detached cleanup; recovery still fences fresh owners
-                # and requires the runner to confirm process termination.
-                detached_session = await sync_to_async(self.conversations.get_session)(
-                    attempt.session_id
-                )
-                await self._ensure_external_attempt_reconciled(
-                    detached_session, force=True
-                )
-        # Cancel and join before any further database work. Cleanup writes
-        # the terminal message; overlapping reads deadlock SQLite.
-        self._arm_abort_keys(closure)
-        await self._join_abort_tree(root, closure)
-        descendant_ids = await sync_to_async(self.sessions.list_descendant_ids)(
-            session.id
-        )
-        closure.update(str(child_id) for child_id in descendant_ids)
-        closure.update(self._descendant_keys(root))
-        self._arm_abort_keys(closure)
-        await self._join_abort_tree(root, closure)
-        await self.interactions.reject_sessions(closure)
-        settled = await self._settle_abort_tree(session, closure)
-        remaining = await sync_to_async(
-            self._run_service_for_engine().repository.list_open_for_sessions,
-            thread_sensitive=True,
-        )(list(uuid.UUID(key) for key in closure))
-        if remaining:
-            raise ConflictError(
-                "External engine cleanup is pending; the session remains busy"
-            )
-        return settled
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._abort_run_tree(session)
 
     async def abort_busy_computeruse_for_workspace(
         self, workspace_id: uuid.UUID
@@ -2067,18 +1320,8 @@ class HarnessService:
         return task
 
     def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
-        """Drop the run task and retrieve any leftover exception."""
-        if self._tasks.get(key) is task:
-            self._tasks.pop(key, None)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            log.error(
-                "harness_background_task_failed",
-                session_id=key,
-                error=str(exc),
-            )
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._on_run_task_done(task, key)
 
     @staticmethod
     async def _await_in_thread_sensitive_context(coro: Awaitable[None]) -> None:
@@ -2097,317 +1340,43 @@ class HarnessService:
         depth: int,
         max_depth: int,
     ) -> None:
-        """Run the loop, persist events, and finalize the assistant message."""
-        from .providers.resolver import StaticModelResolver
-        from .services import ProviderConfigService
-        from .tools import default_tool_registry
+        """Compose the RunExecution boundary with its explicit ports."""
+        from .run_execution import RunExecution, RunExecutionPorts
 
-        key = str(session.id)
-        run_context = self._runs.get(key, {})
-        run_context["execution_started"] = True
-        engine_id = (getattr(session, "harness_id", "native") or "native").strip()
-        mcp_runtime = None
-        phase = "startup"
-        if engine_id != "native":
-            await self._execute_external_run(
-                engine_id=engine_id,
-                session=session,
-                prompt=prompt,
-                history=history,
-                assistant=assistant,
-                organization_id=organization_id,
-                depth=depth,
-                max_depth=max_depth,
-            )
-            return
-        try:
-            # Fail closed on missing plugin credentials before constructing provider
-            # configuration or registering/calling any harness tools.
-            mcp_snapshot = None
-            agent_key = (session.agent_name or "").strip().lower()
-            if agent_key not in {"title", "summary", "compaction"}:
-                mcp_snapshot = await sync_to_async(self.plugin_runtime.prepare)(
-                    session.workspace_id, organization_id
-                )
-            model_resolver = None
-            small_model = ""
-            agent_configs: dict[str, dict[str, Any]] = {}
-            if self._provider_factory is not None:
-                model_resolver = StaticModelResolver(
-                    self._provider_factory(organization_id)
-                ).resolve
-            else:
-                config_service = ProviderConfigService()
-                config = None
-                try:
-                    config = await sync_to_async(config_service.get_config)(
-                        organization_id
-                    )
-                except NotFoundError:
-                    config = None
-                run_context = self._runs.get(key, {})
-                turn_id = run_context.get("provider_turn_id")
-
-                def register_used(account_id: str) -> None:
-                    if turn_id:
-                        self._provider_turn_service.register_use(turn_id, account_id)
-
-                resolver = await sync_to_async(config_service.build_resolver)(
-                    organization_id,
-                    user_id=run_context.get("initiated_by_id"),
-                    account_ids=dict(run_context.get("account_ids") or {}),
-                    on_account_used=register_used if turn_id else None,
-                )
-                await sync_to_async(resolver.prepare_adapters)()
-                model_resolver = resolver.resolve
-                small_model = ((config.small_model if config else "") or "").strip()
-                agent_configs = await sync_to_async(HarnessService._agent_configs_map)(
-                    organization_id
-                )
-                agent_name = (
-                    (session.agent_name or session.mode or "build").strip().lower()
-                )
-                row = agent_configs.get(agent_name, {})
-                agent_model = (
-                    ""
-                    if row.get("inherit_model")
-                    else str(row.get("model") or "").strip()
-                )
-                agent_effort = (
-                    ""
-                    if row.get("inherit_model")
-                    else normalize_reasoning_effort(str(row.get("effort") or ""))
-                )
-                model_default = session.model or agent_model
-                if not model_default:
-                    raise ValueError("No model configured for harness run")
-                session.model = model_default
-                run_effort = normalize_reasoning_effort(agent_effort)
-                if not (session.reasoning_effort or "").strip() and run_effort:
-                    session.reasoning_effort = run_effort
-            model = session.model or "default"
-            context_length = 0
-            model_max_output_tokens = 0
-            last_step_prompt_tokens = 0
-            last_step_completion_tokens = 0
-            last_step_total_tokens = 0
-            context_length, model_max_output_tokens = await sync_to_async(
-                self._resolve_run_model_limits
-            )(
-                organization_id,
-                model,
-                run_context.get("initiated_by_id"),
-                dict(run_context.get("account_ids") or {}),
-            )
-            (
-                last_step_prompt_tokens,
-                last_step_completion_tokens,
-                last_step_total_tokens,
-            ) = await sync_to_async(self._last_assistant_step_tokens)(
-                session.id, assistant.id
-            )
-            accessor = None
-            if self._accessor_factory is not None:
-                accessor = await self._accessor_factory(str(session.workspace_id))
-            tools = default_tool_registry()
-            from .services import ComputerUseConfigService
-
-            computer_options = await sync_to_async(
-                ComputerUseConfigService().get_or_default
-            )(organization_id)
-            # MCP plugin runtime: snapshot + connections are prepared BEFORE
-            # the runner is constructed so any injected runner_factory sees
-            # the same fully-registered ToolRegistry (an injected factory may
-            # snapshot/copy instead of holding the live reference). Prepare
-            # runs in the sync ORM context exactly once (snapshot +
-            # credential resolution, no second ORM/decrypt round in setup).
-            mcp_enabled = accessor is not None and (
-                session.agent_name or ""
-            ).strip().lower() not in (
-                "title",
-                "summary",
-                "compaction",
-            )
-            if mcp_enabled:
-                import apps.harness.mcp_client.runtime as mcp_runtime_module
-
-                mcp_runtime = mcp_runtime_module.McpRuntime()
-                # Reuse the already validated snapshot; setup does not repeat
-                # credential lookup/decryption.
-                await mcp_runtime.setup(
-                    accessor=accessor,
-                    core_tool_names=tools.names(),
-                    prepared=mcp_snapshot,
-                    owner_id=str(assistant.id),
-                    session_id=key,
-                    turn_id=str(assistant.id),
-                    runtime_options=computer_options,
-                )
-                mcp_runtime.register_tools(tools)
-                accessor = await mcp_runtime.execution_accessor(accessor)
-                if agent_key == "computeruse":
-                    mcp_runtime.require_computer_use()
-                if mcp_runtime.skipped:
-                    log.warning(
-                        "mcp_discovery_health",
-                        session_id=key,
-                        skipped=mcp_runtime.skipped,
-                    )
-            if self._runner_factory is not None:
-                loop_runner = self._runner_factory(
-                    model_resolver=model_resolver,
-                    tools=tools,
-                    accessor=accessor,
-                    emit=lambda event: self._on_runner_event(session, assistant, event),
-                )
-            else:
-                effort = (session.reasoning_effort or "").strip() or None
-                loop_runner = self._engine_registry_for_run().create(
-                    "native",
-                    model_resolver=model_resolver,
-                    tools=tools,
-                    accessor=accessor,
-                    emit=lambda event: self._on_runner_event(session, assistant, event),
-                    chat_options=ChatOptions(reasoning_effort=effort),
-                )
-            opts = RunOptions(
-                max_steps=computer_options["max_steps"]
-                if agent_key == "computeruse"
-                else None,
-                depth=depth,
-                max_depth=max_depth,
-                history=history,
-                session_id=key,
-                workspace_id=str(session.workspace_id),
-                organization_id=str(organization_id),
-                small_model=small_model,
-                current_user_message_id=str(
-                    self._runs.get(key, {}).get("user_message_id", "")
-                ),
-                skills=SkillService.merge_bodies(
-                    self._runs.get(key, {}).get("skill_bodies", []),
-                    mcp_snapshot.snapshot.plugin_skills
-                    if mcp_snapshot is not None
-                    else [],
-                ),
-                steering=self._runs.get(key, {}).get("steering"),
-                context_length=context_length,
-                max_output_tokens=model_max_output_tokens,
-                last_step_prompt_tokens=last_step_prompt_tokens,
-                last_step_completion_tokens=last_step_completion_tokens,
-                last_step_total_tokens=last_step_total_tokens,
-                on_permission=lambda **kw: self.interactions.request_permission(
-                    session, assistant, **kw
-                ),
-                on_question=lambda **kw: self.interactions.ask_question(
-                    session, assistant, **kw
-                ),
-                run_subagent=lambda args, ctx, subtask_id: self._run_subagent_tool(
-                    parent=session,
-                    args=args,
-                    ctx=ctx,
-                    subtask_id=subtask_id,
-                    organization_id=organization_id,
-                    agent_configs=dict(agent_configs),
-                ),
-            )
-            phase = "run"
-            result = await loop_runner.run(
-                prompt, session.agent_name or "build", model, session.mode, opts
-            )
-            if mcp_runtime is not None:
-                from .computer_use.recordings import append_video_to_output
-
-                for path in await mcp_runtime.finish():
-                    result.output = append_video_to_output(result.output or "", path)
-            if self._user_abort_requested(session):
-                raise asyncio.CancelledError()
-            # Text deltas were already appended to the assistant message
-            # incrementally (see RunTimeline.record); only genuinely new
-            # tail content still needs persisting. The runner's final
-            # ``output`` is the full assembled answer, so diff it against
-            # what is already stored instead of appending blindly (content
-            # drifts when a rerun/continuation re-emits a prefix). When a
-            # remainder exists it also gets its own text part so message
-            # content and parts never drift apart.
-            await sync_to_async(self.messages.refresh, thread_sensitive=True)(assistant)
-            existing = assistant.content or ""
-            tail = result.output or ""
-            remainder = tail_remainder(existing, tail)
-            if remainder:
-                await sync_to_async(self.messages.append_content)(assistant, remainder)
-                await self.timeline.append_tail_text(session, assistant, remainder)
-            # Message usage is accumulated per step_finish so abort still
-            # keeps completed steps. Session usage is applied once here.
-            await sync_to_async(self.sessions.add_usage)(
-                session,
-                prompt_tokens=result.usage.prompt_tokens,
-                completion_tokens=result.usage.completion_tokens,
-                total_tokens=result.usage.total_tokens,
-                cost=result.cost,
-            )
-            await sync_to_async(self.messages.complete)(
-                assistant, finish=result.finish_reason
-            )
-            await self.timeline.settle_open_stream_parts(assistant)
-        except asyncio.CancelledError:
-            revocation = await self._provider_turn_revocation_message(session)
-            if revocation:
-                run_context["provider_revocation_message"] = revocation
-                with anyio.CancelScope(shield=True):
-                    await sync_to_async(self.messages.complete)(
-                        assistant, finish="aborted", error=revocation
-                    )
-                    await self.timeline.fail_open_parts(
-                        assistant, state="error", output=revocation, session=session
-                    )
-            else:
-                await self._record_run_interruption(session, assistant, phase=phase)
-            raise
-        except Exception as exc:
-            # SDK cancellation is level-triggered until its scopes are closed.
-            revocation = await self._provider_turn_revocation_message(session)
-            public_error = revocation or str(exc)
-            with anyio.CancelScope(shield=True):
-                await sync_to_async(self.messages.complete)(
-                    assistant,
-                    finish="aborted" if revocation else "error",
-                    error=public_error,
-                )
-                await self.timeline.fail_open_parts(
-                    assistant, state="error", output=public_error, session=session
-                )
-            if not revocation:
-                log.exception("harness_run_failed", session_id=key)
-        finally:
-            self._runs.get(key, {})["finalizing"] = True
-            # MCP scopes belong to this task and must close here, in LIFO order.
-            # Even a cancellation during teardown must reach status finalization.
-            try:
-                try:
-                    if mcp_runtime is not None:
-                        try:
-                            try:
-                                await self._finish_mcp_recordings(
-                                    mcp_runtime, session, assistant
-                                )
-                            finally:
-                                await mcp_runtime.aclose()
-                        except asyncio.CancelledError:
-                            current = asyncio.current_task()
-                            if current is not None and current.cancelling():
-                                raise
-                            log.warning("mcp_runtime_close_interrupted", session_id=key)
-                        except Exception:  # pragma: no cover - best effort
-                            log.exception("mcp_runtime_close_failed", session_id=key)
-                finally:
-                    await self._cleanup_session_processes(
-                        workspace_id=str(session.workspace_id),
-                        session_id=key,
-                        reason="run_finished",
-                    )
-            finally:
-                await self._finalize_run(session, assistant)
+        ports = RunExecutionPorts(
+            run_registry=self.run_registry,
+            accessor_factory=self._accessor_factory,
+            cleanup_session_processes=self._cleanup_session_processes,
+            engine_registry_for_run=self._engine_registry_for_run,
+            execute_external_run=self._execute_external_run,
+            finalize_run=self._finalize_run,
+            finish_mcp_recordings=self._finish_mcp_recordings,
+            last_assistant_step_tokens=self._last_assistant_step_tokens,
+            on_runner_event=self._on_runner_event,
+            provider_factory=self._provider_factory,
+            provider_turn_revocation_message=self._provider_turn_revocation_message,
+            provider_turn_service=self._provider_turn_service,
+            record_run_interruption=self._record_run_interruption,
+            resolve_run_model_limits=self._resolve_run_model_limits,
+            run_subagent_tool=self._run_subagent_tool,
+            runner_factory=self._runner_factory,
+            user_abort_requested=self._user_abort_requested,
+            interactions=self.interactions,
+            messages=self.messages,
+            plugin_runtime=self.plugin_runtime,
+            sessions=self.sessions,
+            timeline=self.timeline,
+            agent_configs=self._agent_configs_map,
+        )
+        return await RunExecution(ports).execute(
+            session=session,
+            prompt=prompt,
+            history=history,
+            assistant=assistant,
+            organization_id=organization_id,
+            depth=depth,
+            max_depth=max_depth,
+        )
 
     async def _finish_mcp_recordings(
         self, runtime: Any, session: Any, assistant: Any
@@ -2449,10 +1418,36 @@ class HarnessService:
         max_depth: int,
     ) -> None:
         """Delegate external engine lifecycle work to its execution module."""
-        from .engines.execution import execute_external_run
+        from .engines.execution import ExternalExecutionPorts, execute_external_run
 
+        ports = ExternalExecutionPorts(
+            begin_finalization=lambda: self.run_registry.ensure(
+                str(session.id)
+            ).begin_finalization(),
+            accessor_factory=self._accessor_factory,
+            cancel_owned_task=self._cancel_owned_task,
+            cleanup_session_processes=self._cleanup_session_processes,
+            drop_run_tracking=self._drop_run_tracking,
+            engine_registry_for_run=self._engine_registry_for_run,
+            finalize_external_children=self._finalize_external_children,
+            finalize_owned_claude_error=self._finalize_owned_claude_error,
+            finalize_run=self._finalize_run,
+            finish_mcp_recordings=self._finish_mcp_recordings,
+            on_external_child_event=self._on_external_child_event,
+            on_external_root_event=self._on_external_root_event,
+            provider_turn_revocation_message=self._provider_turn_revocation_message,
+            run_subagent_tool=self._run_subagent_tool,
+            user_abort_requested=self._user_abort_requested,
+            interactions=self.interactions,
+            messages=self.messages,
+            permissions=self.permissions,
+            plugin_runtime=self.plugin_runtime,
+            register_provider_use=self._register_provider_use,
+            resolve_engine_auth=self._resolve_engine_auth,
+        )
         await execute_external_run(
-            self,
+            ports,
+            context=self.run_registry.contexts.get(str(session.id), {}),
             engine_id=engine_id,
             session=session,
             prompt=prompt,
@@ -2485,7 +1480,7 @@ class HarnessService:
                     await self.conversation_events.emit(session.workspace_id)
                     await self._schedule_summary(session, assistant)
         finally:
-            context = self._runs.get(key, {})
+            context = self.run_registry.contexts.get(key, {})
             await self._finish_provider_turn(context)
             root = self._provider_turn_roots.get(
                 str(context.get("provider_turn_id")), context
@@ -2558,22 +1553,25 @@ class HarnessService:
                 harness_id=session.harness_id,
             )
             child_key = str(child.id)
-            self._runs[child_key] = {
-                "session_id": child_key,
-                "message_id": str(child_assistant.id),
-                "user_message_id": str(child_user.id),
-                "text_part_id": None,
-                "reasoning_part_id": None,
-                "tool_parts": {},
-                "step_parts": {},
-                "subtask_parts": {},
-                "skill_bodies": [],
-                "external_projection": True,
-            }
+            self.run_registry.attach_context(
+                child_key,
+                {
+                    "session_id": child_key,
+                    "message_id": str(child_assistant.id),
+                    "user_message_id": str(child_user.id),
+                    "text_part_id": None,
+                    "reasoning_part_id": None,
+                    "tool_parts": {},
+                    "step_parts": {},
+                    "subtask_parts": {},
+                    "skill_bodies": [],
+                    "external_projection": True,
+                },
+            )
             await sync_to_async(self.sessions.mark_status)(
                 child, HarnessSessionStatus.BUSY
             )
-            root_context = self._runs.get(str(session.id), {})
+            root_context = self.run_registry.contexts.get(str(session.id), {})
             root_context.setdefault("external_children", {})[
                 str(event.get("subtask_id", ""))
             ] = {
@@ -2595,7 +1593,9 @@ class HarnessService:
         self, session: HarnessSession, event: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Find a projected child by task id or parent tool-use id."""
-        children = self._runs.get(str(session.id), {}).get("external_children", {})
+        children = self.run_registry.contexts.get(str(session.id), {}).get(
+            "external_children", {}
+        )
         task_id = str(event.get("subtask_id", ""))
         if task_id in children:
             return children[task_id]
@@ -2613,7 +1613,7 @@ class HarnessService:
         self, root_key: str, parent_call_id: str, event: dict[str, Any]
     ) -> None:
         """Persist native-forwarded child events into their own message timeline."""
-        root_context = self._runs.get(root_key, {})
+        root_context = self.run_registry.contexts.get(root_key, {})
         children = root_context.get("external_children", {})
         child_ctx = next(
             (
@@ -2671,7 +1671,9 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Close any child projections left open by a cancelled native stream."""
-        children = self._runs.get(str(session.id), {}).get("external_children", {})
+        children = self.run_registry.contexts.get(str(session.id), {}).get(
+            "external_children", {}
+        )
         for child_ctx in children.values():
             if child_ctx.get("finished"):
                 continue
@@ -2692,26 +1694,12 @@ class HarnessService:
                 )
 
     def _user_abort_requested(self, session: HarnessSession) -> bool:
-        """Inherit explicit stop intent from any ancestor still in the tree."""
-        key = str(session.id)
-        cursor = str(session.parent_id) if session.parent_id else None
-        chain = [key]
-        seen = {key}
-        while cursor and cursor not in seen:
-            chain.append(cursor)
-            seen.add(cursor)
-            if cursor in self._abort_requested:
-                self._abort_requested.update(chain)
-                return True
-            cursor = self._run_parents.get(cursor)
-        return key in self._abort_requested
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._user_abort_requested(session)
 
     def _parent_stop_in_progress(self, session: HarnessSession) -> bool:
-        """True when user stop must end *session* instead of returning a tool error."""
-        if self._user_abort_requested(session):
-            return True
-        parent_task = self._tasks.get(str(session.id))
-        return parent_task is not None and bool(parent_task.cancelling())
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._parent_stop_in_progress(session)
 
     async def _record_run_interruption(
         self, session: HarnessSession, assistant: HarnessMessage, *, phase: str
@@ -2739,7 +1727,7 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Settle an admitted background task cancelled before execution entry."""
-        context = self._runs.get(str(session.id), {})
+        context = self.run_registry.contexts.get(str(session.id), {})
         ownership = context.get("ownership")
         if ownership is not None:
             # Execution never entered, so no runner lease or CLI process could
@@ -2768,7 +1756,7 @@ class HarnessService:
     ) -> None:
         """Release tracking and publish idle after the owning run has settled."""
         key = str(session.id)
-        self._runs.get(key, {})["finalizing"] = True
+        self.run_registry.ensure(key).begin_finalization()
         try:
             with anyio.CancelScope(shield=True):
                 await sync_to_async(self.sessions.mark_status)(
@@ -2779,7 +1767,7 @@ class HarnessService:
                 await publish_assistant_run_finished(assistant.id, session_id=key)
                 if session.parent_id is None:
                     await self._schedule_summary(session, assistant)
-                context = self._runs.get(key, {})
+                context = self.run_registry.contexts.get(key, {})
                 await self._finish_provider_turn(context)
                 turn_id = context.get("provider_turn_id")
                 if turn_id:
@@ -2816,12 +1804,12 @@ class HarnessService:
         finally:
             leftovers = self._close_steering(key)
             followup = bool(leftovers) and not self._user_abort_requested(session)
-            self._runs.pop(key, None)
-            self._event_locks.pop(key, None)
-            self._abort_requested.discard(key)
+            self.run_registry.release_context(key)
+            self.run_registry.release_event_lock(key)
+            self.run_registry.clear_abort(key)
             # Keep task ownership until all persistence/emission awaits have finished.
-            if self._tasks.get(key) is asyncio.current_task():
-                self._tasks.pop(key, None)
+            if self.run_registry.tasks.get(key) is asyncio.current_task():
+                self.run_registry.release_task(key)
             self._forget_run(key)
             if followup:
                 self._schedule_steer_followup(session, leftovers)
@@ -2945,11 +1933,7 @@ class HarnessService:
 
     def _event_lock(self, session_id: str) -> asyncio.Lock:
         """Return the per-session lock for runner-event persistence."""
-        lock = self._event_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._event_locks[session_id] = lock
-        return lock
+        return self.run_registry.event_lock(session_id)
 
     def _session_status_payload(
         self,
@@ -2972,11 +1956,17 @@ class HarnessService:
             assistant_id = str(assistant.id)
         else:
             assistant_id = str(
-                self._runs.get(str(session.id), {}).get("message_id", "") or ""
+                self.run_registry.contexts.get(str(session.id), {}).get(
+                    "message_id", ""
+                )
+                or ""
             )
         if not user_message_id:
             user_message_id = str(
-                self._runs.get(str(session.id), {}).get("user_message_id", "") or ""
+                self.run_registry.contexts.get(str(session.id), {}).get(
+                    "user_message_id", ""
+                )
+                or ""
             )
         payload: dict[str, Any] = {
             "workspace_id": str(session.workspace_id),
@@ -3001,7 +1991,9 @@ class HarnessService:
         # add an avoidable round trip to the streaming hot path.
         part_id = data.get("part_id")
         if part_id and event in (FRONTEND_EVENT_PART, FRONTEND_EVENT_SUBTASK_STARTED):
-            run_ctx = self._runs.get(str(data.get("session_id", "")), {})
+            run_ctx = self.run_registry.contexts.get(
+                str(data.get("session_id", "")), {}
+            )
             positions = run_ctx.setdefault("part_positions", {})
             position = positions.get(str(part_id))
             if position is None:
@@ -3025,7 +2017,7 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Reserve the answer snapshot before spawning its summary follower."""
-        context = self._runs.get(str(session.id), {})
+        context = self.run_registry.contexts.get(str(session.id), {})
         turn_id = context.get("provider_turn_id")
         if context.get("provider_revocation_message"):
             return
@@ -3046,7 +2038,7 @@ class HarnessService:
         holder: str | None = None,
     ) -> None:
         """Generate the user-goal recap with the completed answer's accounts."""
-        context = self._runs.get(str(session.id), {})
+        context = self.run_registry.contexts.get(str(session.id), {})
         turn_id = context.get("provider_turn_id")
         reserved = holder is not None
         holder = holder or f"summary:{uuid.uuid4()}"
@@ -3110,353 +2102,21 @@ class HarnessService:
         organization_id: uuid.UUID,
         agent_configs: dict[str, dict[str, Any]] | None = None,
     ) -> Any:
-        """Create a child session, run it to completion, return tool output.
-
-        Model/effort routing comes from AgentConfig: custom mode uses the
-        fixed config model/effort; inherit mode reuses the parent run model
-        (``args.model_override`` always wins). Effort strategies
-        lowest/medium/highest resolve against the catalog efforts of the
-        inherited model; ``inherit`` reuses the parent reasoning effort.
-
-        ``args.task_id`` resumes a previous child of the same parent
-        (OpenCode parity): the follow-up prompt runs on the same child
-        session with its persisted history instead of creating a fresh
-        one. Unknown/missing ``task_id`` values fall back to a fresh
-        child; foreign or busy children are rejected with ``ToolError``.
-        A ``subagent_type`` mismatch on resume is ignored — the stored
-        child agent keeps running.
-        """
-        from .tools.base import ToolError
-        from .tools.subagents import TASK_OUTPUT_MAX_CHARS, build_task_result
-
-        if ctx.depth >= ctx.max_depth:
-            raise ToolError(
-                f"Subagent depth limit reached (depth={ctx.depth}, "
-                f"max_depth={ctx.max_depth}); nested task calls are not allowed.",
-                tool="task",
-            )
-        agent = (args.agent or args.subagent_type or "general").strip().lower()
-        configs = dict(agent_configs or {}) or self._agent_configs_map(organization_id)
-        row = configs.get(agent, {})
-        inherit = bool(row.get("inherit_model", True))
-        fixed_model = str(row.get("model") or "").strip()
-        codex_parent = getattr(parent, "harness_id", "native") == "codex"
-        effort_normalizer = (
-            (lambda value: (value or "").strip().lower())
-            if codex_parent
-            else normalize_reasoning_effort
-        )
-        fixed_effort = effort_normalizer(str(row.get("effort") or ""))
-        strategy = str(row.get("effort_strategy") or "inherit").strip() or "inherit"
-        override = (args.model_override or "").strip()
-        if inherit:
-            model = (
-                override or (getattr(ctx, "model", "") or "") or parent.model or ""
-            ).strip()
-        else:
-            model = (
-                override
-                or fixed_model
-                or (getattr(ctx, "model", "") or "")
-                or parent.model
-                or ""
-            ).strip()
-        if not model:
-            raise ToolError(
-                "No model available for subagent run",
-                tool="task",
-            )
-        if codex_parent:
-            try:
-                model, _ = await sync_to_async(
-                    self.session_settings.validate_codex_config
-                )(
-                    parent,
-                    model,
-                    "",
-                    account_ids=self._provider_turn_context(parent).get("account_ids"),
-                )
-            except (ValueError, AuthenticationError, NotFoundError) as exc:
-                raise ToolError(str(exc), tool="task") from exc
-        parent_ctx = self._runs.get(str(parent.id), {})
-        message_id = parent_ctx.get("message_id")
-        if not message_id:
-            raise ToolError(
-                "Parent assistant message missing for subagent run",
-                tool="task",
-            )
-        parent_assistant = await sync_to_async(self.messages.get_required)(message_id)
-        child = await self._resolve_resume_child(parent, args.task_id)
-        resumed = child is not None
-        if resumed:
-            agent = (
-                child.agent_name or agent or "general"
-            ).strip().lower() or "general"
-        validate_subagent_delegation(parent.agent_name, agent)
-        if inherit:
-            if strategy in ("lowest", "medium", "highest"):
-                if codex_parent:
-                    from .engines.service import EngineCatalogService
-
-                    models = await sync_to_async(EngineCatalogService().list_models)(
-                        "codex",
-                        organization_id,
-                        parent.created_by_id,
-                        account_ids=self._provider_turn_context(parent).get(
-                            "account_ids"
-                        ),
-                    )
-                    catalog_efforts = next(
-                        (list(m.reasoning_efforts) for m in models if m.id == model), []
-                    )
-                else:
-                    catalog_efforts = self._catalog_efforts_for_model(
-                        organization_id,
-                        model,
-                        self._provider_turn_context(parent).get("initiated_by_id"),
-                        dict(
-                            self._provider_turn_context(parent).get("account_ids") or {}
-                        ),
-                    )
-                from .agents.effort_strategy import resolve_strategy_effort
-
-                child_effort = resolve_strategy_effort(catalog_efforts, strategy)
-            else:
-                child_effort = effort_normalizer(parent.reasoning_effort or "")
-        else:
-            child_effort = fixed_effort
-        if resumed:
-            # Resume keeps the stored child routing: model_override still
-            # wins, otherwise the existing child model/effort continue.
-            assert child is not None
-            if override:
-                if codex_parent:
-                    await sync_to_async(
-                        self.session_settings.validate_codex_config
-                    )(
-                        child,
-                        override,
-                        child.reasoning_effort,
-                        account_ids=self._provider_turn_context(parent).get(
-                            "account_ids"
-                        ),
-                    )
-                child = await sync_to_async(self.sessions.set_model)(child, override)
-                model = override
-            else:
-                model = (child.model or model or "").strip()
-                if not model:
-                    raise ToolError(
-                        "No model available for subagent run",
-                        tool="task",
-                    )
-            child_effort = effort_normalizer(child.reasoning_effort or "")
-        else:
-            child = await sync_to_async(self.create_session)(
-                workspace_id=parent.workspace_id,
-                organization_id=parent.organization_id,
-                prompt=args.prompt,
-                agent_name=agent,
-                mode=parent.mode,
-                model=model,
-                reasoning_effort=child_effort,
-                title=args.description[:255],
-                parent_id=parent.id,
-                user_id=getattr(parent, "created_by_id", None),
-                skill_ids=list(parent.skill_ids or []),
-            )
-        await self._on_runner_event(
-            parent,
-            parent_assistant,
-            {
-                "type": "subtask_started",
-                "subtask_id": subtask_id,
-                "child_session_id": str(child.id),
-                "agent": agent,
-                "description": args.description,
-                "model": child.model or "",
-                "reasoning_effort": child.reasoning_effort or "",
-            },
-        )
-        status = "completed"
-        assistant: HarnessMessage | None = None
-        child_task: asyncio.Task[None] | None = None
-        try:
-            assistant = await self.start_run(
-                child,
-                args.prompt,
-                organization_id=organization_id,
-                workspace_id=str(parent.workspace_id),
-                max_depth=ctx.max_depth,
-                user_id=getattr(parent, "created_by_id", None),
-            )
-            child_task = self._tasks.get(str(child.id))
-            if child_task is not None:
-                # Cancel execution explicitly below, not an already-settling owner.
-                await asyncio.shield(child_task)
-            # A stopped parent must not treat the child outcome as a tool
-            # error the model can recover from by launching another subagent.
-            if self._parent_stop_in_progress(parent):
-                raise asyncio.CancelledError()
-            assistant = await sync_to_async(self.messages.get_required)(assistant.id)
-            output = assistant.content or ""
-            if assistant.finish in ("error", "aborted"):
-                error = assistant.error or "Subagent run interrupted"
-                if output:
-                    error += "\n\nPartial output:\n" + output[:TASK_OUTPUT_MAX_CHARS]
-                raise ToolError(error, tool="task")
-        except asyncio.CancelledError:
-            tracked = child_task or self._tasks.get(str(child.id))
-            if tracked is not None and not tracked.done():
-                if not tracked.cancelling() and not self._runs.get(
-                    str(child.id), {}
-                ).get("finalizing"):
-                    tracked.cancel()
-                try:
-                    await asyncio.shield(tracked)
-                except (asyncio.CancelledError, Exception):
-                    pass
-            # A task cancelled before entry installs a replacement finalizer.
-            # Await that owner without cancelling it before reading its outcome.
-            finalizer = self._tasks.get(str(child.id))
-            if finalizer is not None and finalizer is not tracked:
-                with anyio.CancelScope(shield=True):
-                    while not finalizer.done():
-                        try:
-                            await asyncio.shield(finalizer)
-                        except asyncio.CancelledError:
-                            # A parent stop can arrive while this child is already
-                            # settling. Finish the join before propagating it below.
-                            continue
-            # Awaiting a cancelled child does not cancel this tool task. Only
-            # cancellation of the waiting task/parent should stop the whole run.
-            current = asyncio.current_task()
-            parent_task = self._tasks.get(str(parent.id))
-            if (
-                (current is not None and current.cancelling())
-                or str(parent.id) in self._abort_requested
-                or (parent_task is not None and parent_task.cancelling())
-            ):
-                raise
-            error = "Subagent run aborted"
-            if assistant is not None:
-                await sync_to_async(self.messages.refresh, thread_sensitive=True)(
-                    assistant
-                )
-                error = assistant.error or error
-                if assistant.content:
-                    error += (
-                        "\n\nPartial output:\n"
-                        + assistant.content[:TASK_OUTPUT_MAX_CHARS]
-                    )
-            log.warning(
-                "harness_subagent_interrupted",
-                session_id=str(parent.id),
-                child_session_id=str(child.id),
-                subtask_id=subtask_id,
-                agent=agent,
-                phase="startup" if assistant is None else "run",
-            )
-            await self._on_runner_event(
-                parent,
-                parent_assistant,
-                {
-                    "type": "subtask_finished",
-                    "subtask_id": subtask_id,
-                    "child_session_id": str(child.id),
-                    "agent": agent,
-                    "status": "aborted",
-                    "summary": error[:500],
-                },
-            )
-            raise ToolError(
-                f"Subagent '{agent}' failed (task_id: {child.id}): {error}",
-                tool="task",
-            )
-        except Exception as exc:
-            await self._on_runner_event(
-                parent,
-                parent_assistant,
-                {
-                    "type": "subtask_finished",
-                    "subtask_id": subtask_id,
-                    "child_session_id": str(child.id),
-                    "agent": agent,
-                    "status": "error",
-                    "summary": str(exc)[:500],
-                },
-            )
-            raise ToolError(
-                f"Subagent '{agent}' failed (task_id: {child.id}): {exc}",
-                tool="task",
-            ) from exc
-        await self._on_runner_event(
-            parent,
-            parent_assistant,
-            {
-                "type": "subtask_finished",
-                "subtask_id": subtask_id,
-                "child_session_id": str(child.id),
-                "agent": agent,
-                "status": status,
-                "summary": output[:500],
-            },
-        )
-        return await build_task_result(
-            str(child.id),
-            output,
-            ctx,
-            agent=agent,
-            metadata={
-                "subtask_id": subtask_id,
-                "child_session_id": str(child.id),
-                "task_id": str(child.id),
-                "agent": agent,
-                "status": status,
-                "resumed": resumed,
-            },
+        """Delegate to the SubagentCoordinator domain boundary."""
+        return await self._subagent_coordinator()._run_subagent_tool(
+            parent=parent,
+            args=args,
+            ctx=ctx,
+            subtask_id=subtask_id,
+            organization_id=organization_id,
+            agent_configs=agent_configs,
         )
 
     async def _resolve_resume_child(
         self, parent: HarnessSession, task_id: str | None
     ) -> HarnessSession | None:
-        """Return the resumable child for *task_id* or ``None`` for fresh.
-
-        A child resumes only when it exists and belongs to the same
-        parent, workspace, and organization. Foreign or busy children
-        are rejected so one parent can neither hijack nor queue onto
-        another parent's subagent (sequential resume only, no
-        update-while-running).
-        """
-        from .tools.base import ToolError
-
-        raw = (task_id or "").strip()
-        if not raw:
-            return None
-        try:
-            child_id = uuid.UUID(raw)
-        except (ValueError, TypeError, AttributeError):
-            return None
-        child = await sync_to_async(self.sessions.get_by_id)(child_id)
-        if child is None:
-            # OpenCode parity: an unknown task_id starts a fresh child.
-            return None
-        if (
-            child.parent_id != parent.id
-            or child.workspace_id != parent.workspace_id
-            or child.organization_id != parent.organization_id
-        ):
-            raise ToolError(
-                f"task_id '{raw}' does not belong to this session",
-                tool="task",
-            )
-        if self.is_running(child.id):
-            raise ToolError(
-                f"Subagent '{raw}' is still running; wait for it to finish "
-                "before resuming it",
-                tool="task",
-            )
-        return child
+        """Delegate to the SubagentCoordinator domain boundary."""
+        return await self._subagent_coordinator()._resolve_resume_child(parent, task_id)
 
 
 _default_harness_service: HarnessService | None = None

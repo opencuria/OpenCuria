@@ -86,6 +86,11 @@ class ScriptedAccessor:
             for name, stall in stalls.items()
         }
 
+    async def desktop_action(self, action: str, args: dict) -> dict:
+        """Supply the workspace binding required by an engine execution accessor."""
+        assert action == "binding"
+        return {"ok": True, "display": ":99", "xauthority": "/tmp/test.xauth"}
+
     async def open_process(
         self, command, workdir="/workspace", env=None, timeout=None
     ) -> ScriptedProcess:

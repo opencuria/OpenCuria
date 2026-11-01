@@ -31,7 +31,7 @@ async def test_each_answer_snapshots_current_provider_account(codex_setup):
     async def execute(**kwargs):
         current = kwargs["session"]
         context = service._runs[str(current.id)]
-        context["execution_started"] = True
+        service.run_registry.ensure(str(current.id)).execution_started = True
         observed.append(dict(context["account_ids"]))
         entered.set()
         await release.wait()
