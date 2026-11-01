@@ -1,17 +1,22 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { useElementSize } from '@vueuse/core'
 import { Loader2, MousePointer2, Send, Square, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { pointingEngaged, pointingError } from '@/lib/voicePointing'
-import { VOICE_LEVEL_HISTORY, voiceCaptureControls as controls } from '@/lib/voiceCaptureControls'
+import { voiceCaptureControls as controls } from '@/lib/voiceCaptureControls'
 
 /** `embedded` replaces the composer toolbar; otherwise the bar floats in a viewer. */
 defineProps<{ embedded?: boolean }>()
 const recording = computed(() => controls.value?.state === 'recording')
+const waveform = ref<HTMLElement | null>(null)
+const { width } = useElementSize(waveform)
 // Newest first: the row is reversed so fresh samples enter at the right edge.
 const bars = computed(() => {
   const levels = controls.value?.levels ?? []
-  return Array.from({ length: VOICE_LEVEL_HISTORY }, (_, index) =>
+  // Cover the measured width with 3px bars and 3px gaps, padding history with quiet dots.
+  const count = Math.ceil((width.value + 3) / 6)
+  return Array.from({ length: count }, (_, index) =>
     Math.round(3 + Math.min(1, levels[levels.length - 1 - index] ?? 0) * 25),
   )
 })
@@ -41,7 +46,8 @@ const bars = computed(() => {
       <template v-if="controls.state === 'recording'">
         <span class="sr-only">Recording</span>
         <div
-          class="flex h-full min-w-0 flex-1 flex-row-reverse items-center gap-[3px] overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_3rem)]"
+          ref="waveform"
+          class="flex h-full min-w-0 flex-1 flex-row-reverse items-center gap-[3px] overflow-hidden"
           aria-hidden="true"
           data-testid="voice-waveform"
         >
@@ -54,7 +60,11 @@ const bars = computed(() => {
         </div>
       </template>
       <span v-else-if="controls.state === 'error'" class="truncate text-xs text-destructive">
-        {{ embedded ? 'Voice input needs attention.' : 'Voice input needs attention. Review it in the composer.' }}
+        {{
+          embedded
+            ? 'Voice input needs attention.'
+            : 'Voice input needs attention. Review it in the composer.'
+        }}
       </span>
       <span v-else class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
         <Loader2 :size="14" class="shrink-0 animate-spin" />

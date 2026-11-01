@@ -246,6 +246,33 @@ describe('VoiceInputControl', () => {
 })
 
 describe('VoiceCaptureBar', () => {
+  const resizeCallbacks = new Map<Element, (width: number) => void>()
+  beforeEach(() => {
+    resizeCallbacks.clear()
+    class FakeResizeObserver {
+      private targets = new Set<Element>()
+      constructor(private callback: ResizeObserverCallback) {}
+      observe(target: Element): void {
+        this.targets.add(target)
+        resizeCallbacks.set(target, (width) => this.callback(
+          [{ target, contentRect: { width } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver,
+        ))
+      }
+      disconnect(): void {
+        this.targets.forEach((target) => resizeCallbacks.delete(target))
+        this.targets.clear()
+      }
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+  })
+  async function resize(wrapper: VueWrapper, width: number): Promise<void> {
+    await nextTick()
+    const callback = resizeCallbacks.get(wrapper.get('[data-testid="voice-waveform"]').element)
+    expect(callback).toBeDefined()
+    callback!(width)
+    await nextTick()
+  }
   function controls(overrides: Partial<NonNullable<typeof voiceCaptureControls.value>> = {}) {
     return {
       workspaceId: 'workspace-1', state: 'recording' as const, levels: [0, 0.5, 1],
@@ -257,8 +284,9 @@ describe('VoiceCaptureBar', () => {
     voiceCaptureControls.value = controls()
     const wrapper = mount(VoiceCaptureBar)
     wrappers.push(wrapper)
+    await resize(wrapper, 480)
     const bars = wrapper.findAll('[data-testid="voice-waveform"] > span')
-    expect(bars.length).toBeGreaterThan(3)
+    expect(bars).toHaveLength(81)
     // Newest sample first in a reversed row, so it sits at the right edge.
     expect(bars.slice(0, 4).map((bar) => bar.attributes('style'))).toEqual([
       'height: 28px;', 'height: 16px;', 'height: 3px;', 'height: 3px;',
@@ -269,6 +297,46 @@ describe('VoiceCaptureBar', () => {
     expect(voiceCaptureControls.value.stop).toHaveBeenCalledOnce()
     expect(voiceCaptureControls.value.send).toHaveBeenCalledOnce()
     expect(voiceCaptureControls.value.cancel).toHaveBeenCalledOnce()
+  })
+
+  it.each([false, true])('fills the available width and follows resizes (embedded: %s)', async (embedded) => {
+    voiceCaptureControls.value = controls({ levels: Array(160).fill(1) })
+    const wrapper = mount(VoiceCaptureBar, { props: { embedded } })
+    wrappers.push(wrapper)
+    const waveform = wrapper.get('[data-testid="voice-waveform"]')
+    expect(waveform.attributes('class')).not.toContain('mask-image')
+    for (const width of [240, 960, 2200, 4096, 357.5, 0, 1800]) {
+      await resize(wrapper, width)
+      const bars = waveform.findAll('span')
+      expect(bars).toHaveLength(Math.ceil((width + 3) / 6))
+      // The row covers the entire width, with less than one bar + gap clipped.
+      const coverage = bars.length * 6 - 3
+      expect(coverage).toBeGreaterThanOrEqual(width)
+      expect(coverage - width).toBeLessThan(6)
+      expect(bars[0]!.attributes('style')).toBe('height: 28px;')
+      if (bars.length > 160) {
+        expect(bars.slice(160).every((bar) => bar.attributes('style') === 'height: 3px;')).toBe(true)
+      }
+    }
+    wrapper.unmount()
+    expect(resizeCallbacks.has(waveform.element)).toBe(false)
+  })
+
+  it('fills a newly mounted waveform after waiting for microphone access', async () => {
+    voiceCaptureControls.value = controls({ state: 'requesting' })
+    const wrapper = mount(VoiceCaptureBar)
+    wrappers.push(wrapper)
+    expect(wrapper.find('[data-testid="voice-waveform"]').exists()).toBe(false)
+    voiceCaptureControls.value = controls({ levels: [] })
+    await nextTick()
+    await resize(wrapper, 2100)
+    const bars = wrapper.findAll('[data-testid="voice-waveform"] > span')
+    expect(bars).toHaveLength(351)
+    expect(bars.every((bar) => bar.attributes('style') === 'height: 3px;')).toBe(true)
+    voiceCaptureControls.value = controls({ state: 'processing' })
+    await nextTick()
+    expect(wrapper.find('[data-testid="voice-waveform"]').exists()).toBe(false)
+    expect(resizeCallbacks.size).toBe(0)
   })
 
   it('indicates pointing only once something was pointed at, and its failure', async () => {
