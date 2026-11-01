@@ -13,7 +13,9 @@ existing keys — see ``APIKeyPermission``)::
 - ``harness:run`` — create sessions, send follow-up prompts, abort,
   switch session mode, rename/delete sessions, save/delete provider config
 - ``harness:permissions`` — resolve permission and question requests
-- ``harness:providers`` — manage named provider accounts and ChatGPT OAuth
+
+Provider-account management and ChatGPT OAuth use ``harness:providers`` in the
+separate provider-account adapter.
 """
 
 from __future__ import annotations
@@ -28,18 +30,14 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from apps.runners.services import get_runner_service
+from common.api_errors import api_key_permission_denied
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.request_context import get_organization_id
 
 from .conversation_service import ConversationService
-from .model_catalog_service import clear_models_cache
 from .schemas import (
     AgentConfigOut,
     AgentConfigSaveIn,
-    ChatGPTOAuthCancelIn,
-    ChatGPTOAuthStartIn,
-    ChatGPTOAuthStartOut,
-    ChatGPTOAuthStatusOut,
     ComputerUseConfigIn,
     ComputerUseConfigOut,
     HarnessConversationOut,
@@ -57,11 +55,8 @@ from .schemas import (
     HarnessSteerIn,
     HarnessSteerOut,
     HarnessTodoOut,
-    ProviderAccountIn,
-    ProviderAccountOut,
     ProviderConfigIn,
     ProviderConfigOut,
-    ProviderSelectionIn,
     RecentModelOut,
     RecentModelSaveIn,
     SubagentConfigIn,
@@ -77,14 +72,6 @@ from .session_access_service import SessionAccessService
 from .session_settings_service import SessionSettingsService
 
 harness_router = Router(tags=["harness"])
-
-
-def _perm_denied(permission: APIKeyPermission):  # type: ignore[no-untyped-def]
-    """Return a 403 error tuple for a denied API key permission."""
-    return 403, {
-        "detail": f"API key lacks permission: {permission.value}",
-        "code": "permission_denied",
-    }
 
 
 def _get_service():  # type: ignore[no-untyped-def]
@@ -155,7 +142,7 @@ def _recent_model_to_out(row) -> RecentModelOut:  # type: ignore[no-untyped-def]
 def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
     """Return all harness sessions of a workspace (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -198,7 +185,7 @@ async def create_harness_session(
 ):
     """Create a session and dispatch the first prompt as a background run."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -260,7 +247,7 @@ async def send_harness_message(
 ):
     """Start a follow-up run on an idle session (409 when busy)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -337,7 +324,7 @@ async def steer_harness_session(
     run settles automatically starts a follow-up run.
     """
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -375,7 +362,7 @@ async def withdraw_harness_steer(
 ):
     """Remove a queued message; 404 ``not_found`` once the run consumed it."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -407,7 +394,7 @@ async def fork_harness_session(
 ):
     """Fork a session through the selected assistant answer."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -446,7 +433,7 @@ async def edit_harness_message(
 ):
     """Edit a user message, drop the suffix, and start a rerun (409 busy)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -500,7 +487,7 @@ async def patch_harness_session(
 ):
     """Rename a harness session (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -531,7 +518,7 @@ async def patch_harness_session(
 async def delete_harness_session(request: HttpRequest, session_id: uuid.UUID):
     """Delete a session, aborting any active run first (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -557,7 +544,7 @@ async def delete_harness_session(request: HttpRequest, session_id: uuid.UUID):
 def list_harness_conversations(request: HttpRequest):
     """Return root sessions across the caller's workspaces in the org."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     runner_service = _get_service()
@@ -602,7 +589,7 @@ def list_harness_conversations(request: HttpRequest):
 def mark_harness_session_read(request: HttpRequest, session_id: uuid.UUID):
     """Record that the user opened a harness session (dashboard unread)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -623,7 +610,7 @@ def mark_harness_session_read(request: HttpRequest, session_id: uuid.UUID):
 def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
     """Record that the user explicitly marked a harness session unread."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -646,7 +633,7 @@ def dismiss_harness_notice(
 ):
     """Persist that the user dismissed one stopped/failed notice."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -669,7 +656,7 @@ async def set_harness_session_mode(
 ):
     """Switch mode on an idle session (409 when a run is active)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -705,7 +692,7 @@ async def set_harness_session_mode(
 async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
     """Cancel the active run task and mark message/parts aborted."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -733,7 +720,7 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
 def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
     """Return the session envelope without heavyweight detail fields."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -759,7 +746,7 @@ def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
 def get_harness_part(request: HttpRequest, session_id: uuid.UUID, part_id: uuid.UUID):
     """Return full detail for one part in an owned session."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -780,7 +767,7 @@ def get_harness_part(request: HttpRequest, session_id: uuid.UUID, part_id: uuid.
 def list_harness_todos(request: HttpRequest, session_id: uuid.UUID):
     """Return persisted todos of a session (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
@@ -815,7 +802,7 @@ async def resolve_harness_permission(
 ):
     """Resolve a pending permission request (once|always|reject)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PERMISSIONS):
-        return _perm_denied(APIKeyPermission.HARNESS_PERMISSIONS)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_PERMISSIONS.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -864,7 +851,7 @@ async def resolve_harness_question(
 ):
     """Submit answers for a pending question request (resumes the tool)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PERMISSIONS):
-        return _perm_denied(APIKeyPermission.HARNESS_PERMISSIONS)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_PERMISSIONS.value)
     from asgiref.sync import sync_to_async
 
     org_id = get_organization_id(request)
@@ -914,7 +901,7 @@ async def resolve_harness_question(
 def list_recent_models(request: HttpRequest):
     """Return the user's recent models (newest first, capped server-side)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -936,7 +923,7 @@ def list_recent_models(request: HttpRequest):
 def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
     """Upsert one recent-model row (LRU); called after a successful send."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -972,7 +959,7 @@ def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
 def list_org_agent_configs(request: HttpRequest):
     """Return one row per configurable agent (defaults when unstored)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -994,7 +981,7 @@ def list_org_agent_configs(request: HttpRequest):
 def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
     """Validate and upsert per-agent configs."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1021,7 +1008,7 @@ def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
 def get_org_subagent_config(request: HttpRequest):
     """Return the org subagent config (defaults when unstored)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1042,7 +1029,7 @@ def get_org_subagent_config(request: HttpRequest):
 def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
     """Validate and upsert the org subagent config."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1067,7 +1054,7 @@ def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
 def get_org_computer_use_config(request: HttpRequest):
     """Return the org computer-use config (defaults when unstored)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1090,7 +1077,7 @@ def get_org_computer_use_config(request: HttpRequest):
 def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfigIn):
     """Validate and upsert the org computer-use config."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1117,7 +1104,7 @@ def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfi
 def get_org_provider_config(request: HttpRequest):
     """Return the organization's helper-model and voice defaults."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1138,7 +1125,7 @@ def get_org_provider_config(request: HttpRequest):
 def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
     """Save helper-model and voice defaults; agent models belong to AgentConfig."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
@@ -1154,292 +1141,3 @@ def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.get(
-    "/provider-config/accounts/",
-    response={200: list[ProviderAccountOut], 401: dict, 403: dict, 404: dict},
-    summary="List visible connected provider accounts",
-)
-def list_provider_accounts(request: HttpRequest):
-    """List connected private/shared accounts visible to the current user."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.provider_accounts import ProviderAccountService
-
-        rows = ProviderAccountService().list_accounts(org_id, int(request.user.id))
-        return 200, [ProviderAccountOut(**row) for row in rows if row["connected"]]
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.post(
-    "/provider-config/accounts/{provider}/",
-    response={201: ProviderAccountOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Create a named provider account",
-)
-def create_provider_account(
-    request: HttpRequest, provider: str, payload: ProviderAccountIn
-):
-    """Create one private account or an admin-created org-shared account."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.provider_accounts import ProviderAccountService
-
-        if provider == "chatgpt":
-            raise ValueError("ChatGPT accounts must be connected using OAuth")
-        account = ProviderAccountService().save_account(
-            organization_id=org_id,
-            user=request.user,
-            provider=provider,
-            payload=payload.model_dump(exclude_unset=True),
-        )
-        clear_models_cache(str(org_id))
-        row = next(
-            item
-            for item in ProviderAccountService().list_accounts(
-                org_id, int(request.user.id), provider
-            )
-            if item["id"] == str(account.id)
-        )
-        return 201, ProviderAccountOut(**row)
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, TypeError, KeyError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.put(
-    "/provider-config/accounts/{provider}/{account_id}/",
-    response={200: ProviderAccountOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Update a named provider account",
-)
-def update_provider_account(
-    request: HttpRequest,
-    provider: str,
-    account_id: uuid.UUID,
-    payload: ProviderAccountIn,
-):
-    """Update an exact visible account after verifying its provider."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.provider_accounts import ProviderAccountService
-
-        service = ProviderAccountService()
-        account = service.get_account(
-            org_id, int(request.user.id), account_id, manage=True
-        )
-        if account.provider != provider:
-            raise NotFoundError("ProviderAccount", str(account_id))
-        updated = service.save_account(
-            organization_id=org_id,
-            user=request.user,
-            provider=provider,
-            payload=payload.model_dump(exclude_unset=True),
-            account_id=account_id,
-        )
-        clear_models_cache(str(org_id))
-        row = next(
-            item
-            for item in service.list_accounts(org_id, int(request.user.id), provider)
-            if item["id"] == str(updated.id)
-        )
-        return 200, ProviderAccountOut(**row)
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, TypeError, KeyError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.delete(
-    "/provider-config/accounts/{provider}/{account_id}/",
-    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Delete a named provider account",
-)
-def delete_provider_account(request: HttpRequest, provider: str, account_id: uuid.UUID):
-    """Delete only the exact account when visible and manageable."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.provider_accounts import ProviderAccountService
-
-        service = ProviderAccountService()
-        account = service.get_account(
-            org_id, int(request.user.id), account_id, manage=True
-        )
-        if account.provider != provider:
-            raise NotFoundError("ProviderAccount", str(account_id))
-        service.delete_account(org_id, int(request.user.id), account_id)
-        clear_models_cache(str(org_id))
-        return 204, None
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except ValueError as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.put(
-    "/provider-config/selection/{provider}/",
-    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Select the active provider account for this user and organization",
-)
-def select_provider_account(
-    request: HttpRequest, provider: str, payload: ProviderSelectionIn
-):
-    """Select one visible account or explicitly select no account."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.provider_accounts import ProviderAccountService
-
-        ProviderAccountService().select_account(
-            org_id, int(request.user.id), provider, payload.account_id
-        )
-        return 204, None
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except ValueError as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.post(
-    "/provider-config/providers/chatgpt/oauth/start/",
-    response={
-        200: ChatGPTOAuthStartOut,
-        400: dict,
-        401: dict,
-        403: dict,
-        404: dict,
-        502: dict,
-    },
-    summary="Start ChatGPT device OAuth flow",
-)
-async def start_chatgpt_oauth(request: HttpRequest, payload: ChatGPTOAuthStartIn):
-    """Start an isolated durable ChatGPT flow for the current user."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    from apps.harness.provider_oauth import ProviderOAuthService
-    from apps.harness.providers.base import ProviderError
-
-    try:
-        org_id = get_organization_id(request)
-        result = await ProviderOAuthService().start(
-            organization_id=org_id,
-            user=request.user,
-            label=payload.label,
-            shared=payload.shared,
-            account_id=payload.account_id,
-        )
-        return 200, ChatGPTOAuthStartOut(**result)
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, TypeError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-    except ProviderError:
-        return 502, {
-            "detail": "ChatGPT OAuth provider request failed",
-            "code": "provider_error",
-        }
-
-
-@harness_router.get(
-    "/provider-config/providers/chatgpt/oauth/status/",
-    response={
-        200: ChatGPTOAuthStatusOut,
-        400: dict,
-        401: dict,
-        403: dict,
-        404: dict,
-        410: dict,
-        502: dict,
-    },
-    summary="Poll ChatGPT device OAuth status (single attempt)",
-)
-async def poll_chatgpt_oauth_status(request: HttpRequest, flow_id: uuid.UUID):
-    """Poll one user's flow once; flow IDs are private to their creator."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    from apps.harness.provider_oauth import ProviderOAuthService
-    from apps.harness.providers.base import ProviderError
-
-    try:
-        result = await ProviderOAuthService().status(
-            organization_id=get_organization_id(request),
-            user=request.user,
-            flow_id=flow_id,
-        )
-        if result["status"] == "no_flow":
-            return 404, {
-                **result,
-                "detail": "No pending ChatGPT OAuth flow",
-                "code": "no_flow",
-            }
-        if result["status"] == "expired":
-            return 410, result
-        return 200, ChatGPTOAuthStatusOut(**result)
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, TypeError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-    except ProviderError:
-        return 502, {
-            "detail": "ChatGPT OAuth provider request failed",
-            "code": "provider_error",
-        }
-
-
-@harness_router.post(
-    "/provider-config/providers/chatgpt/oauth/cancel/",
-    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Cancel one pending ChatGPT OAuth flow",
-)
-async def cancel_chatgpt_oauth(request: HttpRequest, payload: ChatGPTOAuthCancelIn):
-    """Cancel the caller's explicitly identified OAuth flow."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    from apps.harness.provider_oauth import ProviderOAuthService
-
-    try:
-        from asgiref.sync import sync_to_async
-
-        cancelled = await sync_to_async(ProviderOAuthService().cancel)(
-            organization_id=get_organization_id(request),
-            user=request.user,
-            flow_id=payload.flow_id,
-        )
-        if not cancelled:
-            return 404, {"detail": "No pending OAuth flow", "code": "no_flow"}
-        return 204, None
-    except (ValueError, TypeError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}

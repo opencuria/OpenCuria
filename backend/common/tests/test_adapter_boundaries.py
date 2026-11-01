@@ -416,6 +416,56 @@ def test_lifecycle_outbox_never_imports_its_consumers(dependencies) -> None:
     assert not violations, "\n".join(sorted(violations))
 
 
+def test_provider_account_routes_delegate_management_policy(
+    trees, dependencies
+) -> None:
+    """Account routes must not compose credential mutations or catalog policy."""
+    path = APPS_ROOT / "harness" / "provider_accounts_api.py"
+    imports = dependencies[_module_name(path)]
+    assert "apps.harness.provider_account_management_service" in imports
+    violations = sorted(
+        module
+        for module in imports
+        if _within(module, {"apps.harness.model_catalog_service"})
+    )
+    violations.extend(
+        f"{node.lineno}: {node.attr}"
+        for node in ast.walk(trees[path])
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"get_account", "save_account", "list_accounts", "provider"}
+    )
+    violations.extend(
+        f"{node.lineno}: connected account policy"
+        for node in ast.walk(trees[path])
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Constant)
+        and node.slice.value == "connected"
+    )
+    violations.extend(
+        f"{node.lineno}: ProviderAccountService.{node.func.attr}"
+        for node in ast.walk(trees[path])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Call)
+        and isinstance(node.func.value.func, ast.Name)
+        and node.func.value.func.id == "ProviderAccountService"
+        and node.func.attr != "select_account"
+    )
+    assert not violations, "\n".join(sorted(violations))
+
+
+def test_provider_account_management_is_independent_of_transport(
+    trees, dependencies
+) -> None:
+    """Account workflows must be reusable without REST, realtime or MCP adapters."""
+    adapters = {_module_name(path) for path in _adapter_modules(trees)}
+    root = "apps.harness.provider_account_management_service"
+    violations = _dependency_violations(
+        dependencies, {root}, lambda imported: _within(imported, adapters)
+    )
+    assert not violations, "\n".join(sorted(violations))
+
+
 def test_scheduled_restart_recovery_reaches_harness_only_through_its_service(
     dependencies,
 ) -> None:

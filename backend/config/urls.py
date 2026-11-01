@@ -22,6 +22,7 @@ from apps.credentials.oauth_api import credential_oauth_router, service_oauth_ro
 from apps.harness.api import harness_router
 from apps.harness.commit_message_api import commit_message_router
 from apps.harness.engines.api import engines_router
+from apps.harness.provider_accounts_api import provider_accounts_router
 from apps.harness.voice_api import voice_router, voice_settings_router
 from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
@@ -77,6 +78,7 @@ api.add_router("/credentials/", credential_router)
 api.add_router("/credentials/", credential_oauth_router)
 api.add_router("/skills/", skill_router)
 api.add_router("/", harness_router)
+api.add_router("/", provider_accounts_router)
 api.add_router("/", engines_router)
 api.add_router("/", scheduled_task_router)
 api.add_router("/org-credential-services/", org_credential_service_router)

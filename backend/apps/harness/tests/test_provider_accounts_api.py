@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness import model_catalog_service
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.organizations.models import Membership, MembershipRole
 from common.utils import generate_api_token, hash_token
@@ -312,3 +313,58 @@ def test_account_api_requires_provider_permission(accounts_setup, method, path):
     )
     assert getattr(denied, method)(path, **kwargs).status_code == 403
     assert getattr(_client(outsider, org), method)(path, **kwargs).status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_account_mutations_invalidate_only_their_organization_catalog(
+    accounts_setup, monkeypatch
+):
+    """Successful writes invalidate catalogs; rejected writes leave them intact."""
+    org, _admin, member, _outsider = accounts_setup
+    client = _client(member, org)
+    cache = model_catalog_service.ModelsCatalogCache()
+    monkeypatch.setattr(model_catalog_service, "_catalog_cache", cache)
+    key = f"{org.id}:accounts:cached"
+    other_key = f"{uuid.uuid4()}:accounts:cached"
+    cache.set(other_key, [])
+    cache.set(key, [])
+
+    created = _post(client, "openrouter", {"api_key": "private-key"})
+    assert created.status_code == 201
+    assert cache.get(key) is None
+    assert cache.get(other_key) == []
+    account_id = created.json()["id"]
+
+    cache.set(key, [])
+    wrong_provider = _put(client, "chatgpt", account_id, {"label": "Rejected"})
+    assert wrong_provider.status_code == 404
+    assert cache.get(key) == []
+    wrong_delete = client.delete(f"{ACCOUNTS}chatgpt/{account_id}/")
+    assert wrong_delete.status_code == 404
+    assert cache.get(key) == []
+    assert client.get(ACCOUNTS).json()[0]["id"] == account_id
+
+    updated = _put(client, "openrouter", account_id, {"label": "Renamed"})
+    assert updated.status_code == 200
+    assert updated.json()["label"] == "Renamed"
+    assert cache.get(key) is None
+    assert cache.get(other_key) == []
+
+    cache.set(key, [])
+    assert client.delete(f"{ACCOUNTS}openrouter/{account_id}/").status_code == 204
+    assert cache.get(key) is None
+    assert cache.get(other_key) == []
+
+
+@pytest.mark.django_db
+def test_chatgpt_account_creation_requires_oauth(accounts_setup):
+    """Direct creation cannot bypass the OAuth connection workflow."""
+    org, _admin, member, _outsider = accounts_setup
+    client = _client(member, org)
+    result = _post(client, "chatgpt", {"label": "ChatGPT"})
+    assert result.status_code == 400
+    assert result.json() == {
+        "detail": "ChatGPT accounts must be connected using OAuth",
+        "code": "validation_error",
+    }
+    assert client.get(ACCOUNTS).json() == []
