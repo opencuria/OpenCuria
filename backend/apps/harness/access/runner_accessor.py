@@ -378,10 +378,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         self._emit = emit
         self._default_timeout = default_timeout
         self._desktop_geometry = desktop_geometry
-        # Optional request/response transport for stream control events
-        # (``workspace:stream_start/input/close`` need Socket.IO ACKs).
-        # Falls back to :meth:`_emit_no_ack` when the service only offers
-        # fire-and-forget emit — stream opens then fail closed on ACK wait.
+        # Stream control requires Socket.IO ACKs; file/exec RPCs use emit.
         self._call = call
         self._on_stderr = on_stderr
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -1140,10 +1137,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
     # -- Generic byte streams (workspace:stream_* transport) ---------------
 
-    async def _emit_no_ack(self, event: str, payload: dict[str, Any]) -> None:
-        """Fire-and-forget emit used when no ACK transport is wired."""
-        await self._emit(event, payload)
-
     async def _stream_call(
         self,
         event: str,
@@ -1151,26 +1144,22 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None,
     ) -> dict[str, Any]:
         """Send a stream control event and wait for the runner ACK."""
+        if self._call is None:
+            raise RunnerAccessorError(
+                f"{event} failed: no acknowledgement transport configured"
+            )
         timeout_s = self._resolve_timeout(timeout)
-        if self._call is not None:
-            try:
-                result = await asyncio.wait_for(
-                    self._call(event, payload, timeout_s), timeout_s
-                )
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    f"Harness request '{event}' timed out "
-                    f"after {timeout_s:.1f}s"
-                ) from exc
-            if isinstance(result, dict):
-                return result
-            return {"ok": True, "result": result}
-        # No ACK transport: emit without ACK and fail closed (the runner
-        # cannot confirm the open; callers must not assume success).
-        await self._emit_no_ack(event, payload)
-        raise RunnerAccessorError(
-            f"{event} failed: no acknowledgement transport configured"
-        )
+        try:
+            result = await asyncio.wait_for(
+                self._call(event, payload, timeout_s), timeout_s
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Harness request '{event}' timed out after {timeout_s:.1f}s"
+            ) from exc
+        if not isinstance(result, dict):
+            raise RunnerAccessorError(f"{event} failed: invalid acknowledgement")
+        return result
 
     def _register_byte_stream(self, connection_id: str) -> _StreamState:
         """Register bounded queue state for one open byte stream."""
@@ -1446,19 +1435,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 self._loop.call_soon_threadsafe(_fail)
                 return
         _fail()
-
-    async def cancel_stream(self, connection_id: str) -> None:
-        """Cancel one open byte stream (timeout/owner-gone path).
-
-        Sends best-effort remote close and unregisters routing state so
-        a later harness-run ``aclose`` is a no-op. Fail-closed: unknown
-        ids raise ``StreamClosedError``.
-        """
-        if connection_id not in self._byte_streams:
-            raise StreamClosedError(
-                f"stream {connection_id!r} is not open"
-            )
-        await self._stream_close(connection_id)
 
     async def _stream_receive(self, connection_id: str) -> bytes:
         """Return the next stdout chunk for *connection_id* (``b""`` = EOF).

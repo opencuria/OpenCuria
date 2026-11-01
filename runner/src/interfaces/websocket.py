@@ -1194,12 +1194,11 @@ class WebSocketInterface(Interface):
                 if existing is not None and not existing.done():
                     raise ValueError(f"Duplicate connection_id: {conn_echo!r}")
                 if kind == "process":
-                    command = raw.get("command", raw.get("args", []))
                     await self._service.streams.stream_start_process(
                         workspace_id,
                         conn_echo,
-                        command,
-                        workdir=raw.get("workdir", raw.get("cwd", "/workspace")),
+                        raw.get("command", []),
+                        workdir=raw.get("workdir", "/workspace"),
                         env=raw.get("env", {}),
                         **(
                             {"owner": raw["owner"]}
@@ -1821,20 +1820,6 @@ class WebSocketInterface(Interface):
                     },
                 )
                 logger.exception("harness_process_verify_failed")
-
-        @sio.on("workspace:stream_cancel")
-        async def on_workspace_stream_cancel(data: dict) -> None:
-            raw = data if isinstance(data, dict) else {}
-            conn = raw.get("connection_id", "")
-            if not isinstance(conn, str) or not conn.strip():
-                logger.warning("stream_cancel_missing_connection_id")
-                return
-            task = self._running_tasks.pop(f"stream:{conn}", None)
-            if task is not None and not task.done():
-                task.cancel()
-                logger.info("stream_cancelled", connection_id=conn)
-            with contextlib.suppress(Exception):
-                await self._service.streams.stream_close(conn)
 
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:

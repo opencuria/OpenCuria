@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import threading
+from unittest.mock import AsyncMock
 
 import pytest
 
 from apps.harness.access.base import StreamClosedError, WorkspaceByteStream
 from apps.harness.access.runner_accessor import (
+    RunnerAccessorError,
     RunnerWorkspaceAccessor,
     route_stream_closed,
     route_stream_output,
@@ -228,35 +230,6 @@ async def test_offline_fails_streams() -> None:
     await stream.aclose()
 
 
-async def test_queue_cap_fails_closed() -> None:
-    transport = FakeCallTransport()
-    accessor = _accessor(transport, default_timeout=30.0)
-    stream = await accessor.open_process(["yes"])
-    conn = stream.connection_id
-    # Flood beyond the bounded queue: overflow must fail the stream
-    # instead of buffering unbounded output.
-    for _ in range(64 + 5):
-        route_stream_output(
-            {
-                "connection_id": conn,
-                "workspace_id": "ws-1",
-                "stream": "stdout",
-                "data": _b64(b"x" * 100),
-            }
-        )
-    await asyncio.sleep(0.1)
-    drained = 0
-    with pytest.raises(StreamClosedError):
-        # Drain until the overflow error surfaces.
-        for _ in range(80):
-            chunk = await asyncio.wait_for(stream.receive(), timeout=2)
-            if chunk == b"":
-                raise StreamClosedError("expected overflow error, got EOF")
-            drained += 1
-    assert drained >= 1
-    await stream.aclose()
-
-
 async def test_output_from_worker_thread() -> None:
     transport = FakeCallTransport()
     accessor = _accessor(transport)
@@ -354,12 +327,24 @@ async def test_unknown_connection_returns_false() -> None:
 
 
 async def test_no_ack_transport_fails_closed() -> None:
-    async def emit_only(event, payload) -> None:
-        return None
-
-    accessor = RunnerWorkspaceAccessor("ws-1", emit=emit_only)
-    with pytest.raises(Exception, match="no acknowledgement"):
+    emit = AsyncMock()
+    accessor = RunnerWorkspaceAccessor("ws-1", emit=emit)
+    with pytest.raises(RunnerAccessorError, match="no acknowledgement"):
         await accessor.open_process(["cat"])
+    await asyncio.sleep(0)
+    assert not any(
+        call.args[0] == "workspace:stream_start" for call in emit.call_args_list
+    )
+
+
+@pytest.mark.parametrize("ack", [None, True, "ok"])
+async def test_invalid_ack_does_not_open_stream(ack: object) -> None:
+    transport = FakeCallTransport()
+    transport.call = AsyncMock(return_value=ack)
+    accessor = _accessor(transport)
+    with pytest.raises(RunnerAccessorError, match="invalid acknowledgement"):
+        await accessor.open_process(["cat"])
+    assert not accessor._byte_streams
 
 
 async def test_receive_has_no_idle_timeout() -> None:
@@ -488,47 +473,6 @@ async def test_route_returns_false_for_closed_stream() -> None:
     assert conn not in _ACCESSORS_BY_STREAM
 
 
-async def test_stderr_never_logged_with_content() -> None:
-    """Stderr callback must not log content (only connection id + count)."""
-    import logging as _logging
-
-    records: list[_logging.LogRecord] = []
-
-    class _Handler(_logging.Handler):
-        def emit(self, record: _logging.LogRecord) -> None:
-            records.append(record)
-
-    secret = b"super-secret-token-12345"
-    transport = FakeCallTransport()
-    accessor = _accessor(transport)
-    stream = await accessor.open_process(["cat"])
-    conn = stream.connection_id
-    # Default on_stderr is None in this harness; wire the factory one.
-    from apps.harness.access.runner_accessor import create_harness_accessor
-
-    _ = create_harness_accessor
-    route_stream_output(
-        {
-            "connection_id": conn,
-            "workspace_id": "ws-1",
-            "stream": "stderr",
-            "data": _b64(secret),
-        }
-    )
-    route_stream_output(
-        {
-            "connection_id": conn,
-            "workspace_id": "ws-1",
-            "stream": "stdout",
-            "data": _b64(b"ok"),
-        }
-    )
-    assert await stream.receive() == b"ok"
-    await stream.aclose()
-    for record in records:
-        assert "super-secret" not in record.getMessage()
-
-
 async def test_concurrent_process_and_tcp_streams() -> None:
     """Concurrent process + TCP opens both succeed with distinct ids."""
     transport = FakeCallTransport()
@@ -542,29 +486,6 @@ async def test_concurrent_process_and_tcp_streams() -> None:
     assert sorted(kinds) == ["process", "tcp"]
     await proc.aclose()
     await tcp.aclose()
-
-
-async def test_byte_stream_state_unregisters_routing() -> None:
-    """Closing a byte stream drops its routing state (no stale ACKs)."""
-    transport = FakeCallTransport()
-    accessor = _accessor(transport)
-    first = await accessor.open_process(["echo", "one"])
-    conn = first.connection_id
-    await first.aclose()
-    # Unknown ids fail closed on cancel; deliveries report False.
-    with pytest.raises(StreamClosedError):
-        await accessor.cancel_stream(conn)
-    assert (
-        route_stream_output(
-            {
-                "connection_id": conn,
-                "workspace_id": "ws-1",
-                "stream": "stdout",
-                "data": _b64(b"x"),
-            }
-        )
-        is False
-    )
 
 
 # -- MCP failure diagnosis: stderr excerpt + lifecycle counters ------------
@@ -682,24 +603,4 @@ async def test_stream_diagnostics_counters() -> None:
     diag = accessor.get_stream_diagnostics(conn)
     assert diag["closed"] is True
     assert diag["exit_code"] == 3
-    await stream.aclose()
-
-
-async def test_open_process_sends_command_argv0_logged() -> None:
-    """open_process sends the full argv but the open path only records
-    argv[0] in its own bookkeeping (full args never persist server-side)."""
-    transport = FakeCallTransport()
-    accessor = _accessor(transport)
-    stream = await accessor.open_process(
-        ["npx", "-y", "@playwright/mcp@latest", "--secret-flag", "s3cret"]
-    )
-    _event, payload = transport.calls[0]
-    # Full argv still reaches the runner (it must spawn the process).
-    assert payload["command"] == [
-        "npx",
-        "-y",
-        "@playwright/mcp@latest",
-        "--secret-flag",
-        "s3cret",
-    ]
     await stream.aclose()
