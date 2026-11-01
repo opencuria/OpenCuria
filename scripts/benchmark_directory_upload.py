@@ -35,9 +35,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "runner"))
 
 from src import chunking  # noqa: E402
+from src.application import RunnerApplication  # noqa: E402
 from src.chunking import CHUNK_B64_SIZE  # noqa: E402
 from src.config import RunnerSettings  # noqa: E402
-from src.interfaces.websocket import WebSocketInterface  # noqa: E402
 from src.models import WorkspaceInfo  # noqa: E402
 from src.service import WorkspaceService  # noqa: E402
 from src.services.files import FileManager  # noqa: E402
@@ -118,7 +118,8 @@ async def _measure(
         )
         manager.capture_fence = service.capture_fence
         managers[variant] = manager
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(service, settings)
+    interface = application.interface
     emitted: list[dict] = []
 
     async def emit(event: str, payload: dict, **kwargs: Any) -> None:
@@ -168,7 +169,7 @@ async def _measure(
                 "status": "success",
             }
         ]
-        assert not interface._upload_transfers
+        assert not interface._uploads._uploads
 
     async def timed(variant: str) -> tuple[float, float, float]:
         service.files = managers[variant]

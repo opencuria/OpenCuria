@@ -37,6 +37,12 @@ def builder(tmp_path, monkeypatch):
     # Test-driver guests do not consume physical CPUs; host admission tests
     # override this value explicitly to exercise one-core hardware.
     monkeypatch.setattr("src.runtime.qemu_runtime.psutil.cpu_count", lambda: 8)
+    # Synthetic guests must not depend on concurrent host memory pressure.
+    # Capacity tests override this observation with their own bounded scenarios.
+    monkeypatch.setattr(
+        "src.runtime.qemu_runtime.psutil.virtual_memory",
+        lambda: SimpleNamespace(total=16 * 1024**3, available=15 * 1024**3),
+    )
     r = runtime(tmp_path)
     r._settings = SimpleNamespace(
         qemu_image_cache_dir=str(tmp_path / "images"),

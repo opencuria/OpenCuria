@@ -38,6 +38,20 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+  execution:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
+    build: *backend_build
+    container_name: opencuria_local_execution
+    restart: unless-stopped
+    entrypoint: [python, manage.py, execute_harness]
+    environment: *id002
+    volumes: *id003
+    networks: *id004
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_started
   webapp:
     image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     build:

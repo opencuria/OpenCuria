@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock
-
 import pytest
 
-from common.process_ownership import BackendProcessGuard, backend_process_lock_path
+from common.process_ownership import ExecutionProcessGuard, execution_process_lock_path
 
 
 def test_live_process_keeps_lock_until_descriptor_closes(tmp_path):
-    path = tmp_path / "backend.asgi.lock"
-    owner = BackendProcessGuard(path)
-    contender = BackendProcessGuard(path)
+    path = tmp_path / "backend.execution.lock"
+    owner = ExecutionProcessGuard(path)
+    contender = ExecutionProcessGuard(path)
     owner.acquire()
     try:
-        with pytest.raises(RuntimeError, match="Another live backend process"):
+        with pytest.raises(RuntimeError, match="Another live execution process"):
             contender.acquire()
         with pytest.raises(RuntimeError, match="already started"):
             owner.acquire()
@@ -30,57 +27,12 @@ def test_live_process_keeps_lock_until_descriptor_closes(tmp_path):
 def test_lock_identity_follows_sqlite_data_and_supports_shared_override(
     tmp_path, settings, monkeypatch
 ):
-    monkeypatch.delenv("BACKEND_PROCESS_LOCK_PATH", raising=False)
+    monkeypatch.delenv("EXECUTION_PROCESS_LOCK_PATH", raising=False)
     settings.DATABASES = {
         "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": tmp_path / "db"}
     }
-    assert backend_process_lock_path() == tmp_path / "db.asgi.lock"
+    assert execution_process_lock_path() == tmp_path / "db.execution.lock"
     settings.DATABASES["default"]["NAME"] = tmp_path / "other"
-    assert backend_process_lock_path() == tmp_path / "other.asgi.lock"
-    monkeypatch.setenv("BACKEND_PROCESS_LOCK_PATH", str(tmp_path / "shared-lock"))
-    assert backend_process_lock_path() == tmp_path / "shared-lock"
-
-
-@pytest.mark.asyncio
-async def test_expired_database_lease_cannot_start_repair_while_owner_lives(
-    tmp_path, monkeypatch
-):
-    from config import asgi
-
-    owner = BackendProcessGuard(tmp_path / "backend.lock")
-    contender = BackendProcessGuard(owner.path)
-    owner.acquire()
-
-    class FakeScheduler:
-        # A database lease could already be expired or its connection lost.
-        start = AsyncMock()
-        stop = AsyncMock()
-
-    class FakeRecovery:
-        start = AsyncMock()
-        stop = AsyncMock()
-
-    monkeypatch.setattr(
-        "common.process_ownership.acquire_backend_process_guard", contender.acquire
-    )
-    monkeypatch.setattr(
-        "apps.scheduled_tasks.services.ScheduledTaskScheduler", FakeScheduler
-    )
-    monkeypatch.setattr(
-        "apps.harness.recovery_worker.HarnessRecoveryWorker", FakeRecovery
-    )
-    incoming = asyncio.Queue()
-    await incoming.put({"type": "lifespan.startup"})
-    outgoing = []
-
-    async def send(message):
-        outgoing.append(message)
-
-    try:
-        await asgi.application({"type": "lifespan"}, incoming.get, send)
-        FakeScheduler.start.assert_not_awaited()
-        FakeRecovery.start.assert_not_awaited()
-        assert outgoing[0]["type"] == "lifespan.startup.failed"
-        assert "Another live backend process" in outgoing[0]["message"]
-    finally:
-        owner.release_failed_start()
+    assert execution_process_lock_path() == tmp_path / "other.execution.lock"
+    monkeypatch.setenv("EXECUTION_PROCESS_LOCK_PATH", str(tmp_path / "shared-lock"))
+    assert execution_process_lock_path() == tmp_path / "shared-lock"

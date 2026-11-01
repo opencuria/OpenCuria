@@ -1,5 +1,8 @@
 """Independent recovery work progresses while failing stages remain unhealthy."""
 
+from apps.runners.services.infra.frontend_bus import FrontendBusService
+
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -8,7 +11,6 @@ import pytest
 from apps.runners.deletion_repository import DeletionRepository
 from apps.runners.inventory_repository import InventoryRepository
 from apps.runners.operations import OperationRepository
-from apps.runners.services import RunnerService
 from apps.runners.services.capture import CaptureService
 from apps.runners.services.image_retention import ImageRetentionService
 from apps.runners.services.recovery import RecoveryService
@@ -83,9 +85,9 @@ async def test_notification_failure_does_not_block_other_results_or_delivery(
         {"workspace_id": "second", "status": "running", "diagnostic": ""},
     ]
     notification = Mock(side_effect=[ConnectionError("frontend unavailable"), None])
-    monkeypatch.setattr(RunnerService, "_forward_to_frontend", notification)
+    monkeypatch.setattr(FrontendBusService, 'forward_to_frontend', notification)
     completed = Mock()
-    monkeypatch.setattr(RunnerService, "_forward_workspace_operation", completed)
+    monkeypatch.setattr(FrontendBusService, 'forward_workspace_operation', completed)
     transport = AsyncMock()
     with pytest.raises(RuntimeError, match="stages failed: notification"):
         await RecoveryService().tick(transport)

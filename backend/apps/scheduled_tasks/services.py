@@ -949,7 +949,7 @@ class ScheduledTaskService:
 
 
 class ScheduledTaskScheduler:
-    """Single asyncio-loop scheduler started only by ASGI lifespan."""
+    """Single asyncio-loop scheduler started only by the execution worker."""
 
     def __init__(
         self,
@@ -982,7 +982,7 @@ class ScheduledTaskScheduler:
             await lease.release()
             raise RuntimeError(
                 "Another backend process owns the scheduled-task scheduler; "
-                "run exactly one backend ASGI worker"
+                "run exactly one execution worker"
             )
         self._lease = lease
         try:

@@ -24,6 +24,21 @@ their libvirt domain is gone before removing the network, disk, seed ISO, or hos
 key. Failed stop, undefine, or domain enumeration retains those resources for
 retry. Incomplete storage inventories and physical dependents still block removal.
 
+## Persistent command execution
+
+`RunnerApplication` owns composition and shutdown. Socket.IO registers lifecycle
+commands once and dispatches them to `OperationExecutor.execute(event, data)`.
+The executor commits admission, invokes the transport-neutral `LifecycleCommands`
+service, validates its `CommandResult`, commits the terminal result, and publishes
+its replayable envelope. Progress uses a separate best-effort publication port.
+No component replaces Socket.IO methods or inspects already registered handlers.
+
+`WorkspaceEvidence` records initialization and credential-scrub proofs while the
+lifecycle mutex is held. Its journal is injected into `WorkspaceService` by the
+application, independently of the WebSocket adapter. Reconnects replay committed
+outcomes; cancellation of a delivery waiter cannot cancel admitted runtime work.
+Shutdown drains effects before the application releases the journal writer lock.
+
 ## VM memory reclamation
 
 VMs enable virtio-balloon [free page reporting][free-page-reporting] so the host

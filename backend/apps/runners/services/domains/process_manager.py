@@ -1,27 +1,13 @@
-"""Background process management (Phase 3 domain mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces``,
-``self.tasks``, ``self.processes``, ``self._process_pending`` plus sibling
-helpers (``_emit_to_runner`` via ``RunnerTransportMixin``,
-``_forward_*`` / ``_push_process_*`` via ``FrontendBusMixin``,
-``_ensure_process_dispatchable`` / ``_validate_task_runner`` /
-``_validate_harness_workspace_runner`` via ``OwnershipMixin``). Lazy
-``django`` imports stay inside the method bodies; harness streams are
-failed through the ``HarnessGateway`` port. The single
-``RunnerService._process_log_paths`` call inside the static
-``_process_verify_candidates`` became the explicit
-``ProcessManagerMixin._process_log_paths`` (same staticmethod, class name
-instead of facade name — no circular import, no behaviour change).
-"""
+"""Manage workspace process definitions and their correlated runner RPCs."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 
@@ -30,13 +16,43 @@ from common.utils import generate_uuid
 
 from ...enums import ProcessStatus, WorkspaceStatus
 from ...exceptions import RunnerOfflineError, WorkspaceNotFoundError
+from ..infra.rpc_registry import PendingProcessRequest
 from ..process_lookup import ProcessLookupService
+
+if TYPE_CHECKING:
+    from ...models import Runner, Workspace, WorkspaceProcess
+    from ...process_repository import WorkspaceProcessRepository
+    from ...repositories import WorkspaceRepository
+    from ..infra.frontend_bus import FrontendBusService
+    from ..infra.ownership import OwnershipService
+    from ..infra.rpc_registry import RpcRegistryService
+    from ..ports import HarnessGateway, RunnerTransport
 
 logger = logging.getLogger(__name__)
 
 
-class ProcessManagerMixin:
-    """Workspace background-process RPCs shared by RunnerService."""
+class ProcessManagerService:
+    """Workspace background-process RPCs with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        processes: type[WorkspaceProcessRepository],
+        workspaces: type[WorkspaceRepository],
+        frontend_bus: FrontendBusService,
+        harness: Callable[[], HarnessGateway],
+        ownership: OwnershipService,
+        rpc_registry: RpcRegistryService,
+        runner_transport: RunnerTransport,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.processes = processes
+        self.workspaces = workspaces
+        self.frontend_bus = frontend_bus
+        self.harness = harness
+        self.ownership = ownership
+        self.rpc_registry = rpc_registry
+        self.runner_transport = runner_transport
 
     # ------------------------------------------------------------------
     # Background processes (workspace-bound, no auto-restart)
@@ -44,7 +60,7 @@ class ProcessManagerMixin:
 
     # Runner harness:process_* handlers only emit *_result events (no
     # Socket.IO ACK payload), so process RPCs correlate via request_id
-    # futures stored in ``self._process_pending`` (cf. harness accessor).
+    # futures stored in ``self.rpc_registry.process_pending`` (cf. harness accessor).
     _PROCESS_RPC_TIMEOUT_SECONDS = 30
     _PROCESS_LIVE_TIMEOUT_SECONDS = 10
 
@@ -73,21 +89,31 @@ class ProcessManagerMixin:
         event: str,
         data: dict,
         runner_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Route a harness:process_*_result reply to its waiter (sync).
 
         Called from Socket.IO handlers via ``sync_to_async``. Validates
         that the workspace belongs to the sending runner, then resolves
         the correlated request future.
         """
-        if event not in self._PROCESS_RESULT_EVENTS:
-            return
+        if event not in self._PROCESS_RESULT_EVENTS or not isinstance(data, dict):
+            return False
         workspace_id = str(data.get("workspace_id", ""))
         request_id = str(data.get("request_id", ""))
         if not request_id:
             logger.warning("%s rejected: missing request_id", event)
-            return
-        if runner_id and workspace_id:
+            return False
+        pending = self.rpc_registry.process_pending.get(request_id)
+        if pending is None or pending.future.done():
+            return False
+        if (
+            workspace_id != pending.workspace_id
+            or event != pending.result_event
+            or (runner_id is not None and runner_id != pending.runner_id)
+        ):
+            logger.warning("%s rejected: process request context mismatch", event)
+            return False
+        if runner_id:
             try:
                 workspace_uuid = uuid.UUID(workspace_id)
             except (ValueError, TypeError):
@@ -96,12 +122,12 @@ class ProcessManagerMixin:
                     event,
                     workspace_id,
                 )
-                return
-            if not self._validate_harness_workspace_runner(
+                return False
+            if not self.ownership.validate_harness_workspace_runner(
                 workspace_uuid, runner_id
             ):
-                return
-        self._resolve_process_future(request_id, data)
+                return False
+        return self.rpc_registry.resolve_process_future(request_id, data)
 
     async def _await_process_result(
         self,
@@ -109,22 +135,27 @@ class ProcessManagerMixin:
         request_id: str,
         event: str,
         payload: dict,
-        runner: "Runner",
+        runner: Runner,
         timeout: float,
     ) -> dict:
         """Emit a process RPC and wait for its correlated result."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self._process_pending[request_id] = future
+        self.rpc_registry.process_pending[request_id] = PendingProcessRequest(
+            future=future,
+            workspace_id=str(payload["workspace_id"]),
+            result_event=f"{event}_result",
+            runner_id=str(runner.id),
+        )
         try:
-            await self._emit_to_runner(runner, event, payload)
+            await self.runner_transport.emit_to_runner(runner, event, payload)
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError as exc:
             raise ConflictError(
                 f"Runner did not respond to '{event}' within {timeout:.0f}s"
             ) from exc
         finally:
-            self._process_pending.pop(request_id, None)
+            self.rpc_registry.process_pending.pop(request_id, None)
             if not future.done():
                 future.cancel()
 
@@ -165,7 +196,7 @@ class ProcessManagerMixin:
         *,
         kind: str | None = None,
         session_id: uuid.UUID | str | None = None,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Resolve a process by id or exact name, scoped to a workspace.
 
         Temp names require a session; user controls can address temp rows by
@@ -175,9 +206,7 @@ class ProcessManagerMixin:
         parsed_session = self._coerce_session_id(session_id)
         resolved = await sync_to_async(
             ProcessLookupService(repository=self.processes).resolve
-        )(
-            workspace_id, id_or_name, kind=kind, session_id=parsed_session
-        )
+        )(workspace_id, id_or_name, kind=kind, session_id=parsed_session)
         if resolved is None:
             raise WorkspaceNotFoundError(str(id_or_name))
         return resolved
@@ -203,7 +232,7 @@ class ProcessManagerMixin:
         return cleaned
 
     @staticmethod
-    def _assert_not_temp(process: "WorkspaceProcess", *, action: str) -> None:
+    def _assert_not_temp(process: WorkspaceProcess, *, action: str) -> None:
         """Reject user-driven start/restart/delete of temp processes."""
         if str(getattr(process, "kind", "") or "") == "temp":
             raise ConflictError(
@@ -222,7 +251,7 @@ class ProcessManagerMixin:
         user=None,
         session_id: uuid.UUID | str | None = None,
         kind: str | None = None,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Start a detached background process in a workspace (upsert by name).
 
         The process ``name`` is the identity within its workspace: a new
@@ -251,7 +280,7 @@ class ProcessManagerMixin:
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
-        runner = self._ensure_process_dispatchable(workspace)
+        runner = self.ownership.ensure_process_dispatchable(workspace)
 
         cleaned_name = self._clean_process_name(name)
         cleaned_command = (command or "").strip()
@@ -311,9 +340,9 @@ class ProcessManagerMixin:
                 # Race: a concurrent start won the unique name slot —
                 # retry once as a restart of the winner (same kind scope).
                 if parsed_kind == "temp":
-                    winner = await sync_to_async(
-                        self.processes.get_temp_by_name
-                    )(workspace_id, cleaned_name, parsed_session)
+                    winner = await sync_to_async(self.processes.get_temp_by_name)(
+                        workspace_id, cleaned_name, parsed_session
+                    )
                 else:
                     winner = await sync_to_async(self.processes.get_by_name)(
                         workspace_id, cleaned_name
@@ -324,9 +353,10 @@ class ProcessManagerMixin:
                 process_id = winner.id
                 if winner.status == ProcessStatus.RUNNING:
                     await self._stop_running_process(workspace, winner)
-                    winner = await sync_to_async(self.processes.get_by_id)(
-                        winner.id
-                    ) or winner
+                    winner = (
+                        await sync_to_async(self.processes.get_by_id)(winner.id)
+                        or winner
+                    )
                     existing = winner
                 run_count = max(winner.run_count or 0, 0) + 1
                 await sync_to_async(self.processes.update_for_restart)(
@@ -339,9 +369,7 @@ class ProcessManagerMixin:
                     session_id=parsed_session,
                 )
 
-        log_path_abs, exit_path_abs = self._process_log_paths(
-            process_id, run_count
-        )
+        log_path_abs, exit_path_abs = self._process_log_paths(process_id, run_count)
         request_id = uuid.uuid4().hex
         try:
             result = await self._await_process_result(
@@ -368,7 +396,7 @@ class ProcessManagerMixin:
                 status=ProcessStatus.FAILED,
                 exit_code=None,
             )
-            self._push_process_status(
+            self.frontend_bus.push_process_status(
                 workspace_id=str(workspace_id),
                 process_id=str(process_id),
                 status=ProcessStatus.FAILED,
@@ -383,7 +411,7 @@ class ProcessManagerMixin:
                 status=ProcessStatus.FAILED,
                 exit_code=None,
             )
-            self._push_process_status(
+            self.frontend_bus.push_process_status(
                 workspace_id=str(workspace_id),
                 process_id=str(process_id),
                 status=ProcessStatus.FAILED,
@@ -401,10 +429,8 @@ class ProcessManagerMixin:
         )
         refreshed = await sync_to_async(self.processes.get_by_id)(process_id)
         if refreshed is None:
-            raise ConflictError(
-                f"Process record {process_id} vanished after start"
-            )
-        self._push_process_status(
+            raise ConflictError(f"Process record {process_id} vanished after start")
+        self.frontend_bus.push_process_status(
             workspace_id=str(workspace_id),
             process_id=str(process_id),
             status=ProcessStatus.RUNNING,
@@ -423,9 +449,9 @@ class ProcessManagerMixin:
 
     async def _stop_running_process(
         self,
-        workspace: "Workspace",
-        stored: "WorkspaceProcess",
-    ) -> "WorkspaceProcess":
+        workspace: Workspace,
+        stored: WorkspaceProcess,
+    ) -> WorkspaceProcess:
         """Stop a RUNNING record via the runner (SIGTERM, then SIGKILL).
 
         Shared by :meth:`stop_process`, :meth:`start_process` (restart via
@@ -455,15 +481,13 @@ class ProcessManagerMixin:
                 # process may still live: verify once — a reattached
                 # "running" answer means the stop must be retried
                 # against the revived entry instead of marking EXITED.
-                verified = await self._verify_process_candidates(
-                    workspace, [stored]
+                verified = await self._verify_process_candidates(workspace, [stored])
+                live_status = str(
+                    (verified.get(str(process_id)) or {}).get("status") or ""
                 )
-                live_status = str((verified.get(str(process_id)) or {}).get(
-                    "status") or "")
                 if live_status == "running":
                     logger.info(
-                        "Process %s reattached on runner during stop, "
-                        "retrying stop",
+                        "Process %s reattached on runner during stop, retrying stop",
                         process_id,
                     )
                     retry_request_id = uuid.uuid4().hex
@@ -481,15 +505,11 @@ class ProcessManagerMixin:
                     retry_error = result.get("error")
                     if retry_error:
                         if "not found" in str(retry_error).lower():
-                            return await self._mark_process_vanished(
-                                workspace, stored
-                            )
+                            return await self._mark_process_vanished(workspace, stored)
                         raise ConflictError(
                             f"Runner failed to stop process: {retry_error}"
                         )
-                    return await self._mark_process_stopped(
-                        workspace, stored, result
-                    )
+                    return await self._mark_process_stopped(workspace, stored, result)
                 # Verify confirms the process is gone (exited/unknown)
                 # or the verify itself failed: fall through to EXITED
                 # only when the process is really gone; a verify
@@ -509,10 +529,10 @@ class ProcessManagerMixin:
 
     async def _mark_process_stopped(
         self,
-        workspace: "Workspace",
-        stored: "WorkspaceProcess",
+        workspace: Workspace,
+        stored: WorkspaceProcess,
         result: dict,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Persist a successful stop reply (EXITED vs KILLED mapping)."""
         workspace_id = workspace.id
         process_id = stored.id
@@ -528,7 +548,7 @@ class ProcessManagerMixin:
             status=status,
             exit_code=exit_code,
         )
-        self._push_process_status(
+        self.frontend_bus.push_process_status(
             workspace_id=str(workspace_id),
             process_id=str(process_id),
             status=status,
@@ -549,11 +569,11 @@ class ProcessManagerMixin:
 
     async def _mark_process_vanished(
         self,
-        workspace: "Workspace",
-        stored: "WorkspaceProcess",
+        workspace: Workspace,
+        stored: WorkspaceProcess,
         *,
         exit_code: int | None = None,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Mark a RUNNING row EXITED after the runner confirmed it is gone."""
         workspace_id = workspace.id
         process_id = stored.id
@@ -562,7 +582,7 @@ class ProcessManagerMixin:
             status=ProcessStatus.EXITED,
             exit_code=exit_code,
         )
-        self._push_process_status(
+        self.frontend_bus.push_process_status(
             workspace_id=str(workspace_id),
             process_id=str(process_id),
             status=ProcessStatus.EXITED,
@@ -577,7 +597,7 @@ class ProcessManagerMixin:
 
     @staticmethod
     def _process_verify_candidates(
-        processes: list["WorkspaceProcess"],
+        processes: list[WorkspaceProcess],
     ) -> list[dict]:
         """Build ``expected`` payloads for a process_verify RPC."""
         candidates: list[dict] = []
@@ -588,7 +608,7 @@ class ProcessManagerMixin:
                 process_uuid = uuid.UUID(str(process.id))
             except (ValueError, TypeError, AttributeError):
                 continue
-            log_path_abs, exit_path_abs = ProcessManagerMixin._process_log_paths(
+            log_path_abs, exit_path_abs = ProcessManagerService._process_log_paths(
                 process_uuid, process.run_count or 1
             )
             candidates.append(
@@ -606,8 +626,8 @@ class ProcessManagerMixin:
 
     async def _verify_process_candidates(
         self,
-        workspace: "Workspace",
-        processes: list["WorkspaceProcess"],
+        workspace: Workspace,
+        processes: list[WorkspaceProcess],
     ) -> dict[str, dict]:
         """Verify vanished candidates via ``harness:process_verify`` RPC.
 
@@ -622,9 +642,9 @@ class ProcessManagerMixin:
         runner = workspace.runner
         merged: dict[str, dict] = {}
         try:
-            self._ensure_workspace_available(workspace)
+            self.ownership.ensure_workspace_available(workspace)
             for offset in range(0, len(candidates), self._PROCESS_VERIFY_BATCH_SIZE):
-                batch = candidates[offset:offset + self._PROCESS_VERIFY_BATCH_SIZE]
+                batch = candidates[offset : offset + self._PROCESS_VERIFY_BATCH_SIZE]
                 request_id = uuid.uuid4().hex
                 result = await self._await_process_result(
                     request_id=request_id,
@@ -662,7 +682,7 @@ class ProcessManagerMixin:
     async def reverify_vanished_processes(
         self,
         workspace_id: uuid.UUID,
-        vanished: list["WorkspaceProcess"],
+        vanished: list[WorkspaceProcess],
     ) -> list[uuid.UUID]:
         """Verify vanished rows and apply the outcome (async, RPC path).
 
@@ -695,11 +715,9 @@ class ProcessManagerMixin:
                     status=ProcessStatus.RUNNING,
                     pid=pid,
                 )
-                refreshed = await sync_to_async(self.processes.get_by_id)(
-                    process.id
-                )
+                refreshed = await sync_to_async(self.processes.get_by_id)(process.id)
                 current = refreshed or process
-                self._push_process_status(
+                self.frontend_bus.push_process_status(
                     workspace_id=str(workspace_id),
                     process_id=key,
                     status=ProcessStatus.RUNNING,
@@ -716,9 +734,7 @@ class ProcessManagerMixin:
             elif live_status in ("exited", "unknown"):
                 live_exit = live.get("exit_code")
                 try:
-                    exit_code = (
-                        int(live_exit) if live_exit is not None else None
-                    )
+                    exit_code = int(live_exit) if live_exit is not None else None
                 except (TypeError, ValueError):
                     exit_code = None
                 # "unknown" without an exit code means the runner probed
@@ -728,7 +744,7 @@ class ProcessManagerMixin:
                     status=ProcessStatus.EXITED,
                     exit_code=exit_code,
                 )
-                self._push_process_status(
+                self.frontend_bus.push_process_status(
                     workspace_id=str(workspace_id),
                     process_id=key,
                     status=ProcessStatus.EXITED,
@@ -770,9 +786,7 @@ class ProcessManagerMixin:
         )
         cutoff = tz.now() - timedelta(seconds=limit)
         changed: list[uuid.UUID] = []
-        running = list(
-            self.processes.list_running_by_workspace(workspace_uuid)
-        )
+        running = list(self.processes.list_running_by_workspace(workspace_uuid))
         for process in running:
             if process.pid is not None:
                 continue
@@ -784,7 +798,7 @@ class ProcessManagerMixin:
                 status=ProcessStatus.FAILED,
                 exit_code=None,
             )
-            self._push_process_status(
+            self.frontend_bus.push_process_status(
                 workspace_id=str(workspace_id),
                 process_id=str(process.id),
                 status=ProcessStatus.FAILED,
@@ -804,7 +818,7 @@ class ProcessManagerMixin:
         *,
         user=None,
         session_id: uuid.UUID | str | None = None,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Restart a named process on the same row (stable id, new log).
 
         Reuses the stored command/workdir (no overwrite, unlike
@@ -825,14 +839,13 @@ class ProcessManagerMixin:
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
-        self._ensure_process_dispatchable(workspace)
+        self.ownership.ensure_process_dispatchable(workspace)
 
         current = stored
         if current.status == ProcessStatus.RUNNING:
             current = await self._stop_running_process(workspace, current)
             current = (
-                await sync_to_async(self.processes.get_by_id)(current.id)
-                or current
+                await sync_to_async(self.processes.get_by_id)(current.id) or current
             )
 
         run_count = max(current.run_count or 0, 0) + 1
@@ -840,9 +853,7 @@ class ProcessManagerMixin:
         command = current.command
         workdir = current.workdir
         runner = workspace.runner
-        log_path_abs, exit_path_abs = self._process_log_paths(
-            process_id, run_count
-        )
+        log_path_abs, exit_path_abs = self._process_log_paths(process_id, run_count)
         await sync_to_async(self.processes.update_for_restart)(
             process_id,
             command=command,
@@ -879,7 +890,7 @@ class ProcessManagerMixin:
                 status=ProcessStatus.FAILED,
                 exit_code=None,
             )
-            self._push_process_status(
+            self.frontend_bus.push_process_status(
                 workspace_id=str(workspace_id),
                 process_id=str(process_id),
                 status=ProcessStatus.FAILED,
@@ -894,7 +905,7 @@ class ProcessManagerMixin:
                 status=ProcessStatus.FAILED,
                 exit_code=None,
             )
-            self._push_process_status(
+            self.frontend_bus.push_process_status(
                 workspace_id=str(workspace_id),
                 process_id=str(process_id),
                 status=ProcessStatus.FAILED,
@@ -912,7 +923,7 @@ class ProcessManagerMixin:
         )
         refreshed = await sync_to_async(self.processes.get_by_id)(process_id)
         process = refreshed or current
-        self._push_process_status(
+        self.frontend_bus.push_process_status(
             workspace_id=str(workspace_id),
             process_id=str(process_id),
             status=ProcessStatus.RUNNING,
@@ -944,18 +955,16 @@ class ProcessManagerMixin:
         stored = await self._resolve_process(workspace_id, id_or_name)
         self._assert_not_temp(stored, action="deleted")
         if stored.status == ProcessStatus.RUNNING:
-            workspace = await sync_to_async(self.workspaces.get_by_id)(
-                workspace_id
-            )
+            workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
             if workspace is None:
                 raise WorkspaceNotFoundError(str(workspace_id))
-            self._ensure_process_dispatchable(workspace)
+            self.ownership.ensure_process_dispatchable(workspace)
             await self._stop_running_process(workspace, stored)
         process_id = stored.id
         await sync_to_async(self.processes.delete_for_workspace)(
             process_id, workspace_id
         )
-        self._push_process_removed(
+        self.frontend_bus.push_process_removed(
             workspace_id=str(workspace_id),
             process_id=str(process_id),
         )
@@ -974,7 +983,7 @@ class ProcessManagerMixin:
         running_only: bool = False,
         session_id: uuid.UUID | str | None = None,
         live: bool = True,
-    ) -> list["WorkspaceProcess"]:
+    ) -> list[WorkspaceProcess]:
         """Return DB processes, optionally reconciling against live runner state.
 
         ``live`` defaults to True to preserve the existing MCP/service behavior.
@@ -992,7 +1001,7 @@ class ProcessManagerMixin:
             raise WorkspaceNotFoundError(str(workspace_id))
 
         if live:
-            self._ensure_workspace_available(workspace)
+            self.ownership.ensure_workspace_available(workspace)
 
         if (
             live
@@ -1055,7 +1064,7 @@ class ProcessManagerMixin:
         id_or_name: uuid.UUID | str,
         *,
         session_id: uuid.UUID | str | None = None,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Return one process scoped to a workspace, live-merged when online.
 
         ``id_or_name`` accepts a process UUID or the exact process name
@@ -1075,7 +1084,7 @@ class ProcessManagerMixin:
             and process.workspace.status == WorkspaceStatus.RUNNING
             and process.workspace.runner.is_online
         ):
-            self._ensure_workspace_available(process.workspace)
+            self.ownership.ensure_workspace_available(process.workspace)
             try:
                 request_id = uuid.uuid4().hex
                 result = await self._await_process_result(
@@ -1096,15 +1105,13 @@ class ProcessManagerMixin:
                     if live_status == "exited" or (
                         live_status == "unknown" and live_exit is not None
                     ):
-                        exit_code = (
-                            int(live_exit) if live_exit is not None else None
-                        )
+                        exit_code = int(live_exit) if live_exit is not None else None
                         await sync_to_async(self.processes.mark_finished)(
                             process_id,
                             status=ProcessStatus.EXITED,
                             exit_code=exit_code,
                         )
-                        self._push_process_status(
+                        self.frontend_bus.push_process_status(
                             workspace_id=str(workspace_id),
                             process_id=str(process_id),
                             status=ProcessStatus.EXITED,
@@ -1128,7 +1135,7 @@ class ProcessManagerMixin:
         id_or_name: uuid.UUID | str,
         *,
         session_id: uuid.UUID | str | None = None,
-    ) -> "WorkspaceProcess":
+    ) -> WorkspaceProcess:
         """Stop a tracked background process (SIGTERM, then SIGKILL after grace).
 
         Already-finished records are returned unchanged (idempotent).
@@ -1147,7 +1154,7 @@ class ProcessManagerMixin:
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
-        self._ensure_process_dispatchable(workspace)
+        self.ownership.ensure_process_dispatchable(workspace)
         return await self._stop_running_process(workspace, stored)
 
     async def stop_session_processes(
@@ -1157,7 +1164,7 @@ class ProcessManagerMixin:
         *,
         kind: str = "temp",
         reason: str = "session_finished",
-    ) -> list["WorkspaceProcess"]:
+    ) -> list[WorkspaceProcess]:
         """Stop all RUNNING rows of one agent session (cleanup hook).
 
         Best-effort per row: each stop is attempted individually, failures
@@ -1177,15 +1184,13 @@ class ProcessManagerMixin:
                 workspace_id, parsed_session, kind=parsed_kind
             )
         )
-        stopped: list["WorkspaceProcess"] = []
+        stopped: list[WorkspaceProcess] = []
         for row in rows:
             try:
                 # Internal session cleanup is not a user live interaction.
                 # Preserve it during lifecycle holds; runner results and cleanup
                 # must remain able to settle their existing process records.
-                workspace = await sync_to_async(self.workspaces.get_by_id)(
-                    workspace_id
-                )
+                workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
                 if workspace is None:
                     raise WorkspaceNotFoundError(str(workspace_id))
                 if not workspace.runner.is_online:
@@ -1224,7 +1229,7 @@ class ProcessManagerMixin:
         self,
         workspace_id: str,
         reported: list[dict],
-    ) -> tuple[list[uuid.UUID], list["WorkspaceProcess"]]:
+    ) -> tuple[list[uuid.UUID], list[WorkspaceProcess]]:
         """Reconcile DB running processes with a runner heartbeat list (sync).
 
         *reported* holds ``{process_id, status, exit_code, pid}`` dicts.
@@ -1251,10 +1256,8 @@ class ProcessManagerMixin:
                 by_id[str(entry["process_id"])] = entry
 
         changed: list[uuid.UUID] = []
-        vanished: list["WorkspaceProcess"] = []
-        running = list(
-            self.processes.list_running_by_workspace(workspace_uuid)
-        )
+        vanished: list[WorkspaceProcess] = []
+        running = list(self.processes.list_running_by_workspace(workspace_uuid))
         for process in running:
             if process.pid is None:
                 continue
@@ -1277,7 +1280,7 @@ class ProcessManagerMixin:
                     status=ProcessStatus.EXITED,
                     exit_code=exit_code,
                 )
-                self._push_process_status(
+                self.frontend_bus.push_process_status(
                     workspace_id=str(workspace_id),
                     process_id=str(process.id),
                     status=ProcessStatus.EXITED,
@@ -1304,9 +1307,7 @@ class ProcessManagerMixin:
             workspace_uuid = uuid.UUID(str(workspace_id))
         except (ValueError, TypeError):
             return 0
-        running = list(
-            self.processes.list_running_by_workspace(workspace_uuid)
-        )
+        running = list(self.processes.list_running_by_workspace(workspace_uuid))
         if not running:
             return 0
         self.processes.mark_processes_killed(
@@ -1314,7 +1315,7 @@ class ProcessManagerMixin:
             status=ProcessStatus.KILLED,
         )
         for process in running:
-            self._push_process_status(
+            self.frontend_bus.push_process_status(
                 workspace_id=str(workspace_id),
                 process_id=str(process.id),
                 status=ProcessStatus.KILLED,
@@ -1329,13 +1330,10 @@ class ProcessManagerMixin:
         # Streams are workspace-bound too: fail them so harness waiters
         # surface the lifecycle event instead of hanging.
         try:
-            self._harness().fail_streams(
-                lambda stream_workspace_id: stream_workspace_id
-                == str(workspace_id),
+            self.harness().fail_streams(
+                lambda stream_workspace_id: stream_workspace_id == str(workspace_id),
                 f"workspace {workspace_id} lifecycle: {reason}",
             )
         except Exception:
-            logger.exception(
-                "Failed failing streams for workspace %s", workspace_id
-            )
+            logger.exception("Failed failing streams for workspace %s", workspace_id)
         return len(running)

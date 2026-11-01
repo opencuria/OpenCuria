@@ -83,9 +83,9 @@ class TestStartProcess:
     @pytest.mark.asyncio
     async def test_start_happy_path(self, service, runner, workspace, user):
         """Start should persist a record and resolve pid/log_path from the reply."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         pushes: list[tuple] = []
-        service._forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             assert event == "harness:process_start"
@@ -104,7 +104,7 @@ class TestStartProcess:
                 },
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
         process = await service.start_process(
             workspace.id,
@@ -129,8 +129,8 @@ class TestStartProcess:
         """Starting an imported count-zero definition keeps its id and first log."""
         definition = _make_process_definition(workspace)
         transport = AsyncMock(return_value={"pid": 2121})
-        service._await_process_result = transport  # type: ignore[method-assign]
-        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
 
         started = await service.start_process(
             workspace.id,
@@ -165,8 +165,8 @@ class TestStartProcess:
         """An upsert race restarts the winner at run one, not run two."""
         winner = _make_process_definition(workspace, name="race-winner")
         transport = AsyncMock(return_value={"pid": 3232})
-        service._await_process_result = transport  # type: ignore[method-assign]
-        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
         with (
             patch.object(
                 service.processes, "get_by_name", side_effect=[None, winner]
@@ -204,7 +204,7 @@ class TestStartProcess:
         self, service, runner, workspace, user
     ):
         """Runner error replies should mark the record failed and raise."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             _feed_reply(
@@ -216,14 +216,14 @@ class TestStartProcess:
                 {"process_id": payload["process_id"], "error": "boom"},
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
         with pytest.raises(ConflictError):
-            await service.start_process(workspace.id, "sleep 60", name="sleeper", user=user)
+            await service.start_process(
+                workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
-        failed = WorkspaceProcess.objects.exclude(
-            status=ProcessStatus.RUNNING
-        ).first()
+        failed = WorkspaceProcess.objects.exclude(status=ProcessStatus.RUNNING).first()
         assert failed is not None
         assert failed.status == ProcessStatus.FAILED
         assert failed.run_count == 1
@@ -243,7 +243,7 @@ class TestStartProcess:
             sid="other-sid",
             organization=organization,
         )
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             # Send the reply as if it came from the *other* runner.
@@ -256,11 +256,13 @@ class TestStartProcess:
                 {"process_id": payload["process_id"], "pid": 1},
             )
 
-        service._emit_to_runner.side_effect = _emit
-        service._PROCESS_RPC_TIMEOUT_SECONDS = 1
+        service.runner_transport.emit_to_runner.side_effect = _emit
+        service.process_manager._PROCESS_RPC_TIMEOUT_SECONDS = 1
 
         with pytest.raises(ConflictError):
-            await service.start_process(workspace.id, "sleep 60", name="sleeper", user=user)
+            await service.start_process(
+                workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
     @pytest.mark.asyncio
     async def test_start_runner_offline(self, service, offline_runner, user):
@@ -305,8 +307,8 @@ class TestRestartProcess:
             workdir="/srv/configured",
         )
         transport = AsyncMock(return_value={"pid": 2122})
-        service._await_process_result = transport  # type: ignore[method-assign]
-        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
 
         restarted = await service.restart_process(
             workspace.id, definition.id, user=user
@@ -350,12 +352,12 @@ class TestRestartProcess:
             await resolved_both.wait()
             return stale
 
-        service._resolve_process = AsyncMock(  # type: ignore[method-assign]
+        service.process_manager._resolve_process = AsyncMock(  # type: ignore[method-assign]
             side_effect=_resolve_stale_copy
         )
         transport = AsyncMock(return_value={"pid": 4343})
-        service._await_process_result = transport  # type: ignore[method-assign]
-        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
 
         outcomes = await asyncio.gather(
             service.restart_process(workspace.id, definition.id, user=user),
@@ -395,9 +397,9 @@ class TestStopProcess:
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
 
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         pushes: list[tuple] = []
-        service._forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             assert event == "harness:process_stop"
@@ -417,7 +419,7 @@ class TestStopProcess:
                 },
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
         stopped = await service.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.KILLED
@@ -431,7 +433,7 @@ class TestStopProcess:
             process.id, status=ProcessStatus.EXITED, exit_code=0
         )
         emit = AsyncMock()
-        service._emit_to_runner = emit  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = emit  # type: ignore[method-assign]
 
         result = await service.stop_process(workspace.id, process.id)
         assert result.status == ProcessStatus.EXITED
@@ -445,7 +447,7 @@ class TestStopProcess:
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         state: dict = {"first_stop_id": None}
 
         async def _emit(runner_arg, event, payload):
@@ -499,12 +501,13 @@ class TestStopProcess:
                         },
                     )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
         stopped = await service.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.KILLED
         events = [
-            call.args[1] for call in service._emit_to_runner.call_args_list
+            call.args[1]
+            for call in service.runner_transport.emit_to_runner.call_args_list
         ]
         assert events.count("harness:process_stop") == 2
         assert "harness:process_verify" in events
@@ -517,7 +520,7 @@ class TestStopProcess:
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             if event == "harness:process_verify":
@@ -552,7 +555,7 @@ class TestStopProcess:
                     },
                 )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
         stopped = await service.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.EXITED
@@ -566,7 +569,7 @@ class TestStopProcess:
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             if event == "harness:process_verify":
@@ -584,9 +587,11 @@ class TestStopProcess:
                 },
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
-        with patch.object(service, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05):
+        with patch.object(
+            service.process_manager, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05
+        ):
             result = await service.stop_process(workspace.id, process.id)
         assert result.status == ProcessStatus.RUNNING
         result.refresh_from_db()
@@ -626,7 +631,7 @@ class TestListProcesses:
             process.id, status=ProcessStatus.RUNNING, pid=4242
         )
         emit = AsyncMock()
-        service._emit_to_runner = emit  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = emit  # type: ignore[method-assign]
 
         rows = await service.list_processes(workspace.id, live=False)
 
@@ -657,7 +662,7 @@ class TestListProcesses:
         """An empty runner list and stale-row sweep leave EXITED definitions alone."""
         definition = _make_process_definition(workspace)
         transport = AsyncMock(return_value={"processes": []})
-        service._await_process_result = transport  # type: ignore[method-assign]
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
 
         rows = await service.list_processes(workspace.id, live=True)
 
@@ -667,9 +672,7 @@ class TestListProcesses:
         transport.assert_awaited_once()
         assert transport.await_args.kwargs["event"] == "harness:process_list"
 
-        changed, vanished = service.reconcile_workspace_processes(
-            str(workspace.id), []
-        )
+        changed, vanished = service.reconcile_workspace_processes(str(workspace.id), [])
         assert changed == []
         assert vanished == []
         assert service.sweep_unconfirmed_processes(str(workspace.id)) == []
@@ -699,14 +702,14 @@ class TestListProcesses:
                 {"processes": [{"process_id": str(process.id), "status": "running"}]},
             )
 
-        service._emit_to_runner = AsyncMock(  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock(  # type: ignore[method-assign]
             side_effect=_emit
         )
 
         rows = await service.list_processes(workspace.id)
 
         assert [row.id for row in rows] == [process.id]
-        service._emit_to_runner.assert_awaited_once()
+        service.runner_transport.emit_to_runner.assert_awaited_once()
 
 
 @pytest.mark.django_db
@@ -717,7 +720,7 @@ class TestReconcile:
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
 
-        with patch.object(service, "_forward_to_frontend") as forward:
+        with patch.object(service.frontend_bus, 'forward_to_frontend') as forward:
             changed, vanished = service.reconcile_workspace_processes(
                 str(workspace.id),
                 [
@@ -761,7 +764,7 @@ class TestReconcile:
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
 
-        with patch.object(service, "_forward_to_frontend") as forward:
+        with patch.object(service.frontend_bus, 'forward_to_frontend') as forward:
             changed, vanished = service.reconcile_workspace_processes(
                 str(workspace.id),
                 [
@@ -800,7 +803,11 @@ class TestReconcile:
 
         auto_stop = AsyncMock(return_value=None)
         with (
-            patch.object(service, "auto_stop_inactive_workspaces", new=auto_stop),
+            patch.object(
+                service.heartbeat_reconciler,
+                "auto_stop_inactive_workspaces",
+                new=auto_stop,
+            ),
             patch.object(
                 service.workspaces,
                 "list_by_runner",
@@ -823,9 +830,9 @@ class TestReconcile:
         assert auto_stop.await_args.kwargs["workspaces"][0].id == workspace.id
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
-        assert [row.id for row in service._pending_process_verify[str(workspace.id)]] == [
-            process.id
-        ]
+        assert [
+            row.id for row in service._pending_process_verify[str(workspace.id)]
+        ] == [process.id]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -851,7 +858,7 @@ class TestReverifyVanished:
                 {"processes": statuses},
             )
 
-        service._emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
 
     @pytest.mark.asyncio
     async def test_verify_running_revives_row(self, service, runner, workspace):
@@ -870,10 +877,8 @@ class TestReverifyVanished:
                 }
             ],
         )
-        with patch.object(service, "_forward_to_frontend"):
-            changed = await service.reverify_vanished_processes(
-                workspace.id, [process]
-            )
+        with patch.object(service.frontend_bus, 'forward_to_frontend'):
+            changed = await service.reverify_vanished_processes(workspace.id, [process])
         assert changed == [process.id]
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
@@ -913,11 +918,11 @@ class TestReverifyVanished:
         async def _emit(runner_arg, event, payload):
             return  # never reply -> timeout
 
-        service._emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
-        with patch.object(service, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05):
-            changed = await service.reverify_vanished_processes(
-                workspace.id, [process]
-            )
+        service.runner_transport.emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+        with patch.object(
+            service.process_manager, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05
+        ):
+            changed = await service.reverify_vanished_processes(workspace.id, [process])
         assert changed == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
@@ -947,7 +952,7 @@ class TestSweepUnconfirmed:
         assert process.pid is None
         old = tz.now() - timedelta(seconds=3600)
         type(process).objects.filter(id=process.id).update(started_at=old)
-        with patch.object(service, "_forward_to_frontend"):
+        with patch.object(service.frontend_bus, 'forward_to_frontend'):
             changed = service.sweep_unconfirmed_processes(str(workspace.id))
         assert changed == [process.id]
         process.refresh_from_db()

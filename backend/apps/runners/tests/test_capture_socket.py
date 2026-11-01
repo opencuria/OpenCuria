@@ -12,7 +12,7 @@ import socketio
 
 from apps.runners import sio_server
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.services import RunnerService
+from apps.runners.services import RunnerRepositories, RunnerService
 from common import realtime
 
 # These are the completion events consumed by useWorkspaceFileEvents. In
@@ -36,6 +36,8 @@ def capture_socket(monkeypatch):
     server = socketio.AsyncServer(async_mode="asgi")
     sio_server._register_frontend_handlers(server)
     server.emit = AsyncMock()
+    server.enter_room = AsyncMock()
+    server.leave_room = AsyncMock()
     server.get_session = AsyncMock(return_value={"user_id": "123"})
     access = AsyncMock(return_value=True)
     monkeypatch.setattr(sio_server, "_frontend_user_can_access_workspace", access)
@@ -48,10 +50,11 @@ def capture_socket(monkeypatch):
         current_task_id=uuid.uuid4(),
         runner=SimpleNamespace(id=uuid.uuid4(), is_online=True),
     )
-    service = RunnerService(sio_server=server)
-    service.workspaces = Mock()
+    service = RunnerService(
+        sio_server=server, repositories=RunnerRepositories(workspaces=Mock())
+    )
     service.workspaces.get_by_id.return_value = workspace
-    service._emit_to_runner = AsyncMock()
+    service.runner_transport.emit_to_runner = AsyncMock()
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
     monkeypatch.setattr(realtime, "get_sio_server", lambda: server)
     return server, service, workspace, access
@@ -82,7 +85,7 @@ async def test_capture_conflict_completes_request_once(
     await server.handlers["/frontend"][f"frontend:{event}"]("caller", data)
 
     access.assert_awaited_once_with(123, str(workspace.id))
-    service._emit_to_runner.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
     server.emit.assert_awaited_once()
     args, kwargs = server.emit.await_args
     assert args[0] == result_event
@@ -136,7 +139,7 @@ async def test_unauthorized_capture_requests_are_silently_dropped(
         )
     service_lookup.assert_not_called()
     dispatch.assert_not_awaited()
-    service._emit_to_runner.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
     server.emit.assert_not_awaited()
     if not authenticated:
         access.assert_not_awaited()
@@ -154,7 +157,7 @@ async def test_normal_requests_dispatch_once(
         "caller", request(workspace)
     )
     access.assert_awaited_once()
-    service._emit_to_runner.assert_awaited_once()
+    service.runner_transport.emit_to_runner.assert_awaited_once()
     server.emit.assert_not_awaited()
 
 
@@ -165,25 +168,48 @@ async def test_capture_allows_subscriptions_and_status_delivery(capture_socket):
     data = {"workspace_id": workspace_id}
     handlers = server.handlers["/frontend"]
     await handlers["frontend:subscribe_workspace"]("caller", data)
+    server.enter_room.assert_awaited_once_with(
+        "caller", f"workspace:{workspace_id}", namespace="/frontend"
+    )
     assert realtime._frontend_subscriptions[workspace_id] == {"caller"}
     assert realtime._frontend_sid_workspaces["caller"] == {workspace_id}
     status = {**data, "status": "running", "active_operation": "capturing_image"}
     await realtime.emit_to_frontend("workspace:status_changed", status, workspace_id)
     server.emit.assert_awaited_once_with(
-        "workspace:status_changed", status, to="caller", namespace="/frontend"
+        "workspace:status_changed",
+        status,
+        to=f"workspace:{workspace_id}",
+        namespace="/frontend",
     )
     await handlers["frontend:unsubscribe_workspace"]("caller", data)
+    server.leave_room.assert_awaited_once_with(
+        "caller", f"workspace:{workspace_id}", namespace="/frontend"
+    )
     assert workspace_id not in realtime._frontend_subscriptions
     assert not realtime._frontend_sid_workspaces["caller"]
-    service._emit_to_runner.assert_not_awaited()
+    service.runner_transport.emit_to_runner.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_unrelated_service_errors_are_not_swallowed(capture_socket):
     server, service, workspace, _ = capture_socket
-    service.forward_terminal_input = AsyncMock(side_effect=RuntimeError("unexpected"))
+    service.interactive_sessions.forward_terminal_input = AsyncMock(
+        side_effect=RuntimeError("unexpected")
+    )
     with pytest.raises(RuntimeError, match="unexpected"):
         await server.handlers["/frontend"]["frontend:terminal_input"](
             "caller", request(workspace)
         )
     server.emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_subscription_cannot_join_workspace_room(capture_socket):
+    server, _, workspace, access = capture_socket
+    access.return_value = False
+    await server.handlers["/frontend"]["frontend:subscribe_workspace"](
+        "caller", {"workspace_id": str(workspace.id)}
+    )
+    server.enter_room.assert_not_awaited()
+    server.leave_room.assert_not_awaited()
+    assert not realtime._frontend_sid_workspaces["caller"]

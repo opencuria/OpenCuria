@@ -25,7 +25,7 @@ else:
 "
 fi
 
-echo "==> Starting Uvicorn ASGI server (single worker; scheduler shares its event loop)..."
+echo "==> Starting Uvicorn API server (agent execution runs in the execution service)..."
 # The explicit `websockets` dependency enables this backend without uvicorn[standard].
 # Allow the existing 200 MiB Socket.IO frames carrying computer-use screenshots.
 exec uvicorn config.asgi:application \

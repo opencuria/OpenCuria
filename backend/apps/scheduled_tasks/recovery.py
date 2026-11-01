@@ -24,7 +24,7 @@ class ScheduledTaskRecoveryService:
     def recover_backend_restart(self) -> int:
         """Recover active ledger rows and their turns in one locked transaction."""
         now = timezone.now()
-        error = "Backend restarted before the run completed"
+        error = "Execution worker restarted before the run completed"
         recovered = 0
         with self.repository.restart_runs() as runs:
             for run in runs:

@@ -1,4 +1,4 @@
-"""Dispatch validated Git operations and correlate replies from the owning runner."""
+"""Dispatch validated Git operations and correlate owned runner replies."""
 
 from __future__ import annotations
 
@@ -22,11 +22,36 @@ from ..infra.rpc_registry import PendingGitRequest
 if TYPE_CHECKING:
     from ...models import Runner
 
+if TYPE_CHECKING:
+    from ...repositories import WorkspaceRepository
+    from ..domains.workspace_lifecycle import WorkspaceLifecycleService
+    from ..infra.ownership import OwnershipService
+    from ..infra.rpc_registry import RpcRegistryService
+    from ..ports import RunnerTransport
+
 logger = logging.getLogger(__name__)
 
 
-class GitOperationsMixin:
-    """Whitelisted git RPCs shared by RunnerService."""
+class GitOperationsService:
+    """Whitelisted git RPCs with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+        ownership: OwnershipService,
+        rpc_registry: RpcRegistryService,
+        runner_transport: RunnerTransport,
+        workspace_lifecycle: WorkspaceLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+        self.ownership = ownership
+        self.rpc_registry = rpc_registry
+        self.runner_transport = runner_transport
+        self.workspace_lifecycle = workspace_lifecycle
+        self.git_locks: dict[str, asyncio.Lock] = {}
+        self.git_locks_guard = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Git operations (productive git integration)
@@ -35,8 +60,12 @@ class GitOperationsMixin:
     #: Read-only operations (short timeout budget).
     GIT_READ_OPERATIONS = frozenset(
         {
-            "list_repos", "repo_snapshot", "repo_history", "working_diff",
-            "commit_details", "file_content",
+            "list_repos",
+            "repo_snapshot",
+            "repo_history",
+            "working_diff",
+            "commit_details",
+            "file_content",
         }
     )
 
@@ -81,11 +110,11 @@ class GitOperationsMixin:
         and entries are reused, never recreated per call.
         """
         key = self._git_lock_key(workspace_id, repo_path)
-        async with self._git_locks_guard:
-            lock = self._git_locks.get(key)
+        async with self.git_locks_guard:
+            lock = self.git_locks.get(key)
             if lock is None:
                 lock = asyncio.Lock()
-                self._git_locks[key] = lock
+                self.git_locks[key] = lock
             return lock
 
     def handle_git_reply(
@@ -93,7 +122,7 @@ class GitOperationsMixin:
         event: str,
         data: dict,
         runner_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Route a git:operation_result reply to its waiter (sync).
 
         Called from the Socket.IO handler via ``sync_to_async`` after
@@ -109,28 +138,27 @@ class GitOperationsMixin:
         logged once and dropped.
         """
         if event != "git:operation_result":
-            return
+            return False
         if not isinstance(data, dict):
             logger.warning("git:operation_result rejected: malformed payload")
-            return
+            return False
         raw_request_id = data.get("request_id", "")
         request_id = str(raw_request_id or "")
         if not request_id:
             logger.warning("git:operation_result rejected: missing request_id")
-            return
-        pending = self._git_pending.get(request_id)
+            return False
+        pending = self.rpc_registry.git_pending.get(request_id)
         if pending is None:
             logger.warning("git reply for unknown request_id %s", request_id)
-            return
+            return False
         raw_workspace_id = data.get("workspace_id", "")
         workspace_id = str(raw_workspace_id or "")
         if not workspace_id:
             logger.warning(
-                "git:operation_result rejected: missing workspace_id "
-                "(request %s)",
+                "git:operation_result rejected: missing workspace_id (request %s)",
                 request_id,
             )
-            return
+            return False
         try:
             workspace_uuid = uuid.UUID(workspace_id)
         except (ValueError, TypeError, AttributeError):
@@ -138,34 +166,31 @@ class GitOperationsMixin:
                 "git:operation_result rejected: invalid workspace_id %s",
                 workspace_id,
             )
-            return
+            return False
         if workspace_id != pending.workspace_id:
             logger.warning(
-                "git:operation_result rejected: workspace_id mismatch "
-                "(request %s)",
+                "git:operation_result rejected: workspace_id mismatch (request %s)",
                 request_id,
             )
-            return
+            return False
         raw_operation = data.get("operation")
         if not isinstance(raw_operation, str) or not raw_operation:
             logger.warning(
-                "git:operation_result rejected: missing operation "
-                "(request %s)",
+                "git:operation_result rejected: missing operation (request %s)",
                 request_id,
             )
-            return
+            return False
         if raw_operation != pending.operation:
             logger.warning(
-                "git:operation_result rejected: operation mismatch "
-                "(request %s)",
+                "git:operation_result rejected: operation mismatch (request %s)",
                 request_id,
             )
-            return
+            return False
         if runner_id:
-            if not self._validate_harness_workspace_runner(
+            if not self.ownership.validate_harness_workspace_runner(
                 workspace_uuid, runner_id
             ):
-                return
+                return False
         else:
             # No sender to check (unit/internal call): the reply workspace
             # must still resolve to a known workspace so a forged reply
@@ -175,8 +200,8 @@ class GitOperationsMixin:
                     "git:operation_result rejected: workspace %s not found",
                     workspace_id,
                 )
-                return
-        self._resolve_git_future(request_id, data)
+                return False
+        return self.rpc_registry.resolve_git_future(request_id, data)
 
     async def _await_git_result(
         self,
@@ -191,18 +216,18 @@ class GitOperationsMixin:
         """Emit a git:operation RPC and wait for its correlated result."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self._git_pending[request_id] = PendingGitRequest(
+        self.rpc_registry.git_pending[request_id] = PendingGitRequest(
             future=future,
             workspace_id=str(workspace_id),
             operation=operation,
         )
         try:
-            await self._emit_to_runner(runner, "git:operation", payload)
+            await self.runner_transport.emit_to_runner(runner, "git:operation", payload)
             return await asyncio.wait_for(future, timeout)
         except asyncio.TimeoutError as exc:
             raise RunnerTimeoutError("git:operation", timeout) from exc
         finally:
-            self._git_pending.pop(request_id, None)
+            self.rpc_registry.git_pending.pop(request_id, None)
             if not future.done():
                 future.cancel()
 
@@ -255,7 +280,7 @@ class GitOperationsMixin:
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
-        runner = self._ensure_git_dispatchable(workspace)
+        runner = self.ownership.ensure_git_dispatchable(workspace)
 
         safe_args = validate_git_args(operation, dict(args or {}))
         if operation == "commit" and user is not None:
@@ -294,7 +319,7 @@ class GitOperationsMixin:
                 raise ConflictError(f"Git operation failed: {exc}") from exc
         if not isinstance(result, dict):
             raise ConflictError("Git operation returned no result")
-        await self.touch_workspace_activity(workspace_id)
+        await self.workspace_lifecycle.touch_workspace_activity(workspace_id)
         return result
 
     @staticmethod

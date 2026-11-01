@@ -204,7 +204,9 @@ async def test_runner_heartbeat_refreshes_liveness_before_reconciliation(
     service = sio_server.get_runner_service()
     reconcile = Mock(return_value=[])
     monkeypatch.setattr(service, "handle_heartbeat", reconcile)
-    monkeypatch.setattr(service, "reconcile_vanished_processes", AsyncMock())
+    monkeypatch.setattr(
+        service.heartbeat_reconciler, "reconcile_vanished_processes", AsyncMock()
+    )
     Runner.objects.filter(pk=runner.pk).update(
         last_heartbeat_at=timezone.now() - timedelta(hours=1)
     )
@@ -218,7 +220,7 @@ async def test_runner_heartbeat_refreshes_liveness_before_reconciliation(
     await receive(runner.sid, {"workspaces": [{"workspace_id": "w"}]})
     assert reconcile.call_args.kwargs["workspaces"] == [{"workspace_id": "w"}]
     assert reconcile.call_args.kwargs["runner"].id == runner.id
-    service.reconcile_vanished_processes.assert_awaited_once()
+    service.heartbeat_reconciler.reconcile_vanished_processes.assert_awaited_once()
 
 
 @pytest.mark.django_db(transaction=True)

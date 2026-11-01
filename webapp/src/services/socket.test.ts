@@ -208,7 +208,7 @@ describe('browser realtime adapter', () => {
     const pending = store.fetchDirectory('ws-1', '/workspace')
     const late = socket.emit.mock.calls
       .filter(([event]) => event === 'frontend:files_list')
-      .at(-1)![1]
+      .slice(-1)[0]![1]
     const pendingSearch = store.findFiles('ws-1', 'a')
     store.reset()
     await pending

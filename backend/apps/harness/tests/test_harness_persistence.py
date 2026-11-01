@@ -281,13 +281,18 @@ def test_django_todo_repository_replaces_list(harness_workspace) -> None:
     rows = TodoRepository.list_for_session(session.id)
     assert [(r.content, r.order) for r in rows] == [("only", 0)]
 
-    empty = repo.list("not-a-uuid")
-    assert empty.items == []
+    # Repository identities are UUIDs; nonexistent valid identities return an
+    # empty list, malformed identities are rejected by the storage boundary.
+    import uuid
+
+    assert repo.list(str(uuid.uuid4())).items == []
+    with pytest.raises(ValueError):
+        repo.list("not-a-uuid")
 
 
 @pytest.mark.django_db
 def test_todo_save_rejects_non_uuid_session() -> None:
     """Saving todos without a real session UUID raises ValueError."""
     repo = TodoRepository()
-    with pytest.raises(ValueError, match="real session UUID"):
+    with pytest.raises(ValueError):
         repo.save("plain-session", [TodoItem(content="x")])

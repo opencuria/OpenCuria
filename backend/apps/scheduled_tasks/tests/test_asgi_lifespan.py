@@ -1,71 +1,47 @@
+"""API restarts own transport only; execution and jobs have another lifetime."""
+
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from config import asgi
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("startup_fails", [False, True])
-async def test_asgi_lifespan_starts_and_stops_single_scheduler(
-    monkeypatch, startup_fails
-):
-    events = []
+async def test_asgi_lifespan_owns_only_reply_transport(monkeypatch, startup_fails):
+    from apps.runners import reply_routing as runner_reply_relay
 
-    class FakeScheduler:
-        async def start(self, *, before_dispatch):
-            events.append("started")
-            await before_dispatch()
-
-        async def stop(self):
-            events.append("stopped")
-
-    class FakeRecovery:
-        async def start(self):
-            events.append("recovery_started")
-
-        async def stop(self):
-            events.append("recovery_stopped")
-
-    class FakeNotifications:
-        async def start(self):
-            if startup_fails:
-                raise RuntimeError("notification startup failed")
-
-        async def stop(self):
-            pass
-
-    monkeypatch.setattr(
-        "apps.scheduled_tasks.services.ScheduledTaskScheduler", FakeScheduler
+    start = AsyncMock(
+        side_effect=RuntimeError("transport unavailable") if startup_fails else None
     )
-    monkeypatch.setattr(
-        "apps.harness.recovery_worker.HarnessRecoveryWorker", FakeRecovery
+    stop = AsyncMock()
+    monkeypatch.setattr(runner_reply_relay, "start_runner_reply_relay", start)
+    monkeypatch.setattr(runner_reply_relay, "stop_runner_reply_relay", stop)
+    scheduler = Mock(side_effect=AssertionError("API must not construct a scheduler"))
+    recovery = Mock(
+        side_effect=AssertionError("API must not recover native executions")
     )
+    notifications = Mock(side_effect=AssertionError("API must not own background jobs"))
     monkeypatch.setattr(
-        "apps.notifications.worker.NotificationWorker", FakeNotifications
+        "apps.scheduled_tasks.services.ScheduledTaskScheduler", scheduler
     )
-    guard = SimpleNamespace(release_failed_start=Mock())
-    monkeypatch.setattr(
-        "common.process_ownership.acquire_backend_process_guard", lambda: guard
-    )
+    monkeypatch.setattr("apps.harness.recovery_worker.HarnessRecoveryWorker", recovery)
+    monkeypatch.setattr("apps.notifications.worker.NotificationWorker", notifications)
     incoming = asyncio.Queue()
     outgoing = []
     await incoming.put({"type": "lifespan.startup"})
     await incoming.put({"type": "lifespan.shutdown"})
 
-    async def receive():
-        return await incoming.get()
-
     async def send(message):
         outgoing.append(message)
 
-    await asgi.application(
-        {"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send
-    )
-    assert events == ["started", "recovery_started", "recovery_stopped", "stopped"]
-    guard.release_failed_start.assert_not_called()
+    await asgi.application({"type": "lifespan"}, incoming.get, send)
+    start.assert_awaited_once()
+    stop.assert_awaited_once()
+    scheduler.assert_not_called()
+    recovery.assert_not_called()
+    notifications.assert_not_called()
     assert [message["type"] for message in outgoing] == (
         ["lifespan.startup.failed"]
         if startup_fails

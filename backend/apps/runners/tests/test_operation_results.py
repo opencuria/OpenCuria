@@ -40,16 +40,23 @@ def test_callback_failure_rolls_back_state_journal_and_notifications(
     """A failed callback cannot commit partial state or publish its queued events."""
     task, data = pending_result
     service = RunnerService()
-    callback = service.handle_workspace_stopped
+    callback = service.workspace_lifecycle.handle_workspace_stopped
 
-    def fail_after_callback(task_id: str, workspace_id: str, runner_id: str) -> None:
-        callback(task_id, workspace_id, runner_id)
+    def fail_after_callback(
+        task_id: str,
+        workspace_id: str,
+        runner_id: str,
+        credentials_present: bool | None = None,
+    ) -> None:
+        callback(task_id, workspace_id, runner_id, credentials_present)
         assert Task.objects.get(pk=task_id).status == "completed"
         assert Workspace.objects.get(pk=workspace_id).status == "stopped"
         assert LifecycleCommand.objects.get(task_id=task_id).phase == "result"
         raise RuntimeError("callback interrupted")
 
-    monkeypatch.setattr(service, "handle_workspace_stopped", fail_after_callback)
+    monkeypatch.setattr(
+        service.workspace_lifecycle, "handle_workspace_stopped", fail_after_callback
+    )
     with django_capture_on_commit_callbacks(execute=True):
         with pytest.raises(RuntimeError, match="callback interrupted"):
             apply_result(service, str(runner.id), "workspace:stopped", data)

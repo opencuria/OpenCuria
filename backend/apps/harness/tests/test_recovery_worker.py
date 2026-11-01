@@ -182,6 +182,8 @@ async def test_recovery_publication_preserves_a_newly_admitted_turn(
     monkeypatch, status
 ):
     service = SimpleNamespace(
+        reconcile_recovered_run=Mock(),
+        is_running=Mock(return_value=False),
         _emit_frontend=AsyncMock(),
         _session_status_payload=Mock(return_value={"status": "idle"}),
         conversation_events=SimpleNamespace(emit=AsyncMock()),
@@ -191,11 +193,261 @@ async def test_recovery_publication_preserves_a_newly_admitted_turn(
     )
     workspace_id = uuid.uuid4()
     row = SimpleNamespace(
-        session=SimpleNamespace(status=status, workspace_id=workspace_id),
-        assistant_message=object(),
+        session=SimpleNamespace(
+            id=uuid.uuid4(), status=status, workspace_id=workspace_id
+        ),
+        assistant_message=SimpleNamespace(id=uuid.uuid4()),
     )
     worker = HarnessRecoveryWorker()
     worker.runs.repository = SimpleNamespace(get_by_id=lambda _identity: row)
     await worker._publish_recovered(uuid.uuid4())
+    service.reconcile_recovered_run.assert_called_once_with(
+        row.session.id, row.assistant_message.id
+    )
     assert service._emit_frontend.await_count == (1 if status == "idle" else 0)
     service.conversation_events.emit.assert_awaited_once_with(workspace_id)
+
+
+def test_recovery_clears_only_matching_stop_intent_and_external_projections():
+    from apps.harness.harness_service import HarnessService
+
+    service = HarnessService()
+    registry = service.run_registry
+    registry.attach_context("root", {"message_id": "old-root"})
+    registry.request_abort("root")
+    # Failed external cleanup releases heavy runtime state but retains identity
+    # while the explicit stop bit still has an outstanding recovery obligation.
+    registry.release_context("root")
+    assert registry.get("root").assistant_message_id == "old-root"
+    registry.attach_context(
+        "projection",
+        {
+            "message_id": "old-child",
+            "external_projection": True,
+            "external_parent_session_id": "root",
+            "external_parent_message_id": "old-root",
+        },
+    )
+    registry.request_abort("projection")
+    registry.link_parent("projection", "root")
+    registry.attach_context("native-child", {"message_id": "native-message"})
+    registry.link_parent("native-child", "root")
+    registry.attach_context(
+        "other-projection",
+        {
+            "message_id": "other-child",
+            "external_projection": True,
+            "external_parent_session_id": "root",
+            "external_parent_message_id": "new-root",
+        },
+    )
+    native = registry.get("native-child")
+    other = registry.get("other-projection")
+    service.reconcile_recovered_run("root", "old-root")
+    assert "root" not in registry.aborts
+    assert registry.get("projection") is None
+    assert registry.get("native-child") is native
+    assert registry.get("other-projection") is other
+    assert native.is_running
+    assert other.is_running
+    assert not service._user_abort_requested(
+        SimpleNamespace(id="future", parent_id="root")
+    )
+
+
+async def test_recovery_preserves_new_admission_and_only_drops_old_projections():
+    from apps.harness.harness_service import HarnessService
+
+    service = HarnessService()
+    registry = service.run_registry
+    registry.attach_context("root", {"message_id": "fresh-root"})
+    registry.request_abort("root")  # A newer stop belongs to the fresh answer.
+    task = asyncio.create_task(asyncio.sleep(100))
+    registry.start_execution("root", task)
+    registry.attach_context(
+        "old-projection",
+        {
+            "message_id": "old-child",
+            "external_projection": True,
+            "external_parent_session_id": "root",
+            "external_parent_message_id": "old-root",
+        },
+    )
+    registry.attach_context("resumed-child", {"message_id": "fresh-child"})
+    registry.link_parent("resumed-child", "root")
+    independent = registry.get("resumed-child")
+    root = registry.get("root")
+    try:
+        service.reconcile_recovered_run("root", "old-root")
+        assert registry.get("root") is root
+        assert root.task is task and not task.cancelling()
+        assert root.abort_requested
+        assert root.context == {"message_id": "fresh-root"}
+        assert registry.get("old-projection") is None
+        assert registry.get("resumed-child") is independent
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_recovery_never_drops_a_matching_task_or_admission_reference():
+    from apps.harness.harness_service import HarnessService
+
+    service = HarnessService()
+    registry = service.run_registry
+    registry.attach_context("root", {"message_id": "old-root"})
+    registry.request_abort("root")
+    task = asyncio.create_task(asyncio.sleep(0))
+    registry.start_execution("root", task)
+    await task
+    service.reconcile_recovered_run("root", "old-root")
+    assert registry.get("root").task is task
+    assert registry.get("root").abort_requested
+    registry.release_task("root", task)
+    registry.release_context("root")
+    registry.begin_admission("root", asyncio.current_task())
+    service.reconcile_recovered_run("root", "old-root")
+    assert registry.get("root").admission is asyncio.current_task()
+    assert registry.get("root").abort_requested
+
+
+def test_context_compatibility_projection_records_recovery_identity():
+    from apps.harness.run_state import RunRegistry
+
+    registry = RunRegistry()
+    registry.contexts["session"] = {"message_id": "old-assistant"}
+    registry.request_abort("session")
+    registry.release_context("session")
+    assert registry.get("session").assistant_message_id == "old-assistant"
+    registry.clear_abort("session")
+    assert registry.get("session") is None  # Identity alone never retains a run.
+
+
+async def test_recovery_does_not_publish_stale_idle_over_local_fresh_admission(
+    monkeypatch,
+):
+    from apps.harness.harness_service import HarnessService
+
+    service = HarnessService()
+    service._emit_frontend = AsyncMock()
+    service.conversation_events.emit = AsyncMock()
+    session_id, recovered_message_id, fresh_message_id = (
+        uuid.uuid4(),
+        uuid.uuid4(),
+        uuid.uuid4(),
+    )
+    registry = service.run_registry
+    registry.begin_admission(str(session_id), asyncio.current_task())
+    registry.attach_context(str(session_id), {"message_id": str(fresh_message_id)})
+    monkeypatch.setattr(
+        "apps.harness.harness_service.get_harness_service",
+        lambda: service,
+    )
+    # The repository snapshot was read before the fresh local admission began.
+    row = SimpleNamespace(
+        session=SimpleNamespace(
+            id=session_id, status="idle", workspace_id=uuid.uuid4()
+        ),
+        assistant_message=SimpleNamespace(id=recovered_message_id),
+    )
+    worker = HarnessRecoveryWorker()
+    worker.runs.repository = SimpleNamespace(get_by_id=lambda _: row)
+    await worker._publish_recovered(uuid.uuid4())
+    service._emit_frontend.assert_not_awaited()
+    assert registry.get(str(session_id)).admission is asyncio.current_task()
+    assert registry.get(str(session_id)).assistant_message_id == str(fresh_message_id)
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_explicit_attempt_cleanup_reconciles_only_after_confirmation(recovered):
+    from apps.harness.harness_service import HarnessService
+    from common.exceptions import ConflictError
+
+    attempt = SimpleNamespace(
+        lease_id=None,
+        status="closing",
+        assistant_message_id=uuid.uuid4(),
+    )
+    run_service = SimpleNamespace(
+        repository=SimpleNamespace(get_open_for_session=lambda _: attempt),
+        prepare_session=AsyncMock(return_value=True),
+    )
+    if not recovered:
+        run_service.prepare_session.side_effect = ConflictError("cleanup pending")
+    service = HarnessService(run_service=run_service)
+    service.reconcile_recovered_run = Mock()
+    session = SimpleNamespace(id=uuid.uuid4(), harness_id="codex")
+    if recovered:
+        assert await service._ensure_external_attempt_reconciled(session, force=True)
+        service.reconcile_recovered_run.assert_called_once_with(
+            session.id,
+            attempt.assistant_message_id,
+        )
+    else:
+        with pytest.raises(ConflictError, match="cleanup pending"):
+            await service._ensure_external_attempt_reconciled(session, force=True)
+        service.reconcile_recovered_run.assert_not_called()
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_startup_recovery_uses_same_local_reconciliation_port(recovered):
+    from dataclasses import fields
+
+    from apps.harness.run_preparation import RunPreparation, RunPreparationPorts
+    from common.exceptions import ConflictError
+
+    attempt = SimpleNamespace(lease_id=None, assistant_message_id=uuid.uuid4())
+    run_service = SimpleNamespace(
+        repository=SimpleNamespace(get_open_for_session=lambda _: attempt),
+        prepare_session=AsyncMock(return_value=True),
+    )
+    if not recovered:
+        run_service.prepare_session.side_effect = ConflictError("cleanup pending")
+    dependencies = {field.name: Mock() for field in fields(RunPreparationPorts)}
+    dependencies.update(
+        accessor_factory=None,
+        provider_turn_context=Mock(return_value={}),
+        user_abort_requested=Mock(return_value=False),
+        run_service_for_engine=lambda: run_service,
+        sessions=SimpleNamespace(get_depth=lambda _: 0),
+        validate_provider_for_run=Mock(return_value="openai/gpt"),
+    )
+    ports = RunPreparationPorts(**dependencies)
+    preparation = RunPreparation(ports)
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        harness_id="codex",
+        created_by_id=42,
+        parent_id=None,
+        status="idle",
+        mode="build",
+        agent_name="build",
+        model="openai/gpt",
+        reasoning_effort="",
+        skill_ids=[],
+    )
+    if recovered:
+        prepared = await preparation.prepare(
+            session,
+            "prompt",
+            user_id=42,
+            account_ids={},
+            max_depth=3,
+        )
+        assert prepared.session is session
+        ports.reconcile_recovered_run.assert_called_once_with(
+            session.id,
+            attempt.assistant_message_id,
+        )
+    else:
+        with pytest.raises(ConflictError, match="cleanup pending"):
+            await preparation.prepare(
+                session,
+                "prompt",
+                user_id=42,
+                account_ids={},
+                max_depth=3,
+            )
+        ports.reconcile_recovered_run.assert_not_called()

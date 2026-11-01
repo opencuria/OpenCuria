@@ -14,6 +14,7 @@ from functools import partial
 import structlog
 
 from .config import RunnerSettings
+from .journal import Journal
 from .runtime.artifacts import RuntimeArtifactManager
 from .runtime.base import RuntimeBackend
 from .services.capture_fence import CaptureFence
@@ -40,13 +41,18 @@ class WorkspaceService:
         self,
         runtime: RuntimeBackend,
         settings: RunnerSettings,
+        *,
+        journal: Journal | None = None,
     ) -> None:
+        self.journal = journal
         self._runtime = runtime
         self._settings = settings
         self.registry = WorkspaceRegistry(runtime, settings)
         get_cached = self.registry.get_cached
         get_runtime = self.registry.get_runtime
-        self.credentials = CredentialManager(sync_timeout=settings.credential_sync_timeout)
+        self.credentials = CredentialManager(
+            sync_timeout=settings.credential_sync_timeout
+        )
         self.terminal_manager = TerminalManager(
             runtime,
             get_cached,
@@ -104,6 +110,8 @@ class WorkspaceService:
         self.runtime_artifacts = RuntimeArtifactManager(
             runtime, get_cached, get_runtime, settings.state_dir
         )
+        if journal is not None:
+            self.configure_operation_persistence(journal)
         for manager in (
             self.images,
             self.terminal_manager,
@@ -117,6 +125,19 @@ class WorkspaceService:
             self.runtime_artifacts,
         ):
             manager.capture_fence = self.capture_fence
+
+    def configure_operation_persistence(self, journal: Journal) -> None:
+        """Attach one application-owned journal to lifecycle evidence boundaries."""
+        from .workspace_evidence import WorkspaceEvidence
+
+        if self.journal is not None and self.journal is not journal:
+            raise RuntimeError("Workspace persistence is already configured")
+        self.journal = journal
+        evidence = WorkspaceEvidence(self, journal)
+        self.lifecycle.checkpoint_hook = evidence.checkpoint
+        self.lifecycle.scrub_proof_hook = evidence.scrub_proof
+        self.images.scrub_proof_hook = evidence.scrub_proof
+        self.images.checkpoint_hook = evidence.checkpoint
 
     async def inventory_for_runner(self) -> dict:
         """Collect the QEMU storage inventory with explicit completeness."""
@@ -132,7 +153,7 @@ class WorkspaceService:
             scan = await runtime.inventory()
         except Exception:  # noqa: BLE001 - failed scan is incomplete evidence
             scan = RuntimeInventory(errors=["Runtime unavailable"])
-        if getattr(self, "_journal", None):
+        if self.journal:
             for resource in scan.resources:
                 workspace_id = resource.metadata.get("workspace_id")
                 if resource.kind == "workspace" and workspace_id:
@@ -141,8 +162,10 @@ class WorkspaceService:
                     except ValueError:
                         continue
                     await self._observe_workspace_state(
-                        workspace_uuid, resource.state,
-                        epochs.get(workspace_uuid, 0), workspace_uuid in active,
+                        workspace_uuid,
+                        resource.state,
+                        epochs.get(workspace_uuid, 0),
+                        workspace_uuid in active,
                     )
         snapshots.append(asdict(scan))
         return {
@@ -163,7 +186,7 @@ class WorkspaceService:
             return
         # Queue immediately after the epoch check. Journal's FIFO IO admission
         # orders this before checkpoints from any lifecycle starting afterwards.
-        await self._journal.call("observe_workspace", str(workspace_id), state)
+        await self.journal.call("observe_workspace", str(workspace_id), state)
 
     async def workspace_incarnation(self, workspace_id: str) -> tuple[dict, str] | None:
         """Read exact current resource identity for durable checkpoint validation."""
@@ -177,7 +200,7 @@ class WorkspaceService:
         inspect_source = getattr(runtime, "workspace_incarnation", None)
         if inspect_source is not None:
             result = await inspect_source(workspace_id)
-            if result and getattr(self, "_journal", None):
+            if result and self.journal:
                 await self._observe_workspace_state(
                     workspace_uuid, result[1], epoch, active
                 )
@@ -202,7 +225,7 @@ class WorkspaceService:
                     )
                 )
         result = matches[0] if len(matches) == 1 else None
-        if result and getattr(self, "_journal", None):
+        if result and self.journal:
             await self._observe_workspace_state(
                 workspace_uuid, result[1], epoch, active
             )
@@ -210,10 +233,10 @@ class WorkspaceService:
 
     async def publication_evidence(self, identity: dict) -> tuple[str, dict] | None:
         """Prove publication or exact incarnation-bound initialization/scrub checkpoint."""
-        if identity.get("workspace_id") and getattr(self, "_journal", None):
+        if identity.get("workspace_id") and self.journal:
             observed = await self.workspace_incarnation(identity["workspace_id"])
             proof = (
-                await self._journal.call("proof", identity["workspace_id"], observed[0])
+                await self.journal.call("proof", identity["workspace_id"], observed[0])
                 if observed
                 else None
             )
@@ -253,7 +276,8 @@ class WorkspaceService:
                     op != identity.get("operation_id")
                     or image != identity.get("image_instance_id")
                     or target != identity.get("target")
-                    or capture and meta.get("instance_id") != identity.get("workspace_id")
+                    or capture
+                    and meta.get("instance_id") != identity.get("workspace_id")
                 ):
                     continue
                 if (identity.get("image_path")) and (
@@ -324,7 +348,7 @@ class WorkspaceService:
 
     async def partial_workspace_identity(self, workspace_id: uuid.UUID) -> str | None:
         """Recover a partial allocation only from durable exact create ownership."""
-        journal = getattr(self, "_journal", None)
+        journal = self.journal
         recover = getattr(self._runtime, "quiesce_interrupted_workspace", None)
         if (
             journal is None
@@ -366,10 +390,10 @@ class WorkspaceService:
         if state not in {"running", "exited", "stopped"}:
             return result
         result["workspace_status"] = "running" if state == "running" else "stopped"
-        if getattr(self, "_journal", None) is not None:
+        if self.journal is not None:
             observed = await self.workspace_incarnation(workspace_id)
             proof = (
-                await self._journal.call("proof", workspace_id, observed[0])
+                await self.journal.call("proof", workspace_id, observed[0])
                 if observed is not None and observed[1] == state
                 else None
             )
@@ -430,7 +454,5 @@ class WorkspaceService:
         self.streams.intent_store = StreamIntentStore(state_dir)
         self.streams.lease_store = store
         self.streams.epoch = epoch
-        self.desktop.configure_leases(
-            store, epoch, self.streams.close_owner_streams
-        )
+        self.desktop.configure_leases(store, epoch, self.streams.close_owner_streams)
         self.registry.desktop_manager = self.desktop

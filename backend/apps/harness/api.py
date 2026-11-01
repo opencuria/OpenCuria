@@ -93,7 +93,7 @@ def _get_service():  # type: ignore[no-untyped-def]
 
 
 def _resolve_harness_service():  # type: ignore[no-untyped-def]
-    """Return the process-wide HarnessService (runner accessor wired)."""
+    """Resolve persisted command submission for the API process."""
     from apps.harness.harness_service import get_harness_service
 
     return get_harness_service()
@@ -277,7 +277,7 @@ async def send_harness_message(
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         SessionAccessService.require_user_promptable(session.parent_id)
-        if not service.is_running(session.id):
+        if not await sync_to_async(service.is_running)(session.id):
             settings = SessionSettingsService()
             if payload.mode and payload.mode.strip():
                 session = await sync_to_async(settings.set_mode)(
@@ -677,7 +677,7 @@ async def set_harness_session_mode(
         service = _resolve_harness_service()
         session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        if service.is_running(session.id):
+        if await sync_to_async(service.is_running)(session.id):
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
@@ -1387,7 +1387,7 @@ async def poll_chatgpt_oauth_status(request: HttpRequest, flow_id: uuid.UUID):
         result = await ProviderOAuthService().status(
             organization_id=get_organization_id(request),
             user=request.user,
-            flow_id=flow_id
+            flow_id=flow_id,
         )
         if result["status"] == "no_flow":
             return 404, {

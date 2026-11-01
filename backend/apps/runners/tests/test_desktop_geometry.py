@@ -145,15 +145,19 @@ async def test_start_desktop_payload_includes_geometry(desktop_api) -> None:
     workspace.save(update_fields=["desktop_width", "desktop_height", "updated_at"])
 
     service = RunnerService(sio_server=AsyncMock())
-    service._emit_to_runner = AsyncMock()
-    service._viewer_rpc = AsyncMock(return_value={"epoch": "runner-epoch"})
-    await service.start_desktop(
-        workspace.id, user=desktop_api["user"],
-        organization_id=desktop_api["org"].id,
-        viewer_client_id=uuid.uuid4(), intent_revision=1,
+    service.runner_transport.emit_to_runner = AsyncMock()
+    service.interactive_sessions._viewer_rpc = AsyncMock(
+        return_value={"epoch": "runner-epoch"}
     )
-    event = service._emit_to_runner.await_args.args[1]
-    payload = service._emit_to_runner.await_args.args[2]
+    await service.start_desktop(
+        workspace.id,
+        user=desktop_api["user"],
+        organization_id=desktop_api["org"].id,
+        viewer_client_id=uuid.uuid4(),
+        intent_revision=1,
+    )
+    event = service.runner_transport.emit_to_runner.await_args.args[1]
+    payload = service.runner_transport.emit_to_runner.await_args.args[2]
     assert event == "task:start_desktop"
     assert payload["desktop_width"] == 1280
     assert payload["desktop_height"] == 720

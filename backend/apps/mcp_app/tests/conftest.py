@@ -65,9 +65,16 @@ def _build_world() -> World:
 
 
 @pytest.fixture
-async def world(transactional_db) -> World:
+async def world(transactional_db, monkeypatch) -> World:
     """Organization member with one online runner and one running workspace."""
-    return await sync_to_async(_build_world)()
+    from apps.harness import harness_service as application
+
+    # Domain adapter tests inject an execution service explicitly. Cross-process
+    # production composition has its own durable-command integration tests.
+    service = application.HarnessService()
+    monkeypatch.setattr(application, "_default_harness_service", service)
+    yield await sync_to_async(_build_world)()
+    await service.shutdown_runs()
 
 
 @pytest.fixture

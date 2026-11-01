@@ -1019,9 +1019,12 @@ async def test_edit_preserves_auto_model_and_effort(
     harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Resolved per-turn defaults must not become persistent edit overrides."""
+    from unittest.mock import AsyncMock
+
     from apps.harness.services import AgentConfigService
 
-    service = HarnessService()
+    # This settings regression owns no Socket.IO lifecycle or network transport.
+    service = HarnessService(emit=AsyncMock())
     session = await _db_create_session(harness_workspace)
     HarnessSessionRepository.set_model(session, "")
     AgentConfigService().save_configs(

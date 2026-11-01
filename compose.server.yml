@@ -46,7 +46,7 @@ services:
         condition: service_healthy
     environment: &backend_environment
       DJANGO_ENV: production
-      BACKEND_PROCESS_LOCK_PATH: /var/lib/opencuria/backend/process.lock
+      EXECUTION_PROCESS_LOCK_PATH: /var/lib/opencuria/backend/process.lock
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
@@ -85,6 +85,19 @@ services:
       timeout: 10s
       retries: 6
       start_period: 30s
+  execution:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
+    container_name: opencuria_execution
+    restart: unless-stopped
+    entrypoint: [python, manage.py, execute_harness]
+    environment: *backend_environment
+    volumes: *backend_volumes
+    networks: *id002
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
   webapp:
     image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     container_name: opencuria_webapp

@@ -29,7 +29,9 @@ def desktop_access(workspace, user, organization, monkeypatch):
         busy_workspace_ids=Mock(return_value=set()),
     )
     service = RunnerService(harness_gateway=gateway)
-    service._call_runner = AsyncMock(return_value={"ok": True, "text": "clipboard"})
+    service.runner_transport.call_runner = AsyncMock(
+        return_value={"ok": True, "text": "clipboard"}
+    )
     key = str(workspace.id)
     monkeypatch.setitem(service._active_desktops, key, {"computer_use": False})
     monkeypatch.setattr("apps.runners.api._get_service", lambda: service)
@@ -102,7 +104,7 @@ def test_desktop_action_access_contract(
             identifier = org.id if expected_status is None else target_id
             with pytest.raises(NotFoundError, match=f"{resource} '{identifier}'"):
                 call(target_id, *args, **context)
-            service._call_runner.assert_not_awaited()
+            service.runner_transport.call_runner.assert_not_awaited()
             gateway.abort_busy_computeruse.assert_not_awaited()
         else:
             assert (
@@ -116,7 +118,7 @@ def test_desktop_action_access_contract(
             if action == "take-control":
                 gateway.abort_busy_computeruse.assert_awaited_once_with(workspace.id)
             else:
-                service._call_runner.assert_awaited_once()
+                service.runner_transport.call_runner.assert_awaited_once()
         return
 
     client = _make_client(
@@ -132,7 +134,7 @@ def test_desktop_action_access_contract(
         # The existing membership gate runs before the route's error mapping.
         with pytest.raises(NotFoundError, match=f"Organization '{org.id}'"):
             _desktop_request(client, target_id, action)
-        service._call_runner.assert_not_awaited()
+        service.runner_transport.call_runner.assert_not_awaited()
         gateway.abort_busy_computeruse.assert_not_awaited()
         return
 
@@ -145,15 +147,18 @@ def test_desktop_action_access_contract(
             "code": "not_found",
             "gaps": None,
         }
-        service._call_runner.assert_not_awaited()
+        service.runner_transport.call_runner.assert_not_awaited()
         gateway.abort_busy_computeruse.assert_not_awaited()
     elif action == "take-control":
         assert response.json() == {"aborted_session_ids": []}
         gateway.abort_busy_computeruse.assert_awaited_once_with(workspace.id)
-        service._call_runner.assert_not_awaited()
+        service.runner_transport.call_runner.assert_not_awaited()
     else:
         assert response.json() == {"text": "clipboard"}
-        events = [call.args[1] for call in service._call_runner.await_args_list]
+        events = [
+            call.args[1]
+            for call in service.runner_transport.call_runner.await_args_list
+        ]
         assert events == (
             ["desktop:clipboard_read"]
             if action == "clipboard/read"
@@ -194,4 +199,4 @@ def test_desktop_action_availability_contract(desktop_access, action, blocked_by
         assert response.status_code == 409, response.content
         assert response.json()["code"] == "conflict"
         gateway.abort_busy_computeruse.assert_not_awaited()
-    service._call_runner.assert_not_awaited()
+    service.runner_transport.call_runner.assert_not_awaited()

@@ -136,7 +136,7 @@ def test_captured_image_clone_access(
     async def fake_emit(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(get_runner_service(), "_emit_to_runner", fake_emit)
+    monkeypatch.setattr(get_runner_service().runner_transport, "emit_to_runner", fake_emit)
 
     client = _make_client(
         user=workspace_access_setup[actor_key],

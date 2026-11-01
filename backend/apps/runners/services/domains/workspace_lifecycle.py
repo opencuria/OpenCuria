@@ -1,24 +1,11 @@
-"""Workspace lifecycle (Phase 3 domain mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces``,
-``self.tasks``, ``self.image_instances``, ``self.processes`` plus sibling
-helpers (``_dispatch_workspace_task`` / ``_set_workspace_operation`` via
-``TaskDispatchMixin``, ``_ensure_*`` guards via ``OwnershipMixin``,
-``_forward_*`` via ``FrontendBusMixin``, ``_resolve_credential_selection`` /
-``_credential_resolve_call`` / ``_resolved_credentials_payload`` via
-:class:`CredentialSyncMixin`, ``mark_processes_killed`` via
-:class:`ProcessManagerMixin`). Callers select credentials by ID; this module
-never imports the credentials context and reaches it only through
-``CredentialSyncMixin``.
-"""
+"""Admit and dispatch workspace provisioning and lifecycle operations."""
 
 from __future__ import annotations
 
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -53,11 +40,53 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import ImageInstance, Runner, Task, Workspace
     from ...repositories import WorkspaceLaunchState
 
+if TYPE_CHECKING:
+    from ...repositories import (
+        ImageInstanceRepository,
+        TaskRepository,
+        WorkspaceRepository,
+    )
+    from ..domains.credential_sync import CredentialSyncService
+    from ..domains.process_manager import ProcessManagerService
+    from ..infra.frontend_bus import FrontendBusService
+    from ..infra.ownership import OwnershipService
+    from ..infra.session_store import SessionStoreService
+    from ..infra.task_dispatch import TaskDispatchService
+    from ..ports import HarnessGateway, RunnerTransport
+
 logger = logging.getLogger(__name__)
 
 
-class WorkspaceLifecycleMixin:
-    """Workspace CRUD and lifecycle dispatch shared by RunnerService."""
+class WorkspaceLifecycleService:
+    """Workspace CRUD and lifecycle dispatch with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        image_instances: type[ImageInstanceRepository],
+        tasks: type[TaskRepository],
+        workspaces: type[WorkspaceRepository],
+        credential_sync: CredentialSyncService,
+        frontend_bus: FrontendBusService,
+        harness: Callable[[], HarnessGateway],
+        ownership: OwnershipService,
+        process_manager: ProcessManagerService,
+        runner_transport: RunnerTransport,
+        session_store: SessionStoreService,
+        task_dispatch: TaskDispatchService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.image_instances = image_instances
+        self.tasks = tasks
+        self.workspaces = workspaces
+        self.credential_sync = credential_sync
+        self.frontend_bus = frontend_bus
+        self.harness = harness
+        self.ownership = ownership
+        self.process_manager = process_manager
+        self.runner_transport = runner_transport
+        self.session_store = session_store
+        self.task_dispatch = task_dispatch
 
     async def touch_workspace_activity(
         self,
@@ -95,7 +124,7 @@ class WorkspaceLifecycleMixin:
         return f"workspace-{str(workspace_id)[:8]}"
 
     @staticmethod
-    def _validate_runner_qemu_limits(runner: Runner) -> None:
+    def validate_runner_qemu_limits(runner: Runner) -> None:
         """Validate min/max/default and total limits for a runner's QEMU config."""
         if runner.qemu_min_vcpus > runner.qemu_max_vcpus:
             raise ConflictError("Runner vCPU minimum cannot exceed maximum")
@@ -158,7 +187,7 @@ class WorkspaceLifecycleMixin:
         }.get(task_type)
 
     @staticmethod
-    def _workspace_operation_label(operation: str | None) -> str:
+    def workspace_operation_label(operation: str | None) -> str:
         """Return a readable operation label for conflict messages."""
         if not operation:
             return "busy"
@@ -237,7 +266,7 @@ class WorkspaceLifecycleMixin:
             raise ConflictError("An image artifact is required")
 
         resolved = (
-            await self._resolve_credential_selection(
+            await self.credential_sync.resolve_credential_selection(
                 credential_ids, user=user, organization_id=organization_id
             )
             if credential_ids is not None
@@ -261,7 +290,7 @@ class WorkspaceLifecycleMixin:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        self._validate_runner_qemu_limits(runner)
+        self.validate_runner_qemu_limits(runner)
         resolved_qemu_vcpus: int | None = None
         resolved_qemu_memory_mb: int | None = None
         resolved_qemu_disk_size_gb: int | None = None
@@ -269,13 +298,13 @@ class WorkspaceLifecycleMixin:
             resolved_qemu_vcpus,
             resolved_qemu_memory_mb,
             resolved_qemu_disk_size_gb,
-        ) = self._resolve_qemu_resources(
+        ) = self.task_dispatch.resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        await self._ensure_qemu_active_capacity(
+        await self.task_dispatch.ensure_qemu_active_capacity(
             runner=runner,
             requested_vcpus=resolved_qemu_vcpus,
             requested_memory_mb=resolved_qemu_memory_mb,
@@ -329,12 +358,12 @@ class WorkspaceLifecycleMixin:
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
             operation_payload=command.payload,
-            credentials_present=self._has_credential_material(resolved),
+            credentials_present=self.credential_sync.has_credential_material(resolved),
             task_type=command.task_type,
         )
         # Dispatch to runner — include workspace_id so the runner
         # uses the same UUID the backend assigned.
-        await self._dispatch_workspace_task(
+        await self.task_dispatch.dispatch_workspace_task(
             runner=runner,
             event=command.event,
             task=task,
@@ -343,7 +372,7 @@ class WorkspaceLifecycleMixin:
             payload={
                 "task_id": str(task_id),
                 **command.payload,
-                **self._resolved_credentials_payload(resolved),
+                **self.credential_sync.resolved_credentials_payload(resolved),
             },
         )
         logger.info(
@@ -383,13 +412,13 @@ class WorkspaceLifecycleMixin:
         if organization_id is None:
             organization_id = workspace.runner.organization_id
         resolved = (
-            await self._resolve_credential_selection(
+            await self.credential_sync.resolve_credential_selection(
                 credential_ids, user=user, organization_id=organization_id
             )
             if credential_ids is not None
             else None
         )
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
         acknowledged_credentials_present = bool(workspace.credentials_present)
 
         trimmed_name = None
@@ -414,7 +443,7 @@ class WorkspaceLifecycleMixin:
             needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
                 has_ordinary_selection_change
                 or bool(workspace.credentials_present)
-                != self._has_credential_material(resolved)
+                != self.credential_sync.has_credential_material(resolved)
             )
 
         qemu_fields_requested = any(
@@ -433,13 +462,13 @@ class WorkspaceLifecycleMixin:
                     "must be running or stopped to reconfigure resources"
                 )
             runner = workspace.runner
-            self._validate_runner_qemu_limits(runner)
+            self.validate_runner_qemu_limits(runner)
             current = (
                 workspace.qemu_vcpus or runner.qemu_default_vcpus,
                 workspace.qemu_memory_mb or runner.qemu_default_memory_mb,
                 workspace.qemu_disk_size_gb or runner.qemu_default_disk_size_gb,
             )
-            qemu_values = self._resolve_qemu_resources(
+            qemu_values = self.task_dispatch.resolve_qemu_resources(
                 runner=runner,
                 qemu_vcpus=qemu_vcpus,
                 qemu_memory_mb=qemu_memory_mb,
@@ -450,7 +479,7 @@ class WorkspaceLifecycleMixin:
             if qemu_changed and workspace.status == WorkspaceStatus.RUNNING:
                 if not workspace.runner.is_online:
                     raise RunnerOfflineError(str(workspace.runner_id))
-                await self._ensure_qemu_active_capacity(
+                await self.task_dispatch.ensure_qemu_active_capacity(
                     runner=runner,
                     requested_vcpus=qemu_values[0],
                     requested_memory_mb=qemu_values[1],
@@ -482,12 +511,12 @@ class WorkspaceLifecycleMixin:
 
         # Side effects occur only after the final DB configuration is committed.
         if qemu_changed and workspace.status == WorkspaceStatus.RUNNING:
-            await sync_to_async(self.mark_processes_killed)(
+            await sync_to_async(self.process_manager.mark_processes_killed)(
                 str(workspace_id), reason="workspace_reconfigured"
             )
             task = workspace._lifecycle_task
             task_id = task.id
-            await self._dispatch_workspace_task(
+            await self.task_dispatch.dispatch_workspace_task(
                 runner=workspace.runner,
                 event="task:update_workspace",
                 task=task,
@@ -513,8 +542,10 @@ class WorkspaceLifecycleMixin:
                 )
             else:
                 try:
-                    acknowledged_presence = await self._dispatch_credential_inject(
-                        workspace, resolved=resolved, wait=True
+                    acknowledged_presence = (
+                        await self.credential_sync.dispatch_credential_inject(
+                            workspace, resolved=resolved, wait=True
+                        )
                     )
                     workspace = await sync_to_async(self.workspaces.get_by_id)(
                         workspace_id
@@ -576,7 +607,7 @@ class WorkspaceLifecycleMixin:
                 workspace_id,
                 idle_before=idle_before,
                 expected_timeout_minutes=timeout_minutes,
-                has_busy_agent=self._harness().has_busy_session,
+                has_busy_agent=self.harness().has_busy_session,
             )
             if workspace is None:
                 raise ConflictError(
@@ -586,7 +617,7 @@ class WorkspaceLifecycleMixin:
             workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
             if workspace is None:
                 raise WorkspaceNotFoundError(str(workspace_id))
-            self._ensure_workspace_available(workspace)
+            self.ownership.ensure_workspace_available(workspace)
 
         try:
             if workspace.status != WorkspaceStatus.RUNNING:
@@ -607,7 +638,7 @@ class WorkspaceLifecycleMixin:
                 workspace=workspace,
             )
 
-            await self._dispatch_workspace_task(
+            await self.task_dispatch.dispatch_workspace_task(
                 runner=runner,
                 event="task:stop_workspace",
                 task=task,
@@ -630,7 +661,7 @@ class WorkspaceLifecycleMixin:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
-        self._ensure_workspace_available(workspace)
+        self.ownership.ensure_workspace_available(workspace)
 
         if workspace.status != WorkspaceStatus.STOPPED:
             raise WorkspaceStateError(
@@ -648,18 +679,18 @@ class WorkspaceLifecycleMixin:
         qemu_vcpus = effective["vcpus"]
         qemu_memory_mb = effective["memory_mb"]
         qemu_disk_size_gb = effective["disk_size_gb"]
-        self._validate_runner_qemu_limits(runner)
+        self.validate_runner_qemu_limits(runner)
         (
             qemu_vcpus,
             qemu_memory_mb,
             qemu_disk_size_gb,
-        ) = self._resolve_qemu_resources(
+        ) = self.task_dispatch.resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        await self._ensure_qemu_active_capacity(
+        await self.task_dispatch.ensure_qemu_active_capacity(
             runner=runner,
             requested_vcpus=qemu_vcpus,
             requested_memory_mb=qemu_memory_mb,
@@ -673,10 +704,10 @@ class WorkspaceLifecycleMixin:
         )
 
         # Phase-4 port: prefer the injected credential_resolver.
-        resolve_call = self._credential_resolve_call(workspace)
+        resolve_call = self.credential_sync.credential_resolve_call(workspace)
         workspace_credentials = await sync_to_async(resolve_call)(workspace)
 
-        await self._dispatch_workspace_task(
+        await self.task_dispatch.dispatch_workspace_task(
             runner=runner,
             event="task:resume_workspace",
             task=task,
@@ -688,7 +719,9 @@ class WorkspaceLifecycleMixin:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
-                **self._resolved_credentials_payload(workspace_credentials),
+                **self.credential_sync.resolved_credentials_payload(
+                    workspace_credentials
+                ),
             },
         )
         return task
@@ -721,14 +754,14 @@ class WorkspaceLifecycleMixin:
 
         disk_size_gb = workspace.qemu_disk_size_gb
         disk_size_gb = disk_size_for(workspace.qemu_disk_size_gb, target)
-        vcpus, memory_mb, disk_size_gb = self._resolve_qemu_resources(
+        vcpus, memory_mb, disk_size_gb = self.task_dispatch.resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
             qemu_disk_size_gb=disk_size_gb,
         )
         if workspace.status != WorkspaceStatus.RUNNING:
-            await self._ensure_qemu_active_capacity(
+            await self.task_dispatch.ensure_qemu_active_capacity(
                 runner=runner,
                 requested_vcpus=vcpus,
                 requested_memory_mb=memory_mb,
@@ -737,7 +770,9 @@ class WorkspaceLifecycleMixin:
             )
 
         try:
-            await sync_to_async(self._credential_resolve_call(workspace))(workspace)
+            await sync_to_async(
+                self.credential_sync.credential_resolve_call(workspace)
+            )(workspace)
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear conflict
             raise ConflictError(
                 "Workspace credentials cannot be resolved. Fix or detach them "
@@ -749,11 +784,11 @@ class WorkspaceLifecycleMixin:
         )(
             workspace_id,
             image_id,
-            has_busy_agent=self._harness().has_busy_session,
+            has_busy_agent=self.harness().has_busy_session,
             requested_by=user,
             qemu_disk_size_gb=disk_size_gb,
         )
-        await sync_to_async(self._forward_workspace_operation)(
+        await sync_to_async(self.frontend_bus.forward_workspace_operation)(
             str(workspace_id), workspace.active_operation
         )
         logger.info(
@@ -791,7 +826,7 @@ class WorkspaceLifecycleMixin:
         ):
             raise ConflictError(
                 f"Workspace '{workspace.id}' is currently "
-                f"{self._workspace_operation_label(workspace.active_operation)}"
+                f"{self.workspace_operation_label(workspace.active_operation)}"
             )
 
         runner = workspace.runner
@@ -807,7 +842,7 @@ class WorkspaceLifecycleMixin:
             previous_status = workspace.status
             await sync_to_async(self.workspaces.mark_deleting)(workspace_id)
             try:
-                await self._dispatch_workspace_task(
+                await self.task_dispatch.dispatch_workspace_task(
                     runner=runner,
                     event="task:remove_workspace",
                     task=task,
@@ -826,7 +861,7 @@ class WorkspaceLifecycleMixin:
                 raise
         else:
             await sync_to_async(self.workspaces.mark_pending_deletion)(workspace_id)
-            await self._emit_to_runner(
+            await self.runner_transport.emit_to_runner(
                 runner,
                 "task:remove_workspace",
                 {
@@ -835,7 +870,7 @@ class WorkspaceLifecycleMixin:
                 },
             )
 
-        self._forward_to_frontend(
+        self.frontend_bus.forward_to_frontend(
             "workspace:status_changed",
             {
                 "workspace_id": str(workspace_id),
@@ -876,7 +911,7 @@ class WorkspaceLifecycleMixin:
         ):
             return
 
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         workspace = task.workspace
@@ -893,8 +928,8 @@ class WorkspaceLifecycleMixin:
         self.tasks.complete(task)
         logger.info("Workspace created: %s", workspace_id)
 
-        self._forward_workspace_status(workspace, task_id=task_id)
-        self._forward_workspace_operation(workspace_id, None)
+        self.frontend_bus.forward_workspace_status(workspace, task_id=task_id)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_stopped(
         self,
@@ -921,7 +956,7 @@ class WorkspaceLifecycleMixin:
         ):
             return
 
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         workspace = task.workspace
@@ -930,17 +965,19 @@ class WorkspaceLifecycleMixin:
             self.workspaces.update_active_operation(workspace, None)
             if credentials_present is False:
                 self.workspaces.update_credentials_present(workspace, False)
-            self._pending_credential_inject.discard(
+            self.credential_sync.pending_inject.discard(
                 (str(workspace.runner_id), str(workspace.id))
             )
-            self.mark_processes_killed(str(workspace.id), reason="workspace_stopped")
-        self._cleanup_desktop_state(workspace_id)
+            self.process_manager.mark_processes_killed(
+                str(workspace.id), reason="workspace_stopped"
+            )
+        self.session_store.cleanup_desktop_state(workspace_id)
         self.tasks.complete(task)
         logger.info("Workspace stopped: %s", workspace_id)
 
         if workspace:
-            self._forward_workspace_status(workspace, task_id=task_id)
-        self._forward_workspace_operation(workspace_id, None)
+            self.frontend_bus.forward_workspace_status(workspace, task_id=task_id)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_resumed(
         self,
@@ -967,7 +1004,7 @@ class WorkspaceLifecycleMixin:
         ):
             return
 
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         workspace = task.workspace
@@ -982,8 +1019,8 @@ class WorkspaceLifecycleMixin:
         logger.info("Workspace resumed: %s", workspace_id)
 
         if workspace:
-            self._forward_workspace_status(workspace, task_id=task_id)
-        self._forward_workspace_operation(workspace_id, None)
+            self.frontend_bus.forward_workspace_status(workspace, task_id=task_id)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_updated(
         self, task_id: str, workspace_id: str, runner_id: str | None = None
@@ -1006,7 +1043,7 @@ class WorkspaceLifecycleMixin:
         ):
             return
 
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         workspace = task.workspace
@@ -1014,7 +1051,7 @@ class WorkspaceLifecycleMixin:
             self.workspaces.update_active_operation(workspace, None)
         self.tasks.complete(task)
         logger.info("Workspace updated: %s", workspace_id)
-        self._forward_workspace_operation(workspace_id, None)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_rpc_error(
         self,
@@ -1052,7 +1089,7 @@ class WorkspaceLifecycleMixin:
             and task.workspace.current_task_id != task.id
         ):
             return
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         # If this was a workspace lifecycle creation task, mark workspace failed.
@@ -1060,7 +1097,7 @@ class WorkspaceLifecycleMixin:
         workspace_id = str(workspace.id) if workspace else None
         if workspace:
             self.workspaces.update_active_operation(workspace, None)
-            self._pending_credential_inject.discard(
+            self.credential_sync.pending_inject.discard(
                 (str(workspace.runner_id), str(workspace.id))
             )
         recreating = WorkspaceOperationRepository.owns_recreate_child(task.id)
@@ -1094,9 +1131,9 @@ class WorkspaceLifecycleMixin:
 
         if workspace_id:
             if workspace and observed_status is not None:
-                self._forward_workspace_status(workspace, task_id=task_id)
+                self.frontend_bus.forward_workspace_status(workspace, task_id=task_id)
             if workspace and task.type == TaskType.REMOVE_WORKSPACE and not recreating:
-                self._forward_to_frontend(
+                self.frontend_bus.forward_to_frontend(
                     "workspace:status_changed",
                     {
                         "workspace_id": workspace_id,
@@ -1105,8 +1142,8 @@ class WorkspaceLifecycleMixin:
                     },
                     workspace_id,
                 )
-            self._forward_workspace_operation(workspace_id, None)
-            self._forward_to_frontend(
+            self.frontend_bus.forward_workspace_operation(workspace_id, None)
+            self.frontend_bus.forward_to_frontend(
                 "workspace:error",
                 {"workspace_id": workspace_id, "task_id": task_id, "error": error},
                 workspace_id,
@@ -1138,7 +1175,7 @@ class WorkspaceLifecycleMixin:
         ):
             return
 
-        if not self._validate_task_runner(task, runner_id):
+        if not self.ownership.validate_task_runner(task, runner_id):
             return
 
         recreating = WorkspaceOperationRepository.owns_recreate_child(task.id)
@@ -1161,8 +1198,10 @@ class WorkspaceLifecycleMixin:
                 RecreateService.removed(workspace)
             else:
                 self.workspaces.mark_deleted(workspace.id)
-            self.mark_processes_killed(str(workspace.id), reason="workspace_removed")
-        self._cleanup_desktop_state(workspace_id)
+            self.process_manager.mark_processes_killed(
+                str(workspace.id), reason="workspace_removed"
+            )
+        self.session_store.cleanup_desktop_state(workspace_id)
 
         self.tasks.complete(task)
         logger.info(
@@ -1174,7 +1213,7 @@ class WorkspaceLifecycleMixin:
         )
 
         if recreating:
-            self._forward_to_frontend(
+            self.frontend_bus.forward_to_frontend(
                 "workspace:status_changed",
                 {
                     "workspace_id": workspace_id,
@@ -1183,10 +1222,10 @@ class WorkspaceLifecycleMixin:
                 },
                 workspace_id,
             )
-            self._forward_workspace_operation(workspace_id, None)
+            self.frontend_bus.forward_workspace_operation(workspace_id, None)
             return
 
-        self._forward_to_frontend(
+        self.frontend_bus.forward_to_frontend(
             "workspace:status_changed",
             {
                 "workspace_id": workspace_id,
@@ -1195,7 +1234,7 @@ class WorkspaceLifecycleMixin:
             },
             workspace_id,
         )
-        self._forward_workspace_operation(workspace_id, None)
+        self.frontend_bus.forward_workspace_operation(workspace_id, None)
 
     async def create_workspace_from_image_artifact(
         self,
@@ -1214,7 +1253,7 @@ class WorkspaceLifecycleMixin:
         associations.
         """
         resolved = (
-            await self._resolve_credential_selection(
+            await self.credential_sync.resolve_credential_selection(
                 credential_ids, user=user, organization_id=organization_id
             )
             if credential_ids is not None
@@ -1251,18 +1290,18 @@ class WorkspaceLifecycleMixin:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        self._validate_runner_qemu_limits(runner)
+        self.validate_runner_qemu_limits(runner)
         (
             qemu_vcpus,
             qemu_memory_mb,
             qemu_disk_size_gb,
-        ) = self._resolve_qemu_resources(
+        ) = self.task_dispatch.resolve_qemu_resources(
             runner=runner,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        await self._ensure_qemu_active_capacity(
+        await self.task_dispatch.ensure_qemu_active_capacity(
             runner=runner,
             requested_vcpus=qemu_vcpus,
             requested_memory_mb=qemu_memory_mb,
@@ -1298,7 +1337,7 @@ class WorkspaceLifecycleMixin:
             credentials=list(resolved.credentials) if resolved is not None else [],
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
-            credentials_present=self._has_credential_material(resolved),
+            credentials_present=self.credential_sync.has_credential_material(resolved),
             task_type=TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
             operation_payload={
                 "workspace_id": str(workspace_id),
@@ -1310,7 +1349,7 @@ class WorkspaceLifecycleMixin:
             },
         )
 
-        await self._dispatch_workspace_task(
+        await self.task_dispatch.dispatch_workspace_task(
             runner=runner,
             event="task:create_workspace_from_image_artifact",
             task=task,
@@ -1325,7 +1364,7 @@ class WorkspaceLifecycleMixin:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
-                **self._resolved_credentials_payload(resolved),
+                **self.credential_sync.resolved_credentials_payload(resolved),
             },
         )
         logger.info(

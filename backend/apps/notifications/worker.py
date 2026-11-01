@@ -1,4 +1,4 @@
-"""ASGI-owned delivery loop; queue state and leases remain in the database."""
+"""Execution-worker-owned delivery loop; queue state and leases remain in the database."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class NotificationWorker:
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        """Start exactly once alongside the existing ASGI scheduler."""
+        """Start exactly once alongside the existing execution scheduler."""
         if self._task is not None:
             return
         if self.service is None:

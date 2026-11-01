@@ -1,3 +1,5 @@
+from src.commands import CommandResult
+from tests.command_support import make_executor
 """Real qcow2 publication and backing graph tests; mocked hypervisor only."""
 
 import asyncio
@@ -218,7 +220,7 @@ async def test_mutation_cancellation_drains_thread_and_holds_lock():
 @pytest.mark.asyncio
 async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
     from src.config import RunnerSettings
-    from src.journal import COMMANDS, Journal, OperationExecutor
+    from src.journal import COMMANDS, Journal
     from src.service import WorkspaceService
 
     r = runtime(tmp_path)
@@ -256,7 +258,7 @@ async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
 
     socket = Socket()
     reopened = Journal(str(tmp_path / "journal"), defer_recovery=True)
-    executor = OperationExecutor(socket, reopened, service.publication_evidence)
+    executor = make_executor(socket, reopened, service.publication_evidence)
     await executor.replay()
     event, result = reopened.pending()[0]
     assert event == "image:built" and result["image_path"] == str(target)
@@ -557,7 +559,7 @@ async def test_source_scrub_survives_corrupt_output_but_not_external_disk_write(
 @pytest.mark.asyncio
 async def test_truncated_conversion_failure_retains_safe_source_evidence(tmp_path):
     from src.config import RunnerSettings
-    from src.journal import COMMANDS, Journal, OperationExecutor
+    from src.journal import COMMANDS, Journal
     from src.service import WorkspaceService
 
     r = runtime(tmp_path)
@@ -588,10 +590,11 @@ async def test_truncated_conversion_failure_retains_safe_source_evidence(tmp_pat
         qcow(output)
         with output.open("r+b") as stream:
             stream.truncate(80)
-        await socket.emit("image_artifact:failed", {"error": "No space left on device"})
+        result = CommandResult('image_artifact:failed', {'error': 'No space left on device'})
+        return result
 
     socket = Socket()
-    executor = OperationExecutor(
+    executor = make_executor(
         socket, Journal(str(tmp_path / "journal")), observer=service
     )
     await socket.handlers["/"]["task:create_image_artifact"](

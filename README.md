@@ -226,7 +226,7 @@ If you do not want Docker Compose for day-to-day development:
 ./scripts/setup-dev.sh
 ```
 
-After that you can run `backend`, `webapp`, and `runner` individually. When
+After that you can run the API, execution worker, `webapp`, and `runner` individually. When
 updating a source checkout, apply backend migrations before starting the ASGI server:
 
 ```bash
@@ -235,24 +235,34 @@ cd backend
 .venv/bin/uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --workers 1 --lifespan on --ws websockets-sansio --ws-max-size 209715200
 ```
 
+Start execution in a separate terminal with the same backend environment and database:
+
+```bash
+cd backend
+.venv/bin/python manage.py execute_harness
+```
+
 The webapp and mobile app are npm workspaces in this repository. Install their
 dependencies once at the repository root with `npm ci` (the root
 `package-lock.json` is authoritative), then use `npm run dev:web` or
 `npm run dev:mobile`. Mobile build and local API/device networking notes are in
 the [mobile app guide](./docs/mobile-app.md).
 
-The Docker backend entrypoint runs migrations automatically and starts one Uvicorn
-ASGI worker. The worker owns the in-process scheduled-task loop alongside Socket.IO
-and the harness; keep it single-process/single-worker. A PostgreSQL advisory lock
-or SQLite TTL-row lease controls scheduling, but lease expiry does not prove that
-native chat execution has stopped. Before restart recovery, a process-lifetime
-file lock also excludes another live local backend. SQLite places it next to its
-database; PostgreSQL deployments should set `BACKEND_PROCESS_LOCK_PATH` to a file
-on shared backend storage. Server Compose mounts that storage for the backend.
-Successful or failed ASGI startup retains ownership until process exit, including
-while native tasks drain after shutdown. This supports one backend on one host;
-separate hosts without a common file lock are not supported for native recovery.
-Raw Django `runserver` has no scheduler startup hook and is not suitable for production.
+The Docker backend entrypoint runs migrations and starts the API. Compose runs
+`execute_harness` as the separate `execution` service. API restarts leave native
+runs and background jobs running. The supported deployment keeps one realtime API gateway because terminal and
+desktop sessions still own gateway-local state. Redis routes runner replies and
+authorized workspace events between that gateway and the execution worker.
+
+One execution worker owns the native task registry, scheduler, notifications and
+recovery. Its durable command queue separates admitted work from HTTP requests.
+A process-lifetime file lock excludes another live execution owner; SQLite places
+it next to its database. PostgreSQL deployments with multiple hosts must set
+`EXECUTION_PROCESS_LOCK_PATH` on shared execution storage. The scheduler also holds
+a database lease. A worker restart settles interrupted native work and recovers
+external engines through their existing runner ownership fences. See the
+[execution architecture](docs/execution-architecture.md) for ownership, command
+recovery and deployment details.
 Scheduled tasks are personal
 prompts in an IANA timezone: `recurrence: "once"` runs a single time on `run_date`
 (`YYYY-MM-DD`) at a local `HH:MM` and then disables itself; daily or selected weekdays
@@ -356,8 +366,9 @@ sudo ./backend/systemd/install-recovery-service.sh
 ```
 
 The installer uses the backend virtualenv and environment file, applies migrations,
-enables `opencuria-recover-lifecycle.service` at boot, and starts the backend and
-worker together. It briefly stops both services to apply migrations. Override
+enables `opencuria-recover-lifecycle.service` and `opencuria-execution.service` at
+boot, and starts the API and both workers after the upgrade. It briefly stops
+these services to apply migrations. Later API restarts leave execution running. Override
 `--env-file` or the service names when the deployment differs. To inspect the
 rendered files first, use `--no-activate --output-dir /tmp/opencuria-systemd`.
 When updating a local runner as well, add `--restart-runner opencuria-runner.service`.

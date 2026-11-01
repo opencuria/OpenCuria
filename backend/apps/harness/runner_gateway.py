@@ -20,6 +20,10 @@ from .repositories import HarnessSessionRepository
 class RunnerHarnessGateway:
     """Route runner-service callbacks into the agent harness."""
 
+    def owns_runner_reply(self, event: str, data: dict) -> bool:
+        """Expose local correlation ownership without sharing private registries."""
+        return runner_accessor.owns_runner_reply(event, data)
+
     def route_harness_result(self, data: dict) -> bool:
         """Deliver a ``harness:*_result`` payload to its accessor."""
         return runner_accessor.route_harness_result(data)

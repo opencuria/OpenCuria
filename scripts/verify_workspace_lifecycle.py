@@ -22,8 +22,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
+from src.application import RunnerApplication
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
 from src.runtime.base import WorkspaceConfig
 from src.runtime.qemu_runtime import QemuRuntime
 from src.service import WorkspaceService
@@ -83,7 +83,10 @@ async def crash_child(root: Path) -> None:
     """Pause at the actual initialization boundary until the parent SIGKILLs us."""
     runtime, settings = runtime_at(root, "crash-state")
     service = WorkspaceService(runtime, settings)
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(
+        service, settings, publish=lambda event, data: offline(event, data)
+    )
+    interface = application.interface
 
     async def offline(*args: Any, **kwargs: Any) -> None:
         raise ConnectionError("intentional backend outage")
@@ -116,7 +119,10 @@ async def verify(root: Path, cloud_image: Path, distro: str) -> None:
     cache_image.chmod(0o644)
     runtime, settings = runtime_at(root)
     service = WorkspaceService(runtime, settings)
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(
+        service, settings, publish=lambda event, data: transport(event, data)
+    )
+    interface = application.interface
     emitted: list[tuple[str, Any]] = []
     backend_online = False
 
@@ -339,7 +345,12 @@ async def verify(root: Path, cloud_image: Path, distro: str) -> None:
             await child.wait()
         restart_runtime, restart_settings = runtime_at(root, "crash-state")
         restart_service = WorkspaceService(restart_runtime, restart_settings)
-        restarted = WebSocketInterface(restart_service, restart_settings)
+        restart_application = RunnerApplication(
+            restart_service,
+            restart_settings,
+            publish=lambda event, data: transport(event, data),
+        )
+        restarted = restart_application.interface
         restarted._operations.emit = transport
         restarted._sio.connected = backend_online
         await restarted._operations.replay()

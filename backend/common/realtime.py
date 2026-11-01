@@ -94,12 +94,9 @@ async def emit_to_frontend(
     authentication and authorize subscriptions before registering them.
     """
     sio = get_sio_server()
-    sids = _frontend_subscriptions.get(workspace_id, set())
-    if not sids:
-        return
-
-    for sid in sids.copy():
-        try:
-            await sio.emit(event, data, to=sid, namespace="/frontend")
-        except Exception:
-            logger.warning("Failed to emit %s to frontend sid %s", event, sid)
+    try:
+        await sio.emit(
+            event, data, to=f"workspace:{workspace_id}", namespace="/frontend"
+        )
+    except Exception:
+        logger.warning("Failed to emit %s to workspace %s", event, workspace_id)

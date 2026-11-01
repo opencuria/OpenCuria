@@ -17,7 +17,7 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.repositories import HarnessSessionRepository
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.schemas import DesktopClipboardReadIn
-from apps.runners.services import RunnerService
+from apps.runners.services import RunnerRepositories, RunnerService
 from common.exceptions import ConflictError
 from common.utils import generate_api_token, hash_token
 
@@ -27,10 +27,12 @@ def clipboard_api(capture_workspace, monkeypatch):
     """Exercise real service authorization with an isolated runner transport."""
     user, org, workspace = capture_workspace
     service = RunnerService()
-    service._call_runner = AsyncMock(
+    service.runner_transport.call_runner = AsyncMock(
         return_value={"ok": True, "text": "clipboard text"}
     )
-    service.read_desktop_clipboard = AsyncMock(wraps=service.read_desktop_clipboard)
+    service.read_desktop_clipboard = AsyncMock(
+        wraps=service.read_desktop_clipboard
+    )
     monkeypatch.setitem(
         service._active_desktops, str(workspace.id), {"computer_use": False}
     )
@@ -129,7 +131,7 @@ def test_same_org_member_cannot_read_another_owners_clipboard(clipboard_api):
     )
 
     assert response.status_code == 404, response.content
-    service._call_runner.assert_not_awaited()
+    service.runner_transport.call_runner.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -172,7 +174,7 @@ def test_other_org_cannot_read_clipboard(clipboard_api):
     )
 
     assert response.status_code == 404, response.content
-    service._call_runner.assert_not_awaited()
+    service.runner_transport.call_runner.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -232,7 +234,9 @@ def test_selection_options_forward_to_service(clipboard_api, payload, expected):
 @pytest.fixture
 def selection_service(monkeypatch):
     """RunnerService with lightweight ports for selection-copy tests."""
-    service = RunnerService(sio_server=AsyncMock())
+    service = RunnerService(
+        sio_server=AsyncMock(), repositories=RunnerRepositories(workspaces=Mock())
+    )
     workspace_id = uuid.uuid4()
     workspace = SimpleNamespace(
         id=workspace_id,
@@ -243,7 +247,7 @@ def selection_service(monkeypatch):
             id=uuid.uuid4(), organization_id=uuid.uuid4(), is_online=True
         ),
     )
-    service.get_workspace = Mock(return_value=workspace)
+    service.runner_lifecycle.get_workspace = Mock(return_value=workspace)
     monkeypatch.setattr(
         "apps.organizations.services.OrganizationService.require_membership", Mock()
     )
@@ -251,11 +255,12 @@ def selection_service(monkeypatch):
         "apps.organizations.services.OrganizationService.get_user_role",
         Mock(return_value="member"),
     )
-    service.workspaces = Mock()
     service.workspaces.get_by_id.return_value = workspace
     service.workspaces.touch_activity = Mock()
-    service._ensure_workspace_available = Mock()
-    service._call_runner = AsyncMock(return_value={"ok": True, "text": "selected"})
+    service.ownership.ensure_workspace_available = Mock()
+    service.runner_transport.call_runner = AsyncMock(
+        return_value={"ok": True, "text": "selected"}
+    )
     service._active_desktops[str(workspace_id)] = {"computer_use": False}
     monkeypatch.setattr(
         HarnessSessionRepository,
@@ -284,7 +289,7 @@ async def test_selection_rpc_uses_finite_timeout_and_omits_false_options(
     )
 
     assert result == "selected"
-    service._call_runner.assert_awaited_once_with(
+    service.runner_transport.call_runner.assert_awaited_once_with(
         workspace.runner,
         "desktop:clipboard_read",
         {"workspace_id": str(workspace.id), "copy_selection": True},
@@ -308,7 +313,7 @@ async def test_selection_rejects_malformed_rpc_responses_without_details(
     selection_service, response
 ):
     service, workspace, context = selection_service
-    service._call_runner.return_value = response
+    service.runner_transport.call_runner.return_value = response
 
     with pytest.raises(ConflictError) as error:
         await service.read_desktop_clipboard(
@@ -324,7 +329,7 @@ async def test_selection_rejects_malformed_rpc_responses_without_details(
 @pytest.mark.parametrize("failure", [RuntimeError("sensitive secret"), TimeoutError()])
 async def test_selection_rpc_failures_are_sanitized(selection_service, failure):
     service, workspace, context = selection_service
-    service._call_runner.side_effect = failure
+    service.runner_transport.call_runner.side_effect = failure
 
     with pytest.raises(ConflictError) as error:
         await service.read_desktop_clipboard(
@@ -346,7 +351,9 @@ async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse
     service, workspace, context = selection_service
     if busy_kind == "capture":
         workspace.active_operation = "capturing_image"
-        service._ensure_workspace_available.side_effect = ConflictError("capture lock")
+        service.ownership.ensure_workspace_available.side_effect = ConflictError(
+            "capture lock"
+        )
     elif busy_kind == "desktop-computeruse":
         service._active_desktops[str(workspace.id)]["computer_use"] = True
     else:
@@ -361,7 +368,7 @@ async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse
             workspace.id, copy_selection=True, **context
         )
 
-    service._call_runner.assert_not_awaited()
+    service.runner_transport.call_runner.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -389,7 +396,7 @@ async def test_selection_timeout_bounds_full_operation(selection_service):
         entered_rpc.set()
         await asyncio.Event().wait()
 
-    service._call_runner.side_effect = wait_forever
+    service.runner_transport.call_runner.side_effect = wait_forever
     start = time.monotonic()
     with pytest.raises(ConflictError) as error:
         await service.read_desktop_clipboard(
@@ -399,4 +406,4 @@ async def test_selection_timeout_bounds_full_operation(selection_service):
     assert entered_rpc.is_set()
     assert time.monotonic() - start < 4.5
     assert str(error.value) == "Unable to copy the desktop selection. Try again."
-    assert service._call_runner.await_args.kwargs["timeout"] == 3.5
+    assert service.runner_transport.call_runner.await_args.kwargs["timeout"] == 3.5

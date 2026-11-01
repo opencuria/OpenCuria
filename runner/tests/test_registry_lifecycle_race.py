@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 from src.models import WorkspaceInfo
 from src.runtime.base import RuntimeWorkspaceInfo
 from src.runtime.inventory import RuntimeInventory, StorageResource
@@ -199,7 +199,7 @@ async def test_same_instance_merge_preserves_credentials_different_instance_does
     ws_id, runtime, service, interface = setup(tmp_path)
     canonical = service.registry.get_cached(ws_id)
     canonical.credentials_present = False
-    await interface._checkpoint_workspace(ws_id, False, "scrubbed")
+    await interface._operations.commands._evidence.checkpoint(ws_id, False, "scrubbed")
     await service.registry.sync_from_runtime()
     assert service.registry.get_cached(ws_id) is canonical
     assert canonical.credentials_present is False
@@ -207,7 +207,7 @@ async def test_same_instance_merge_preserves_credentials_different_instance_does
     await service.registry.sync_from_runtime()
     assert service.registry.get_cached(ws_id) is not canonical
     assert service.registry.get_cached(ws_id).credentials_present is None
-    assert not await interface._workspace_scrub_proof(ws_id)
+    assert not await interface._operations.commands._evidence.scrub_proof(ws_id)
     with pytest.raises(RuntimeError, match="no exact scrub proof"):
         await service.lifecycle.stop_workspace(ws_id)
     interface._operations.journal.close()
@@ -339,7 +339,7 @@ async def test_credential_replacement_updates_presence_and_invalidates_old_proof
     canonical = service.registry.get_cached(ws_id)
     canonical.status = "running"
     canonical.credentials_present = False
-    await interface._checkpoint_workspace(ws_id, False, "workspace:created")
+    await interface._operations.commands._evidence.checkpoint(ws_id, False, "workspace:created")
     incarnation = (await runtime.workspace_incarnation(str(ws_id)))[0]
 
     async def inject(*args):
@@ -372,7 +372,7 @@ async def test_partial_scrub_revokes_running_proof_before_any_credential_write(t
     canonical = service.registry.get_cached(ws_id)
     canonical.status = "running"
     canonical.credentials_present = True
-    await interface._checkpoint_workspace(ws_id, True, "workspace:created")
+    await interface._operations.commands._evidence.checkpoint(ws_id, True, "workspace:created")
     incarnation = (await runtime.workspace_incarnation(str(ws_id)))[0]
 
     async def scrub(*args):

@@ -20,7 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
-from src.interfaces.websocket import WebSocketInterface
+from src.application import RunnerApplication
 from src.service import WorkspaceService
 from verify_workspace_lifecycle import command, runtime_at
 
@@ -55,7 +55,10 @@ async def child(root: Path, cloud: Path, mode: str) -> None:
     runtime, settings = runtime_at(root)
     runtime._resolve_build_base_image = lambda _: cloud
     service = WorkspaceService(runtime, settings)
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(
+        service, settings, publish=lambda event, data: emitted(event, data)
+    )
+    interface = application.interface
 
     async def barrier(label: str) -> None:
         (root / "child-ready").write_text(label)
@@ -172,7 +175,10 @@ async def verify(root: Path, cloud: Path) -> None:
                 await process.wait()
 
             service = WorkspaceService(runtime, settings)
-            interface = WebSocketInterface(service, settings)
+            application = RunnerApplication(
+                service, settings, publish=lambda event, data: emitted(event, data)
+            )
+            interface = application.interface
             interface._sio.connected = True
             emissions = []
             recipe_attempts = [0]

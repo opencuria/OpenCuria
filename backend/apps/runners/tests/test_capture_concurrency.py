@@ -135,7 +135,7 @@ def test_foreign_callback_does_not_release_capture_or_emit_events(
         row.attempt + 1 if foreign_field == "attempt" else str(uuid.uuid4())
     )
     frontend = Mock()
-    monkeypatch.setattr(service, "_forward_to_frontend", frontend)
+    monkeypatch.setattr(service.frontend_bus, 'forward_to_frontend', frontend)
     with django_capture_on_commit_callbacks(execute=True):
         assert not apply_result(service, str(runner.id), "workspace:stopped", data)
     frontend.assert_not_called()

@@ -149,7 +149,7 @@ def test_unresolved_fence_blocks_reservation(harness_workspace, scheduled):
         status="failed",
     )
     Workspace.objects.filter(id=harness_workspace.id).update(current_task=task)
-    with pytest.raises(ConflictError, match="unresolved"):
+    with pytest.raises(ConflictError, match="recovery is waiting"):
         HarnessService().reserve_run(session, scheduled=scheduled)
     assert HarnessSession.objects.get(id=session.id).status == "idle"
 

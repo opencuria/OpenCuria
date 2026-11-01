@@ -121,6 +121,13 @@ class RunnerAccessorError(RuntimeError):
 _ACCESSORS_BY_REQUEST: dict[str, RunnerWorkspaceAccessor] = {}
 
 
+def owns_runner_reply(event: str, data: dict[str, Any]) -> bool:
+    """Return whether this execution process owns a reply's live correlation."""
+    if event in {"workspace:stream_output", "workspace:stream_closed"}:
+        return str(data.get("connection_id", "")) in _ACCESSORS_BY_STREAM
+    return str(data.get("request_id", "")) in _ACCESSORS_BY_REQUEST
+
+
 def route_harness_result(data: dict[str, Any]) -> bool:
     """Deliver a ``harness:*_result`` payload to its accessor."""
     accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))

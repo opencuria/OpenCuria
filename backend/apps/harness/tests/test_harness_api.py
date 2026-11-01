@@ -1005,7 +1005,7 @@ def test_permission_resolve_needs_permission_key(harness_setup, fake_harness_ser
 
 @pytest.mark.django_db(transaction=True)
 def test_production_harness_service_wires_runner_accessor():
-    """REST uses the harness singleton whose accessor talks to the runner."""
+    """REST submits commands; only the execution factory wires runner access."""
     from apps.harness.harness_service import (
         get_harness_service,
         reset_default_harness_service,
@@ -1013,9 +1013,14 @@ def test_production_harness_service_wires_runner_accessor():
 
     reset_default_harness_service()
     try:
+        from apps.harness.command_service import RemoteHarnessService
+        from apps.harness.harness_service import create_default_harness_service
+
         service = harness_api._resolve_harness_service()
-        assert callable(service._accessor_factory)
+        assert isinstance(service, RemoteHarnessService)
         assert get_harness_service() is service
+        execution = create_default_harness_service()
+        assert callable(execution._accessor_factory)
     finally:
         reset_default_harness_service()
 

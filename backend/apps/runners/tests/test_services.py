@@ -1001,7 +1001,7 @@ class TestWorkspaceOperationState:
         self, service, runner, workspace
     ):
         """No-op QEMU updates must not restart a running workspace."""
-        service._dispatch_workspace_task = AsyncMock()
+        service.task_dispatch.dispatch_workspace_task = AsyncMock()
         workspace.qemu_vcpus = None
         workspace.qemu_memory_mb = None
         workspace.qemu_disk_size_gb = None
@@ -1032,7 +1032,7 @@ class TestWorkspaceOperationState:
             workspace=workspace,
             type=TaskType.UPDATE_WORKSPACE,
         ).exists()
-        service._dispatch_workspace_task.assert_not_awaited()
+        service.task_dispatch.dispatch_workspace_task.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_busy_workspace_rejects_stop(self, service, workspace):
@@ -1585,7 +1585,8 @@ class TestDesktopSessionImageContent:
         assert "ffmpeg" in script
         assert "xdotool" in script
         assert "allow_resize: false" in script
-        assert "-AcceptSetDesktopSize=0" in script
+        # The image owns KasmVNC YAML policy. Runtime startup flags are
+        # covered separately by runner/tests/test_service_desktop.py.
         assert "--start-maximized" not in script
         assert "openbox-session" not in script
         assert "xfce4-session" in script

@@ -102,12 +102,13 @@ a stopped observation, interrupted stop or lost reply is not scrub proof.
 
 ## Deployment
 
-Run migrations, ASGI and `python manage.py recover_lifecycle` with the same DB,
+Run migrations, ASGI, `python manage.py execute_harness` and
+`python manage.py recover_lifecycle` with the same DB,
 credential encryption key, application version and REDIS_URL. Redis channel
 `opencuria-runner` delivers messages, not durable truth (DB rows are truth).
 Systemd template: `backend/systemd/opencuria-recovery.service`, rendered and enabled
 with `sudo ./backend/systemd/install-recovery-service.sh`; compose services
-include recovery and Redis. Runner journal is private FULL-sync SQLite/WAL under
+include execution, recovery and Redis. Runner journal is private FULL-sync SQLite/WAL under
 RUNNER_STATE_DIR (default ~/.local/share/opencuria/runner); runner compose/systemd
 persist it. Never delete that volume or run two processes against one journal.
 

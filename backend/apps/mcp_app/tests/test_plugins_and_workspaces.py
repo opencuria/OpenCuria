@@ -16,7 +16,7 @@ from apps.runners.enums import WorkspaceStatus
 from apps.runners.models import ImageDefinition, ImageInstance, Workspace
 from apps.runners.services import get_runner_service
 from apps.runners.services.domains.workspace_lifecycle import (
-    WorkspaceLifecycleMixin,
+    WorkspaceLifecycleService,
 )
 from apps.runners.tests.test_image_versions import make_line
 
@@ -195,8 +195,8 @@ async def test_power_tools_are_idempotent_and_delete_dispatches(world, monkeypat
     async def stop(self, workspace_id, **kwargs):
         calls.append(("stop", workspace_id))
 
-    monkeypatch.setattr(WorkspaceLifecycleMixin, "remove_workspace", remove)
-    monkeypatch.setattr(WorkspaceLifecycleMixin, "stop_workspace", stop)
+    monkeypatch.setattr(WorkspaceLifecycleService, "remove_workspace", remove)
+    monkeypatch.setattr(WorkspaceLifecycleService, "stop_workspace", stop)
     ctx = world.ctx()
 
     started = await ok(ctx, "workspace_start", workspace="billing-api")
@@ -235,7 +235,7 @@ def _selected_token(world, value: str):
 
 async def test_workspace_create_attaches_credentials_by_name(world, monkeypatch):
     emit = AsyncMock()
-    monkeypatch.setattr(get_runner_service(), "_emit_to_runner", emit)
+    monkeypatch.setattr(get_runner_service().runner_transport, "emit_to_runner", emit)
     credential = await sync_to_async(_selected_token)(world, "create-secret")
     await sync_to_async(make_line)(world.runner, world.user, name="Captured base")
 
@@ -257,8 +257,14 @@ async def test_workspace_create_attaches_credentials_by_name(world, monkeypatch)
 
 
 async def test_workspace_update_replaces_credentials_by_name(world, monkeypatch):
-    call_runner = AsyncMock(return_value={"ok": True, "credentials_present": True})
-    monkeypatch.setattr(get_runner_service(), "_call_runner", call_runner)
+    async def acknowledge(_event, payload, **_kwargs):
+        return {"ok": True, "credentials_present": bool(payload["env_vars"])}
+
+    transport = AsyncMock()
+    transport.call.side_effect = acknowledge
+    world.runner.sid = "mcp-credential-runner"
+    await sync_to_async(world.runner.save)(update_fields=["sid"])
+    monkeypatch.setattr(get_runner_service().runner_transport, "sio", transport)
     credential = await sync_to_async(_selected_token)(world, "update-secret")
     ctx = world.ctx()
 
@@ -273,6 +279,6 @@ async def test_workspace_update_replaces_credentials_by_name(world, monkeypatch)
     assert "credentials" not in detached
     injected = [
         next(arg for arg in call.args if isinstance(arg, dict))["env_vars"]
-        for call in call_runner.await_args_list
+        for call in transport.call.await_args_list
     ]
     assert injected == [{"ACME_TOKEN": "update-secret"}, {}]

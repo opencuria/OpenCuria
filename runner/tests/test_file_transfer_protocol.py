@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from src.chunking import CHUNK_B64_SIZE
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 from tests.test_file_chunking import FakeChunkService, _emits_of, _interface, _payload
 
 PREFIXES = ("files:upload", "harness:write_file")

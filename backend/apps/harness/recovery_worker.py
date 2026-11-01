@@ -1,4 +1,4 @@
-"""ASGI-owned recovery of persisted harness work after execution is lost."""
+"""Execution-worker-owned recovery of persisted harness work after execution is lost."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ log = structlog.get_logger(__name__)
 class HarnessRecoveryWorker:
     """Repair turns without requiring a user to submit another prompt.
 
-    Start only after the ASGI scheduler acquires exclusive backend ownership.
+    Start only after the execution scheduler acquires exclusive backend ownership.
     Native execution died with the previous process. External execution instead
     requires expired ownership and positive runner process-release confirmation.
     """
@@ -78,7 +78,8 @@ class HarnessRecoveryWorker:
         if row is None:
             return
         service = get_harness_service()
-        if row.session.status == "idle":
+        service.reconcile_recovered_run(row.session.id, row.assistant_message.id)
+        if row.session.status == "idle" and not service.is_running(row.session.id):
             await service._emit_frontend(
                 FRONTEND_EVENT_STATUS,
                 service._session_status_payload(

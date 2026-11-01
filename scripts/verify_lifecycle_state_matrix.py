@@ -22,7 +22,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
-from src.interfaces.websocket import WebSocketInterface
+from src.application import RunnerApplication
 from src.runtime.base import WorkspaceConfig
 from src.runtime.storage import sha256_digest
 from src.service import WorkspaceService
@@ -90,7 +90,10 @@ async def verify(root: Path, cloud_image: Path, distro: str) -> None:
     matrix = Matrix(root, distro)
     runtime, settings = runtime_at(root)
     service = WorkspaceService(runtime, settings)
-    interface = WebSocketInterface(service, settings)
+    application = RunnerApplication(
+        service, settings, publish=lambda event, data: emit(event, data)
+    )
+    interface = application.interface
     owned: set[str] = set()
     images: set[Path] = set()
     active_tasks: list[asyncio.Task] = []
@@ -278,7 +281,7 @@ async def verify(root: Path, cloud_image: Path, distro: str) -> None:
         )
         await guest(first, "echo persistent >/workspace/persistence-marker")
         await service.lifecycle.stop_workspace(uuid.UUID(first))
-        assert await interface._workspace_scrub_proof(uuid.UUID(first))
+        assert await application.evidence.scrub_proof(uuid.UUID(first))
         matrix.passed(13)
         artifact = await service.images.create_image_artifact(
             uuid.UUID(first),
@@ -421,7 +424,7 @@ async def verify(root: Path, cloud_image: Path, distro: str) -> None:
         )
         assert await guest(second, "cat /workspace/build-marker") == "build-1"
         await service.lifecycle.stop_workspace(uuid.UUID(second))
-        assert await interface._workspace_scrub_proof(uuid.UUID(second))
+        assert await application.evidence.scrub_proof(uuid.UUID(second))
         matrix.passed(24)
         before = (await runtime.workspace_incarnation(first))[0]
         await service.lifecycle.remove_workspace(uuid.UUID(first))
@@ -507,7 +510,12 @@ async def verify(root: Path, cloud_image: Path, distro: str) -> None:
             await child.wait()
         restart_runtime, restart_settings = runtime_at(root, "crash-state")
         restart_service = WorkspaceService(restart_runtime, restart_settings)
-        restarted = WebSocketInterface(restart_service, restart_settings)
+        restart_application = RunnerApplication(
+            restart_service,
+            restart_settings,
+            publish=lambda event, data: emit(event, data),
+        )
+        restarted = restart_application.interface
         restarted._operations.emit = emit
         # The matrix deliberately injects transport instead of a deployed backend.
         # Reflect its restored connection in the Socket.IO test fixture as well.

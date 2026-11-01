@@ -36,7 +36,7 @@ def member(user, organization):
 def emit(monkeypatch):
     """Use the real service path; replace only the runner transport."""
     emit = AsyncMock()
-    monkeypatch.setattr(get_runner_service(), "_emit_to_runner", emit)
+    monkeypatch.setattr(get_runner_service().runner_transport, "emit_to_runner", emit)
     return emit
 
 

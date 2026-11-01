@@ -1,3 +1,5 @@
+from src.commands import CommandResult
+from tests.command_support import make_executor
 """Lifecycle admission and durable publication under delayed or failed storage."""
 
 import asyncio
@@ -11,7 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.journal import COMMANDS, Journal, OperationExecutor, _disk_helper_active
+from src.journal import COMMANDS, Journal, _disk_helper_active
 from src.runtime.inventory import RuntimeInventory, StorageResource
 from src.service import WorkspaceService
 
@@ -93,10 +95,11 @@ async def test_cancelled_delivery_during_fsync_still_executes_once_and_drains(
 
     async def handler(data):
         calls.append(data)
-        await socket.emit("workspace:created", {})
+        result = CommandResult('workspace:created', {})
+        return result
 
     socket = Socket(handler)
-    executor = OperationExecutor(socket, journal)
+    executor = make_executor(socket, journal)
     monkeypatch.setattr(journal, "begin", delayed_begin)
     delivery = asyncio.create_task(
         socket.handlers["/"]["task:create_workspace"](command())
@@ -134,11 +137,12 @@ async def test_terminal_inspection_keeps_target_fenced_but_allows_other_targets(
 
     async def handler(data):
         calls.append(data["operation_id"])
-        await socket.emit("workspace:created", {})
+        result = CommandResult('workspace:created', {})
+        return result
 
     socket = Socket(handler)
     journal = Journal(str(tmp_path))
-    executor = OperationExecutor(
+    executor = make_executor(
         socket, journal,
         observer=SimpleNamespace(workspace_incarnation=incarnation),
     )
@@ -170,7 +174,7 @@ async def test_recovery_retries_transient_inspection_and_continues_other_records
     reconciler = AsyncMock(
         side_effect=[OSError("runtime unavailable"), None, None]
     )
-    executor = OperationExecutor(socket, journal, reconciler=reconciler)
+    executor = make_executor(socket, journal, reconciler=reconciler)
     monkeypatch.setattr(executor, "helpers_active", lambda: False)
     await executor.replay()
     assert journal.lookup("first")[2] is None
@@ -191,7 +195,7 @@ async def test_orphan_helpers_keep_crashed_operations_unfinished_and_target_fenc
     journal.begin("task:create_workspace", command())
     handler = AsyncMock()
     socket = Socket(handler)
-    executor = OperationExecutor(socket, journal)
+    executor = make_executor(socket, journal)
     monkeypatch.setattr(executor, "helpers_active", lambda: True)
     await executor.replay()
     assert journal.pending() == []
@@ -220,14 +224,15 @@ async def test_terminal_delivery_does_not_overwrite_lifecycle_checkpoint(tmp_pat
     async def handler(data):
         # A later lifecycle effect has already replaced the old operation proof.
         await journal.call("checkpoint", "workspace", incarnation, newer_proof)
-        await socket.emit("workspace:created", {"credentials_present": False})
+        result = CommandResult('workspace:created', {'credentials_present': False})
+        return result
 
     observer = SimpleNamespace(
         workspace_incarnation=AsyncMock(return_value=(incarnation, "running")),
         lifecycle=SimpleNamespace(checkpoint_hook=AsyncMock()),
     )
     socket = Socket(handler)
-    OperationExecutor(socket, journal, observer=observer)
+    make_executor(socket, journal, observer=observer)
     await socket.handlers["/"]["task:create_workspace"](command())
     assert journal.proof("workspace", incarnation) == newer_proof
     observer.workspace_incarnation.assert_not_awaited()
@@ -317,12 +322,13 @@ async def test_orphan_guest_script_keeps_build_unfinished_until_guest_stops(
     data = command("build", "image")
 
     async def failed_build(payload):
-        await socket.emit("image:build_failed", {"error": "cleanup failed"})
+        result = CommandResult('image:build_failed', {'error': 'cleanup failed'})
+        return result
 
     socket = Socket(failed_build)
     if stage == "restart":
         journal.begin("task:build_image", data)
-    executor = OperationExecutor(socket, journal, observer=observer)
+    executor = make_executor(socket, journal, observer=observer)
     monkeypatch.setattr(executor, "helpers_active", lambda: False)
     if stage == "failed_cleanup":
         await socket.handlers["/"]["task:build_image"](data)

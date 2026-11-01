@@ -9,7 +9,7 @@ import socketio
 from aiohttp import web
 
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 from src.runtime.base import RuntimeWorkspaceInfo
 from src.runtime.inventory import RuntimeInventory
 from src.service import WorkspaceService

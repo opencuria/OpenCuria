@@ -744,7 +744,7 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
     session, workspace, before_count, skill_ids = await sync_to_async(prepare)()
     delivery = "new_turn"
-    if service.is_running(session.id):
+    if await sync_to_async(service.is_running)(session.id):
         if settings:
             raise ToolError(
                 "The agent is still working, so model, mode, effort and skills "

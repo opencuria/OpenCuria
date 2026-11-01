@@ -17,7 +17,6 @@ import base64
 import contextlib
 import time
 import uuid
-from datetime import datetime
 
 import aiohttp
 import socketio
@@ -25,6 +24,7 @@ import structlog
 
 from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
+from ..journal import COMMANDS, OperationExecutor
 from ..runtime.artifacts import ArtifactRequestError
 from ..service import WorkspaceService
 from ..services.system_metrics import SystemMetricsCollector
@@ -62,24 +62,20 @@ class _ReconnectingAsyncClient(socketio.AsyncClient):
 class WebSocketInterface(Interface):
     """python-socketio async client that bridges backend ↔ service."""
 
-    def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
+    def __init__(
+        self,
+        service: WorkspaceService,
+        settings: RunnerSettings,
+        operations: OperationExecutor,
+        *,
+        sio: socketio.AsyncClient,
+        inventory_epoch: str,
+    ) -> None:
         super().__init__(service)
         self._settings = settings
-        self._sio = _ReconnectingAsyncClient(
-            reconnection=True,
-            reconnection_attempts=0,  # unlimited
-            reconnection_delay=2,
-            reconnection_delay_max=30,
-            logger=False,
-            # Engine.IO clients do not take max_http_buffer_size (server
-            # only). aiohttp's ws_connect default max_msg_size is 4 MiB;
-            # raise it to match backend Socket.IO / Uvicorn 200 MiB caps
-            # so inbound workspace file payloads are not dropped.
-            websocket_extra_options={
-                "max_msg_size": SOCKETIO_MAX_HTTP_BUFFER_SIZE,
-            },
-        )
-        self._inventory_epoch = str(uuid.uuid4())
+        self._sio = sio
+        self._operations = operations
+        self._inventory_epoch = inventory_epoch
         self._desktop_epoch = self._inventory_epoch
         self._inventory_sequence = 0
         self._stopping = asyncio.Event()
@@ -94,128 +90,19 @@ class WebSocketInterface(Interface):
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._system_metrics = SystemMetricsCollector(settings)
         self._desktop_proxy = DesktopProxy(
-            get_guest_ip=lambda workspace_id: (
-                service.desktop.get_desktop_guest_ip(workspace_id)
+            get_guest_ip=lambda workspace_id: service.desktop.get_desktop_guest_ip(
+                workspace_id
             ),
-            get_session=lambda workspace_id: (
-                service.desktop.get_desktop_session(workspace_id)
+            get_session=lambda workspace_id: service.desktop.get_desktop_session(
+                workspace_id
             ),
             events=self._sio,
             capture_fence=getattr(service, "capture_fence", None),
         )
         self._uploads = UploadTransfers()
         self._setup_handlers()
-        from ..journal import Journal, OperationExecutor
-
-        self._operations = OperationExecutor(
-            self._sio,
-            Journal(settings.state_dir, defer_recovery=True),
-            reconciler=getattr(self._service, "publication_evidence", None),
-            observer=self._service,
-        )
-        lifecycle = getattr(self._service, "lifecycle", None)
-        if lifecycle is not None:
-            lifecycle.checkpoint_hook = self._checkpoint_workspace
-            lifecycle.scrub_proof_hook = self._workspace_scrub_proof
-        self._service._journal = self._operations.journal
-        configure = getattr(self._service, "configure_desktop_leases", None)
-        if configure is not None:
-            configure(settings.state_dir, self._inventory_epoch)
         desktop = getattr(self._service, "desktop", None)
         self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
-        images = getattr(self._service, "images", None)
-        if images is not None:
-            images.scrub_proof_hook = self._workspace_scrub_proof
-            images.checkpoint_hook = self._checkpoint_workspace
-
-    async def _workspace_scrub_proof(self, workspace_id: uuid.UUID) -> bool:
-        """Verify the durable scrub checkpoint against a fresh unchanged incarnation."""
-        observed = await self._service.workspace_incarnation(str(workspace_id))
-        if not observed or observed[1] not in {"exited", "stopped"}:
-            await self._operations.journal.call(
-                "invalidate_checkpoint", str(workspace_id)
-            )
-            return False
-        proof = await self._operations.journal.call(
-            "proof", str(workspace_id), observed[0]
-        )
-        return bool(
-            proof
-            and proof.get("credentials_present") is False
-            and proof.get("state") in {"exited", "stopped"}
-            and proof.get("event")
-            in {
-                "scrubbed",
-                "workspace:stopped",
-                "workspace:created",
-                "workspace:resumed",
-            }
-        )
-
-    async def _checkpoint_workspace(
-        self, workspace_id: uuid.UUID, credentials_present: bool | None, event: str
-    ) -> None:
-        """Checkpoint scrub/readiness against inspected identity, not caller booleans."""
-        if event in {"injecting", "scrubbing"}:
-            await self._operations.journal.call(
-                "invalidate_checkpoint", str(workspace_id)
-            )
-            return
-        try:
-            observed = await self._service.workspace_incarnation(str(workspace_id))
-        except Exception:
-            observed = None
-        if observed:
-            from ..journal import _active
-
-            binding = _active.get() or {}
-            await self._operations.journal.call(
-                "checkpoint",
-                str(workspace_id),
-                observed[0],
-                {
-                    "event": event,
-                    "state": observed[1],
-                    "operation_id": binding.get("operation_id"),
-                    "credentials_present": credentials_present,
-                    "initialized": event in {
-                        "workspace:created", "workspace:resumed",
-                        "workspace:credentials_injected",
-                    },
-                },
-            )
-
-    async def _workspace_failure_evidence(
-        self, workspace_id: uuid.UUID
-    ) -> dict[str, object]:
-        """Report inspected runtime state and incarnation-bound credential proof."""
-        evidence: dict[str, object] = {"outcome_known": False}
-        try:
-            observed = await self._service.workspace_incarnation(str(workspace_id))
-            if not observed or observed[1] not in {"running", "exited", "stopped"}:
-                return evidence
-            incarnation, state = observed
-            evidence["observed_status"] = state
-            proof = await self._operations.journal.call(
-                "proof", str(workspace_id), incarnation
-            )
-            # Lifecycle marks credentials unknown before a potentially partial scrub.
-            # An older running checkpoint cannot prove what remains after that write.
-            registry = getattr(self._service, "registry", None)
-            if registry is not None:
-                info = registry.get_cached(workspace_id)
-                if info.credentials_present is None:
-                    return evidence
-            if proof and proof.get("state") == state:
-                credentials_present = proof.get("credentials_present")
-                if isinstance(credentials_present, bool):
-                    evidence.update(
-                        credentials_present=credentials_present, outcome_known=True
-                    )
-        except Exception:
-            # Neither stale cache entries nor a failed inspection prove an outcome.
-            pass
-        return evidence
 
     def _desktop_lifecycle_payload(self, workspace_id: uuid.UUID) -> dict | None:
         """Return a desktop:process payload for *workspace_id*, if any."""
@@ -556,6 +443,20 @@ class WebSocketInterface(Interface):
     def _setup_handlers(self) -> None:
         sio = self._sio
 
+        async def dispatch(event: str, data: dict) -> dict | None:
+            return await self._operations.execute(event, data)
+
+        # Register command entry points once, before delivery. The executor owns
+        # admission/effects/results; Socket.IO owns only inbound/outbound delivery.
+        from functools import partial
+
+        for event in COMMANDS:
+            sio.on(event, partial(dispatch, event))
+        sio.on("operation:ack", self._operations.acknowledge)
+        sio.on("operation:inspect", self._operations.inspect)
+        sio.on("operation:seal", self._operations.seal)
+        sio.on("operation:inspect_request", self._operations.inspect_request)
+
         @sio.on("inventory:refresh")
         async def refresh_inventory(data=None) -> None:
             await self._send_inventory()
@@ -654,270 +555,6 @@ class WebSocketInterface(Interface):
             )
 
         # -- task events -------------------------------------------------------
-
-        @sio.on("task:create_workspace")
-        async def on_create_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            # Use workspace_id from backend if provided
-            raw_ws_id = data.get("workspace_id")
-            workspace_id = uuid.UUID(raw_ws_id) if raw_ws_id else None
-
-            log = logger.bind(task_id=task_id)
-            log.info("task_received", task="create_workspace")
-
-            try:
-                (
-                    ws_id,
-                    credentials_present,
-                ) = await self._service.lifecycle.create_workspace(
-                    repos=data.get("repos", []),
-                    qemu_vcpus=data.get("qemu_vcpus"),
-                    qemu_memory_mb=data.get("qemu_memory_mb"),
-                    qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                    workspace_id=workspace_id,
-                    base_image_path=data.get("base_image_path") or None,
-                )
-                await sio.emit(
-                    "workspace:created",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(ws_id),
-                        "status": "created",
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info("task_completed", workspace_id=str(ws_id))
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "error": str(exc),
-                        "outcome_known": False,
-                    },
-                )
-                log.exception("task_failed")
-
-        @sio.on("task:build_image")
-        async def on_build_image(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            build_job_id = data.get("build_job_id", "")
-            log = logger.bind(task_id=task_id, build_job_id=build_job_id)
-            log.info("task_received", task="build_image")
-            try:
-
-                async def _progress(line: str) -> None:
-                    await sio.emit(
-                        "image:build_progress",
-                        {
-                            "task_id": task_id,
-                            "build_job_id": build_job_id,
-                            "line": line,
-                        },
-                    )
-
-                # Step 2: image ops go through the ImageManager directly.
-                result = await self._service.images.build_image(
-                    build_job_id=build_job_id,
-                    base_distro=data.get("base_distro", ""),
-                    init_script=data.get("init_script", ""),
-                    image_path=data.get("image_path", ""),
-                    operation_id=data.get("operation_id"),
-                    image_instance_id=data.get("image_instance_id"),
-                    progress_callback=_progress,
-                )
-                await sio.emit(
-                    "image:built",
-                    {
-                        "task_id": task_id,
-                        "build_job_id": build_job_id,
-                        "image_path": result.get("image_path", ""),
-                        **{
-                            key: result[key]
-                            for key in ("min_disk_size_gb", "virtual_size_bytes")
-                            if key in result
-                        },
-                    },
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "image:build_failed",
-                    {
-                        "task_id": task_id,
-                        "build_job_id": build_job_id,
-                        "error": str(exc),
-                    },
-                )
-                log.exception("image_build_failed")
-
-        @sio.on("task:stop_workspace")
-        async def on_stop_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                credentials_present = await self._service.lifecycle.stop_workspace(
-                    workspace_id
-                )
-                await sio.emit(
-                    "workspace:stopped",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info("workspace_stopped")
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "error": str(exc),
-                        **await self._workspace_failure_evidence(workspace_id),
-                    },
-                )
-                log.exception("stop_failed")
-
-        @sio.on("task:resume_workspace")
-        async def on_resume_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                credentials_present = await self._service.lifecycle.resume_workspace(
-                    workspace_id,
-                    qemu_vcpus=data.get("qemu_vcpus"),
-                    qemu_memory_mb=data.get("qemu_memory_mb"),
-                    qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
-                await sio.emit(
-                    "workspace:resumed",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info("workspace_resumed")
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "error": str(exc),
-                        **await self._workspace_failure_evidence(workspace_id),
-                    },
-                )
-                log.exception("resume_failed")
-
-        @sio.on("task:update_workspace")
-        async def on_update_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id,
-                workspace_id=str(workspace_id),
-            )
-            try:
-                await self._service.lifecycle.update_workspace_resources(
-                    workspace_id,
-                    qemu_vcpus=int(data["qemu_vcpus"]),
-                    qemu_memory_mb=int(data["qemu_memory_mb"]),
-                    qemu_disk_size_gb=int(data["qemu_disk_size_gb"]),
-                )
-                await sio.emit(
-                    "workspace:updated",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                    },
-                )
-                log.info("workspace_updated")
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc), "outcome_known": False},
-                )
-                log.exception("update_workspace_failed")
-
-        @sio.on("task:inject_credentials")
-        async def on_inject_credentials(data: dict) -> dict:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                credentials_present = await self._service.lifecycle.inject_credentials(
-                    workspace_id,
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
-                await sio.emit(
-                    "workspace:credentials_injected",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info(
-                    "workspace_credentials_injected",
-                    credentials_present=credentials_present,
-                )
-                return {
-                    "ok": True,
-                    "credentials_present": credentials_present,
-                }
-            except Exception as exc:
-                evidence = await self._workspace_failure_evidence(workspace_id)
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc), **evidence},
-                )
-                log.exception("inject_credentials_failed")
-                return {"ok": False, "error": str(exc), **evidence}
-
-        @sio.on("task:remove_workspace")
-        async def on_remove_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                # Preserve the last exact physical identity until cleanup has
-                # completed; an earlier partial remove may have lost its domain
-                # while disk/network/managed-owner cleanup is still outstanding.
-                if not self._service.registry.workspace_exists(workspace_id):
-                    await self._service.registry.sync_from_runtime()
-                already_absent = not self._service.registry.workspace_exists(
-                    workspace_id
-                )
-                await self._service.lifecycle.remove_workspace(workspace_id)
-                await self._service.registry.sync_from_runtime()
-                if self._service.registry.workspace_exists(workspace_id):
-                    raise RuntimeError("Runtime removal could not be verified")
-                await sio.emit(
-                    "workspace:removed",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "result": "already_absent" if already_absent else "deleted",
-                        "already_absent": already_absent,
-                    },
-                )
-                log.info("workspace_removed", already_absent=already_absent)
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc), "outcome_known": False},
-                )
-                log.exception("remove_failed")
 
         @sio.on("task:start_terminal")
         async def on_start_terminal(data: dict) -> None:
@@ -2539,7 +2176,9 @@ class WebSocketInterface(Interface):
         async def on_editor_write(data: dict) -> dict:
             try:
                 return await self._service.files.save_editor_file(
-                    uuid.UUID(data["workspace_id"]), data["path"], data["content"],
+                    uuid.UUID(data["workspace_id"]),
+                    data["path"],
+                    data["content"],
                     data["expected_revision"],
                 )
             except Exception as exc:
@@ -2782,133 +2421,6 @@ class WebSocketInterface(Interface):
 
         # -- image artifact events ---------------------------------------------
 
-        @sio.on("task:create_image_artifact")
-        async def on_create_image_artifact(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            name = data["name"]
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            log.info("task_received", task="create_image_artifact")
-            try:
-                artifact = await self._service.images.create_image_artifact(
-                    workspace_id,
-                    name,
-                    artifact_id=data.get("image_instance_id"),
-                    operation_id=data.get("operation_id"),
-                )
-                await sio.emit(
-                    "image_artifact:created",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "image_artifact_id": artifact.artifact_id,
-                        "name": artifact.name,
-                        "created_at": (
-                            artifact.created_at.isoformat()
-                            if isinstance(artifact.created_at, datetime)
-                            else str(artifact.created_at)
-                        ),
-                        "size_bytes": artifact.size_bytes,
-                        **{
-                            key: getattr(artifact, key)
-                            for key in ("min_disk_size_gb", "virtual_size_bytes")
-                            if getattr(artifact, key, None) is not None
-                        },
-                    },
-                )
-                log.info(
-                    "image_artifact_created", image_artifact_id=artifact.artifact_id
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "image_artifact:failed",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "error": str(exc),
-                    },
-                )
-                log.exception("create_image_artifact_failed")
-
-        @sio.on("task:delete_image_artifact")
-        async def on_delete_image_artifact(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            image_artifact_id = data["image_artifact_id"]
-            image_instance_id = data.get("image_instance_id", "")
-            log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
-            try:
-                result = await self._service.images.delete_image_reference(
-                    image_ref=image_artifact_id,
-                )
-                await sio.emit(
-                    "image_artifact:deleted",
-                    {
-                        "task_id": task_id,
-                        "image_instance_id": image_instance_id,
-                        "image_artifact_id": image_artifact_id,
-                        "result": result,
-                        "already_absent": result == "already_absent",
-                    },
-                )
-                log.info(
-                    "image_artifact_deleted",
-                    image_artifact_id=image_artifact_id,
-                    result=result,
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "image_artifact:delete_failed",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("delete_image_artifact_failed")
-
-        @sio.on("task:create_workspace_from_image_artifact")
-        async def on_create_workspace_from_image_artifact(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            image_artifact_id = data["image_artifact_id"]
-            raw_ws_id = data.get("workspace_id")
-            new_workspace_id = uuid.UUID(raw_ws_id) if raw_ws_id else uuid.uuid4()
-            log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
-            log.info("task_received", task="create_workspace_from_image_artifact")
-            try:
-                (
-                    ws_id,
-                    credentials_present,
-                ) = await self._service.images.create_workspace_from_image_artifact(
-                    image_artifact_id=image_artifact_id,
-                    new_workspace_id=new_workspace_id,
-                    qemu_vcpus=data.get("qemu_vcpus"),
-                    qemu_memory_mb=data.get("qemu_memory_mb"),
-                    qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
-                await sio.emit(
-                    "workspace:created",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(ws_id),
-                        "status": "created",
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info(
-                    "workspace_created_from_image_artifact",
-                    workspace_id=str(ws_id),
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(new_workspace_id),
-                        "error": str(exc),
-                        "outcome_known": False,
-                    },
-                )
-                log.exception("clone_failed")
-
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
@@ -2942,7 +2454,8 @@ class WebSocketInterface(Interface):
                 OSError,
             ) as exc:
                 logger.warning(
-                    "websocket_retrying", error_type=type(exc).__name__,
+                    "websocket_retrying",
+                    error_type=type(exc).__name__,
                     retry_delay=retry_delay,
                 )
             if not self._stopping.is_set():
@@ -2973,10 +2486,14 @@ class WebSocketInterface(Interface):
             # A timeout is not evidence of guest-side process termination.
             logger.warning("stream_shutdown_unconfirmed", exc_info=True)
         maintenance = [
-            task for task in (
-                self._heartbeat_task, self._delivery_task, self._observation_task,
+            task
+            for task in (
+                self._heartbeat_task,
+                self._delivery_task,
+                self._observation_task,
                 self._metrics_task,
-            ) if task is not None
+            )
+            if task is not None
         ]
         for task in maintenance:
             task.cancel()

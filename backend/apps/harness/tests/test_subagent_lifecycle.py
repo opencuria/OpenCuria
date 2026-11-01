@@ -820,7 +820,7 @@ async def test_direct_cancel_during_final_idle_emit_releases_bookkeeping(
     monkeypatch.setattr(service, "_emit_frontend", emit)
     assistant, task = await start(service, session)
     await checkpoint(entered)
-    assert service._runs[str(session.id)]["finalizing"]
+    assert service.run_registry.finalizing(str(session.id))
     assistant.refresh_from_db()
     assert assistant.finish == "stop"
     task.cancel()
@@ -936,7 +936,7 @@ async def test_concurrent_aborts_join_blocked_interruption_persistence(
     first_abort = asyncio.create_task(service.abort_run(session.id))
     await checkpoint(persistence_entered)
     assert task.cancelling() == 1
-    assert not service._runs[str(session.id)].get("finalizing")
+    assert not service.run_registry.finalizing(str(session.id))
 
     def shield(owner):
         if owner is task and asyncio.current_task() is second_abort:
@@ -949,7 +949,7 @@ async def test_concurrent_aborts_join_blocked_interruption_persistence(
     assert task.cancelling() == 1
     assert not task.done()
     assert not first_abort.done() and not second_abort.done()
-    assert not service._runs[str(session.id)].get("finalizing")
+    assert not service.run_registry.finalizing(str(session.id))
     assert str(session.id) in service._abort_requested
     release.set()
     results = await asyncio.wait_for(asyncio.gather(first_abort, second_abort), TIMEOUT)

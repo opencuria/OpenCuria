@@ -28,6 +28,11 @@ from common.realtime import (
     unsubscribe_frontend,
 )
 
+from .reply_routing import (
+    RUNNER_REPLY_METHODS,
+    notify_runner_disconnected,
+    route_runner_reply,
+)
 from .services import get_runner_service
 from .services.infra.desktop_tunnels import (
     close_runner_ws_tunnels,
@@ -207,7 +212,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         """Handle runner disconnection."""
         await close_runner_ws_tunnels(sid)
         service = get_runner_service()
-        await sync_to_async(service.unregister_runner)(sid)
+        runner_id = await sync_to_async(service.unregister_runner)(sid)
+        if runner_id:
+            await notify_runner_disconnected(runner_id)
         logger.info("Runner disconnected (sid=%s)", sid)
 
     # --- Runner → Backend events ---
@@ -257,46 +264,19 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     # RPC replies stay inside the backend; stream replies also ACK acceptance.
-    def register_reply(event: str, method: str, *, ack: bool = False) -> None:
+    def register_reply(event: str, *, ack: bool = False) -> None:
         @sio.on(event)
         async def on_reply(sid: str, data: dict) -> dict | None:
             runner_id = await _require_runner_id(sio, sid, event)
             if not runner_id:
                 return {"ok": False, "error": "unauthenticated"} if ack else None
-            accepted = await sync_to_async(getattr(get_runner_service(), method))(
-                event, data, runner_id=runner_id
+            accepted = await route_runner_reply(
+                event, data, runner_id, service=get_runner_service()
             )
             return {"ok": bool(accepted)} if ack else None
 
-    for method, events in (
-        (
-            "handle_harness_reply",
-            (
-                "harness:exec_wait_result",
-                "harness:read_file_result",
-                "harness:read_file_chunk",
-                "harness:write_file_result",
-                "harness:list_result",
-                "harness:desktop_action_result",
-                "workspace:artifact_ensure_result",
-            ),
-        ),
-        ("handle_git_reply", ("git:operation_result",)),
-        (
-            "handle_process_reply",
-            (
-                "harness:process_start_result",
-                "harness:process_list_result",
-                "harness:process_get_result",
-                "harness:process_stop_result",
-                "harness:process_verify_result",
-            ),
-        ),
-    ):
-        for event in events:
-            register_reply(event, method)
-    for event in ("workspace:stream_output", "workspace:stream_closed"):
-        register_reply(event, "handle_stream_reply", ack=True)
+    for event, method in RUNNER_REPLY_METHODS.items():
+        register_reply(event, ack=method == "handle_stream_reply")
 
     # --- Terminal events from runner ---
 
@@ -731,6 +711,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         ):
             return
 
+        await sio.enter_room(sid, f"workspace:{workspace_id}", namespace="/frontend")
         subscribe_frontend(sid, workspace_id)
         logger.debug("Frontend %s subscribed to workspace %s", sid, workspace_id)
 
@@ -744,6 +725,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         if not await _ensure_frontend_workspace_access(sio, sid, workspace_id):
             return
 
+        await sio.leave_room(sid, f"workspace:{workspace_id}", namespace="/frontend")
         unsubscribe_frontend(sid, workspace_id)
         logger.debug("Frontend %s unsubscribed from workspace %s", sid, workspace_id)
 

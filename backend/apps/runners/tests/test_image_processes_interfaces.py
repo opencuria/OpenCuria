@@ -175,7 +175,7 @@ def runner_service_with_mocked_transport(monkeypatch):
     """Use the real RunnerService path but replace only runner transport emit."""
     service = get_runner_service()
     emit = AsyncMock()
-    monkeypatch.setattr(service, "_emit_to_runner", emit)
+    monkeypatch.setattr(service.runner_transport, 'emit_to_runner', emit)
     return service, emit
 
 

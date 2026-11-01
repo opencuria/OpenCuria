@@ -1,16 +1,10 @@
-"""Workspace/runner ownership guards (Phase 1 infra mixin).
-
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services.py``. No logic changes; the mixin relies on the
-facade (``RunnerService``) providing ``self.workspaces``,
-``self.processes`` and sibling helpers such as
-``_workspace_operation_label`` / ``_desktop_workspace_runner``.
-"""
+"""Enforce workspace admission and authenticated runner ownership."""
 
 from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
@@ -23,13 +17,29 @@ from ...exceptions import RunnerOfflineError, WorkspaceStateError
 if TYPE_CHECKING:
     from ...models import Runner, Workspace
 
+if TYPE_CHECKING:
+    from ...repositories import WorkspaceRepository
+    from ..session_state import InteractiveSessionState
+
 logger = logging.getLogger(__name__)
 
 
-class OwnershipMixin:
-    """Ownership/availability guards shared by RunnerService."""
+class OwnershipService:
+    """Ownership/availability guards with explicitly supplied collaborators."""
 
-    def _ensure_workspace_available(self, workspace: Workspace) -> None:
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+        state: InteractiveSessionState,
+        operation_label: Callable[[str | None], str],
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+        self.state = state
+        self.operation_label = operation_label
+
+    def ensure_workspace_available(self, workspace: Workspace) -> None:
         """Reject mutating operations while another blocking lifecycle action runs."""
         if workspace.status in (
             WorkspaceStatus.PENDING_DELETION,
@@ -46,7 +56,7 @@ class OwnershipMixin:
         if workspace.active_operation:
             raise ConflictError(
                 f"Workspace '{workspace.id}' is currently "
-                f"{self._workspace_operation_label(workspace.active_operation)}"
+                f"{self.operation_label(workspace.active_operation)}"
             )
 
     def is_workspace_available(self, workspace_id: uuid.UUID) -> bool:
@@ -55,12 +65,12 @@ class OwnershipMixin:
         if workspace is None:
             return False
         try:
-            self._ensure_workspace_available(workspace)
+            self.ensure_workspace_available(workspace)
         except ConflictError:
             return False
         return True
 
-    def _validate_task_runner(self, task, runner_id: str | None) -> bool:
+    def validate_task_runner(self, task, runner_id: str | None) -> bool:
         """Return True if the task belongs to the given runner.
 
         When *runner_id* is None the check is skipped (e.g. in tests).
@@ -78,7 +88,7 @@ class OwnershipMixin:
             return False
         return True
 
-    async def _desktop_event_owned_by_runner(
+    async def desktop_event_owned_by_runner(
         self, workspace_id: str, runner_id: str | None
     ) -> bool:
         """Return True when *runner_id* owns the desktop *workspace_id*.
@@ -111,7 +121,7 @@ class OwnershipMixin:
                 runner_id,
             )
             return False
-        cached = self._desktop_workspace_runner.get(workspace_id)
+        cached = self.state.desktop_runners.get(workspace_id)
         if cached is not None and cached != runner_id:
             logger.warning(
                 "desktop event rejected: workspace %s is owned by runner %s, not %s",
@@ -136,7 +146,7 @@ class OwnershipMixin:
             return False
         return True
 
-    def _ensure_process_dispatchable(self, workspace: Workspace) -> Runner:
+    def ensure_process_dispatchable(self, workspace: Workspace) -> Runner:
         """Validate that a process RPC may be dispatched (sync).
 
         Processes never set ``active_operation``, but live dispatch must
@@ -156,13 +166,13 @@ class OwnershipMixin:
                 f"Workspace '{workspace.id}' is '{workspace.status}', "
                 f"must be '{WorkspaceStatus.RUNNING}' for background processes"
             )
-        self._ensure_workspace_available(workspace)
+        self.ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
         return runner
 
-    def _ensure_git_dispatchable(self, workspace: Workspace) -> Runner:
+    def ensure_git_dispatchable(self, workspace: Workspace) -> Runner:
         """Validate that a git RPC may be dispatched (sync).
 
         Git never touches ``active_operation`` for dispatch bookkeeping,
@@ -184,7 +194,7 @@ class OwnershipMixin:
         if workspace.active_operation:
             raise WorkspaceStateError(
                 f"Workspace '{workspace.id}' is currently "
-                f"{self._workspace_operation_label(workspace.active_operation)}"
+                f"{self.operation_label(workspace.active_operation)}"
             )
         if workspace.status != WorkspaceStatus.RUNNING:
             raise WorkspaceStateError(
@@ -196,7 +206,7 @@ class OwnershipMixin:
             raise RunnerOfflineError(str(runner.id))
         return runner
 
-    def _validate_harness_workspace_runner(
+    def validate_harness_workspace_runner(
         self,
         workspace_id: uuid.UUID,
         runner_id: str,

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from apps.harness import harness_service as service_module
+from apps.harness import run_cancellation as service_module
 from apps.harness.providers.base import Delta, ProviderError
 from apps.harness.tests.test_harness_service import FakeProvider, _tool_step
 from apps.harness.tests.test_subagent_depth import _service, _session
@@ -202,15 +202,15 @@ async def test_root_abort_joins_already_cancelling_grandchild_persistence(
         # Compute provenance after release, not before the root stop marks it.
         await original_record(session, assistant, phase=phase)
 
+    monkeypatch.setattr(service, "_record_run_interruption", record)
     assistant, root_task = await start(service, root)
     await checkpoint(provider.grandchild_entered)
     sessions = tree(root)
     leaf_task = service._tasks[str(sessions[-1].id)]
-    monkeypatch.setattr(service, "_record_run_interruption", record)
     leaf_task.cancel()
     await checkpoint(entered)
     assert leaf_task.cancelling() == 1
-    assert not service._runs[str(sessions[-1].id)].get("finalizing")
+    assert not service.run_registry.finalizing(str(sessions[-1].id))
 
     def shield(owner):
         if owner is leaf_task and root_task.cancelling():
@@ -224,7 +224,7 @@ async def test_root_abort_joins_already_cancelling_grandchild_persistence(
         assert leaf_task.cancelling() == 1
         assert not abort.done() and not root_task.done() and not leaf_task.done()
         assert all(str(s.id) in service._abort_requested for s in sessions)
-        assert not service._runs[str(sessions[-1].id)].get("finalizing")
+        assert not service.run_registry.finalizing(str(sessions[-1].id))
     finally:
         release.set()
         await finish(abort)
