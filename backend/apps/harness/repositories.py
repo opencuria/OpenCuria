@@ -1735,6 +1735,21 @@ class QuestionRequestRepository:
         )
 
     @staticmethod
+    def pending_session_ids(session_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return requested sessions with pending gates, without question bodies."""
+        if not session_ids:
+            return set()
+        return set(
+            QuestionRequest.objects.filter(
+                session_id__in=session_ids,
+                status=QuestionRequestStatus.PENDING,
+            )
+            .order_by()
+            .values_list("session_id", flat=True)
+            .distinct()
+        )
+
+    @staticmethod
     def resolve(
         request: QuestionRequest,
         *,

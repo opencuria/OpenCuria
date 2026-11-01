@@ -85,6 +85,21 @@ class PermissionRequestRepository:
         return list(query.order_by("created_at"))
 
     @staticmethod
+    def pending_session_ids(session_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return requested sessions with pending gates, without action payloads."""
+        if not session_ids:
+            return set()
+        return set(
+            perm_models.PermissionRequest.objects.filter(
+                session_id__in=session_ids,
+                status=perm_models.PermissionRequestStatus.PENDING,
+            )
+            .order_by()
+            .values_list("session_id", flat=True)
+            .distinct()
+        )
+
+    @staticmethod
     def mark_resolved(
         request: perm_models.PermissionRequest,
         *,

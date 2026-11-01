@@ -301,13 +301,8 @@ class ConversationService:
             if parent_id is None:
                 continue
             children_map.setdefault(parent_id, []).append(session_id)
-        pending_perm_ids = {
-            row.session_id
-            for row in self.permission_requests.list_pending_for_sessions(all_ids)
-        }
-        pending_question_ids = {
-            row.session_id for row in self.questions.list_pending_for_sessions(all_ids)
-        }
+        pending_perm_ids = self.permission_requests.pending_session_ids(all_ids)
+        pending_question_ids = self.questions.pending_session_ids(all_ids)
         result: dict[uuid.UUID, dict[str, Any]] = {}
         for session in sessions:
             tree = _descendant_ids(session.id, children_map)
