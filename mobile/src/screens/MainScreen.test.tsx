@@ -36,6 +36,12 @@ const mockNotificationController = {
   consumeTarget: mockConsumeTarget,
   live: { available: false },
 };
+jest.mock(
+  "remend",
+  () => ({ __esModule: true, default: (markdown: string) => markdown }),
+  { virtual: true },
+);
+
 jest.mock("../notifications/NotificationContext", () => ({
   useNotifications: () => ({
     controller: mockNotificationController,
@@ -191,6 +197,12 @@ jest.mock("../components", () => {
       loading?: boolean;
       messages: Array<{ content: string }>;
       onPullUpAtEnd?: () => void;
+      onOpenFile: (path: string) => void;
+      onOpenAttachment: (attachment: {
+        uri: string;
+        filename: string;
+        mime: string;
+      }) => void;
     }) =>
       ReactRuntime.createElement(
         View,
@@ -209,6 +221,19 @@ jest.mock("../components", () => {
               onPress: props.onPullUpAtEnd,
             })
           : null,
+        ReactRuntime.createElement(Pressable, {
+          testID: "test-file-link",
+          onPress: () => props.onOpenFile("/workspace/index.ts"),
+        }),
+        ReactRuntime.createElement(Pressable, {
+          testID: "test-attachment",
+          onPress: () =>
+            props.onOpenAttachment({
+              uri: "data:application/pdf;base64,JVBERg==",
+              mime: "application/pdf",
+              filename: "report.pdf",
+            }),
+        }),
       ),
   };
 });
@@ -316,7 +341,12 @@ function mockClient() {
     },
     conversations: { list: jest.fn().mockResolvedValue([]) },
     skills: { list: jest.fn().mockResolvedValue([]) },
-    files: { findFiles: jest.fn().mockResolvedValue({ paths: [] }) },
+    files: {
+      findFiles: jest.fn().mockResolvedValue({ paths: [] }),
+      readFile: jest
+        .fn()
+        .mockResolvedValue({ content: btoa("const answer = 42;"), size: 18 }),
+    },
   };
 }
 
@@ -1027,8 +1057,12 @@ it("resumes a Codex session with an immutable engine/provider and no native-mode
   const client = mockClient();
   client.harness.listEngines.mockResolvedValue([
     {
-      id: "codex", name: "Codex", connected: true, modes: ["build", "plan"],
-      default_model: codexModel.id, default_effort: "low",
+      id: "codex",
+      name: "Codex",
+      connected: true,
+      modes: ["build", "plan"],
+      default_model: codexModel.id,
+      default_effort: "low",
     },
   ]);
   Object.assign(client.harness, {
@@ -1260,4 +1294,70 @@ it("hides the previous chat during navigation and preserves the new transcript w
   expect(screen.getByTestId("transcript-state")).toBe(transcript);
   expect(transcript).toHaveTextContent("Next reply");
   tree.unmount();
+});
+
+it("opens chat file links in the explorer viewer and closes back to chat", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+  );
+  fireEvent.press(screen.getByTestId("test-file-link"));
+  await screen.findByTestId("file-source");
+  expect(screen.getByTestId("file-viewer")).toBeTruthy();
+  expect(screen.queryByTestId("media-viewer-sheet")).toBeNull();
+  expect(client.files.readFile).toHaveBeenCalledWith(
+    runningWorkspace.id,
+    "/workspace/index.ts",
+    1024 * 1024,
+  );
+  fireEvent(screen.getByTestId("file-viewer"), "accessibilityEscape");
+  expect(screen.queryByTestId("file-viewer")).toBeNull();
+  expect(screen.getByTestId("transcript-state")).toBeTruthy();
+});
+
+it("opens tool attachments in the shared file viewer", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+  );
+  fireEvent.press(screen.getByTestId("test-attachment"));
+  await screen.findByTestId("file-viewer");
+  expect(
+    screen.getByText("report.pdf", { includeHiddenElements: true }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Share or open" })).toBeTruthy();
+  expect(screen.queryByTestId("media-viewer-sheet")).toBeNull();
+  expect(client.files.readFile).not.toHaveBeenCalled();
+});
+
+it("closes the file viewer when navigating to a different chat", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+  );
+  fireEvent.press(screen.getByTestId("test-file-link"));
+  await screen.findByTestId("file-source");
+  await act(async () => {
+    snapshot = { ...snapshot, activeSessionId: "another-chat" };
+    listeners.forEach((listener) => listener());
+  });
+  expect(screen.queryByTestId("file-viewer")).toBeNull();
 });

@@ -1,3 +1,4 @@
+import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import type { OpenCuriaClient } from "@opencuria/client";
 import { base64ToBytes, createUtf8StreamDecoder } from "../utf8";
 
@@ -105,4 +106,9 @@ export function isImagePath(path: string): boolean {
 
 export function isSvgPath(path: string): boolean {
   return /\.svg$/i.test(path);
+}
+
+/** Prefer TypeScript source over the ambiguous MPEG transport-stream suffix. */
+export function isVideoPath(path: string): boolean {
+  return !/\.ts$/i.test(path) && classifyWorkspaceFile(path) === "video";
 }

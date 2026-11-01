@@ -3,6 +3,7 @@ import type { OpenCuriaClient } from "@opencuria/client";
 import {
   BinaryFileError,
   delimiterFor,
+  isVideoPath,
   parseDelimited,
   readWorkspaceText,
 } from "./fileContent";
@@ -21,6 +22,14 @@ const clientReturning = (
       }),
     },
   }) as unknown as OpenCuriaClient;
+
+it("recognizes workspace videos while keeping TypeScript files as source", () => {
+  expect(isVideoPath("/workspace/recording.MP4")).toBe(true);
+  expect(isVideoPath("/workspace/demo.mov")).toBe(true);
+  expect(isVideoPath("/workspace/index.ts")).toBe(false);
+  expect(isVideoPath("/workspace/index.TS")).toBe(false);
+  expect(isVideoPath("/workspace/index.tsx")).toBe(false);
+});
 
 describe("readWorkspaceText", () => {
   it("decodes UTF-8 and drops a BOM", async () => {

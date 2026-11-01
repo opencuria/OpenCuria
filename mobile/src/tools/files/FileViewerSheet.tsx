@@ -8,7 +8,9 @@ import {
   View,
 } from "react-native";
 import { Image } from "expo-image";
+import { useVideoPlayer, VideoView } from "expo-video";
 import * as Clipboard from "expo-clipboard";
+import * as Sharing from "expo-sharing";
 import { SvgXml } from "react-native-svg";
 import type { OpenCuriaClient } from "@opencuria/client";
 import { ChatMarkdown } from "../../components/ChatMarkdown";
@@ -23,6 +25,7 @@ import {
   isImagePath,
   isMarkdownPath,
   isSvgPath,
+  isVideoPath,
   parseDelimited,
   readWorkspaceText,
   type WorkspaceText,
@@ -30,11 +33,17 @@ import {
 import { SourceView } from "./SourceView";
 
 type Mode = "preview" | "source";
+/** A workspace path or an inline tool attachment from the chat. */
+export type FileViewerTarget =
+  | string
+  | { uri: string; filename: string; mime: string };
+
 type Content =
   | { phase: "loading" }
   | { phase: "error"; message: string; binary?: boolean }
   | { phase: "text"; file: WorkspaceText }
-  | { phase: "image"; uri: string };
+  | { phase: "image" | "video"; uri: string }
+  | { phase: "attachment" };
 
 /** Source wrap preference for this app session. */
 let wrapSource = false;
@@ -50,13 +59,13 @@ function previewable(path: string): boolean {
 
 /**
  * File viewer like t3code's file screen: highlighted source, Markdown, table
- * and image previews, Preview/Source, word wrap, copy and share actions.
+ * and media previews, Preview/Source, word wrap, copy and share actions.
  */
 export function FileViewerSheet({
   client,
   workspaceId,
   media,
-  path,
+  file: target,
   bottomInset,
   onInsertIntoChat,
   onClose,
@@ -64,7 +73,7 @@ export function FileViewerSheet({
   client: OpenCuriaClient;
   workspaceId: string;
   media: MediaCache | null;
-  path: string | null;
+  file: FileViewerTarget | null;
   bottomInset: number;
   onInsertIntoChat?: (text: string) => void;
   onClose: () => void;
@@ -74,18 +83,51 @@ export function FileViewerSheet({
   const [mode, setMode] = useState<Mode>("preview");
   const [wrap, setWrap] = useState(wrapSource);
   const [attempt, setAttempt] = useState(0);
+  const path = typeof target === "string" ? target : null;
+  const attachment = typeof target === "object" ? target : null;
 
   useEffect(() => {
-    if (!path) return;
-    setMode(previewable(path) ? "preview" : "source");
+    if (!path && !attachment) return;
+    setMode(
+      !path || previewable(path) || isVideoPath(path) ? "preview" : "source",
+    );
     setContent({ phase: "loading" });
     let live = true;
     let release: (() => void) | undefined;
-    if (isImagePath(path)) {
+    if (attachment) {
       if (!media) {
         setContent({
           phase: "error",
-          message: "Images need a connected workspace.",
+          message: "Attachments need a connected workspace.",
+        });
+        return;
+      }
+      const phase = attachment.mime.startsWith("image/")
+        ? "image"
+        : attachment.mime.startsWith("video/")
+          ? "video"
+          : "attachment";
+      if (phase === "attachment") setContent({ phase });
+      else
+        media
+          .saveAttachment(attachment.uri)
+          .then((uri) => live && setContent({ phase, uri }))
+          .catch((error: unknown) => {
+            if (live)
+              setContent({
+                phase: "error",
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : "Could not load the attachment",
+              });
+          });
+    } else if (path && (isImagePath(path) || isVideoPath(path))) {
+      const phase = isVideoPath(path) ? "video" : "image";
+      if (!media) {
+        setContent({
+          phase: "error",
+          message: "Media need a connected workspace.",
         });
         return;
       }
@@ -94,7 +136,7 @@ export function FileViewerSheet({
         .then((pinned) => {
           if (!live) return pinned.release();
           release = () => pinned.release();
-          setContent({ phase: "image", uri: pinned.uri });
+          setContent({ phase, uri: pinned.uri });
         })
         .catch((error: unknown) => {
           if (live)
@@ -103,10 +145,10 @@ export function FileViewerSheet({
               message:
                 error instanceof Error
                   ? error.message
-                  : "Could not load the image",
+                  : "Could not load the media",
             });
         });
-    } else {
+    } else if (path) {
       readWorkspaceText(client, workspaceId, path)
         .then((file) => live && setContent({ phase: "text", file }))
         .catch((error: unknown) => {
@@ -127,21 +169,27 @@ export function FileViewerSheet({
       live = false;
       release?.();
     };
-  }, [attempt, client, media, path, workspaceId]);
+  }, [attempt, attachment, client, media, path, workspaceId]);
 
-  if (!path) return null;
-  const name = path.split("/").pop() ?? path;
-  const folder = path.slice(0, path.length - name.length - 1) || "/";
+  if (!target) return null;
+  const name = path?.split("/").pop() ?? attachment!.filename;
+  const folder = path
+    ? path.slice(0, path.length - name.length - 1) || "/"
+    : "";
   const relative = folder.replace(/^\/workspace\/?/, "");
-  const canToggle = previewable(path) && !isImagePath(path);
+  const canToggle = path && previewable(path) && !isImagePath(path);
   const text = content.phase === "text" ? content.file.text : null;
-  const delimiter = delimiterFor(path);
+  const delimiter = path ? delimiterFor(path) : null;
 
   const share = async () => {
     if (!media) return;
     try {
+      if (attachment) {
+        await media.shareAttachment(attachment.uri);
+        return;
+      }
+      if (!path) return;
       const opened = await media.openFile(path);
-      const Sharing = await import("expo-sharing");
       if (await Sharing.isAvailableAsync())
         await Sharing.shareAsync(opened.uri, {
           mimeType: opened.mimeType,
@@ -182,10 +230,12 @@ export function FileViewerSheet({
           },
         ]
       : []),
-    ...(onInsertIntoChat
+    ...(onInsertIntoChat && path
       ? [{ id: "mention", title: "Mention in chat", symbol: "at" }]
       : []),
-    { id: "copy-path", title: "Copy path", symbol: "doc.on.doc" },
+    ...(path
+      ? [{ id: "copy-path", title: "Copy path", symbol: "doc.on.doc" }]
+      : []),
     ...(text !== null
       ? [
           {
@@ -207,8 +257,8 @@ export function FileViewerSheet({
     else if (id === "wrap") {
       wrapSource = !wrap;
       setWrap(!wrap);
-    } else if (id === "mention") onInsertIntoChat?.(`@file:${path} `);
-    else if (id === "copy-path") void Clipboard.setStringAsync(path);
+    } else if (id === "mention" && path) onInsertIntoChat?.(`@file:${path} `);
+    else if (id === "copy-path" && path) void Clipboard.setStringAsync(path);
     else if (id === "copy-contents" && text !== null)
       void Clipboard.setStringAsync(text);
     else if (id === "share") void share();
@@ -248,6 +298,16 @@ export function FileViewerSheet({
         )}
       </View>
     );
+  else if (content.phase === "attachment")
+    body = (
+      <View style={styles.center}>
+        <Text style={[styles.detail, { color: theme.mutedText }]}>
+          Open or share this document with another app.
+        </Text>
+        <Button title="Share or open" onPress={() => void share()} />
+      </View>
+    );
+  else if (content.phase === "video") body = <VideoPreview uri={content.uri} />;
   else if (content.phase === "image")
     body = (
       <ScrollView
@@ -264,7 +324,7 @@ export function FileViewerSheet({
         />
       </ScrollView>
     );
-  else {
+  else if (content.phase === "text" && path) {
     const file = content.file;
     const notice = file.truncated ? (
       <View
@@ -326,20 +386,33 @@ export function FileViewerSheet({
           />
         </View>
       );
-  }
+  } else body = null;
 
   return (
     <ToolDetailSheet
       visible
       onClose={onClose}
       title={name}
-      subtitle={relative || "workspace"}
+      subtitle={path ? relative || "workspace" : undefined}
       actions={actions}
       onAction={onAction}
       testID="file-viewer"
     >
       {body}
     </ToolDetailSheet>
+  );
+}
+
+function VideoPreview({ uri }: { uri: string }): React.JSX.Element {
+  const player = useVideoPlayer(uri, (instance) => instance.play());
+  return (
+    <VideoView
+      player={player}
+      nativeControls
+      contentFit="contain"
+      style={{ flex: 1 }}
+      testID="file-video"
+    />
   );
 }
 

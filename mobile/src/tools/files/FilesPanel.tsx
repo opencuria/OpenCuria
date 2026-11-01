@@ -82,7 +82,7 @@ export function FilesPanel({
         client={client}
         workspaceId={workspaceId}
         media={media}
-        path={openPath}
+        file={openPath}
         bottomInset={bottomInset}
         onInsertIntoChat={onInsertIntoChat}
         onClose={() => setOpenPath(null)}

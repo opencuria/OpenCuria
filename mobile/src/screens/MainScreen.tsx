@@ -9,16 +9,14 @@ import React, {
 import {
   ActivityIndicator,
   Alert,
-  Image,
   Platform,
-  ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { KeyboardController } from "react-native-keyboard-controller";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useVideoPlayer, VideoView } from "expo-video";
 import { Settings2 } from "lucide-react-native";
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
 import {
@@ -65,7 +63,6 @@ import {
   pickDocuments,
   pickPhoto,
   uploadAttachments,
-  type OpenedWorkspaceFile,
 } from "../platform";
 import { Banner, Button, NativeModal, NativeAction } from "../ui/primitives";
 import { Drawer } from "../ui/Drawer";
@@ -83,6 +80,7 @@ import { NotificationSettings } from "../notifications/NotificationSettings";
 import { setViewedNotificationSession } from "../notifications/native";
 import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
+import { FileViewerSheet, type FileViewerTarget } from "../tools/files";
 import { releaseGitControllers } from "../tools/git";
 import { releaseTerminalSessions } from "../tools/terminal";
 
@@ -112,7 +110,7 @@ type SheetName =
   | "profile"
   | "settings"
   | "rename"
-  | "media"
+  | "file"
   | null;
 type NavigationRequest = {
   revision: number;
@@ -181,8 +179,8 @@ export function MainScreen(): React.JSX.Element {
   const [renameText, setRenameText] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [resolving, setResolving] = useState<Set<string>>(new Set());
-  const [file, setFile] = useState<OpenedWorkspaceFile | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
+  const [file, setFile] = useState<FileViewerTarget | null>(null);
+  const insets = useSafeAreaInsets();
   const [noticeInset, setNoticeInset] = useState(0);
   const generation = useRef(0);
   const overviewGeneration = useRef(0);
@@ -216,6 +214,10 @@ export function MainScreen(): React.JSX.Element {
   const selectedModel = resolveCatalogModel(modelsForEngine, model);
   const modeConfig = agentConfigs.find((item) => item.agent === mode);
   const contextKey = `${client?.api.baseUrl ?? ""}:${session?.organizationId ?? ""}:${workspaceId ?? ""}:${chat.activeSessionId ?? "new"}`;
+  useEffect(() => {
+    setFile(null);
+    setSheet((current) => (current === "file" ? null : current));
+  }, [contextKey]);
   const activeIsSubtask = Boolean(chat.activeSession?.parent_id);
   const navigationReady = Boolean(
     workspaceId &&
@@ -906,44 +908,6 @@ export function MainScreen(): React.JSX.Element {
     requestNavigation(workspace.id, { newChat: true });
   };
 
-  const viewFile = async (path: string) => {
-    if (!media) return;
-    try {
-      setFile(await media.openFile(path));
-      setFileError(null);
-      setSheet("media");
-    } catch (cause) {
-      setError(errorMessage(cause, "Could not open this file."));
-    }
-  };
-  const viewAttachment = async (attachment: {
-    uri: string;
-    filename: string;
-    mime: string;
-  }) => {
-    if (!media) return;
-    try {
-      const uri = await media.saveAttachment(attachment.uri);
-      const kind: OpenedWorkspaceFile["kind"] = attachment.mime.startsWith(
-        "image/",
-      )
-        ? "image"
-        : attachment.mime.startsWith("video/")
-          ? "video"
-          : "binary";
-      setFile({
-        uri,
-        mimeType: attachment.mime,
-        name: attachment.filename,
-        kind,
-      });
-      setFileError(null);
-      setSheet("media");
-    } catch (cause) {
-      setError(errorMessage(cause, "Could not open this attachment."));
-    }
-  };
-
   const gateAction = async (id: string, action: () => Promise<void>) => {
     if (resolveCounts.current.has(id)) return;
     const count = 1;
@@ -1125,6 +1089,17 @@ export function MainScreen(): React.JSX.Element {
     void KeyboardController.dismiss().catch(() => undefined);
     setSheet(name);
   };
+  const insertIntoChat = chatUnavailable
+    ? undefined
+    : (text: string) => {
+        setDraft((current) =>
+          !current || /\s$/.test(current)
+            ? `${current}${text}`
+            : `${current} ${text}`,
+        );
+        setSheet(null);
+        setFile(null);
+      };
   const chatMenuAction = (id: string) => {
     if (id === "workspace") {
       setSearch("");
@@ -1320,10 +1295,12 @@ export function MainScreen(): React.JSX.Element {
               controller!.requestPartDetail(sessionId, partId)
             }
             onOpenFile={(path) => {
-              void viewFile(path);
+              setFile(path);
+              openSheet("file");
             }}
             onOpenAttachment={(attachment) => {
-              void viewAttachment(attachment);
+              setFile(attachment);
+              openSheet("file");
             }}
             onPullUpAtEnd={
               toolsAvailable ? () => openSheet("tools") : undefined
@@ -1363,18 +1340,7 @@ export function MainScreen(): React.JSX.Element {
           workspaceId={workspace.id}
           workspaceName={workspace.name}
           media={media}
-          onInsertIntoChat={
-            chatUnavailable
-              ? undefined
-              : (text) => {
-                  setDraft((current) =>
-                    !current || /\s$/.test(current)
-                      ? `${current}${text}`
-                      : `${current} ${text}`,
-                  );
-                  setSheet(null);
-                }
-          }
+          onInsertIntoChat={insertIntoChat}
         />
       ) : null}
 
@@ -1545,16 +1511,21 @@ export function MainScreen(): React.JSX.Element {
           style={{ alignSelf: "stretch" }}
         />
       </NativeModal>
-      <MediaSheet
-        visible={sheet === "media"}
-        file={file}
-        error={fileError}
-        onError={setFileError}
-        onClose={() => {
-          setSheet(null);
-          setFile(null);
-        }}
-      />
+      {workspace && sheet === "file" ? (
+        <FileViewerSheet
+          key={contextKey}
+          client={client}
+          workspaceId={workspace.id}
+          media={media}
+          file={file}
+          bottomInset={insets.bottom}
+          onInsertIntoChat={insertIntoChat}
+          onClose={() => {
+            setSheet(null);
+            setFile(null);
+          }}
+        />
+      ) : null}
     </View>
   );
 }
@@ -1633,98 +1604,6 @@ function SearchField({
   );
 }
 
-function MediaSheet({
-  visible,
-  file,
-  error,
-  onError,
-  onClose,
-}: {
-  visible: boolean;
-  file: OpenedWorkspaceFile | null;
-  error: string | null;
-  onError: (value: string | null) => void;
-  onClose: () => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  return (
-    <NativeModal
-      visible={visible}
-      onClose={onClose}
-      title={file?.name ?? "Attachment"}
-      testID="media-viewer-sheet"
-    >
-      {error ? <Banner tone="error" message={error} /> : null}
-      {file?.kind === "image" ? (
-        <Image
-          source={{ uri: file.uri }}
-          resizeMode="contain"
-          style={{ width: "100%", height: 380 }}
-          accessibilityLabel={file.name}
-        />
-      ) : null}
-      {file?.kind === "video" ? <VideoPreview uri={file.uri} /> : null}
-      {file?.kind === "text" ? (
-        <ScrollView style={{ maxHeight: 450 }}>
-          <Text
-            selectable
-            style={{
-              color: theme.text,
-              fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
-              fontSize: 13,
-              lineHeight: 19,
-            }}
-          >
-            {file.text ?? ""}
-          </Text>
-        </ScrollView>
-      ) : null}
-      {file && file.kind === "binary" ? (
-        <View
-          style={[styles.docPreview, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <Settings2 color={theme.primary} size={24} />
-          <Text style={{ color: theme.text, fontWeight: "600" }}>
-            {file.mimeType}
-          </Text>
-          <Text style={{ color: theme.mutedText, textAlign: "center" }}>
-            Downloaded securely. Open or share this document with another app.
-          </Text>
-          <Button
-            title="Share or open"
-            variant="primary"
-            onPress={() => {
-              void import("expo-sharing")
-                .then(({ shareAsync }) =>
-                  shareAsync(file.uri, {
-                    mimeType: file.mimeType,
-                    dialogTitle: file.name,
-                  }),
-                )
-                .catch((cause: unknown) =>
-                  onError(errorMessage(cause, "Could not share file.")),
-                );
-            }}
-          />
-        </View>
-      ) : null}
-    </NativeModal>
-  );
-}
-function VideoPreview({ uri }: { uri: string }): React.JSX.Element {
-  const player = useVideoPlayer(uri, (instance) => {
-    instance.play();
-  });
-  return (
-    <VideoView
-      player={player}
-      nativeControls
-      contentFit="contain"
-      style={{ width: "100%", height: 300, borderRadius: 16 }}
-    />
-  );
-}
-
 const styles = StyleSheet.create({
   root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
@@ -1750,13 +1629,5 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
-  },
-  docPreview: {
-    minHeight: 210,
-    borderRadius: 18,
-    padding: 22,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 12,
   },
 });
