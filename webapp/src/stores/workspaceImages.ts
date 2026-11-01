@@ -85,8 +85,6 @@ export const MEDIA_CACHE_BUDGET_BYTES = 32 * 1024 * 1024
 /** Base64 strings are retained as UTF-16 JavaScript strings. */
 const BASE64_STORAGE_BYTES_PER_CHAR = 2
 
-export type UploadStatus = 'uploading' | 'done' | 'error'
-
 export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   // path → image data URL
   const imageCache = reactive<Record<string, string>>({})
@@ -104,29 +102,13 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   const mediaEntries = new Map<string, MediaEntry>()
   const mediaPins = new Map<string, number>()
   const mediaGeneration = ref(0)
-  const retiredVideoUrls = new Map<string, Set<string>>()
-  const failedUploadPaths = new Set<string>()
   let mediaUseCounter = 0
-
-  function mediaUrl(path: string): string | undefined {
-    return imageCache[path] ?? videoCache[path]
-  }
 
   function estimateDataUrlBytes(url: string): number {
     return url.length * BASE64_STORAGE_BYTES_PER_CHAR
   }
 
   function trackMedia(path: string, kind: 'image' | 'video', url: string, bytes: number): void {
-    const previous = mediaEntries.get(path)
-    if (previous?.kind === 'video' && previous.url !== url) {
-      if ((mediaPins.get(path) ?? 0) > 0) {
-        const retired = retiredVideoUrls.get(path) ?? new Set<string>()
-        retired.add(previous.url)
-        retiredVideoUrls.set(path, retired)
-      } else {
-        URL.revokeObjectURL(previous.url)
-      }
-    }
     mediaEntries.set(path, {
       kind,
       url,
@@ -135,31 +117,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     })
   }
 
-  function syncMediaEntry(path: string): MediaEntry | undefined {
-    const image = imageCache[path]
-    const video = videoCache[path]
-    const url = image ?? video
-    const kind = image ? 'image' : video ? 'video' : undefined
-    if (!url || !kind) {
-      mediaEntries.delete(path)
-      return undefined
-    }
-    const known = mediaEntries.get(path)
-    if (known?.url === url && known.kind === kind) return known
-    const bytes = kind === 'video' ? (known?.bytes ?? 0) : estimateDataUrlBytes(url)
-    trackMedia(path, kind, url, bytes)
-    return mediaEntries.get(path)
-  }
-
   function trimMediaCache(): void {
-    // Reconcile direct cache assignments used by legacy callers/tests. This
-    // sweep runs on mutations/releases, never on render getters.
-    const paths = new Set([...Object.keys(imageCache), ...Object.keys(videoCache)])
-    for (const path of mediaEntries.keys()) {
-      if (!paths.has(path)) mediaEntries.delete(path)
-    }
-    for (const path of paths) syncMediaEntry(path)
-
     let totalBytes = [...mediaEntries.values()].reduce((sum, entry) => sum + entry.bytes, 0)
     if (totalBytes <= MEDIA_CACHE_BUDGET_BYTES) return
 
@@ -183,9 +141,6 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     const count = mediaPins.get(path) ?? 0
     if (count <= 1) {
       mediaPins.delete(path)
-      for (const url of retiredVideoUrls.get(path) ?? []) URL.revokeObjectURL(url)
-      retiredVideoUrls.delete(path)
-      if (failedUploadPaths.delete(path)) removeMedia(path)
     } else {
       mediaPins.set(path, count - 1)
     }
@@ -204,31 +159,11 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     }
     const count = mediaPins.get(path) ?? 0
     mediaPins.set(path, count + 1)
-    syncMediaEntry(path)
-  }
-
-  function removeMedia(path: string): void {
-    if ((mediaPins.get(path) ?? 0) > 0) return
-    delete imageCache[path]
-    const video = videoCache[path]
-    if (video) {
-      delete videoCache[path]
-      URL.revokeObjectURL(video)
-    }
-    delete videoMimeTypes[path]
-    mediaEntries.delete(path)
   }
 
   const fetchingPaths = reactive<Record<string, boolean>>({})
   const fetchingVideos = reactive<Record<string, boolean>>({})
   let readController = new AbortController()
-
-  // Upload state tracking: path → status
-  const uploadStatuses = reactive<Record<string, UploadStatus>>({})
-  const uploadStatusTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
-  const uploadPinnedPaths = new Set<string>()
-  // requestId → path for in-flight uploads
-  const pendingUploadIds = ref<Map<string, string>>(new Map())
 
   // Concurrency control for media reads.
   const fetchQueue: Array<{
@@ -360,78 +295,10 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     trimMediaCache()
   }
 
-  /**
-   * Directly store a local data URL for an image path (used for optimistic preview
-   * after a local file is dropped/uploaded before the runner confirms).
-   */
-  function storeLocalImage(path: string, dataUrl: string): void {
-    imageCache[path] = dataUrl
-    trackMedia(path, 'image', dataUrl, estimateDataUrlBytes(dataUrl))
-    delete fetchingPaths[path]
-    if (failedUploadPaths.has(path)) {
-      failedUploadPaths.delete(path)
-      if (!uploadPinnedPaths.has(path)) {
-        uploadPinnedPaths.add(path)
-        pinMedia(path, true)
-      }
-    } else if (uploadStatuses[path] === 'uploading' && !uploadPinnedPaths.has(path)) {
-      uploadPinnedPaths.add(path)
-      pinMedia(path, true)
-    }
-    trimMediaCache()
-  }
-
-  /** Register an in-flight upload so the UI can show upload feedback. */
-  function trackUpload(requestId: string, path: string): void {
-    const previousTimeout = uploadStatusTimeouts.get(path)
-    if (previousTimeout !== undefined) clearTimeout(previousTimeout)
-    uploadStatusTimeouts.delete(path)
-    pendingUploadIds.value.set(requestId, path)
-    uploadStatuses[path] = 'uploading'
-    failedUploadPaths.delete(path)
-    if (mediaUrl(path) && !uploadPinnedPaths.has(path)) {
-      uploadPinnedPaths.add(path)
-      pinMedia(path, true)
-    }
-  }
-
-  /**
-   * Called from useWorkspaceFileEvents when a files:upload_result event arrives.
-   */
-  function handleUploadResult(requestId: string, status: string, error?: string): void {
-    const path = pendingUploadIds.value.get(requestId)
-    if (!path) return
-    pendingUploadIds.value.delete(requestId)
-
-    if (status === 'success' && !error) {
-      uploadStatuses[path] = 'done'
-      const timeout = setTimeout(() => {
-        uploadStatusTimeouts.delete(path)
-        if (uploadStatuses[path] === 'done') delete uploadStatuses[path]
-      }, 3000)
-      uploadStatusTimeouts.set(path, timeout)
-      if (uploadPinnedPaths.delete(path)) pinMedia(path, false)
-      trimMediaCache()
-    } else {
-      const previousTimeout = uploadStatusTimeouts.get(path)
-      if (previousTimeout !== undefined) clearTimeout(previousTimeout)
-      uploadStatusTimeouts.delete(path)
-      uploadStatuses[path] = 'error'
-      removeMedia(path)
-      if ((mediaPins.get(path) ?? 0) > 0) failedUploadPaths.add(path)
-      if (uploadPinnedPaths.delete(path)) pinMedia(path, false)
-    }
-  }
-
-  function getUploadStatus(path: string): UploadStatus | null {
-    return uploadStatuses[path] ?? null
-  }
-
   function reset(): void {
     readController.abort()
     readController = new AbortController()
     const urlsToRevoke = Object.values(videoCache)
-    for (const urls of retiredVideoUrls.values()) urlsToRevoke.push(...urls)
     Object.keys(imageCache).forEach((k) => {
       delete imageCache[k]
     })
@@ -447,18 +314,9 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     Object.keys(fetchingVideos).forEach((k) => {
       delete fetchingVideos[k]
     })
-    Object.keys(uploadStatuses).forEach((k) => {
-      delete uploadStatuses[k]
-    })
-    uploadStatusTimeouts.forEach((t) => clearTimeout(t))
-    uploadStatusTimeouts.clear()
     mediaEntries.clear()
     mediaUseCounter = 0
     mediaPins.clear()
-    retiredVideoUrls.clear()
-    failedUploadPaths.clear()
-    uploadPinnedPaths.clear()
-    pendingUploadIds.value.clear()
     fetchQueue.length = 0
     activeCount = 0
     mediaGeneration.value += 1
@@ -474,7 +332,6 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     videoMimeTypes,
     fetchingPaths,
     fetchingVideos,
-    uploadStatuses,
     mediaGeneration,
     isImagePath,
     isVideoPath,
@@ -485,12 +342,8 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     isFetchingVideo,
     fetchImage,
     fetchVideo,
-    storeLocalImage,
     pinMedia,
     releaseMedia,
-    trackUpload,
-    handleUploadResult,
-    getUploadStatus,
     reset,
   }
 })

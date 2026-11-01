@@ -2,11 +2,9 @@
 import { onMounted, onUnmounted, toValue, type MaybeRefOrGetter } from 'vue'
 import { onEvent } from '@/services/socket'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 
 export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): void {
   const fileExplorerStore = useFileExplorerStore()
-  const workspaceImageStore = useWorkspaceImageStore()
   const cleanupFns: (() => void)[] = []
 
   function currentId(): string {
@@ -25,7 +23,6 @@ export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): v
           data.error,
           fileExplorerStore.shouldRefreshUploadResult(data.request_id),
         )
-        workspaceImageStore.handleUploadResult(data.request_id, data.status, data.error)
       }),
     )
   })

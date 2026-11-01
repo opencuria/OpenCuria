@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useWorkspaceFileEvents } from './useWorkspaceFileEvents'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useNotificationStore } from '@/stores/notifications'
 import { CHAT_UPLOAD_DIR } from '@/lib/chatUpload'
 import { listWorkspaceFiles } from '@/services/socket'
@@ -90,9 +89,7 @@ describe('useWorkspaceFileEvents', () => {
     const notify = useNotificationStore()
     const notificationSpy = vi.spyOn(notify, 'error')
     const fileExplorer = useFileExplorerStore()
-    const images = useWorkspaceImageStore()
     vi.spyOn(fileExplorer, 'fetchDirectory').mockResolvedValue(undefined)
-    const imageResult = vi.spyOn(images, 'handleUploadResult')
     const uploadHandler = vi.spyOn(fileExplorer, 'handleUploadResult')
     const upload = fileExplorer.trackAndUpload(
       'ws-1',
@@ -126,51 +123,15 @@ describe('useWorkspaceFileEvents', () => {
       false,
     ])
     expect(vi.mocked(listWorkspaceFiles)).toHaveBeenCalledTimes(1)
-    expect(imageResult).toHaveBeenCalledTimes(4)
-    expect(images.getUploadStatus('/workspace/shared.txt')).toBeNull()
     expect(notificationSpy).not.toHaveBeenCalled()
-  })
-
-  it('routes image-only uploads despite duplicate explorer listeners', () => {
-    const fileExplorer = useFileExplorerStore()
-    const uploadHandler = vi.spyOn(fileExplorer, 'handleUploadResult')
-    const images = useWorkspaceImageStore()
-    const imageResult = vi.spyOn(images, 'handleUploadResult')
-    images.trackUpload('image-only-upload', '/workspace/photo.png')
-    images.storeLocalImage('/workspace/photo.png', 'data:image/png;base64,eA==')
-    mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
-    mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
-
-    for (let i = 0; i < 2; i++) {
-      emitEvent('files:upload_result', {
-        workspace_id: 'ws-1',
-        request_id: 'image-only-upload',
-        path: '/workspace/photo.png',
-        status: 'error',
-        error: 'upload failed',
-      })
-    }
-
-    expect(uploadHandler).toHaveBeenCalledTimes(4)
-    expect(uploadHandler.mock.results.map((result) => result.value)).toEqual([
-      false,
-      false,
-      false,
-      false,
-    ])
-    expect(imageResult).toHaveBeenCalledTimes(4)
-    expect(images.getUploadStatus('/workspace/photo.png')).toBe('error')
-    expect(images.getImageUrl('/workspace/photo.png')).toBeNull()
   })
 
   it('keeps isolated scheduled uploads quiet with duplicate listeners and late cancelled replies', async () => {
     const notify = useNotificationStore()
     const notificationSpy = vi.spyOn(notify, 'error')
     const fileExplorer = useFileExplorerStore()
-    const images = useWorkspaceImageStore()
     const refresh = vi.spyOn(fileExplorer, 'fetchDirectory')
     refresh.mockClear()
-    const imageResult = vi.spyOn(images, 'handleUploadResult')
     const upload = fileExplorer.trackAndUpload(
       'ws-1',
       'isolated-duplicate',
@@ -217,8 +178,6 @@ describe('useWorkspaceFileEvents', () => {
     }
 
     expect(refresh).not.toHaveBeenCalled()
-    expect(imageResult).toHaveBeenCalledTimes(8)
-    expect(images.getUploadStatus('/workspace/task/task.txt')).toBeNull()
     expect(notificationSpy).not.toHaveBeenCalled()
   })
 

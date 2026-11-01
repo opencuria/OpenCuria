@@ -59,6 +59,7 @@ describe('HarnessMarkdown', () => {
     const store = useWorkspaceImageStore()
     store.reset()
     vi.clearAllMocks()
+    vi.mocked(readWorkspaceFile).mockReset().mockImplementation(() => new Promise(() => {}))
   })
 
   afterEach(() => {
@@ -114,58 +115,26 @@ describe('HarnessMarkdown', () => {
     parseSpy.mockRestore()
   })
 
-  it('releases visible media pins when a markdown segment is removed', async () => {
+  it('reacquires markdown media pins after reset and releases them when the segment disappears', async () => {
     const store = useWorkspaceImageStore()
-    const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
-    store.imageCache['/workspace/a.png'] = `data:image/png;base64,${payload}`
-    const wrapper = mountMarkdown('![a](/workspace/a.png)')
-    await nextTick()
-    store.storeLocalImage('/workspace/b.png', `data:image/png;base64,${payload}`)
-
-    await wrapper.setProps({ text: 'No more media' })
-    await nextTick()
-
-    expect(store.imageCache['/workspace/a.png']).toBeUndefined()
-    wrapper.unmount()
-  })
-
-  it('reacquires markdown media pins after store reset without stale unpinning', async () => {
-    let resolveRead!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void
-    vi.mocked(readWorkspaceFile).mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveRead = resolve
-      }),
-    )
-    const store = useWorkspaceImageStore()
-    const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
-    store.pinMedia('/workspace/a.png', true)
-    store.storeLocalImage('/workspace/a.png', `data:image/png;base64,${payload}`)
-    const wrapper = mountMarkdown('![a](/workspace/a.png)')
-    store.pinMedia('/workspace/a.png', false)
-    await nextTick()
+    const payload = Buffer.alloc(5 * 1024 * 1024, 1).toString('base64')
+    vi.mocked(readWorkspaceFile).mockImplementation(async (_, path) => ({
+      workspace_id: 'ws-1', request_id: 'media-1', path,
+      content: payload, size: 5 * 1024 * 1024, truncated: false, mime_type: 'image/png',
+    }))
+    const wrapper = mountMarkdown('![a](/workspace/a.png) ![b](/workspace/b.png) ![c](/workspace/c.png)')
+    await flushPromises()
     expect(store.getImageUrl('/workspace/a.png')).not.toBeNull()
 
     store.reset()
-    await nextTick()
     expect(store.getImageUrl('/workspace/a.png')).toBeNull()
-    expect(readWorkspaceFile).toHaveBeenCalled()
-    resolveRead({
-      workspace_id: 'ws-1',
-      request_id: 'media-1',
-      path: '/workspace/a.png',
-      content: payload,
-      size: 20 * 1024 * 1024,
-      truncated: false,
-      mime_type: 'image/png',
-    })
     await flushPromises()
+    expect(store.getImageUrl('/workspace/a.png')).not.toBeNull()
+    expect(readWorkspaceFile).toHaveBeenCalledTimes(6)
 
-    expect(store.imageCache['/workspace/a.png']).toBeDefined()
-
-    store.storeLocalImage('/workspace/b.png', `data:image/png;base64,${payload}`)
-    expect(store.imageCache['/workspace/a.png']).toBeDefined()
-    wrapper.unmount()
+    await wrapper.setProps({ text: '![b](/workspace/b.png) ![c](/workspace/c.png)' })
     expect(store.getImageUrl('/workspace/a.png')).toBeNull()
+    wrapper.unmount()
   })
 
   it('renders a video element when the store has a cached URL', () => {
