@@ -42,7 +42,10 @@ import {
   withdrawHarnessSteer,
 } from '@/services/harness.api'
 import { ApiRequestError } from '@/services/api'
-import { hydrateHarnessPart } from '@/lib/toolDisplay'
+import {
+  ChatTimelineController,
+  StaleChatRequestError,
+} from '@opencuria/chat-core/chatTimelineController'
 import {
   applyPartDelta,
   applySubtaskFinished,
@@ -50,10 +53,7 @@ import {
   applyTodoUpdate,
   ensureBusyAssistant,
   hasDeliveredSteer,
-  mergeBusyFetchedMessages,
   routeAssistantMessage,
-  settleOpenStreamParts,
-  sortHarnessMessages,
   sortHarnessParts,
 } from '@/lib/harnessReducer'
 import {
@@ -128,23 +128,10 @@ export const useHarnessStore = defineStore('harness', () => {
   const dismissedNoticeIds = ref<Record<string, true>>({})
 
   const sessionFetches = new Map<string, Promise<void>>()
-  const partFetches = new Map<string, Promise<void>>()
   const todoFetches = new Map<string, Promise<void>>()
-  const partGenerations = new Map<string, number>()
   /** Deleted edit suffixes must not be resurrected by stale snapshots or events. */
   const discardedMessageIds = new Map<string, Set<string>>()
-  const detailGenerations = new Map<string, number>()
-  const detailFetches = new Map<string, Promise<boolean>>()
-  const detailCache = new Map<string, HarnessPart>()
-  const pinnedDetailKeys = new Set<string>()
   const detailErrors = ref<Record<string, string>>({})
-  const DETAIL_CACHE_LIMIT = 100
-  // Inactive hydrated transcripts are a UI cache only; the server remains
-  // authoritative. Protected sessions may exceed either inactive-cache limit.
-  const INACTIVE_TRANSCRIPT_LIMIT = 4
-  const INACTIVE_TRANSCRIPT_BUDGET_BYTES = 16 * 1024 * 1024
-  /** Session -> estimated payload bytes, ordered least- to most-recently used. */
-  const transcriptLru = new Map<string, number>()
   let activeSelectionGeneration = 0
   const todoGenerations = new Map<string, number>()
   let sessionsGeneration = 0
@@ -231,67 +218,42 @@ export const useHarnessStore = defineStore('harness', () => {
     return messagesBySession.value[sessionId]!
   }
 
-  /** Estimate retained transcript size without allocating a serialized copy. */
-  function estimateTranscriptBytes(messages: HarnessMessage[]): number {
-    const stack: Array<{ value: unknown; multiplier: number }> = [
-      { value: messages, multiplier: 1 },
-    ]
-    const visited = new WeakMap<object, number>()
-    let bytes = 0
-
-    while (stack.length) {
-      const { value, multiplier } = stack.pop()!
-      if (typeof value === 'string') {
-        bytes += value.length * 2 * multiplier
-      } else if (
-        typeof value === 'number' ||
-        typeof value === 'boolean' ||
-        typeof value === 'bigint'
-      ) {
-        bytes += 8 * multiplier
-      } else if (value && typeof value === 'object') {
-        const raw = toRaw(value)
-        const previousMultiplier = visited.get(raw) ?? 0
-        if (previousMultiplier >= multiplier) continue
-
-        const isDetailedPart =
-          !Array.isArray(raw) &&
-          'detail_loaded' in raw &&
-          raw.detail_loaded === true &&
-          'type' in raw &&
-          ['tool', 'reasoning', 'patch', 'compaction'].includes(String(raw.type))
-        const effectiveMultiplier = isDetailedPart ? multiplier * 2 : multiplier
-        const additionalMultiplier = effectiveMultiplier - previousMultiplier
-        visited.set(raw, effectiveMultiplier)
-
-        if (Array.isArray(raw)) {
-          bytes += (24 + raw.length * 8) * additionalMultiplier
-          for (const item of raw) stack.push({ value: item, multiplier: effectiveMultiplier })
-        } else {
-          bytes += 32 * additionalMultiplier
-          for (const key of Object.keys(raw)) {
-            bytes += (key.length * 2 + 8) * additionalMultiplier
-            stack.push({
-              value: (raw as Record<string, unknown>)[key],
-              multiplier: effectiveMultiplier,
-            })
-          }
-        }
-      }
-    }
-
-    return bytes
+  /** Keep Vue row references reactive while the shared controller replaces snapshots. */
+  function publishTranscript(sessionId: string, messages: HarnessMessage[]): void {
+    const current = new Map(
+      (messagesBySession.value[sessionId] ?? []).map((message) => [message.id, message]),
+    )
+    messagesBySession.value[sessionId] = messages.map((message) => {
+      const existing = current.get(message.id)
+      if (!existing || existing === message) return message
+      const parts = new Map(existing.parts.map((part) => [part.id, part]))
+      const publishedParts = message.parts.map((part) => {
+        const previous = parts.get(part.id)
+        return previous ? Object.assign(previous, part) : part
+      })
+      return Object.assign(existing, message, { parts: publishedParts })
+    })
   }
 
+  const timeline = new ChatTimelineController({
+    load: listHarnessParts,
+    loadDetail: getHarnessPart,
+    read: (sessionId) => messagesBySession.value[sessionId],
+    write: publishTranscript,
+    status: (sessionId) => sessions.value.find((session) => session.id === sessionId)?.status,
+    discardMessage: isDiscardedMessage,
+    protectedSessions: protectedTranscriptSessions,
+    forget: forgetTranscript,
+    unwrap: toRaw,
+    onError: (cause) =>
+      useNotificationStore().error(
+        'Failed to load messages',
+        cause instanceof Error ? cause.message : 'Unknown error',
+      ),
+  })
+
   function touchTranscript(sessionId: string, recalculateBytes = false): void {
-    const messages = messagesBySession.value[sessionId]
-    if (!messages) return
-    const bytes =
-      recalculateBytes || !transcriptLru.has(sessionId)
-        ? estimateTranscriptBytes(messages)
-        : transcriptLru.get(sessionId)!
-    transcriptLru.delete(sessionId)
-    transcriptLru.set(sessionId, bytes)
+    timeline.touch(sessionId, recalculateBytes)
   }
 
   /** Protect a lineage family when its contents support the active subtask UI. */
@@ -320,41 +282,22 @@ export const useHarnessStore = defineStore('harness', () => {
       protectFamily(request.session_id)
     }
     // A live fetch or explicitly pinned detail is an explicit temporary cache pin.
-    for (const key of pinnedDetailKeys) protectFamily(key.slice(0, key.lastIndexOf(':')))
-    const inFlightSessionIds = new Set([
-      ...[...partFetches.keys()].map((key) => key.slice(0, key.lastIndexOf(':'))),
-      ...[...detailFetches.keys()].map((key) => key.slice(0, key.lastIndexOf(':'))),
-      ...todoFetches.keys(),
-    ])
+    for (const sessionId of timeline.pinnedSessionIds()) protectFamily(sessionId)
+    const inFlightSessionIds = new Set([...timeline.pendingSessionIds(), ...todoFetches.keys()])
     for (const sessionId of inFlightSessionIds) protectFamily(sessionId)
     return protectedIds
   }
 
   function invalidatePartFetches(sessionId: string): void {
-    partGenerations.set(sessionId, (partGenerations.get(sessionId) ?? 0) + 1)
-    for (const key of partFetches.keys()) {
-      if (key.startsWith(`${sessionId}:`)) partFetches.delete(key)
-    }
+    timeline.invalidate(sessionId)
   }
 
   function forgetTranscript(sessionId: string): void {
-    transcriptLru.delete(sessionId)
+    timeline.forget(sessionId)
     discardedMessageIds.delete(sessionId)
     invalidatePartFetches(sessionId)
-    detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
     todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
-    for (const key of detailFetches.keys()) {
-      if (key.startsWith(`${sessionId}:`)) detailFetches.delete(key)
-    }
     todoFetches.delete(sessionId)
-    for (const [key, part] of detailCache) {
-      if (part.session_id !== sessionId) continue
-      detailCache.delete(key)
-      pinnedDetailKeys.delete(key)
-    }
-    for (const key of pinnedDetailKeys) {
-      if (key.startsWith(`${sessionId}:`)) pinnedDetailKeys.delete(key)
-    }
     const errors = { ...detailErrors.value }
     for (const key of Object.keys(errors)) {
       if (key.startsWith(`${sessionId}:`)) delete errors[key]
@@ -371,59 +314,20 @@ export const useHarnessStore = defineStore('harness', () => {
     steerRevisions.delete(sessionId)
   }
 
-  /** Keep only a small LRU of unprotected inactive transcripts. */
   function trimInactiveTranscripts(): void {
-    const protectedIds = protectedTranscriptSessions()
-    let inactiveCount = 0
-    let inactiveBytes = 0
-    for (const [sessionId, bytes] of transcriptLru) {
-      if (protectedIds.has(sessionId)) continue
-      inactiveCount += 1
-      inactiveBytes += bytes
-    }
-    for (const sessionId of transcriptLru.keys()) {
-      if (
-        inactiveCount <= INACTIVE_TRANSCRIPT_LIMIT &&
-        inactiveBytes <= INACTIVE_TRANSCRIPT_BUDGET_BYTES
-      ) {
-        break
-      }
-      if (protectedIds.has(sessionId)) continue
-      const bytes = transcriptLru.get(sessionId) ?? 0
-      forgetTranscript(sessionId)
-      inactiveCount -= 1
-      inactiveBytes -= bytes
-    }
+    timeline.trim()
   }
 
   /** Clear transcript caches and invalidate all outstanding session fetches. */
   function clearTranscriptCaches(): void {
     const sessionIdFromKey = (key: string): string => key.slice(0, key.indexOf(':'))
-    const partSessionIds = new Set([
-      ...partGenerations.keys(),
-      ...[...partFetches.keys()].map(sessionIdFromKey),
-    ])
-    const detailSessionIds = new Set([
-      ...detailGenerations.keys(),
-      ...[...detailFetches.keys()].map(sessionIdFromKey),
-    ])
     const todoSessionIds = new Set([...todoGenerations.keys(), ...todoFetches.keys()])
-    for (const sessionId of partSessionIds) {
-      partGenerations.set(sessionId, (partGenerations.get(sessionId) ?? 0) + 1)
-    }
-    for (const sessionId of detailSessionIds) {
-      detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
-    }
     for (const sessionId of todoSessionIds) {
       todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
     }
-    transcriptLru.clear()
-    partFetches.clear()
+    timeline.clear()
     discardedMessageIds.clear()
-    detailFetches.clear()
     todoFetches.clear()
-    detailCache.clear()
-    pinnedDetailKeys.clear()
     detailErrors.value = {}
     messagesBySession.value = {}
     todosBySession.value = {}
@@ -437,140 +341,42 @@ export const useHarnessStore = defineStore('harness', () => {
 
   // --- Actions ---
 
-  function rememberPartDetail(sessionId: string, part: HarnessPart): void {
-    if (!part.detail_loaded || !['tool', 'reasoning', 'patch', 'compaction'].includes(part.type))
-      return
-    const key = `${sessionId}:${part.id}`
-    detailCache.delete(key)
-    detailCache.set(key, {
-      ...part,
-      input: part.input ? { ...part.input } : {},
-      meta: part.meta ? { ...part.meta } : {},
-    })
-    while (detailCache.size > DETAIL_CACHE_LIMIT) {
-      const oldest = [...detailCache.keys()].find((candidate) => !pinnedDetailKeys.has(candidate))
-      if (oldest === undefined) break
-      const evicted = detailCache.get(oldest)
-      detailCache.delete(oldest)
-      if (!evicted) continue
-      const stored = messagesBySession.value[evicted.session_id]
-        ?.flatMap((message) => message.parts)
-        .find((item) => item.id === evicted.id)
-      if (stored?.detail_loaded && !pinnedDetailKeys.has(`${evicted.session_id}:${evicted.id}`)) {
-        stored.input = stored.type === 'tool' ? { tool: stored.tool ?? '' } : {}
-        if (!(stored.state === 'error' && stored.output === 'Tool failed')) stored.output = ''
-        stored.meta = {}
-        stored.detail_loaded = false
-      }
-    }
-  }
-
   function pinPartDetail(sessionId: string, partId: string, pinned: boolean): void {
-    const key = `${sessionId}:${partId}`
-    if (pinned) {
-      pinnedDetailKeys.add(key)
-      const cached = detailCache.get(key)
-      if (cached) {
-        detailCache.delete(key)
-        detailCache.set(key, cached)
-      }
-    } else {
-      pinnedDetailKeys.delete(key)
-      trimInactiveTranscripts()
-    }
+    timeline.pinDetail(sessionId, partId, pinned)
   }
 
   function invalidatePartDetails(sessionId: string, clear = false): void {
-    detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
-    if (!clear) return
-    for (const [key, cached] of detailCache) {
-      if (cached.session_id !== sessionId) continue
-      detailCache.delete(key)
-      pinnedDetailKeys.delete(key)
-      const stored = messagesBySession.value[sessionId]
-        ?.flatMap((message) => message.parts)
-        .find((item) => item.id === cached.id)
-      if (stored) {
-        stored.input = stored.type === 'tool' ? { tool: stored.tool ?? '' } : {}
-        // Keep bounded live previews and generic error status text.
-        if (!(stored.state === 'error' && stored.output === 'Tool failed')) stored.output = ''
-        const lightweightMeta: Record<string, unknown> = {}
-        if (typeof stored.meta?.['step'] === 'number') lightweightMeta.step = stored.meta['step']
-        stored.meta = lightweightMeta
-        stored.detail_loaded = false
-      }
-    }
+    timeline.invalidateDetails(sessionId, clear, clear)
   }
 
   async function fetchPartDetail(sessionId: string, partId: string): Promise<boolean> {
-    const message = messagesBySession.value[sessionId]?.find((item) =>
-      item.parts.some((part) => part.id === partId),
-    )
-    const part = message?.parts.find((item) => item.id === partId)
+    const part = messagesBySession.value[sessionId]
+      ?.flatMap((message) => message.parts)
+      .find((item) => item.id === partId)
     if (!part || part.detail_loaded) return Boolean(part?.detail_loaded)
     if (part.state === 'pending' || part.state === 'running') return false
+    const selection = activeSelectionGeneration
+    const generation = timeline.generation(sessionId)
+    const isCurrent = () =>
+      activeSessionId.value === sessionId &&
+      selection === activeSelectionGeneration &&
+      generation === timeline.generation(sessionId) &&
+      sessions.value.some((session) => session.id === sessionId)
     const key = `${sessionId}:${partId}`
-    const existing = detailFetches.get(key)
-    if (existing) return existing
-    const sessionGeneration = detailGenerations.get(sessionId) ?? 0
-    const selectionGeneration = activeSelectionGeneration
-    const partGeneration = partGenerations.get(sessionId) ?? 0
-    const flight = (async () => {
-      try {
-        // A finished part can be expanded while its containing conversation
-        // is still busy. Never fetch a pending/running part, but do not gate
-        // historical/completed rows on the session's overall busy status.
-        if (part.state === 'pending' || part.state === 'running') return false
-        const detail = await getHarnessPart(sessionId, partId)
-        const stillExists = sessions.value.some((item) => item.id === sessionId)
-        if (
-          !stillExists ||
-          activeSessionId.value !== sessionId ||
-          selectionGeneration !== activeSelectionGeneration ||
-          sessionGeneration !== (detailGenerations.get(sessionId) ?? 0) ||
-          partGeneration !== (partGenerations.get(sessionId) ?? 0)
-        )
-          return false
-        const currentMessage = messagesBySession.value[sessionId]?.find(
-          (item) => item.id === message!.id,
-        )
-        const currentPart = currentMessage?.parts.find((item) => item.id === partId)
-        if (!currentPart || currentPart.state === 'pending' || currentPart.state === 'running')
-          return false
-        // A run transition racing the request invalidates only unfinished parts;
-        // completed/error rows remain safe to hydrate during an active run.
-        Object.assign(currentPart, detail, {
-          session_id: sessionId,
-          message_id: currentMessage!.id,
-          detail_loaded: true,
-        })
-        rememberPartDetail(sessionId, currentPart)
-        touchTranscript(sessionId, true)
-        const errors = { ...detailErrors.value }
-        delete errors[key]
-        detailErrors.value = errors
-        return true
-      } catch (e: unknown) {
-        if (
-          sessionGeneration === (detailGenerations.get(sessionId) ?? 0) &&
-          selectionGeneration === activeSelectionGeneration &&
-          partGeneration === (partGenerations.get(sessionId) ?? 0)
-        ) {
-          detailErrors.value = {
-            ...detailErrors.value,
-            [key]: e instanceof Error ? e.message : 'Failed to load part details',
-          }
-        }
-        throw e
+    try {
+      await timeline.requestDetail(sessionId, partId, { context: String(selection), isCurrent })
+      const errors = { ...detailErrors.value }
+      delete errors[key]
+      detailErrors.value = errors
+      return true
+    } catch (cause) {
+      if (!isCurrent() || cause instanceof StaleChatRequestError) return false
+      detailErrors.value = {
+        ...detailErrors.value,
+        [key]: cause instanceof Error ? cause.message : 'Failed to load part details',
       }
-    })().finally(() => {
-      if (detailFetches.get(key) === flight) {
-        detailFetches.delete(key)
-        trimInactiveTranscripts()
-      }
-    })
-    detailFetches.set(key, flight)
-    return flight
+      throw cause
+    }
   }
 
   async function fetchSessions(workspaceId: string): Promise<void> {
@@ -704,81 +510,23 @@ export const useHarnessStore = defineStore('harness', () => {
     await flight
   }
 
-  async function fetchParts(sessionId: string, hydrateChildren = true): Promise<void> {
-    const key = `${sessionId}:${hydrateChildren}`
-    let flight = partFetches.get(key)
-    if (!flight) {
-      const generation = (partGenerations.get(sessionId) ?? 0) + 1
-      partGenerations.set(sessionId, generation)
-      flight = (async () => {
+  async function fetchParts(
+    sessionId: string,
+    hydrateChildren = true,
+    refreshAfterExisting = false,
+  ): Promise<void> {
+    await timeline.fetch(sessionId, {
+      variant: String(hydrateChildren),
+      refreshAfterExisting,
+      prepare: () => {
         const auth = useAuthStore()
         const identity = { userId: auth.user?.id, organizationId: auth.activeOrganizationId }
         const steerRevision = steerRevisions.get(sessionId) ?? 0
-        // A gate a socket event adds while the request is in flight is newer
-        // than the response, so only gates known now may be settled by it.
         const knownGateIds = new Set([
           ...Object.keys(pendingPermissions.value),
           ...Object.keys(pendingQuestions.value),
         ])
-        try {
-          const response = await listHarnessParts(sessionId)
-          if (partGenerations.get(sessionId) !== generation) return
-          const previous = messagesBySession.value[sessionId] ?? []
-          const previousByPart = new Map(
-            previous.flatMap((row) => row.parts.map((part) => [part.id, part] as const)),
-          )
-          const incoming = sortHarnessMessages(
-            response.messages
-              .filter((message) => !isDiscardedMessage(sessionId, message.id))
-              .map((message) => {
-                const parts = (message.parts ?? []).map((part) => {
-                  const prior = previousByPart.get(part.id)
-                  const cached = detailCache.get(`${sessionId}:${part.id}`)
-                  const source = prior?.detail_loaded ? prior : cached
-                  const mergedPart = source
-                    ? {
-                        ...part,
-                        input: source.input,
-                        output: source.output,
-                        meta: source.meta,
-                        detail_loaded: true,
-                      }
-                    : part
-                  const hydratedPart = hydrateHarnessPart({
-                    ...mergedPart,
-                    session_id: sessionId,
-                    message_id: message.id,
-                  })
-                  if (hydratedPart.detail_loaded) rememberPartDetail(sessionId, hydratedPart)
-                  return hydratedPart
-                })
-                const content =
-                  message.role === 'assistant' && !message.content
-                    ? parts
-                        .filter((part) => part.type === 'text')
-                        .map((part) => part.output)
-                        .join('')
-                    : message.content
-                return { ...message, content, session_id: sessionId, parts }
-              }),
-          )
-          const session = sessions.value.find((item) => item.id === sessionId)
-          messagesBySession.value[sessionId] =
-            session?.status === 'busy'
-              ? mergeBusyFetchedMessages(previous, incoming)
-              : settleOpenStreamParts(incoming)
-          touchTranscript(sessionId, true)
-          // Timeline parts intentionally omit parent ids. Restore them from
-          // the enclosing REST envelope after reconciliation too, since a
-          // busy merge can carry forward live-only rows from the previous
-          // message snapshot.
-          for (const message of messagesBySession.value[sessionId] ?? []) {
-            message.session_id = sessionId
-            for (const part of message.parts) {
-              part.session_id = sessionId
-              part.message_id = message.id
-            }
-          }
+        return async (response) => {
           // Pending gates are listed for this session and all descendants, so
           // the response also settles subagent gates resolved while offline.
           const scope = new Set(collectDescendantSessionIds(sessionId, sessions.value))
@@ -816,36 +564,13 @@ export const useHarnessStore = defineStore('harness', () => {
             const childIds = collectRunningChildSessionIds(messagesBySession.value[sessionId] ?? [])
             await Promise.all(childIds.map((childId) => fetchParts(childId, false)))
           }
-        } catch (e: unknown) {
-          if (partGenerations.get(sessionId) === generation) {
-            useNotificationStore().error(
-              'Failed to load messages',
-              e instanceof Error ? e.message : 'Unknown error',
-            )
-          }
         }
-      })().finally(() => {
-        if (partFetches.get(key) === flight) {
-          partFetches.delete(key)
-          trimInactiveTranscripts()
-        }
-      })
-      partFetches.set(key, flight)
-    }
-    await flight
+      },
+    })
   }
 
-  /**
-   * The idle event needs a snapshot taken *after* the run completed. If an
-   * earlier busy fetch is still in flight, awaiting the deduplicated request
-   * would only replay its stale snapshot and leave the final answer missing.
-   */
   async function refreshPartsAfterIdle(sessionId: string): Promise<void> {
-    const ongoing = [...partFetches.entries()]
-      .filter(([key]) => key.startsWith(`${sessionId}:`))
-      .map(([, flight]) => flight)
-    if (ongoing.length) await Promise.all(ongoing)
-    await fetchParts(sessionId)
+    await fetchParts(sessionId, true, true)
   }
 
   async function fetchTodos(sessionId: string): Promise<void> {

@@ -32,10 +32,7 @@ import {
   applySubtaskStarted,
   applyTodoUpdate,
   ensureBusyAssistant,
-  mergeBusyFetchedMessages,
   routeAssistantMessage,
-  settleOpenStreamParts,
-  sortHarnessMessages,
   sortHarnessParts,
 } from "@opencuria/chat-core/harnessReducer";
 import {
@@ -43,12 +40,10 @@ import {
   collectDescendantSessionIds,
 } from "@opencuria/chat-core/harnessSubtaskActivity";
 import { assertHarnessSessionSelection } from "@opencuria/chat-core/harnessModels";
-import { hydrateHarnessPart } from "@opencuria/chat-core/toolDisplay";
+import { ChatTimelineController } from "@opencuria/chat-core/chatTimelineController";
+import type { HarnessTimeline } from "@opencuria/client";
 
 const EMPTY_MESSAGES = Object.freeze([]) as unknown as HarnessMessage[];
-const DETAIL_CACHE_LIMIT = 100;
-const INACTIVE_TRANSCRIPT_LIMIT = 4;
-const INACTIVE_TRANSCRIPT_BUDGET_BYTES = 16 * 1024 * 1024;
 
 /** Options used when creating a conversation or sending/editing a turn. */
 export interface ChatRunOptions {
@@ -86,20 +81,9 @@ interface SelectionContext {
   selectionGeneration: number;
 }
 
-interface TimelineFlight extends SelectionContext {
-  promise: Promise<void>;
-  revision: number;
-  sessionStatusAtRequest: HarnessSession["status"] | undefined;
-}
-
 interface TodoFlight extends SelectionContext {
   promise: Promise<void>;
   revision: number;
-}
-
-interface CachedDetail {
-  sessionId: string;
-  part: HarnessPart;
 }
 
 type SessionEvent = { workspace_id: string; session_id: string };
@@ -166,10 +150,6 @@ function cloneMessage(message: HarnessMessage): HarnessMessage {
   };
 }
 
-function cloneMessages(messages: HarnessMessage[]): HarnessMessage[] {
-  return messages.map(cloneMessage);
-}
-
 function freezeTree<T>(value: T): T {
   if (!value || typeof value !== "object" || Object.isFrozen(value))
     return value;
@@ -209,20 +189,6 @@ function cloneQuestionRequest(
   };
 }
 
-function sessionByteEstimate(messages: HarnessMessage[]): number {
-  // Avoid a JSON serialization (and its temporary allocation) in the stream path.
-  let bytes = 0;
-  for (const message of messages) {
-    bytes += (message.content.length + message.id.length) * 2 + 128;
-    for (const part of message.parts) {
-      bytes +=
-        (part.output.length + part.title.length + part.id.length) * 2 + 160;
-      bytes += part.detail_loaded ? 512 : 0;
-    }
-  }
-  return bytes;
-}
-
 /**
  * Stateful harness controller bound to an authenticated shared client.
  * The parent owns workspace navigation, auth, and native foreground events.
@@ -241,11 +207,8 @@ export class ChatController {
     HarnessPermissionRequest
   >();
   private readonly questionsById = new Map<string, HarnessQuestionRequest>();
-  private readonly timelineFlights = new Map<string, TimelineFlight>();
+  private readonly timeline: ChatTimelineController<HarnessTimeline>;
   private readonly todoFlights = new Map<string, TodoFlight>();
-  private readonly detailFlights = new Map<string, Promise<HarnessPart>>();
-  private readonly pinnedDetailKeys = new Set<string>();
-  private readonly detailCache = new Map<string, CachedDetail>();
   private readonly sessionRevisions = new Map<string, number>();
   private readonly sessionTombstones = new Set<string>();
   private readonly ownedSessionIds = new Set<string>();
@@ -257,10 +220,7 @@ export class ChatController {
   private readonly readFlights = new Map<string, Promise<void>>();
   private readonly unreadFlights = new Map<string, Promise<void>>();
   private readonly dismissedNotices = new Map<string, string>();
-  private readonly transcriptLru = new Map<string, number>();
-  private readonly timelineRevisions = new Map<string, number>();
   private readonly todoRevisions = new Map<string, number>();
-  private readonly detailRevisions = new Map<string, number>();
 
   private workspaceId: string | null = null;
   private activeSessionId: string | null = null;
@@ -280,6 +240,18 @@ export class ChatController {
   private snapshot: ChatControllerSnapshot;
 
   constructor(private readonly client: OpenCuriaClient) {
+    this.timeline = new ChatTimelineController({
+      load: (sessionId) => this.client.harness.timeline(sessionId),
+      loadDetail: (sessionId, partId) =>
+        this.client.harness.getPart(sessionId, partId),
+      read: (sessionId) => this.messagesBySession.get(sessionId),
+      write: (sessionId, messages) =>
+        this.messagesBySession.set(sessionId, freezeMessages(messages)),
+      status: (sessionId) =>
+        this.sessions.find((session) => session.id === sessionId)?.status,
+      protectedSessions: () => this.protectedTranscriptSessions(),
+      forget: (sessionId) => this.forgetSession(sessionId),
+    });
     this.connected = client.realtime.isConnected;
     this.snapshot = this.buildSnapshot();
     this.bindRealtime();
@@ -579,20 +551,11 @@ export class ChatController {
   private forgetSession(sessionId: string): void {
     this.messagesBySession.delete(sessionId);
     this.todosBySession.delete(sessionId);
-    this.transcriptLru.delete(sessionId);
-    this.timelineRevisions.set(
-      sessionId,
-      (this.timelineRevisions.get(sessionId) ?? 0) + 1,
-    );
+    this.timeline.forget(sessionId);
     this.todoRevisions.set(
       sessionId,
       (this.todoRevisions.get(sessionId) ?? 0) + 1,
     );
-    this.detailRevisions.set(
-      sessionId,
-      (this.detailRevisions.get(sessionId) ?? 0) + 1,
-    );
-    this.timelineFlights.delete(sessionId);
     this.todoFlights.delete(sessionId);
     for (const key of this.readFlights.keys()) {
       if (key === sessionId) this.readFlights.delete(key);
@@ -604,15 +567,6 @@ export class ChatController {
       if (key === sessionId) this.sendFlights.delete(key);
     }
     this.pendingSends.delete(sessionId);
-    for (const key of this.detailFlights.keys()) {
-      if (key.startsWith(`${sessionId}:`)) this.detailFlights.delete(key);
-    }
-    for (const [id, detail] of this.detailCache) {
-      if (detail.sessionId === sessionId) {
-        this.detailCache.delete(id);
-        this.pinnedDetailKeys.delete(id);
-      }
-    }
     for (const [id, request] of this.permissionsById) {
       if (request.session_id === sessionId) this.permissionsById.delete(id);
     }
@@ -645,15 +599,12 @@ export class ChatController {
       this.sessions = [];
       this.ownedSessionIds.clear();
       this.trustedChildSessionIds.clear();
+      this.timeline.clear();
       this.messagesBySession.clear();
       this.todosBySession.clear();
       this.permissionsById.clear();
       this.questionsById.clear();
-      this.timelineFlights.clear();
       this.todoFlights.clear();
-      this.detailFlights.clear();
-      this.detailCache.clear();
-      this.pinnedDetailKeys.clear();
       this.sendFlights.clear();
       this.createFlights.clear();
       this.readFlights.clear();
@@ -661,11 +612,8 @@ export class ChatController {
       this.sessionRevisions.clear();
       this.sessionTombstones.clear();
       this.ownedSessionIds.clear();
-      this.timelineRevisions.clear();
       this.todoRevisions.clear();
-      this.detailRevisions.clear();
       this.pendingSends.clear();
-      this.transcriptLru.clear();
       this.dismissedNotices.clear();
       this.activeWorkspaceSessionsLoaded = false;
       this.sessionListGeneration += 1;
@@ -1470,158 +1418,22 @@ export class ChatController {
     const context = this.captureSelection();
     if (!context || !this.isInActiveLineage(sessionId))
       throw new Error("Part is outside the active conversation");
-    const key = `${sessionId}:${partId}`;
-    const cached = this.detailCache.get(key);
-    if (cached) {
-      this.detailCache.delete(key);
-      this.detailCache.set(key, cached);
-      return clonePart(cached.part);
-    }
-    const existing = this.detailFlights.get(key);
-    if (existing) {
-      this.pinnedDetailKeys.add(key);
-      return existing;
-    }
-    const current = this.findPart(sessionId, partId);
-    if (!current) throw new Error("Part is no longer available");
-    if (current.state === "pending" || current.state === "running") {
-      throw new Error("Details are not available until the part is complete");
-    }
-    if (current.detail_loaded) {
-      this.rememberDetail(key, current);
-      return clonePart(current);
-    }
-    this.pinnedDetailKeys.add(key);
-    const detailRevision = this.detailRevisions.get(sessionId) ?? 0;
-    const flight = (async () => {
-      try {
-        const result = (await this.client.harness.getPart(
-          sessionId,
-          partId,
-        )) as HarnessPart;
-        if (
-          !this.selectionIsCurrent(context, sessionId) ||
-          detailRevision !== (this.detailRevisions.get(sessionId) ?? 0)
-        )
-          throw new Error("Conversation changed while loading part details");
-        const message = this.messagesBySession
-          .get(sessionId)
-          ?.find((row) => row.parts.some((part) => part.id === partId));
-        const part = message?.parts.find((row) => row.id === partId);
-        if (
-          !message ||
-          !part ||
-          part.state === "pending" ||
-          part.state === "running"
-        ) {
-          throw new Error("Part changed while loading details");
-        }
-        const merged = {
-          ...part,
-          ...(result as Partial<HarnessPart>),
-          session_id: sessionId,
-          message_id: message.id,
-          detail_loaded: true,
-        } as HarnessPart;
-        this.replacePart(sessionId, message.id, partId, merged);
-        this.rememberDetail(key, merged);
-        this.touchTranscript(sessionId, true);
-        this.publish();
-        return clonePart(merged);
-      } catch (error) {
-        if (this.selectionIsCurrent(context))
-          this.setError(error, "Failed to load part details");
-        throw error;
-      }
-    })().finally(() => {
-      if (this.detailFlights.get(key) === flight)
-        this.detailFlights.delete(key);
-      this.pinnedDetailKeys.delete(key);
-    });
-    this.detailFlights.set(key, flight);
-    return flight;
-  }
-
-  private findPart(sessionId: string, partId: string): HarnessPart | undefined {
-    return this.messagesBySession
-      .get(sessionId)
-      ?.flatMap((message) => message.parts)
-      .find((part) => part.id === partId);
-  }
-
-  private replacePart(
-    sessionId: string,
-    messageId: string,
-    partId: string,
-    replacement: HarnessPart,
-  ): void {
-    const messages = this.messagesBySession.get(sessionId);
-    if (!messages) return;
-    const messageIndex = messages.findIndex(
-      (message) => message.id === messageId,
-    );
-    if (messageIndex < 0) return;
-    const next = [...messages];
-    const message = cloneMessage(messages[messageIndex]!);
-    const partIndex = message.parts.findIndex((part) => part.id === partId);
-    if (partIndex < 0) return;
-    message.parts[partIndex] = clonePart(replacement);
-    next[messageIndex] = message;
-    this.messagesBySession.set(sessionId, next);
-  }
-
-  private rememberDetail(key: string, part: HarnessPart): void {
-    this.detailCache.delete(key);
-    this.detailCache.set(key, {
-      sessionId: part.session_id,
-      part: clonePart(part),
-    });
-    while (this.detailCache.size > DETAIL_CACHE_LIMIT) {
-      const oldest = [...this.detailCache.keys()].find(
-        (candidate) => !this.pinnedDetailKeys.has(candidate),
-      );
-      if (!oldest) break;
-      const removed = this.detailCache.get(oldest);
-      this.detailCache.delete(oldest);
-      if (!removed) continue;
-      const original = this.findPart(removed.sessionId, removed.part.id);
-      if (!original?.detail_loaded) continue;
-      const lightweight = clonePart(original);
-      lightweight.input =
-        lightweight.type === "tool" ? { tool: lightweight.tool ?? "" } : {};
-      if (
-        !(lightweight.state === "error" && lightweight.output === "Tool failed")
-      )
-        lightweight.output = "";
-      lightweight.meta = {};
-      lightweight.detail_loaded = false;
-      const message = this.messagesBySession
-        .get(removed.sessionId)
-        ?.find((row) => row.parts.some((part) => part.id === lightweight.id));
-      if (message)
-        this.replacePart(
-          removed.sessionId,
-          message.id,
-          lightweight.id,
-          lightweight,
-        );
+    try {
+      const part = await this.timeline.requestDetail(sessionId, partId, {
+        context: `${context.workspaceGeneration}:${context.selectionGeneration}`,
+        isCurrent: () => this.selectionIsCurrent(context, sessionId),
+      });
+      this.publish();
+      return clonePart(part);
+    } catch (error) {
+      if (this.selectionIsCurrent(context))
+        this.setError(error, "Failed to load part details");
+      throw error;
     }
   }
 
   private invalidatePartDetails(sessionId: string): void {
-    this.detailRevisions.set(
-      sessionId,
-      (this.detailRevisions.get(sessionId) ?? 0) + 1,
-    );
-    for (const key of this.detailFlights.keys()) {
-      if (key.startsWith(`${sessionId}:`)) this.detailFlights.delete(key);
-    }
-    for (const [key, cached] of this.detailCache) {
-      if (cached.sessionId === sessionId) {
-        this.detailCache.delete(key);
-        this.pinnedDetailKeys.delete(key);
-      }
-    }
+    this.timeline.invalidateDetails(sessionId, true);
   }
 
   private async fetchTimeline(
@@ -1629,135 +1441,43 @@ export class ChatController {
     context: SelectionContext,
     refreshAfterExisting = false,
   ): Promise<void> {
-    const existing = this.timelineFlights.get(sessionId);
-    if (
-      existing &&
-      existing.workspaceGeneration === context.workspaceGeneration &&
-      existing.selectionGeneration === context.selectionGeneration
-    ) {
-      if (!refreshAfterExisting) return existing.promise;
-      await existing.promise.catch(() => undefined);
-      if (!this.selectionIsCurrent(context, sessionId)) return;
-      return this.fetchTimeline(sessionId, context);
-    }
-    if (!this.selectionIsCurrent(context, sessionId)) return;
-    const revision = (this.timelineRevisions.get(sessionId) ?? 0) + 1;
-    this.timelineRevisions.set(sessionId, revision);
-    const flight: TimelineFlight = {
-      ...context,
-      revision,
-      promise: Promise.resolve(),
-      sessionStatusAtRequest: this.sessions.find(
-        (session) => session.id === sessionId,
-      )?.status,
-    };
-    flight.promise = (async () => {
-      try {
-        const timeline = await this.client.harness.timeline(sessionId);
-        if (
-          !this.selectionIsCurrent(context, sessionId) ||
-          this.timelineRevisions.get(sessionId) !== revision ||
-          !this.sessions.some(
+    try {
+      await this.timeline.fetch(sessionId, {
+        context: `${context.workspaceGeneration}:${context.selectionGeneration}`,
+        refreshAfterExisting,
+        isCurrent: () =>
+          this.selectionIsCurrent(context, sessionId) &&
+          this.sessions.some(
             (session) =>
               session.id === sessionId &&
               session.workspace_id === context.workspaceId,
-          )
-        )
-          return;
-        const currentStatus = this.sessions.find(
-          (session) => session.id === sessionId,
-        )?.status;
-        this.applyTimeline(
-          sessionId,
-          timeline,
-          currentStatus === "busy" ? "busy" : flight.sessionStatusAtRequest,
-        );
-      } catch (error) {
-        if (
-          this.selectionIsCurrent(context, sessionId) &&
-          this.timelineRevisions.get(sessionId) === revision
-        ) {
-          this.setError(error, "Failed to load conversation");
-          throw error;
-        }
-      }
-    })().finally(() => {
-      if (this.timelineFlights.get(sessionId) === flight)
-        this.timelineFlights.delete(sessionId);
-      this.trimInactiveTranscripts();
-    });
-    this.timelineFlights.set(sessionId, flight);
-    return flight.promise;
+          ),
+        prepare: () => {
+          const knownGates = new Set([
+            ...this.permissionsById.keys(),
+            ...this.questionsById.keys(),
+          ]);
+          return (snapshot) =>
+            this.applyTimelineGates(sessionId, snapshot, knownGates);
+        },
+      });
+    } catch (error) {
+      this.setError(error, "Failed to load conversation");
+      throw error;
+    }
   }
 
-  private applyTimeline(
+  private applyTimelineGates(
     sessionId: string,
-    timeline: Awaited<ReturnType<OpenCuriaClient["harness"]["timeline"]>>,
-    sessionStatusAtRequest: HarnessSession["status"] | undefined,
+    timeline: HarnessTimeline,
+    knownGates: Set<string>,
   ): void {
-    const previous = this.messagesBySession.get(sessionId) ?? [];
-    const previousParts = new Map(
-      previous.flatMap((message) =>
-        message.parts.map((part) => [part.id, part] as const),
-      ),
-    );
-    const incoming = sortHarnessMessages(
-      (timeline.messages ?? []).map((message) => {
-        const parts = (message.parts ?? []).map((rawPart) => {
-          const prior = previousParts.get(rawPart.id);
-          const cached = this.detailCache.get(
-            `${sessionId}:${rawPart.id}`,
-          )?.part;
-          const source = prior?.detail_loaded ? prior : cached;
-          const merged = source
-            ? {
-                ...rawPart,
-                input: source.input,
-                output: source.output,
-                meta: source.meta,
-                detail_loaded: true,
-                ...(source.display ? { display: source.display } : {}),
-              }
-            : rawPart;
-          return hydrateHarnessPart({
-            ...merged,
-            session_id: sessionId,
-            message_id: message.id,
-          });
-        });
-        const content =
-          message.role === "assistant" && !message.content
-            ? parts
-                .filter((part) => part.type === "text")
-                .map((part) => part.output)
-                .join("")
-            : message.content;
-        return { ...message, content, session_id: sessionId, parts };
-      }),
-    );
     const session = this.sessions.find((item) => item.id === sessionId);
-    const reconciled =
-      session?.status === "busy"
-        ? mergeBusyFetchedMessages(cloneMessages(previous), incoming)
-        : sessionStatusAtRequest === "busy"
-          ? this.preserveLatestStreamFromStaleIdle(previous, incoming)
-          : settleOpenStreamParts(incoming);
-    for (const message of reconciled) {
-      message.session_id = sessionId;
-      for (const part of message.parts) {
-        part.session_id = sessionId;
-        part.message_id = message.id;
-        if (part.detail_loaded)
-          this.rememberDetail(`${sessionId}:${part.id}`, part);
-      }
-    }
-    this.messagesBySession.set(sessionId, freezeMessages(reconciled));
-    this.touchTranscript(sessionId, true);
-
     // A timeline response is authoritative only for gates belonging to that
     // session. Never wipe a concurrently pending gate from a child/sibling.
     for (const [id, request] of this.permissionsById) {
-      if (request.session_id === sessionId) this.permissionsById.delete(id);
+      if (request.session_id === sessionId && knownGates.has(id))
+        this.permissionsById.delete(id);
     }
     for (const request of timeline.permissions ?? []) {
       if (request.session_id === sessionId) {
@@ -1771,7 +1491,8 @@ export class ChatController {
       }
     }
     for (const [id, request] of this.questionsById) {
-      if (request.session_id === sessionId) this.questionsById.delete(id);
+      if (request.session_id === sessionId && knownGates.has(id))
+        this.questionsById.delete(id);
     }
     for (const request of timeline.questions ?? []) {
       if (request.session_id === sessionId) {
@@ -1785,47 +1506,6 @@ export class ChatController {
       }
     }
     this.publish();
-  }
-
-  private preserveLatestStreamFromStaleIdle(
-    previous: HarnessMessage[],
-    incoming: HarnessMessage[],
-  ): HarnessMessage[] {
-    const priorLatest = [...previous]
-      .reverse()
-      .find((message) => message.role === "assistant");
-    if (!priorLatest) return settleOpenStreamParts(incoming);
-    const existingIndex = incoming.findIndex(
-      (message) => message.id === priorLatest.id,
-    );
-    const next = [...incoming];
-    if (existingIndex >= 0) {
-      const server = cloneMessage(incoming[existingIndex]!);
-      const live = cloneMessage(priorLatest);
-      if (server.completed_at == null) {
-        server.content =
-          live.content.length > server.content.length
-            ? live.content
-            : server.content;
-        const parts = new Map(server.parts.map((part) => [part.id, part]));
-        for (const livePart of live.parts) {
-          const stored = parts.get(livePart.id);
-          if (!stored) {
-            server.parts.push(livePart);
-          } else if (stored.output.length < livePart.output.length) {
-            Object.assign(stored, livePart);
-          }
-        }
-        server.parts = sortHarnessParts(server.parts);
-        server.model = server.model || live.model;
-        server.reasoning_effort =
-          server.reasoning_effort || live.reasoning_effort;
-        next[existingIndex] = server;
-      }
-    } else if (priorLatest.completed_at == null) {
-      next.push(cloneMessage(priorLatest));
-    }
-    return sortHarnessMessages(next);
   }
 
   private async fetchTodos(
@@ -1888,10 +1568,7 @@ export class ChatController {
     sessionId: string,
     context: SelectionContext,
   ): Promise<void> {
-    const ongoing = this.timelineFlights.get(sessionId);
-    if (ongoing) await ongoing.promise.catch(() => undefined);
-    if (!this.selectionIsCurrent(context, sessionId)) return;
-    await this.fetchTimeline(sessionId, context);
+    await this.fetchTimeline(sessionId, context, true);
   }
 
   private async refreshTodosAfterIdle(
@@ -2226,53 +1903,37 @@ export class ChatController {
   }
 
   private touchTranscript(sessionId: string, recalculate = false): void {
-    const messages = this.messagesBySession.get(sessionId);
-    if (!messages) return;
-    const bytes =
-      recalculate || !this.transcriptLru.has(sessionId)
-        ? sessionByteEstimate(messages)
-        : this.transcriptLru.get(sessionId)!;
-    this.transcriptLru.delete(sessionId);
-    this.transcriptLru.set(sessionId, bytes);
+    this.timeline.touch(sessionId, recalculate);
+  }
+
+  private protectedTranscriptSessions(): Set<string> {
+    const ids = new Set<string>();
+    const protectFamily = (sessionId: string): void => {
+      ids.add(sessionId);
+      for (const ancestor of collectAncestorSessions(sessionId, this.sessions))
+        ids.add(ancestor.id);
+      for (const descendant of collectDescendantSessionIds(
+        sessionId,
+        this.sessions,
+      ))
+        ids.add(descendant);
+    };
+    if (this.activeSessionId) protectFamily(this.activeSessionId);
+    for (const session of this.sessions)
+      if (session.status === "busy") protectFamily(session.id);
+    for (const gate of [
+      ...this.permissionsById.values(),
+      ...this.questionsById.values(),
+    ])
+      protectFamily(gate.session_id);
+    for (const id of this.timeline.pendingSessionIds()) protectFamily(id);
+    for (const id of this.timeline.pinnedSessionIds()) protectFamily(id);
+    for (const id of this.todoFlights.keys()) protectFamily(id);
+    return ids;
   }
 
   private trimInactiveTranscripts(): void {
-    let count = 0;
-    let bytes = 0;
-    for (const [sessionId, estimate] of this.transcriptLru) {
-      if (sessionId === this.activeSessionId) continue;
-      const session = this.sessions.find((row) => row.id === sessionId);
-      const hasGate = [
-        ...this.permissionsById.values(),
-        ...this.questionsById.values(),
-      ].some((request) => request.session_id === sessionId);
-      if (session?.status === "busy" || hasGate) continue;
-      count += 1;
-      bytes += estimate;
-    }
-    if (
-      count <= INACTIVE_TRANSCRIPT_LIMIT &&
-      bytes <= INACTIVE_TRANSCRIPT_BUDGET_BYTES
-    )
-      return;
-    for (const sessionId of [...this.transcriptLru.keys()]) {
-      if (
-        count <= INACTIVE_TRANSCRIPT_LIMIT &&
-        bytes <= INACTIVE_TRANSCRIPT_BUDGET_BYTES
-      )
-        break;
-      if (sessionId === this.activeSessionId) continue;
-      const session = this.sessions.find((row) => row.id === sessionId);
-      const hasGate = [
-        ...this.permissionsById.values(),
-        ...this.questionsById.values(),
-      ].some((request) => request.session_id === sessionId);
-      if (session?.status === "busy" || hasGate) continue;
-      const estimate = this.transcriptLru.get(sessionId) ?? 0;
-      this.forgetSession(sessionId);
-      count -= 1;
-      bytes -= estimate;
-    }
+    this.timeline.trim();
   }
 
   private assertLive(): void {
@@ -2289,10 +1950,8 @@ export class ChatController {
     this.releaseWorkspace = null;
     for (const detach of this.detachRealtime.splice(0)) detach();
     this.listeners.clear();
-    this.timelineFlights.clear();
+    this.timeline.clear();
     this.todoFlights.clear();
-    this.detailFlights.clear();
-    this.pinnedDetailKeys.clear();
     this.trustedChildSessionIds.clear();
     this.sendFlights.clear();
     this.createFlights.clear();

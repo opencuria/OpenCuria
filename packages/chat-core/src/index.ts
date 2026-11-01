@@ -17,3 +17,5 @@ export * from "./harnessUsage";
 export * from "./harnessPagination";
 export * from "./toolDisplay";
 export * from "./workspaceReadiness";
+
+export * from "./chatTimelineController";
