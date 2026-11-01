@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { X, ZoomIn, ZoomOut, RotateCcw, Move, Maximize2 } from '@lucide/vue'
+import { Download, Minus, Plus, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
+import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
 import { activePointingWorkspace } from '@/lib/voicePointing'
+import { useNotificationStore } from '@/stores/notifications'
 
 const props = defineProps<{
   src: string
   alt?: string
-  /** Workspace path, rather than the temporary browser URL, for voice pointing. */
+  /** Original workspace reference, independent of the temporary browser URL. */
   path?: string
   workspaceId?: string
 }>()
@@ -18,14 +20,16 @@ const emit = defineEmits<{
   close: []
 }>()
 
+interface Point {
+  x: number
+  y: number
+}
+
 const triggerEl = document.activeElement instanceof HTMLElement ? document.activeElement : null
 const stageEl = ref<HTMLElement | null>(null)
 const loadFailed = ref(false)
-
-function restoreFocus(event: Event): void {
-  event.preventDefault()
-  if (triggerEl?.isConnected) triggerEl.focus()
-}
+const isDownloading = ref(false)
+// Zoom is relative to the original pixels: 100% always means actual image size.
 const zoom = ref(1)
 const panX = ref(0)
 const panY = ref(0)
@@ -35,84 +39,30 @@ const naturalHeight = ref(0)
 const stageWidth = ref(0)
 const stageHeight = ref(0)
 
-const minZoom = 1
-const maxZoom = 6
-const zoomStep = 1.2
-
-let activePointerId: number | null = null
-let hasDragged = false
-let pointerStartedOnImage = false
-let dragStartX = 0
-let dragStartY = 0
-let dragOriginX = 0
-let dragOriginY = 0
+const maxZoom = 8
+const zoomLevels = [0.1, 0.125, 1 / 6, 0.25, 1 / 3, 0.5, 2 / 3, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8]
+const pointers = new Map<number, Point>()
 let resizeObserver: ResizeObserver | null = null
+let downloadController: AbortController | null = null
 
-const fittedScale = computed(() => {
+const imageReady = computed(() => !loadFailed.value && naturalWidth.value > 0)
+const minZoom = computed(() => {
   if (!naturalWidth.value || !naturalHeight.value || !stageWidth.value || !stageHeight.value)
     return 1
-  return Math.min(stageWidth.value / naturalWidth.value, stageHeight.value / naturalHeight.value)
+  return Math.min(1, stageWidth.value / naturalWidth.value, stageHeight.value / naturalHeight.value)
 })
-
-const fittedWidth = computed(() => naturalWidth.value * fittedScale.value)
-const fittedHeight = computed(() => naturalHeight.value * fittedScale.value)
-
-const maxPanX = computed(() => Math.max(0, (fittedWidth.value * zoom.value - stageWidth.value) / 2))
-const maxPanY = computed(() =>
-  Math.max(0, (fittedHeight.value * zoom.value - stageHeight.value) / 2),
+const maxPanX = computed(() =>
+  Math.max(0, (naturalWidth.value * zoom.value - stageWidth.value) / 2),
 )
-
+const maxPanY = computed(() =>
+  Math.max(0, (naturalHeight.value * zoom.value - stageHeight.value) / 2),
+)
+const canPan = computed(() => maxPanX.value > 0 || maxPanY.value > 0)
 const zoomPercent = computed(() => `${Math.round(zoom.value * 100)}%`)
 
-function clampPan(nextX = panX.value, nextY = panY.value): void {
-  panX.value = Math.min(maxPanX.value, Math.max(-maxPanX.value, nextX))
-  panY.value = Math.min(maxPanY.value, Math.max(-maxPanY.value, nextY))
-}
-
-function syncStageSize(): void {
-  const rect = stageEl.value?.getBoundingClientRect()
-  if (!rect) return
-  stageWidth.value = rect.width
-  stageHeight.value = rect.height
-  clampPan()
-}
-
-function resetView(): void {
-  zoom.value = 1
-  panX.value = 0
-  panY.value = 0
-}
-
-function setZoom(nextZoom: number, origin?: { x: number; y: number }): void {
-  const clampedZoom = Math.min(maxZoom, Math.max(minZoom, nextZoom))
-  if (clampedZoom === zoom.value) return
-
-  if (!origin || !stageWidth.value || !stageHeight.value) {
-    zoom.value = clampedZoom
-    if (clampedZoom === minZoom) {
-      panX.value = 0
-      panY.value = 0
-    } else {
-      clampPan()
-    }
-    return
-  }
-
-  const stageCenterX = stageWidth.value / 2
-  const stageCenterY = stageHeight.value / 2
-  const contentX = (origin.x - stageCenterX - panX.value) / zoom.value
-  const contentY = (origin.y - stageCenterY - panY.value) / zoom.value
-
-  zoom.value = clampedZoom
-  panX.value = origin.x - stageCenterX - contentX * clampedZoom
-  panY.value = origin.y - stageCenterY - contentY * clampedZoom
-
-  if (clampedZoom === minZoom) {
-    panX.value = 0
-    panY.value = 0
-  } else {
-    clampPan()
-  }
+function restoreFocus(event: Event): void {
+  event.preventDefault()
+  if (triggerEl?.isConnected) triggerEl.focus()
 }
 
 function keepViewerFocus(): void {
@@ -123,12 +73,47 @@ function keepViewerFocus(): void {
   })
 }
 
-function zoomIn(origin?: { x: number; y: number }): void {
-  setZoom(zoom.value * zoomStep, origin)
+function clampPan(nextX = panX.value, nextY = panY.value): void {
+  panX.value = Math.min(maxPanX.value, Math.max(-maxPanX.value, nextX))
+  panY.value = Math.min(maxPanY.value, Math.max(-maxPanY.value, nextY))
 }
 
-function zoomOut(origin?: { x: number; y: number }): void {
-  setZoom(zoom.value / zoomStep, origin)
+function resetView(): void {
+  zoom.value = minZoom.value
+  panX.value = 0
+  panY.value = 0
+}
+
+function syncStageSize(): void {
+  const stage = stageEl.value
+  if (!stage) return
+  const wasFitted = Math.abs(zoom.value - minZoom.value) < 0.0001
+  // Layout dimensions stay accurate during the dialog's opening animation.
+  stageWidth.value = stage.clientWidth
+  stageHeight.value = stage.clientHeight
+  if (wasFitted) resetView()
+  else setZoom(zoom.value)
+}
+
+function setZoom(nextZoom: number, origin?: Point, nextOrigin = origin): void {
+  const clampedZoom = Math.min(maxZoom, Math.max(minZoom.value, nextZoom))
+  const ratio = clampedZoom / zoom.value
+  const center = { x: stageWidth.value / 2, y: stageHeight.value / 2 }
+  const from = origin ?? center
+  const to = nextOrigin ?? from
+  // Preserve the image pixel under the cursor (or moving pinch midpoint).
+  const nextX = to.x - center.x - (from.x - center.x - panX.value) * ratio
+  const nextY = to.y - center.y - (from.y - center.y - panY.value) * ratio
+  zoom.value = clampedZoom
+  clampPan(nextX, nextY)
+}
+
+function zoomIn(): void {
+  setZoom(zoomLevels.find((level) => level > zoom.value + 0.0001) ?? maxZoom)
+}
+
+function zoomOut(): void {
+  setZoom([...zoomLevels].reverse().find((level) => level < zoom.value - 0.0001) ?? minZoom.value)
 }
 
 function onImageLoad(event: Event): void {
@@ -136,74 +121,152 @@ function onImageLoad(event: Event): void {
   naturalWidth.value = img.naturalWidth
   naturalHeight.value = img.naturalHeight
   syncStageSize()
+  resetView()
 }
 
-function getRelativeStagePoint(clientX: number, clientY: number): { x: number; y: number } | null {
-  const rect = stageEl.value?.getBoundingClientRect()
-  if (!rect) return null
-  return {
-    x: clientX - rect.left,
-    y: clientY - rect.top,
-  }
+function getStagePoint(clientX: number, clientY: number): Point {
+  const rect = stageEl.value!.getBoundingClientRect()
+  return { x: clientX - rect.left, y: clientY - rect.top }
 }
 
 function onKeydown(event: KeyboardEvent): void {
-  if (loadFailed.value || event.ctrlKey || event.metaKey || event.altKey) return
-  if (!['+', '=', '-', '0'].includes(event.key)) return
+  if (!imageReady.value || event.ctrlKey || event.metaKey || event.altKey) return
+  if (!['+', '=', '-', '0', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key))
+    return
   event.preventDefault()
   if (event.key === '+' || event.key === '=') zoomIn()
   if (event.key === '-') zoomOut()
   if (event.key === '0') resetView()
+  const step = event.shiftKey ? 150 : 50
+  if (event.key === 'ArrowLeft') clampPan(panX.value + step, panY.value)
+  if (event.key === 'ArrowRight') clampPan(panX.value - step, panY.value)
+  if (event.key === 'ArrowUp') clampPan(panX.value, panY.value + step)
+  if (event.key === 'ArrowDown') clampPan(panX.value, panY.value - step)
 }
 
 function onWheel(event: WheelEvent): void {
-  if (loadFailed.value || event.deltaY === 0) return
-  const origin = getRelativeStagePoint(event.clientX, event.clientY)
-  if (event.deltaY < 0) zoomIn(origin ?? undefined)
-  else zoomOut(origin ?? undefined)
+  if (!imageReady.value) return
+  // Browsers report wheel distances in pixels, lines, or pages. Tiny trackpad
+  // deltas must stay tiny instead of triggering a full button-sized zoom step.
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stageHeight.value : 1
+  const delta = Math.max(-100, Math.min(100, event.deltaY * unit))
+  const sensitivity = event.ctrlKey ? 0.005 : 0.001
+  setZoom(zoom.value * Math.exp(-delta * sensitivity), getStagePoint(event.clientX, event.clientY))
 }
 
 function onPointerDown(event: PointerEvent): void {
-  hasDragged = false
-  pointerStartedOnImage = event.target instanceof HTMLImageElement
-  if (zoom.value <= minZoom || event.button !== 0) return
-  activePointerId = event.pointerId
+  if (!imageReady.value || event.button !== 0 || pointers.size >= 2) return
+  event.preventDefault()
+  pointers.set(event.pointerId, getStagePoint(event.clientX, event.clientY))
   isDragging.value = true
-  dragStartX = event.clientX
-  dragStartY = event.clientY
-  dragOriginX = panX.value
-  dragOriginY = panY.value
   stageEl.value?.setPointerCapture(event.pointerId)
 }
 
 function onPointerMove(event: PointerEvent): void {
-  if (!isDragging.value || activePointerId !== event.pointerId) return
-  if (Math.abs(event.clientX - dragStartX) > 3 || Math.abs(event.clientY - dragStartY) > 3) {
-    hasDragged = true
+  const previous = pointers.get(event.pointerId)
+  if (!previous) return
+  const point = getStagePoint(event.clientX, event.clientY)
+  const other = [...pointers.entries()].find(([id]) => id !== event.pointerId)?.[1]
+  if (other) {
+    const distance = Math.hypot(previous.x - other.x, previous.y - other.y)
+    if (distance > 0) {
+      setZoom(
+        (zoom.value * Math.hypot(point.x - other.x, point.y - other.y)) / distance,
+        { x: (previous.x + other.x) / 2, y: (previous.y + other.y) / 2 },
+        { x: (point.x + other.x) / 2, y: (point.y + other.y) / 2 },
+      )
+    }
+  } else {
+    clampPan(panX.value + point.x - previous.x, panY.value + point.y - previous.y)
   }
-  clampPan(dragOriginX + (event.clientX - dragStartX), dragOriginY + (event.clientY - dragStartY))
+  pointers.set(event.pointerId, point)
 }
 
-function stopDragging(event?: PointerEvent): void {
-  if (event && activePointerId === event.pointerId) {
-    stageEl.value?.releasePointerCapture(event.pointerId)
+function onPointerEnd(event: PointerEvent): void {
+  pointers.delete(event.pointerId)
+  isDragging.value = pointers.size > 0
+  if (stageEl.value?.hasPointerCapture(event.pointerId)) {
+    stageEl.value.releasePointerCapture(event.pointerId)
   }
-  activePointerId = null
+}
+
+function clearPointers(): void {
+  for (const id of pointers.keys()) {
+    if (stageEl.value?.hasPointerCapture(id)) stageEl.value.releasePointerCapture(id)
+  }
+  pointers.clear()
   isDragging.value = false
 }
 
-function onStageClick(): void {
-  // Pointer capture retargets image clicks and completed pan gestures to the stage.
-  if (hasDragged || pointerStartedOnImage) return
-  emit('close')
+function onDoubleClick(event: MouseEvent): void {
+  if (!imageReady.value) return
+  if (zoom.value > minZoom.value + 0.0001) resetView()
+  else setZoom(Math.max(1, minZoom.value * 2), getStagePoint(event.clientX, event.clientY))
 }
 
-function onDoubleClick(event: MouseEvent): void {
-  if (loadFailed.value) return
-  const origin = getRelativeStagePoint(event.clientX, event.clientY)
-  if (zoom.value > 1.5) resetView()
-  else zoomIn(origin ?? undefined)
+function downloadFilename(mime: string): string {
+  const pathName = props.path?.split('/').pop()
+  if (pathName) return pathName
+  const source = new URL(props.src, window.location.href)
+  if (source.protocol === 'http:' || source.protocol === 'https:') {
+    const name = decodeURIComponent(source.pathname.split('/').pop() ?? '')
+    if (name.includes('.')) return name
+  }
+  const extension = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]?.split('+')[0] || 'png'
+  return `image.${extension}`
 }
+
+async function downloadImage(): Promise<void> {
+  if (isDownloading.value || !imageReady.value) return
+  const controller = new AbortController()
+  downloadController = controller
+  isDownloading.value = true
+  try {
+    const response = await fetch(props.src, { signal: controller.signal })
+    if (!response.ok) throw new Error('Image download failed')
+    const blob = await response.blob()
+    if (controller.signal.aborted) return
+    const filename = downloadFilename(blob.type)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    try {
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+    } finally {
+      anchor.remove()
+      // Allow the browser to start reading the blob before revoking it.
+      setTimeout(() => URL.revokeObjectURL(url), 30_000)
+    }
+  } catch {
+    if (!controller.signal.aborted) {
+      useNotificationStore().error(
+        'Download failed',
+        'The image could not be downloaded. Please retry.',
+      )
+    }
+  } finally {
+    if (downloadController === controller) {
+      downloadController = null
+      isDownloading.value = false
+    }
+  }
+}
+
+watch(
+  () => props.src,
+  () => {
+    downloadController?.abort()
+    downloadController = null
+    isDownloading.value = false
+    clearPointers()
+    loadFailed.value = false
+    naturalWidth.value = 0
+    naturalHeight.value = 0
+    resetView()
+  },
+)
 
 // Dialog content mounts through a portal after the lightbox itself.
 watch(
@@ -218,7 +281,11 @@ watch(
   { flush: 'post' },
 )
 
-onUnmounted(() => resizeObserver?.disconnect())
+onUnmounted(() => {
+  resizeObserver?.disconnect()
+  downloadController?.abort()
+  clearPointers()
+})
 </script>
 
 <template>
@@ -232,8 +299,14 @@ onUnmounted(() => resizeObserver?.disconnect())
       @focusout="keepViewerFocus"
     >
       <DialogTitle class="sr-only">Image Viewer</DialogTitle>
-      <DialogDescription class="sr-only">Full-screen preview with zoom and pan.</DialogDescription>
-      <div class="absolute inset-x-4 bottom-14 z-20 mx-auto w-fit max-w-[calc(100vw-2rem)]">
+      <DialogDescription class="sr-only">
+        Scroll or pinch to zoom, drag to pan, double-click to toggle zoom. Press 0 to fit or Escape
+        to close.
+      </DialogDescription>
+      <div
+        v-if="voiceCaptureControls"
+        class="absolute inset-x-4 bottom-4 z-20 mx-auto w-fit max-w-[calc(100vw-2rem)]"
+      >
         <p
           v-if="activePointingWorkspace && (!props.path || !props.workspaceId)"
           role="status"
@@ -244,76 +317,69 @@ onUnmounted(() => resizeObserver?.disconnect())
         <VoiceCaptureBar class="w-[min(36rem,calc(100vw-2rem))] shadow-md" />
       </div>
       <div
-        class="absolute inset-x-0 top-0 z-10 flex items-start justify-end gap-4 px-4 py-4 sm:justify-between sm:px-6"
+        class="absolute top-3 right-3 z-10 flex items-center gap-1 rounded-full border bg-card p-1 shadow-sm sm:top-4 sm:right-4"
       >
-        <div class="hidden max-w-[min(50rem,72vw)] sm:block">
-          <p class="text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-            Image Viewer
-          </p>
-          <p v-if="props.alt" class="mt-1 truncate text-sm">{{ props.alt }}</p>
-          <p v-else class="mt-1 text-sm text-muted-foreground">
-            Full-screen preview with zoom and pan.
-          </p>
-        </div>
-
-        <div class="flex items-center gap-2 rounded-full border bg-card px-2 py-2">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Zoom out"
-            title="Zoom out (-)"
-            :disabled="zoom <= minZoom || loadFailed"
-            @click="zoomOut()"
-          >
-            <ZoomOut />
-          </Button>
-          <div class="min-w-[4.75rem] text-center text-sm font-medium tabular-nums">
-            {{ zoomPercent }}
-          </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Zoom in"
-            title="Zoom in (+)"
-            :disabled="zoom >= maxZoom || loadFailed"
-            @click="zoomIn()"
-          >
-            <ZoomIn />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Reset view"
-            title="Reset view (0)"
-            :disabled="loadFailed"
-            @click="resetView"
-          >
-            <RotateCcw />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Close image preview"
-            title="Close (Esc)"
-            @click="emit('close')"
-          >
-            <X />
-          </Button>
-        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="rounded-full"
+          aria-label="Zoom out"
+          title="Zoom out (-)"
+          :disabled="zoom <= minZoom || !imageReady"
+          @click="zoomOut"
+        >
+          <Minus />
+        </Button>
+        <span aria-label="Zoom level" class="min-w-14 text-center text-sm font-medium tabular-nums">
+          {{ zoomPercent }}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="rounded-full"
+          aria-label="Zoom in"
+          title="Zoom in (+)"
+          :disabled="zoom >= maxZoom || !imageReady"
+          @click="zoomIn"
+        >
+          <Plus />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="rounded-full"
+          aria-label="Download image"
+          title="Download image"
+          :disabled="!imageReady || isDownloading"
+          :aria-busy="isDownloading"
+          @click="downloadImage"
+        >
+          <Download />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="rounded-full"
+          aria-label="Close image preview"
+          title="Close (Esc)"
+          @click="emit('close')"
+        >
+          <X />
+        </Button>
       </div>
 
       <div
         ref="stageEl"
-        class="absolute inset-x-0 top-[5rem] bottom-[4.5rem] touch-none overflow-hidden px-3 sm:top-[5.75rem] sm:px-6"
-        :class="zoom > 1 ? (isDragging ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-zoom-in'"
+        data-slot="image-viewport"
+        class="absolute inset-x-3 top-16 bottom-3 touch-none overflow-hidden overscroll-contain sm:inset-x-4 sm:top-18 sm:bottom-4"
+        :class="isDragging ? 'cursor-grabbing' : canPan ? 'cursor-grab' : 'cursor-default'"
         @wheel.prevent="onWheel"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
-        @pointerup="stopDragging"
-        @pointercancel="stopDragging"
-        @pointerleave="stopDragging"
+        @pointerup="onPointerEnd"
+        @pointercancel="onPointerEnd"
+        @lostpointercapture="onPointerEnd"
         @dblclick.prevent="onDoubleClick"
-        @click="onStageClick"
       >
         <div class="flex h-full items-center justify-center">
           <p v-if="loadFailed" role="status" class="text-sm text-muted-foreground">
@@ -326,30 +392,15 @@ onUnmounted(() => resizeObserver?.disconnect())
             :data-voice-image-path="props.path"
             :data-voice-workspace="props.workspaceId"
             :style="{
-              width: `${fittedWidth}px`,
-              height: `${fittedHeight}px`,
+              width: `${naturalWidth}px`,
+              height: `${naturalHeight}px`,
               transform: `translate3d(${panX}px, ${panY}px, 0) scale(${zoom})`,
-              transition: isDragging ? 'none' : 'transform 0.16s ease-out',
             }"
-            class="max-w-none select-none object-contain shadow-2xl"
+            class="max-w-none shrink-0 select-none shadow-2xl"
             draggable="false"
             @load="onImageLoad"
             @error="loadFailed = true"
-            @click.stop
           />
-        </div>
-      </div>
-
-      <div
-        class="absolute inset-x-0 bottom-0 z-10 flex items-center justify-between gap-4 px-4 py-3 text-xs text-muted-foreground sm:px-6"
-      >
-        <div class="flex items-center gap-2">
-          <Move :size="14" />
-          <span>Drag to pan when zoomed</span>
-        </div>
-        <div class="flex items-center gap-2">
-          <Maximize2 :size="14" />
-          <span>Wheel or double-click to zoom</span>
         </div>
       </div>
     </DialogContent>
