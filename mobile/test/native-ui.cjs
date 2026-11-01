@@ -142,8 +142,25 @@ exports.NativeMenu = ({
   )
 }
 
-exports.NativeContextMenu = ({ children, label, actions, onSelect }) =>
-  h(
+exports.NativeContextMenu = ({ children, label, actions, onSelect, fitContent }) => {
+  const [open, setOpen] = React.useState(false)
+  if (fitContent) return h(
+    View,
+    null,
+    children(() => setOpen(true)),
+    ...(open ? actions.map((action) => h(
+      Pressable,
+      {
+        key: action.id,
+        accessibilityRole: 'button',
+        accessibilityLabel: action.title,
+        disabled: action.disabled,
+        onPress: () => { setOpen(false); onSelect(action.id) },
+      },
+      h(Text, null, action.title),
+    )) : []),
+  )
+  return h(
     View,
     null,
     children(),
@@ -153,6 +170,7 @@ exports.NativeContextMenu = ({ children, label, actions, onSelect }) =>
       h(Text, null, 'More'),
     ),
   )
+}
 
 exports.NativeList = ({ sections }) =>
   h(

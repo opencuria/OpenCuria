@@ -55,6 +55,7 @@ describe("gitActionButton", () => {
     expect(gitActionButton(repo({ changes: [staged, modified] }), null)).toMatchObject({
       kind: "commit",
       title: "Commit",
+      symbol: "arrow.up",
       enabled: true,
       stagesAll: false,
     });
@@ -82,6 +83,7 @@ describe("gitActionButton", () => {
     expect(gitActionButton(repo({ branches: diverged }), null)).toMatchObject({
       kind: "sync",
       title: "Sync Changes 1↓ 2↑",
+      symbol: "arrow.up.arrow.down",
       enabled: true,
     });
   });

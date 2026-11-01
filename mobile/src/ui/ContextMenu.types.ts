@@ -6,6 +6,8 @@ export interface NativeContextMenuProps {
   label: string;
   actions: NativeMenuAction[];
   onSelect: (id: string) => void;
+  /** Size a compact trigger to its contents instead of filling a list row. */
+  fitContent?: boolean;
   /**
    * Renders the tappable content. Android passes `showMenu` for its long
    * press; iOS presents the menu on long press itself.

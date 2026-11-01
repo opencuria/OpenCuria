@@ -62,7 +62,7 @@ export function gitActionButton(
   const commit = button(
     "commit",
     merging ? "Continue" : "Commit",
-    "checkmark",
+    "arrow.up",
     !conflicted && (hasChanges || merging),
     staged === 0 && unstaged > 0,
   );
@@ -72,7 +72,7 @@ export function gitActionButton(
   if (!branch) return commit;
   if (!branch.upstream)
     return repo.remotes.length
-      ? button("publish", "Publish Branch", "icloud.and.arrow.up", true)
+      ? button("publish", "Publish Branch", "arrow.up", true)
       : commit;
   const ahead = branch.ahead ?? 0;
   const behind = branch.behind ?? 0;
@@ -81,7 +81,7 @@ export function gitActionButton(
   return button(
     "sync",
     `Sync Changes${counts}`,
-    "arrow.triangle.2.circlepath",
+    "arrow.up.arrow.down",
     true,
   );
 }

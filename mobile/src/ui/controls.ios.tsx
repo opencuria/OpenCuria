@@ -13,6 +13,7 @@ import {
   font,
   frame,
   labelStyle,
+  onLongPressGesture,
   tint,
 } from "@expo/ui/swift-ui/modifiers";
 import type {
@@ -152,6 +153,7 @@ export function IconButton({
 export function NativeAction({
   children,
   onPress,
+  onLongPress,
   disabled: inactive,
   fitContent,
   style,
@@ -175,6 +177,7 @@ export function NativeAction({
           modifiers={[
             buttonStyle("borderless"),
             disabled(Boolean(inactive)),
+            ...(onLongPress ? [onLongPressGesture(onLongPress)] : []),
             ...(label ? [accessibilityLabel(label)] : []),
             ...(hint ? [accessibilityHint(hint)] : []),
           ]}

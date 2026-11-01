@@ -24,6 +24,7 @@ import * as Clipboard from "expo-clipboard";
 import {
   Archive,
   ArrowDown,
+  ArrowDownUp,
   ArrowUp,
   ChevronDown,
   ChevronRight,
@@ -62,6 +63,7 @@ import type {
 } from "@opencuria/chat-core/gitTypes";
 import { ComposerEditor } from "../../components/ComposerEditor";
 import { ComposerSurface } from "../../ui/ComposerSurface";
+import { ComposerAction } from "../../ui/ComposerAction";
 import { NativeContextMenu } from "../../ui/ContextMenu";
 import { Banner, Button, IconButton } from "../../ui/primitives";
 import { NativeMenu, type NativeMenuAction } from "../../ui/NativeMenu";
@@ -312,7 +314,7 @@ export function GitPanel({
     );
   };
 
-  // -- source control action (VS Code's single button + more actions) -----------
+  // -- source control action (tap to run, hold for more actions) ---------------
   const merging = Boolean(repo?.mergeState.merging);
   const action = gitActionButton(repo, state.busyOperation);
   const ahead = branch?.ahead ?? 0;
@@ -362,7 +364,7 @@ export function GitPanel({
     {
       id: "commit",
       title: merging ? "Continue Merge" : "Commit",
-      symbol: "checkmark",
+      symbol: "arrow.up",
       disabled: !canCommit,
     },
     {
@@ -379,7 +381,9 @@ export function GitPanel({
     },
     {
       id: "push",
-      title: hasUpstream ? `Push${ahead ? ` (${ahead})` : ""}` : "Publish Branch",
+      title: hasUpstream
+        ? `Push${ahead ? ` (${ahead})` : ""}`
+        : "Publish Branch",
       symbol: hasUpstream ? "arrow.up" : "icloud.and.arrow.up",
       disabled: !canPush,
     },
@@ -392,7 +396,7 @@ export function GitPanel({
     {
       id: "sync",
       title: "Sync",
-      symbol: "arrow.triangle.2.circlepath",
+      symbol: "arrow.up.arrow.down",
       disabled: !canTrack,
     },
   ];
@@ -979,67 +983,51 @@ export function GitPanel({
       {detailsPending ? null : (
         <View style={styles.commitBox}>
           <ComposerSurface>
-            <View style={styles.editorRow}>
-              <ComposerEditor
-                ref={messageInput}
-                value={message}
-                onChangeText={setMessage}
-                placeholder={
-                  repo?.currentBranch
-                    ? `Message (commit on '${repo.currentBranch}')`
-                    : "Message (detached HEAD)"
-                }
-                placeholderTextColor={theme.subtleText}
-                accessibilityLabel="Commit message"
-                style={[styles.messageInput, { color: theme.text }]}
-                testID="git-commit-message"
-              />
-              {state.generatingCommitMessage ? (
-                <View style={styles.generate}>
-                  <ActivityIndicator size="small" color={theme.mutedText} />
-                </View>
-              ) : (
-                <IconButton
-                  label="Generate commit message"
-                  symbol="sparkles"
-                  icon={<Sparkles size={17} color={theme.mutedText} />}
-                  tone="quiet"
-                  disabled={!staged.length && !unstaged.length}
-                  onPress={() => void generate()}
-                  testID="git-generate-message"
-                />
-              )}
-            </View>
+            <ComposerEditor
+              ref={messageInput}
+              value={message}
+              onChangeText={setMessage}
+              placeholder={
+                repo?.currentBranch
+                  ? `Message (commit on '${repo.currentBranch}')`
+                  : "Message (detached HEAD)"
+              }
+              placeholderTextColor={theme.subtleText}
+              accessibilityLabel="Commit message"
+              style={[styles.messageInput, { color: theme.text }]}
+              testID="git-commit-message"
+            />
             <View style={styles.actionRow}>
-              <Button
-                title={action.title}
-                symbol={action.symbol as never}
-                variant="primary"
-                shape="capsule"
-                busy={action.running}
-                disabled={!action.enabled}
-                onPress={runAction}
-                style={styles.flex}
-                testID="git-action"
+              <ComposerAction
+                label="Generate commit message"
+                icon={Sparkles}
+                busy={state.generatingCommitMessage}
+                disabled={busy || (!staged.length && !unstaged.length)}
+                onPress={() => void generate()}
+                testID="git-generate-message"
               />
-              <NativeMenu
-                label="More actions"
+              <View style={styles.flex} />
+              <NativeContextMenu
+                label="Git actions"
+                fitContent
                 actions={moreActions}
                 onSelect={onMoreAction}
-                style={styles.moreMenu}
-                testID="git-more-actions"
               >
-                <View style={styles.moreTarget}>
-                  <View
-                    style={[
-                      styles.moreCircle,
-                      { backgroundColor: theme.controlFill },
-                    ]}
-                  >
-                    <ChevronDown size={20} color={theme.mutedText} />
-                  </View>
-                </View>
-              </NativeMenu>
+                {(showMenu) => (
+                  <ComposerAction
+                    label={action.title}
+                    title={action.title}
+                    icon={action.kind === "sync" ? ArrowDownUp : ArrowUp}
+                    primary
+                    busy={action.running}
+                    disabled={!action.enabled}
+                    onPress={runAction}
+                    onLongPress={showMenu}
+                    accessibilityHint="Hold for more Git actions"
+                    testID="git-action"
+                  />
+                )}
+              </NativeContextMenu>
             </View>
           </ComposerSurface>
           {repo?.mergeState.merging ? (
@@ -1593,44 +1581,22 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   // The editor matches the chat composer's; its glass surface holds the action.
-  editorRow: { flexDirection: "row", alignItems: "flex-start" },
   messageInput: {
-    flex: 1,
     minWidth: 0,
     minHeight: 36,
     maxHeight: 150,
     paddingHorizontal: 0,
     paddingVertical: 6,
-    marginLeft: 12,
+    marginHorizontal: 12,
     marginTop: 6,
     fontSize: 17,
     lineHeight: 24,
   },
-  generate: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   actionRow: {
+    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-    paddingTop: 6,
-  },
-  moreMenu: { width: 44, height: 44 },
-  moreTarget: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  moreCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
   },
   detailsLoading: { paddingVertical: 32, alignItems: "center" },
   groupRow: {

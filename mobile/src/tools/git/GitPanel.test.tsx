@@ -195,6 +195,53 @@ it("offers to stage every change when nothing is staged", async () => {
   alert.mockRestore();
 });
 
+it("opens the other actions on hold without committing, then runs Pull", async () => {
+  const { client, git } = fakeClient();
+  renderPanel(client);
+  fireEvent.changeText(await screen.findByTestId("git-commit-message"), "Keep draft");
+  expect(screen.queryByTestId("git-more-actions")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Pull" })).toBeNull();
+
+  const operationsBeforeHold = git.operation.mock.calls.length;
+  fireEvent(screen.getByTestId("git-action"), "longPress");
+  expect(git.operation).toHaveBeenCalledTimes(operationsBeforeHold);
+  expect(screen.getByRole("button", { name: "Commit & Push" })).toBeTruthy();
+  fireEvent.press(screen.getByRole("button", { name: "Pull" }));
+  await waitFor(() => expect(git.operation).toHaveBeenCalledWith("ws", {
+    operation: "pull", repo_path: "/workspace/app",
+  }));
+  expect(screen.getByTestId("git-commit-message")).toHaveDisplayValue("Keep draft");
+  expect(screen.queryByRole("button", { name: "Pull" })).toBeNull();
+});
+
+it("keeps the menu available when the suggested commit is unavailable", async () => {
+  const { client, git } = fakeClient(snapshot({
+    changes: [],
+    branches: [{ name: "main", tip_hash: "aaaaaaaa11", upstream: "origin/main", ahead: 0, behind: 0 }],
+  }));
+  renderPanel(client);
+  const action = await screen.findByTestId("git-action");
+  const operationsBeforeTap = git.operation.mock.calls.length;
+  fireEvent.press(action);
+  expect(git.operation).toHaveBeenCalledTimes(operationsBeforeTap);
+  fireEvent(action, "longPress");
+  fireEvent.press(screen.getByRole("button", { name: "Pull" }));
+  await waitFor(() => expect(git.operation).toHaveBeenCalledWith("ws", {
+    operation: "pull", repo_path: "/workspace/app",
+  }));
+});
+
+it("generates a subject from the composer button and preserves it after a failed commit", async () => {
+  const { client, git } = fakeClient();
+  renderPanel(client);
+  fireEvent.press(await screen.findByTestId("git-generate-message"));
+  await waitFor(() => expect(screen.getByTestId("git-commit-message")).toHaveDisplayValue("Subject"));
+  git.operation.mockRejectedValueOnce(new Error("Cannot commit"));
+  fireEvent.press(screen.getByTestId("git-action"));
+  expect(await screen.findByLabelText("Commit failed, Cannot commit")).toBeTruthy();
+  expect(screen.getByTestId("git-commit-message")).toHaveDisplayValue("Subject");
+});
+
 it("syncs a clean branch that is ahead and behind", async () => {
   const { client, git } = fakeClient(
     snapshot({

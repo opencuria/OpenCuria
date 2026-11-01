@@ -38,6 +38,7 @@ import { Banner, NativeAction } from "../ui/primitives";
 import { NativeMenu } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
+import { ComposerAction, ComposerActionContent } from "../ui/ComposerAction";
 import { ComposerEditor } from "./ComposerEditor";
 import {
   COMPOSER_INPUT_NATIVE_ID,
@@ -534,18 +535,8 @@ export function ChatComposer({
         );
       }}
     >
-      <View pointerEvents="none" style={styles.actionTarget}>
-        <View
-          style={[
-            styles.actionCircle,
-            {
-              backgroundColor: theme.controlFill,
-              opacity: disabled ? 0.38 : 1,
-            },
-          ]}
-        >
-          <Plus size={21} color={theme.mutedText} />
-        </View>
+      <View pointerEvents="none">
+        <ComposerActionContent icon={Plus} disabled={disabled} />
       </View>
     </NativeMenu>
   ) : null;
@@ -571,31 +562,19 @@ export function ChatComposer({
       />
     ) : null;
   const sendDisabled = busy ? !onStop || stopping : !canSubmit || sending;
-  const actionForeground = sendDisabled ? theme.subtleText : theme.background;
   const sendButton = (
-    <NativeAction
-      accessibilityRole="button"
-      accessibilityLabel={busy ? "Stop OpenCuria" : "Send message"}
+    <ComposerAction
+      label={busy ? "Stop OpenCuria" : "Send message"}
+      icon={busy ? Square : ArrowUp}
+      primary
+      iconSize={busy ? 14 : 22}
+      filledIcon={busy}
       disabled={sendDisabled}
       onPress={() => {
         void send();
       }}
-      style={styles.actionTarget}
       testID={busy ? "chat-composer-stop" : "chat-composer-send"}
-    >
-      <View
-        style={[
-          styles.actionCircle,
-          { backgroundColor: sendDisabled ? theme.controlFill : theme.text },
-        ]}
-      >
-        {busy ? (
-          <Square size={14} color={actionForeground} fill={actionForeground} />
-        ) : (
-          <ArrowUp size={22} strokeWidth={2.25} color={actionForeground} />
-        )}
-      </View>
-    </NativeAction>
+    />
   );
 
   return (
@@ -852,20 +831,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
-  },
-  // A compact visible circle keeps the full native touch target around it.
-  actionTarget: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  actionCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
   },
   settings: { flex: 1, flexDirection: "row", minWidth: 0 },
   chips: {

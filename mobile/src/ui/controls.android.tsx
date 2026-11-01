@@ -13,6 +13,7 @@ import {
 } from "@expo/ui/jetpack-compose";
 import {
   defaultMinSize,
+  combinedClickable,
   fillMaxWidth,
   fillMaxSize,
   semantics,
@@ -142,6 +143,7 @@ export function IconButton({
 export function NativeAction({
   children,
   onPress,
+  onLongPress,
   disabled,
   style,
   testID,
@@ -160,11 +162,19 @@ export function NativeAction({
         ignoreSafeAreaKeyboardInsets
       >
         <Surface
-          onClick={() => onPress?.()}
+          onClick={onLongPress ? undefined : () => onPress?.()}
           enabled={!disabled}
           color="transparent"
           modifiers={[
             fillMaxSize(),
+            ...(onLongPress
+              ? [
+                  combinedClickable({
+                    onClick: disabled ? undefined : onPress,
+                    onLongClick: disabled ? undefined : onLongPress,
+                  }),
+                ]
+              : []),
             ...(accessibilityLabel
               ? [semantics({ contentDescription: accessibilityLabel })]
               : []),

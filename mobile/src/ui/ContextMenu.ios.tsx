@@ -16,13 +16,14 @@ export function NativeContextMenu({
   label,
   actions,
   onSelect,
+  fitContent,
   children,
 }: NativeContextMenuProps): React.JSX.Element {
   const { theme } = useTheme();
   return (
     <Host
-      matchContents={{ vertical: true }}
-      style={{ width: "100%" }}
+      matchContents={fitContent ? true : { vertical: true }}
+      style={fitContent ? undefined : { width: "100%" }}
       colorScheme={theme.scheme}
       seedColor={theme.primary}
       ignoreSafeArea="all"
@@ -30,7 +31,7 @@ export function NativeContextMenu({
       <ContextMenu>
         <ContextMenu.Trigger>
           {/* RNHostView preserves the row's touch target and intrinsic height. */}
-          <RNHostView matchContents={{ vertical: true }}>
+          <RNHostView matchContents={fitContent ? true : { vertical: true }}>
             {children()}
           </RNHostView>
         </ContextMenu.Trigger>
