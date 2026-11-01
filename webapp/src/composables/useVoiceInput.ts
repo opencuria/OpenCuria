@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
 import { fileToBase64 } from '@/lib/chatUpload'
 import { createSecureUuid } from '@/lib/secureUuid'
 import { monitorVoiceAudio, type VoiceAudioMonitor } from '@/lib/voiceAudio'
+import { VOICE_LEVEL_HISTORY } from '@/lib/voiceCaptureControls'
 import { startPointing, type PointingResult } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
@@ -35,6 +36,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   const warning = ref('')
   const elapsedMs = ref(0)
   const audioLevel = ref(0)
+  const audioLevels = shallowRef<readonly number[]>([])
   const audio = shallowRef<Blob | null>(null)
   const pointingFailed = ref(false)
   let visualError: Error | null = null
@@ -75,6 +77,11 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     audioLevel.value = 0
   }
 
+  function sampleAudio(): void {
+    audioLevel.value = audioMonitor?.sample() ?? 0
+    audioLevels.value = [...audioLevels.value.slice(1 - VOICE_LEVEL_HISTORY), audioLevel.value]
+  }
+
   function cancel(): void {
     generation++
     controller?.abort()
@@ -95,6 +102,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     chunks = []
     bytes = 0
     audio.value = null
+    audioLevels.value = []
     transcript = null
     pointingResult = null
     visualError = null
@@ -112,7 +120,6 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   async function start(options: {
     workspaceId: string
     model: string
-    pointing: boolean
     maxDurationMs?: number
     maxAudioBytes?: number
   }): Promise<void> {
@@ -190,7 +197,12 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
         cancel()
         error.value = 'The microphone recording failed. Please try again.'
       }
-      if (options.pointing) pointing = startPointing(workspaceId, recordingId, origin)
+      try {
+        // Passive until the speaker points at an image or desktop; never blocks dictation.
+        pointing = startPointing(workspaceId, recordingId, origin)
+      } catch {
+        pointing = null
+      }
       recorder.start(1000)
       state.value = 'recording'
       acquired.getAudioTracks().forEach((track) => {
@@ -200,7 +212,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
       })
       document.addEventListener('visibilitychange', onVisibility)
       timer = setInterval(() => {
-        audioLevel.value = audioMonitor?.sample() ?? 0
+        sampleAudio()
         elapsedMs.value = Math.min(Math.round(performance.now() - origin), limitDuration)
         if (elapsedMs.value >= limitDuration) void stop()
       }, 100)
@@ -366,6 +378,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     warning,
     elapsedMs,
     audioLevel,
+    audioLevels,
     audio,
     busy,
     pointingFailed,

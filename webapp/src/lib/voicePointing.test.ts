@@ -3,6 +3,8 @@ import {
   activePointingWorkspace,
   captureDesktopFrame,
   imagePoint,
+  pointingEngaged,
+  pointingError,
   registerPointingDesktop,
   startPointing,
 } from './voicePointing'
@@ -44,6 +46,26 @@ function viewer(): { iframe: HTMLIFrameElement; send: ReturnType<typeof vi.fn> }
   return { iframe, send }
 }
 
+function pointAt(iframe: HTMLIFrameElement, overrides = {}): void {
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      origin: 'https://desktop.test',
+      source: iframe.contentWindow,
+      data: {
+        type: 'opencuria:voice-pointer',
+        sessionId: recordingId,
+        event: 'move',
+        observed_at: performance.timeOrigin + performance.now(),
+        width: 1920,
+        height: 1080,
+        x: 960,
+        y: 540,
+        ...overrides,
+      },
+    }),
+  )
+}
+
 function frameReply(iframe: HTMLIFrameElement, requestId: string, overrides = {}): void {
   window.dispatchEvent(
     new MessageEvent('message', {
@@ -78,6 +100,8 @@ describe('voice pointing', () => {
     unregister = null
     document.body.innerHTML = ''
     activePointingWorkspace.value = null
+    pointingEngaged.value = false
+    pointingError.value = null
     vi.unstubAllGlobals()
     vi.useRealTimers()
   })
@@ -103,7 +127,8 @@ describe('voice pointing', () => {
     move('pointerdown')
     move('pointerup')
     window.dispatchEvent(new Event('blur'))
-    const result = await recording.stop()
+    expect(pointingEngaged.value).toBe(true)
+    const result = (await recording.stop())!
     expect(result.pointers[0]).toEqual({
       t_ms: 100,
       event: 'move',
@@ -136,8 +161,26 @@ describe('voice pointing', () => {
     image.dataset.voiceImagePath = '/workspace/design.png'
     image.dataset.voiceWorkspace = 'workspace-b'
     await vi.advanceTimersByTimeAsync(100)
-    const result = await recording.stop()
-    expect(result.pointers.every((point) => point.target === null)).toBe(true)
+    expect(pointingEngaged.value).toBe(false)
+    // Nothing recordable was pointed at, so the dictation stays plain.
+    expect(await recording.stop()).toBeNull()
+  })
+
+  it('stays passive for plain dictation: no frames, no uploads and no result', async () => {
+    const { iframe, send } = viewer()
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    move('pointermove')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(frameRequests(send)).toHaveLength(0)
+    // The viewer is still observed so pointing can start at any moment.
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'opencuria:voice-observe', enabled: true, frameWidth: 0 }),
+      'https://desktop.test',
+    )
+    expect(await recording.stop()).toBeNull()
+    expect(transport.track).not.toHaveBeenCalled()
+    expect(pointingEngaged.value).toBe(false)
   })
 
   it('shows the laser only on a recordable image and restores the cursor on leave and stop', async () => {
@@ -275,17 +318,32 @@ describe('voice pointing', () => {
     unregister = registerPointingDesktop('workspace-a', () => iframe)
     recording = startPointing('workspace-a', recordingId, performance.now())
     await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
     const result = recording.stop()
     frameReply(iframe, frameRequests(send)[0]!.requestId)
-    expect((await result).frames).toEqual([])
+    expect(await result).toBeNull()
     expect(transport.send).not.toHaveBeenCalled()
   })
 
   it('bounds click floods and reports an explicit failure instead of growing indefinitely', async () => {
+    const image = document.createElement('img')
+    image.dataset.voiceImagePath = '/workspace/design.png'
+    image.dataset.voiceWorkspace = 'workspace-a'
+    Object.defineProperties(image, { naturalWidth: { value: 1000 }, naturalHeight: { value: 500 } })
+    image.getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 }) as DOMRect
+    hit = image
     recording = startPointing('workspace-a', recordingId, performance.now())
     for (let index = 0; index < 6100; index++) move('pointerdown')
+    expect(pointingError.value).toContain('event limit')
     await expect(recording.stop()).rejects.toThrow('event limit')
     expect(activePointingWorkspace.value).toBeNull()
+  })
+
+  it('never fails plain dictation because of an unused pointing observer', async () => {
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    for (let index = 0; index < 6100; index++) move('pointerdown')
+    expect(pointingError.value).toBeNull()
+    expect(await recording.stop()).toBeNull()
   })
 
   it('captures fresh frames while uploads drain and observes real iframe clicks without intercepting input', async () => {
@@ -300,10 +358,13 @@ describe('voice pointing', () => {
     )
     recording = startPointing('workspace-a', recordingId, performance.now())
     await vi.advanceTimersByTimeAsync(0)
+    expect(frameRequests(send)).toHaveLength(0)
+    pointAt(iframe) // The first pointer on the desktop starts capture immediately.
     expect(frameRequests(send)).toHaveLength(1)
     frameReply(iframe, frameRequests(send)[0]!.requestId)
     await vi.advanceTimersByTimeAsync(100)
     expect(transport.track).toHaveBeenCalledOnce()
+    expect(pointingEngaged.value).toBe(true)
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'opencuria:voice-observe',
@@ -339,7 +400,7 @@ describe('voice pointing', () => {
     await vi.advanceTimersByTimeAsync(0)
     const resultPromise = recording.stop()
     completeUpload()
-    const result = await resultPromise
+    const result = (await resultPromise)!
     expect(result.frames).toEqual([
       { t_ms: 0, path: `/workspace/.opencuria/recordings/${recordingId}/frames/000000.jpg` },
       { t_ms: 500, path: `/workspace/.opencuria/recordings/${recordingId}/frames/000001.jpg` },
@@ -365,6 +426,7 @@ describe('voice pointing', () => {
     unregister = registerPointingDesktop('workspace-a', () => iframe)
     recording = startPointing('workspace-a', recordingId, performance.now())
     await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
     frameReply(iframe, frameRequests(send)[0]!.requestId)
     await vi.advanceTimersByTimeAsync(100)
     window.dispatchEvent(
@@ -383,23 +445,27 @@ describe('voice pointing', () => {
         },
       }),
     )
-    const result = await recording.stop()
+    const result = (await recording.stop())!
     expect(result.frames).toHaveLength(1)
     expect(result.pointers.find((point) => point.event === 'down')?.target).toBeNull()
   })
 
   it('does not capture a hidden or disconnected viewer', async () => {
     const { iframe, send } = viewer()
-    iframe.removeAttribute('data-voice-desktop')
     unregister = registerPointingDesktop('workspace-a', () => iframe)
     recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    frameReply(iframe, frameRequests(send)[0]!.requestId)
+    await vi.advanceTimersByTimeAsync(100)
+    iframe.removeAttribute('data-voice-desktop')
     await vi.advanceTimersByTimeAsync(500)
-    expect(frameRequests(send)).toHaveLength(0)
+    expect(frameRequests(send)).toHaveLength(1)
     iframe.dataset.voiceDesktop = ''
     iframe.style.visibility = 'hidden'
     await vi.advanceTimersByTimeAsync(500)
-    expect(frameRequests(send)).toHaveLength(0)
-    await recording.stop()
+    expect(frameRequests(send)).toHaveLength(1)
+    expect((await recording.stop())!.frames).toHaveLength(1)
   })
 
   it('rejects malformed framebuffer dimensions instead of assigning workspace display dimensions', async () => {

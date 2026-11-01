@@ -11,7 +11,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import VoiceInputControl from '@/components/chat/VoiceInputControl.vue'
-import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
 import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
 import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
@@ -175,12 +174,18 @@ const emit = defineEmits<{
 
 const isScheduledTask = computed(() => props.variant === 'scheduled-task')
 const prompt = ref(props.prompt ?? '')
+/** Voice capture replaces the toolbar and blocks sending until it settles. */
 const voiceBusy = ref(false)
-function insertDictation(text: string, path?: string): void {
+function insertDictation(text: string, path?: string, send = false): void {
   const addition = path ? `${text}\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:${path}` : text
   prompt.value = [prompt.value.trimEnd(), addition].filter(Boolean).join('\n')
   saveToCache(prompt.value)
-  void nextTick(() => { resizeTextarea(); focusTextarea() })
+  // The busy flag clears in the same flush; sending earlier would be rejected.
+  void nextTick(() => {
+    if (send) handleSend()
+    resizeTextarea()
+    focusTextarea()
+  })
 }
 const textareaRef = ref<InstanceType<typeof ComposerRichEditor> | null>(null)
 const imageTokens = computed(() => imageMentionTokens(prompt.value))
@@ -1391,7 +1396,6 @@ function onComposerKeydown(e: KeyboardEvent): void {
             {{ localHarnessId === 'native' ? 'Connect a provider in Settings' : `${harnessLabel} unavailable — check accounts in Provider settings` }}
           </button>
 
-          <VoiceCaptureBar v-if="voiceBusy" class="mx-4 mt-3" />
           <HarnessMentionImages
             v-if="imageTokens.length"
             :tokens="imageTokens"
@@ -1478,6 +1482,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             data-testid="composer-toolbar"
           >
             <div
+              v-show="!voiceBusy"
               class="flex min-w-0 flex-[1_1_10rem] flex-wrap items-center gap-1"
               data-testid="composer-toolbar-leading"
             >
@@ -1539,9 +1544,12 @@ function onComposerKeydown(e: KeyboardEvent): void {
               />
             </div>
 
-            <div class="ml-auto flex shrink-0 items-center gap-1">
+            <div
+              class="flex items-center gap-1"
+              :class="voiceBusy ? 'min-w-0 flex-1' : 'ml-auto shrink-0'"
+            >
               <Button
-                v-if="!isScheduledTask"
+                v-if="!isScheduledTask && !voiceBusy"
                 type="button"
                 variant="ghost"
                 size="icon"
@@ -1577,7 +1585,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                   />
                 </svg>
               </Button>
-              <div v-if="workspaceId" class="relative">
+              <div v-if="workspaceId" v-show="!voiceBusy" class="relative">
                 <Button
                   type="button"
                   variant="ghost"
@@ -1610,7 +1618,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 @busy="voiceBusy = $event"
               />
               <Button
-                v-if="steering && hasText"
+                v-if="steering && hasText && !voiceBusy"
                 type="button"
                 variant="ghost"
                 size="icon"
@@ -1626,7 +1634,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 <Square v-else :size="14" />
               </Button>
               <Button
-                v-if="!isScheduledTask"
+                v-if="!isScheduledTask && !voiceBusy"
                 :disabled="!primaryEnabled"
                 size="icon"
                 class="h-8 w-8 shrink-0 rounded-full transition-all"

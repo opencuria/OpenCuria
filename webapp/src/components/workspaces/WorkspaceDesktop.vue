@@ -156,7 +156,7 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
         </div>
       </div>
 
-      <VoiceCaptureBar />
+      <VoiceCaptureBar class="mx-3 my-2" />
 
       <!-- Viewport, aspect-ratio matched to the desktop resolution -->
       <div

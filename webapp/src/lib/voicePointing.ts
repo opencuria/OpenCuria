@@ -1,4 +1,10 @@
-/** Synchronized, workspace-scoped visual references for an explicit voice recording. */
+/**
+ * Synchronized, workspace-scoped visual references for a voice recording.
+ *
+ * Observation is passive and starts with every dictation; it only produces a
+ * result once the speaker actually points at a workspace image or desktop.
+ * Desktop frames are captured lazily from the first pointer on the desktop.
+ */
 import { shallowRef } from 'vue'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { sendFilesUpload } from '@/services/socket'
@@ -28,6 +34,8 @@ export interface PointingResult {
 
 export const activePointingWorkspace = shallowRef<string | null>(null)
 export const pointingError = shallowRef<string | null>(null)
+/** True once the active recording has linked a pointer or frame to an image/desktop. */
+export const pointingEngaged = shallowRef(false)
 const desktops = new Map<string, () => HTMLIFrameElement | null>()
 let activeOwner: symbol | null = null
 const MAX_DURATION_MS = 5 * 60 * 1000
@@ -152,13 +160,16 @@ export function captureDesktopFrame(
   })
 }
 
-/** Observe image and iframe pointers without intercepting desktop interaction. */
+/**
+ * Observe image and iframe pointers without intercepting desktop interaction.
+ * `stop()` resolves to `null` when nothing was pointed at during the recording.
+ */
 export function startPointing(
   workspaceId: string,
   recordingId: string,
   originMs: number,
 ): {
-  stop(): Promise<PointingResult>
+  stop(): Promise<PointingResult | null>
   cancel(): void
 } {
   if (activePointingWorkspace.value) throw new Error('A pointing recording is already active.')
@@ -166,6 +177,7 @@ export function startPointing(
   const owner = Symbol(recordingId)
   activeOwner = owner
   pointingError.value = null
+  pointingEngaged.value = false
   activePointingWorkspace.value = workspaceId
   const pointers: PointerSample[] = []
   const frames: PointingResult['frames'] = []
@@ -176,6 +188,9 @@ export function startPointing(
   let observedViewer: HTMLIFrameElement | null = null
   let stopped = false
   let cancelled = false
+  let engaged = false
+  // Desktop frames are only worth capturing once the speaker points at the desktop.
+  let desktopRequested = false
   let failure: Error | null = null
   let pendingCapture: Promise<void> | null = null
   const pendingUploads = new Set<Promise<void>>()
@@ -193,11 +208,18 @@ export function startPointing(
   }
   const originEpoch = performance.timeOrigin + originMs
   const elapsed = (): number => Math.max(0, Math.round(performance.now() - originMs))
+  const engage = (): void => {
+    if (engaged) return
+    engaged = true
+    if (activeOwner === owner) pointingEngaged.value = true
+  }
+  /** The speaker referenced an image or the desktop, even if its capture failed. */
+  const visual = (): boolean => engaged || desktopRequested
   const fail = (error: Error): void => {
     failure = error
     showImageCursor(null)
     if (observedViewer) observe(observedViewer, false)
-    if (activeOwner === owner) pointingError.value = error.message
+    if (activeOwner === owner && visual()) pointingError.value = error.message
   }
   const observe = (iframe: HTMLIFrameElement, enabled: boolean): void => {
     try {
@@ -309,7 +331,9 @@ export function startPointing(
       fail(new Error('The pointing recording reached its event limit.'))
       return
     }
-    pointers.push({ t_ms, event, ...resolvePoint(t_ms) })
+    const point = resolvePoint(t_ms)
+    if (point.target) engage()
+    pointers.push({ t_ms, event, ...point })
   }
   const pointer = (event: PointerEvent): void => {
     desktopPoint = null
@@ -370,12 +394,17 @@ export function startPointing(
     desktopPoint = { x: data.x, y: data.y, width: data.width, height: data.height }
     // The parent supplies regular 100 ms move samples; retain discrete clicks.
     if (data.event !== 'move') sample(data.event, t_ms)
+    if (!desktopRequested) {
+      desktopRequested = true
+      capture()
+    }
   }
+  /** Renew viewer observation; capture frames only after the desktop was pointed at. */
   const capture = (): void => {
     if (stopped || failure || document.visibilityState === 'hidden' || elapsed() > MAX_DURATION_MS)
       return
     const iframe = syncViewer()
-    if (pendingCapture || !iframe) return
+    if (!desktopRequested || pendingCapture || !iframe) return
     if (pendingUploads.size >= 8) {
       fail(new Error('Desktop uploads are too slow to keep recording.'))
       return
@@ -397,6 +426,7 @@ export function startPointing(
       const path = `${directory}/${filename}`
       frameSizes.set(path, { width: frame.width, height: frame.height })
       frames.push({ t_ms, path })
+      engage()
       observe(iframe, !failure)
       const store = useFileExplorerStore()
       const uploadId = `voice-frame-${recordingId}-${index}`
@@ -468,7 +498,9 @@ export function startPointing(
       await pendingCapture
       await Promise.all(pendingUploads)
       if (cancelled) throw new Error('Pointing recording cancelled.')
-      if (failure) throw failure
+      if (failure && visual()) throw failure
+      // Plain dictation: nothing was pointed at, so nothing visual is attached.
+      if (!engaged) return null
       pointers.sort((a, b) => a.t_ms - b.t_ms)
       return { pointers, frames }
     },

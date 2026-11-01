@@ -16,12 +16,18 @@ Both choices are saved in the organization's existing provider configuration.
 Provider credentials remain server-side. Audio is sent to the selected speech
 provider; the transcript is sent to the cleanup provider.
 
-In chat, click the microphone to start or finish. The adjacent **Record pointing
-too** toggle opts into image/desktop recording before capture starts. Models
-are configured only in Settings. The recording bar shows elapsed time, a signal
-meter, Finish and Discard; it remains available in image and desktop viewers.
-The result is inserted into the existing draft for review, never sent to the
-agent automatically. Plain dictation creates no workspace recording files.
+In chat, click the microphone to start. While recording, a bar replaces the
+composer toolbar: **Discard** (X) drops the audio without transcription, a live
+waveform shows the signal, **Stop and edit** (■) inserts the transcript into the
+existing draft for review, and **Stop and send** sends the draft as soon as the
+transcript is ready. The same bar is available in image and desktop viewers.
+Models are configured only in Settings.
+
+Pointing needs no opt-in. Every dictation observes workspace images and the
+desktop passively; a pointing recording is only created once the speaker points
+at a linked image or the desktop. Desktop frames are captured from the first
+pointer on the desktop onward. A pointer icon in the bar confirms that pointing
+is recorded. Plain dictation creates no workspace recording files.
 
 ## Audio and text processing
 
@@ -78,7 +84,7 @@ unlinked images keep their normal cursor. Stopping, discarding or a capture
 failure restores the normal cursor immediately.
 
 Pointer sampling targets 100 ms, with separate down/up/leave events. Desktop
-snapshots target 500 ms. Actual observation times use the recording's monotonic
+snapshots target 500 ms once the desktop was pointed at. Actual observation times use the recording's monotonic
 clock; browser delays are not disguised as exact sampling intervals. Capture
 and uploads run independently with one capture and at most eight uploads in
 flight. A full queue or failed upload surfaces an error rather than producing a
@@ -113,7 +119,9 @@ ending the microphone track finishes recording. Navigation, disabling the
 composer and unmounting discard it and fence late asynchronous results.
 
 Network errors retain audio for Retry. Failed visual capture requires an
-explicit **Use dictation only** choice to keep the text without visual artifacts.
+explicit **Use dictation only** choice to keep the text without visual artifacts;
+failures of an observer that never linked anything cannot affect plain dictation.
+Retry and **Use dictation only** keep the chosen stop or send action.
 Discard or failure can leave uploaded frames without completed metadata; these
 partial directories can be removed through workspace files. Recording requests
 validate organization/workspace access and bounded canonical paths, timelines,

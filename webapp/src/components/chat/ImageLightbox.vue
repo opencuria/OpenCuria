@@ -241,7 +241,7 @@ onUnmounted(() => resizeObserver?.disconnect())
         >
           This image has no workspace path. Pointing cannot be linked to it.
         </p>
-        <VoiceCaptureBar />
+        <VoiceCaptureBar class="w-[min(36rem,calc(100vw-2rem))] shadow-md" />
       </div>
       <div
         class="absolute inset-x-0 top-0 z-10 flex items-start justify-end gap-4 px-4 py-4 sm:justify-between sm:px-6"

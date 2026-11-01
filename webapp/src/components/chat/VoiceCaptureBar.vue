@@ -1,71 +1,103 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Mic, MousePointer2, Loader2, Square, X } from '@lucide/vue'
+import { Loader2, MousePointer2, Send, Square, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { pointingError } from '@/lib/voicePointing'
-import { voiceCaptureControls as controls } from '@/lib/voiceCaptureControls'
-const elapsed = computed(() => {
-  const seconds = Math.floor((controls.value?.elapsedMs || 0) / 1000)
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+import { pointingEngaged, pointingError } from '@/lib/voicePointing'
+import { VOICE_LEVEL_HISTORY, voiceCaptureControls as controls } from '@/lib/voiceCaptureControls'
+
+/** `embedded` replaces the composer toolbar; otherwise the bar floats in a viewer. */
+defineProps<{ embedded?: boolean }>()
+const recording = computed(() => controls.value?.state === 'recording')
+// Newest first: the row is reversed so fresh samples enter at the right edge.
+const bars = computed(() => {
+  const levels = controls.value?.levels ?? []
+  return Array.from({ length: VOICE_LEVEL_HISTORY }, (_, index) =>
+    Math.round(3 + Math.min(1, levels[levels.length - 1 - index] ?? 0) * 25),
+  )
 })
 </script>
+
 <template>
   <div
     v-if="controls"
-    class="flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-xs"
-    role="status"
-    aria-live="polite"
+    class="flex min-w-0 items-center gap-1.5"
+    :class="embedded ? 'flex-1' : 'rounded-full bg-muted p-1'"
+    role="group"
+    aria-label="Voice input"
     data-testid="voice-capture-bar"
   >
-    <Mic v-if="controls.state === 'recording'" :size="14" class="text-destructive" />
-    <X v-else-if="controls.state === 'error'" :size="14" class="text-destructive" />
-    <Loader2 v-else :size="14" class="animate-spin" />
-    <span v-if="controls.state === 'recording'"
-      >{{ controls.pointing ? 'Dictating + pointing' : 'Dictating'
-      }}<span aria-hidden="true"> · {{ elapsed }}</span></span
-    >
-    <span v-else-if="controls.state === 'error'"
-      >Voice input needs attention. Review it in the composer.</span
-    >
-    <span v-else>{{
-      controls.state === 'requesting' ? 'Waiting for microphone…' : 'Preparing your text…'
-    }}</span>
-    <MousePointer2 v-if="controls.pointing" :size="14" />
-    <span
-      v-if="controls.state === 'recording' && controls.audioLevel !== undefined"
-      class="h-1.5 w-10 overflow-hidden rounded-full bg-foreground/10"
-      role="meter"
-      aria-label="Microphone level"
-      :aria-valuenow="Math.round(controls.audioLevel * 100)"
-      aria-valuemin="0"
-      aria-valuemax="100"
-    >
-      <span
-        class="block h-full bg-primary transition-[width] duration-100"
-        :style="{ width: `${controls.audioLevel * 100}%` }"
-      />
-    </span>
-    <span
-      v-if="controls.state === 'recording' && controls.pointing && pointingError"
-      class="text-destructive"
-      >Visual capture failed. Finish to keep your dictation.</span
-    >
     <Button
-      v-if="controls.state === 'recording'"
-      size="sm"
+      type="button"
       variant="secondary"
-      class="h-7"
-      aria-label="Finish dictation"
-      @click="controls.stop"
-      ><Square :size="12" /> Finish</Button
-    >
-    <Button
-      size="icon"
-      variant="ghost"
-      class="h-7 w-7"
-      aria-label="Discard dictation"
+      size="icon-sm"
+      title="Discard recording"
+      aria-label="Discard recording"
+      data-testid="voice-cancel"
       @click="controls.cancel"
-      ><X :size="14"
-    /></Button>
+    >
+      <X :size="16" />
+    </Button>
+    <div class="flex h-8 min-w-0 flex-1 items-center px-1" role="status" aria-live="polite">
+      <template v-if="controls.state === 'recording'">
+        <span class="sr-only">Recording</span>
+        <div
+          class="flex h-full min-w-0 flex-1 flex-row-reverse items-center gap-[3px] overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_3rem)]"
+          aria-hidden="true"
+          data-testid="voice-waveform"
+        >
+          <span
+            v-for="(height, index) in bars"
+            :key="index"
+            class="w-[3px] shrink-0 rounded-full bg-foreground/60"
+            :style="{ height: `${height}px` }"
+          />
+        </div>
+      </template>
+      <span v-else-if="controls.state === 'error'" class="truncate text-xs text-destructive">
+        {{ embedded ? 'Voice input needs attention.' : 'Voice input needs attention. Review it in the composer.' }}
+      </span>
+      <span v-else class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+        <Loader2 :size="14" class="shrink-0 animate-spin" />
+        <span class="truncate">{{
+          controls.state === 'requesting' ? 'Waiting for microphone…' : 'Transcribing…'
+        }}</span>
+      </span>
+    </div>
+    <span v-if="recording && pointingError" class="shrink-0 text-xs text-destructive"
+      >Pointing failed</span
+    >
+    <span
+      v-else-if="recording && pointingEngaged"
+      class="shrink-0 text-primary"
+      role="img"
+      title="Pointing is recorded"
+      aria-label="Pointing is recorded"
+      ><MousePointer2 :size="14"
+    /></span>
+    <template v-if="controls.state !== 'error'">
+      <Button
+        type="button"
+        variant="secondary"
+        size="icon-sm"
+        :disabled="!recording"
+        title="Stop and edit"
+        aria-label="Stop and edit"
+        data-testid="voice-stop"
+        @click="controls.stop"
+      >
+        <Square class="size-3 fill-current" />
+      </Button>
+      <Button
+        type="button"
+        size="icon-sm"
+        :disabled="!recording"
+        title="Stop and send"
+        aria-label="Stop and send"
+        data-testid="voice-send"
+        @click="controls.send"
+      >
+        <Send :size="16" />
+      </Button>
+    </template>
   </div>
 </template>

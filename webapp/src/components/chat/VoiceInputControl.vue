@@ -1,25 +1,32 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Mic, MousePointer2, Loader2, RotateCcw, Square, X } from '@lucide/vue'
+import { Mic, RotateCcw, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
 import { getVoiceConfig } from '@/services/voice.api'
 import { useVoiceInput, voiceSupported, voiceUnavailableReason } from '@/composables/useVoiceInput'
 import { voiceCaptureControls } from '@/lib/voiceCaptureControls'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 
 const props = defineProps<{ workspaceId: string; contextKey?: string; disabled?: boolean }>()
-const emit = defineEmits<{ result: [text: string, path?: string]; busy: [value: boolean] }>()
-const pointing = ref(false)
+const emit = defineEmits<{
+  /** `send` asks the composer to submit right away instead of offering an edit. */
+  result: [text: string, path: string | undefined, send: boolean]
+  busy: [value: boolean]
+}>()
 const loading = ref(false)
 const configError = ref('')
 const setupMissing = ref(false)
-const voice = useVoiceInput((text, path) => emit('result', text, path))
-const { state, error, warning, elapsedMs, pointingFailed, audioLevel } = voice
+// Survives processing errors so Retry and "Use dictation only" keep the chosen action.
+let sendOnResult = false
+const voice = useVoiceInput((text, path) => {
+  const send = sendOnResult
+  sendOnResult = false
+  emit('result', text, path, send)
+})
+const { state, error, warning, pointingFailed, audioLevels } = voice
 const busy = computed(() => voice.busy.value || loading.value)
 const notice = computed(() => error.value || configError.value || warning.value)
-const microphoneLabel = computed(() =>
-  state.value === 'recording' ? 'Finish dictation' : 'Dictate a message',
-)
 let configGeneration = 0
 let configAbort: AbortController | null = null
 
@@ -33,7 +40,13 @@ function dismiss(): void {
   invalidateConfig()
   configError.value = ''
   setupMissing.value = false
+  sendOnResult = false
   voice.cancel()
+}
+function finish(send: boolean): void {
+  if (state.value !== 'recording') return
+  sendOnResult = send
+  void voice.stop()
 }
 function openSettings(): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
@@ -52,6 +65,7 @@ async function start(): Promise<void> {
   loading.value = true
   configError.value = ''
   setupMissing.value = false
+  sendOnResult = false
   try {
     const config = await getVoiceConfig(props.workspaceId, request.signal)
     if (generation !== configGeneration || props.disabled) return
@@ -63,7 +77,6 @@ async function start(): Promise<void> {
     await voice.start({
       workspaceId: props.workspaceId,
       model: config.default_model,
-      pointing: pointing.value,
       maxDurationMs: config.max_duration_ms,
       maxAudioBytes: config.max_audio_bytes,
     })
@@ -82,10 +95,6 @@ async function start(): Promise<void> {
     }
   }
 }
-function toggleRecording(): void {
-  if (state.value === 'recording') void voice.stop()
-  else void start()
-}
 watch(() => [props.workspaceId, props.contextKey], dismiss)
 watch(
   () => props.disabled,
@@ -93,18 +102,18 @@ watch(
     if (value) dismiss()
   },
 )
-watch([busy, state, elapsedMs, pointing, audioLevel], () => {
+watch([busy, state, audioLevels], () => {
   emit('busy', busy.value)
-  if (voice.busy.value)
+  if (busy.value)
     voiceCaptureControls.value = {
       workspaceId: props.workspaceId,
-      state: state.value as 'requesting' | 'recording' | 'processing' | 'error',
-      elapsedMs: elapsedMs.value,
-      audioLevel: audioLevel.value,
-      pointing: pointing.value,
-      stop: () => {
-        void voice.stop()
-      },
+      // Loading voice settings precedes the microphone prompt.
+      state: voice.busy.value
+        ? (state.value as 'requesting' | 'recording' | 'processing' | 'error')
+        : 'requesting',
+      levels: audioLevels.value,
+      stop: () => finish(false),
+      send: () => finish(true),
       cancel: dismiss,
     }
   else if (voiceCaptureControls.value?.cancel === dismiss) voiceCaptureControls.value = null
@@ -117,42 +126,22 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="flex items-center gap-0.5">
+  <div class="flex min-w-0 items-center" :class="busy ? 'flex-1' : ''">
+    <VoiceCaptureBar v-if="busy" embedded />
     <Button
+      v-else
       type="button"
       variant="ghost"
       size="icon"
-      class="h-8 w-8"
-      :class="state === 'recording' ? 'text-destructive' : 'text-muted-foreground'"
-      :disabled="disabled || (busy && state !== 'recording')"
-      :title="microphoneLabel"
-      :aria-label="microphoneLabel"
-      :aria-busy="loading || state === 'processing'"
+      class="h-8 w-8 text-muted-foreground hover:text-foreground"
+      :disabled="disabled"
+      title="Dictate a message"
+      aria-label="Dictate a message"
       data-testid="composer-voice"
-      @click="toggleRecording"
+      @click="start"
     >
-      <Loader2
-        v-if="loading || state === 'requesting' || state === 'processing'"
-        :size="16"
-        class="animate-spin"
-      />
-      <Square v-else-if="state === 'recording'" :size="14" />
-      <Mic v-else :size="16" />
+      <Mic :size="16" />
     </Button>
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon"
-      class="h-8 w-8"
-      :class="pointing ? 'bg-primary/10 text-primary hover:bg-primary/15' : 'text-muted-foreground'"
-      :disabled="disabled || busy"
-      :aria-pressed="pointing"
-      title="Record pointing too"
-      aria-label="Record pointing too"
-      data-testid="composer-voice-pointing"
-      @click="pointing = !pointing"
-      ><MousePointer2 :size="15"
-    /></Button>
     <div
       v-if="notice"
       class="absolute bottom-full left-4 right-4 mb-2 rounded-lg border bg-popover px-3 py-2 text-xs shadow-md"

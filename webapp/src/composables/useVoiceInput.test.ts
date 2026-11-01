@@ -5,6 +5,7 @@ import { useVoiceInput, voiceSupported, voiceUnavailableReason } from './useVoic
 import { fileToBase64 } from '@/lib/chatUpload'
 import { monitorVoiceAudio } from '@/lib/voiceAudio'
 import { startPointing } from '@/lib/voicePointing'
+import { VOICE_LEVEL_HISTORY } from '@/lib/voiceCaptureControls'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
 vi.mock('@/lib/voiceAudio', () => ({ monitorVoiceAudio: vi.fn(() => null) }))
@@ -58,7 +59,11 @@ const transcript: VoiceTranscript = {
   text: 'Clean text.',
   segments: [{ start_ms: 0, end_ms: 500, text: 'Clean text.' }], timing: 'provider',
 }
-const options = { workspaceId: 'workspace-1', model: 'openai/whisper-1', pointing: false }
+const options = { workspaceId: 'workspace-1', model: 'openai/whisper-1' }
+const pointed = {
+  pointers: [{ t_ms: 100, event: 'move' as const, x: 1, y: 2, target: { kind: 'image' as const, path: '/workspace/a.png', width: 10, height: 10 } }],
+  frames: [],
+}
 let now = 0
 let getUserMedia: ReturnType<typeof vi.fn>
 let media: ReturnType<typeof makeStream>
@@ -93,8 +98,9 @@ beforeEach(() => {
   vi.mocked(fileToBase64).mockResolvedValue('encoded-audio')
   vi.mocked(transcribeVoice).mockResolvedValue(transcript)
   vi.mocked(saveVoiceRecording).mockResolvedValue({ path: '/workspace/.opencuria/recordings/id/manifest.json' })
+  // Plain dictation by default: the passive observer saw no pointing.
   vi.mocked(startPointing).mockReturnValue({
-    stop: vi.fn().mockResolvedValue({ pointers: [], frames: [] }), cancel: vi.fn(),
+    stop: vi.fn().mockResolvedValue(null), cancel: vi.fn(),
   } as unknown as ReturnType<typeof startPointing>)
 })
 afterEach(() => {
@@ -115,7 +121,7 @@ describe('voice browser capabilities', () => {
     expect(voiceSupported()).toBe(true)
     expect(voiceUnavailableReason()).toBe('')
     const { voice } = create()
-    await voice.start({ ...options, pointing: true })
+    await voice.start(options)
     expect(voice.state.value).toBe('recording')
     expect(startPointing).toHaveBeenCalledWith('workspace-1', expect.stringMatching(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/), expect.any(Number))
   })
@@ -172,8 +178,21 @@ describe('useVoiceInput microphone lifecycle', () => {
     now = 600
     await vi.advanceTimersByTimeAsync(100)
     expect(voice.audioLevel.value).toBe(0.1)
+    expect(voice.audioLevels.value).toEqual([0.1])
     await voice.stop()
     expect(transcribeVoice).toHaveBeenCalledWith('workspace-1', expect.objectContaining({ duration_ms: 600 }), expect.any(AbortSignal))
+  })
+
+  it('keeps a bounded level history for the waveform and clears it with the recording', async () => {
+    let level = 0
+    vi.mocked(monitorVoiceAudio).mockReturnValue({ sample: () => (level += 0.001), hasSignal: () => true, close: vi.fn() })
+    const { voice } = create()
+    await voice.start(options)
+    await vi.advanceTimersByTimeAsync(100 * (VOICE_LEVEL_HISTORY + 20))
+    expect(voice.audioLevels.value).toHaveLength(VOICE_LEVEL_HISTORY)
+    expect(voice.audioLevels.value[VOICE_LEVEL_HISTORY - 1]).toBeCloseTo((VOICE_LEVEL_HISTORY + 20) * 0.001)
+    voice.cancel()
+    expect(voice.audioLevels.value).toEqual([])
   })
 
   it('reports permission denial and releases the shared microphone reservation', async () => {
@@ -365,22 +384,50 @@ describe('useVoiceInput microphone lifecycle', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(2)
   })
 
-  it.each([true, false])('reports missing phrase timing only for pointing recordings (pointing=%s)', async (pointing) => {
+  it.each([true, false])('reports missing phrase timing only for pointing recordings (pointed=%s)', async (didPoint) => {
     vi.mocked(transcribeVoice).mockResolvedValueOnce({ ...transcript, timing: 'approximate' })
+    vi.mocked(startPointing).mockReturnValueOnce({
+      stop: vi.fn().mockResolvedValue(didPoint ? pointed : null), cancel: vi.fn(),
+    })
     const { voice, onResult } = create()
-    await voice.start({ ...options, pointing })
+    await voice.start(options)
     now = 1000
     await voice.stop()
     expect(onResult).toHaveBeenCalledOnce()
     expect(voice.state.value).toBe('idle')
-    if (pointing) expect(voice.warning.value).toMatch(/approximate speech timing/i)
+    if (didPoint) expect(voice.warning.value).toMatch(/approximate speech timing/i)
     else expect(voice.warning.value).toBe('')
+  })
+
+  it('always observes pointing passively but saves nothing when nothing was pointed at', async () => {
+    const { voice, onResult } = create()
+    await voice.start(options)
+    expect(startPointing).toHaveBeenCalledOnce()
+    now = 1000
+    await voice.stop()
+    expect(saveVoiceRecording).not.toHaveBeenCalled()
+    expect(onResult).toHaveBeenCalledExactlyOnceWith('Clean text.', undefined)
+  })
+
+  it('keeps dictation available when the pointing observer cannot start', async () => {
+    vi.mocked(startPointing).mockImplementationOnce(() => {
+      throw new Error('A pointing recording is already active.')
+    })
+    const { voice, onResult } = create()
+    await voice.start(options)
+    expect(voice.state.value).toBe('recording')
+    now = 1000
+    await voice.stop()
+    expect(onResult).toHaveBeenCalledExactlyOnceWith('Clean text.', undefined)
   })
 
   it('retries pointing persistence using the cached transcript', async () => {
     vi.mocked(saveVoiceRecording).mockRejectedValueOnce(new Error('Workspace offline'))
+    vi.mocked(startPointing).mockReturnValueOnce({
+      stop: vi.fn().mockResolvedValue(pointed), cancel: vi.fn(),
+    })
     const { voice, onResult } = create()
-    await voice.start({ ...options, pointing: true })
+    await voice.start(options)
     now = 1000
     await voice.stop()
     expect(voice.state.value).toBe('error')
@@ -402,7 +449,7 @@ describe('useVoiceInput microphone lifecycle', () => {
       stop: vi.fn(() => pending.promise), cancel: cancelPointing,
     })
     const { voice, onResult } = create()
-    await voice.start({ ...options, pointing: true })
+    await voice.start(options)
     now = 1000
     const stopping = voice.stop()
     await settle()
@@ -419,7 +466,7 @@ describe('useVoiceInput microphone lifecycle', () => {
       stop: vi.fn().mockRejectedValue(new Error('Desktop disconnected')), cancel: vi.fn(),
     })
     const { voice, onResult } = create()
-    await voice.start({ ...options, pointing: true })
+    await voice.start(options)
     now = 1000
     await voice.stop()
     expect(voice.state.value).toBe('error')
