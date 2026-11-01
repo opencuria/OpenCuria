@@ -136,6 +136,8 @@ def _recent_model_to_out(row) -> RecentModelOut:  # type: ignore[no-untyped-def]
     return RecentModelOut(
         model=row.model or "",
         effort=row.effort or "",
+        harness_id=row.harness_id,
+        mode=row.mode,
         last_used_at=row.last_used_at,
     )
 
@@ -948,6 +950,8 @@ def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
             request.user,
             model=model_id,
             effort=(payload.effort or "").strip(),
+            harness_id=payload.harness_id,
+            mode=payload.mode,
         )
         if row is None:
             return 400, {"detail": "model is required", "code": "validation_error"}

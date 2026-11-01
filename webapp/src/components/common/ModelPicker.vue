@@ -30,7 +30,7 @@ const props = withDefaults(
     /** Catalog-known recents, newest first (max. 6); defaults to catalog head. */
     recentModels?: ProviderModel[]
     /** Last-used effort per model id (restored on selection). */
-    recentEfforts?: RecentModelEntry[]
+    recentEfforts?: Pick<RecentModelEntry, 'id' | 'effort'>[]
     loading?: boolean
     disabled?: boolean
     defaultModelLabel?: string

@@ -75,17 +75,21 @@ describe('harness store recent-models save-on-send', () => {
     const store = useHarnessStore()
     const session = await store.createSession('ws-1', 'hello', 'build', 'acme/think', [], 'high')
     expect(session?.id).toBe('session-1')
-    expect(saveMock).toHaveBeenCalledWith('acme/think', 'high')
+    expect(saveMock).toHaveBeenCalledWith('acme/think', 'high', undefined, {
+      harness_id: 'native', mode: 'build',
+    })
   })
 
   it('records usage after sendMessage succeeds', async () => {
-    sendMock.mockResolvedValue(makeSession())
+    sendMock.mockResolvedValue(makeSession({ model: 'acme/other', reasoning_effort: 'low', mode: 'plan' }))
     const store = useHarnessStore()
     await store.sendMessage('session-1', 'follow up', {
       model: 'acme/other',
       reasoningEffort: 'low',
     })
-    expect(saveMock).toHaveBeenCalledWith('acme/other', 'low')
+    expect(saveMock).toHaveBeenCalledWith('acme/other', 'low', undefined, {
+      harness_id: 'native', mode: 'plan',
+    })
   })
 
   it('records the resolved Codex model and effort after creating a chat with defaults', async () => {
@@ -98,7 +102,9 @@ describe('harness store recent-models save-on-send', () => {
     )
     const store = useHarnessStore()
     await store.createSession('ws-1', 'hello', 'build', '', [], '', 'codex')
-    expect(saveMock).toHaveBeenCalledWith('chatgpt/gpt-6.1-sol', 'high')
+    expect(saveMock).toHaveBeenCalledWith('chatgpt/gpt-6.1-sol', 'high', undefined, {
+      harness_id: 'codex', mode: 'build',
+    })
   })
 
   it('remembers Codex effort on follow-ups even when no overrides are sent', async () => {
@@ -111,10 +117,12 @@ describe('harness store recent-models save-on-send', () => {
     )
     const store = useHarnessStore()
     await store.sendMessage('session-1', 'follow up', {})
-    expect(saveMock).toHaveBeenCalledWith('chatgpt/gpt-6.1-sol', 'ultra')
+    expect(saveMock).toHaveBeenCalledWith('chatgpt/gpt-6.1-sol', 'ultra', undefined, {
+      harness_id: 'codex', mode: 'build',
+    })
   })
 
-  it('persists Claude selection and does not write its alias into native model recents', async () => {
+  it('persists Claude selection with its engine', async () => {
     createMock.mockResolvedValue(makeSession({ harness_id: 'claude', model: 'sonnet' }))
     const store = useHarnessStore()
     const session = await store.createSession(
@@ -136,14 +144,18 @@ describe('harness store recent-models save-on-send', () => {
       reasoning_effort: 'high',
       harness_id: 'claude',
     })
-    expect(saveMock).not.toHaveBeenCalled()
+    expect(saveMock).toHaveBeenCalledWith('sonnet', 'high', undefined, {
+      harness_id: 'claude', mode: 'build',
+    })
   })
 
-  it('does not write Claude model ids into native recents on follow-up sends', async () => {
+  it('remembers the Claude agent on follow-up sends', async () => {
     sendMock.mockResolvedValue(makeSession({ harness_id: 'claude', model: 'sonnet' }))
     const store = useHarnessStore()
     await store.sendMessage('session-1', 'follow up', { model: 'sonnet' })
-    expect(saveMock).not.toHaveBeenCalled()
+    expect(saveMock).toHaveBeenCalledWith('sonnet', 'high', undefined, {
+      harness_id: 'claude', mode: 'build',
+    })
   })
 
   it('records nothing when createSession fails', async () => {

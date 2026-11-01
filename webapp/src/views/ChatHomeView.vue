@@ -429,6 +429,7 @@ watch(
               ref="homeChatInputRef"
               :workspace-id="selectedWorkspaceId ?? undefined"
               :session-id="null"
+              restore-last-selection
               :mode="composerMode"
               :harness-id="composerHarnessId"
               :model="harnessStore.modelInput"

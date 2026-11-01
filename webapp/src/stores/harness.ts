@@ -79,17 +79,18 @@ interface SendOptions {
   reasoningEffort?: string
 }
 
-/** Codex defaults are resolved server-side; remember the admitted selection. */
+/** External defaults are resolved server-side; remember the admitted selection. */
 function recordComposerModelUsage(
   session: HarnessSession,
   model: string,
   effort: string,
   harnessId = session.harness_id ?? 'native',
 ): void {
-  if (harnessId === 'claude') return
   recordRecentModelUsage(
-    harnessId === 'codex' ? session.model : model,
-    harnessId === 'codex' ? (session.reasoning_effort ?? effort) : effort,
+    session.model || model,
+    session.reasoning_effort ?? effort,
+    harnessId,
+    session.mode,
   )
 }
 

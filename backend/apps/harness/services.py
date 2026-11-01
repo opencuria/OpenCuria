@@ -330,7 +330,16 @@ class RecentModelService:
         return self.repository.list_by_user(org_id, user_id)
 
     def record_usage(
-        self, org_id: uuid.UUID, user, *, model: str, effort: str = ""
+        self,
+        org_id: uuid.UUID,
+        user,
+        *,
+        model: str,
+        effort: str = "",
+        harness_id: str = "native",
+        mode: str = "build",
     ) -> RecentModel | None:
         """Record one used model; None when the model id is blank."""
-        return self.repository.record_usage(org_id, user, model=model, effort=effort)
+        return self.repository.record_usage(
+            org_id, user, model=model, effort=effort, harness_id=harness_id, mode=mode
+        )

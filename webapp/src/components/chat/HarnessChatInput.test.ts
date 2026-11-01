@@ -239,6 +239,106 @@ describe('HarnessChatInput', () => {
     codexModelsMock.mockResolvedValue(codexModels)
   }
 
+  it.each([
+    ['native', 'plan', 'openrouter/model-big', 'low', 'OpenCuria Plan'],
+    ['claude', 'build', 'sonnet', 'high', 'Claude Agent Build'],
+    ['codex', 'build', 'chatgpt/gpt-6.1-sol', 'ultra', 'Codex Build'],
+    ['codex', 'plan', 'openrouter/vendor/codex', 'low', 'Codex Plan'],
+  ] as const)('restores the last %s %s selection for a new chat', async (
+    harnessId, mode, model, effort, label,
+  ) => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model, effort, harness_id: harnessId, mode, last_used_at: '' },
+    ])
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain(label)
+    await setEditorText(wrapper, 'New chat')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]).toEqual(['New chat', mode, model, [], effort, harnessId])
+    wrapper.unmount()
+  })
+
+  it('restores the saved agent when returning from an existing chat to a new chat', async () => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'build', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ sessionId: 'existing', engineLocked: true })
+    await flushPromises()
+    await wrapper.setProps({ sessionId: null, engineLocked: false, restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Build')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { sessionId: 'existing', engineLocked: true },
+    { variant: 'scheduled-task' },
+  ])('preserves an existing session or task selection: %j', async (props) => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'plan', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ ...props, restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('OpenCuria Build')
+    expect(wrapper.emitted('update:harnessId')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('keeps native defaults when the saved agent is disconnected', async () => {
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'plan', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('OpenCuria Build')
+    expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['openrouter/model-big'])
+    wrapper.unmount()
+  })
+
+  it('does not replace a manual agent selection when saved preferences arrive late', async () => {
+    enableCodex()
+    let resolveRecents!: (rows: harnessApi.RecentModelUsage[]) => void
+    vi.mocked(harnessApi.listRecentModels).mockImplementationOnce(
+      () => new Promise(resolve => { resolveRecents = resolve }),
+    )
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-claude-plan"]').trigger('click')
+    await flushPromises()
+    resolveRecents([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'build', last_used_at: '' },
+    ])
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Claude Agent Plan')
+    wrapper.unmount()
+  })
+
+  it('keeps text entered while the saved agent selection is loading', async () => {
+    enableCodex()
+    let resolveRecents!: (rows: harnessApi.RecentModelUsage[]) => void
+    vi.mocked(harnessApi.listRecentModels).mockImplementationOnce(
+      () => new Promise(resolve => { resolveRecents = resolve }),
+    )
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    await setEditorText(wrapper, 'Keep this draft')
+    resolveRecents([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'build', last_used_at: '' },
+    ])
+    await flushPromises()
+    expect(editorText(wrapper)).toBe('Keep this draft')
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Build')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]).toEqual([
+      'Keep this draft', 'build', 'chatgpt/gpt-6.1-sol', [], 'ultra', 'codex',
+    ])
+    wrapper.unmount()
+  })
+
   it('creates a Codex chat with backend defaults through the existing mode/model menus', async () => {
     enableCodex('openrouter/vendor/codex')
     const wrapper = mountInput()

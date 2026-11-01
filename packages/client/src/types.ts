@@ -1,10 +1,12 @@
 import type {
   HarnessConversation,
+  HarnessId,
   HarnessMessage,
   HarnessPartsOut,
   HarnessPermissionRequest,
   HarnessQuestionRequest,
   HarnessSession,
+  HarnessSessionMode,
   HarnessSteer,
   HarnessTodo,
 } from "@opencuria/chat-core/harness";
@@ -152,6 +154,9 @@ export type ProviderConfigInput = Partial<ProviderConfig>;
 export interface RecentModelUsage {
   model: string;
   effort: string;
+  /** Absent on older backends. */
+  harness_id?: HarnessId;
+  mode?: HarnessSessionMode;
   last_used_at: string;
 }
 

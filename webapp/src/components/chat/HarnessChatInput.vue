@@ -49,6 +49,7 @@ import {
   recentCatalogModels,
   recentEffortFor,
   useRecentModels,
+  type RecentModelEntry,
 } from '@/lib/recentModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import ModelPicker from '@/components/common/ModelPicker.vue'
@@ -117,6 +118,8 @@ const props = defineProps<{
   mode?: HarnessSessionMode
   harnessId?: HarnessId
   engineLocked?: boolean
+  /** New-chat surfaces opt in; existing sessions and task editors keep their selection. */
+  restoreLastSelection?: boolean
   /** Persisted session model, never the editable composer selection. */
   sessionModel?: string
   skillOptions?: Skill[]
@@ -242,6 +245,10 @@ let applyEngineDefaultsAfterCatalog = false
 let modelRequestGeneration = 0
 let selectionRevision = 0
 let catalogContext = ''
+const canRestoreSelection = () =>
+  Boolean(props.restoreLastSelection) && !props.sessionId && !props.engineLocked && !isScheduledTask.value
+let restoreSelectionPending = canRestoreSelection()
+let restoredSelection: RecentModelEntry | undefined
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
@@ -478,6 +485,7 @@ async function loadProviderModels(): Promise<void> {
   if (catalogContext !== nextCatalogContext) engineCatalog.value = []
   catalogContext = nextCatalogContext
   const revision = selectionRevision
+  const promptBeforeLoad = prompt.value
   const isCurrent = () =>
     requestGeneration === modelRequestGeneration &&
     engineId === localHarnessId.value &&
@@ -488,10 +496,46 @@ async function loadProviderModels(): Promise<void> {
       listHarnessEngines().catch(() => []).then((rows) => {
         if (isCurrent()) engines.value = rows
       }),
-      engineId !== 'claude' ? loadRecentModels() : Promise.resolve([]),
+      engineId !== 'claude' || restoreSelectionPending ? loadRecentModels() : Promise.resolve([]),
     ])
     if (!isCurrent()) return
     engineCatalog.value = models
+    if (restoreSelectionPending && revision === selectionRevision) {
+      restoreSelectionPending = false
+      const recent = recentEntries.value[0]
+      if (recent && !engineUnavailable(recent.harnessId)) {
+        restoredSelection = recent
+        localMode.value = recent.mode
+        emit('update:mode', localMode.value)
+        if (recent.harnessId !== engineId) {
+          const draftChanged = prompt.value !== promptBeforeLoad
+          if (draftChanged) clearCache()
+          localHarnessId.value = recent.harnessId
+          localModel.value = ''
+          localEffort.value = ''
+          emit('update:harnessId', localHarnessId.value)
+          emit('update:model', '')
+          emit('update:effort', '')
+          if (draftChanged) saveToCache(prompt.value)
+          else prompt.value = loadFromCache()
+          applyEngineDefaultsAfterCatalog = true
+          void loadProviderModels()
+          return
+        }
+      }
+    }
+    if (restoredSelection && revision === selectionRevision) {
+      const rememberedModel = models.find((model) => model.id === restoredSelection?.id)
+      if (rememberedModel) {
+        localModel.value = rememberedModel.id
+        localEffort.value = snapEffort(rememberedModel, restoredSelection.effort)
+        emit('update:model', localModel.value)
+        emit('update:effort', localEffort.value)
+        applyEngineDefaultsAfterCatalog = false
+        harness.markComposerDirty()
+      }
+      restoredSelection = undefined
+    }
     providerMissing.value = engineUnavailable(engineId) || catalog.value.length === 0
     if (
       engineId !== 'native' &&
@@ -586,13 +630,20 @@ watch(
 
 watch(
   () => `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}`,
-  () => void loadProviderModels(),
+  () => {
+    restoreSelectionPending = canRestoreSelection()
+    restoredSelection = undefined
+    void loadProviderModels()
+  },
 )
 
 watch(
   () => props.sessionId,
   () => {
     if (!isScheduledTask.value) prompt.value = loadFromCache()
+    restoreSelectionPending = canRestoreSelection()
+    restoredSelection = undefined
+    if (restoreSelectionPending) void loadProviderModels()
   },
 )
 
@@ -715,6 +766,9 @@ function setHarnessMode(harnessId: HarnessId, mode: HarnessSessionMode): void {
     openProviderSettings()
     return
   }
+  selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
   const harnessChanged = harnessId !== localHarnessId.value
   // The visible draft follows a manual engine change. Move its cache entry
   // too, otherwise sending only clears the new key and leaves stale text behind.
@@ -748,12 +802,17 @@ function setMode(mode: HarnessSessionMode): void {
 }
 
 function toggleMode(): void {
+  selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
   setMode(localMode.value === 'build' ? 'plan' : 'build')
 }
 
 function setModel(value: string): void {
   if (!catalog.value.some((model) => model.id === value)) return
   selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
   applyEngineDefaultsAfterCatalog = false
   localModel.value = value
   emit('update:model', value)
@@ -762,6 +821,8 @@ function setModel(value: string): void {
 
 function setEffort(value: string): void {
   selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
   applyEngineDefaultsAfterCatalog = false
   localEffort.value = value
   emit('update:effort', value)

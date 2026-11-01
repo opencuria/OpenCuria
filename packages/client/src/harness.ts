@@ -238,11 +238,16 @@ export function createHarnessApi(getApi: () => ApiClient) {
       request<AgentConfig[]>("PUT", "/agent-configs/", { configs }, signal),
     listRecentModels: (signal?: AbortSignal) =>
       request<RecentModelUsage[]>("GET", "/recent-models/", undefined, signal),
-    saveRecentModel: (model: string, effort = "", signal?: AbortSignal) =>
+    saveRecentModel: (
+      model: string,
+      effort = "",
+      signal?: AbortSignal,
+      selection: Pick<RecentModelUsage, "harness_id" | "mode"> = {},
+    ) =>
       request<RecentModelUsage>(
         "PUT",
         "/recent-models/",
-        { model, effort },
+        { model, effort, ...selection },
         signal,
       ),
     getDefaultConfig: (signal?: AbortSignal) =>

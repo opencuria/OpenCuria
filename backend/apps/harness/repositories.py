@@ -227,6 +227,8 @@ class RecentModelRepository:
         *,
         model: str,
         effort: str = "",
+        harness_id: str = "native",
+        mode: str = "build",
     ) -> RecentModel | None:
         """Upsert one recent-model row (LRU); ignore blank model ids.
 
@@ -241,9 +243,13 @@ class RecentModelRepository:
             organization_id=org_pk,
             user_id=getattr(user, "id", user),
             model=model_id[:255],
-            defaults={"effort": effort_token[:50]},
+            defaults={
+                "effort": effort_token[:50],
+                "harness_id": harness_id,
+                "mode": mode,
+            },
         )
-        # Bump last_used_at explicitly: update_or_create only touches `effort`.
+        # Bump recency explicitly after updating the saved selection.
         RecentModel.objects.filter(pk=row.pk).update(last_used_at=timezone.now())
         row.refresh_from_db()
         # Prune overflow (keep newest MAX_ENTRIES).

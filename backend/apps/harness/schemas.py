@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ninja import Schema
 from pydantic import ConfigDict, Field
@@ -264,10 +264,12 @@ class AgentConfigOut(Schema):
 
 
 class RecentModelOut(Schema):
-    """One recently used composer model with its last-used effort."""
+    """One recently used composer model with its effort and agent selection."""
 
     model: str
     effort: str = ""
+    harness_id: Literal["native", "claude", "codex"] = "native"
+    mode: Literal["build", "plan"] = "build"
     last_used_at: datetime
 
 
@@ -276,6 +278,8 @@ class RecentModelSaveIn(Schema):
 
     model: str
     effort: str = ""
+    harness_id: Literal["native", "claude", "codex"] = "native"
+    mode: Literal["build", "plan"] = "build"
 
 
 class SubagentConfigIn(Schema):

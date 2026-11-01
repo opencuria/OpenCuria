@@ -75,10 +75,19 @@ def _client(*, user, org, permissions: list[str]) -> Client:
     )
 
 
-def _put(client: Client, model: str, effort: str = ""):
+def _put(
+    client: Client,
+    model: str,
+    effort: str = "",
+    *,
+    harness_id: str = "native",
+    mode: str = "build",
+):
     return client.put(
         RECENT_URL,
-        data=json.dumps({"model": model, "effort": effort}),
+        data=json.dumps(
+            {"model": model, "effort": effort, "harness_id": harness_id, "mode": mode}
+        ),
         content_type="application/json",
     )
 
@@ -123,6 +132,59 @@ def test_recent_models_put_upsert_and_ordering(recent_setup):
         ).count()
         == 2
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("harness_id", ["native", "claude", "codex"])
+def test_recent_models_remember_agent_and_mode(recent_setup, harness_id):
+    """Remember the full selection, including updates for the same model."""
+    client = _client(
+        user=recent_setup["owner"], org=recent_setup["org"], permissions=BOTH
+    )
+    response = _put(
+        client, "shared/model", "high", harness_id=harness_id, mode="plan"
+    )
+    assert response.status_code == 200
+    latest = client.get(RECENT_URL).json()[0]
+    assert latest["harness_id"] == harness_id
+    assert latest["mode"] == "plan"
+    assert latest["effort"] == "high"
+
+    assert _put(client, "shared/model", "low").status_code == 200
+    rows = client.get(RECENT_URL).json()
+    assert len(rows) == 1
+    assert rows[0]["harness_id"] == "native"
+    assert rows[0]["mode"] == "build"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("harness_id", "mode"), [("unknown", "build"), ("codex", "unknown")]
+)
+def test_recent_models_reject_invalid_agent_selection(recent_setup, harness_id, mode):
+    """Invalid selections never replace the saved preference."""
+    client = _client(
+        user=recent_setup["owner"], org=recent_setup["org"], permissions=BOTH
+    )
+    response = _put(client, "model", harness_id=harness_id, mode=mode)
+    assert response.status_code == 422
+    assert client.get(RECENT_URL).json() == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_recent_models_legacy_save_defaults_to_native_build(recent_setup):
+    """Older clients can keep saving just model and effort."""
+    client = _client(
+        user=recent_setup["owner"], org=recent_setup["org"], permissions=BOTH
+    )
+    response = client.put(
+        RECENT_URL,
+        data=json.dumps({"model": "model", "effort": "high"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response.json()["harness_id"] == "native"
+    assert response.json()["mode"] == "build"
 
 
 @pytest.mark.django_db(transaction=True)

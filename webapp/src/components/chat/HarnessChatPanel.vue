@@ -811,6 +811,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :mode="composerMode"
           :harness-id="composerHarnessId"
           :engine-locked="Boolean(harness.activeSessionId)"
+          :restore-last-selection="!harness.activeSessionId"
           :session-model="activeSession?.model"
           :model="harness.modelInput"
           :effort="harness.effortInput"

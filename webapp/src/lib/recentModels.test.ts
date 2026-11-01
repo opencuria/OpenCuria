@@ -65,6 +65,7 @@ describe('recentModels', () => {
     expect(entries.map((entry) => entry.id)).toEqual(['b', 'a', 'c', 'd', 'e', 'f'])
     expect(recentEffortFor('b')).toBe('high')
     expect(recentEffortFor('missing')).toBe('')
+    expect(entries[0]).toMatchObject({ harnessId: 'native', mode: 'build' })
   })
 
   it('returns [] when the fetch fails', async () => {
@@ -102,7 +103,9 @@ describe('recentModels', () => {
     expect(useRecentModels().entries.value.map((entry) => entry.id)).toEqual(['b', 'a'])
     expect(recentEffortFor('b')).toBe('high')
     await vi.waitFor(() => {
-      expect(saveMock).toHaveBeenCalledWith('b', 'high')
+      expect(saveMock).toHaveBeenCalledWith('b', 'high', undefined, {
+        harness_id: 'native', mode: 'build',
+      })
     })
 
     // Save failures never throw (send must not break).
@@ -114,5 +117,49 @@ describe('recentModels', () => {
     recordRecentModelUsage('   ')
     expect(useRecentModels().entries.value).toEqual([])
     expect(saveMock).not.toHaveBeenCalled()
+  })
+
+  it('remembers the full last-used agent selection', async () => {
+    listMock.mockResolvedValue([])
+    await loadRecentModels()
+    recordRecentModelUsage('model', 'High', 'codex', 'plan')
+    expect(useRecentModels().entries.value[0]).toEqual({
+      id: 'model', effort: 'high', harnessId: 'codex', mode: 'plan',
+    })
+    await vi.waitFor(() => {
+      expect(saveMock).toHaveBeenCalledWith('model', 'high', undefined, {
+        harness_id: 'codex', mode: 'plan',
+      })
+    })
+  })
+
+  it('does not reuse preferences or pending responses across organizations', async () => {
+    let resolveFirst!: (rows: harnessApi.RecentModelUsage[]) => void
+    listMock.mockImplementationOnce(() => new Promise(resolve => { resolveFirst = resolve }))
+    const first = loadRecentModels()
+    localStorage.setItem('kern_active_org_id', 'other-org')
+    try {
+      listMock.mockResolvedValueOnce([
+        { model: 'other', effort: 'low', harness_id: 'native', mode: 'build', last_used_at: '' },
+      ])
+      await loadRecentModels()
+      resolveFirst([
+        { model: 'private', effort: 'high', harness_id: 'codex', mode: 'plan', last_used_at: '' },
+      ])
+      await first
+      expect(useRecentModels().entries.value.map(entry => entry.id)).toEqual(['other'])
+    } finally {
+      localStorage.removeItem('kern_active_org_id')
+    }
+  })
+
+  it('keeps a successful send newer than an in-flight preferences load', async () => {
+    let resolve!: (rows: harnessApi.RecentModelUsage[]) => void
+    listMock.mockImplementationOnce(() => new Promise(done => { resolve = done }))
+    const loading = loadRecentModels()
+    recordRecentModelUsage('new', 'high', 'codex', 'plan')
+    resolve([{ model: 'old', effort: 'low', last_used_at: '' }])
+    await loading
+    expect(useRecentModels().entries.value[0]).toMatchObject({ id: 'new', harnessId: 'codex', mode: 'plan' })
   })
 })

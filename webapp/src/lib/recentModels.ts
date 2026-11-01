@@ -1,5 +1,5 @@
 /**
- * Recent composer models: server-persisted usage (model + last effort).
+ * Recent composer selections: server-persisted model, effort, engine and mode.
  *
  * Written on successful sends via `saveRecentModel` (fire-and-forget, never
  * blocks sending); read once per composer mount and mirrored into
@@ -10,18 +10,30 @@
 import { ref } from 'vue'
 
 import type { ProviderModel } from './harnessModels'
+import type { HarnessId, HarnessSessionMode } from '@/types/harness'
 import { listRecentModels, saveRecentModel } from '@/services/harness.api'
+import { providerCatalogContext } from './providerCatalog'
 
 export const MAX_RECENT_MODELS = 6
 
 export interface RecentModelEntry {
   id: string
   effort: string
+  harnessId: HarnessId
+  mode: HarnessSessionMode
 }
 
 /** In-memory mirror of the server list (single-flight load, shared). */
 const entries = ref<RecentModelEntry[]>([])
 let inflight: Promise<RecentModelEntry[]> | null = null
+let cachedContext = ''
+
+function ensureContext(): void {
+  const context = providerCatalogContext()
+  if (context === cachedContext) return
+  resetRecentModelsCache()
+  cachedContext = context
+}
 
 function normalize(rows: RecentModelUsageRow[]): RecentModelEntry[] {
   const seen = new Set<string>()
@@ -30,7 +42,12 @@ function normalize(rows: RecentModelUsageRow[]): RecentModelEntry[] {
     const id = (row?.model ?? '').trim()
     if (!id || seen.has(id)) continue
     seen.add(id)
-    out.push({ id, effort: (row?.effort ?? '').trim().toLowerCase() })
+    out.push({
+      id,
+      effort: (row?.effort ?? '').trim().toLowerCase(),
+      harnessId: row.harness_id === 'claude' || row.harness_id === 'codex' ? row.harness_id : 'native',
+      mode: row.mode === 'plan' ? 'plan' : 'build',
+    })
     if (out.length >= MAX_RECENT_MODELS) break
   }
   return out
@@ -39,21 +56,26 @@ function normalize(rows: RecentModelUsageRow[]): RecentModelEntry[] {
 interface RecentModelUsageRow {
   model?: string
   effort?: string
-}
-
-async function fetchRecents(): Promise<RecentModelEntry[]> {
-  const rows = await listRecentModels()
-  entries.value = normalize(Array.isArray(rows) ? rows : [])
-  return entries.value
+  harness_id?: HarnessId
+  mode?: HarnessSessionMode
 }
 
 /** Load the user's recent models (coalesced; failures yield []). */
 export function loadRecentModels(): Promise<RecentModelEntry[]> {
+  ensureContext()
   if (inflight == null) {
-    inflight = fetchRecents().catch(() => {
-      entries.value = []
-      return entries.value
-    })
+    const entriesBeforeLoad = entries.value
+    const request: Promise<RecentModelEntry[]> = listRecentModels()
+      .then((rows) => {
+        const normalized = normalize(Array.isArray(rows) ? rows : [])
+        if (inflight === request && entries.value === entriesBeforeLoad) entries.value = normalized
+        return inflight === request ? entries.value : normalized
+      })
+      .catch(() => {
+        if (inflight === request && entries.value === entriesBeforeLoad) entries.value = []
+        return []
+      })
+    inflight = request
   }
   return inflight
 }
@@ -103,23 +125,30 @@ export function recentCatalogModels(models: ProviderModel[]): ProviderModel[] {
  * Record one usage after a successful send. Updates the local mirror
  * optimistically (LRU) and persists server-side without blocking.
  */
-export function recordRecentModelUsage(modelId: string, effort = ''): void {
+export function recordRecentModelUsage(
+  modelId: string,
+  effort = '',
+  harnessId: HarnessId = 'native',
+  mode: HarnessSessionMode = 'build',
+): void {
   const id = (modelId ?? '').trim()
   if (!id) return
+  ensureContext()
   const normalizedEffort = (effort ?? '').trim().toLowerCase()
   entries.value = [
-    { id, effort: normalizedEffort },
+    { id, effort: normalizedEffort, harnessId, mode },
     ...entries.value.filter((entry) => entry.id !== id),
   ].slice(0, MAX_RECENT_MODELS)
   // Fire-and-forget: a failed save must never break sending. The
   // Promise.resolve guard also tolerates mocked clients in tests.
   void Promise.resolve()
-    .then(() => saveRecentModel(id, normalizedEffort))
+    .then(() => saveRecentModel(id, normalizedEffort, undefined, { harness_id: harnessId, mode }))
     .catch(() => undefined)
 }
 
-/** Drop caches (tests only). */
+/** Drop the current user-context cache. */
 export function resetRecentModelsCache(): void {
   entries.value = []
   inflight = null
+  cachedContext = ''
 }

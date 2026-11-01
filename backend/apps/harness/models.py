@@ -771,12 +771,13 @@ class Todo(models.Model):
 
 class RecentModel(models.Model):
     """
-    Per-user recently used composer model (+ last effort), org-scoped.
+    Per-user recently used composer model and agent selection, org-scoped.
 
     Written on successful chat sends (fire-and-forget); read to render the
     composer's Recent list (max. 6 in the UI). One row per (organization,
     user, model); ``effort`` is denormalized so the picker can restore the
-    last-used effort per model without joining message history.
+    last-used effort per model without joining message history. The newest
+    row also supplies the engine and mode for new chats.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -802,6 +803,8 @@ class RecentModel(models.Model):
         blank=True,
         help_text="Last-used reasoning effort for this model.",
     )
+    harness_id = models.CharField(max_length=20, default="native")
+    mode = models.CharField(max_length=10, default="build")
     last_used_at = models.DateTimeField(
         auto_now=True,
         db_index=True,
