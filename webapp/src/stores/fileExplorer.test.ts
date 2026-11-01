@@ -3,15 +3,15 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { useFileExplorerStore } from './fileExplorer'
 import { useEditorStore } from './editor'
-import { downloadWorkspaceFile, sendFilesList } from '@/services/socket'
+import { downloadWorkspaceFile, listWorkspaceFiles, findWorkspaceFiles } from '@/services/socket'
 import { readEditorFile } from '@/services/editor.api'
 import { flushPromises } from '@vue/test-utils'
 import { toast } from 'vue-sonner'
 import type { FileContentResult, FileDownloadResult } from '@opencuria/client/types'
 
 vi.mock('@/services/socket', () => ({
-  sendFilesList: vi.fn(),
-  sendFilesFind: vi.fn(),
+  listWorkspaceFiles: vi.fn(),
+  findWorkspaceFiles: vi.fn(),
   downloadWorkspaceFile: vi.fn(),
   sendFilesUpload: vi.fn(),
 }))
@@ -58,6 +58,12 @@ beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
   vi.mocked(readEditorFile).mockReset()
+  vi.mocked(listWorkspaceFiles).mockResolvedValue({
+    workspace_id: WS_ID,
+    request_id: 'list',
+    path: '/workspace',
+    entries: [],
+  })
   vi.useRealTimers()
   // jsdom has no object-URL support.
   Object.assign(URL, {
@@ -78,77 +84,81 @@ afterEach(() => {
   }
 })
 
-describe('fileExplorer correlated directory listings', () => {
-  it('returns correlated entries without mutating the shared explorer tree', async () => {
-    const store = useFileExplorerStore()
-    const result = store.fetchDirectoryEntries(WS_ID, '/workspace')
-    const requestId =
-      vi.mocked(sendFilesList).mock.calls[vi.mocked(sendFilesList).mock.calls.length - 1]![1]
+describe('fileExplorer directory and search state', () => {
+  it('keeps isolated listings out of the tree and applies explorer listings', async () => {
     const entries = [
       { name: 'task.txt', path: '/workspace/task.txt', type: 'file' as const, size: 4 },
     ]
-
-    store.handleListResult(requestId, '/workspace', entries, undefined, 'ws-other')
-    expect(store.tree).toEqual([])
-    store.handleListResult(requestId, '/workspace', entries, undefined, WS_ID)
-
-    await expect(result).resolves.toEqual(entries)
-    expect(store.tree).toEqual([])
-  })
-
-  it('fails closed on directory permission errors and clears pending state on abort', async () => {
+    vi.mocked(listWorkspaceFiles).mockResolvedValue({
+      workspace_id: WS_ID,
+      request_id: 'list',
+      path: '/workspace',
+      entries,
+    })
     const store = useFileExplorerStore()
-    const failed = store.fetchDirectoryEntries(WS_ID, '/workspace/.opencuria')
-    const failedId =
-      vi.mocked(sendFilesList).mock.calls[vi.mocked(sendFilesList).mock.calls.length - 1]![1]
-    store.handleListResult(failedId, '/workspace/.opencuria', [], 'Permission denied', WS_ID)
-    await expect(failed).resolves.toBeNull()
-
-    const controller = new AbortController()
-    const aborted = store.fetchDirectoryEntries(WS_ID, '/workspace', { signal: controller.signal })
-    controller.abort()
-    await expect(aborted).resolves.toBeNull()
+    await expect(store.fetchDirectoryEntries(WS_ID, '/workspace')).resolves.toEqual(entries)
+    expect(store.tree).toEqual([])
+    await store.fetchDirectory(WS_ID, '/workspace')
+    expect(store.tree).toMatchObject(entries)
+    expect(store.loadingPaths.size).toBe(0)
   })
 
-  it('resolves timed out listings as unavailable and ignores late results', async () => {
-    vi.useFakeTimers()
-    try {
-      const store = useFileExplorerStore()
-      const result = store.fetchDirectoryEntries(WS_ID, '/workspace')
-      const requestId =
-        vi.mocked(sendFilesList).mock.calls[vi.mocked(sendFilesList).mock.calls.length - 1]![1]
-      vi.advanceTimersByTime(30_001)
-      await expect(result).resolves.toBeNull()
-      store.handleListResult(requestId, '/workspace', [], undefined, WS_ID)
-      expect(store.tree).toEqual([])
-    } finally {
-      vi.useRealTimers()
-    }
+  it('settles failed listings and searches without leaving loading state', async () => {
+    vi.mocked(listWorkspaceFiles).mockRejectedValue(new Error('Permission denied'))
+    vi.mocked(findWorkspaceFiles).mockRejectedValue(new Error('Disconnected'))
+    const store = useFileExplorerStore()
+    await expect(store.fetchDirectoryEntries(WS_ID, '/workspace')).resolves.toBeNull()
+    await store.fetchDirectory(WS_ID, '/workspace')
+    expect(store.loadingPaths.size).toBe(0)
+    await expect(store.findFiles(WS_ID, 'task')).resolves.toEqual([])
+  })
+
+  it('forwards caller cancellation and discards responses arriving after reset', async () => {
+    const listing = deferred<Awaited<ReturnType<typeof listWorkspaceFiles>>>()
+    vi.mocked(listWorkspaceFiles).mockReturnValue(listing.promise)
+    const store = useFileExplorerStore()
+    const controller = new AbortController()
+    const isolated = store.fetchDirectoryEntries(WS_ID, '/workspace', { signal: controller.signal })
+    const signal = vi.mocked(listWorkspaceFiles).mock.calls[0]![2]!
+    controller.abort()
+    expect(signal.aborted).toBe(true)
+    const explorer = store.fetchDirectory(WS_ID, '/workspace')
+    store.reset()
+    expect(vi.mocked(listWorkspaceFiles).mock.calls[1]![2]!.aborted).toBe(true)
+    listing.resolve({
+      workspace_id: WS_ID,
+      request_id: 'list',
+      path: '/workspace',
+      entries: [{ name: 'stale.txt', path: '/workspace/stale.txt', type: 'file', size: 1 }],
+    })
+    await expect(isolated).resolves.toBeNull()
+    await explorer
+    expect(store.tree).toEqual([])
   })
 })
 
 describe('fileExplorer tracked upload cancellation', () => {
   it('deduplicates terminal upload results until TTL expiry and refreshes once', async () => {
     const store = useFileExplorerStore()
-    const refresh = vi.mocked(sendFilesList)
+    const refresh = vi.mocked(listWorkspaceFiles)
     const upload = store.trackAndUpload(WS_ID, 'upload-once', '/workspace', 'once.txt', 'eA==')
 
     expect(
       store.handleUploadResult('unknown-from-other-client', '/workspace', 'success', WS_ID),
     ).toBe(false)
     expect(refresh).not.toHaveBeenCalled()
-    vi.mocked(sendFilesList).mockClear()
+    vi.mocked(listWorkspaceFiles).mockClear()
     expect(store.handleUploadResult('upload-once', '/workspace', 'success', WS_ID)).toBe(true)
     await upload
     expect(store.handleUploadResult('upload-once', '/workspace', 'success', WS_ID)).toBe(false)
     expect(refresh).toHaveBeenCalledTimes(1)
-    expect(refresh).toHaveBeenCalledWith(WS_ID, expect.any(String), '/workspace')
+    expect(refresh).toHaveBeenCalledWith(WS_ID, '/workspace', expect.any(AbortSignal))
   })
 
   it('deduplicates errors and keeps cancelled tombstones through repeated late results', async () => {
     const { toast } = await import('vue-sonner')
     const store = useFileExplorerStore()
-    const refresh = vi.mocked(sendFilesList)
+    const refresh = vi.mocked(listWorkspaceFiles)
     refresh.mockClear()
     const failed = store.trackAndUpload(
       WS_ID,
@@ -227,7 +237,7 @@ describe('fileExplorer tracked upload cancellation', () => {
     expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
 
     store.handleUploadResult('upload-owned', '/workspace', 'success', WS_ID)
-    expect(vi.mocked(sendFilesList)).not.toHaveBeenCalled()
+    expect(vi.mocked(listWorkspaceFiles)).not.toHaveBeenCalled()
     expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
 
     store.cancelUpload('upload-other')

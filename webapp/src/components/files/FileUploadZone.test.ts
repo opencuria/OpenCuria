@@ -9,8 +9,8 @@ import { useNotificationStore } from '@/stores/notifications'
 import { sendFilesUpload } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
-  sendFilesList: vi.fn(),
-  sendFilesFind: vi.fn(),
+  listWorkspaceFiles: vi.fn(async () => ({ entries: [] })),
+  findWorkspaceFiles: vi.fn(),
   sendFilesUpload: vi.fn(),
 }))
 

@@ -8,7 +8,7 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useNotificationStore } from '@/stores/notifications'
 import { CHAT_UPLOAD_DIR } from '@/lib/chatUpload'
-import { sendFilesList } from '@/services/socket'
+import { listWorkspaceFiles } from '@/services/socket'
 
 const listeners: Partial<Record<string, Array<(data: unknown) => void>>> = {}
 
@@ -17,7 +17,7 @@ function emitEvent(event: string, data: unknown): void {
 }
 
 vi.mock('@/services/socket', () => ({
-  sendFilesList: vi.fn(),
+  listWorkspaceFiles: vi.fn(async () => ({ entries: [] })),
   onEvent: vi.fn((event: string, callback: (data: unknown) => void) => {
     listeners[event] ??= []
     listeners[event]!.push(callback)
@@ -43,46 +43,19 @@ const FileEventsHost = defineComponent({
 describe('useWorkspaceFileEvents', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    vi.clearAllMocks()
     for (const key of Object.keys(listeners)) {
       delete listeners[key]
     }
   })
 
-  it('routes matching files:list_result events to the file explorer store', () => {
-    const fileExplorerStore = useFileExplorerStore()
-    const spy = vi.spyOn(fileExplorerStore, 'handleListResult')
-    mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
-
-    emitEvent('files:list_result', {
-      workspace_id: 'ws-1',
-      request_id: 'req-1',
-      path: '/workspace',
-      entries: [{ name: 'README.md', path: '/workspace/README.md', type: 'file', size: 12 }],
-    })
-
-    expect(spy).toHaveBeenCalledWith(
-      'req-1',
-      '/workspace',
-      [{ name: 'README.md', path: '/workspace/README.md', type: 'file', size: 12 }],
-      undefined,
-      'ws-1',
-      true,
-    )
-  })
-
-  it('ignores file events for a different workspace', () => {
-    const fileExplorerStore = useFileExplorerStore()
-    const spy = vi.spyOn(fileExplorerStore, 'handleListResult')
-    mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
-
-    emitEvent('files:list_result', {
-      workspace_id: 'ws-other',
-      request_id: 'req-2',
-      path: '/workspace',
-      entries: [],
-    })
-
-    expect(spy).not.toHaveBeenCalled()
+  it('ignores upload results for a different workspace and detaches on unmount', () => {
+    const handler = vi.spyOn(useFileExplorerStore(), 'handleUploadResult')
+    const host = mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
+    emitEvent('files:upload_result', { workspace_id: 'ws-other', request_id: 'other' })
+    expect(handler).not.toHaveBeenCalled()
+    host.unmount()
+    expect(listeners).toEqual({})
   })
 
   it('does not refresh the shared explorer after an isolated scheduled upload', async () => {
@@ -152,7 +125,7 @@ describe('useWorkspaceFileEvents', () => {
       false,
       false,
     ])
-    expect(vi.mocked(sendFilesList)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(listWorkspaceFiles)).toHaveBeenCalledTimes(1)
     expect(imageResult).toHaveBeenCalledTimes(4)
     expect(images.getUploadStatus('/workspace/shared.txt')).toBeNull()
     expect(notificationSpy).not.toHaveBeenCalled()

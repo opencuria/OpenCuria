@@ -1,4 +1,4 @@
-/** Route directory, search and upload events; the shared client owns reads/downloads. */
+/** Route upload UI events; the shared client owns directory/search/read/download RPCs. */
 import { onMounted, onUnmounted, toValue, type MaybeRefOrGetter } from 'vue'
 import { onEvent } from '@/services/socket'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
@@ -14,31 +14,6 @@ export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): v
   }
 
   onMounted(() => {
-    cleanupFns.push(
-      onEvent('files:list_result', (data) => {
-        if (data.workspace_id !== currentId()) return
-        fileExplorerStore.handleListResult(
-          data.request_id,
-          data.path,
-          data.entries,
-          data.error,
-          data.workspace_id,
-          true,
-        )
-      }),
-    )
-
-    cleanupFns.push(
-      onEvent('files:find_result', (data) => {
-        if (data.workspace_id !== currentId()) return
-        fileExplorerStore.handleFindResult(
-          data.request_id,
-          (data.paths ?? []).map((entry) => entry.path),
-          data.error,
-        )
-      }),
-    )
-
     cleanupFns.push(
       onEvent('files:upload_result', (data) => {
         if (data.workspace_id !== currentId()) return

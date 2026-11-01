@@ -772,6 +772,10 @@ describe("realtime and file transfers", () => {
     ["read", true],
     ["download", false],
     ["download", true],
+    ["list", false],
+    ["list", true],
+    ["find", false],
+    ["find", true],
   ] as const)(
     "cancels %s and releases its room (already aborted: %s)",
     async (kind, alreadyAborted) => {
@@ -788,31 +792,38 @@ describe("realtime and file transfers", () => {
       socket.connect();
       const controller = new AbortController();
       if (alreadyAborted) controller.abort();
-      const read =
-        kind === "read"
-          ? client.files.readFile(
-              "ws-1",
-              "/workspace/image.png",
-              undefined,
-              controller.signal,
-            )
-          : client.files.downloadFile(
-              "ws-1",
-              "/workspace/image.png",
-              controller.signal,
-            );
+      const read = {
+        read: () =>
+          client.files.readFile(
+            "ws-1",
+            "/workspace/image.png",
+            undefined,
+            controller.signal,
+          ),
+        download: () =>
+          client.files.downloadFile(
+            "ws-1",
+            "/workspace/image.png",
+            controller.signal,
+          ),
+        list: () =>
+          client.files.listFiles("ws-1", "/workspace", controller.signal),
+        find: () =>
+          client.files.findFiles("ws-1", "image", 50, controller.signal),
+      }[kind]();
       if (!alreadyAborted) {
-        socket.trigger(
-          `files:${kind === "read" ? "content" : "download"}_chunk`,
-          {
-            workspace_id: "ws-1",
-            request_id: "cancel-read",
-            path: "/workspace/image.png",
-            index: 0,
-            total_chunks: 1,
-            content: "YWJj",
-          },
-        );
+        if (kind === "read" || kind === "download")
+          socket.trigger(
+            `files:${kind === "read" ? "content" : "download"}_chunk`,
+            {
+              workspace_id: "ws-1",
+              request_id: "cancel-read",
+              path: "/workspace/image.png",
+              index: 0,
+              total_chunks: 1,
+              content: "YWJj",
+            },
+          );
         controller.abort();
         expect(socket.emitted.at(-1)?.event).toBe(
           "frontend:unsubscribe_workspace",
@@ -821,19 +832,16 @@ describe("realtime and file transfers", () => {
         expect(socket.emitted).toHaveLength(0);
       }
       await expect(read).rejects.toMatchObject({ code: "cancelled" });
-      socket.trigger(
-        `files:${kind === "read" ? "content" : "download"}_result`,
-        {
-          workspace_id: "ws-1",
-          request_id: "cancel-read",
-          path: "/workspace/image.png",
-          content: "",
-          size: 3,
-          truncated: false,
-          chunked: true,
-          total_chunks: 1,
-        },
-      );
+      socket.trigger(`files:${kind === "read" ? "content" : kind}_result`, {
+        workspace_id: "ws-1",
+        request_id: "cancel-read",
+        path: "/workspace/image.png",
+        content: "",
+        size: 3,
+        truncated: false,
+        chunked: true,
+        total_chunks: 1,
+      });
       client.realtime.dispose();
     },
   );

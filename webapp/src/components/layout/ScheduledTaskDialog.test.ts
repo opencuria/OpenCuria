@@ -40,8 +40,8 @@ vi.mock('@/lib/recentModels', () => ({
 }))
 vi.mock('@/services/socket', () => ({
   sendFilesUpload: vi.fn(),
-  sendFilesList: vi.fn(),
-  sendFilesFind: vi.fn(),
+  listWorkspaceFiles: vi.fn(async () => ({ entries: [] })),
+  findWorkspaceFiles: vi.fn(),
   onEvent: vi.fn(() => () => {}),
   subscribeToWorkspace: vi.fn(() => () => {}),
 }))

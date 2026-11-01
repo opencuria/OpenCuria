@@ -406,34 +406,7 @@ export interface FileNode {
   isExpanded?: boolean
 }
 
-export interface FileEntryRaw {
-  name: string
-  path: string
-  type: 'file' | 'directory'
-  size: number
-}
-
-export interface FilesListResultEvent {
-  workspace_id: string
-  request_id: string
-  path: string
-  entries: FileEntryRaw[]
-  error?: string
-}
-
-export interface FilesFindPath {
-  name: string
-  path: string
-}
-
-export interface FilesFindResultEvent {
-  workspace_id: string
-  request_id: string
-  query: string
-  paths: FilesFindPath[]
-  truncated?: boolean
-  error?: string
-}
+export type { FileEntry as FileEntryRaw } from '@opencuria/client/types'
 
 export interface FilesUploadResultEvent {
   workspace_id: string

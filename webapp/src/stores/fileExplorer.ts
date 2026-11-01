@@ -6,17 +6,11 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { FileNode, FileEntryRaw } from '@/types'
-import { sendFilesList, sendFilesFind, downloadWorkspaceFile } from '@/services/socket'
+import { listWorkspaceFiles, findWorkspaceFiles, downloadWorkspaceFile } from '@/services/socket'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useEditorStore } from '@/stores/editor'
-
-let requestCounter = 0
-
-function nextRequestId(): string {
-  return `files-${++requestCounter}-${Date.now()}`
-}
 
 /** Delay before a download object URL is revoked (lets the click dispatch). */
 const DOWNLOAD_REVOKE_DELAY_MS = 1000
@@ -26,7 +20,7 @@ const UPLOAD_TERMINAL_TTL_MS = 30_000
 /** Bound terminal upload bookkeeping if a result stream is unusually busy. */
 const MAX_TERMINAL_UPLOAD_IDS = 500
 
-/** How long a directory, search or upload request may stay pending. */
+/** How long an upload request may stay pending. */
 const REQUEST_TIMEOUT_MS = 30_000
 
 function formatBytes(size: number): string {
@@ -46,23 +40,11 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   // Pending request callbacks: request_id → resolver
   const pendingRequests = ref<Map<string, (data: unknown) => void>>(new Map())
-  const pendingDirectoryRequests = new Map<
-    string,
-    {
-      workspaceId: string
-      path: string
-      updateTree: boolean
-      onResult: (entries: FileEntryRaw[] | null) => void
-      signal?: AbortSignal
-      abort?: () => void
-    }
-  >()
   const pendingUploadRefreshPolicy = new Map<string, boolean>()
   const pendingUploadRequests = new Map<string, { workspaceId: string; path: string }>()
   const terminalUploadRequestIds = new Map<string, ReturnType<typeof setTimeout>>()
-  const pendingFindRequests = ref<Map<string, (paths: string[]) => void>>(new Map())
 
-  const downloadControllers = new Set<AbortController>()
+  const fileControllers = new Set<AbortController>()
   const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   function clearPendingTimer(requestId: string): void {
@@ -196,8 +178,8 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   }
 
   function reset(): void {
-    for (const controller of downloadControllers) controller.abort()
-    downloadControllers.clear()
+    for (const controller of fileControllers) controller.abort()
+    fileControllers.clear()
     selectedPath.value = null
     tree.value = []
     expandedPaths.value = new Set()
@@ -207,73 +189,34 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     pendingUploadRequests.clear()
     for (const timer of terminalUploadRequestIds.values()) clearTimeout(timer)
     terminalUploadRequestIds.clear()
-    for (const request of pendingDirectoryRequests.values()) {
-      request.signal?.removeEventListener('abort', request.abort!)
-      request.onResult(null)
-    }
-    pendingDirectoryRequests.clear()
-    pendingFindRequests.value.clear()
     for (const timer of pendingTimers.values()) clearTimeout(timer)
     pendingTimers.clear()
   }
 
   // -- socket request helpers -----------------------------------------------
 
-  function requestDirectory(
+  async function requestDirectory(
     workspaceId: string,
     path: string,
     updateTree: boolean,
     signal?: AbortSignal,
   ): Promise<FileEntryRaw[] | null> {
-    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return Promise.resolve(null)
-    if (updateTree) loadingPaths.value.add(path)
-    const requestId = nextRequestId()
-    return new Promise((resolve) => {
-      const request: {
-        workspaceId: string
-        path: string
-        updateTree: boolean
-        onResult: (entries: FileEntryRaw[] | null) => void
-        signal?: AbortSignal
-        abort?: () => void
-      } = {
-        workspaceId,
-        path,
-        updateTree,
-        onResult: resolve,
-        signal,
-      }
-      const abort = (): void => {
-        if (pendingDirectoryRequests.get(requestId) !== request) return
-        pendingDirectoryRequests.delete(requestId)
-        signal?.removeEventListener('abort', abort)
-        clearPendingTimer(requestId)
-        if (updateTree) loadingPaths.value.delete(path)
-        resolve(null)
-      }
-      request.abort = abort
-      if (signal?.aborted) {
-        resolve(null)
-        return
-      }
-      signal?.addEventListener('abort', abort, { once: true })
-      pendingDirectoryRequests.set(requestId, request)
-      armPendingTimer(requestId, () => {
-        pendingDirectoryRequests.delete(requestId)
-        signal?.removeEventListener('abort', abort)
-        if (updateTree) loadingPaths.value.delete(path)
-        resolve(null)
-      })
-      try {
-        sendFilesList(workspaceId, requestId, path)
-      } catch {
-        clearPendingTimer(requestId)
-        pendingDirectoryRequests.delete(requestId)
-        signal?.removeEventListener('abort', abort)
-        if (updateTree) loadingPaths.value.delete(path)
-        resolve(null)
-      }
-    })
+    const controller = new AbortController()
+    fileControllers.add(controller)
+    const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    const loading = loadingPaths.value
+    if (updateTree) loading.add(path)
+    try {
+      const result = await listWorkspaceFiles(workspaceId, path, requestSignal)
+      if (requestSignal.aborted) return null
+      if (updateTree) setTree(path, result.entries)
+      return result.entries
+    } catch {
+      return null
+    } finally {
+      fileControllers.delete(controller)
+      if (updateTree) loading.delete(path)
+    }
   }
 
   function fetchDirectory(workspaceId: string, path: string): Promise<void> {
@@ -289,28 +232,23 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     return requestDirectory(workspaceId, path, false, options.signal)
   }
 
-  function findFiles(workspaceId: string, query: string, limit = 50): Promise<string[]> {
-    const requestId = nextRequestId()
-    return new Promise((resolve) => {
-      pendingFindRequests.value.set(requestId, (paths) => {
-        resolve(paths)
-      })
-      armPendingTimer(requestId, () => {
-        pendingFindRequests.value.delete(requestId)
-        resolve([])
-      })
-      if (!sendFilesFind(workspaceId, requestId, query, limit)) {
-        clearPendingTimer(requestId)
-        pendingFindRequests.value.delete(requestId)
-        resolve([])
-      }
-    })
+  async function findFiles(workspaceId: string, query: string, limit = 50): Promise<string[]> {
+    const controller = new AbortController()
+    fileControllers.add(controller)
+    try {
+      const result = await findWorkspaceFiles(workspaceId, query, limit, controller.signal)
+      return controller.signal.aborted ? [] : result.paths
+    } catch {
+      return []
+    } finally {
+      fileControllers.delete(controller)
+    }
   }
 
   async function downloadFile(workspaceId: string, path: string): Promise<void> {
     if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
     const controller = new AbortController()
-    downloadControllers.add(controller)
+    fileControllers.add(controller)
     try {
       const result = await downloadWorkspaceFile(workspaceId, path, controller.signal)
       if (!controller.signal.aborted) {
@@ -324,7 +262,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
         )
       }
     } finally {
-      downloadControllers.delete(controller)
+      fileControllers.delete(controller)
     }
   }
 
@@ -367,56 +305,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
       if (oldestTimer) clearTimeout(oldestTimer)
       terminalUploadRequestIds.delete(oldestId)
     }
-  }
-
-  function handleListResult(
-    requestId: string,
-    path: string,
-    entries: FileEntryRaw[],
-    error?: string,
-    workspaceId?: string,
-    onlyKnownRequests = false,
-  ): void {
-    const directoryRequest = pendingDirectoryRequests.get(requestId)
-    if (directoryRequest) {
-      if (
-        directoryRequest.path !== path ||
-        (workspaceId !== undefined && directoryRequest.workspaceId !== workspaceId)
-      )
-        return
-      pendingDirectoryRequests.delete(requestId)
-      directoryRequest.signal?.removeEventListener('abort', directoryRequest.abort!)
-      clearPendingTimer(requestId)
-      if (directoryRequest.updateTree) loadingPaths.value.delete(path)
-      const result = error ? null : entries
-      if (directoryRequest.updateTree && result) setTree(path, result)
-      directoryRequest.onResult(result)
-      return
-    }
-    if (onlyKnownRequests) return
-
-    const callback = pendingRequests.value.get(requestId)
-    if (callback) {
-      callback(null)
-      pendingRequests.value.delete(requestId)
-    }
-    clearPendingTimer(requestId)
-    loadingPaths.value.delete(path)
-
-    if (error) {
-      console.warn('[fileExplorer] list error:', error)
-      return
-    }
-
-    setTree(path, entries)
-  }
-
-  function handleFindResult(requestId: string, paths: string[], error?: string): void {
-    const callback = pendingFindRequests.value.get(requestId)
-    if (!callback) return
-    pendingFindRequests.value.delete(requestId)
-    clearPendingTimer(requestId)
-    callback(error ? [] : paths)
   }
 
   function handleUploadResult(
@@ -593,9 +481,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     failUpload,
     formatBytes,
     // event handlers
-    handleListResult,
     shouldRefreshUploadResult,
-    handleFindResult,
     handleUploadResult,
   }
 })

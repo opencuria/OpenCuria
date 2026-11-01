@@ -125,7 +125,12 @@ describe('browser realtime adapter', () => {
     socket.emit.mockClear()
     service.sendTerminalInput('ws-1', 'terminal-1', 'aGk=')
     service.sendFilesUpload('ws-1', 'request-2', '/workspace', 'a.txt', 'aGk=')
-    expect(service.sendFilesFind('ws-1', 'request-3', 'a', 50)).toBe(false)
+    await expect(service.findWorkspaceFiles('ws-1', 'a', 50)).rejects.toMatchObject({
+      code: 'workspace_transitioning',
+    })
+    await expect(service.listWorkspaceFiles('ws-1', '/workspace')).rejects.toMatchObject({
+      code: 'workspace_transitioning',
+    })
     await expect(service.readWorkspaceFile('ws-1', '/workspace/a.png')).rejects.toMatchObject({
       code: 'workspace_transitioning',
     })
@@ -173,6 +178,44 @@ describe('browser realtime adapter', () => {
     store.reset()
     await flushPromises()
     expect(store.isFetchingImage('/workspace/pending.png')).toBe(false)
+    expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
+      workspace_id: 'ws-1',
+    })
+  })
+
+  it('loads directory trees and file suggestions without view listeners and cancels on reset', async () => {
+    const { useFileExplorerStore } = await import('@/stores/fileExplorer')
+    service.connect()
+    socket.connect()
+    const store = useFileExplorerStore()
+    const listing = store.fetchDirectory('ws-1', '/workspace')
+    const request = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_list')![1]
+    const entries = [{ name: 'a.txt', path: '/workspace/a.txt', type: 'file', size: 3 }]
+    socket.trigger('files:list_result', { ...request, entries })
+    await listing
+    expect(store.tree).toMatchObject(entries)
+
+    const search = store.findFiles('ws-1', 'a', 10)
+    const find = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_find')![1]
+    expect(find.limit).toBe(10)
+    socket.trigger('files:find_result', {
+      ...find,
+      paths: [{ name: 'a.txt', path: '/workspace/a.txt' }],
+      truncated: false,
+    })
+    await expect(search).resolves.toEqual(['/workspace/a.txt'])
+
+    const pending = store.fetchDirectory('ws-1', '/workspace')
+    const late = socket.emit.mock.calls
+      .filter(([event]) => event === 'frontend:files_list')
+      .at(-1)![1]
+    const pendingSearch = store.findFiles('ws-1', 'a')
+    store.reset()
+    await pending
+    await expect(pendingSearch).resolves.toEqual([])
+    socket.trigger('files:list_result', { ...late, entries })
+    expect(store.tree).toEqual([])
+    expect(store.loadingPaths.size).toBe(0)
     expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
       workspace_id: 'ws-1',
     })

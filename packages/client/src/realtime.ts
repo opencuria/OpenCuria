@@ -382,14 +382,20 @@ export class RealtimeClient {
   }
 
   /** Search workspace-relative names. Wire `{path,name}` entries become full paths at the client boundary. */
-  async findFiles(workspaceId: string, query: string): Promise<FileFindResult> {
+  async findFiles(
+    workspaceId: string,
+    query: string,
+    limit = 50,
+    signal?: AbortSignal,
+  ): Promise<FileFindResult> {
     const result = await this.requestFile<FileFindResultEvent>(
       "find",
       workspaceId,
       query,
       "files:find_result",
       "frontend:files_find",
-      { query, limit: 50 },
+      { query, limit },
+      signal,
     );
     return {
       ...result,
@@ -402,7 +408,11 @@ export class RealtimeClient {
     };
   }
 
-  listFiles(workspaceId: string, path: string): Promise<FileListResult> {
+  listFiles(
+    workspaceId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<FileListResult> {
     const wantedPath = normalizedPath(path);
     return this.requestFile(
       "list",
@@ -411,6 +421,7 @@ export class RealtimeClient {
       "files:list_result",
       "frontend:files_list",
       { path: wantedPath },
+      signal,
     );
   }
 

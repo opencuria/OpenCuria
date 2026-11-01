@@ -1,6 +1,11 @@
 /** Browser state and frontend commands over the shared realtime transport. */
 import { FileTransferError, RealtimeClient } from '@opencuria/client/realtime'
-import type { FileContentResult, FileDownloadResult } from '@opencuria/client/types'
+import type {
+  FileContentResult,
+  FileDownloadResult,
+  FileListResult,
+  FileFindResult,
+} from '@opencuria/client/types'
 import { planFilesUpload } from '@opencuria/chat-core/fileChunks'
 import { getActivePinia } from 'pinia'
 import { ref } from 'vue'
@@ -8,8 +13,6 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { getConfig } from './config'
 import { getApiClient } from './api'
 import type {
-  FilesListResultEvent,
-  FilesFindResultEvent,
   FilesUploadResultEvent,
   ProcessRemovedEvent,
   ProcessStatusChangedEvent,
@@ -170,8 +173,6 @@ type EventMap = {
   'desktop:started': DesktopStartedEvent
   'desktop:stopped': DesktopStoppedEvent
   'desktop:viewer_released': DesktopViewerReleasedEvent
-  'files:list_result': FilesListResultEvent
-  'files:find_result': FilesFindResultEvent
   'files:upload_result': FilesUploadResultEvent
   'runner:offline': RunnerOfflineEvent
   'runner:online': RunnerOnlineEvent
@@ -275,39 +276,29 @@ export async function readWorkspaceFile(
   return getClient().readFile(workspaceId, path, maxSize, signal)
 }
 
-/**
- * Request a directory listing inside the workspace VM.
- */
-export function sendFilesList(workspaceId: string, requestId: string, path: string): void {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  client?.emit('frontend:files_list', {
-    workspace_id: workspaceId,
-    request_id: requestId,
-    path,
-  })
+/** List a directory through the shared correlated file transport. */
+export async function listWorkspaceFiles(
+  workspaceId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<FileListResult> {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) {
+    throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
+  }
+  return getClient().listFiles(workspaceId, path, signal)
 }
 
-/**
- * Search workspace files for `@` mention autocomplete.
- *
- * Returns false when the socket is not connected so callers can resolve
- * immediately instead of waiting for a result that will never arrive.
- */
-export function sendFilesFind(
+/** Search workspace files through the shared correlated file transport. */
+export async function findWorkspaceFiles(
   workspaceId: string,
-  requestId: string,
   query: string,
   limit: number,
-): boolean {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return false
-  return (
-    client?.emit('frontend:files_find', {
-      workspace_id: workspaceId,
-      request_id: requestId,
-      query,
-      limit,
-    }) ?? false
-  )
+  signal?: AbortSignal,
+): Promise<FileFindResult> {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) {
+    throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
+  }
+  return getClient().findFiles(workspaceId, query, limit, signal)
 }
 
 /**

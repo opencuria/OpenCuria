@@ -12,12 +12,12 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useEditorStore } from '@/stores/editor'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import WorkspaceEditor from '@/components/editor/WorkspaceEditor.vue'
-import { readWorkspaceFile, sendFilesList } from '@/services/socket'
+import { readWorkspaceFile } from '@/services/socket'
 import { readEditorFile } from '@/services/editor.api'
 
 vi.mock('@/services/socket', () => ({
-  sendFilesList: vi.fn(),
-  sendFilesFind: vi.fn(),
+  listWorkspaceFiles: vi.fn(async () => ({ entries: [] })),
+  findWorkspaceFiles: vi.fn(),
   readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
 
@@ -232,10 +232,6 @@ describe('HarnessMarkdown', () => {
     const path = '/workspace/sb-laden-konzept/sb-laden-konzept.pdf'
     const store = useFileExplorerStore()
     useSidePanelStore().close()
-    vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
-      queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
-      return true
-    })
     let resolveRead!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void
     vi.mocked(readWorkspaceFile).mockReturnValueOnce(
       new Promise((resolve) => {
@@ -282,11 +278,6 @@ describe('HarnessMarkdown', () => {
     ['[File](docs/%252e%252e.txt)', '/workspace/docs/%2e%2e.txt'],
     ['[File][doc]\n\n[doc]: /workspace/README.md "Read me"', '/workspace/README.md'],
   ])('reads the exact decoded filename for %s', async (text, path) => {
-    const store = useFileExplorerStore()
-    vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
-      queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
-      return true
-    })
     const wrapper = mountMarkdown(text)
     await wrapper.get('a').trigger('click')
     await flushPromises()
@@ -295,11 +286,6 @@ describe('HarnessMarkdown', () => {
   })
 
   it('shows editor errors when a linked file cannot be read', async () => {
-    const store = useFileExplorerStore()
-    vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
-      queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
-      return true
-    })
     vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error('Permission denied'))
     const wrapper = mountMarkdown('[Missing](missing.pdf)')
     const viewer = mount(WorkspaceEditor)
