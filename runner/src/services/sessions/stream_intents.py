@@ -29,20 +29,14 @@ class StreamIntentStore:
                     connection_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
                     instance_id TEXT NOT NULL,
                     lease_id TEXT NOT NULL, epoch TEXT NOT NULL,
-                    control_path TEXT NOT NULL, state TEXT NOT NULL);
+                    control_path TEXT NOT NULL, state TEXT NOT NULL,
+                    guest_token TEXT);
                 CREATE INDEX IF NOT EXISTS intents_owner ON intents(lease_id);
                 CREATE INDEX IF NOT EXISTS intents_workspace
                     ON intents(workspace_id, instance_id, state);
                 CREATE TABLE IF NOT EXISTS ended_owners (
                     lease_id TEXT PRIMARY KEY);
             """)
-
-        with self._db() as db:
-            columns = {r["name"] for r in db.execute("PRAGMA table_info(intents)")}
-            if "runtime_type" in columns:
-                db.execute("ALTER TABLE intents DROP COLUMN runtime_type")
-            if "guest_token" not in columns:
-                db.execute("ALTER TABLE intents ADD COLUMN guest_token TEXT")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:

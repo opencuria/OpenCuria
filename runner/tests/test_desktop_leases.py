@@ -701,23 +701,6 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         runtime.spawn_process.assert_not_awaited()
         await manager.desktop_action(self.ws, "release", intent)
 
-    async def test_recording_schema_upgrade_leaves_legacy_token_unknown(self):
-        import sqlite3
-
-        with sqlite3.connect(self.store.path) as db:
-            db.execute(
-                "CREATE TABLE desktop_recordings (recording_id TEXT PRIMARY KEY, "
-                "lease_id TEXT, workspace_id TEXT, instance_id TEXT, owner_id TEXT, "
-                "epoch TEXT, control_path TEXT, path TEXT, state TEXT)"
-            )
-            db.execute(
-                "INSERT INTO desktop_recordings VALUES "
-                "('old','one',?,'guest','run','old','control','output','closing')",
-                (str(self.ws),),
-            )
-        rows = await self.store.recordings("one")
-        self.assertIsNone(rows[0]["guest_token"])
-
     def guest_manager(self, *, stop_kills_xvnc: bool = True):
         """Exercise the real stop path without invoking unsafe baked guest scripts."""
         stop_script = "/usr/local/bin/opencuria-desktop-stop"

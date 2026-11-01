@@ -42,36 +42,19 @@ class DesktopLeaseStore:
                     owner_id TEXT NOT NULL, epoch TEXT NOT NULL,
                     revision INTEGER NOT NULL, state TEXT NOT NULL,
                     activated INTEGER NOT NULL DEFAULT 0,
-                    expires_at REAL NOT NULL)""")
+                    expires_at REAL NOT NULL,
+                    activation_revision INTEGER NOT NULL DEFAULT 0,
+                    activation_target INTEGER NOT NULL DEFAULT 0,
+                    input_ended_revision INTEGER NOT NULL DEFAULT 0)""")
                 db.execute("""CREATE TABLE IF NOT EXISTS desktop_recordings (
                     recording_id TEXT PRIMARY KEY, lease_id TEXT NOT NULL,
                     workspace_id TEXT NOT NULL, instance_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL, epoch TEXT NOT NULL,
                     control_path TEXT NOT NULL, path TEXT NOT NULL,
-                    state TEXT NOT NULL)""")
+                    state TEXT NOT NULL, guest_token TEXT)""")
                 db.execute("""CREATE TABLE IF NOT EXISTS desktop_input (
                     workspace_id TEXT PRIMARY KEY, lease_id TEXT,
                     last_lease_id TEXT NOT NULL, fence INTEGER NOT NULL)""")
-                lease_columns = {
-                    r[1] for r in db.execute("PRAGMA table_info(desktop_leases)")
-                }
-                for name in (
-                    "activation_revision",
-                    "activation_target",
-                    "input_ended_revision",
-                ):
-                    if name not in lease_columns:
-                        db.execute(
-                            f"ALTER TABLE desktop_leases ADD COLUMN {name} "
-                            "INTEGER NOT NULL DEFAULT 0"
-                        )
-                # Upgrade existing recording ledgers without inventing old tokens.
-                if "guest_token" not in {
-                    r[1] for r in db.execute("PRAGMA table_info(desktop_recordings)")
-                }:
-                    db.execute(
-                        "ALTER TABLE desktop_recordings ADD COLUMN guest_token TEXT"
-                    )
                 db.execute(
                     "CREATE INDEX IF NOT EXISTS lease_workspace_state "
                     "ON desktop_leases(workspace_id,state)"
