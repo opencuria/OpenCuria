@@ -54,3 +54,12 @@ tokens, server URL, and organization ID. It never stores a password. SecureStore
 failures propagate. `clear()` immediately invalidates pending reads/saves and
 queues deletion after any active write, so logout cannot be undone by an older
 save.
+
+## Git selection (`gitSelection.ts`)
+
+`NativeGitSelectionStorage` keeps the last selected repository path in
+SecureStore, keyed by a hash of the server, organization and workspace. Reads
+and writes are serialized across Git controllers. The controller restores the
+selection before loading repository details and falls back to the first
+available repository if the saved path no longer exists. Storage failures
+leave Git usable with an in-memory selection.

@@ -129,7 +129,10 @@ function fakeClient(repo: RawGitRepoSnapshot = snapshot()) {
     commitMessage: jest.fn(async () => ({ message: "Subject" })),
     fileContent: jest.fn(async () => ({ content: "export const a = 1;\n" })),
   };
-  return { client: { git } as unknown as OpenCuriaClient, git };
+  const api = {
+    getContext: () => ({ baseUrl: "https://server.test/api/v1", organizationId: "org" }),
+  };
+  return { client: { api, git } as unknown as OpenCuriaClient, git };
 }
 
 function renderPanel(client: OpenCuriaClient) {

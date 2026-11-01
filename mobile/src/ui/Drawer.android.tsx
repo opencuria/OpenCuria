@@ -2,9 +2,9 @@ import React from "react";
 import { StyleSheet, View } from "react-native";
 import {
   Ellipsis,
+  GitBranch,
   Menu,
   MessageCirclePlus,
-  SquareTerminal,
 } from "lucide-react-native";
 import type { DrawerProps } from "./Drawer.types";
 import { IconButton } from "./controls";
@@ -48,7 +48,7 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
             />
             <IconButton
               label="Git, Terminal & Files"
-              icon={<SquareTerminal color={theme.text} size={22} />}
+              icon={<GitBranch color={theme.text} size={22} />}
               onPress={props.onTools}
               disabled={!props.canOpenTools}
               testID="workspace-tools"

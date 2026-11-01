@@ -2,8 +2,11 @@
 
 `WorkspaceToolsSheet` presents Git, Terminal and Files of the chat's workspace
 (see [Native chat design](../../../docs/mobile-chat-design.md#workspace-tools)).
-`MainScreen` opens it from the chat header's button or the transcript's pull-up
+`MainScreen` opens it from the chat header's branch button or the transcript's pull-up
 (`ChatMessages.onPullUpAtEnd`).
+
+The Git repository selection persists per server, organization and workspace
+through app restarts using the native SecureStore adapter.
 
 Each section is a panel in `panels.ts` receiving `WorkspaceToolProps`
 (`types.ts`): client, workspace, `active` (visible section), media cache, bottom

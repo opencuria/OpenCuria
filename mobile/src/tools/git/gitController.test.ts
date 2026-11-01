@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as SecureStore from "expo-secure-store";
 import { ApiRequestError, type OpenCuriaClient } from "@opencuria/client";
 import type { RawGitRepoSnapshot } from "@opencuria/chat-core/gitTypes";
+import { __values } from "../../platform/test-mocks/expo-secure-store";
 import { GitController, selectedGitRepo } from "./gitController";
 
 function snapshot(patch: Partial<RawGitRepoSnapshot> = {}): RawGitRepoSnapshot {
@@ -32,21 +34,43 @@ function snapshot(patch: Partial<RawGitRepoSnapshot> = {}): RawGitRepoSnapshot {
   };
 }
 
-function fakeClient() {
+function fakeClient(baseUrl = "https://server.test/api/v1", organizationId = "org") {
   const git = {
     repos: vi.fn(async () => ({
       ok: true,
       repos: [{ id: "/workspace/app", name: "app", path: "/workspace/app", current_branch: "main", head_hash: "aaa" }],
     })),
-    repo: vi.fn(async () => ({ ok: true, snapshot: snapshot() })),
+    repo: vi.fn(async (_workspace: string, path: string) => ({
+      ok: true,
+      snapshot: snapshot({ id: path, path }),
+    })),
     history: vi.fn(),
     commitDetails: vi.fn(),
     operation: vi.fn(async () => ({ ok: true, snapshot: snapshot() })),
     commitMessage: vi.fn(async () => ({ message: " Subject " })),
     fileContent: vi.fn(),
   };
-  return { client: { git } as unknown as OpenCuriaClient, git };
+  const api = { getContext: () => ({ baseUrl, organizationId }) };
+  return { client: { api, git } as unknown as OpenCuriaClient, git };
 }
+
+function multiRepoClient(baseUrl?: string, organizationId?: string) {
+  const result = fakeClient(baseUrl, organizationId);
+  result.git.repos.mockResolvedValue({
+    ok: true,
+    repos: ["app", "other"].map((name) => ({
+      id: `/workspace/${name}`,
+      path: `/workspace/${name}`,
+      name,
+      current_branch: "main",
+      head_hash: "aaa",
+    })),
+  });
+  return result;
+}
+
+beforeEach(() => __values.clear());
+afterEach(() => vi.restoreAllMocks());
 
 describe("GitController", () => {
   it("loads summaries, then the selected repository's details", async () => {
@@ -68,6 +92,120 @@ describe("GitController", () => {
     expect(git.repos).toHaveBeenCalledTimes(1);
     expect(git.repo).toHaveBeenCalledTimes(1);
     expect(controller.getSnapshot().repoDetails["/workspace/app"]).toBeTruthy();
+  });
+
+  it("restores the saved repository with a new client and controller", async () => {
+    const first = multiRepoClient();
+    const controller = new GitController(first.client, "ws");
+    await controller.refresh();
+    controller.selectRepo("/workspace/other");
+    controller.dispose();
+
+    const reopened = multiRepoClient();
+    const next = new GitController(reopened.client, "ws");
+    await next.refresh();
+    expect(next.repo?.path).toBe("/workspace/other");
+    expect(reopened.git.repo).toHaveBeenCalledWith("ws", "/workspace/other");
+    expect(reopened.git.repo).not.toHaveBeenCalledWith("ws", "/workspace/app");
+    expect([...__values.values()]).toEqual(["/workspace/other"]);
+  });
+
+  it.each([
+    ["ws-2", "https://server.test/api/v1", "org"],
+    ["ws", "https://another-server.test/api/v1", "org"],
+    ["ws", "https://server.test/api/v1", "org-2"],
+  ])("isolates preferences for workspace %s, server %s, organization %s", async (
+    workspaceId, baseUrl, organizationId,
+  ) => {
+    const { client } = multiRepoClient();
+    const first = new GitController(client, "ws");
+    await first.refresh();
+    first.selectRepo("/workspace/other");
+    first.dispose();
+
+    const other = new GitController(
+      multiRepoClient(baseUrl, organizationId).client, workspaceId,
+    );
+    await other.refresh();
+    expect(other.repo?.path).toBe("/workspace/app");
+
+    const reopened = new GitController(multiRepoClient().client, "ws");
+    await reopened.refresh();
+    expect(reopened.repo?.path).toBe("/workspace/other");
+  });
+
+  it("restores by path when repository IDs change", async () => {
+    const { client, git } = multiRepoClient();
+    const first = new GitController(client, "ws");
+    await first.refresh({ withDetails: false });
+    first.selectRepo("/workspace/other");
+    first.dispose();
+    const result = await git.repos();
+    git.repos.mockResolvedValue({
+      ...result,
+      repos: result.repos.map((repo) => ({ ...repo, id: `new:${repo.path}` })),
+    });
+    const reopened = new GitController(client, "ws");
+    await reopened.refresh({ withDetails: false });
+    expect(reopened.getSnapshot().selectedRepoId).toBe("new:/workspace/other");
+  });
+
+  it("falls back when the saved repository has been removed", async () => {
+    const { client, git } = multiRepoClient();
+    const first = new GitController(client, "ws");
+    await first.refresh();
+    first.selectRepo("/workspace/other");
+    first.dispose();
+
+    git.repos.mockResolvedValue({
+      ok: true,
+      repos: (await git.repos()).repos.slice(0, 1),
+    });
+    const reopened = new GitController(client, "ws");
+    await reopened.refresh();
+    expect(reopened.repo?.path).toBe("/workspace/app");
+  });
+
+  it("keeps the preference through an empty repository listing", async () => {
+    const { client, git } = multiRepoClient();
+    const first = new GitController(client, "ws");
+    await first.refresh();
+    first.selectRepo("/workspace/other");
+    first.dispose();
+
+    git.repos.mockResolvedValueOnce({ ok: true, repos: [] });
+    const reopened = new GitController(client, "ws");
+    await reopened.refresh();
+    expect(reopened.repo).toBeNull();
+    await reopened.refresh();
+    expect(reopened.repo?.path).toBe("/workspace/other");
+  });
+
+  it("keeps the latest selection after rapid changes", async () => {
+    const { client } = multiRepoClient();
+    const first = new GitController(client, "ws");
+    await first.refresh();
+    first.selectRepo("/workspace/other");
+    first.selectRepo("/workspace/app");
+    first.selectRepo("/workspace/other");
+    first.dispose();
+    first.selectRepo("/workspace/app");
+
+    const reopened = new GitController(client, "ws");
+    await reopened.refresh();
+    expect(reopened.repo?.path).toBe("/workspace/other");
+  });
+
+  it("keeps Git usable when native preference storage fails", async () => {
+    vi.spyOn(SecureStore, "getItemAsync").mockRejectedValue(new Error("Unavailable"));
+    vi.spyOn(SecureStore, "setItemAsync").mockRejectedValue(new Error("Unavailable"));
+    const { client } = multiRepoClient();
+    const controller = new GitController(client, "ws");
+    await expect(controller.refresh()).resolves.toBe(true);
+    controller.selectRepo("/workspace/other");
+    await expect(controller.refresh()).resolves.toBe(true);
+    expect(controller.repo?.path).toBe("/workspace/other");
+    expect(controller.getSnapshot().error).toBeNull();
   });
 
   it("commits staged changes and pushes the new commit", async () => {

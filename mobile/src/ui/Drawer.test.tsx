@@ -79,6 +79,21 @@ beforeEach(() => {
 
 afterEach(() => jest.restoreAllMocks());
 
+it("opens workspace tools from a native branch button", () => {
+  const { props } = setup();
+  const { options } = mockScreen.mock.calls.at(-1)![0];
+  const tools = (options.unstable_headerRightItems() as NativeStackHeaderItem[])
+    .find((item) => item.type === "button" && item.label === "Git, Terminal & Files");
+  expect(tools).toMatchObject({
+    type: "button",
+    icon: { type: "sfSymbol", name: "arrow.triangle.branch" },
+    disabled: false,
+  });
+  if (tools?.type !== "button") throw new Error("Expected workspace tools button");
+  tools.onPress();
+  expect(props.onTools).toHaveBeenCalledTimes(1);
+});
+
 it("keeps chat commands out of UIKit's automatic selection mode", () => {
   setup();
   const more = moreMenu();

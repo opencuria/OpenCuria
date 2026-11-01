@@ -25,6 +25,7 @@ import type {
   GitRepo,
   GitRepoSummary,
 } from "@opencuria/chat-core/gitTypes";
+import { NativeGitSelectionStorage } from "../../platform/gitSelection";
 import { showToast, type ToastOptions } from "../../ui/toast";
 
 /** Feedback for a finished action; the app shows it as a toast. */
@@ -73,8 +74,8 @@ const INITIAL: GitSnapshot = {
   commitDetailsError: {},
 };
 
-/** Last selected repository per workspace for this app session. */
-const selectedRepos = new Map<string, string>();
+/** Serialize preference reads/writes across controller lifetimes. */
+const selectedRepos = new NativeGitSelectionStorage();
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message || "Unknown error";
@@ -109,12 +110,22 @@ export class GitController {
   private readonly detailsInFlight = new Set<string>();
   private opQueue: Promise<void> = Promise.resolve();
   private lastAutoFetch: { key: string; at: number } | null = null;
+  private readonly selectionScope: string;
+  private selectionTask: Promise<void> | null = null;
+  private selectedRepoPath: string | null = null;
 
   constructor(
     private readonly client: OpenCuriaClient,
     readonly workspaceId: string,
     private readonly notifier: GitNotify = showToast,
-  ) {}
+  ) {
+    const context = client.api.getContext();
+    this.selectionScope = JSON.stringify([
+      context.baseUrl,
+      context.organizationId,
+      workspaceId,
+    ]);
+  }
 
   readonly getSnapshot = (): GitSnapshot => this.snapshot;
 
@@ -176,22 +187,40 @@ export class GitController {
     const previous = this.snapshot.repos.find(
       (repo) => repo.id === this.snapshot.selectedRepoId,
     );
-    const remembered = selectedRepos.get(this.workspaceId);
     const selected =
-      next.find((repo) => repo.id === remembered) ??
+      next.find((repo) => repo.path === this.selectedRepoPath) ??
       next.find((repo) => repo.id === this.snapshot.selectedRepoId) ??
       (previous
         ? next.find((repo) => repo.path === previous.path)
         : undefined) ??
       next[0];
     const selectedRepoId = selected?.id ?? "";
-    if (selectedRepoId) selectedRepos.set(this.workspaceId, selectedRepoId);
+    if (selected) this.rememberSelection(selected.path);
     const changed = selectedRepoId !== this.snapshot.selectedRepoId;
     this.set({
       repos: next,
       repoDetails,
       selectedRepoId,
       ...(changed ? { expandedCommitHash: null } : {}),
+    });
+  }
+
+  private loadSelection(): Promise<void> {
+    return (this.selectionTask ??= selectedRepos
+      .load(this.selectionScope)
+      .then((path) => {
+        this.selectedRepoPath = path;
+      })
+      .catch(() => {
+        // Preferences are optional; Git must work when storage is unavailable.
+      }));
+  }
+
+  private rememberSelection(path: string): void {
+    if (this.selectedRepoPath === path) return;
+    this.selectedRepoPath = path;
+    void selectedRepos.save(this.selectionScope, path).catch(() => {
+      // Keep the selection in memory if the native store cannot write.
     });
   }
 
@@ -287,7 +316,10 @@ export class GitController {
     const task = (async () => {
       if (!silent) this.set({ loading: true, error: null });
       try {
-        const res = await this.client.git.repos(this.workspaceId);
+        const [res] = await Promise.all([
+          this.client.git.repos(this.workspaceId),
+          this.loadSelection(),
+        ]);
         if (!this.current(gen)) return false;
         this.applySummaries((res.repos ?? []).map(normalizeRepoSummary));
         if (!silent) this.set({ loading: false, error: null });
@@ -382,9 +414,10 @@ export class GitController {
   }
 
   selectRepo(id: string): void {
+    if (this.disposed) return;
     const summary = this.snapshot.repos.find((repo) => repo.id === id);
     if (!summary || id === this.snapshot.selectedRepoId) return;
-    selectedRepos.set(this.workspaceId, id);
+    this.rememberSelection(summary.path);
     this.set({ selectedRepoId: id, expandedCommitHash: null });
     const gen = this.generation;
     void this.ensureDetails(summary.path).then((ok) => {

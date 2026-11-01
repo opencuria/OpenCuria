@@ -18,6 +18,9 @@ export default {
       "expo-secure-store": fileURLToPath(
         new URL("./test-mocks/expo-secure-store.ts", import.meta.url),
       ),
+      "expo-crypto": fileURLToPath(
+        new URL("./test-mocks/expo-crypto.ts", import.meta.url),
+      ),
       "expo-document-picker": fileURLToPath(
         new URL("./test-mocks/expo-document-picker.ts", import.meta.url),
       ),
