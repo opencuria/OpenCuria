@@ -251,7 +251,7 @@ async def test_async_operation_projection_without_unsafe_orm(
         CaptureService.allocate(workspace.id, "capture", has_busy_agent=has_busy_agent)
 
     await sync_to_async(allocate)()
-    service._forward_workspace_operation(str(workspace.id), None)
+    service.frontend_bus.forward_workspace_operation(str(workspace.id), None)
     # Await the scheduled projection rather than permitting ORM access on the loop.
     pending = asyncio.all_tasks() - {asyncio.current_task()}
     await asyncio.gather(*pending)
@@ -313,7 +313,7 @@ async def test_async_operation_delivery_stays_on_original_loop(
 
     with monkeypatch.context() as patch:
         patch.setattr(loop, "create_task", capture_task)
-        service._forward_workspace_operation(str(workspace.id), None)
+        service.frontend_bus.forward_workspace_operation(str(workspace.id), None)
 
     assert len(tasks) == 1
     await asyncio.wait_for(asyncio.gather(*tasks, delivered), timeout=5)

@@ -831,7 +831,10 @@ class TestReconcile:
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
         assert [
-            row.id for row in service._pending_process_verify[str(workspace.id)]
+            row.id
+            for row in service.heartbeat_reconciler.pending_process_verify[
+                str(workspace.id)
+            ]
         ] == [process.id]
 
 
@@ -931,13 +934,15 @@ class TestReverifyVanished:
     async def test_reconcile_vanished_drains_stash(self, service, runner, workspace):
         """The heartbeat stash is drained even when the runner is offline."""
         process = self._running_process(service, workspace)
-        service._pending_process_verify[str(workspace.id)] = [process]
+        service.heartbeat_reconciler.pending_process_verify[str(workspace.id)] = [
+            process
+        ]
         # Runner lost its sid -> offline path, rows stay RUNNING.
         runner.sid = ""
         runner.save(update_fields=["sid"])
         changed = await service.reconcile_vanished_processes(runner)
         assert changed == []
-        assert service._pending_process_verify == {}
+        assert service.heartbeat_reconciler.pending_process_verify == {}
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
 

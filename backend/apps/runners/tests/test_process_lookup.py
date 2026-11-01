@@ -105,12 +105,12 @@ async def test_process_resolution_precedence_and_scope(
     service = RunnerService()
     if expected is None:
         with pytest.raises(WorkspaceNotFoundError) as error:
-            await service._resolve_process(
+            await service.process_manager._resolve_process(
                 records["workspace"].id, value, kind=kind, session_id=session_id
             )
         assert error.value.identifier == str(value)
     else:
-        process = await service._resolve_process(
+        process = await service.process_manager._resolve_process(
             records["workspace"].id, value, kind=kind, session_id=session_id
         )
         assert process.id == records[expected].id
@@ -121,6 +121,6 @@ async def test_process_lookup_rejects_invalid_session_before_resolving(
 ) -> None:
     """Malformed session identities keep the existing validation error."""
     with pytest.raises(ValueError, match="Invalid session_id: invalid"):
-        await RunnerService()._resolve_process(
+        await RunnerService().process_manager._resolve_process(
             workspace.id, "worker", session_id="invalid"
         )

@@ -44,16 +44,16 @@ class RecoveryService:
                 try:
                     workspace_id = result["workspace_id"]
                     if result.get("status"):
-                        await sync_to_async(service._forward_to_frontend)(
+                        await sync_to_async(service.frontend_bus.forward_to_frontend)(
                             "workspace:status_changed",
                             {"workspace_id": workspace_id, "status": result["status"]},
                             workspace_id,
                         )
-                    await sync_to_async(service._forward_workspace_operation)(
-                        workspace_id, None
-                    )
+                    await sync_to_async(
+                        service.frontend_bus.forward_workspace_operation
+                    )(workspace_id, None)
                     if result["diagnostic"]:
-                        await sync_to_async(service._forward_to_frontend)(
+                        await sync_to_async(service.frontend_bus.forward_to_frontend)(
                             "workspace:error",
                             {
                                 "workspace_id": workspace_id,
@@ -109,13 +109,13 @@ class RecoveryService:
                 }:
                     from apps.credentials.services import CredentialSvc
 
-                    from . import RunnerService
+                    from .domains.credential_sync import CredentialSyncService
 
                     resolved = await sync_to_async(
                         CredentialSvc().resolve_workspace_credentials
                     )(command.task.workspace)
                     payload.update(
-                        RunnerService._resolved_credentials_payload(resolved)
+                        CredentialSyncService.resolved_credentials_payload(resolved)
                     )
                 data = OperationRepository.envelope(command, payload)
                 await transport.emit(command.event, data, room=command.task.runner.sid)

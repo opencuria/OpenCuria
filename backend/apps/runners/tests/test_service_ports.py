@@ -1,10 +1,4 @@
-"""Port/delegation contract tests for the runners service facade (Phase 5).
-
-Only ports, delegation and facade contracts — no business-logic duplicates.
-Covers constructor injection, the definition mutability guard,
-repository-delegation methods (mocked repos), pending registry isolation,
-and facade attribute reachability (whitelists, timeouts).
-"""
+"""Runner service port injection, gateway routing and admission contracts."""
 
 from __future__ import annotations
 
@@ -81,20 +75,20 @@ def test_constructor_injects_ports():
         credential_resolver=resolver,
         harness_gateway=gateway,
     )
-    assert svc.sio is None
-    assert svc._credential_resolver is resolver
+    assert svc.runner_transport.sio is None
+    assert svc.credential_sync._credential_resolver is resolver
     assert svc._harness() is gateway
 
 
 def test_constructor_defaults_and_positional():
     svc_default = RunnerService()
-    assert svc_default.sio is None
-    assert svc_default._credential_resolver is None
+    assert svc_default.runner_transport.sio is None
+    assert svc_default.credential_sync._credential_resolver is None
     assert svc_default._harness_gateway is None
     assert svc_default._harness() is get_harness_gateway()
     sentinel = object()
     svc_positional = RunnerService(sentinel)
-    assert svc_positional.sio is sentinel
+    assert svc_positional.runner_transport.sio is sentinel
 
 
 def test_registered_harness_gateway_is_the_harness_adapter():
@@ -108,10 +102,15 @@ def test_harness_reply_and_stream_routing_use_gateway():
     svc = RunnerService(harness_gateway=gateway)
     result = {"request_id": "r1", "workspace_id": "w"}
     chunk = {"request_id": "r2", "workspace_id": "w"}
-    assert svc._route_harness_reply("harness:list_result", result) is True
+    assert (
+        svc.runner_transport.route_harness_reply("harness:list_result", result) is True
+    )
     svc.runner_transport.validate_file_chunk = MagicMock(return_value=True)
-    assert svc._route_harness_reply("harness:read_file_chunk", chunk) is True
-    assert svc._route_harness_reply("terminal:output", {}) is None
+    assert (
+        svc.runner_transport.route_harness_reply("harness:read_file_chunk", chunk)
+        is True
+    )
+    assert svc.runner_transport.route_harness_reply("terminal:output", {}) is None
     assert gateway.calls == [("result", result), ("chunk", chunk)]
 
 
@@ -147,7 +146,9 @@ def test_viewer_rpc_maps_harness_failures_to_conflict():
     gateway = _FakeHarnessGateway()
     svc = RunnerService(harness_gateway=gateway)
     workspace_id = uuid.uuid4()
-    assert asyncio.run(svc._viewer_rpc(workspace_id, "status", {})) == {"ok": True}
+    assert asyncio.run(
+        svc.interactive_sessions._viewer_rpc(workspace_id, "status", {})
+    ) == {"ok": True}
     assert gateway.calls == [("desktop_action", str(workspace_id), "status", {})]
 
     for error in (HarnessActionError("down"), TimeoutError()):
@@ -156,7 +157,9 @@ def test_viewer_rpc_maps_harness_failures_to_conflict():
 
         gateway.desktop_action = _fail
         with pytest.raises(ConflictError, match="could not be confirmed"):
-            asyncio.run(svc._viewer_rpc(workspace_id, "status", {}))
+            asyncio.run(
+                svc.interactive_sessions._viewer_rpc(workspace_id, "status", {})
+            )
 
 
 def test_take_desktop_control_checks_availability_before_gateway():
@@ -220,45 +223,16 @@ def test_lifecycle_admissions_ask_gateway_for_busy_agents(runner, user):
     assert not Task.objects.filter(workspace=workspace).exists()
 
 
-def test_constructor_repositories_and_stores():
-    svc = RunnerService()
-    assert svc.runners is not None
-    assert svc.workspaces is not None
-    assert svc.tasks is not None
-    assert svc.image_instances is not None
-    assert svc.image_definitions is not None
-    assert svc.build_jobs is not None
-    assert svc.processes is not None
-    assert isinstance(svc._process_pending, dict)
-    assert isinstance(svc._git_pending, dict)
-    assert isinstance(svc._pending_process_verify, dict)
-
-
-def test_ensure_definition_mutable_rejects_frozen_definition():
+def test_deactivate_runner_image_rejects_frozen_definition():
     from apps.runners.models import ImageDefinition
     from common.exceptions import ConflictError
 
     frozen = types.SimpleNamespace(status=ImageDefinition.Status.DELETED)
     svc = RunnerService()
     with pytest.raises(ConflictError):
-        svc._ensure_definition_mutable(frozen)
-    with pytest.raises(ConflictError):
         svc.deactivate_runner_image(
             types.SimpleNamespace(image_definition=frozen, runner=object())
         )
-
-
-def test_repository_delegation_methods_mocked():
-    svc = RunnerService(
-        harness_gateway=_FakeHarnessGateway(),
-        repositories=RunnerRepositories(workspaces=MagicMock()),
-    )
-    artifact_id = uuid.uuid4()
-    workspace = types.SimpleNamespace(id=artifact_id)
-    svc.workspaces.get_by_id.return_value = workspace
-
-    assert svc.get_workspace_or_none(artifact_id) is workspace
-    svc.workspaces.get_by_id.assert_called_with(artifact_id)
 
 
 @pytest.mark.parametrize("busy", [False, True])
@@ -301,21 +275,3 @@ def test_workspace_read_propagates_activity_lookup_failure():
 
     with pytest.raises(RuntimeError, match="unavailable"):
         svc.get_workspace_or_none(uuid.uuid4())
-
-
-def test_pending_registries_are_instance_local():
-    first, second = RunnerService(), RunnerService()
-    registries = ("_process_pending", "_git_pending", "_pending_process_verify")
-    for name in registries:
-        getattr(first, name)["request"] = object()
-        assert getattr(second, name) == {}
-
-
-def test_facade_constants_reachable():
-    svc = RunnerService()
-    assert "list_repos" in svc.GIT_READ_OPERATIONS
-    assert svc.BUILD_LOG_MAX_CHARS == 200_000
-    assert svc._PROCESS_RPC_TIMEOUT_SECONDS == 30
-    assert svc._STREAM_CHUNK_SIZE == 64 * 1024
-    assert isinstance(svc._active_terminals, dict)
-    assert isinstance(svc._active_desktops, dict)

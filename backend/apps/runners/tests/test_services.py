@@ -1550,7 +1550,7 @@ class TestNativeComputerUseWorkspaceDependencies:
             runner,
             user,
         )
-        script = service._build_qemu_init_script_content(definition)
+        script = service.image_lifecycle._build_qemu_init_script_content(definition)
         for package in self._NATIVE_APT:
             assert package in script
         assert "startxfce4" in script
@@ -1572,7 +1572,7 @@ class TestDesktopSessionImageContent:
             base_distro="ubuntu:24.04",
         )
 
-        script = service._build_qemu_init_script_content(definition)
+        script = service.image_lifecycle._build_qemu_init_script_content(definition)
 
         assert "startxfce4" in script
         assert "WhiteSur" in script
@@ -1630,7 +1630,7 @@ class TestImageDefinitionLifecycle:
         assert updated.status == ImageBuildJob.Status.ACTIVE
         assert build.status == ImageBuildJob.Status.ACTIVE
         assert instance.status == ImageInstance.Status.READY
-        service.sio.emit.assert_not_called()
+        service.runner_transport.sio.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_activate_build_job_builds_when_never_built(
@@ -1653,7 +1653,7 @@ class TestImageDefinitionLifecycle:
         build.refresh_from_db()
         assert updated.id == build.id
         assert build.status == ImageBuildJob.Status.PENDING
-        service.sio.emit.assert_called()
+        service.runner_transport.sio.emit.assert_called()
 
     @pytest.mark.asyncio
     async def test_trigger_build_job_stays_pending_when_runner_offline(
@@ -1676,7 +1676,7 @@ class TestImageDefinitionLifecycle:
         assert build.status == ImageBuildJob.Status.PENDING
         assert build.build_task_id is not None
         assert build.pending_generation_id is not None
-        service.sio.emit.assert_not_called()
+        service.runner_transport.sio.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_trigger_build_job_rejects_deleting_definition(

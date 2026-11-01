@@ -34,7 +34,7 @@ def clipboard_api(capture_workspace, monkeypatch):
         wraps=service.read_desktop_clipboard
     )
     monkeypatch.setitem(
-        service._active_desktops, str(workspace.id), {"computer_use": False}
+        service.session_store.state.desktops, str(workspace.id), {"computer_use": False}
     )
     monkeypatch.setattr("apps.runners.api._get_service", lambda: service)
 
@@ -261,7 +261,7 @@ def selection_service(monkeypatch):
     service.runner_transport.call_runner = AsyncMock(
         return_value={"ok": True, "text": "selected"}
     )
-    service._active_desktops[str(workspace_id)] = {"computer_use": False}
+    service.session_store.state.desktops[str(workspace_id)] = {"computer_use": False}
     monkeypatch.setattr(
         HarnessSessionRepository,
         "list_busy_computeruse_for_workspace",
@@ -275,7 +275,7 @@ def selection_service(monkeypatch):
             "organization_id": workspace.runner.organization_id,
         },
     )
-    service._active_desktops.pop(str(workspace_id), None)
+    service.session_store.state.desktops.pop(str(workspace_id), None)
 
 
 @pytest.mark.asyncio
@@ -355,7 +355,7 @@ async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse
             "capture lock"
         )
     elif busy_kind == "desktop-computeruse":
-        service._active_desktops[str(workspace.id)]["computer_use"] = True
+        service.session_store.state.desktops[str(workspace.id)]["computer_use"] = True
     else:
         monkeypatch.setattr(
             HarnessSessionRepository,

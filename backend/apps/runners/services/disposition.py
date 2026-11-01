@@ -75,8 +75,8 @@ class DispositionService:
             )
             if changed and row.workspace_id:
                 workspace_id = str(row.workspace_id)
-                service._forward_workspace_operation(workspace_id, None)
-                service._forward_to_frontend(
+                service.frontend_bus.forward_workspace_operation(workspace_id, None)
+                service.frontend_bus.forward_to_frontend(
                     "workspace:error",
                     {"workspace_id": workspace_id, "error": diagnostic},
                     workspace_id,
@@ -109,10 +109,10 @@ class DispositionService:
             return False
         if row.workspace_id:
             workspace_id = str(row.workspace_id)
-            service._forward_workspace_operation(workspace_id, None)
+            service.frontend_bus.forward_workspace_operation(workspace_id, None)
             workspace = service.workspaces.get_by_id(row.workspace_id)
             if workspace is not None:
-                service._forward_workspace_status(workspace)
+                service.frontend_bus.forward_workspace_status(workspace)
         return True
 
     @staticmethod
@@ -338,7 +338,7 @@ class DispositionService:
         if not row.runner.is_online or not row.runner.sid:
             return result
         try:
-            evidence = await transport._call_runner(
+            evidence = await transport.runner_transport.call_runner(
                 row.runner,
                 "operation:inspect",
                 row.identity,
@@ -424,7 +424,7 @@ class DispositionService:
             action == "acknowledge_interrupted"
             and evidence.get("diagnostic_code") == "identity_not_recorded"
         ):
-            evidence = await transport._call_runner(
+            evidence = await transport.runner_transport.call_runner(
                 row.runner,
                 "operation:seal",
                 row.identity,

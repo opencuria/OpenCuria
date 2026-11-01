@@ -102,8 +102,10 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
             if newly_interrupted:
                 result.intervene(reason)
             if state.workspace_id and newly_interrupted:
-                service._forward_workspace_operation(str(state.workspace_id), None)
-                service._forward_to_frontend(
+                service.frontend_bus.forward_workspace_operation(
+                    str(state.workspace_id), None
+                )
+                service.frontend_bus.forward_to_frontend(
                     "workspace:error",
                     {
                         "workspace_id": str(state.workspace_id),

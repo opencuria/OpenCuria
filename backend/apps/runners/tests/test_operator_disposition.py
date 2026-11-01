@@ -111,7 +111,7 @@ async def test_offline_inspection_never_dispatches(
         transport, workspace.created_by, runner.organization_id, task.id
     )
     assert result["evidence"]["status"] == "unknown"
-    transport._call_runner.assert_not_called()
+    transport.runner_transport.call_runner.assert_not_called()
 
 
 @pytest.mark.django_db(transaction=True)

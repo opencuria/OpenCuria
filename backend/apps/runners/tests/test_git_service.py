@@ -215,13 +215,18 @@ class TestRunGitOperationHappyPath:
     @pytest.mark.asyncio
     async def test_per_repo_serialization_keys(self, service, workspace):
         """Lock keys are per workspace/repo; bare list_repos uses /workspace."""
-        assert service._git_lock_key(workspace.id, None) == f"{workspace.id}:/workspace"
-        assert service._git_lock_key(workspace.id, "/workspace/repo") == (
-            f"{workspace.id}:/workspace/repo"
+        assert (
+            service.git_operations._git_lock_key(workspace.id, None)
+            == f"{workspace.id}:/workspace"
         )
-        lock_a = await service._git_lock(workspace.id, "/workspace/a")
-        lock_a_again = await service._git_lock(workspace.id, "/workspace/a")
-        lock_b = await service._git_lock(workspace.id, "/workspace/b")
+        assert service.git_operations._git_lock_key(
+            workspace.id, "/workspace/repo"
+        ) == (f"{workspace.id}:/workspace/repo")
+        lock_a = await service.git_operations._git_lock(workspace.id, "/workspace/a")
+        lock_a_again = await service.git_operations._git_lock(
+            workspace.id, "/workspace/a"
+        )
+        lock_b = await service.git_operations._git_lock(workspace.id, "/workspace/b")
         assert lock_a is lock_a_again
         assert lock_a is not lock_b
 
@@ -260,12 +265,12 @@ class TestCommitIdentityFallback:
             def get_full_name(self):
                 return ""
 
-        name, email = RunnerService.commit_identity_for_user(_NoName())
+        name, email = GitOperationsService.commit_identity_for_user(_NoName())
         assert name == "bob"
         assert email == "bob@example.com"
 
         anon = SimpleNamespace(email="", username="", get_full_name=lambda: "")
-        name2, email2 = RunnerService.commit_identity_for_user(anon)
+        name2, email2 = GitOperationsService.commit_identity_for_user(anon)
         assert name2 == "opencuria"
         assert email2 == "opencuria@localhost"
 
@@ -462,7 +467,7 @@ class TestHandleGitReply:
     ):
         loop = asyncio.new_event_loop()
         fut = loop.create_future()
-        service._git_pending[request_id] = PendingGitRequest(
+        service.rpc_registry.git_pending[request_id] = PendingGitRequest(
             future=fut,
             workspace_id=str(workspace_id),
             operation=operation,
@@ -471,7 +476,7 @@ class TestHandleGitReply:
 
     def test_unknown_request_id_dropped(self, service, runner, workspace):
         """Replies for unknown request_ids resolve nothing."""
-        assert service._resolve_git_future("nope", {"ok": True}) is False
+        assert service.rpc_registry.resolve_git_future("nope", {"ok": True}) is False
 
     def test_missing_workspace_id_dropped(self, service, runner, workspace):
         """Authenticated replies without workspace_id are dropped."""
@@ -490,7 +495,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-1", None)
+            service.rpc_registry.git_pending.pop("req-1", None)
             loop.close()
 
     def test_foreign_runner_reply_dropped(
@@ -523,7 +528,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-2", None)
+            service.rpc_registry.git_pending.pop("req-2", None)
             loop.close()
 
     def test_happy_reply_resolves_future(self, service, runner, workspace):
@@ -550,7 +555,7 @@ class TestHandleGitReply:
                 "ok": True,
             }
         finally:
-            service._git_pending.pop("req-ok", None)
+            service.rpc_registry.git_pending.pop("req-ok", None)
             loop.close()
 
     def test_happy_reply_resolves_without_runner_id(
@@ -573,7 +578,7 @@ class TestHandleGitReply:
             )
             assert fut.done()
         finally:
-            service._git_pending.pop("req-internal", None)
+            service.rpc_registry.git_pending.pop("req-internal", None)
             loop.close()
 
     def test_missing_operation_dropped(self, service, runner, workspace):
@@ -593,7 +598,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-no-op", None)
+            service.rpc_registry.git_pending.pop("req-no-op", None)
             loop.close()
 
     def test_operation_mismatch_dropped(self, service, runner, workspace):
@@ -614,7 +619,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-op-mismatch", None)
+            service.rpc_registry.git_pending.pop("req-op-mismatch", None)
             loop.close()
 
     def test_nonstring_operation_dropped(self, service, runner, workspace):
@@ -635,7 +640,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-op-nonstr", None)
+            service.rpc_registry.git_pending.pop("req-op-nonstr", None)
             loop.close()
 
     def test_workspace_mismatch_dropped_same_runner(
@@ -667,7 +672,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-ws-mismatch", None)
+            service.rpc_registry.git_pending.pop("req-ws-mismatch", None)
             loop.close()
 
     def test_workspace_mismatch_dropped_without_runner_id(
@@ -699,7 +704,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-ws-mismatch-internal", None)
+            service.rpc_registry.git_pending.pop("req-ws-mismatch-internal", None)
             loop.close()
 
     def test_invalid_workspace_uuid_dropped(self, service, runner, workspace):
@@ -720,7 +725,7 @@ class TestHandleGitReply:
             )
             assert not fut.done()
         finally:
-            service._git_pending.pop("req-ws-invalid", None)
+            service.rpc_registry.git_pending.pop("req-ws-invalid", None)
             loop.close()
 
     def test_mismatched_reply_keeps_pending_for_late_happy_reply(
@@ -742,7 +747,7 @@ class TestHandleGitReply:
                 runner_id=str(runner.id),
             )
             assert not fut.done()
-            assert "req-retry" in service._git_pending
+            assert "req-retry" in service.rpc_registry.git_pending
             service.handle_git_reply(
                 "git:operation_result",
                 {
@@ -755,7 +760,7 @@ class TestHandleGitReply:
             )
             assert fut.done()
         finally:
-            service._git_pending.pop("req-retry", None)
+            service.rpc_registry.git_pending.pop("req-retry", None)
             loop.close()
 
     @pytest.mark.asyncio
@@ -768,7 +773,7 @@ class TestHandleGitReply:
 
         service.runner_transport.emit_to_runner = AsyncMock(side_effect=_never_emit)  # type: ignore[method-assign]
         with pytest.raises(RunnerTimeoutError):
-            await service._await_git_result(
+            await service.git_operations._await_git_result(
                 request_id=request_id,
                 workspace_id=workspace.id,
                 operation="list_repos",
@@ -776,7 +781,7 @@ class TestHandleGitReply:
                 runner=runner,
                 timeout=0.02,
             )
-        assert request_id not in service._git_pending
+        assert request_id not in service.rpc_registry.git_pending
 
     @pytest.mark.asyncio
     async def test_await_registers_expected_workspace_and_operation(
@@ -786,7 +791,7 @@ class TestHandleGitReply:
         seen: dict = {}
 
         async def _capture(runner_arg, event, payload):
-            pending = service._git_pending.get(payload["request_id"])
+            pending = service.rpc_registry.git_pending.get(payload["request_id"])
             seen["pending"] = pending
             assert isinstance(pending, PendingGitRequest)
             assert pending.workspace_id == str(workspace.id)
@@ -804,7 +809,7 @@ class TestHandleGitReply:
             )
 
         monkeypatch.setattr(service.runner_transport, 'emit_to_runner', _capture)
-        result = await service._await_git_result(
+        result = await service.git_operations._await_git_result(
             request_id="req-register-check",
             workspace_id=workspace.id,
             operation="list_repos",
@@ -813,14 +818,14 @@ class TestHandleGitReply:
             timeout=5.0,
         )
         assert result["ok"] is True
-        assert "req-register-check" not in service._git_pending
+        assert "req-register-check" not in service.rpc_registry.git_pending
         assert seen["pending"].workspace_id == str(workspace.id)
         assert seen["pending"].operation == "list_repos"
 
     def test_unknown_event_ignored(self, service):
         """Non-git events never touch git futures."""
         service.handle_git_reply("harness:process_start_result", {"request_id": "x"})
-        assert "x" not in service._git_pending
+        assert "x" not in service.rpc_registry.git_pending
 
     def test_malformed_payload_dropped(self, service, runner):
         """Non-dict / request-less payloads are dropped without resolving."""

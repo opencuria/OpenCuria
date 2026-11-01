@@ -1,10 +1,11 @@
 # Runner application services
 
-`RunnerService` is the composition root and compatibility facade used by REST,
-Socket.IO, MCP and the harness. Its methods preserve the existing signatures and
-delegate to named service instances. Domain behavior does not inherit from the
-facade, reach into it, or depend on sibling methods appearing on a shared `self`.
-New internal callers should request the narrow service they need.
+`RunnerService` is the composition root and application facade used by REST,
+Socket.IO, MCP and the harness. Its operation methods delegate to named service
+instances. Domain behavior does not inherit from the facade, reach into it, or
+depend on sibling methods appearing on a shared `self`.
+Internal callers use the owning service directly; internal helpers, constants
+and mutable state are not mirrored on the facade.
 
 Each domain and infrastructure service has a keyword-only constructor listing its
 repositories and collaborators. No constructor accepts a `RunnerService` or an
@@ -55,8 +56,7 @@ The interactive state object is created once per facade and explicitly supplied
 to session storage, interactive sessions and ownership checks. No mutable state
 lives on a service class. A second facade gets separate maps and locks. The
 application singleton remains a composition convenience, not a prerequisite for
-correct instance isolation. Read-only compatibility properties on the facade
-expose the existing inspection API without creating another copy of this state.
+correct instance isolation. Tests inspect state directly on its owning service.
 
 Services can be tested directly. For example, a process-RPC test constructs
 `ProcessManagerService` with a fake runner transport and a real

@@ -1,14 +1,11 @@
-"""Compose runner services and retain the existing adapter-facing API.
+"""Compose runner services and expose the adapter-facing application API.
 
-Every domain service is independently constructed. The facade owns no operation,
-RPC or interactive-session state; its methods only delegate to named services.
-The explicit compatibility methods keep REST, Socket.IO and harness callers on
-one composition root while allowing callers to adopt narrower service ports.
+Domain services own their behavior and mutable state. Internal callers use those
+services directly; the facade exposes operations for REST, Socket.IO and harness.
 """
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,10 +23,7 @@ from ..repositories import (
     TaskRepository,
     WorkspaceRepository,
 )
-from .domains.credential_sync import (
-    _CREDENTIAL_INJECT_TIMEOUT_SECONDS,
-    CredentialSyncService,
-)
+from .domains.credential_sync import CredentialSyncService
 from .domains.file_transfer import FileTransferService
 from .domains.git_operations import GitOperationsService
 from .domains.heartbeat_reconciler import HeartbeatReconcilerService
@@ -54,12 +48,7 @@ from .session_state import InteractiveSessionState
 if TYPE_CHECKING:
     from django.contrib.auth.models import AbstractUser as User
 
-    from apps.credentials.services import ResolvedCredentials
-    from apps.organizations.models import Membership
-
-    from ..enums import TaskType, WorkspaceOperation
     from ..models import (
-        ImageInstance,
         Runner,
         RunnerSystemMetrics,
         Task,
@@ -239,253 +228,13 @@ class RunnerService:
         """Coordinate journal-result validation and domain result handlers."""
         return apply_result(self, runner_id, event, data)
 
-    @property
-    def sio(self) -> Any:
-        """Expose the transport adapter for callers that inspect its presence."""
-        return self.runner_transport.sio
-
-    @property
-    def _active_terminals(self) -> Any:
-        """Inspect state owned by ``session_store``."""
-        return self.session_store.state.terminals
-
-    @property
-    def _terminal_workspace_runner(self) -> Any:
-        """Inspect state owned by ``session_store``."""
-        return self.session_store.state.terminal_runners
-
-    @property
-    def _active_desktops(self) -> Any:
-        """Inspect state owned by ``session_store``."""
-        return self.session_store.state.desktops
-
-    @property
-    def _desktop_workspace_runner(self) -> Any:
-        """Inspect state owned by ``session_store``."""
-        return self.session_store.state.desktop_runners
-
-    @property
-    def _desktop_state_versions(self) -> Any:
-        """Inspect state owned by ``session_store``."""
-        return self.session_store.state.desktop_versions
-
-    @property
-    def _runner_desktop_epochs(self) -> Any:
-        """Inspect state owned by ``session_store``."""
-        return self.session_store.state.runner_epochs
-
-    @property
-    def _process_pending(self) -> Any:
-        """Inspect state owned by ``rpc_registry``."""
-        return self.rpc_registry.process_pending
-
-    @property
-    def _git_pending(self) -> Any:
-        """Inspect state owned by ``rpc_registry``."""
-        return self.rpc_registry.git_pending
-
-    @property
-    def _pending_credential_inject(self) -> Any:
-        """Inspect state owned by ``credential_sync``."""
-        return self.credential_sync.pending_inject
-
-    @property
-    def _pending_process_verify(self) -> Any:
-        """Inspect state owned by ``heartbeat_reconciler``."""
-        return self.heartbeat_reconciler.pending_process_verify
-
-    @property
-    def _git_locks(self) -> Any:
-        """Inspect state owned by ``git_operations``."""
-        return self.git_operations.git_locks
-
-    @property
-    def _git_locks_guard(self) -> Any:
-        """Inspect state owned by ``git_operations``."""
-        return self.git_operations.git_locks_guard
-
-    @property
-    def _credential_resolver(self) -> Any:
-        """Inspect state owned by ``credential_sync``."""
-        return self.credential_sync._credential_resolver
-
-    _FRONTEND_CHUNK_B64_SIZE = FileTransferService._FRONTEND_CHUNK_B64_SIZE
-
-    _FRONTEND_READ_MAX_CHUNKS = FileTransferService._FRONTEND_READ_MAX_CHUNKS
-
-    GIT_READ_OPERATIONS = GitOperationsService.GIT_READ_OPERATIONS
-
-    _GIT_READ_TIMEOUT_SECONDS = GitOperationsService._GIT_READ_TIMEOUT_SECONDS
-
-    _GIT_NETWORK_TIMEOUT_SECONDS = GitOperationsService._GIT_NETWORK_TIMEOUT_SECONDS
-
-    BUILD_LOG_MAX_CHARS = ImageLifecycleService.BUILD_LOG_MAX_CHARS
-
-    _PROCESS_RPC_TIMEOUT_SECONDS = ProcessManagerService._PROCESS_RPC_TIMEOUT_SECONDS
-
-    _PROCESS_LIVE_TIMEOUT_SECONDS = ProcessManagerService._PROCESS_LIVE_TIMEOUT_SECONDS
-
-    _PROCESS_RESULT_EVENTS = ProcessManagerService._PROCESS_RESULT_EVENTS
-
-    _PROCESS_VERIFY_BATCH_SIZE = ProcessManagerService._PROCESS_VERIFY_BATCH_SIZE
-
-    _PROCESS_UNCONFIRMED_MAX_AGE_SECONDS = (
-        ProcessManagerService._PROCESS_UNCONFIRMED_MAX_AGE_SECONDS
-    )
-
-    _STREAM_CALL_TIMEOUT_SECONDS = StreamTransportService._STREAM_CALL_TIMEOUT_SECONDS
-
-    _STREAM_CHUNK_SIZE = StreamTransportService._STREAM_CHUNK_SIZE
-
-    _STREAM_RESULT_EVENTS = StreamTransportService._STREAM_RESULT_EVENTS
-
-    def _forward_to_frontend(self, event: str, data: dict, workspace_id: str) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus.forward_to_frontend(event, data, workspace_id)
-
-    def _emit_frontend_event(self, event: str, data: dict, workspace_id: str) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus._emit_frontend_event(event, data, workspace_id)
-
-    def _forward_runner_status_to_frontend(self, runner: Runner, status: str) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus.forward_runner_status_to_frontend(runner, status)
-
-    def _forward_workspace_operation(
-        self, workspace_id: str, active_operation: str | None
-    ) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus.forward_workspace_operation(
-            workspace_id, active_operation
-        )
-
-    def _project_workspace_operation(
-        self, workspace_id: str, active_operation: str | None
-    ) -> dict:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus._project_workspace_operation(
-            workspace_id, active_operation
-        )
-
-    async def _forward_workspace_operation_async(
-        self, workspace_id: str, active_operation: str | None
-    ) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return await self.frontend_bus.forward_workspace_operation_async(
-            workspace_id, active_operation
-        )
-
-    def _forward_workspace_status(
-        self,
-        workspace: Workspace,
-        *,
-        task_id: str | None = None,
-        status: str | None = None,
-    ) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus.forward_workspace_status(
-            workspace, task_id=task_id, status=status
-        )
-
-    def _push_process_status(
-        self,
-        *,
-        workspace_id: str,
-        process_id: str,
-        status: str,
-        exit_code: int | None = None,
-        pid: int | None = None,
-        log_path: str | None = None,
-        run_count: int | None = None,
-    ) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus.push_process_status(
-            workspace_id=workspace_id,
-            process_id=process_id,
-            status=status,
-            exit_code=exit_code,
-            pid=pid,
-            log_path=log_path,
-            run_count=run_count,
-        )
-
-    def _push_process_removed(self, *, workspace_id: str, process_id: str) -> None:
-        """Delegate to :class:`FrontendBusService`."""
-        return self.frontend_bus.push_process_removed(
-            workspace_id=workspace_id, process_id=process_id
-        )
-
-    def _ensure_workspace_available(self, workspace: Workspace) -> None:
-        """Delegate to :class:`OwnershipService`."""
-        return self.ownership.ensure_workspace_available(workspace)
-
     def is_workspace_available(self, workspace_id: uuid.UUID) -> bool:
         """Delegate to :class:`OwnershipService`."""
         return self.ownership.is_workspace_available(workspace_id)
 
-    def _validate_task_runner(self, task, runner_id: str | None) -> bool:
-        """Delegate to :class:`OwnershipService`."""
-        return self.ownership.validate_task_runner(task, runner_id)
-
-    async def _desktop_event_owned_by_runner(
-        self, workspace_id: str, runner_id: str | None
-    ) -> bool:
-        """Delegate to :class:`OwnershipService`."""
-        return await self.ownership.desktop_event_owned_by_runner(
-            workspace_id, runner_id
-        )
-
-    def _ensure_process_dispatchable(self, workspace: Workspace) -> Runner:
-        """Delegate to :class:`OwnershipService`."""
-        return self.ownership.ensure_process_dispatchable(workspace)
-
-    def _ensure_git_dispatchable(self, workspace: Workspace) -> Runner:
-        """Delegate to :class:`OwnershipService`."""
-        return self.ownership.ensure_git_dispatchable(workspace)
-
-    def _validate_harness_workspace_runner(
-        self, workspace_id: uuid.UUID, runner_id: str
-    ) -> bool:
-        """Delegate to :class:`OwnershipService`."""
-        return self.ownership.validate_harness_workspace_runner(workspace_id, runner_id)
-
-    def _resolve_process_future(self, request_id: str, payload: dict) -> bool:
-        """Delegate to :class:`RpcRegistryService`."""
-        return self.rpc_registry.resolve_process_future(request_id, payload)
-
-    def _resolve_git_future(self, request_id: str, payload: dict) -> bool:
-        """Delegate to :class:`RpcRegistryService`."""
-        return self.rpc_registry.resolve_git_future(request_id, payload)
-
-    async def _emit_to_runner(self, runner: Runner, event: str, data: dict) -> None:
-        """Delegate to :class:`RunnerTransportService`."""
-        return await self.runner_transport.emit_to_runner(runner, event, data)
-
-    async def _prepare_lifecycle_delivery(
-        self, runner: Runner, event: str, data: dict
-    ) -> tuple[str | None, dict]:
-        """Delegate to :class:`RunnerTransportService`."""
-        return await self.runner_transport._prepare_lifecycle_delivery(
-            runner, event, data
-        )
-
     def record_operation_heartbeat(self, runner_id: str, data: dict) -> None:
         """Delegate to :class:`RunnerTransportService`."""
         return self.runner_transport.record_operation_heartbeat(runner_id, data)
-
-    async def _call_runner(
-        self, runner: Runner, event: str, data: dict, *, timeout: int = 15
-    ) -> dict:
-        """Delegate to :class:`RunnerTransportService`."""
-        return await self.runner_transport.call_runner(
-            runner, event, data, timeout=timeout
-        )
-
-    def _route_harness_reply(
-        self, event: str, data: dict, runner_id: str | None = None
-    ) -> bool | None:
-        """Delegate to :class:`RunnerTransportService`."""
-        return self.runner_transport.route_harness_reply(event, data, runner_id)
 
     async def emit_harness_event(
         self, runner: Runner, event: str, payload: dict
@@ -499,10 +248,6 @@ class RunnerService:
         """Delegate to :class:`RunnerTransportService`."""
         return self.runner_transport.handle_harness_reply(event, data, runner_id)
 
-    def _set_runner_desktop_epoch(self, runner_id: str, epoch: str | None) -> None:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.set_runner_desktop_epoch(runner_id, epoch)
-
     def is_desktop_active(self, workspace_id: str) -> bool:
         """Delegate to :class:`SessionStoreService`."""
         return self.session_store.is_desktop_active(workspace_id)
@@ -510,183 +255,6 @@ class RunnerService:
     def get_desktop_info(self, workspace_id: str) -> dict | None:
         """Delegate to :class:`SessionStoreService`."""
         return self.session_store.get_desktop_info(workspace_id)
-
-    @staticmethod
-    def _normalize_desktop_state(desktop_state: dict) -> dict:
-        """Delegate to :class:`SessionStoreService`."""
-        return SessionStoreService._normalize_desktop_state(desktop_state)
-
-    def _desktop_public_summary(self, workspace_id: str) -> dict:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.desktop_public_summary(workspace_id)
-
-    def _record_active_desktop(
-        self, workspace_id: str, desktop_state: dict, *, runner_id: str
-    ) -> bool:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.record_active_desktop(
-            workspace_id, desktop_state, runner_id=runner_id
-        )
-
-    def _desktop_state_is_stale(
-        self,
-        workspace_id: str,
-        *,
-        epoch: str,
-        generation: int,
-        runner_id: str,
-        active: bool = True,
-    ) -> bool:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.desktop_state_is_stale(
-            workspace_id,
-            epoch=epoch,
-            generation=generation,
-            runner_id=runner_id,
-            active=active,
-        )
-
-    def _remember_desktop_state(
-        self,
-        workspace_id: str,
-        *,
-        epoch: str,
-        generation: int,
-        runner_id: str,
-        active: bool,
-    ) -> None:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.remember_desktop_state(
-            workspace_id,
-            epoch=epoch,
-            generation=generation,
-            runner_id=runner_id,
-            active=active,
-        )
-
-    def _sync_desktop_state_from_heartbeat(
-        self,
-        workspace_id: str,
-        desktop_state: dict | None,
-        *,
-        runner_id: str,
-        desktop_epoch: str,
-        desktop_generation: int,
-        desktop_session_tracked: bool,
-    ) -> None:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.sync_desktop_state_from_heartbeat(
-            workspace_id,
-            desktop_state,
-            runner_id=runner_id,
-            desktop_epoch=desktop_epoch,
-            desktop_generation=desktop_generation,
-            desktop_session_tracked=desktop_session_tracked,
-        )
-
-    def _cleanup_desktop_state(self, workspace_id: str) -> None:
-        """Delegate to :class:`SessionStoreService`."""
-        return self.session_store.cleanup_desktop_state(workspace_id)
-
-    async def _set_workspace_operation(
-        self, workspace: Workspace, operation: WorkspaceOperation | None
-    ) -> Workspace:
-        """Delegate to :class:`TaskDispatchService`."""
-        return await self.task_dispatch._set_workspace_operation(workspace, operation)
-
-    async def _dispatch_workspace_task(
-        self,
-        *,
-        runner: Runner,
-        event: str,
-        payload: dict,
-        task: Task,
-        workspace: Workspace | None = None,
-        operation: WorkspaceOperation | None = None,
-    ) -> None:
-        """Delegate to :class:`TaskDispatchService`."""
-        return await self.task_dispatch.dispatch_workspace_task(
-            runner=runner,
-            event=event,
-            payload=payload,
-            task=task,
-            workspace=workspace,
-            operation=operation,
-        )
-
-    @staticmethod
-    def _resolve_qemu_resources(
-        *,
-        runner: Runner,
-        qemu_vcpus: int | None,
-        qemu_memory_mb: int | None,
-        qemu_disk_size_gb: int | None,
-        current: tuple[int, int, int] | None = None,
-    ) -> tuple[int, int, int]:
-        """Delegate to :class:`TaskDispatchService`."""
-        return TaskDispatchService.resolve_qemu_resources(
-            runner=runner,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-            current=current,
-        )
-
-    async def _ensure_qemu_active_capacity(
-        self,
-        *,
-        runner: Runner,
-        requested_vcpus: int,
-        requested_memory_mb: int,
-        requested_disk_size_gb: int,
-        exclude_workspace_id: uuid.UUID | None = None,
-    ) -> None:
-        """Delegate to :class:`TaskDispatchService`."""
-        return await self.task_dispatch.ensure_qemu_active_capacity(
-            runner=runner,
-            requested_vcpus=requested_vcpus,
-            requested_memory_mb=requested_memory_mb,
-            requested_disk_size_gb=requested_disk_size_gb,
-            exclude_workspace_id=exclude_workspace_id,
-        )
-
-    async def _resolve_credential_selection(
-        self,
-        credential_ids: list[uuid.UUID],
-        *,
-        user,
-        organization_id: uuid.UUID | None,
-    ) -> ResolvedCredentials:
-        """Delegate to :class:`CredentialSyncService`."""
-        return await self.credential_sync.resolve_credential_selection(
-            credential_ids, user=user, organization_id=organization_id
-        )
-
-    def _credential_resolve_call(self, workspace):
-        """Delegate to :class:`CredentialSyncService`."""
-        return self.credential_sync.credential_resolve_call(workspace)
-
-    @staticmethod
-    def _has_credential_material(resolved: ResolvedCredentials | None) -> bool:
-        """Delegate to :class:`CredentialSyncService`."""
-        return CredentialSyncService.has_credential_material(resolved)
-
-    @staticmethod
-    def _resolved_credentials_payload(resolved) -> dict:
-        """Delegate to :class:`CredentialSyncService`."""
-        return CredentialSyncService.resolved_credentials_payload(resolved)
-
-    async def _dispatch_credential_inject(
-        self,
-        workspace: Workspace,
-        *,
-        resolved: ResolvedCredentials | None = None,
-        wait: bool = False,
-    ) -> bool | None:
-        """Delegate to :class:`CredentialSyncService`."""
-        return await self.credential_sync.dispatch_credential_inject(
-            workspace, resolved=resolved, wait=wait
-        )
 
     async def dispatch_credential_reconcile(
         self, workspace_ids: list[uuid.UUID]
@@ -720,68 +288,17 @@ class RunnerService:
         """Delegate to :class:`FileTransferService`."""
         return await self.file_transfer.forward_files_event(workspace_id, event, data)
 
-    @staticmethod
-    def _validate_upload_start(data: dict) -> bool:
-        """Delegate to :class:`FileTransferService`."""
-        return FileTransferService._validate_upload_start(data)
-
-    @staticmethod
-    def _validate_upload_relay(event: str, data: dict) -> bool:
-        """Delegate to :class:`FileTransferService`."""
-        return FileTransferService._validate_upload_relay(event, data)
-
-    @classmethod
-    def _validate_runner_file_chunk(cls, event: str, data: dict) -> bool:
-        """Delegate to :class:`FileTransferService`."""
-        return FileTransferService.validate_runner_file_chunk(event, data)
-
     async def handle_files_result(
         self, event: str, data: dict, runner_id: str | None = None
     ) -> None:
         """Delegate to :class:`FileTransferService`."""
         return await self.file_transfer.handle_files_result(event, data, runner_id)
 
-    @classmethod
-    def git_timeout_for(cls, operation: str) -> float:
-        """Delegate to :class:`GitOperationsService`."""
-        return GitOperationsService.git_timeout_for(operation)
-
-    @staticmethod
-    def _git_lock_key(workspace_id: uuid.UUID, repo_path: str | None) -> str:
-        """Delegate to :class:`GitOperationsService`."""
-        return GitOperationsService._git_lock_key(workspace_id, repo_path)
-
-    async def _git_lock(
-        self, workspace_id: uuid.UUID, repo_path: str | None
-    ) -> asyncio.Lock:
-        """Delegate to :class:`GitOperationsService`."""
-        return await self.git_operations._git_lock(workspace_id, repo_path)
-
     def handle_git_reply(
         self, event: str, data: dict, runner_id: str | None = None
     ) -> bool:
         """Delegate to :class:`GitOperationsService`."""
         return self.git_operations.handle_git_reply(event, data, runner_id)
-
-    async def _await_git_result(
-        self,
-        *,
-        request_id: str,
-        workspace_id: uuid.UUID,
-        operation: str,
-        payload: dict,
-        runner: Runner,
-        timeout: float,
-    ) -> dict:
-        """Delegate to :class:`GitOperationsService`."""
-        return await self.git_operations._await_git_result(
-            request_id=request_id,
-            workspace_id=workspace_id,
-            operation=operation,
-            payload=payload,
-            runner=runner,
-            timeout=timeout,
-        )
 
     async def run_git_operation(
         self,
@@ -796,21 +313,6 @@ class RunnerService:
         return await self.git_operations.run_git_operation(
             workspace_id, operation, repo_path=repo_path, args=args, user=user
         )
-
-    @staticmethod
-    def commit_identity_for_user(user) -> tuple[str, str]:
-        """Delegate to :class:`GitOperationsService`."""
-        return GitOperationsService.commit_identity_for_user(user)
-
-    def _get_workspace_auto_stop_deadline(self, workspace) -> datetime | None:
-        """Delegate to :class:`HeartbeatReconcilerService`."""
-        return self.heartbeat_reconciler._get_workspace_auto_stop_deadline(workspace)
-
-    def _should_auto_stop_workspace(
-        self, workspace, *, now: datetime | None = None
-    ) -> bool:
-        """Delegate to :class:`HeartbeatReconcilerService`."""
-        return self.heartbeat_reconciler._should_auto_stop_workspace(workspace, now=now)
 
     async def auto_stop_inactive_workspaces(
         self,
@@ -845,30 +347,6 @@ class RunnerService:
     async def reconcile_vanished_processes(self, runner: Runner) -> list[uuid.UUID]:
         """Delegate to :class:`HeartbeatReconcilerService`."""
         return await self.heartbeat_reconciler.reconcile_vanished_processes(runner)
-
-    @staticmethod
-    def _map_instance_status(status: str) -> str:
-        """Delegate to :class:`HeartbeatReconcilerService`."""
-        return HeartbeatReconcilerService._map_instance_status(status)
-
-    @staticmethod
-    def _validate_qemu_base_distro(base_distro: str) -> None:
-        """Delegate to :class:`ImageLifecycleService`."""
-        return ImageLifecycleService._validate_qemu_base_distro(base_distro)
-
-    @staticmethod
-    def _desktop_session_init_script_block() -> str:
-        """Delegate to :class:`ImageLifecycleService`."""
-        return ImageLifecycleService._desktop_session_init_script_block()
-
-    @classmethod
-    def _build_qemu_init_script_content(cls, definition) -> str:
-        """Delegate to :class:`ImageLifecycleService`."""
-        return ImageLifecycleService._build_qemu_init_script_content(definition)
-
-    def _ensure_definition_mutable(self, definition) -> None:
-        """Delegate to :class:`ImageLifecycleService`."""
-        return self.image_lifecycle._ensure_definition_mutable(definition)
 
     def deactivate_runner_image(self, build):
         """Delegate to :class:`ImageLifecycleService`."""
@@ -1008,14 +486,6 @@ class RunnerService:
             task_id, error, runner_id
         )
 
-    def _mark_definition_delete_failed(
-        self, definition_id: uuid.UUID | None, *, error: str
-    ) -> None:
-        """Delegate to :class:`ImageLifecycleService`."""
-        return self.image_lifecycle._mark_definition_delete_failed(
-            definition_id, error=error
-        )
-
     async def activate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Delegate to :class:`ImageLifecycleService`."""
         return await self.image_lifecycle.activate_image_definition(definition_id)
@@ -1088,20 +558,6 @@ class RunnerService:
         return InteractiveSessionsService.viewer_identity(
             workspace_id, user_id, viewer_client_id
         )
-
-    async def _viewer_workspace(
-        self, workspace_id: uuid.UUID, *, user, organization_id: uuid.UUID
-    ) -> Workspace:
-        """Delegate to :class:`InteractiveSessionsService`."""
-        return await self.interactive_sessions._viewer_workspace(
-            workspace_id, user=user, organization_id=organization_id
-        )
-
-    async def _viewer_rpc(
-        self, workspace_id: uuid.UUID, action: str, args: dict
-    ) -> dict:
-        """Delegate to :class:`InteractiveSessionsService`."""
-        return await self.interactive_sessions._viewer_rpc(workspace_id, action, args)
 
     async def take_desktop_control(
         self, workspace_id: uuid.UUID, *, user: User, organization_id: uuid.UUID
@@ -1320,62 +776,6 @@ class RunnerService:
         """Delegate to :class:`ProcessManagerService`."""
         return self.process_manager.handle_process_reply(event, data, runner_id)
 
-    async def _await_process_result(
-        self,
-        *,
-        request_id: str,
-        event: str,
-        payload: dict,
-        runner: Runner,
-        timeout: float,
-    ) -> dict:
-        """Delegate to :class:`ProcessManagerService`."""
-        return await self.process_manager._await_process_result(
-            request_id=request_id,
-            event=event,
-            payload=payload,
-            runner=runner,
-            timeout=timeout,
-        )
-
-    @staticmethod
-    def _clean_process_name(name: str | None) -> str:
-        """Delegate to :class:`ProcessManagerService`."""
-        return ProcessManagerService._clean_process_name(name)
-
-    @staticmethod
-    def _process_log_paths(process_id: uuid.UUID, run_count: int) -> tuple[str, str]:
-        """Delegate to :class:`ProcessManagerService`."""
-        return ProcessManagerService._process_log_paths(process_id, run_count)
-
-    async def _resolve_process(
-        self,
-        workspace_id: uuid.UUID,
-        id_or_name: uuid.UUID | str,
-        *,
-        kind: str | None = None,
-        session_id: uuid.UUID | str | None = None,
-    ) -> WorkspaceProcess:
-        """Delegate to :class:`ProcessManagerService`."""
-        return await self.process_manager._resolve_process(
-            workspace_id, id_or_name, kind=kind, session_id=session_id
-        )
-
-    @staticmethod
-    def _coerce_session_id(session_id: uuid.UUID | str | None) -> uuid.UUID | None:
-        """Delegate to :class:`ProcessManagerService`."""
-        return ProcessManagerService._coerce_session_id(session_id)
-
-    @staticmethod
-    def _coerce_process_kind(kind: str | None) -> str:
-        """Delegate to :class:`ProcessManagerService`."""
-        return ProcessManagerService._coerce_process_kind(kind)
-
-    @staticmethod
-    def _assert_not_temp(process: WorkspaceProcess, *, action: str) -> None:
-        """Delegate to :class:`ProcessManagerService`."""
-        return ProcessManagerService._assert_not_temp(process, action=action)
-
     async def start_process(
         self,
         workspace_id: uuid.UUID,
@@ -1398,45 +798,6 @@ class RunnerService:
             user=user,
             session_id=session_id,
             kind=kind,
-        )
-
-    async def _stop_running_process(
-        self, workspace: Workspace, stored: WorkspaceProcess
-    ) -> WorkspaceProcess:
-        """Delegate to :class:`ProcessManagerService`."""
-        return await self.process_manager._stop_running_process(workspace, stored)
-
-    async def _mark_process_stopped(
-        self, workspace: Workspace, stored: WorkspaceProcess, result: dict
-    ) -> WorkspaceProcess:
-        """Delegate to :class:`ProcessManagerService`."""
-        return await self.process_manager._mark_process_stopped(
-            workspace, stored, result
-        )
-
-    async def _mark_process_vanished(
-        self,
-        workspace: Workspace,
-        stored: WorkspaceProcess,
-        *,
-        exit_code: int | None = None,
-    ) -> WorkspaceProcess:
-        """Delegate to :class:`ProcessManagerService`."""
-        return await self.process_manager._mark_process_vanished(
-            workspace, stored, exit_code=exit_code
-        )
-
-    @staticmethod
-    def _process_verify_candidates(processes: list[WorkspaceProcess]) -> list[dict]:
-        """Delegate to :class:`ProcessManagerService`."""
-        return ProcessManagerService._process_verify_candidates(processes)
-
-    async def _verify_process_candidates(
-        self, workspace: Workspace, processes: list[WorkspaceProcess]
-    ) -> dict[str, dict]:
-        """Delegate to :class:`ProcessManagerService`."""
-        return await self.process_manager._verify_process_candidates(
-            workspace, processes
         )
 
     async def reverify_vanished_processes(
@@ -1579,12 +940,6 @@ class RunnerService:
         """Delegate to :class:`RunnerLifecycleService`."""
         return self.runner_lifecycle.record_runner_system_metrics(runner, metrics)
 
-    def _record_workspace_disk_usage(
-        self, runner: Runner, vm_metrics: dict | None
-    ) -> None:
-        """Delegate to :class:`RunnerLifecycleService`."""
-        return self.runner_lifecycle._record_workspace_disk_usage(runner, vm_metrics)
-
     def get_latest_runner_metrics(
         self, runner_id: uuid.UUID
     ) -> RunnerSystemMetrics | None:
@@ -1629,25 +984,6 @@ class RunnerService:
     def get_workspace_or_none(self, workspace_id: uuid.UUID) -> Workspace | None:
         """Delegate to :class:`RunnerLifecycleService`."""
         return self.runner_lifecycle.get_workspace_or_none(workspace_id)
-
-    def _populate_workspace_activity(self, workspaces: list[Workspace]) -> None:
-        """Delegate to :class:`RunnerLifecycleService`."""
-        return self.runner_lifecycle._populate_workspace_activity(workspaces)
-
-    @classmethod
-    def _is_stream_event(cls, event: str) -> bool:
-        """Delegate to :class:`StreamTransportService`."""
-        return StreamTransportService._is_stream_event(event)
-
-    def _validate_stream_payload(
-        self, event: str, data: dict
-    ) -> tuple[str, str] | None:
-        """Delegate to :class:`StreamTransportService`."""
-        return self.stream_transport._validate_stream_payload(event, data)
-
-    def _validate_stream_chunk_payload(self, data: dict) -> bool:
-        """Delegate to :class:`StreamTransportService`."""
-        return self.stream_transport._validate_stream_chunk_payload(data)
 
     def handle_stream_reply(
         self, event: str, data: dict, runner_id: str | None = None
@@ -1703,26 +1039,11 @@ class RunnerService:
             workspace_id, user=user, organization_id=organization_id
         )
 
-    @staticmethod
-    def _is_desktop_viewer(
-        workspace: Workspace, *, user_id: int, role: str | None
-    ) -> bool:
-        """Delegate to :class:`WorkspaceAccessService`."""
-        return WorkspaceAccessService._is_desktop_viewer(
-            workspace, user_id=user_id, role=role
-        )
-
     def resolve_desktop_viewer(
         self, user_id: int | str, workspace_id: str
     ) -> tuple[User, uuid.UUID]:
         """Delegate to :class:`WorkspaceAccessService`."""
         return self.workspace_access.resolve_desktop_viewer(user_id, workspace_id)
-
-    def _workspace_membership(
-        self, user_id: int | str, workspace_id: str
-    ) -> tuple[Workspace, Membership] | None:
-        """Delegate to :class:`WorkspaceAccessService`."""
-        return self.workspace_access._workspace_membership(user_id, workspace_id)
 
     async def touch_workspace_activity(
         self, workspace_id: uuid.UUID, *, at: datetime | None = None
@@ -1737,44 +1058,6 @@ class RunnerService:
     ) -> WorkspaceLaunchState:
         """Delegate to :class:`WorkspaceLifecycleService`."""
         return self.workspace_lifecycle.get_workspace_launch_state(workspace_id)
-
-    @staticmethod
-    def _derive_workspace_name(
-        name: str, repos: list[str], workspace_id: uuid.UUID
-    ) -> str:
-        """Delegate to :class:`WorkspaceLifecycleService`."""
-        return WorkspaceLifecycleService._derive_workspace_name(
-            name, repos, workspace_id
-        )
-
-    @staticmethod
-    def _validate_runner_qemu_limits(runner: Runner) -> None:
-        """Delegate to :class:`WorkspaceLifecycleService`."""
-        return WorkspaceLifecycleService.validate_runner_qemu_limits(runner)
-
-    @staticmethod
-    def _task_workspace_operation(task_type: TaskType) -> WorkspaceOperation | None:
-        """Delegate to :class:`WorkspaceLifecycleService`."""
-        return WorkspaceLifecycleService._task_workspace_operation(task_type)
-
-    @staticmethod
-    def _workspace_operation_label(operation: str | None) -> str:
-        """Delegate to :class:`WorkspaceLifecycleService`."""
-        return WorkspaceLifecycleService.workspace_operation_label(operation)
-
-    def _placement_for_image_instance(
-        self,
-        image: ImageInstance,
-        *,
-        organization_id: uuid.UUID | None = None,
-        requested_runner_id: uuid.UUID | None = None,
-    ) -> Runner:
-        """Delegate to :class:`WorkspaceLifecycleService`."""
-        return self.workspace_lifecycle._placement_for_image_instance(
-            image,
-            organization_id=organization_id,
-            requested_runner_id=requested_runner_id,
-        )
 
     async def create_workspace(
         self,
@@ -1981,6 +1264,5 @@ def get_runner_service() -> RunnerService:
 __all__ = [
     "RunnerService",
     "RunnerRepositories",
-    "_CREDENTIAL_INJECT_TIMEOUT_SECONDS",
     "get_runner_service",
 ]

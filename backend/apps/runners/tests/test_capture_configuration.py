@@ -154,7 +154,7 @@ async def test_queued_reconciliation_rechecks_fresh_state(credential_service, ho
     await service.dispatch_credential_reconcile([workspace.id])
     service.tasks.create.assert_not_called()
     service.runner_transport.emit_to_runner.assert_not_awaited()
-    assert service._pending_credential_inject == set()
+    assert service.credential_sync.pending_inject == set()
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_explicit_lifecycle_credential_delivery_is_not_fenced(credential_s
     service.frontend_bus.forward_workspace_status = Mock()
     service.workspaces.update_credentials_present.return_value = workspace
     assert (
-        await service._dispatch_credential_inject(
+        await service.credential_sync.dispatch_credential_inject(
             workspace,
             resolved=ResolvedCredentials(env_vars={"TOKEN": "test-secret"}),
             wait=True,

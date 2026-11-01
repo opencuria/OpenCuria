@@ -159,16 +159,16 @@ def test_process_guard_preserves_state_and_offline_errors(interaction_service):
     service, workspace = interaction_service
     workspace.status = WorkspaceStatus.DELETING
     with pytest.raises(WorkspaceStateError):
-        service._ensure_process_dispatchable(workspace)
+        service.ownership.ensure_process_dispatchable(workspace)
     workspace.status = WorkspaceStatus.STOPPED
     with pytest.raises(WorkspaceStateError):
-        service._ensure_process_dispatchable(workspace)
+        service.ownership.ensure_process_dispatchable(workspace)
     workspace.status = WorkspaceStatus.RUNNING
     workspace.active_operation = ""
     workspace.current_task_id = None
     workspace.runner.is_online = False
     with pytest.raises(RunnerOfflineError):
-        service._ensure_process_dispatchable(workspace)
+        service.ownership.ensure_process_dispatchable(workspace)
 
 
 @pytest.mark.asyncio

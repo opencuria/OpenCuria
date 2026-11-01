@@ -183,7 +183,7 @@ async def test_proxy_target_needs_an_active_desktop_and_a_connected_runner(
     workspace_id = str(workspace.id)
     assert await _get_desktop_proxy_target(workspace_id) is None
 
-    desktops = dict(get_runner_service()._active_desktops)
+    desktops = dict(get_runner_service().session_store.state.desktops)
     desktops[workspace_id] = {"port": 6901}
     monkeypatch.setattr(
         get_runner_service().session_store.state, "desktops", desktops

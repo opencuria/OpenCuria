@@ -33,7 +33,9 @@ def desktop_access(workspace, user, organization, monkeypatch):
         return_value={"ok": True, "text": "clipboard"}
     )
     key = str(workspace.id)
-    monkeypatch.setitem(service._active_desktops, key, {"computer_use": False})
+    monkeypatch.setitem(
+        service.session_store.state.desktops, key, {"computer_use": False}
+    )
     monkeypatch.setattr("apps.runners.api._get_service", lambda: service)
     return service, gateway, workspace, user, organization
 

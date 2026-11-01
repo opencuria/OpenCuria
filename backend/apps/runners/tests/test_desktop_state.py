@@ -31,7 +31,7 @@ def state():
 @pytest.fixture
 def service(runner, monkeypatch):
     service = RunnerService(sio_server=AsyncMock())
-    service._set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
+    service.session_store.set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
     return service
 
@@ -143,7 +143,7 @@ async def test_stop_clears_route_and_fences_late_active_events(
     )
     await send("stopped", task_id=str(task.id) if task else None)
     assert service.get_desktop_info(str(workspace.id)) is None
-    assert service._desktop_state_versions[str(workspace.id)] == (
+    assert service.session_store.state.desktop_versions[str(workspace.id)] == (
         str(runner.id),
         state["epoch"],
         5,
@@ -182,8 +182,8 @@ async def test_registered_epoch_replaces_previous_runner_process(
     service, workspace, send
 ):
     await send("process")
-    runner_id = service._desktop_workspace_runner[str(workspace.id)]
-    service._set_runner_desktop_epoch(runner_id, "new-epoch")
+    runner_id = service.session_store.state.desktop_runners[str(workspace.id)]
+    service.session_store.set_runner_desktop_epoch(runner_id, "new-epoch")
     await send("process", epoch="new-epoch", generation=1)
     await send("stopped")
     assert service.get_desktop_info(str(workspace.id))["epoch"] == "new-epoch"
@@ -204,7 +204,7 @@ async def test_delayed_task_completion_cannot_overwrite_a_newer_desktop(
     newer = {**state, "generation": 6}
 
     def complete(_task):
-        service._record_active_desktop(
+        service.session_store.record_active_desktop(
             str(workspace.id), newer, runner_id=str(runner.id)
         )
 
@@ -225,10 +225,10 @@ async def test_events_require_real_workspace_ownership(
     if cached:
         await send("process")
         # Force ownership validation against the database with an empty owner cache.
-        service._desktop_workspace_runner.pop(str(workspace.id))
+        service.session_store.state.desktop_runners.pop(str(workspace.id))
     emit.reset_mock()
     foreign_runner = str(uuid.uuid4())
-    service._set_runner_desktop_epoch(foreign_runner, state["epoch"])
+    service.session_store.set_runner_desktop_epoch(foreign_runner, state["epoch"])
     await send(
         event,
         sender=foreign_runner,
@@ -241,10 +241,10 @@ async def test_events_require_real_workspace_ownership(
 @pytest.mark.asyncio
 async def test_ownership_lookup_is_async_safe(service, runner, workspace, monkeypatch):
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
-    assert await service._desktop_event_owned_by_runner(
+    assert await service.ownership.desktop_event_owned_by_runner(
         str(workspace.id), str(runner.id)
     )
-    assert not await service._desktop_event_owned_by_runner(
+    assert not await service.ownership.desktop_event_owned_by_runner(
         str(uuid.uuid4()), str(runner.id)
     )
 
@@ -267,7 +267,9 @@ def test_heartbeat_recovery_and_liveness_fencing(
     if desktop and generation == 5:
         assert service.get_desktop_info(ws_id) is None
     else:
-        service._record_active_desktop(ws_id, state, runner_id=str(runner.id))
+        service.session_store.record_active_desktop(
+            ws_id, state, runner_id=str(runner.id)
+        )
     service.handle_heartbeat(
         runner,
         [
@@ -297,7 +299,7 @@ def test_workspace_shutdown_cleans_desktop_state(
     service, runner, workspace, state, operation
 ):
     ws_id = str(workspace.id)
-    service._record_active_desktop(ws_id, state, runner_id=str(runner.id))
+    service.session_store.record_active_desktop(ws_id, state, runner_id=str(runner.id))
     task = Task.objects.create(
         runner=runner,
         workspace=workspace,
@@ -310,7 +312,7 @@ def test_workspace_shutdown_cleans_desktop_state(
         str(task.id), ws_id, runner_id=str(runner.id)
     )
     assert service.get_desktop_info(ws_id) is None
-    assert ws_id not in service._desktop_workspace_runner
+    assert ws_id not in service.session_store.state.desktop_runners
     workspace.refresh_from_db()
     assert workspace.status == (
         WorkspaceStatus.STOPPED if operation == "stopped" else WorkspaceStatus.DELETED

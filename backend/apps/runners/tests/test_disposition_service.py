@@ -111,13 +111,13 @@ async def test_retry_workflow_keeps_rpc_and_response_contract(
     )
     row = _operation(runner, workspace)
     transport = AsyncMock()
-    transport._call_runner.return_value = _evidence(row)
+    transport.runner_transport.call_runner.return_value = _evidence(row)
     result = await DispositionService().act(
         transport, user, runner.organization_id, row.task_id, "retry"
     )
     assert result["previous_operation_id"] == str(row.task_id)
     assert result["operation_id"] != str(row.task_id)
-    transport._call_runner.assert_awaited_once_with(
+    transport.runner_transport.call_runner.assert_awaited_once_with(
         runner, "operation:inspect", OperationRepository.envelope(row, {}), timeout=60
     )
     row.refresh_from_db()
@@ -141,7 +141,7 @@ async def test_member_cannot_acknowledge_before_contacting_runner(
             row.task_id,
             "acknowledge_interrupted",
         )
-    transport._call_runner.assert_not_called()
+    transport.runner_transport.call_runner.assert_not_called()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -154,7 +154,10 @@ async def test_reconcile_passes_the_exact_runner_outcome(
     row = _operation(runner, workspace)
     outcome = {**OperationRepository.envelope(row, {}), "error": "runner failure"}
     transport = AsyncMock()
-    transport._call_runner.return_value = {**_evidence(row), "result": outcome}
+    transport.runner_transport.call_runner.return_value = {
+        **_evidence(row),
+        "result": outcome,
+    }
     with patch(
         "apps.runners.services.disposition.apply_result", return_value=True
     ) as apply:
@@ -172,7 +175,7 @@ async def test_acknowledge_seals_unrecorded_identity_before_release(
     row = _operation(runner, workspace)
     evidence = _evidence(row, known=False)
     transport = AsyncMock()
-    transport._call_runner.side_effect = [
+    transport.runner_transport.call_runner.side_effect = [
         {**evidence, "status": "unknown", "diagnostic_code": "identity_not_recorded"},
         evidence,
     ]
@@ -183,7 +186,9 @@ async def test_acknowledge_seals_unrecorded_identity_before_release(
         "released": True,
         "resources_preserved": True,
     }
-    assert [call.args[1] for call in transport._call_runner.await_args_list] == [
+    assert [
+        call.args[1] for call in transport.runner_transport.call_runner.await_args_list
+    ] == [
         "operation:inspect",
         "operation:seal",
     ]

@@ -138,7 +138,7 @@ async def test_runner_handler_reply_routes_through_owned_backend_to_accessor(
         workspace_service.runtime_artifacts.ensure_runtime_artifact.assert_awaited_once()
 
     backend["service"].runner_transport.sio = AsyncMock()
-    backend["service"].sio.emit = AsyncMock(side_effect=backend_emit)
+    backend["service"].runner_transport.sio.emit = AsyncMock(side_effect=backend_emit)
     accessor = await create_harness_accessor(backend["service"], str(workspace.id))
     result = await accessor.ensure_runtime_artifact("claude-agent", "2.1.316")
 

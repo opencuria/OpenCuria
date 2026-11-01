@@ -39,7 +39,7 @@ async def test_lost_credential_ack_keeps_durable_fence_then_recovers(
     workspace.credentials.add(credential)
     sio_mock.call = AsyncMock(side_effect=SocketIOTimeoutError())
     with pytest.raises(ConflictError):
-        await service._dispatch_credential_inject(workspace, wait=True)
+        await service.credential_sync.dispatch_credential_inject(workspace, wait=True)
     task = Task.objects.get(type="inject_credentials", workspace=workspace)
     command = LifecycleCommand.objects.get(task=task)
     workspace.refresh_from_db()
@@ -154,7 +154,7 @@ async def test_old_session_ack_cannot_complete_current_injection(
 
     sio_mock.call = AsyncMock(side_effect=reconnect)
     assert (
-        await service._dispatch_credential_inject(
+        await service.credential_sync.dispatch_credential_inject(
             workspace, resolved=ResolvedCredentials(), wait=True
         )
         is None
