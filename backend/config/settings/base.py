@@ -35,6 +35,10 @@ DEBUG = False
 
 ALLOWED_HOSTS: list[str] = []
 
+# Voice input sends up to 8 MiB of compressed audio as base64 JSON. Keep the
+# request bounded while allowing ten-minute recordings and pointing manifests.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
+
 
 # --- Application definition ---
 

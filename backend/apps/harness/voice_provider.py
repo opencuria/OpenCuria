@@ -103,7 +103,7 @@ class VoiceProvider:
         """Prefer provider timestamps and retry plain JSON only if unsupported."""
         try:
             return await asyncio.wait_for(
-                self._transcribe(account, model, audio, mime_type), timeout=65
+                self._transcribe(account, model, audio, mime_type), timeout=180
             )
         except asyncio.TimeoutError as exc:
             raise VoiceProviderError(
@@ -116,7 +116,7 @@ class VoiceProvider:
         fmt = _FORMATS.get(mime_type.split(";", 1)[0].strip().lower())
         if fmt is None:
             raise ValueError("Unsupported recording format")
-        async with httpx.AsyncClient(timeout=httpx.Timeout(65, connect=10)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10)) as client:
             transport = self.client or client
             try:
                 for verbose in (True, False):

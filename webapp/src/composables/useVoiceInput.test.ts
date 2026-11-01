@@ -6,6 +6,7 @@ import { fileToBase64 } from '@/lib/chatUpload'
 import { monitorVoiceAudio } from '@/lib/voiceAudio'
 import { startPointing } from '@/lib/voicePointing'
 import { VOICE_LEVEL_HISTORY } from '@/lib/voiceCaptureControls'
+import { VOICE_MAX_DURATION_MS } from '@/lib/voiceLimits'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
 vi.mock('@/lib/voiceAudio', () => ({ monitorVoiceAudio: vi.fn(() => null) }))
@@ -299,6 +300,32 @@ describe('useVoiceInput microphone lifecycle', () => {
     expect(onResult).toHaveBeenCalledOnce()
   })
 
+  it('retains ten minutes of 64 kbit/s audio and pointing until the shared duration boundary', async () => {
+    vi.mocked(startPointing).mockReturnValue({
+      stop: vi.fn().mockResolvedValue(pointed), cancel: vi.fn(), audioActivity: vi.fn(),
+    })
+    const { voice, onResult } = create()
+    await voice.start(options)
+    const recorder = FakeMediaRecorder.instances[0]!
+    for (let second = 1; second <= 600; second++) {
+      recorder.emit('a'.repeat(8000))
+      now = second * 1000
+      await vi.advanceTimersByTimeAsync(1000)
+      if (second < 600) expect(voice.state.value).toBe('recording')
+    }
+    await settle()
+    const file = vi.mocked(fileToBase64).mock.calls[0]![0]
+    expect(file.size).toBe(600 * 8000 + recorder.finalChunk.length)
+    expect(transcribeVoice).toHaveBeenCalledWith(options.workspaceId,
+      expect.objectContaining({ duration_ms: VOICE_MAX_DURATION_MS }), expect.any(AbortSignal))
+    expect(saveVoiceRecording).toHaveBeenCalledWith(options.workspaceId,
+      expect.objectContaining({ ...pointed, duration_ms: VOICE_MAX_DURATION_MS }), expect.any(AbortSignal))
+    expect(media.track.stop).toHaveBeenCalledOnce()
+    expect(onResult).toHaveBeenCalledOnce()
+    expect(voice.error.value).toBe('')
+    expect(voice.state.value).toBe('idle')
+  })
+
   it('finishes recording if the microphone track ends', async () => {
     const { voice, onResult } = create()
     await voice.start(options)
@@ -356,7 +383,7 @@ describe('useVoiceInput microphone lifecycle', () => {
     const stopping = voice.stop()
     await settle()
     const signal = vi.mocked(transcribeVoice).mock.calls[0]![2]!
-    await vi.advanceTimersByTimeAsync(179_999)
+    await vi.advanceTimersByTimeAsync(299_999)
     expect(signal.aborted).toBe(false)
     expect(voice.state.value).toBe('processing')
     await vi.advanceTimersByTimeAsync(1)

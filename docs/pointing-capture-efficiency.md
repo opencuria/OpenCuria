@@ -1,7 +1,10 @@
 # Pointing capture efficiency review
 
-Reviewed 2026-10-31. This is an investigation and implementation proposal;
-recording behavior has not been changed. No CPU or bandwidth benchmark was run.
+Historical investigation from 2026-10-31. The findings and proposal below describe
+the earlier capture implementation. Revision tracking, snapshot reuse, sparse
+pointer events and ten-minute recording support are now implemented; see
+[Voice input](voice-input.md) for current behavior, limits and verification.
+The original investigation did not run a CPU or bandwidth benchmark.
 
 ## Finding
 

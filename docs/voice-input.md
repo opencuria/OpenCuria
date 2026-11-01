@@ -83,9 +83,18 @@ desktop surfaces with a matching captured frame. Controls, letterboxing and
 unlinked images keep their normal cursor. Stopping, discarding or a capture
 failure restores the normal cursor immediately.
 
-Pointer sampling targets 100 ms, with separate down/up/leave events. Desktop
-snapshots start at 500 ms once the desktop was pointed at. Exact framebuffer
-pixel comparison skips unchanged images before JPEG encoding or upload. Without
+Pointer sampling targets 100 ms, with separate down/up/leave events. Unchanged
+positions are omitted: the last position holds until the next event. Clicks,
+surface/frame changes and leaving a supported surface are retained. Resolving a
+desktop pointer no longer copies the growing frame list.
+
+Desktop snapshots start at 500 ms once the desktop was pointed at. A recording-local
+observer tracks drawing calls and dimension resets on the actual framebuffer;
+unchanged revisions skip snapshot allocation, pixel readback, encoding and upload.
+Changed revisions reuse one snapshot canvas and compare exact pixels before JPEG
+encoding, so redundant redraws also skip uploads. Unsupported canvas instrumentation
+falls back to exact pixel comparison. Observation ends and restores the original
+canvas methods on stop, cancellation, viewer replacement or keepalive expiry. Without
 microphone activity or mouse movement/clicks, the interval doubles for every five
 seconds of inactivity, capped at 30 seconds. Activity restores the 500 ms cadence;
 stationary pointer heartbeats and desktop animations do not count as activity.
@@ -110,16 +119,22 @@ Successful pointing captures are saved under:
 All `t_ms`, `start_ms` and `end_ms` values are milliseconds relative to microphone
 recording start. `transcript.json` contains cleaned `text`, source `segments`,
 `segments_kind`, `raw_text`, timing quality, model IDs and cleanup warnings.
-`pointer.json` contains `coordinate_space: "original-image-pixels"` and
+`pointer.json` contains `coordinate_space: "original-image-pixels"`,
+`unchanged_positions_omitted: true` and
 `events: [{t_ms, event, x, y, target}]`; targets identify kind, path and dimensions.
 `metadata.json` links both files and `frames: [{t_ms, path}]`, with duration and
 UTC server save time. It is written last, after all referenced uploads succeed.
 The draft links this completion manifest for the agent.
 
-Recordings are limited to five minutes and 1,500,000 audio bytes. At the requested
-64 kbit/s, the byte limit can finish recording before five minutes; codec/bitrate
-choices vary by browser. Desktop frames are bounded individually and in total.
-Recognition and cleanup each have a 65-second total timeout. Hiding the tab or
+Recordings are limited to ten minutes and 8 MiB of compressed audio. At the requested
+64 kbit/s, ten minutes uses about 4.8 MB, leaving room for codec/container overhead;
+bitrate choices vary by browser. Django accepts up to 12 MiB of JSON to accommodate
+base64 audio; any external API proxy must also allow requests of that size.
+Pointing allows 12,000 events and 1,201 desktop frames, with limits of 2 MiB per JPEG
+and 256 MiB of uploaded JPEGs in total. Frames upload incrementally; the browser
+retains metadata and at most eight pending uploads rather than all image blobs.
+Recognition has a 180-second total timeout, cleanup 65 seconds, and the browser
+allows five minutes for processing both stages and saving the manifest. Hiding the tab or
 ending the microphone track finishes recording. Navigation, disabling the
 composer and unmounting discard it and fence late asynchronous results.
 
@@ -161,7 +176,18 @@ and [OpenRouter transcription](https://openrouter.ai/docs/guides/overview/multim
 
 ## Verification scope
 
-Validation includes the real local OpenCuria browser, a nested workspace VM and
+The ten-minute limits have regression coverage for 600 seconds of 64 kbit/s audio,
+continuous desktop changes (1,201 frames), movement and clicks, stationary image
+references, late speech intervals, full-size HTTP requests, and permission/failure
+paths. This is a simulated recording clock, not a ten-minute physical microphone run.
+A Chromium comparison using the actual bridge on a 1920×1080 canvas and the actual
+cross-origin capture client measured 120 idle polls: full pixel readbacks and canvas
+allocations fell from 121 to one; median request round-trip time fell from 24 ms to
+0.7 ms in this local test. This measures the static-frame capture path, not overall
+desktop latency or a complete live VM recording. Actual drawing still produced a
+new frame and stopping removed the recording hooks.
+
+Earlier validation includes the real local OpenCuria browser, a nested workspace VM and
 its KasmVNC framebuffer, desktop interaction during capture, saved recording
 artifacts, and real OpenRouter transcription/cleanup calls using controlled
 spoken audio. Unit tests cover lifecycle, permissions, provider failures,

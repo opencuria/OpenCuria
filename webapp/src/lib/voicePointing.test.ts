@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from './voiceLimits'
 import {
   activePointingWorkspace,
   captureDesktopFrame,
@@ -142,7 +143,6 @@ describe('voice pointing', () => {
       'down',
       'up',
       'leave',
-      'leave',
     ])
     expect(result.pointers[result.pointers.length - 1]?.target).toBeNull()
     expect(activePointingWorkspace.value).toBeNull()
@@ -239,7 +239,7 @@ describe('voice pointing', () => {
     recording = startPointing('workspace-a', recordingId, performance.now())
     move('pointermove')
     expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(true)
-    for (let index = 0; index < 6100; index++) move('pointerdown')
+    for (let index = 0; index <= VOICE_MAX_POINTERS; index++) move('pointerdown')
     expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
     recording.cancel()
     recording = startPointing('workspace-a', recordingId, performance.now())
@@ -334,7 +334,7 @@ describe('voice pointing', () => {
     image.getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 }) as DOMRect
     hit = image
     recording = startPointing('workspace-a', recordingId, performance.now())
-    for (let index = 0; index < 6100; index++) move('pointerdown')
+    for (let index = 0; index <= VOICE_MAX_POINTERS; index++) move('pointerdown')
     expect(pointingError.value).toContain('event limit')
     await expect(recording.stop()).rejects.toThrow('event limit')
     expect(activePointingWorkspace.value).toBeNull()
@@ -571,6 +571,74 @@ describe('voice pointing', () => {
     clearInterval(speech)
     expect(frameRequests(send)).toHaveLength(81)
     expect((await recording.stop())!.frames).toHaveLength(81)
+  })
+
+  it('records ten minutes of changing desktop content, movement and clicks within the limits', async () => {
+    const { iframe, send } = viewer()
+    send.mockImplementation((data) => {
+      if (data.type !== 'opencuria:voice-frame') return
+      // Account for 200 KiB JPEGs without allocating 240 MiB in this unit test.
+      const blob = new Blob(['jpeg'], { type: 'image/jpeg' })
+      Object.defineProperty(blob, 'size', { value: 200 * 1024 })
+      queueMicrotask(() => frameReply(iframe, data.requestId, {
+        data: { type: data.type, requestId: data.requestId, frameId: data.requestId,
+          blob, width: 1920, height: 1080,
+          captured_at: performance.timeOrigin + performance.now() },
+      }))
+    })
+    unregister = registerPointingDesktop('workspace-a', () => iframe)
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    await vi.advanceTimersByTimeAsync(0)
+    pointAt(iframe)
+    const activity = setInterval(() => {
+      const x = Math.floor(performance.now() / 100) % 1920
+      pointAt(iframe, { x })
+      if (performance.now() % 1000 === 0) {
+        pointAt(iframe, { event: 'down', x })
+        pointAt(iframe, { event: 'up', x })
+      }
+      recording!.audioActivity()
+    }, 100)
+    await vi.advanceTimersByTimeAsync(VOICE_MAX_DURATION_MS)
+    clearInterval(activity)
+    expect(pointingError.value).toBeNull()
+    const result = (await recording.stop())!
+    expect(result.frames).toHaveLength(1201)
+    const lastFrame = result.frames[result.frames.length - 1]!
+    expect(lastFrame.t_ms).toBe(VOICE_MAX_DURATION_MS)
+    expect(result.pointers.length).toBeGreaterThan(6000)
+    expect(result.pointers.length).toBeLessThan(VOICE_MAX_POINTERS)
+    const clicks = result.pointers.filter((point) => point.event === 'down')
+    const lastClick = clicks[clicks.length - 1]!
+    expect(lastClick.t_ms).toBe(VOICE_MAX_DURATION_MS)
+    expect(lastClick.target?.kind).toBe('desktop')
+    expect(lastClick.target?.path).toBe(lastFrame.path)
+    expect(transport.send).toHaveBeenCalledTimes(1201)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('holds an unchanged image position for ten minutes and preserves later clicks and transitions', async () => {
+    const image = document.createElement('img')
+    image.dataset.voiceImagePath = '/workspace/design.png'
+    image.dataset.voiceWorkspace = 'workspace-a'
+    Object.defineProperties(image, { naturalWidth: { value: 1000 }, naturalHeight: { value: 500 } })
+    image.getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 }) as DOMRect
+    hit = image
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    move('pointermove')
+    await vi.advanceTimersByTimeAsync(VOICE_MAX_DURATION_MS - 100)
+    move('pointerdown')
+    move('pointerup')
+    image.dataset.voiceImagePath = '/workspace/other.png'
+    await vi.advanceTimersByTimeAsync(100)
+    const result = (await recording.stop())!
+    expect(result.pointers.map((point) => point.event)).toEqual(['move', 'down', 'up', 'move', 'leave'])
+    expect(result.pointers[0]!.t_ms).toBe(100)
+    expect(result.pointers[1]!.t_ms).toBe(VOICE_MAX_DURATION_MS - 100)
+    expect(result.pointers[3]!.target?.path).toBe('/workspace/other.png')
+    expect(pointingError.value).toBeNull()
+    expect(transport.send).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('aborts an in-flight capture on stop without corrupting the accepted recording', async () => {

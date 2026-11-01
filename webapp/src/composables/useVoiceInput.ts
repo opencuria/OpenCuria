@@ -4,11 +4,10 @@ import { fileToBase64 } from '@/lib/chatUpload'
 import { createSecureUuid } from '@/lib/secureUuid'
 import { monitorVoiceAudio, type VoiceAudioMonitor } from '@/lib/voiceAudio'
 import { VOICE_LEVEL_HISTORY } from '@/lib/voiceCaptureControls'
+import { VOICE_MAX_AUDIO_BYTES, VOICE_MAX_DURATION_MS } from '@/lib/voiceLimits'
 import { startPointing, type PointingResult } from '@/lib/voicePointing'
 import { saveVoiceRecording, transcribeVoice, type VoiceTranscript } from '@/services/voice.api'
 
-const MAX_DURATION = 300_000
-const MAX_BYTES = 1_500_000
 // The meter scales RMS by 12; ignore low background energy when pacing visuals.
 const VISUAL_AUDIO_ACTIVITY_LEVEL = 0.03
 let microphoneOwner: symbol | null = null
@@ -58,8 +57,8 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
   let recordingId = ''
   let origin = 0
   let durationMs = 0
-  let limitDuration = MAX_DURATION
-  let limitBytes = MAX_BYTES
+  let limitDuration = VOICE_MAX_DURATION_MS
+  let limitBytes = VOICE_MAX_AUDIO_BYTES
   let chunks: Blob[] = []
   let bytes = 0
   let stopped: Promise<void> | null = null
@@ -152,8 +151,8 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     microphoneOwner = owner
     workspaceId = options.workspaceId
     model = options.model
-    limitDuration = Math.min(options.maxDurationMs || MAX_DURATION, MAX_DURATION)
-    limitBytes = Math.min(options.maxAudioBytes || MAX_BYTES, MAX_BYTES)
+    limitDuration = Math.min(options.maxDurationMs || VOICE_MAX_DURATION_MS, VOICE_MAX_DURATION_MS)
+    limitBytes = Math.min(options.maxAudioBytes || VOICE_MAX_AUDIO_BYTES, VOICE_MAX_AUDIO_BYTES)
     state.value = 'requesting'
     try {
       const acquired = await navigator.mediaDevices.getUserMedia({
@@ -243,7 +242,7 @@ export function useVoiceInput(onResult: (text: string, path?: string) => void) {
     error.value = ''
     const request = new AbortController()
     controller = request
-    const requestTimer = setTimeout(() => request.abort(), 180_000)
+    const requestTimer = setTimeout(() => request.abort(), 300_000)
     try {
       if (!transcript) {
         const encoded = await fileToBase64(

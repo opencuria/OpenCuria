@@ -11,6 +11,7 @@ import { sendFilesUpload } from '@/services/socket'
 import { fileToBase64 } from '@/lib/chatUpload'
 import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
 import { createSecureUuid } from '@/lib/secureUuid'
+import { VOICE_MAX_DURATION_MS, VOICE_MAX_POINTERS } from '@/lib/voiceLimits'
 
 export interface PointerTarget {
   kind: 'image' | 'desktop'
@@ -38,9 +39,9 @@ export const pointingError = shallowRef<string | null>(null)
 export const pointingEngaged = shallowRef(false)
 const desktops = new Map<string, () => HTMLIFrameElement | null>()
 let activeOwner: symbol | null = null
-const MAX_DURATION_MS = 5 * 60 * 1000
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
-const MAX_TOTAL_BYTES = 64 * 1024 * 1024
+// Frames are uploaded as they arrive; only metadata and in-flight uploads stay in memory.
+const MAX_TOTAL_BYTES = 256 * 1024 * 1024
 const FRAME_INTERVAL_MS = 500
 const MAX_FRAME_INTERVAL_MS = 30_000
 const IDLE_BACKOFF_STEP_MS = 5000
@@ -307,11 +308,18 @@ export function startPointing(
       showImageCursor(null)
       return { x: null, y: null, target: null }
     }
-    if (stopped || failure || t_ms > MAX_DURATION_MS || document.visibilityState === 'hidden')
+    if (stopped || failure || t_ms > VOICE_MAX_DURATION_MS || document.visibilityState === 'hidden')
       return empty()
     if (desktopPoint && observedViewer) {
       showImageCursor(null)
-      const frame = [...frames].reverse().find((item) => item.t_ms <= t_ms)
+      // Usually the latest frame: walk backwards without copying the recording history.
+      let frame: PointingResult['frames'][number] | undefined
+      for (let index = frames.length - 1; index >= 0; index--) {
+        if (frames[index]!.t_ms <= t_ms) {
+          frame = frames[index]
+          break
+        }
+      }
       const size = frame && frameSizes.get(frame.path)
       if (frame && size?.width === desktopPoint.width && size.height === desktopPoint.height)
         return {
@@ -358,17 +366,28 @@ export function startPointing(
   }
   const sample = (event: PointerSample['event'], t_ms = elapsed()): void => {
     if (stopped || failure) return
-    if (t_ms > MAX_DURATION_MS) {
+    if (t_ms > VOICE_MAX_DURATION_MS) {
       showImageCursor(null)
       if (observedViewer) observe(observedViewer, false)
       return
     }
-    if (pointers.length >= 6000) {
+    const point = resolvePoint(t_ms)
+    if (point.target) engage()
+    const previous = pointers[pointers.length - 1]
+    const samePoint =
+      previous?.x === point.x &&
+      previous?.y === point.y &&
+      previous?.target?.kind === point.target?.kind &&
+      previous?.target?.path === point.target?.path &&
+      previous?.target?.width === point.target?.width &&
+      previous?.target?.height === point.target?.height
+    // A point remains valid until the next event. Preserve clicks and the first
+    // leave, but omit idle heartbeats and activity on unrelated UI surfaces.
+    if ((!point.target && !previous?.target) || (samePoint && event === 'move')) return
+    if (pointers.length >= VOICE_MAX_POINTERS) {
       fail(new Error('The pointing recording reached its event limit.'))
       return
     }
-    const point = resolvePoint(t_ms)
-    if (point.target) engage()
     pointers.push({ t_ms, event, ...point })
   }
   const pointer = (event: PointerEvent): void => {
@@ -454,7 +473,12 @@ export function startPointing(
   }
   /** Renew viewer observation; capture frames only after the desktop was pointed at. */
   const capture = (): void => {
-    if (stopped || failure || document.visibilityState === 'hidden' || elapsed() > MAX_DURATION_MS)
+    if (
+      stopped ||
+      failure ||
+      document.visibilityState === 'hidden' ||
+      elapsed() > VOICE_MAX_DURATION_MS
+    )
       return
     const iframe = syncViewer()
     if (!desktopRequested || pendingCapture || !iframe) return
@@ -467,7 +491,7 @@ export function startPointing(
     pendingCapture = (async () => {
       const frame = await captureDesktopFrame(iframe, abort.signal, previousFrameId)
       const t_ms = Math.round(frame.capturedAt - originEpoch)
-      if (stopped || cancelled || iframe !== observedViewer || t_ms > MAX_DURATION_MS) return
+      if (stopped || cancelled || iframe !== observedViewer || t_ms > VOICE_MAX_DURATION_MS) return
       if (t_ms < 0 || t_ms > elapsed() + 100)
         throw new Error('The desktop returned an invalid frame timestamp.')
       if ('unchanged' in frame) return

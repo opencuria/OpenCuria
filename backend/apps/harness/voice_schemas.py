@@ -8,9 +8,11 @@ from typing import Literal
 from ninja import Schema
 from pydantic import Field, model_validator
 
-MAX_DURATION_MS = 300_000
-# Keeps base64 JSON below Django's default 2.5 MiB body limit, even with metadata.
-MAX_AUDIO_BYTES = 1_500_000
+MAX_DURATION_MS = 600_000
+# Ten minutes at the requested 64 kbit/s uses about 4.8 MB; leave codec headroom.
+# The base64 JSON fits the configured 12 MiB DATA_UPLOAD_MAX_MEMORY_SIZE.
+MAX_AUDIO_BYTES = 8 * 1024 * 1024
+MAX_AUDIO_BASE64_LENGTH = 4 * ((MAX_AUDIO_BYTES + 2) // 3)
 
 
 class VoiceModel(Schema):
@@ -35,7 +37,7 @@ class VoiceConfig(Schema):
 class VoiceTranscribeIn(Schema):
     """One complete, independently decodable browser recording."""
 
-    audio_base64: str = Field(min_length=1, max_length=2_000_000)
+    audio_base64: str = Field(min_length=1, max_length=MAX_AUDIO_BASE64_LENGTH)
     mime_type: str = Field(max_length=100)
     # Accepted for older clients; model selection is resolved from saved settings.
     model: str = Field(default="", max_length=255)
@@ -110,7 +112,7 @@ class VoiceRecordingIn(Schema):
     timing: Literal["provider", "approximate"]
     segments: list[VoiceSegment] = Field(max_length=3000)
     pointers: list[VoicePointer] = Field(max_length=12_000)
-    frames: list[VoiceFrame] = Field(max_length=601)
+    frames: list[VoiceFrame] = Field(max_length=1201)
 
 
 class VoiceRecordingOut(Schema):

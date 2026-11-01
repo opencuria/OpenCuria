@@ -416,6 +416,7 @@ class VoiceService:
             "schema_version": 1,
             "coordinate_space": "original-image-pixels",
             "sample_interval_ms": 100,
+            "unchanged_positions_omitted": True,
             "events": [item.model_dump() for item in payload.pointers],
         }
         metadata = {

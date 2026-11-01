@@ -17,6 +17,9 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.providers.base import Delta
 from apps.harness.voice_provider import VoiceAccount, VoiceProvider, VoiceProviderError
 from apps.harness.voice_schemas import (
+    MAX_AUDIO_BYTES,
+    MAX_DURATION_MS,
+    VoiceConfig,
     VoiceRecordingIn,
     VoiceSegment,
     VoiceTranscribeIn,
@@ -59,6 +62,99 @@ def test_valid_recording(recording: dict) -> None:
     """The output directory is server-derived from the UUID."""
     payload = VoiceRecordingIn(**recording)
     assert validate_recording(payload).endswith(recording["recording_id"])
+
+
+@pytest.fixture
+def ten_minute_recording(recording: dict) -> dict:
+    """A continuously changing desktop with pointer movement and late speech."""
+    root = f"/workspace/.opencuria/recordings/{recording['recording_id']}"
+    recording["duration_ms"] = MAX_DURATION_MS
+    recording["segments"] = [
+        {"start_ms": 599_000, "end_ms": MAX_DURATION_MS, "text": "Change this."}
+    ]
+    recording["frames"] = [
+        {"t_ms": index * 500, "path": f"{root}/frames/{index:06d}.jpg"}
+        for index in range(1201)
+    ]
+    recording["pointers"] = [
+        {
+            **recording["pointers"][0],
+            "event": "move",
+            "t_ms": index * 100,
+            "target": {
+                **recording["pointers"][0]["target"],
+                "path": recording["frames"][index // 5]["path"],
+            },
+        }
+        for index in range(6001)
+    ]
+    return recording
+
+
+def test_ten_minute_recording_and_limits(ten_minute_recording: dict) -> None:
+    """Audio, speech, frame and pointer timelines all accept the same duration."""
+    config = VoiceConfig(available=True)
+    assert config.max_duration_ms == 600_000
+    assert config.max_audio_bytes == 8 * 1024 * 1024
+    validate_recording(VoiceRecordingIn(**ten_minute_recording))
+    ten_minute_recording["duration_ms"] += 1
+    with pytest.raises(ValidationError):
+        VoiceRecordingIn(**ten_minute_recording)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("endpoint", ["transcribe", "recordings"])
+def test_full_length_requests_pass_http_body_limits(
+    harness_workspace, monkeypatch, ten_minute_recording, endpoint
+) -> None:
+    """Exercise Django's actual JSON body reader, not just direct schema parsing."""
+    service = SimpleNamespace(
+        transcribe=AsyncMock(
+            return_value=VoiceTranscript(
+                text="hello", segments=[], timing="approximate"
+            )
+        ),
+        save_recording=AsyncMock(return_value="/workspace/test.json"),
+    )
+    monkeypatch.setattr("apps.harness.voice_api.VoiceService", lambda: service)
+    token = "voice-long-recording-key"
+    APIKey.objects.create(
+        user=harness_workspace.created_by,
+        name="voice",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=[
+            APIKeyPermission.HARNESS_RUN.value,
+            APIKeyPermission.TERMINAL_ACCESS.value,
+        ],
+    )
+    body = ten_minute_recording if endpoint == "recordings" else {
+        "audio_base64": base64.b64encode(b"a" * MAX_AUDIO_BYTES).decode(),
+        "mime_type": "audio/webm;codecs=opus",
+        "duration_ms": MAX_DURATION_MS,
+    }
+    response = Client().post(
+        f"/api/v1/workspaces/{harness_workspace.id}/voice/{endpoint}/",
+        data=json.dumps(body),
+        content_type="application/json",
+        HTTP_X_API_KEY=token,
+        HTTP_X_ORGANIZATION_ID=str(harness_workspace.runner.organization_id),
+    )
+    assert response.status_code == 200, response.content
+    assert service.transcribe.await_count + service.save_recording.await_count == 1
+
+
+async def test_audio_over_byte_limit_never_reaches_provider() -> None:
+    """Base64 padding can fit the string bound while decoded audio is too large."""
+    provider = SimpleNamespace(transcribe=AsyncMock())
+    with pytest.raises(ValueError, match="audio size limit"):
+        await VoiceService(provider).transcribe(
+            uuid.uuid4(), 1, VoiceTranscribeIn(
+                audio_base64=base64.b64encode(b"a" * (MAX_AUDIO_BYTES + 1)).decode(),
+                mime_type="audio/webm", duration_ms=MAX_DURATION_MS,
+            )
+        )
+    provider.transcribe.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -267,6 +363,7 @@ async def test_save_recording_writes_completion_marker_last(
     ]
     assert result == calls[-1].args[0]
     assert json.loads(calls[1].args[1])["coordinate_space"] == "original-image-pixels"
+    assert json.loads(calls[1].args[1])["unchanged_positions_omitted"] is True
 
 
 @pytest.mark.django_db(transaction=True)

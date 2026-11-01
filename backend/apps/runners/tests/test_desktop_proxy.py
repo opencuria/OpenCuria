@@ -736,6 +736,7 @@ const document = { referrer: 'https://app.example/chat',
     }
     assert.equal(tag, 'canvas');
     return { getContext: () => ({
+        clearRect() {},
         drawImage: (source) => assert.equal(source, framebuffer),
         getImageData: () => ({ data: new Uint8ClampedArray([0, 0, 0, 255]) }) }),
       toBlob: (reply) => { captures++; reply('jpeg'); } };
@@ -894,6 +895,7 @@ const document = { referrer: 'https://app.example/chat',
   createElement: () => {
     let frozen;
     return { getContext: () => ({
+      clearRect() {},
       drawImage: () => { frozen = pixels.slice(); },
       getImageData: () => {
         if (failRead) throw Error('unreadable canvas');
@@ -975,6 +977,161 @@ deferEncoding = false;
 sessionFrame = capture(sessionFrame.frameId);
 assert.equal(captures, 9);
 assert.equal(capture(sessionFrame.frameId).unchanged, true);
+"""
+    subprocess.run(
+        [
+            node,
+            "-e",
+            "const SCRIPT=" + json.dumps(VOICE_VIEWER_BRIDGE.decode()) + ";" + check,
+        ],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+
+def test_voice_frame_bridge_skips_idle_readback_and_tracks_rendering_lifecycle():
+    """Dirty tracking avoids full-canvas work and fences async/render boundaries."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to execute the browser bridge")
+    check = r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+let message;
+let readbacks = 0;
+let snapshots = 0;
+let encodes = 0;
+let deferred;
+let deferEncoding = false;
+let failEncoding = false;
+let failRead = false;
+let pixels = new Uint8ClampedArray([0, 0, 0, 255]);
+const replies = [];
+const parent = { postMessage: (data) => replies.push(data) };
+const methods = ['clearRect', 'drawImage', 'fill', 'fillRect', 'fillText',
+  'putImageData', 'reset', 'stroke', 'strokeRect', 'strokeText'];
+const context = Object.fromEntries(methods.map((name) => [name, function () {}]));
+const originalFill = context.fillRect;
+class Framebuffer {
+  constructor() { this.w = 2; this.h = 1; }
+  getContext() { return context; }
+  get width() { return this.w; }
+  set width(value) { this.w = value; pixels[0] = 0; }
+  get height() { return this.h; }
+  set height(value) { this.h = value; pixels[0] = 0; }
+}
+let framebuffer = new Framebuffer();
+const window = { parent,
+  addEventListener: (type, handler) => { if (type === 'message') message = handler; },
+  setInterval: () => 1, clearInterval() {} };
+const document = { referrer: 'https://app.example/chat',
+  documentElement: { removeAttribute() {}, style: { removeProperty() {} } },
+  addEventListener() {}, querySelector: () => framebuffer,
+  createElement: () => {
+    snapshots++;
+    let frozen;
+    return { getContext: () => ({
+      clearRect() {},
+      drawImage: () => { frozen = pixels.slice(); },
+      getImageData: () => {
+        readbacks++;
+        if (failRead) throw Error('unreadable canvas');
+        return { data: frozen };
+      }
+    }), toBlob: (reply) => {
+      encodes++;
+      const finish = () => reply(failEncoding ? null : 'jpeg');
+      if (deferEncoding) deferred = finish;
+      else finish();
+    } };
+  } };
+vm.runInNewContext(SCRIPT, { window, document, URL,
+  performance: { timeOrigin: 1000, now: () => 0 } });
+const send = (data) => message({ source: parent, origin: 'https://app.example', data });
+const capture = (previousFrameId) => {
+  send({ type: 'opencuria:voice-frame', requestId: 'request', previousFrameId });
+  return replies.at(-1);
+};
+const observe = { type: 'opencuria:voice-observe',
+  sessionId: '11111111-1111-4111-8111-111111111111', enabled: true };
+send(observe);
+let frame = capture();
+assert.equal(readbacks, 1);
+assert.equal(encodes, 1);
+assert.notEqual(context.fillRect, originalFill);
+// Ten minutes' worth of idle 500 ms polls do no canvas work.
+for (let i = 0; i < 1200; i++) {
+  send(observe); // observation renewals must preserve the revision
+  assert.equal(capture(frame.frameId).unchanged, true);
+}
+assert.equal(readbacks, 1);
+assert.equal(encodes, 1);
+assert.equal(snapshots, 1);
+// Every drawing primitive invalidates the shortcut, including redundant draws.
+for (const name of methods) {
+  context[name]();
+  const before = readbacks;
+  assert.equal(capture(frame.frameId).unchanged, true);
+  assert.equal(readbacks, before + 1);
+  assert.equal(capture(frame.frameId).unchanged, true);
+  assert.equal(readbacks, before + 1);
+}
+assert.equal(encodes, 1); // identical redraws still avoid encoding
+pixels[0] = 1;
+context.fillRect();
+frame = capture(frame.frameId);
+assert.equal(encodes, 2);
+const accepted = frame;
+pixels[0] = 2;
+context.putImageData();
+failRead = true;
+assert.equal(capture(accepted.frameId).blob, null);
+failRead = false;
+failEncoding = true;
+assert.equal(capture(accepted.frameId).blob, null);
+failEncoding = false;
+frame = capture(accepted.frameId);
+assert.ok(frame.frameId);
+// Reusing the snapshot never ties a successful frame to pixels drawn later.
+pixels[0] = 3;
+context.drawImage();
+deferEncoding = true;
+capture(frame.frameId);
+pixels[0] = 4;
+context.drawImage();
+deferred();
+frame = replies.at(-1);
+deferEncoding = false;
+const beforeLaterDraw = encodes;
+frame = capture(frame.frameId);
+assert.equal(encodes, beforeLaterDraw + 1);
+assert.equal(capture(frame.frameId).unchanged, true);
+// Same-size canvas resets and resize-away-and-back must not escape detection.
+const beforeReset = readbacks;
+framebuffer.width = framebuffer.width;
+frame = capture(frame.frameId);
+assert.equal(readbacks, beforeReset + 1);
+assert.equal(frame.blob, 'jpeg');
+framebuffer.height = 2;
+framebuffer.height = 1;
+assert.equal(capture(frame.frameId).unchanged, true);
+assert.equal(readbacks, beforeReset + 2);
+// A replacement of the same size still requires a new frame and restores hooks.
+const old = framebuffer;
+framebuffer = new Framebuffer();
+const beforeReplacement = encodes;
+frame = capture(frame.frameId);
+assert.equal(encodes, beforeReplacement + 1);
+assert.equal(Object.hasOwn(old, 'width'), false);
+send({ ...observe, enabled: false });
+assert.equal(context.fillRect, originalFill);
+assert.equal(Object.hasOwn(framebuffer, 'width'), false);
+assert.equal(Object.hasOwn(framebuffer, 'height'), false);
+send(observe);
+frame = capture(frame.frameId);
+assert.equal(frame.blob, 'jpeg'); // new session cannot acknowledge an old image
+send({ ...observe, enabled: false });
 """
     subprocess.run(
         [
