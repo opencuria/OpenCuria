@@ -87,6 +87,9 @@ ADAPTER_QUERY_ATTRIBUTES = ORM_QUERY_ATTRIBUTES | {
 #: ``CredentialSvc`` methods that decrypt credential secrets.
 CREDENTIAL_RESOLUTION_CALLS = {"resolve_credentials", "resolve_workspace_credentials"}
 
+DependencyGraph = dict[str, set[str]]
+SourceSelector = str | tuple[str, ...]
+
 
 def _module_name(path: Path) -> str:
     """Return the dotted module name for a backend source file."""
@@ -195,33 +198,541 @@ def test_dependency_guard_reports_direct_and_transitive_edges_through_cycles() -
     ) == {"root -> blocked.Direct", "helper -> blocked.Indirect"}
 
 
-def test_mcp_scope_lifetimes_are_independent_of_runtime_composition(
-    dependencies,
-) -> None:
-    """Scope actors own lifetimes; runtime composition owns plugins and transports."""
-    violations = _dependency_violations(
-        dependencies,
-        {"apps.harness.mcp_client.scopes"},
-        lambda name: _within(
-            name,
-            {
+def _repository_modules(trees: dict[Path, ast.Module]) -> set[str]:
+    """Return modules defining a module-level ``*Repository`` class."""
+    return {
+        _module_name(path)
+        for path, tree in trees.items()
+        if any(
+            isinstance(node, ast.ClassDef) and node.name.endswith("Repository")
+            for node in tree.body
+        )
+    }
+
+
+def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
+    """Return ``models`` modules and modules defining a ``*Repository`` class."""
+    return _repository_modules(trees) | {
+        _module_name(path)
+        for path in trees
+        if _module_name(path).rsplit(".", 1)[-1] == "models"
+    }
+
+
+def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
+    """Return REST router, API-key auth, MCP and realtime adapter modules."""
+    return {
+        path
+        for path, tree in trees.items()
+        if _defines_ninja_router(tree)
+        or _module_name(path) == "apps.accounts.api_auth"
+        or _module_name(path).startswith("apps.mcp_app")
+        or _module_name(path) in REALTIME_ADAPTERS
+    }
+
+
+def _is_persistence_module(path: Path) -> bool:
+    """Return True for ``models``/``repositories``-style modules."""
+    return path.stem in {"models", "repositories"} or path.stem.endswith(
+        ("_models", "_repository")
+    )
+
+
+@pytest.fixture(scope="module")
+def source_groups(
+    trees: dict[Path, ast.Module], modules: dict[str, Path]
+) -> DependencyGraph:
+    """Discover shared source sets once instead of in every boundary test."""
+    repositories = _repository_modules(trees)
+    persistence = _persistence_modules(trees)
+    routers = {m for m, p in modules.items() if _defines_ninja_router(trees[p])}
+    return {
+        "all": set(modules),
+        "routers": routers,
+        "adapters": {_module_name(p) for p in _adapter_modules(trees)},
+        "rest_and_mcp": routers | {m for m in modules if _within(m, {"apps.mcp_app"})},
+        "repositories": repositories,
+        "persistence": persistence,
+        "harness_persistence": {m for m in persistence if _within(m, {"apps.harness"})},
+        "repository_only": {
+            m
+            for m, p in modules.items()
+            if ".".join(m.split(".")[:2]) in REPOSITORY_ONLY_APPS
+            and not _is_persistence_module(p)
+        },
+        "account_services": {
+            m
+            for m, p in modules.items()
+            if _within(m, {"apps.accounts"}) and not _is_persistence_module(p)
+        },
+        "credential_and_plugin_services": {
+            m
+            for m, p in modules.items()
+            if _within(m, {"apps.credentials", "apps.plugins"})
+            and not _is_persistence_module(p)
+        },
+    }
+
+
+def _sources(
+    selectors: SourceSelector,
+    groups: DependencyGraph,
+    modules: Iterable[str],
+) -> set[str]:
+    """Resolve a discovered source group or explicit module namespaces."""
+    if isinstance(selectors, str):
+        result = groups[selectors]
+        assert result, f"Empty source group: {selectors}"
+        return result
+    result = {m for m in modules if _within(m, selectors)}
+    assert all(any(_within(m, {s}) for m in result) for s in selectors), selectors
+    return result
+
+
+@pytest.mark.parametrize(
+    ("sources", "forbidden"),
+    [
+        (
+            ("apps.harness.mcp_client.scopes",),
+            (
                 "apps.harness.mcp_client.runtime",
                 "apps.harness.mcp_client.connection",
                 "apps.plugins",
-            },
+            ),
         ),
+        (
+            ("apps.runners.process_repository", "apps.runners.services.process_lookup"),
+            (
+                "apps.harness",
+                "apps.runners.repositories",
+                "apps.runners.services",
+            ),
+        ),
+        (
+            ("apps.runners.operations",),
+            (
+                "apps.runners.repositories",
+                "apps.runners.deletion_repository",
+                "apps.runners.capture_repository",
+                "apps.runners.recreate_repository",
+                "apps.runners.services",
+            ),
+        ),
+        (("apps.harness.provider_account_management_service",), "adapters"),
+        (
+            ("apps.harness.run_recovery_service",),
+            (
+                "apps.harness.harness_service",
+                "apps.harness.runner",
+                "apps.harness.tools",
+                "apps.scheduled_tasks",
+            ),
+        ),
+        (
+            (
+                "apps.harness.commit_message_api",
+                "apps.harness.commit_message_service",
+                "apps.harness.commit_messages",
+                "apps.harness.small_model_service",
+                "apps.harness.session_metadata_service",
+            ),
+            ("apps.harness.harness_service",),
+        ),
+        (
+            ("apps.harness.interaction_service",),
+            (
+                "apps.harness.harness_service",
+                "apps.harness.runner",
+                "apps.harness.engines.execution",
+                "apps.harness.engines.service_runtime",
+                "apps.harness.tools",
+            ),
+        ),
+        (
+            (
+                "apps.harness.provider_history_service",
+                "apps.harness.conversation_service",
+                "apps.harness.conversation_events",
+                "apps.harness.session_settings_service",
+                "apps.harness.schemas",
+            ),
+            (
+                "apps.harness.harness_service",
+                "apps.harness.runner",
+                "apps.harness.engines.execution",
+                "apps.harness.engines.service_runtime",
+            ),
+        ),
+        (
+            ("apps.harness.provider_accounts",),
+            (
+                "apps.harness.services",
+                "apps.harness.provider_turns",
+                "apps.harness.harness_service",
+                "apps.harness.engines",
+                "apps.harness.model_catalog_service",
+                "apps.harness.providers.resolver",
+            ),
+        ),
+        (
+            (
+                "apps.harness.engines.base",
+                "apps.harness.tools.invocation",
+                "apps.harness.engines.claude",
+                "apps.harness.engines.codex",
+            ),
+            ("apps.harness.runner",),
+        ),
+        (
+            ("apps.runners.inventory_repository",),
+            (
+                "apps.runners.services",
+                "apps.runners.activity_repository",
+                "apps.runners.retention_repository",
+                "apps.runners.deletion_repository",
+            ),
+        ),
+        (
+            ("apps.runners.retention_repository", "apps.runners.image_lines"),
+            (
+                "apps.runners.services",
+                "apps.runners.deletion_repository",
+            ),
+        ),
+        (
+            (
+                "apps.runners.workspace_operation_repository",
+                "apps.runners.repositories",
+                "apps.runners.operations",
+            ),
+            (
+                "apps.runners.capture_repository",
+                "apps.runners.recreate_repository",
+                "apps.runners.phase_children",
+            ),
+        ),
+        (
+            ("apps.credentials.repositories",),
+            (
+                "apps.credentials.services",
+                "apps.credentials.mcp_oauth",
+                "apps.credentials.oauth_grant_service",
+                "apps.organizations.services",
+            ),
+        ),
+        (
+            ("apps.credentials.mcp_oauth",),
+            (
+                "apps.credentials.services",
+                "apps.credentials.oauth_grant_service",
+            ),
+        ),
+        (
+            ("apps.credentials.oauth_grant_service",),
+            (
+                "apps.credentials.services",
+                "apps.credentials.mcp_oauth",
+            ),
+        ),
+        (
+            ("apps.credentials.oauth_metadata",),
+            (
+                "apps.credentials.services",
+                "apps.credentials.mcp_oauth",
+                "apps.credentials.oauth_grant_service",
+                "apps.credentials.repositories",
+            ),
+        ),
+        (
+            ("apps.harness.media", "apps.harness.redaction"),
+            (
+                "apps.harness.engines",
+                "apps.harness.tools",
+                "apps.harness.runner",
+                "apps.harness.harness_service",
+            ),
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else ", ".join(value),
+)
+def test_transitive_import_boundaries(
+    sources: SourceSelector,
+    forbidden: SourceSelector,
+    source_groups: DependencyGraph,
+    dependencies: DependencyGraph,
+) -> None:
+    """Reject forbidden dependencies even through lazy imports and helper modules."""
+    roots = _sources(sources, source_groups, dependencies)
+    blocked = source_groups[forbidden] if isinstance(forbidden, str) else forbidden
+    violations = _dependency_violations(
+        dependencies, roots, lambda imported: _within(imported, blocked)
     )
     assert not violations, "\n".join(sorted(violations))
-    modules = {
-        module
-        for module in dependencies
-        if module.startswith("apps.harness.mcp_client.")
+
+
+@pytest.mark.parametrize(
+    ("sources", "forbidden", "exact"),
+    [
+        (
+            ("apps.runners.services.domains", "apps.runners.services.infra"),
+            ("apps.runners.services",),
+            True,
+        ),
+        ("all", "routers", True),
+        (
+            ("apps.harness.harness_service",),
+            (
+                "apps.harness.commit_message_api",
+                "apps.harness.commit_message_service",
+                "apps.harness.commit_messages",
+            ),
+            False,
+        ),
+        ("harness_persistence", ("apps.harness.tools",), False),
+        (
+            ("apps.harness.todos",),
+            (
+                "apps.harness.tools",
+                "apps.harness.engines",
+                "apps.harness.harness_service",
+            ),
+            False,
+        ),
+        (
+            ("apps.harness.tools", "apps.harness.engines"),
+            ("apps.harness.todos.repositories",),
+            False,
+        ),
+        ("all", REALTIME_ADAPTERS, False),
+        (REALTIME_ADAPTERS, "persistence", False),
+        (
+            "rest_and_mcp",
+            (
+                "apps.runners.models.ImageBuildJob",
+                "apps.runners.models.ImageDefinition",
+                "apps.runners.repositories.ImageBuildJobRepository",
+                "apps.runners.repositories.ImageDefinitionRepository",
+            ),
+            True,
+        ),
+        ("adapters", "repositories", False),
+        (("apps.runners.services",), ("apps.harness",), False),
+        (("apps.harness",), ("apps.scheduled_tasks", "apps.mcp_app"), False),
+        (("apps.harness.engines",), ("apps.harness.tools.files",), True),
+        (
+            (
+                "apps.harness.provider_accounts",
+                "apps.harness.provider_oauth",
+                "apps.harness.provider_turns",
+                "apps.credentials.oauth_grant_service",
+            ),
+            ("django.db",),
+            False,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else str(value),
+)
+def test_direct_import_boundaries(
+    sources: SourceSelector,
+    forbidden: SourceSelector,
+    exact: bool,
+    source_groups: DependencyGraph,
+    dependencies: DependencyGraph,
+) -> None:
+    """Keep adapters, workflows and persistence on their owning side of a boundary."""
+    roots = _sources(sources, source_groups, dependencies)
+    blocked = source_groups[forbidden] if isinstance(forbidden, str) else forbidden
+    violations = {
+        f"{module} -> {imported}"
+        for module in roots
+        for imported in dependencies[module]
+        if imported != module
+        and (imported in blocked if exact else _within(imported, blocked))
     }
-    tuple(
-        TopologicalSorter(
-            {module: dependencies[module] & modules for module in modules}
-        ).static_order()
-    )
+    assert not violations, "\n".join(sorted(violations))
+
+
+@pytest.mark.parametrize(
+    ("sources", "forbidden"),
+    [
+        ("adapters", ADAPTER_QUERY_ATTRIBUTES | CREDENTIAL_RESOLUTION_CALLS),
+        ("repository_only", ORM_QUERY_ATTRIBUTES),
+        (
+            "account_services",
+            {
+                "save",
+                "asave",
+                "save_base",
+                "check_password",
+                "acheck_password",
+            },
+        ),
+        (
+            "credential_and_plugin_services",
+            {
+                "filter",
+                "exclude",
+                "select_related",
+                "prefetch_related",
+                "select_for_update",
+                "order_by",
+                "values_list",
+                "annotate",
+                "aggregate",
+                "bulk_create",
+                "bulk_update",
+                "raw",
+            },
+        ),
+        (
+            (
+                "apps.runners.services.process_lookup",
+                "apps.runners.services.process_controls",
+            ),
+            ADAPTER_QUERY_ATTRIBUTES,
+        ),
+        (
+            (
+                "apps.runners.services.storage",
+                "apps.runners.services.inventory_inspection",
+            ),
+            ORM_QUERY_ATTRIBUTES
+            | {"select_related", "prefetch_related", "values_list", "save"},
+        ),
+        (
+            (
+                "apps.harness.provider_accounts",
+                "apps.harness.provider_oauth",
+                "apps.harness.provider_turns",
+            ),
+            {"save", "asave", "delete", "adelete", "lock_mutex"},
+        ),
+        (
+            ("apps.credentials.oauth_grant_service",),
+            {"save", "asave", "delete", "adelete"},
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else ", ".join(sorted(value)),
+)
+def test_persistence_access_boundaries(
+    sources: SourceSelector,
+    forbidden: set[str],
+    source_groups: DependencyGraph,
+    modules: dict[str, Path],
+    trees: dict[Path, ast.Module],
+) -> None:
+    """Services own policy; only repositories query and mutate persisted records."""
+    violations = {
+        f"{module}:{node.lineno} -> {node.attr}"
+        for module in _sources(sources, source_groups, modules)
+        for node in ast.walk(trees[modules[module]])
+        if isinstance(node, ast.Attribute) and node.attr in forbidden
+    }
+    assert not violations, "\n".join(sorted(violations))
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        ("apps.harness.mcp_client",),
+        ("apps.harness.media", "apps.harness.redaction"),
+    ],
+)
+def test_shared_packages_are_acyclic(
+    sources: tuple[str, ...],
+    source_groups: DependencyGraph,
+    dependencies: DependencyGraph,
+) -> None:
+    """Shared packages cannot acquire a circular internal dependency."""
+    roots = _sources(sources, source_groups, dependencies)
+    tuple(TopologicalSorter({m: dependencies[m] & roots for m in roots}).static_order())
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        "apps.harness.interaction_service",
+        "apps.harness.session_metadata_service",
+        "apps.harness.provider_history_service",
+    ],
+)
+def test_orchestration_imports_owning_services(
+    service: str, dependencies: DependencyGraph
+) -> None:
+    """Orchestration uses the extracted interaction, metadata and history services."""
+    assert service in dependencies["apps.harness.harness_service"]
+
+
+@pytest.mark.parametrize(
+    ("forbidden_methods", "forbidden_attributes"),
+    [
+        (
+            {
+                "list_pending_interactions",
+                "list_pending_permissions",
+                "list_pending_questions",
+                "resolve_permission",
+                "resolve_question",
+                "_authorize_file_read",
+                "_on_permission",
+                "_on_question",
+                "_reject_pending_user_gates",
+                "_resolve_sibling_permissions",
+                "_gate_ids",
+                "_reject_tree_gates",
+            },
+            {"_pending_permissions", "_pending_questions"},
+        ),
+        (
+            {
+                "get_session",
+                "get_session_for_workspace",
+                "list_sessions",
+                "list_timeline_messages",
+                "list_timeline_parts",
+                "get_part",
+                "list_todos",
+                "fork_session",
+                "_forked_title",
+                "list_conversations",
+                "mark_session_read",
+                "mark_session_unread",
+                "dismiss_notice",
+                "unread_for_sessions",
+                "is_session_unread",
+                "_is_conversation_unread",
+                "attention_for_sessions",
+                "_emit_conversations_changed",
+                "_emit_conversations_changed_sync",
+                "set_mode",
+                "set_model",
+                "set_reasoning_effort",
+                "update_title",
+                "update_skill_ids",
+                "_validate_codex_session_config",
+            },
+            set(),
+        ),
+    ],
+    ids=["interactions", "saved_state"],
+)
+def test_orchestration_does_not_restore_extracted_facades(
+    forbidden_methods: set[str],
+    forbidden_attributes: set[str],
+    trees: dict[Path, ast.Module],
+) -> None:
+    """Keep extracted methods and state out of the orchestration facade."""
+    tree = trees[APPS_ROOT / "harness" / "harness_service.py"]
+    names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    assert not names & forbidden_methods
+    assert not attributes & forbidden_attributes
 
 
 def test_notifications_reach_harness_only_through_activity_service_and_events(
@@ -294,48 +805,6 @@ def test_notification_worker_and_persistence_leave_policy_to_services(
     assert not violations, "\n".join(sorted(violations))
 
 
-def test_runner_domains_and_infrastructure_never_import_composition_facade(
-    dependencies,
-) -> None:
-    """Domain and infrastructure dependencies must point away from the facade."""
-    services = APPS_ROOT / "runners" / "services"
-    facade = "apps.runners.services"
-    violations = sorted(
-        f"{_module_name(path)} -> {facade}"
-        for package in (services / "domains", services / "infra")
-        for path in package.rglob("*.py")
-        if facade in dependencies[_module_name(path)]
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_process_lookup_and_persistence_are_independent_of_runner_workflows(
-    trees, dependencies
-) -> None:
-    """Process reads must not load unrelated persistence or live execution."""
-    forbidden = {
-        "apps.harness",
-        "apps.runners.repositories",
-        "apps.runners.services",
-    }
-    pending = {
-        "apps.runners.process_repository",
-        "apps.runners.services.process_lookup",
-    }
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, forbidden),
-    )
-    lookup = APPS_ROOT / "runners" / "services" / "process_lookup.py"
-    violations.update(
-        f"{_module_name(lookup)}:{node.lineno} -> {node.attr}"
-        for node in ast.walk(trees[lookup])
-        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
 def test_process_routes_delegate_user_policy_to_process_controls(trees) -> None:
     """REST maps process schemas; services own visibility and allowed controls."""
     routes = [
@@ -351,10 +820,17 @@ def test_process_routes_delegate_user_policy_to_process_controls(trees) -> None:
         )
     ]
     assert {route.name for route in routes} == {
-        "list_processes", "stop_process", "restart_process", "delete_process"
+        "list_processes",
+        "stop_process",
+        "restart_process",
+        "delete_process",
     }
     forbidden = {
-        "get_process", "get_workspace_for_user", "kind", "status", "session_id"
+        "get_process",
+        "get_workspace_for_user",
+        "kind",
+        "status",
+        "session_id",
     }
     violations = []
     for route in routes:
@@ -367,19 +843,13 @@ def test_process_routes_delegate_user_policy_to_process_controls(trees) -> None:
         ), f"{route.name} must use ProcessControlService"
         for node in nodes:
             if (
-                isinstance(node, ast.Attribute) and node.attr in forbidden
+                isinstance(node, ast.Attribute)
+                and node.attr in forbidden
                 or isinstance(node, ast.Name)
                 and node.id in {"getattr", "_get_owned_workspace_async"}
             ):
                 violations.append(f"{route.name}:{node.lineno}")
     assert not violations, "\n".join(violations)
-
-    service = APPS_ROOT / "runners" / "services" / "process_controls.py"
-    assert not [
-        node.attr
-        for node in ast.walk(trees[service])
-        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
-    ], "Process controls must delegate persistence to the execution service"
 
 
 def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
@@ -396,24 +866,6 @@ def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
     assert facade not in _imported_modules(
         path, ast.parse("from ..infra.rpc_registry import PendingGitRequest")
     )
-
-
-def test_lifecycle_outbox_never_imports_its_consumers(dependencies) -> None:
-    """Command claiming must not import the workflows that allocate commands."""
-    consumers = {
-        "apps.runners.repositories",
-        "apps.runners.deletion_repository",
-        "apps.runners.capture_repository",
-        "apps.runners.recreate_repository",
-        "apps.runners.services",
-    }
-    pending = {"apps.runners.operations"}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, consumers),
-    )
-    assert not violations, "\n".join(sorted(violations))
 
 
 def test_provider_account_routes_delegate_management_policy(
@@ -454,18 +906,6 @@ def test_provider_account_routes_delegate_management_policy(
     assert not violations, "\n".join(sorted(violations))
 
 
-def test_provider_account_management_is_independent_of_transport(
-    trees, dependencies
-) -> None:
-    """Account workflows must be reusable without REST, realtime or MCP adapters."""
-    adapters = {_module_name(path) for path in _adapter_modules(trees)}
-    root = "apps.harness.provider_account_management_service"
-    violations = _dependency_violations(
-        dependencies, {root}, lambda imported: _within(imported, adapters)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
 def test_scheduled_restart_recovery_reaches_harness_only_through_its_service(
     dependencies,
 ) -> None:
@@ -501,301 +941,6 @@ def test_scheduled_tasks_persist_only_their_ledger(trees, dependencies) -> None:
         for module in dependencies[_module_name(path)]
         if module in foreign
     )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_harness_restart_recovery_is_independent_of_live_orchestration(
-    dependencies,
-) -> None:
-    """Restart cleanup must stay independent even through local imports."""
-    pending = {"apps.harness.run_recovery_service"}
-    forbidden = (
-        "apps.harness.harness_service",
-        "apps.harness.runner",
-        "apps.harness.tools",
-        "apps.scheduled_tasks",
-    )
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, forbidden),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_no_application_module_imports_a_rest_router_module(trees, dependencies):
-    """Adapters never import REST routers; shared code lives in schemas/services."""
-    router_modules = {
-        _module_name(path)
-        for path, tree in trees.items()
-        if _defines_ninja_router(tree)
-    }
-    assert "apps.harness.api" in router_modules  # discovery sanity check
-    assert "apps.harness.commit_message_api" in router_modules
-
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path, tree in trees.items()
-        for module in dependencies[_module_name(path)] & router_modules
-        if module != _module_name(path)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def _repository_modules(trees: dict[Path, ast.Module]) -> set[str]:
-    """Return modules defining a module-level ``*Repository`` class."""
-    return {
-        _module_name(path)
-        for path, tree in trees.items()
-        if any(
-            isinstance(node, ast.ClassDef) and node.name.endswith("Repository")
-            for node in tree.body
-        )
-    }
-
-
-def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
-    """Return ``models`` modules and modules defining a ``*Repository`` class."""
-    return _repository_modules(trees) | {
-        _module_name(path)
-        for path in trees
-        if _module_name(path).rsplit(".", 1)[-1] == "models"
-    }
-
-
-def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
-    """Return REST router, API-key auth, MCP and realtime adapter modules."""
-    return {
-        path
-        for path, tree in trees.items()
-        if _defines_ninja_router(tree)
-        or _module_name(path) == "apps.accounts.api_auth"
-        or _module_name(path).startswith("apps.mcp_app")
-        or _module_name(path) in REALTIME_ADAPTERS
-    }
-
-
-def test_commit_suggestions_are_independent_of_session_orchestration(
-    modules, dependencies
-) -> None:
-    """Commit generation must not depend on chat lifecycle, even transitively."""
-    workflow = {
-        "apps.harness.commit_message_api",
-        "apps.harness.commit_message_service",
-        "apps.harness.commit_messages",
-        "apps.harness.small_model_service",
-    }
-    lifecycle = "apps.harness.harness_service"
-    assert workflow <= modules.keys()
-    pending = set(workflow)
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: imported == lifecycle or imported.startswith(f"{lifecycle}."),
-    )
-    violations.update(
-        f"{lifecycle} -> {imported}"
-        for imported in dependencies[lifecycle]
-        if _within(imported, workflow - {"apps.harness.small_model_service"})
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_user_interactions_are_independent_of_run_orchestration(
-    trees, modules, dependencies
-) -> None:
-    """All engines and adapters share interactions without a reverse dependency."""
-    interactions = "apps.harness.interaction_service"
-    lifecycle = "apps.harness.harness_service"
-    forbidden = {
-        lifecycle,
-        "apps.harness.runner",
-        "apps.harness.engines.execution",
-        "apps.harness.engines.service_runtime",
-        "apps.harness.tools",
-    }
-    assert interactions in modules
-    assert interactions in dependencies[lifecycle]
-    pending = {interactions}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, forbidden),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-    moved_operations = {
-        "list_pending_interactions",
-        "list_pending_permissions",
-        "list_pending_questions",
-        "resolve_permission",
-        "resolve_question",
-        "_authorize_file_read",
-        "_on_permission",
-        "_on_question",
-        "_reject_pending_user_gates",
-        "_resolve_sibling_permissions",
-        "_gate_ids",
-        "_reject_tree_gates",
-    }
-    lifecycle_methods = {
-        node.name
-        for node in ast.walk(trees[modules[lifecycle]])
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert moved_operations.isdisjoint(lifecycle_methods), (
-        "Migrate interaction callers directly; do not restore orchestration wrappers"
-    )
-    assert not {
-        node.attr
-        for node in ast.walk(trees[modules[lifecycle]])
-        if isinstance(node, ast.Attribute)
-    } & {"_pending_permissions", "_pending_questions"}
-
-
-def test_session_metadata_is_independent_of_run_orchestration(
-    modules, dependencies
-) -> None:
-    """Metadata generation must work without importing the run lifecycle."""
-    lifecycle = "apps.harness.harness_service"
-    metadata = "apps.harness.session_metadata_service"
-    assert metadata in modules
-    assert metadata in dependencies[lifecycle]
-    pending = {metadata}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: imported == lifecycle or imported.startswith(f"{lifecycle}."),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_provider_history_is_independent_of_run_orchestration(
-    modules, dependencies
-) -> None:
-    """Transcript reconstruction must not import live execution, even indirectly."""
-    history = "apps.harness.provider_history_service"
-    lifecycle = "apps.harness.harness_service"
-    execution = {
-        lifecycle,
-        "apps.harness.runner",
-        "apps.harness.engines.execution",
-        "apps.harness.engines.service_runtime",
-    }
-    assert history in modules
-    assert history in dependencies[lifecycle]
-    pending = {history}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, execution),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_saved_session_state_is_independent_of_run_orchestration(
-    trees, modules, dependencies
-) -> None:
-    """Saved-state queries, forks and settings must not load agent execution."""
-    lifecycle = "apps.harness.harness_service"
-    owners = {
-        "apps.harness.conversation_service",
-        "apps.harness.conversation_events",
-        "apps.harness.session_settings_service",
-        "apps.harness.schemas",
-    }
-    execution = {
-        lifecycle,
-        "apps.harness.runner",
-        "apps.harness.engines.execution",
-        "apps.harness.engines.service_runtime",
-    }
-    assert owners <= modules.keys()
-    pending = set(owners)
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, execution),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-    moved_operations = {
-        "get_session",
-        "get_session_for_workspace",
-        "list_sessions",
-        "list_timeline_messages",
-        "list_timeline_parts",
-        "get_part",
-        "list_todos",
-        "fork_session",
-        "_forked_title",
-        "list_conversations",
-        "mark_session_read",
-        "mark_session_unread",
-        "dismiss_notice",
-        "unread_for_sessions",
-        "is_session_unread",
-        "_is_conversation_unread",
-        "attention_for_sessions",
-        "_emit_conversations_changed",
-        "_emit_conversations_changed_sync",
-        "set_mode",
-        "set_model",
-        "set_reasoning_effort",
-        "update_title",
-        "update_skill_ids",
-        "_validate_codex_session_config",
-    }
-    assert (
-        not {
-            node.name
-            for node in ast.walk(trees[modules[lifecycle]])
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        & moved_operations
-    ), "Keep saved conversations and settings out of HarnessService"
-
-
-def test_provider_accounts_never_import_their_orchestration_consumers(
-    dependencies,
-) -> None:
-    """Accounts stay below model discovery, turn orchestration and configuration."""
-    consumers = {
-        "apps.harness.services",
-        "apps.harness.provider_turns",
-        "apps.harness.harness_service",
-        "apps.harness.engines",
-        "apps.harness.model_catalog_service",
-        "apps.harness.providers.resolver",
-    }
-    pending = {"apps.harness.provider_accounts"}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, consumers),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_provider_account_service_delegates_transactions_and_locks(
-    trees, dependencies
-) -> None:
-    """Account and OAuth policy use the repository-owned admission fence."""
-    violations = []
-    for name in ("provider_accounts.py", "provider_oauth.py", "provider_turns.py"):
-        path = APPS_ROOT / "harness" / name
-        tree = trees[path]
-        violations.extend(
-            f"{name}: {module}"
-            for module in sorted(dependencies[_module_name(path)])
-            if module == "django.db" or module.startswith("django.db.")
-        )
-        violations.extend(
-            f"{name}:{node.lineno}: {node.attr}"
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and node.attr in {"save", "asave", "delete", "adelete", "lock_mutex"}
-        )
     assert not violations, "\n".join(sorted(violations))
 
 
@@ -934,330 +1079,6 @@ def test_contracts_import_without_application_setup(source: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_external_engines_never_import_the_native_loop(modules, dependencies) -> None:
-    """Sibling engines and shared contracts must not depend on native execution."""
-    native = "apps.harness.runner"
-    roots = {
-        "apps.harness.engines.base",
-        "apps.harness.tools.invocation",
-    } | {
-        module
-        for module in modules
-        if module.startswith(
-            ("apps.harness.engines.claude.", "apps.harness.engines.codex.")
-        )
-    }
-    assert {
-        "apps.harness.engines.claude.engine",
-        "apps.harness.engines.codex.engine",
-    } <= roots
-    pending = set(roots)
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: imported == native or imported.startswith(f"{native}."),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_harness_persistence_never_imports_tools(trees, dependencies) -> None:
-    """Repositories depend on domain records instead of their tool consumers."""
-    persistence = _persistence_modules(trees)
-    assert "apps.harness.todos.repositories" in persistence
-    assert "apps.harness.repositories" in persistence
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path, tree in trees.items()
-        if _module_name(path).startswith("apps.harness.")
-        and _module_name(path) in persistence
-        for module in dependencies[_module_name(path)]
-        if module == "apps.harness.tools" or module.startswith("apps.harness.tools.")
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_todo_domain_never_imports_its_consumers(dependencies) -> None:
-    """Todo policy and storage cannot depend on tools or engine orchestration."""
-    package = APPS_ROOT / "harness" / "todos"
-    consumers = {
-        "apps.harness.tools",
-        "apps.harness.engines",
-        "apps.harness.harness_service",
-    }
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path in package.rglob("*.py")
-        for module in dependencies[_module_name(path)]
-        if _within(module, consumers)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_todo_tools_and_engines_use_the_service_boundary(dependencies) -> None:
-    """Tool adapters and engines must not select or access todo stores directly."""
-    harness = APPS_ROOT / "harness"
-    consumers = [
-        *(harness / "tools").rglob("*.py"),
-        *(harness / "engines").rglob("*.py"),
-    ]
-    stores = {
-        "apps.harness.todos.repositories",
-    }
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path in consumers
-        for module in dependencies[_module_name(path)]
-        if _within(module, stores)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_no_application_module_imports_a_realtime_adapter(trees, dependencies):
-    """Only the ASGI entry point mounts the Socket.IO and desktop proxy adapters."""
-    violations = sorted(
-        f"{_module_name(path)} -> {adapter}"
-        for path in trees
-        for module in dependencies[_module_name(path)]
-        for adapter in REALTIME_ADAPTERS
-        if _module_name(path) != adapter
-        and (module == adapter or module.startswith(f"{adapter}."))
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_realtime_adapters_reach_persistence_only_through_services(trees, dependencies):
-    """Access rules, presence and telemetry live in services, not in adapters."""
-    persistence = _persistence_modules(trees)
-    assert {"apps.runners.models", "apps.runners.operations"} <= persistence
-
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path, tree in trees.items()
-        if _module_name(path) in REALTIME_ADAPTERS
-        for module in dependencies[_module_name(path)]
-        if _within(module, persistence)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_adapters_reach_image_recipes_only_through_their_service(trees, dependencies):
-    """REST and MCP share ``ImageDefinitionService`` for recipes and builds."""
-    adapters = {
-        path
-        for path, tree in trees.items()
-        if _defines_ninja_router(tree) or _module_name(path).startswith("apps.mcp_app")
-    }
-    persistence = {
-        "apps.runners.models.ImageBuildJob",
-        "apps.runners.models.ImageDefinition",
-        "apps.runners.repositories.ImageBuildJobRepository",
-        "apps.runners.repositories.ImageDefinitionRepository",
-    }
-    violations = sorted(
-        f"{_module_name(path)} -> {name}"
-        for path in adapters
-        for name in dependencies[_module_name(path)] & persistence
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_adapters_never_query_the_orm(trees):
-    """REST, MCP and realtime adapters call services; only repositories query."""
-    adapters = _adapter_modules(trees)
-    assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
-    assert APPS_ROOT / "runners" / "desktop_proxy.py" in adapters
-
-    violations = sorted(
-        f"{_module_name(path)}:{node.lineno}"
-        for path in adapters
-        for node in ast.walk(trees[path])
-        if isinstance(node, ast.Attribute) and node.attr in ADAPTER_QUERY_ATTRIBUTES
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_adapters_never_resolve_credential_secrets(trees):
-    """REST and MCP select credentials by ID; services resolve the secrets."""
-    adapters = _adapter_modules(trees)
-    assert APPS_ROOT / "runners" / "api.py" in adapters  # discovery sanity check
-    assert APPS_ROOT / "mcp_app" / "tools" / "workspaces.py" in adapters
-
-    violations = sorted(
-        f"{_module_name(path)}:{node.lineno} -> {node.attr}"
-        for path in adapters
-        for node in ast.walk(trees[path])
-        if isinstance(node, ast.Attribute) and node.attr in CREDENTIAL_RESOLUTION_CALLS
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def _is_persistence_module(path: Path) -> bool:
-    """Return True for ``models``/``repositories``-style modules."""
-    return path.stem in {"models", "repositories"} or path.stem.endswith(
-        ("_models", "_repository")
-    )
-
-
-def test_services_query_the_orm_only_through_repositories(trees):
-    """Services, tools and engines call repositories; only those query."""
-    checked = [
-        path
-        for path in trees
-        if ".".join(_module_name(path).split(".")[:2]) in REPOSITORY_ONLY_APPS
-        and not _is_persistence_module(path)
-    ]
-    assert APPS_ROOT / "harness" / "harness_service.py" in checked  # sanity check
-    assert APPS_ROOT / "harness" / "permissions" / "service.py" in checked
-    assert APPS_ROOT / "accounts" / "auth_backends.py" in checked
-    assert APPS_ROOT / "accounts" / "sso.py" in checked
-
-    violations = sorted(
-        f"{_module_name(path)}:{node.lineno}"
-        for path in checked
-        for node in ast.walk(trees[path])
-        if isinstance(node, ast.Attribute) and node.attr in ORM_QUERY_ATTRIBUTES
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_inventory_persistence_never_imports_inspection_workflows(dependencies) -> None:
-    """Storage read composition must not pull workflows into scan persistence."""
-    forbidden = {
-        "apps.runners.services",
-        "apps.runners.activity_repository",
-        "apps.runners.retention_repository",
-        "apps.runners.deletion_repository",
-    }
-    pending = {"apps.runners.inventory_repository"}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, forbidden),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_retention_persistence_never_imports_workflows(dependencies) -> None:
-    """Retention inputs stay independent of scheduling and deletion consumers."""
-    forbidden = {"apps.runners.services", "apps.runners.deletion_repository"}
-    pending = {"apps.runners.retention_repository", "apps.runners.image_lines"}
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, forbidden),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_storage_inspection_queries_only_through_repositories(trees) -> None:
-    """Storage services may read loaded records but never issue ORM queries."""
-    services = ("storage", "inventory_inspection")
-    query_attributes = ORM_QUERY_ATTRIBUTES | {
-        "select_related",
-        "prefetch_related",
-        "values_list",
-        "save",
-    }
-    violations = sorted(
-        f"{name}:{node.lineno}: {node.attr}"
-        for name in services
-        for node in ast.walk(trees[APPS_ROOT / "runners" / "services" / f"{name}.py"])
-        if isinstance(node, ast.Attribute) and node.attr in query_attributes
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_workspace_operation_reads_never_import_phase_coordinators(
-    modules, dependencies
-) -> None:
-    """Reading reservations and admitting tasks must not load phase progression."""
-    roots = {
-        "apps.runners.workspace_operation_repository",
-        "apps.runners.repositories",
-        "apps.runners.operations",
-    }
-    coordinators = {
-        "apps.runners.capture_repository",
-        "apps.runners.recreate_repository",
-        "apps.runners.phase_children",
-    }
-    assert roots <= modules.keys()
-    pending = set(roots)
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, coordinators),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_account_services_persist_changes_only_through_repositories(trees):
-    """Account policy selects changes; repositories handle explicit/implicit saves."""
-    violations = sorted(
-        f"{_module_name(path)}:{node.lineno}"
-        for path in trees
-        if path.is_relative_to(APPS_ROOT / "accounts")
-        and not _is_persistence_module(path)
-        for node in ast.walk(trees[path])
-        if isinstance(node, ast.Attribute)
-        and node.attr
-        in {
-            "save",
-            "asave",
-            "save_base",
-            "check_password",
-            "acheck_password",
-        }
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_adapters_reach_repositories_only_through_services(trees, dependencies):
-    """Adapters call the owning service instead of importing a repository."""
-    adapters = _adapter_modules(trees)
-    repositories = _repository_modules(trees)
-    assert APPS_ROOT / "accounts" / "api_auth.py" in adapters
-    assert APPS_ROOT / "mcp_app" / "server.py" in adapters
-    assert {
-        "apps.credentials.repositories",
-        "apps.runners.disposition_repository",
-    } <= repositories
-
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path in adapters
-        for module in dependencies[_module_name(path)]
-        if _within(module, repositories)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_runner_service_never_imports_the_harness(dependencies):
-    """Harness depends on the runner service, never the other way round."""
-    package = APPS_ROOT / "runners" / "services"
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path in package.rglob("*.py")
-        for module in dependencies[_module_name(path)]
-        if module == "apps.harness" or module.startswith("apps.harness.")
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_harness_never_imports_the_apps_built_on_it(trees, dependencies):
-    """Consumers subscribe to harness run events; the harness never calls them."""
-    consumers = ("apps.scheduled_tasks", "apps.mcp_app")
-    package = APPS_ROOT / "harness"
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path in trees
-        if path.is_relative_to(package)
-        for module in dependencies[_module_name(path)]
-        if _within(module, consumers)
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
 def test_foundational_apps_never_import_the_apps_built_on_them(trees, dependencies):
     """Dependencies point from feature apps down to the foundation only."""
     violations = []
@@ -1309,131 +1130,4 @@ def test_context_repositories_are_private_to_their_context(trees, dependencies) 
             for module in dependencies[_module_name(path)]
             if _within(module, repositories)
         )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_oauth_persistence_and_protocol_never_import_their_consumers(
-    modules, dependencies
-) -> None:
-    """OAuth dependencies point toward shared integrity rules and persistence."""
-    services = "apps.credentials.services"
-    workflow = "apps.credentials.mcp_oauth"
-    grants = "apps.credentials.oauth_grant_service"
-    boundaries = {
-        "apps.credentials.repositories": {
-            services,
-            workflow,
-            grants,
-            "apps.organizations.services",
-        },
-        workflow: {services, grants},
-        grants: {services, workflow},
-        "apps.credentials.oauth_metadata": {
-            services,
-            workflow,
-            grants,
-            "apps.credentials.repositories",
-        },
-    }
-    assert boundaries.keys() <= modules.keys()
-    violations = set()
-    for owner, forbidden in boundaries.items():
-        pending = {owner}
-        violations.update(
-            f"{owner}: {edge}"
-            for edge in _dependency_violations(
-                dependencies,
-                pending,
-                lambda imported: _within(imported, forbidden),
-            )
-        )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_oauth_grant_service_delegates_transactions_and_model_writes(
-    trees, dependencies
-) -> None:
-    """Authorization policy cannot bypass its transaction-scoped repository."""
-    path = APPS_ROOT / "credentials" / "oauth_grant_service.py"
-    tree = trees[path]
-    violations = sorted(
-        module
-        for module in dependencies[_module_name(path)]
-        if module == "django.db" or module.startswith("django.db.")
-    )
-    violations.extend(
-        f"{node.lineno}: {node.attr}"
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and node.attr in {"save", "asave", "delete", "adelete"}
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_credentials_and_plugins_delegate_queryset_operations_to_repositories(
-    trees,
-) -> None:
-    """Related managers must not bypass the repository-only ORM rule."""
-    queryset_operations = {
-        "filter",
-        "exclude",
-        "select_related",
-        "prefetch_related",
-        "select_for_update",
-        "order_by",
-        "values_list",
-        "annotate",
-        "aggregate",
-        "bulk_create",
-        "bulk_update",
-        "raw",
-    }
-    violations = sorted(
-        f"{_module_name(path)}:{node.lineno} accesses {node.attr}"
-        for path in trees
-        if path.relative_to(APPS_ROOT).parts[0] in {"credentials", "plugins"}
-        and not _is_persistence_module(path)
-        for node in ast.walk(trees[path])
-        if isinstance(node, ast.Attribute) and node.attr in queryset_operations
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_shared_media_never_imports_its_engine_or_tool_consumers(
-    modules, dependencies
-) -> None:
-    """Media formats, hydration and redaction belong below all harness engines."""
-    roots = {
-        module
-        for module in modules
-        if module == "apps.harness.media"
-        or module.startswith("apps.harness.media.")
-        or module == "apps.harness.redaction"
-    }
-    assert "apps.harness.media.context" in roots
-    # The shared package must also remain internally acyclic.
-    tuple(TopologicalSorter({m: dependencies[m] & roots for m in roots}).static_order())
-    consumers = {
-        "apps.harness.engines",
-        "apps.harness.tools",
-        "apps.harness.runner",
-        "apps.harness.harness_service",
-    }
-    pending = set(roots)
-    violations = _dependency_violations(
-        dependencies,
-        pending,
-        lambda imported: _within(imported, consumers),
-    )
-    assert not violations, "\n".join(sorted(violations))
-
-
-def test_engines_never_source_media_policy_from_the_read_tool(dependencies) -> None:
-    """MIME detection and ingestion limits have one shared, tool-free owner."""
-    engine_root = APPS_ROOT / "harness" / "engines"
-    violations = sorted(
-        str(path.relative_to(BACKEND_ROOT))
-        for path in engine_root.rglob("*.py")
-        if "apps.harness.tools.files" in dependencies[_module_name(path)]
-    )
     assert not violations, "\n".join(sorted(violations))
