@@ -19,9 +19,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/services/editor.api', () => ({
   readEditorFile: vi.fn(),
   saveEditorFile: vi.fn(),
-  readGitFileContent: vi.fn(),
 }))
-vi.mock('@/services/git.api', () => ({ runGitOperation: vi.fn() }))
+vi.mock('@/services/git.api', () => ({
+  readGitFileContent: vi.fn(),
+  runGitOperation: vi.fn(),
+}))
 vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn() }))
 vi.mock('@/stores/fileExplorer', () => ({
   useFileExplorerStore: () => ({

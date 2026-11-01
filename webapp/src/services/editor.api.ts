@@ -8,13 +8,6 @@ export interface EditorFileContent {
   exists?: boolean
 }
 
-export interface GitEditorFileContent {
-  ok: boolean
-  content: string
-  revision: string
-  exists: boolean
-}
-
 export function readEditorFile(
   workspaceId: string,
   path: string,
@@ -38,19 +31,4 @@ export function saveEditorFile(
     content,
     expected_revision: expectedRevision,
   })
-}
-
-/** revision selects a Git source; the returned revision is a content token. */
-export function readGitFileContent(
-  workspaceId: string,
-  repoPath: string,
-  path: string,
-  revision: string,
-  signal?: AbortSignal,
-): Promise<GitEditorFileContent> {
-  const params = new URLSearchParams({ repo_path: repoPath, path, revision })
-  return get<GitEditorFileContent>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/git/file-content/?${params}`,
-    signal,
-  )
 }

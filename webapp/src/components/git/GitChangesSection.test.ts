@@ -23,7 +23,6 @@ vi.mock('vue-sonner', () => ({
 }))
 
 vi.mock('@/services/git.api', () => ({
-  conflictSnapshotOf: vi.fn(() => null),
   generateGitCommitMessage: vi.fn(),
   getGitCommitDetails: vi.fn(),
   getGitHistory: vi.fn(),

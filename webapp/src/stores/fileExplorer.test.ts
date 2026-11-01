@@ -19,7 +19,6 @@ vi.mock('@/services/socket', () => ({
 vi.mock('@/services/editor.api', () => ({
   readEditorFile: vi.fn(),
   saveEditorFile: vi.fn(),
-  readGitFileContent: vi.fn(),
 }))
 
 vi.mock('vue-sonner', () => ({

@@ -24,7 +24,6 @@ vi.mock('@/services/socket', () => ({
 vi.mock('@/services/editor.api', () => ({
   readEditorFile: vi.fn(() => new Promise(() => {})),
   saveEditorFile: vi.fn(),
-  readGitFileContent: vi.fn(),
 }))
 
 vi.mock('@/components/editor/MonacoEditor.vue', () => ({

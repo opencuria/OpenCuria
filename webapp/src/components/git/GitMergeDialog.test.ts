@@ -21,10 +21,6 @@ vi.mock('vue-sonner', () => ({
 }))
 
 vi.mock('@/services/git.api', () => ({
-  conflictSnapshotOf: vi.fn((data: unknown) => {
-    const snapshot = (data as { snapshot?: unknown } | null)?.snapshot
-    return snapshot && typeof snapshot === 'object' ? snapshot : null
-  }),
   getGitCommitDetails: vi.fn(),
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),

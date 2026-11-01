@@ -25,10 +25,6 @@ vi.mock('vue-sonner', () => ({
 }))
 
 vi.mock('@/services/git.api', () => ({
-  conflictSnapshotOf: vi.fn((data: unknown) => {
-    const snapshot = (data as { snapshot?: unknown } | null)?.snapshot
-    return snapshot && typeof snapshot === 'object' ? snapshot : null
-  }),
   generateGitCommitMessage: vi.fn(),
   getGitCommitDetails: vi.fn(),
   getGitHistory: vi.fn(),
@@ -701,6 +697,9 @@ describe('git store (productive)', () => {
       })],
       ['generic conflict without snapshot', new ApiRequestError(409, 'Conflict', 'conflict', {
         ok: false, code: 'conflict', message: 'Conflict',
+      })],
+      ['aggregate instead of a repo snapshot', new ApiRequestError(409, 'Conflict', 'conflict', {
+        ok: false, code: 'conflict', snapshot: { repos: [] },
       })],
     ]
     for (const [label, err] of cases) {

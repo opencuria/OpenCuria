@@ -3,17 +3,19 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { useEditorStore } from './editor'
 import { ApiRequestError } from '@/services/api'
-import { readEditorFile, readGitFileContent, saveEditorFile } from '@/services/editor.api'
-import { runGitOperation } from '@/services/git.api'
+import { readEditorFile, saveEditorFile } from '@/services/editor.api'
+import { readGitFileContent, runGitOperation } from '@/services/git.api'
 import { readWorkspaceFile } from '@/services/socket'
 import { onEditorModelDisposal } from '@/lib/editorModelLifecycle'
 
 vi.mock('@/services/editor.api', () => ({
   readEditorFile: vi.fn(),
-  readGitFileContent: vi.fn(),
   saveEditorFile: vi.fn(),
 }))
-vi.mock('@/services/git.api', () => ({ runGitOperation: vi.fn() }))
+vi.mock('@/services/git.api', () => ({
+  readGitFileContent: vi.fn(),
+  runGitOperation: vi.fn(),
+}))
 vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn() }))
 
 const WS = 'ws-1'

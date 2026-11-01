@@ -1203,7 +1203,11 @@ describe("workspace tools", () => {
       .operation("ws", { operation: "pull", repo_path: "/workspace/r" })
       .catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(ApiRequestError);
-    expect((error as ApiRequestError).status).toBe(409);
+    expect(error).toMatchObject({
+      status: 409,
+      code: "conflict",
+      data: { snapshot: { path: "/workspace/r" } },
+    });
   });
 
   it("starts a terminal over REST and sends input, resize and close on the socket", async () => {

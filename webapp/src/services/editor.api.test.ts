@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { get, put } from './api'
-import { readEditorFile, readGitFileContent, saveEditorFile } from './editor.api'
+import { readEditorFile, saveEditorFile } from './editor.api'
 
 vi.mock('./api', () => ({ get: vi.fn(), put: vi.fn() }))
 
@@ -23,13 +23,5 @@ describe('editor API', () => {
       content: 'Ä\r\nnext',
       expected_revision: 'sha256-before',
     })
-  })
-
-  it('reads full Git blobs with an independently encoded source and path', async () => {
-    await readGitFileContent('ws', '/workspace/repo space', 'a#b.txt', 'abc123^')
-    expect(get).toHaveBeenCalledWith(
-      '/workspaces/ws/git/file-content/?repo_path=%2Fworkspace%2Frepo+space&path=a%23b.txt&revision=abc123%5E',
-      undefined,
-    )
   })
 })
