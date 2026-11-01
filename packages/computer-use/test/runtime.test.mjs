@@ -78,7 +78,7 @@ test('lifecycle fences a turn and cannot be redirected to another turn', async t
 
 test('shipped artifact manifest matches the current source build', async () => {
   const { readFile } = await import('node:fs/promises');
-  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.2.0.json', import.meta.url), 'utf8'));
+  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.2.1.json', import.meta.url), 'utf8'));
   const built = JSON.parse(await readFile(new URL('../dist/manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(shipped.manifest, built, 'Rebuild and pack the Computer Use artifact after source changes.');
 });

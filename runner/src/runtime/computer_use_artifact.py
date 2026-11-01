@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 NODE_VERSION = "22.23.2"
 NODE_PINS = {
     "linux-x64": (
@@ -151,6 +151,23 @@ def launcher(root: Path) -> bytes:
     return f'#!/bin/sh\nexec "{root}/node" --max-old-space-size=256 "{root}/server.js" "$@"\n'.encode()
 
 
+def desktop_bridges_available() -> bool:
+    """Check native bridge packages on supported Debian/Ubuntu guests."""
+    if not shutil.which("gdbus"):
+        return False
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f=${Status}\\n", "libatk-adaptor", "libgail-common"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.returncode == 0 and result.stdout.splitlines() == [
+        "install ok installed",
+        "install ok installed",
+    ]
+
+
 def guest_main() -> None:
     """Install under a guest lock, atomically publish, and reverify."""
     (
@@ -250,7 +267,9 @@ def guest_main() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        if action == "install" and check.returncode:
+        if action == "install" and (
+            check.returncode or not desktop_bridges_available()
+        ):
             # Upgrade older workspace images through their distribution packages.
             env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
             for command in (
@@ -266,6 +285,9 @@ def guest_main() -> None:
                     "python3-gi",
                     "gir1.2-atspi-2.0",
                     "at-spi2-core",
+                    "libatk-adaptor",
+                    "libgail-common",
+                    "libglib2.0-bin",
                     "xclip",
                 ],
             ):
@@ -284,6 +306,8 @@ def guest_main() -> None:
                 stderr=subprocess.DEVNULL,
             )
         check.check_returncode()
+        if not desktop_bridges_available():
+            raise ValueError("Missing accessibility bridge dependencies")
         if not shutil.which("xclip"):
             raise ValueError("Missing clipboard helper")
         sys.stdout.write(VERSION + "\n")

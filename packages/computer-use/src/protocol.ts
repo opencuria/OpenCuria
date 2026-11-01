@@ -1,7 +1,7 @@
 import type { CallToolResult, ContentBlock } from '@modelcontextprotocol/sdk/types.js';
 import contract from './contract.json' with { type: 'json' };
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 export const MAX_CODE_BYTES = 64 * 1024;
 export const MAX_TEXT_BYTES = 64 * 1024;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;

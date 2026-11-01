@@ -46,6 +46,9 @@ _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 DESKTOP_STOP_COMMAND = (
     Path(__file__).with_name("desktop_stop.sh").read_text(encoding="utf-8")
 )
+DESKTOP_SESSION_COMMAND = (
+    Path(__file__).with_name("desktop_session.sh").read_text(encoding="utf-8")
+)
 #: Exit 0 once the exact :1 Xvnc display is gone (bounded ~5 s after SIGTERM).
 DESKTOP_STOPPED_PROBE = (
     'i=0; while [ "$i" -lt 20 ]; do '
@@ -901,13 +904,10 @@ class DesktopManager:
     def _desktop_start_command(width: int, height: int) -> str:
         """Return the shell used to start Xvnc at a fixed geometry.
 
-        Readiness requires the X11 socket *and* the Kasm websocket port
-        6901 (dependency-free ``/dev/tcp`` poll): ``xstartup`` launches
-        exactly once as soon as the X11 socket exists, and the loop only
-        returns once 6901 is additionally reachable so ensure never
-        reports a half-ready Xvnc. The ``.xstartup-started`` marker is
-        per-start: it is cleared before Xvnc launches so every restart
-        re-runs ``xstartup`` after the separate stop command.
+        Refresh the managed session script even in older workspace images.
+        Readiness requires X11, Kasm websocket port 6901, and accessibility
+        activation on the session bus before XFCE launches user applications.
+        Baked or user-edited xstartup files are retained for standalone VNC use.
         """
         geometry = f"{width}x{height}"
         return (
@@ -924,10 +924,14 @@ class DesktopManager:
             # ``XAUTHORITY`` explicitly for the same reason).
             "touch /root/.Xauthority\n"
             "mkdir -p /root/.vnc\n"
-            # Per-start marker: clearing it here guarantees xstartup runs
+            "cat >/root/.vnc/opencuria-session <<'OPENCURIA_DESKTOP_SESSION'\n"
+            + DESKTOP_SESSION_COMMAND
+            + "OPENCURIA_DESKTOP_SESSION\n"
+            "chmod +x /root/.vnc/opencuria-session\n"
+            # Per-start marker: clearing it here guarantees the session runs
             # again after every Xvnc (re)start. It must not persist across
             # starts, otherwise a restarted Xvnc would show an empty desktop.
-            "rm -f /root/.vnc/.xstartup-started\n"
+            "rm -f /root/.vnc/.xstartup-started /root/.vnc/.accessibility-ready\n"
             "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
             f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
             "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
@@ -938,16 +942,17 @@ class DesktopManager:
             "-AcceptSetDesktopSize=0 "
             ">>/root/.vnc/server.log 2>&1 &\n"
             "for _ in $(seq 1 120); do\n"
-            # xstartup launches exactly once as soon as the X11 socket
+            # The session launches exactly once as soon as the X11 socket
             # exists (desktop does not wait for the 6901 websocket); the
             # loop only returns once 6901 is additionally reachable, so
             # ensure never reports a half-ready Xvnc.
             "  if [ -e /tmp/.X11-unix/X1 ] "
             "&& [ ! -f /root/.vnc/.xstartup-started ]; then\n"
             "    touch /root/.vnc/.xstartup-started\n"
-            "    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\n"
+            "    /root/.vnc/opencuria-session >>/root/.vnc/xstartup.log 2>&1 &\n"
             "  fi\n"
             "  if [ -e /tmp/.X11-unix/X1 ] "
+            "&& [ -f /root/.vnc/.accessibility-ready ] "
             "&& (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then\n"
             '    echo "Desktop session started on :1 (ws port 6901)"\n'
             "    exit 0\n"
@@ -955,7 +960,7 @@ class DesktopManager:
             "  sleep 0.25\n"
             "done\n"
             'echo "Desktop session failed to start" >&2\n'
-            "tail -n 50 /root/.vnc/server.log >&2 || true\n"
+            "tail -n 50 /root/.vnc/server.log /root/.vnc/xstartup.log >&2 || true\n"
             "exit 1\n"
         )
 

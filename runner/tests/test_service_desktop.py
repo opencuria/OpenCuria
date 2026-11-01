@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 from src.config import RunnerSettings
 from src.models import DesktopSession, WorkspaceInfo
 from src.service import WorkspaceService
-from src.services.sessions.desktop import DESKTOP_STOP_COMMAND
+from src.services.sessions.desktop import DESKTOP_SESSION_COMMAND, DESKTOP_STOP_COMMAND
 from src.services.sessions.desktop_leases import DesktopLeaseStore
 from src.services.sessions.stream_intents import StreamIntentStore
 
@@ -139,12 +139,30 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/dev/tcp/127.0.0.1/6901", command)
         self.assertIn(".xstartup-started", command)
         self.assertIn("-PublicIP 127.0.0.1", command)
-        self.assertEqual(command.count("/root/.vnc/xstartup >>"), 1)
+        self.assertEqual(command.count("/root/.vnc/opencuria-session >>"), 1)
         marker_clear = command.index("rm -f /root/.vnc/.xstartup-started")
         xvnc_launch = command.index("/usr/bin/Xvnc :1")
-        xstartup_launch = command.index("/root/.vnc/xstartup >>")
+        xstartup_launch = command.index("/root/.vnc/opencuria-session >>")
         self.assertLess(marker_clear, xvnc_launch)
         self.assertLess(xvnc_launch, xstartup_launch)
+
+    async def test_start_refreshes_session_before_launch_and_waits_for_accessibility(
+        self,
+    ) -> None:
+        """Existing images receive current startup without modifying custom xstartup."""
+        command = self.service.desktop._desktop_start_command(1920, 1080)
+        self.assertIn(DESKTOP_SESSION_COMMAND, command)
+        self.assertLess(
+            command.index("cat >/root/.vnc/opencuria-session"),
+            command.index("/usr/bin/Xvnc :1"),
+        )
+        self.assertNotIn("cat >/root/.vnc/xstartup", command)
+        self.assertIn(
+            "rm -f /root/.vnc/.xstartup-started /root/.vnc/.accessibility-ready",
+            command,
+        )
+        ready = command.index("&& [ -f /root/.vnc/.accessibility-ready ]")
+        self.assertLess(ready, command.index('echo "Desktop session started'))
 
     async def test_start_command_creates_xauthority_for_xlib_clients(self) -> None:
         command = self.service.desktop._desktop_start_command(1920, 1080)

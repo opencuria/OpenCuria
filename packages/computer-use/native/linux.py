@@ -53,6 +53,7 @@ class BoundWindow:
     screenshot_id: str = ""
     geometry: tuple[int, int, int, int] = (0, 0, 0, 0)
     image_size: tuple[int, int] = (0, 0)
+    ax_observed: bool = False
 
 
 class LinuxDriver:
@@ -82,10 +83,38 @@ class LinuxDriver:
             gi.require_version("Atspi", "2.0")
             from gi.repository import Atspi
 
+            self._enable_accessibility()
             Atspi.set_timeout(500, 1000)
             self.atspi = Atspi
         except (ImportError, ValueError, AttributeError):
             pass
+
+    @staticmethod
+    def _enable_accessibility() -> None:
+        """Activate the display's bridge, including already-running sessions."""
+        from gi.repository import Gio, GLib
+
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            for name in ("IsEnabled", "ScreenReaderEnabled"):
+                bus.call_sync(
+                    "org.a11y.Bus",
+                    "/org/a11y/bus",
+                    "org.freedesktop.DBus.Properties",
+                    "Set",
+                    GLib.Variant(
+                        "(ssv)", ("org.a11y.Status", name, GLib.Variant("b", True))
+                    ),
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    1000,
+                    None,
+                )
+        except Exception as exc:  # noqa: BLE001 - X11 remains usable without a bridge
+            log.warning(
+                "computer_use_accessibility_activation_failed",
+                error_type=type(exc).__name__,
+            )
 
     @staticmethod
     def _discover_session_bus() -> None:
@@ -168,9 +197,12 @@ class LinuxDriver:
             else []
         )
         for window in self.root.query_tree().children:
-            attributes = window.get_attributes()
-            if window.get_wm_class() or attributes.override_redirect:
-                candidates.append(window)
+            try:
+                attributes = window.get_attributes()
+                if window.get_wm_class() or attributes.override_redirect:
+                    candidates.append(window)
+            except error.XError:
+                continue
         result = []
         seen = set()
         for window in candidates:
@@ -293,29 +325,85 @@ class LinuxDriver:
         desktop = self.atspi.get_desktop(0)
         if desktop is None:
             return None
+        self._refresh_accessibility(desktop)
         best = None
         best_score = 0
+        ambiguous = False
         for index in range(min(desktop.get_child_count(), 200)):
-            app = desktop.get_child_at_index(index)
-            if metadata["pid"] and app.get_process_id() != metadata["pid"]:
-                continue
-            for child_index in range(min(app.get_child_count(), 100)):
-                node = app.get_child_at_index(child_index)
-                if not node:
+            try:
+                app = desktop.get_child_at_index(index)
+                if app is None:
                     continue
-                name = node.get_name() or ""
-                score = 5 if name and name == metadata["title"] else 0
-                component = node.get_component_iface()
-                if component:
-                    extents = component.get_extents(self.atspi.CoordType.SCREEN)
-                    if (
-                        abs(extents.x - metadata["x"]) < 8
-                        and abs(extents.y - metadata["y"]) < 40
-                    ):
-                        score += 3
+            except Exception:  # noqa: BLE001, S112 - closed apps are independent
+                continue
+            try:
+                pid = app.get_process_id()
+            except Exception:  # noqa: BLE001 - some bridges cannot resolve their PID
+                pid = None
+            if metadata["pid"] and pid and pid != metadata["pid"]:
+                continue
+            try:
+                child_count = min(app.get_child_count(), 100)
+            except Exception:  # noqa: BLE001, S112 - closed apps are independent
+                continue
+            for child_index in range(child_count):
+                try:
+                    node = app.get_child_at_index(child_index)
+                    if node is None:
+                        continue
+                    name = node.get_name() or ""
+                    score = 5 if name and name == metadata["title"] else 0
+                except Exception:  # noqa: BLE001, S112 - stale windows are independent
+                    continue
+                try:
+                    component = node.get_component_iface()
+                    if component:
+                        extents = component.get_extents(self.atspi.CoordType.SCREEN)
+                        if (
+                            abs(extents.x - metadata["x"]) < 8
+                            and abs(extents.y - metadata["y"]) < 40
+                            and abs(extents.width - metadata["width"]) < 16
+                            and abs(extents.height - metadata["height"]) < 48
+                        ):
+                            score += 3
+                except Exception:  # noqa: BLE001, S110 - title matching remains available
+                    pass
                 if score > best_score:
                     best, best_score = node, score
-        return best
+                    ambiguous = False
+                elif score and score == best_score:
+                    ambiguous = True
+        return None if ambiguous else best
+
+    @staticmethod
+    def _refresh_accessibility(desktop: Any) -> None:
+        """Process libatspi's deferred signals and invalidate old interface data."""
+        from gi.repository import GLib
+
+        context = GLib.MainContext.default()
+        for _ in range(100):
+            if not context.pending():
+                break
+            context.iteration(False)
+        # libatspi caches interfaces even without its own GLib main loop. A
+        # Chromium frame first queried during activation can otherwise keep an
+        # empty tree for the lifetime of this persistent Python process.
+        desktop.clear_cache()
+
+    @staticmethod
+    def _text_lengths(node: Any, text: str) -> tuple[int, int]:
+        """Use the bridge's insertion-length and character-offset conventions."""
+        try:
+            toolkit = node.get_application().get_toolkit_name() or ""
+        except Exception:  # noqa: BLE001 - default to the standard AT-SPI contract
+            toolkit = ""
+        if toolkit.casefold().startswith("qt"):
+            # Qt 5's AT-SPI bridge applies InsertText.length to QString.resize,
+            # although AT-SPI specifies UTF-8 bytes. Bytes append garbage for
+            # non-ASCII input; QString and Qt text offsets use UTF-16 units.
+            units = len(text.encode("utf-16-le")) // 2
+            return units, units
+        return len(text.encode("utf-8")), len(text)
 
     def _tree(self, bound: BoundWindow) -> tuple[str, str]:
         metadata = self._metadata(bound.window)
@@ -323,6 +411,8 @@ class LinuxDriver:
         bound.snapshot_id = uuid.uuid4().hex
         try:
             root = self._ax_root(metadata)
+            if root is not None:
+                root.clear_cache()
         except Exception:  # noqa: BLE001 - unavailable AX must retain X11 observations
             root = None
 
@@ -333,10 +423,25 @@ class LinuxDriver:
                 self.next_element += 1
             return self.element_ids[native_key]
 
-        if root is None:
+        def fallback() -> tuple[str, str]:
             index = identifier(0)
             name = metadata.get("title", "")
-            return "x11", f"Accessibility source: x11\n{index} window {name}".rstrip()
+            return "x11", (
+                f"Accessibility source: x11\n{index} window {name}\n"
+                "[This window has not exposed an AT-SPI accessibility tree]\n"
+                "[Apps started with accessibility disabled may require reopening; "
+                "Chromium/Electron may require --force-renderer-accessibility]"
+            )
+
+        if root is None:
+            return fallback()
+        try:
+            # Chromium/Electron enable full AX lazily when an assistive client
+            # reads extended properties (AtkGetAttributes), as Orca does.
+            # Reading names/roles/children alone leaves only a window frame.
+            root.get_attributes()
+        except Exception:  # noqa: BLE001, S110 - other bridges may omit attributes
+            pass
 
         count = 0
 
@@ -368,34 +473,46 @@ class LinuxDriver:
                     if states.contains(getattr(self.atspi.StateType, flag))
                 ]
                 info = []
-                for title, value in [
-                    (None, name),
-                    ("Description", node.get_description()),
-                ]:
+                try:
+                    description = node.get_description()
+                except Exception:  # noqa: BLE001 - optional interfaces may disappear
+                    description = ""
+                for title, value in [(None, name), ("Description", description)]:
                     if (
                         value
                         and str(value).strip()
                         and value not in [v for _, v in info]
                     ):
                         info.append((title, str(value)))
-                if role != "password text" and node.get_text_iface():
-                    value = self.atspi.Text.get_text(
-                        node, 0, min(16000, self.atspi.Text.get_character_count(node))
+                try:
+                    if role != "password text" and node.get_text_iface():
+                        value = self.atspi.Text.get_text(
+                            node, 0, min(16000, self.atspi.Text.get_character_count(node))
+                        )
+                        if value and value not in [v for _, v in info]:
+                            info.append(("Value", value))
+                except Exception:  # noqa: BLE001, S110 - retain the other interfaces
+                    pass
+                try:
+                    action = node.get_action_iface()
+                    actions = (
+                        [
+                            action.get_action_name(i)
+                            for i in range(min(action.get_n_actions(), 10))
+                        ]
+                        if action
+                        else []
                     )
-                    if value and value not in [v for _, v in info]:
-                        info.append(("Value", value))
-                action = node.get_action_iface()
-                actions = (
-                    [
-                        action.get_action_name(i)
-                        for i in range(min(action.get_n_actions(), 10))
-                    ]
-                    if action
-                    else []
-                )
+                except Exception:  # noqa: BLE001 - observation does not need actions
+                    actions = []
                 children = []
                 for i in range(min(node.get_child_count(), MAX_NODES)):
-                    child = node.get_child_at_index(i)
+                    if count >= MAX_NODES:
+                        break
+                    try:
+                        child = node.get_child_at_index(i)
+                    except Exception:  # noqa: BLE001, S112 - retain the remaining siblings
+                        continue
                     if child:
                         item = collect(child, depth + 1)
                         if item:
@@ -473,6 +590,9 @@ class LinuxDriver:
 
         tree = collect(root, 0)
         tree = compact(tree) if tree else None
+        if tree is None:
+            bound.elements.clear()
+            return fallback()
         lines = ["Accessibility source: at_spi"]
 
         def render(node: dict[str, Any], depth: int) -> None:
@@ -775,6 +895,66 @@ class LinuxDriver:
             self.lock_fd = None
         self.execution_id = ""
 
+    async def _paste_text(self, bound: BoundWindow, text: str) -> None:
+        """Paste Unicode text through the selected window's native input route."""
+        selection = self.connection.intern_atom("CLIPBOARD")
+        previous_owner = self.connection.get_selection_owner(selection)
+        previous_id = getattr(previous_owner, "id", 0)
+        clipboard = await asyncio.create_subprocess_exec(
+            "xclip",
+            "-selection",
+            "clipboard",
+            "-quiet",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            clipboard.stdin.write(text.encode("utf-8"))
+            await clipboard.stdin.drain()
+            clipboard.stdin.close()
+            deadline = time.monotonic() + 1
+            while True:
+                owner = self.connection.get_selection_owner(selection)
+                if getattr(owner, "id", 0) not in {0, previous_id}:
+                    break
+                if clipboard.returncode is not None or time.monotonic() >= deadline:
+                    raise DriverError(
+                        "CLIPBOARD_UNAVAILABLE", "Clipboard ownership was not acquired"
+                    )
+                await asyncio.sleep(0.01)
+            await self._press(bound, "Control_L+v")
+            # GTK requests TARGETS and UTF8_STRING separately. A one-request
+            # clipboard owner exits too early and silently pastes nothing.
+            await asyncio.sleep(0.2)
+        finally:
+            if clipboard.returncode is None:
+                clipboard.terminate()
+            try:
+                await asyncio.wait_for(clipboard.wait(), 1)
+            except TimeoutError:
+                clipboard.kill()
+                await clipboard.wait()
+
+    async def _focus_text_target(self, node: Any) -> None:
+        """Wait for the application's asynchronous accessibility focus request."""
+        component = node.get_component_iface()
+        if component is None or not component.grab_focus():
+            raise DriverError(
+                "ACTION_FAILED", "The selected editable field could not be focused"
+            )
+        deadline = time.monotonic() + 1
+        while True:
+            node.clear_cache_single()
+            if node.get_state_set().contains(self.atspi.StateType.FOCUSED):
+                return
+            if time.monotonic() >= deadline:
+                raise DriverError(
+                    "ACTION_FAILED",
+                    "The editable field did not receive focus; check for a blocking dialog",
+                )
+            await asyncio.sleep(0.025)
+
     async def dispatch(self, op: str, args: dict[str, Any]) -> dict[str, Any]:
         """Execute one validated operation and return plain JSON data."""
         if op == "begin":
@@ -851,6 +1031,13 @@ class LinuxDriver:
             result: dict[str, Any] = {}
             if args.get("text") or args.get("image"):
                 source, text = self._tree(bound)
+                if not bound.ax_observed:
+                    for _ in range(5):
+                        if source == "at_spi" and len(bound.elements) > 1:
+                            break
+                        await asyncio.sleep(0.1)
+                        source, text = self._tree(bound)
+                    bound.ax_observed = True
                 result.update(state=text, source=source, snapshotId=bound.snapshot_id)
             if args.get("image"):
                 result.update(self._capture(bound))
@@ -935,9 +1122,16 @@ class LinuxDriver:
                 editable = node.get_editable_text_iface()
                 text_iface = node.get_text_iface()
                 if not editable or not text_iface:
-                    raise DriverError(
-                        "UNSUPPORTED_ACTION", "Selected element is not editable"
-                    )
+                    if not node.get_state_set().contains(self.atspi.StateType.EDITABLE):
+                        raise DriverError(
+                            "UNSUPPORTED_ACTION", "Selected element is not editable"
+                        )
+                    # Chromium exposes editable web fields without EditableText.
+                    # Focus the AX target before using the bound keyboard route.
+                    await self._focus_text_target(node)
+                    await self._paste_text(bound, text)
+                    self.settle_at = max(self.settle_at, time.monotonic() + 0.1)
+                    return {}
                 position = max(0, self.atspi.Text.get_caret_offset(node))
                 for index in reversed(range(self.atspi.Text.get_n_selections(node))):
                     selected = self.atspi.Text.get_selection(node, index)
@@ -948,43 +1142,14 @@ class LinuxDriver:
                         raise DriverError(
                             "ACTION_FAILED", "Selected text could not be replaced"
                         )
+                insertion_length, offset_length = self._text_lengths(node, text)
                 if not self.atspi.EditableText.insert_text(
-                    node, position, text, len(text.encode("utf-8"))
+                    node, position, text, insertion_length
                 ):
                     raise DriverError("ACTION_FAILED", "Text insertion was rejected")
-                self.atspi.Text.set_caret_offset(node, position + len(text))
+                self.atspi.Text.set_caret_offset(node, position + offset_length)
             else:
-                clipboard = await asyncio.create_subprocess_exec(
-                    "xclip",
-                    "-selection",
-                    "clipboard",
-                    "-quiet",
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                try:
-                    clipboard.stdin.write(text.encode("utf-8"))
-                    await clipboard.stdin.drain()
-                    clipboard.stdin.close()
-                    await asyncio.sleep(0.05)
-                    if clipboard.returncode is not None:
-                        raise DriverError(
-                            "CLIPBOARD_UNAVAILABLE",
-                            "Clipboard helper exited before paste",
-                        )
-                    await self._press(bound, "Control_L+v")
-                    # GTK requests TARGETS and UTF8_STRING separately. A one-request
-                    # clipboard owner exits too early and silently pastes nothing.
-                    await asyncio.sleep(0.2)
-                finally:
-                    if clipboard.returncode is None:
-                        clipboard.terminate()
-                    try:
-                        await asyncio.wait_for(clipboard.wait(), 1)
-                    except TimeoutError:
-                        clipboard.kill()
-                        await clipboard.wait()
+                await self._paste_text(bound, text)
         elif op == "type_characters":
             text = args.get("text")
             if not isinstance(text, str) or len(text.encode()) > 16000:

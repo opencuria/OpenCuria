@@ -6,7 +6,7 @@ PLUGIN_ID = uuid.UUID("7ca41130-a36a-491d-83fa-cd912bcaaf52")
 PLUGIN_SLUG = "computer-use"
 SERVER_SLUG = "cua_repl"
 ARTIFACT_ID = "computer-use"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 TOOL_POLICY = {
     "exposed_tools": ["js", "js_reset", "desktop"],
     "internal_tools": ["turn_ended"],

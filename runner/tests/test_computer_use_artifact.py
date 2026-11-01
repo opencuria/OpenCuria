@@ -11,10 +11,33 @@ import tarfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from src.runtime import computer_use_artifact as package
 from src.runtime.artifacts import ArtifactProvisionError, RuntimeArtifactManager
+
+
+@pytest.mark.parametrize(
+    "code,status,expected",
+    [
+        (0, "install ok installed\ninstall ok installed\n", True),
+        (1, "install ok installed\n", False),
+        (0, "deinstall ok config-files\ninstall ok installed\n", False),
+    ],
+)
+def test_bridge_dependencies_require_both_installed_packages(code, status, expected):
+    with (
+        patch.object(package.shutil, "which", return_value="/usr/bin/gdbus"),
+        patch.object(package.subprocess, "run") as query,
+    ):
+        query.return_value = SimpleNamespace(returncode=code, stdout=status)
+        assert package.desktop_bridges_available() is expected
+
+
+def test_bridge_dependencies_require_dbus_helper():
+    with patch.object(package.shutil, "which", return_value=None):
+        assert package.desktop_bridges_available() is False
 
 
 def test_shipped_bundle_hash_and_layout():

@@ -1,0 +1,14 @@
+{
+  "sha256": "2a9d044c4e7ea7f332c6f0812b198bac9bb0d76b36fac15ca4d0ff5ac3914ff9",
+  "size": 199334,
+  "manifest": {
+    "version": "0.2.1",
+    "protocol_version": 1,
+    "files": {
+      "server.js": "cedf688e651819ca41d5e32d823e5bc9c10490ec55e3bc00139087b652ada9a4",
+      "worker.js": "d94d9679fabeaa795dd5f13976a9c58fc1a9644ca7b84afcdeeacdefe02ea2b2",
+      "linux.py": "0d1b38fee565808230f73f14b9d8dc08df7bc16d933726153626eb4e1c49fb31",
+      "NOTICES.txt": "e3093bc61a9331e6b7ee021eb3842a5ee4ff1773f894c622a8d89c39a98c377f"
+    }
+  }
+}

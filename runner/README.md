@@ -8,8 +8,15 @@ for local development.
 
 ## Operations
 
-Desktop startup and cleanup use the runner-owned `desktop_stop.sh`, including
-for existing workspace images. Process matching is anchored to desktop
+Desktop startup refreshes the runner-owned `desktop_session.sh` in existing
+workspace images before launching XFCE. It enables AT-SPI on the session bus
+before applications can start and exports the toolkit accessibility settings.
+Desktop readiness also waits for accessibility initialization. Existing live
+sessions are preserved; the next desktop start uses the updated script. The
+image recipe includes a checked copy for standalone VNC startup.
+
+Desktop cleanup uses the runner-owned `desktop_stop.sh`, including for existing
+workspace images. Process matching is anchored to desktop
 executables and display `:1`; arbitrary argv text such as the agent wrapper's
 `profile` must never match `rofi`. Image helper copies are checked against this
 canonical script. Restart the runner after updating; no image rebuild is needed.
@@ -228,5 +235,5 @@ remain outside the runner.
 ## Computer Use
 
 The product-owned Computer Use stdio runtime is installed through
-`ensure_runtime_artifact("computer-use", "0.1.0")`. Its source lives in
+`ensure_runtime_artifact("computer-use", "0.2.1")`. Its source lives in
 [`packages/computer-use`](../packages/computer-use/).

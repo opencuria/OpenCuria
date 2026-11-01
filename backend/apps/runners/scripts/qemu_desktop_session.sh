@@ -81,9 +81,9 @@ apt-get install -y libasound2t64 || apt-get install -y libasound2
 # Native Computer Use: X11 input, AT-SPI observations and clipboard text.
 apt-get install -y --no-install-recommends \
     python3-xlib python3-pil python3-structlog python3-gi \
-    gir1.2-atspi-2.0 at-spi2-core xclip wmctrl \
+    gir1.2-atspi-2.0 at-spi2-core libatk-adaptor libgail-common xclip wmctrl \
     libreoffice-calc python3-uno sudo iproute2
-require_image_commands xclip wmctrl xdotool libreoffice
+require_image_commands xclip wmctrl xdotool libreoffice gdbus
 /usr/bin/python3 - <<'NATIVE_RUNTIME_CHECK'
 import Xlib
 import PIL
@@ -429,6 +429,7 @@ cat >/root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-keyboard-shortcuts.xml
 XML
 
 cat >/root/.gtkrc-2.0 <<'GTK2'
+gtk-modules="gail:atk-bridge"
 gtk-theme-name="WhiteSur-Light"
 gtk-icon-theme-name="WhiteSur"
 gtk-cursor-theme-name="WhiteSur-cursors"
@@ -586,22 +587,51 @@ do
         >"/root/.config/autostart/${name}.desktop"
 done
 
+# Generated copy of runner/src/services/sessions/desktop_session.sh.
+# The runner refreshes this script on desktop start, including older images.
+cat >/root/.vnc/opencuria-session <<'DESKTOP_SESSION'
+#!/bin/bash
+# Canonical desktop startup, refreshed by the runner for existing images too.
+set -eu
+if [ "${1:-}" != --session-bus ]; then
+    unset SESSION_MANAGER
+    unset DBUS_SESSION_BUS_ADDRESS
+    export DISPLAY=:1
+    export HOME=/root
+    export XDG_CURRENT_DESKTOP=XFCE
+    export XDG_SESSION_DESKTOP=xfce
+    export XDG_SESSION_TYPE=x11
+    export GTK_THEME=WhiteSur-Light
+    export XDG_CONFIG_HOME=/root/.config
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    export NO_AT_BRIDGE=0
+    export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+    export QT_ACCESSIBILITY=1
+    # GTK2 needs its loadable modules; GTK3/4 provide their own bridge. Keep an
+    # explicitly customized module setting and all existing theme preferences.
+    if ! grep -q '^[[:space:]]*gtk-modules[[:space:]]*=' /root/.gtkrc-2.0 2>/dev/null; then
+        printf '%s\n' 'gtk-modules="gail:atk-bridge"' >>/root/.gtkrc-2.0
+    fi
+    exec dbus-launch --exit-with-session "$0" --session-bus
+fi
+
+# Set both flags before XFCE can launch user apps. Toolkit environment variables
+# alone do not activate accessibility for every Chrome, Electron or Qt version.
+for property in IsEnabled ScreenReaderEnabled; do
+    gdbus call --session --timeout 5 --dest org.a11y.Bus --object-path /org/a11y/bus \
+        --method org.freedesktop.DBus.Properties.Set \
+        org.a11y.Status "$property" '<true>' >/dev/null
+done
+touch /root/.vnc/.accessibility-ready
+exec startxfce4
+DESKTOP_SESSION
+chmod +x /root/.vnc/opencuria-session
+
 cat >/root/.vnc/xstartup <<'XSTARTUP'
 #!/bin/bash
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export DISPLAY=:1
-export HOME=/root
-export XDG_CURRENT_DESKTOP=XFCE
-export XDG_SESSION_DESKTOP=xfce
-export XDG_SESSION_TYPE=x11
-export GTK_THEME=WhiteSur-Light
-export XDG_CONFIG_HOME=/root/.config
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
-export NO_AT_BRIDGE=0
-exec dbus-launch --exit-with-session startxfce4
+exec /root/.vnc/opencuria-session
 XSTARTUP
 chmod +x /root/.vnc/xstartup
 
