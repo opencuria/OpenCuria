@@ -1,3 +1,5 @@
+from src.commands import CommandResult
+from tests.command_support import make_executor
 """Durable runner lifecycle delivery and interruption contracts."""
 
 import asyncio
@@ -78,12 +80,11 @@ async def test_duplicate_and_outage_dont_abort_work(tmp_path):
         calls.append(data)
         entered.set()
         await release.wait()
-        await sio.emit(
-            "workspace:created", {"task_id": "task", "workspace_id": "workspace"}
-        )
+        result = CommandResult('workspace:created', {'task_id': 'task', 'workspace_id': 'workspace'})
+        return result
 
     sio.handlers["/"] = {event: handler for event in COMMANDS}
-    executor = OperationExecutor(sio, Journal(str(tmp_path)))
+    executor = make_executor(sio, Journal(str(tmp_path)))
     wrapped = sio.handlers["/"]["task:create_workspace"]
     first = asyncio.create_task(wrapped(command()))
     await entered.wait()
@@ -148,10 +149,11 @@ async def test_inspect_running_and_interrupted_are_distinct(tmp_path):
     async def handler(data):
         entered.set()
         await gate.wait()
-        await sio.emit("workspace:error", {"error": "SECRET", "task_id": "task"})
+        result = CommandResult('workspace:error', {'error': 'SECRET', 'task_id': 'task'})
+        return result
 
     sio.handlers["/"] = {event: handler for event in COMMANDS}
-    executor = OperationExecutor(sio, Journal(str(tmp_path)))
+    executor = make_executor(sio, Journal(str(tmp_path)))
     work = asyncio.create_task(sio.handlers["/"]["task:stop_workspace"](command()))
     await asyncio.wait_for(entered.wait(), 2)
     # Lightweight replay renews an executing lease without recovery scans.
@@ -200,7 +202,7 @@ async def test_unrecorded_identity_can_inspect_fresh_quiescence_without_executio
             )
         },
     )()
-    executor = OperationExecutor(sio, Journal(str(tmp_path)), observer=observer)
+    executor = make_executor(sio, Journal(str(tmp_path)), observer=observer)
     result = await executor.inspect(command())
     assert result["status"] == "unknown"
     assert result["execution_finished"] and result["quiescent"]
@@ -228,8 +230,9 @@ async def test_safe_transient_start_retry_is_bounded_and_terminal_only_after_fin
 
     async def handler(data):
         calls.append(data)
-        await sio.emit("workspace:error", {"error": "transient secret"})
+        result = CommandResult('workspace:error', {'error': 'transient secret'})
         assert not executor.journal.pending()  # effect not finished yet
+        return result
 
     sio.handlers["/"] = {event: handler for event in COMMANDS}
     observer = type(
@@ -241,7 +244,7 @@ async def test_safe_transient_start_retry_is_bounded_and_terminal_only_after_fin
             )
         },
     )()
-    executor = OperationExecutor(sio, Journal(str(tmp_path)), observer=observer)
+    executor = make_executor(sio, Journal(str(tmp_path)), observer=observer)
     monkeypatch.setattr("src.journal.asyncio.sleep", AsyncMock())
     await sio.handlers["/"]["task:resume_workspace"](command())
     assert len(calls) == 3
@@ -269,9 +272,8 @@ async def test_finished_capture_enospc_with_exact_scrub_checkpoint_stays_known(
     sio = Socket()
 
     async def handler(data):
-        await sio.emit(
-            "image_artifact:failed", {"error": "No space left on device /secret"}
-        )
+        result = CommandResult('image_artifact:failed', {'error': 'No space left on device /secret'})
+        return result
 
     sio.handlers["/"] = {event: handler for event in COMMANDS}
     incarnation = {"resource_id": "same-disk"}
@@ -287,7 +289,7 @@ async def test_finished_capture_enospc_with_exact_scrub_checkpoint_stays_known(
         {"credentials_present": False, "event": "workspace:stopped", "state": "exited"},
     )
     journal.close()
-    executor = OperationExecutor(sio, Journal(str(tmp_path)), observer=observer)
+    executor = make_executor(sio, Journal(str(tmp_path)), observer=observer)
     await sio.handlers["/"]["task:create_image_artifact"](command())
     result = executor.journal.pending()[0][1]
     assert result["execution_finished"] and result["outcome_known"]
@@ -320,7 +322,7 @@ async def test_sealed_unrecorded_identity_cannot_execute_delayed_recipe(tmp_path
             )
         },
     )()
-    executor = OperationExecutor(sio, Journal(str(tmp_path)), observer=observer)
+    executor = make_executor(sio, Journal(str(tmp_path)), observer=observer)
     sealed = await executor.seal(command())
     assert sealed["status"] == "terminal" and sealed["execution_finished"]
     with pytest.raises(ValueError, match="collision"):
@@ -346,7 +348,7 @@ async def test_effect_then_generic_exception_is_unknown(tmp_path):
         raise RuntimeError("after effect")
 
     socket = Socket()
-    executor = OperationExecutor(socket, Journal(str(tmp_path / "journal")))
+    executor = make_executor(socket, Journal(str(tmp_path / "journal")))
     await socket.handlers["/"]["task:create_workspace"](command())
     event, result = executor.journal.pending()[0]
     assert event == "workspace:error"
@@ -401,14 +403,8 @@ async def test_resume_result_checkpoint_matches_terminal_envelope(
     sio = Socket()
 
     async def handler(data):
-        await sio.emit(
-            "workspace:resumed",
-            {
-                "task_id": data["task_id"],
-                "workspace_id": data["workspace_id"],
-                "credentials_present": credentials_present,
-            },
-        )
+        result = CommandResult('workspace:resumed', {'task_id': data['task_id'], 'workspace_id': data['workspace_id'], 'credentials_present': credentials_present})
+        return result
 
     sio.handlers["/"] = {event: handler for event in COMMANDS}
     incarnation = {"resource_id": "disk"}
@@ -418,7 +414,7 @@ async def test_resume_result_checkpoint_matches_terminal_envelope(
         {"workspace_incarnation": AsyncMock(return_value=(incarnation, "running"))},
     )()
     journal = Journal(str(tmp_path))
-    executor = OperationExecutor(sio, journal, observer=observer)
+    executor = make_executor(sio, journal, observer=observer)
     await sio.handlers["/"]["task:resume_workspace"](command())
     event, result = journal.pending()[0]
     assert event == "workspace:resumed"

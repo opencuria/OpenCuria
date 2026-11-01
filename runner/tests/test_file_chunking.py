@@ -16,7 +16,7 @@ from src.chunking import (
     split_base64_chunks,
 )
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 from src.services.file_download import FILE_DOWNLOAD_TOO_LARGE
 
 _SMALL_JSON = 64 * 1024

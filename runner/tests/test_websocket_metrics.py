@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 
 
 @pytest.fixture

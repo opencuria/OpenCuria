@@ -1,3 +1,4 @@
+from tests.command_support import make_executor
 """Guest lifecycle isolation and durable publication failure regressions."""
 
 import asyncio
@@ -1432,7 +1433,7 @@ async def test_invalid_initial_resources_have_no_effects(builder, activation, in
 async def test_restarted_partial_create_can_be_recovered_and_removed(
     builder, tmp_path, monkeypatch
 ):
-    from src.journal import Journal, OperationExecutor
+    from src.journal import Journal
     from src.service import WorkspaceService
     from tests.test_automatic_operation_recovery import Socket, command
 
@@ -1446,9 +1447,9 @@ async def test_restarted_partial_create_can_be_recovered_and_removed(
     journal.close()
     journal = Journal(str(state_dir), defer_recovery=True)
     service = WorkspaceService(r, RunnerSettings(state_dir=str(state_dir)))
-    service._journal = journal
+    service.journal = journal
     handler = AsyncMock()
-    executor = OperationExecutor(
+    executor = make_executor(
         Socket(handler), journal, observer=service,
         reconciler=service.publication_evidence,
     )
@@ -1479,7 +1480,7 @@ async def test_unowned_partial_create_cannot_be_removed(builder, tmp_path):
     qcow(disk)
     journal = Journal(str(tmp_path / "journal"), defer_recovery=True)
     service = WorkspaceService(r, RunnerSettings(state_dir=str(tmp_path / "journal")))
-    service._journal = journal
+    service.journal = journal
     try:
         with pytest.raises(RuntimeError, match="physical registry identity"):
             await service.lifecycle.remove_workspace(uuid.UUID(workspace_id))
@@ -1502,7 +1503,7 @@ async def test_owned_partial_create_removal_retries_failed_observation(builder, 
     journal = Journal(str(tmp_path / "journal"), defer_recovery=True)
     journal.begin("task:create_workspace", data)
     service = WorkspaceService(r, RunnerSettings(state_dir=str(tmp_path / "journal")))
-    service._journal = journal
+    service.journal = journal
     service.lifecycle._confirm_workspace_ended = AsyncMock()
     quiesce = r.quiesce_interrupted_workspace
     r.quiesce_interrupted_workspace = AsyncMock(side_effect=OSError("libvirt offline"))
@@ -1531,7 +1532,7 @@ async def test_owned_guest_missing_registry_can_be_removed(builder, tmp_path):
     journal = Journal(str(tmp_path / "journal"), defer_recovery=True)
     journal.begin("task:create_workspace", command(target=workspace_id))
     service = WorkspaceService(r, RunnerSettings(state_dir=str(tmp_path / "journal")))
-    service._journal = journal
+    service.journal = journal
     service.lifecycle._confirm_workspace_ended = AsyncMock()
     try:
         assert not service.registry.workspace_exists(uuid.UUID(workspace_id))
@@ -1635,7 +1636,7 @@ async def test_stale_removed_lineage_cannot_delete_reallocated_partial_disk(
     qcow(disk)
     before = disk.stat()
     service = WorkspaceService(r, RunnerSettings(state_dir=str(tmp_path / "journal")))
-    service._journal = journal
+    service.journal = journal
     r.quiesce_interrupted_workspace = AsyncMock()
     try:
         with pytest.raises(RuntimeError, match="physical registry identity"):

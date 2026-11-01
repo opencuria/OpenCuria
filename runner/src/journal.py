@@ -11,10 +11,13 @@ import os
 import sqlite3
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .commands import CommandHandler
 
 import structlog
 
@@ -22,7 +25,6 @@ from .runtime.recovery import RecoveryConflict
 
 logger = structlog.get_logger(__name__)
 
-_terminal = contextvars.ContextVar("lifecycle_terminal", default=None)
 _active = contextvars.ContextVar("lifecycle_operation", default=None)
 TERMINAL = {
     "workspace:created",
@@ -52,8 +54,17 @@ COMMANDS = {
     "task:delete_image_artifact",
 }
 DISK_HELPERS = {
-    "qemu-img", "virt-customize", "guestfish", "genisoimage", "mkisofs",
+    "qemu-img",
+    "virt-customize",
+    "guestfish",
+    "genisoimage",
+    "mkisofs",
 }
+
+
+def current_operation_id() -> str | None:
+    """Return the operation owning this lifecycle effect, when one is active."""
+    return (_active.get() or {}).get("operation_id")
 
 
 def _disk_helper_active(comm: Path) -> bool:
@@ -109,6 +120,7 @@ class Journal:
         )
         if not defer_recovery:
             self.interrupt_unproven()
+
     async def call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         """Run serialized disk IO off the event loop, joining it on cancellation.
 
@@ -195,7 +207,8 @@ class Journal:
             if event == "workspace:removed":
                 return False
             if identity.get("command") in {
-                "task:create_workspace", "task:create_workspace_from_image_artifact",
+                "task:create_workspace",
+                "task:create_workspace_from_image_artifact",
             }:
                 terminal = json.loads(result) if result else None
                 return (
@@ -410,15 +423,25 @@ class Journal:
 
 
 class OperationExecutor:
-    """Wrap existing handlers and emit surface, preserving one runtime implementation."""
+    """Persist command admission and terminal outcomes around an explicit service port."""
 
-    def __init__(self, sio, journal: Journal, reconciler=None, observer=None) -> None:
+    def __init__(
+        self,
+        journal: Journal,
+        commands: CommandHandler,
+        emit: Callable[[str, dict], Awaitable[None]],
+        *,
+        reconciler: Callable | None = None,
+        observer: Any = None,
+        is_connected: Callable[[], bool] = lambda: True,
+    ) -> None:
         self.observer = observer
         self.reconciler = reconciler
         self._recovered = False
-        self.sio = sio
+        self.commands = commands
         self.journal = journal
-        self.emit = sio.emit
+        self.emit = emit
+        self.is_connected = is_connected
         self.running: dict[str, asyncio.Task] = {}
         self._bindings: dict[str, dict] = {}
         self._unresolved = dict(journal.unfinished())
@@ -427,14 +450,6 @@ class OperationExecutor:
         self._recovery_lock = asyncio.Lock()
         self._execution_epoch = 0
         self._closing = False
-        sio.emit = self.record_emit
-        sio.on("operation:ack", self.acknowledge)
-        sio.on("operation:inspect", self.inspect)
-        sio.on("operation:seal", self.seal)
-        sio.on("operation:inspect_request", self.inspect_request)
-        for event in COMMANDS:
-            handler = sio.handlers["/"][event]
-            sio.on(event, self.wrap(event, handler))
 
     @staticmethod
     def helpers_active() -> bool:
@@ -463,9 +478,9 @@ class OperationExecutor:
         }
         return any(
             resource.get("kind") == "workspace"
-            and resource.get("metadata", {}).get("workspace_id", "").startswith(
-                "image-build-"
-            )
+            and resource.get("metadata", {})
+            .get("workspace_id", "")
+            .startswith("image-build-")
             and resource.get("state") not in {"exited", "stopped", "removed"}
             and resource.get("metadata", {}).get("workspace_id") not in owned
             for runtime in snapshot.get("runtimes", [])
@@ -536,7 +551,7 @@ class OperationExecutor:
     async def inspect(self, data: dict) -> dict:
         """Inspect exact identity on this exclusive journal instance without secrets."""
         row = await self.journal.call("lookup", data.get("operation_id"))
-        if hasattr(self.sio, "connected") and not self.sio.connected:
+        if not self.is_connected():
             return {"status": "unknown", "execution_finished": False}
         response = {
             "instance_id": self.journal.instance_id,
@@ -558,13 +573,17 @@ class OperationExecutor:
             identity.get(k) != data.get(k) for k in ("runner_id", "attempt", "target")
         ):
             return response
-        unfinished_publication = row and row[2] is None and identity.get(
-            "failure_event"
-        ) in {"image:build_failed", "image_artifact:failed"}
+        unfinished_publication = (
+            row
+            and row[2] is None
+            and identity.get("failure_event")
+            in {"image:build_failed", "image_artifact:failed"}
+        )
         needs_recovery = row and (
             unfinished_publication
             or (
-                row[2] and row[2].get("outcome_known") is False
+                row[2]
+                and row[2].get("outcome_known") is False
                 and identity.get("failure_event") is not None
             )
         )
@@ -575,7 +594,8 @@ class OperationExecutor:
                 "diagnostic_code": "disk_helpers_active",
             }
         if (
-            row and (
+            row
+            and (
                 unfinished_publication
                 or (row[2] and row[2].get("outcome_known") is False)
             )
@@ -647,7 +667,9 @@ class OperationExecutor:
         return response
 
     @staticmethod
-    def _recovery_blocked(response: dict, identity: dict, error: RecoveryConflict) -> dict:
+    def _recovery_blocked(
+        response: dict, identity: dict, error: RecoveryConflict
+    ) -> dict:
         """Report proven ownership contradiction without asserting quiescence."""
         return {
             **response,
@@ -675,7 +697,8 @@ class OperationExecutor:
                             proof = (
                                 await self.reconciler(identity)
                                 if self.reconciler
-                                and identity.get("failure_event") != "image:build_failed"
+                                and identity.get("failure_event")
+                                != "image:build_failed"
                                 else None
                             )
                             recover = getattr(
@@ -692,7 +715,8 @@ class OperationExecutor:
                             if identity.get("failure_event") == "image:build_failed":
                                 proof = (
                                     await self.reconciler(identity)
-                                    if self.reconciler else None
+                                    if self.reconciler
+                                    else None
                                 )
                             if proof:
                                 event, result = proof
@@ -737,102 +761,89 @@ class OperationExecutor:
             except Exception:  # noqa: BLE001 - isolate transport/runtime failures
                 return
 
-    async def record_emit(self, event: str, data=None, *args, **kwargs):
-        """Capture handler's terminal result even during backend outage."""
-        binding = _active.get()
-        if binding and event in TERMINAL:
-            buffered = _terminal.get()
-            if buffered is not None:
-                buffered[:] = [(event, data or {})]
-                return
-            result = {**(data or {}), **binding, "execution_finished": True}
-            if event in {"image:built", "image:build_failed"}:
-                recover = getattr(
-                    self.observer, "recover_interrupted_operation", None
-                )
-                if recover is not None:
-                    try:
-                        await recover({**binding, "failure_event": "image:build_failed"})
-                    except Exception:
-                        logger.exception(
-                            "image_build_cleanup_unverified",
-                            operation_id=binding["operation_id"],
-                        )
-                        return
-            if event in {"image:built", "image:build_failed"} and not (
-                await self._build_guests_quiescent(binding["operation_id"])
-            ):
-                # Cleanup may fail while the script still runs inside its guest.
-                # Keep the original unfinished identity and target fence; recovery
-                # can seal it only after those untracked effects have ended.
-                logger.warning(
-                    "image_build_effects_unverified", operation_id=binding["operation_id"]
-                )
-                return
-            lifecycle = getattr(self.observer, "lifecycle", None)
-            if (
-                self.observer is not None
-                and hasattr(self.observer, "workspace_incarnation")
-                and binding.get("workspace_id")
-                # Production lifecycle checkpoints are written while holding its
-                # workspace mutex. Re-observing after it returns could attach an
-                # older result to a later credential injection/incarnation.
-                and getattr(lifecycle, "checkpoint_hook", None) is None
-            ):
-                workspace_id = binding["workspace_id"]
+    async def _finish(self, binding: dict, event: str, data: dict) -> None:
+        """Verify effects, commit the outcome, then publish a replayable envelope."""
+        result = {**(data or {}), **binding, "execution_finished": True}
+        if event in {"image:built", "image:build_failed"}:
+            recover = getattr(self.observer, "recover_interrupted_operation", None)
+            if recover is not None:
                 try:
-                    observed = await self.observer.workspace_incarnation(workspace_id)
-                except Exception:  # noqa: BLE001 - failed inspection is not proof
-                    observed = None
-                if observed and event in {
-                    "workspace:created",
-                    "workspace:stopped",
-                    "workspace:resumed",
-                }:
-                    incarnation, state = observed
-                    await self.journal.call(
-                        "checkpoint",
-                        workspace_id,
-                        incarnation,
-                        {
-                            "event": event,
-                            "operation_id": binding["operation_id"],
-                            "state": state,
-                            "credentials_present": result.get("credentials_present"),
-                            "initialized": event != "workspace:stopped",
-                        },
+                    await recover({**binding, "failure_event": "image:build_failed"})
+                except Exception:
+                    logger.exception(
+                        "image_build_cleanup_unverified",
+                        operation_id=binding["operation_id"],
                     )
-            if (
-                event == "image_artifact:failed"
-                and self.observer is not None
-                and hasattr(self.observer, "workspace_incarnation")
-            ):
-                workspace_id = binding.get("workspace_id", "")
-                try:
-                    observed = await self.observer.workspace_incarnation(workspace_id)
-                except Exception:  # noqa: BLE001 - failed inspection is not proof
-                    observed = None
-                proof = (
-                    await self.journal.call("proof", workspace_id, observed[0])
-                    if observed else None
-                )
-                if not (
-                    proof
-                    and proof.get("credentials_present") is False
-                    and proof.get("state") in {"exited", "stopped"}
-                    and observed[1] in {"exited", "stopped"}
-                ):
-                    result.update(diagnostic_code="interrupted", outcome_known=False)
-            await self.journal.call("finish", binding["operation_id"], event, result)
-            self._unresolved.pop(binding["operation_id"], None)
-            await self.replay(binding["operation_id"])
+                    return
+        if event in {"image:built", "image:build_failed"} and not (
+            await self._build_guests_quiescent(binding["operation_id"])
+        ):
+            # Cleanup may fail while the script still runs inside its guest.
+            # Keep the original unfinished identity and target fence; recovery
+            # can seal it only after those untracked effects have ended.
+            logger.warning(
+                "image_build_effects_unverified", operation_id=binding["operation_id"]
+            )
             return
-        if binding:
+        lifecycle = getattr(self.observer, "lifecycle", None)
+        if (
+            self.observer is not None
+            and hasattr(self.observer, "workspace_incarnation")
+            and binding.get("workspace_id")
+            # Production lifecycle checkpoints are written while holding its
+            # workspace mutex. Re-observing after it returns could attach an
+            # older result to a later credential injection/incarnation.
+            and getattr(lifecycle, "checkpoint_hook", None) is None
+        ):
+            workspace_id = binding["workspace_id"]
             try:
-                return await self.emit(event, data, *args, **kwargs)
-            except Exception:  # noqa: BLE001 - isolate transport/runtime failures
-                return  # progress transport loss must not abort runtime work
-        return await self.emit(event, data, *args, **kwargs)
+                observed = await self.observer.workspace_incarnation(workspace_id)
+            except Exception:  # noqa: BLE001 - failed inspection is not proof
+                observed = None
+            if observed and event in {
+                "workspace:created",
+                "workspace:stopped",
+                "workspace:resumed",
+            }:
+                incarnation, state = observed
+                await self.journal.call(
+                    "checkpoint",
+                    workspace_id,
+                    incarnation,
+                    {
+                        "event": event,
+                        "operation_id": binding["operation_id"],
+                        "state": state,
+                        "credentials_present": result.get("credentials_present"),
+                        "initialized": event != "workspace:stopped",
+                    },
+                )
+        if (
+            event == "image_artifact:failed"
+            and self.observer is not None
+            and hasattr(self.observer, "workspace_incarnation")
+        ):
+            workspace_id = binding.get("workspace_id", "")
+            try:
+                observed = await self.observer.workspace_incarnation(workspace_id)
+            except Exception:  # noqa: BLE001 - failed inspection is not proof
+                observed = None
+            proof = (
+                await self.journal.call("proof", workspace_id, observed[0])
+                if observed
+                else None
+            )
+            if not (
+                proof
+                and proof.get("credentials_present") is False
+                and proof.get("state") in {"exited", "stopped"}
+                and observed[1] in {"exited", "stopped"}
+            ):
+                result.update(diagnostic_code="interrupted", outcome_known=False)
+        await self.journal.call("finish", binding["operation_id"], event, result)
+        self._unresolved.pop(binding["operation_id"], None)
+        await self.replay(binding["operation_id"])
+        return
 
     async def safe_retry(self, event: str, data: dict) -> bool:
         """Retry only terminated workspace effects with a complete fresh observation."""
@@ -850,108 +861,106 @@ class OperationExecutor:
             return observed[1] == "running"
         return observed[1] in {"running", "exited", "stopped"}
 
-    def wrap(self, event: str, handler: Callable) -> Callable:
-        """Shield durable admission and execution from caller cancellation."""
+    async def execute(self, event: str, data: dict) -> dict | None:
+        """Shield durable admission and execution from transport cancellation."""
+        if event not in COMMANDS:
+            raise ValueError(f"Unsupported lifecycle command: {event}")
+        if not isinstance(data, dict) or not all(
+            key in data for key in ("operation_id", "attempt", "target", "runner_id")
+        ):
+            return None
+        # Admission includes an uninterruptible fsync. A lost delivery waiter
+        # must not strand a committed operation which never started.
+        task = asyncio.create_task(self._admit(event, data))
+        self._admissions.add(task)
+        task.add_done_callback(self._admissions.discard)
+        return await asyncio.shield(task)
 
-        async def admit(data: dict) -> dict | None:
-            op_id = data["operation_id"]
-            binding = {
-                key: data[key]
-                for key in (
-                    "task_id", "operation_id", "attempt", "target", "runner_id",
-                    "workspace_id", "build_job_id", "image_instance_id",
-                    "image_path",
-                )
-                if key in data
-            }
+    async def _admit(self, event: str, data: dict) -> dict | None:
+        op_id = data["operation_id"]
+        binding = {
+            key: data[key]
+            for key in (
+                "task_id",
+                "operation_id",
+                "attempt",
+                "target",
+                "runner_id",
+                "workspace_id",
+                "build_job_id",
+                "image_instance_id",
+                "image_path",
+            )
+            if key in data
+        }
 
-            async def run() -> dict | None:
-                token = _active.set(binding)
-                try:
-                    terminal = []
-                    terminal_token = _terminal.set(terminal)
-                    try:
-                        for execution_attempt in range(3):
-                            terminal.clear()
-                            response = await handler(data)
-                            failed = terminal and terminal[0][0] == "workspace:error"
-                            if (
-                                not failed
-                                or execution_attempt == 2
-                                or event not in {
-                                    "task:resume_workspace", "task:stop_workspace",
-                                    "task:remove_workspace",
-                                }
-                                or not await self.safe_retry(event, data)
-                            ):
-                                break
-                            await asyncio.sleep(2**execution_attempt)
-                    finally:
-                        _terminal.reset(terminal_token)
-                    if not terminal:
-                        raise RuntimeError("Handler returned without terminal result")
-                    await self.record_emit(*terminal[0])
-                    return response
-                except Exception:  # noqa: BLE001 - isolate runtime/transport failures
-                    row = await self.journal.call("lookup", op_id)
-                    failure_event = row[0]["failure_event"]
-                    await self.record_emit(
-                        failure_event,
-                        {
-                            **binding,
-                            "error": "Handler failed; resources preserved for retry",
-                            "diagnostic_code": "handler_failed",
-                            "outcome_known": False,
-                        },
-                    )
-                finally:
-                    _active.reset(token)
-                    self.running.pop(op_id, None)
-                    self._bindings.pop(op_id, None)
-                    self._execution_epoch += 1
-                    if op_id in self._unresolved:
-                        self._recovered = False
-
-            async with self._admission_lock:
-                if self._closing:
-                    return
-                if any(
-                    identity.get("target") == data["target"] and running_id != op_id
-                    for running_id, identity in (
-                        self._bindings | self._unresolved
-                    ).items()
-                ):
-                    return
-                fresh = await self.journal.call("begin", event, data)
-                if fresh:
-                    task = asyncio.create_task(run())
-                    self.running[op_id] = task
-                    self._bindings[op_id] = binding
-                    self._unresolved[op_id] = binding
-                    self._execution_epoch += 1
-            if fresh:
-                return await asyncio.shield(task)
-            else:
-                await self.replay(op_id)
+        async def run() -> dict | None:
+            token = _active.set(binding)
+            try:
+                for execution_attempt in range(3):
+                    outcome = await self.commands.execute(event, data)
+                    if outcome.event not in TERMINAL:
+                        raise ValueError(
+                            "Command returned an unsupported terminal event"
+                        )
+                    if (
+                        outcome.event != "workspace:error"
+                        or execution_attempt == 2
+                        or event
+                        not in {
+                            "task:resume_workspace",
+                            "task:stop_workspace",
+                            "task:remove_workspace",
+                        }
+                        or not await self.safe_retry(event, data)
+                    ):
+                        break
+                    await asyncio.sleep(2**execution_attempt)
+                await self._finish(binding, outcome.event, outcome.data)
+                return outcome.response
+            except Exception:  # noqa: BLE001 - isolate runtime/transport failures
                 row = await self.journal.call("lookup", op_id)
-                if event == "task:inject_credentials" and row and row[2]:
-                    return {
-                        **row[2],
-                        "ok": row[1] == "workspace:credentials_injected",
-                    }
+                failure_event = row[0]["failure_event"]
+                await self._finish(
+                    binding,
+                    failure_event,
+                    {
+                        **binding,
+                        "error": "Handler failed; resources preserved for retry",
+                        "diagnostic_code": "handler_failed",
+                        "outcome_known": False,
+                    },
+                )
+            finally:
+                _active.reset(token)
+                self.running.pop(op_id, None)
+                self._bindings.pop(op_id, None)
+                self._execution_epoch += 1
+                if op_id in self._unresolved:
+                    self._recovered = False
 
-        async def execute(data: dict) -> dict | None:
-            # Same-version protocol is mandatory; legacy lifecycle work is unsafe.
-            if not all(
-                key in data
-                for key in ("operation_id", "attempt", "target", "runner_id")
+        async with self._admission_lock:
+            if self._closing:
+                return
+            if any(
+                identity.get("target") == data["target"] and running_id != op_id
+                for running_id, identity in (self._bindings | self._unresolved).items()
             ):
                 return
-            # Admission includes an uninterruptible fsync. Shield it too: losing
-            # the delivery waiter must not strand a committed, unexecuted recipe.
-            task = asyncio.create_task(admit(data))
-            self._admissions.add(task)
-            task.add_done_callback(self._admissions.discard)
+            fresh = await self.journal.call("begin", event, data)
+            if fresh:
+                task = asyncio.create_task(run())
+                self.running[op_id] = task
+                self._bindings[op_id] = binding
+                self._unresolved[op_id] = binding
+                self._execution_epoch += 1
+        if fresh:
             return await asyncio.shield(task)
-
-        return execute
+        else:
+            await self.replay(op_id)
+            row = await self.journal.call("lookup", op_id)
+            if event == "task:inject_credentials" and row and row[2]:
+                return {
+                    **row[2],
+                    "ok": row[1] == "workspace:credentials_injected",
+                }

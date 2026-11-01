@@ -85,13 +85,13 @@ def serve(
         sys.exit(1)
 
     async def _run() -> None:
+        from .application import RunnerApplication
         from .runtime.qemu_runtime import QemuRuntime
         from .service import WorkspaceService
-        from .interfaces.websocket import WebSocketInterface
 
         service = WorkspaceService(QemuRuntime(settings=settings), settings)
         await service.registry.sync_from_runtime()
-        ws_interface = WebSocketInterface(service, settings)
+        runner = RunnerApplication(service, settings)
 
         log.info(
             "runner_starting",
@@ -99,7 +99,7 @@ def serve(
         )
 
         try:
-            await ws_interface.start()
+            await runner.start()
         except asyncio.CancelledError:
             log.info("runner_interrupted")
         except KeyboardInterrupt:
@@ -107,7 +107,7 @@ def serve(
         except Exception:
             log.exception("runner_fatal_error")
         finally:
-            await ws_interface.stop()
+            await runner.stop()
             log.info("runner_stopped")
 
     try:

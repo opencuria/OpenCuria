@@ -12,7 +12,8 @@ import aiohttp
 import pytest
 import socketio
 from src.config import RunnerSettings
-from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
+from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE
 from src.models import DesktopSession, WorkspaceInfo
 from src.runtime.base import RuntimeStatus, RuntimeWorkspaceInfo
 from src.service import WorkspaceService

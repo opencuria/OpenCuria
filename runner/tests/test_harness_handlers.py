@@ -13,7 +13,7 @@ import uuid
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 
 
 class _FakeService:

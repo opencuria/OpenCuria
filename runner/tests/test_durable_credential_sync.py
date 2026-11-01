@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 
 from tests.test_automatic_operation_recovery import command, executor_for, snapshot
 from tests.test_websocket_interface import DummyService

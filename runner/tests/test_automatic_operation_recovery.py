@@ -1,3 +1,4 @@
+from tests.command_support import make_executor
 """Automatic interruption recovery without recipe replay or operator approval."""
 
 import asyncio
@@ -62,7 +63,7 @@ def executor_for(tmp_path, observation=None, handler=None):
     )
     socket = Socket(handler)
     journal = Journal(str(tmp_path), defer_recovery=True)
-    return OperationExecutor(socket, journal, observer=observer), socket, observer
+    return make_executor(socket, journal, observer=observer), socket, observer
 
 
 @pytest.mark.asyncio
@@ -149,7 +150,7 @@ async def test_inspection_credential_presence_requires_exact_proof(
     )
     service = WorkspaceService(runtime, RunnerSettings(state_dir=str(tmp_path)))
     journal = Journal(str(tmp_path), defer_recovery=True)
-    service._journal = journal
+    service.journal = journal
     if proof_kind != "none":
         saved = incarnation if proof_kind != "wrong_stat" else {"resource_id": "other"}
         journal.checkpoint(
@@ -337,10 +338,10 @@ async def test_restart_recovers_stop_checkpoint_without_rerun(tmp_path):
         workspace_incarnation=AsyncMock(return_value=(incarnation, "stopped"))
     )
     service = WorkspaceService(runtime, RunnerSettings(state_dir=str(tmp_path)))
-    service._journal = journal
+    service.journal = journal
     handler = AsyncMock()
     socket = Socket(handler)
-    executor = OperationExecutor(
+    executor = make_executor(
         socket, journal, reconciler=service.publication_evidence
     )
     await executor.replay()
@@ -361,7 +362,7 @@ async def test_restart_preserves_create_ambiguity_without_init_replay(tmp_path):
     observer = SimpleNamespace(
         inventory_for_runner=AsyncMock(return_value=snapshot("running"))
     )
-    executor = OperationExecutor(socket, journal, observer=observer)
+    executor = make_executor(socket, journal, observer=observer)
     await executor.replay()
     event, result = journal.pending()[0]
     assert event == "workspace:error"

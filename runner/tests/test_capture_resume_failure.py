@@ -1,3 +1,4 @@
+from tests.command_support import make_executor
 """Resume failure evidence must never infer stopped/clean from cached state."""
 
 import uuid
@@ -6,8 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
-from src.journal import COMMANDS, Journal, OperationExecutor
+from tests.command_support import make_interface as WebSocketInterface
+from src.journal import COMMANDS, Journal
 from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 
@@ -111,7 +112,7 @@ async def test_missing_or_changed_runtime_proof_cannot_use_cache(
         {"state": "exited", "credentials_present": False},
     )
     runtime.workspace_incarnation.return_value = observation
-    evidence = await iface._workspace_failure_evidence(ws)
+    evidence = await iface._operations.commands._workspace_failure_evidence(ws)
     assert evidence["outcome_known"] is False
     assert "credentials_present" not in evidence
 
@@ -119,7 +120,7 @@ async def test_missing_or_changed_runtime_proof_cannot_use_cache(
 async def test_inspection_failure_is_unknown(interface):
     iface, _service, runtime, ws, _ = interface
     runtime.workspace_incarnation.side_effect = RuntimeError("inspection unavailable")
-    assert await iface._workspace_failure_evidence(ws) == {"outcome_known": False}
+    assert await iface._operations.commands._workspace_failure_evidence(ws) == {"outcome_known": False}
 
 
 async def test_journal_recovery_preserves_explicit_unknown_outcome(tmp_path):
@@ -131,7 +132,7 @@ async def test_journal_recovery_preserves_explicit_unknown_outcome(tmp_path):
         emit=AsyncMock(),
         on=lambda *args: None,
     )
-    executor = OperationExecutor(
+    executor = make_executor(
         socket,
         journal,
         reconciler=AsyncMock(

@@ -33,7 +33,7 @@ from unittest.mock import AsyncMock
 
 from src import git as git_ops
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 
@@ -2312,7 +2312,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repo_history_caps_and_unborn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(os.path.join(tmp, "repo"))
+            _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
             capped = await service.git.execute_git_operation(
@@ -2580,7 +2580,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stash_empty_repo_yields_no_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(os.path.join(tmp, "repo"))
+            _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
             snap = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
@@ -2659,7 +2659,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stash_invalid_selector_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(os.path.join(tmp, "repo"))
+            _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
             for operation in ("stash_apply", "stash_pop", "stash_drop"):
                 result = await service.git.execute_git_operation(

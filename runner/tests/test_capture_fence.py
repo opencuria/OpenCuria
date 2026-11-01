@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.interfaces.websocket import WebSocketInterface
+from tests.command_support import make_interface as WebSocketInterface
 from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 from src.services.capture_fence import CaptureFence
