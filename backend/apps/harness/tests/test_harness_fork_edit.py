@@ -115,14 +115,14 @@ async def _run_two_turns(service, session, org_id, ws_id) -> None:  # type: igno
         organization_id=org_id,
         workspace_id=str(ws_id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     await service.start_run(
         session,
         "second",
         organization_id=org_id,
         workspace_id=str(ws_id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
 
 # -- fork title helper -----------------------------------------------------
@@ -152,7 +152,7 @@ async def test_fork_copies_parts_and_clears_child_session_id(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     stored = HarnessMessageRepository.list_for_session(session.id)
     assistant = next(m for m in stored if m.role == "assistant")
@@ -289,7 +289,7 @@ async def test_fork_title_increment_and_fresh_usage(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     await sync_to_async(HarnessSessionRepository.add_usage)(
         session,
         cost=1.25,
@@ -396,7 +396,7 @@ async def test_fork_drops_compaction_tail_start_id_outside_prefix(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     stored = HarnessMessageRepository.list_for_session(session.id)
     assistant = stored[1]
     # Point the checkpoint at a message that will NOT be copied.
@@ -456,7 +456,7 @@ async def test_fork_works_while_source_is_busy(harness_workspace) -> None:
         forked = await ConversationService().fork_session(session.id)
     finally:
         gate.set()
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     assert forked.id != session.id
 
 
@@ -509,7 +509,7 @@ async def test_edit_truncates_suffix_and_reruns(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     current = HarnessMessageRepository.list_for_session(session.id)
     assert [m.content for m in current if m.role == "user"] == ["first edited"]
@@ -613,7 +613,7 @@ async def test_edit_busy_raises_conflict(harness_workspace) -> None:
             )
     finally:
         gate.set()
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
 
 
 @pytest.mark.django_db(transaction=True)
@@ -628,7 +628,7 @@ async def test_edit_assistant_message_raises(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assistant = next(
         m
         for m in HarnessMessageRepository.list_for_session(session.id)
@@ -656,7 +656,7 @@ async def test_edit_empty_prompt_raises(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     user_msg = next(
         m
         for m in HarnessMessageRepository.list_for_session(session.id)
@@ -783,7 +783,7 @@ async def test_edit_rejects_suffix_permission_and_question(harness_workspace) ->
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     # The edit target is part of the suffix: both prefix + unscoped gates
     # linked to it (or unscoped) are rejected.
@@ -847,7 +847,7 @@ async def test_edit_rejects_only_suffix_gates_when_editing_first(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert (
         await sync_to_async(PermissionRequest.objects.get)(id=first_perm.id)
     ).status == "rejected"
@@ -870,7 +870,7 @@ async def test_edit_aborts_and_deletes_suffix_child_session(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     stored = HarnessMessageRepository.list_for_session(session.id)
     first_user = next(m for m in stored if m.role == "user")
     assistant = next(m for m in stored if m.role == "assistant")
@@ -900,7 +900,7 @@ async def test_edit_aborts_and_deletes_suffix_child_session(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert await sync_to_async(HarnessSessionRepository.get_by_id)(child.id) is None
     remaining = parts_for_session(session.id)
@@ -944,7 +944,7 @@ async def test_edit_keeps_prefix_child_session(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert await sync_to_async(HarnessSessionRepository.get_by_id)(child.id) is not None
 
 
@@ -960,7 +960,7 @@ async def test_edit_restores_original_title(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     renamed = await sync_to_async(HarnessSessionRepository.set_title)(
         session, "My custom title"
@@ -977,7 +977,7 @@ async def test_edit_restores_original_title(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(renamed.id)]
+    await service.run_registry.get_task(str(renamed.id))
     renamed.refresh_from_db()
     assert renamed.title == "My custom title"
 
@@ -1006,7 +1006,7 @@ async def test_edit_empty_overrides_are_noop(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     assert session.mode == "build"
     assert session.agent_name == "build"
@@ -1048,7 +1048,7 @@ async def test_edit_preserves_auto_model_and_effort(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     assert session.model == ""
     assert session.reasoning_effort == ""
@@ -1075,7 +1075,7 @@ async def test_edit_applies_mode_model_effort(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     assert session.mode == "plan"
     assert session.agent_name == "plan"
@@ -1111,7 +1111,7 @@ async def test_edit_history_contains_edited_prompt(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert len(seen) == 3
     assert "second" not in " ".join(seen[2])
     assert "first edited" in " ".join(seen[2])
@@ -1132,7 +1132,7 @@ async def test_edit_does_not_regenerate_title_for_first_prompt(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     user_msg = next(
         m
@@ -1146,7 +1146,7 @@ async def test_edit_does_not_regenerate_title_for_first_prompt(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     # FakeProvider runs never spawn the title agent (no small_model config),
     # but the edit path must actively restore the title either way.

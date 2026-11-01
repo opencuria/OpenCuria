@@ -131,7 +131,7 @@ async def test_emit_frontend_adds_cached_part_position(harness_workspace) -> Non
     part = HarnessPartRepository.create(message_id=assistant.id, type="text")
     events: list[dict[str, Any]] = []
     service = _service(events)
-    service._runs[str(session.id)] = {}
+    service.run_registry.attach_context(str(session.id), {})
     payload = {"session_id": str(session.id), "part_id": str(part.id)}
 
     await service._emit_frontend(FRONTEND_EVENT_PART, dict(payload), "ws")

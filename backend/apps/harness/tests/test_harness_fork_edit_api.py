@@ -354,7 +354,7 @@ def test_fork_works_while_busy(fork_edit_setup, fake_fork_service, monkeypatch):
         await asyncio.Event().wait()
 
     task = loop.create_task(_never())
-    fake_fork_service._tasks[str(session.id)] = task
+    fake_fork_service.run_registry.start_execution(str(session.id), task)
     try:
         client = _client(
             user=fork_edit_setup["owner"],
@@ -696,7 +696,7 @@ def test_edit_while_busy_is_409(fork_edit_setup, monkeypatch):
         await asyncio.Event().wait()
 
     task = loop.create_task(_never())
-    service._tasks[str(session.id)] = task
+    service.run_registry.start_execution(str(session.id), task)
     try:
         client = _client(
             user=fork_edit_setup["owner"],

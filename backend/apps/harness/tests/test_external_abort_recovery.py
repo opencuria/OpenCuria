@@ -80,7 +80,7 @@ async def test_root_abort_recovers_detached_external_child(
     assert len(releases) == 1
     assert releases[0]["owner_id"] == str(child.id)
     assert releases[0]["lease_id"] == str(attempt.lease_id)
-    assert not service._abort_requested
+    assert not any(run.abort_requested for run in service.run_registry.records.values())
 
 
 @pytest.mark.parametrize("engine_id", ["claude", "codex"])
@@ -104,7 +104,7 @@ async def test_root_abort_preserves_fresh_foreign_child_ownership(
     assert attempt.owner_token == owner.owner_token
     assert assistant.completed_at is None
     assert not accessor.desktop_calls
-    assert not service._abort_requested
+    assert not any(run.abort_requested for run in service.run_registry.records.values())
 
 
 @pytest.mark.parametrize("engine_id", ["claude", "codex"])

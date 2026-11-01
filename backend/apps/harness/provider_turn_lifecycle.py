@@ -121,13 +121,13 @@ class ProviderTurnLifecycle:
         parent = str(session.parent_id) if session.parent_id else None
         while key and key not in seen:
             seen.add(key)
-            context = self.ports.run_registry.contexts.get(key, {})
+            context = self.ports.run_registry.get_context(key)
             if context.get("provider_turn_id"):
                 return context
-            parent = self.ports.run_registry.parents.get(key, parent)
+            parent = self.ports.run_registry.get_parent(key, parent)
             if parent is None:
                 return {}
-            key, parent = parent, self.ports.run_registry.parents.get(parent)
+            key, parent = parent, self.ports.run_registry.get_parent(parent)
         return {}
 
     async def _register_provider_use(
@@ -253,11 +253,10 @@ class ProviderTurnLifecycle:
                         self.ports.provider_turn_service.set_monitor_required
                     )(turn_id)
                     for key in self.ports.descendant_keys(str(session.id)):
-                        child = self.ports.run_registry.contexts.get(key)
-                        if child is None or child.get("provider_turn_id") != turn_id:
+                        child = self.ports.run_registry.get_context(key)
+                        if child.get("provider_turn_id") != turn_id:
                             continue
-                        if child is not None:
-                            child["provider_revocation_message"] = message
+                        child["provider_revocation_message"] = message
                         task = self.ports.owned_run_task(key)
                         if (
                             task is not None
@@ -269,7 +268,7 @@ class ProviderTurnLifecycle:
                         {
                             key
                             for key in self.ports.descendant_keys(str(session.id))
-                            if self.ports.run_registry.contexts.get(key, {}).get(
+                            if self.ports.run_registry.get_context(key).get(
                                 "provider_turn_id"
                             )
                             == turn_id
@@ -310,8 +309,8 @@ class ProviderTurnLifecycle:
             raise
         except Exception:
             log.exception("provider_turn_monitor_failed", session_id=str(session.id))
-            for key, live in tuple(self.ports.run_registry.contexts.items()):
-                if live.get("provider_turn_id") == turn_id:
+            for key, run in tuple(self.ports.run_registry.records.items()):
+                if (run.context or {}).get("provider_turn_id") == turn_id:
                     self.ports.cancel_owned_task(key)
         finally:
             unregister_revocation_listener(watched_accounts, event=event)

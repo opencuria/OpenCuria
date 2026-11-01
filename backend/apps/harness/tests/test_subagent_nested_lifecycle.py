@@ -118,11 +118,7 @@ def tree(root):
 
 def assert_tree_settled(service, sessions) -> None:
     assert_settled(service, sessions)
-    assert not service._admissions
-    assert not service._tasks
-    assert not service._runs
-    assert not service._event_locks
-    assert not service._abort_requested
+    assert not service.run_registry.records
 
 
 def assert_user_abort(service, sessions) -> None:
@@ -150,7 +146,7 @@ async def test_independent_grandchild_failure_keeps_both_ancestors_running(
     await checkpoint(provider.grandchild_entered)
     sessions = tree(root)
     grandchild = sessions[-1]
-    leaf_task = service._tasks[str(grandchild.id)]
+    leaf_task = service.run_registry.get_task(str(grandchild.id))
     if failure == "cancel":
         leaf_task.cancel()
     else:
@@ -206,7 +202,7 @@ async def test_root_abort_joins_already_cancelling_grandchild_persistence(
     assistant, root_task = await start(service, root)
     await checkpoint(provider.grandchild_entered)
     sessions = tree(root)
-    leaf_task = service._tasks[str(sessions[-1].id)]
+    leaf_task = service.run_registry.get_task(str(sessions[-1].id))
     leaf_task.cancel()
     await checkpoint(entered)
     assert leaf_task.cancelling() == 1
@@ -223,7 +219,7 @@ async def test_root_abort_joins_already_cancelling_grandchild_persistence(
         await checkpoint(joined)
         assert leaf_task.cancelling() == 1
         assert not abort.done() and not root_task.done() and not leaf_task.done()
-        assert all(str(s.id) in service._abort_requested for s in sessions)
+        assert all(service.run_registry.is_aborted(str(s.id)) for s in sessions)
         assert not service.run_registry.finalizing(str(sessions[-1].id))
     finally:
         release.set()
@@ -276,14 +272,14 @@ async def test_root_abort_covers_grandchild_admitted_after_descendant_snapshot(
     assistant, root_task = await start(service, root)
     await checkpoint(provider.child_entered)
     child = children(root)[0]
-    assert all(str(s.id) in service._runs for s in (root, child))
+    assert all(service.run_registry.get(str(s.id)) is not None for s in (root, child))
     monkeypatch.setattr(service_module, "sync_to_async", adapter)
     abort = asyncio.create_task(service.abort_run(root.id))
     await checkpoint(admitted)
     sessions = tree(root)
     assert set(snapshots[0]) == {root.id, child.id}
     assert sessions[-1].id not in snapshots[0]
-    assert str(sessions[-1].id) in service._admissions
+    assert service.run_registry.get_admission(str(sessions[-1].id)) is not None
     assert not provider.grandchild_entered.is_set()
     release_snapshot.set()
     await finish(abort)
@@ -319,11 +315,11 @@ async def test_root_stop_ends_parallel_children_and_grandchild(
     await asyncio.wait_for(service.abort_run(root.id), TIMEOUT)
     assert root_task.done()
     assert not provider.release.is_set()
-    assert not service._tasks
+    assert not any(run.task for run in service.run_registry.records.values())
     assistant.refresh_from_db()
     assert (assistant.finish, assistant.error) == ("aborted", "aborted by user")
     assert_user_abort(service, sessions)
     finished = [e for e in events if e["event"] == "harness.subtask_finished"]
     assert len(finished) == 3
     assert {e["status"] for e in finished} == {"aborted"}
-    assert all(str(row.id) not in service._run_parents for row in sessions)
+    assert all(str(row.id) not in service.run_registry.records for row in sessions)

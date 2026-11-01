@@ -604,7 +604,7 @@ async def test_runner_factory_sees_registered_mcp_tools(harness_workspace):
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     finally:
         mcp_runtime_module.McpRuntime = real
     assistant.refresh_from_db()

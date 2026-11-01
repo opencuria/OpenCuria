@@ -19,6 +19,7 @@ from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import HarnessSessionRepository
+from apps.harness.tests.helpers import attach_run_context
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -506,7 +507,7 @@ async def test_title_agent_updates_session_title(
         workspace_id=str(harness_workspace.id),
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     for _ in range(20):
         await asyncio.sleep(0.05)
         refreshed = HarnessSessionRepository.get_by_id(session.id)
@@ -585,12 +586,7 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
     parent_assistant = service.messages.create(
         session_id=parent.id, role="assistant", content=""
     )
-    service._runs[str(parent.id)] = {
-        "session_id": str(parent.id),
-        "message_id": str(parent_assistant.id),
-        "tool_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, parent, parent_assistant)
     ctx = type(
         "Ctx",
         (),
@@ -675,12 +671,7 @@ async def test_task_resume_reprompts_same_child_session(harness_workspace) -> No
     parent_assistant = service.messages.create(
         session_id=parent.id, role="assistant", content=""
     )
-    service._runs[str(parent.id)] = {
-        "session_id": str(parent.id),
-        "message_id": str(parent_assistant.id),
-        "tool_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, parent, parent_assistant)
     ctx = type(
         "Ctx",
         (),
@@ -782,12 +773,7 @@ async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> 
         assistant = service.messages.create(
             session_id=owner.id, role="assistant", content=""
         )
-        service._runs[str(owner.id)] = {
-            "session_id": str(owner.id),
-            "message_id": str(assistant.id),
-            "tool_parts": {},
-            "subtask_parts": {},
-        }
+        attach_run_context(service, owner, assistant)
     ctx = type(
         "Ctx",
         (),
@@ -821,7 +807,9 @@ async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> 
         model="big-model",
         parent_id=parent.id,
     )
-    service._tasks[str(own.id)] = asyncio.get_running_loop().create_future()
+    service.run_registry.start_execution(
+        str(own.id), asyncio.get_running_loop().create_future()
+    )
     try:
         with pytest.raises(ToolError, match="still running"):
             await service._run_subagent_tool(
@@ -837,7 +825,8 @@ async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> 
                 organization_id=org_id,
             )
     finally:
-        pending = service._tasks.pop(str(own.id), None)
+        pending = service.run_registry.get_task(str(own.id))
+        service.run_registry.release_task(str(own.id))
         if pending is not None and not pending.done():
             pending.cancel()
     # Unknown task_id falls back to a fresh child (OpenCode parity).

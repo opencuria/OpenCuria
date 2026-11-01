@@ -269,7 +269,8 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
             "account_ids": dict(ctx.get("account_ids") or {}),
             "provider_turn_id": str(ctx.get("provider_turn_id")),
         }
-        for key, ctx in service._runs.items()
+        for key, run in service.run_registry.records.items()
+        if (ctx := run.context) is not None
     }
     service.conversation_events.emit_sync = lambda *_: None
     original_tools = harness_tools.default_tool_registry
@@ -335,7 +336,11 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
     finally:
         provider.release.set()
         provider.title_release.set()
-        tasks = list(service._tasks.values())
+        tasks = [
+            run.task
+            for run in service.run_registry.records.values()
+            if run.task is not None
+        ]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -362,7 +367,7 @@ async def start(data, session, prompt="Local test"):
     assistant = await data.service.start_run(
         session, prompt, user_id=data.workspace.created_by_id
     )
-    task = data.service._tasks[str(session.id)]
+    task = data.service.run_registry.get_task(str(session.id))
     return assistant, task
 
 
@@ -384,8 +389,7 @@ def assert_settled(data, session, assistant, status="completed", *, launched=Tru
         assert run.lease_epoch == "local-epoch"
     assert session.status == "idle"
     assert HarnessRunRepository.get_open_for_session(session.id) is None
-    assert str(session.id) not in data.service._tasks
-    assert str(session.id) not in data.service._runs
+    assert data.service.run_registry.get(str(session.id)) is None
     assert all(s.process.returncode is not None for s in data.accessor.streams)
     return run
 
@@ -886,7 +890,7 @@ async def test_native_codex_child_projection_and_shared_checkpoint(runtime, chil
     assert child.model == session.model
     assert child.created_by_id == session.created_by_id
     assert child.status == "idle"
-    assert str(child.id) not in data.service._runs
+    assert data.service.run_registry.get(str(child.id)) is None
     assert child_assistant.content == "Child-only answer."
     if child_tool:
         assert (
@@ -1148,7 +1152,7 @@ async def test_scheduled_occurrence_snapshot_uses_owner_current_account(runtime)
     frozen = scheduler._task_for_run(task, run)
     assert frozen.prompt == "Scheduled original prompt"
     run = await scheduler._create_and_start_run(frozen, run, data.service)
-    running = data.service._tasks.get(str(run.session_id))
+    running = data.service.run_registry.get_task(str(run.session_id))
     if running is not None:
         await asyncio.wait_for(running, 35)
     run.refresh_from_db()
@@ -1357,8 +1361,7 @@ async def test_superseded_owner_cannot_emit_bind_checkpoint_or_finalize(runtime)
         "Released." in json.dumps(event) for event in data.events[before_events:]
     )
     assert all(s.process.returncode is not None for s in data.accessor.streams)
-    assert str(session.id) not in data.service._tasks
-    assert str(session.id) not in data.service._runs
+    assert data.service.run_registry.get(str(session.id)) is None
 
 
 async def test_real_native_codex_child_mcp_retains_separate_agent_scope(

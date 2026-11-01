@@ -108,22 +108,21 @@ class RunCancellation:
 
     def _forget_run(self, key: str) -> None:
         """Drop a finished session once nothing still points at it."""
-        parent = self.ports.run_registry.parents.get(key)
-        if any(owner == key for owner in self.ports.run_registry.parents.values()):
-            return
-        self.ports.run_registry.unlink_parent(key)
-        if (
-            parent
-            and parent not in self.ports.run_registry.tasks
-            and parent not in self.ports.run_registry.contexts
-            and parent not in self.ports.run_registry.admissions
+        registry = self.ports.run_registry
+        parent = registry.get_parent(key)
+        if any(
+            run.indexed and run.parent_id == key for run in registry.records.values()
         ):
+            return
+        registry.unlink_parent(key)
+        parent_run = registry.get(parent) if parent else None
+        if parent_run is not None and not parent_run.is_running:
             self._forget_run(parent)
 
     def _drop_run_tracking(self, key: str) -> None:
         """Release local task bookkeeping without publishing a terminal status."""
         workspace_id = str(
-            self.ports.run_registry.contexts.get(key, {}).get("workspace_id") or ""
+            self.ports.run_registry.get_context(key).get("workspace_id") or ""
         )
         dropped = self.ports.close_steering(key)
         if dropped and workspace_id:
@@ -142,7 +141,7 @@ class RunCancellation:
             current = asyncio.current_task()
         except RuntimeError:
             current = None
-        if current is not None and self.ports.run_registry.tasks.get(key) is current:
+        if current is not None and self.ports.run_registry.get_task(key) is current:
             self.ports.run_registry.release_task(key)
         self._forget_run(key)
 
@@ -152,8 +151,8 @@ class RunCancellation:
         changed = True
         while changed:
             changed = False
-            for key, parent in self.ports.run_registry.parents.items():
-                if parent in keys and key not in keys:
+            for key, run in self.ports.run_registry.records.items():
+                if run.indexed and run.parent_id in keys and key not in keys:
                     keys.add(key)
                     changed = True
         return keys
@@ -165,10 +164,10 @@ class RunCancellation:
         Cancelling those would abort the parent, so only a dedicated run
         task or a non-tool admission (root startup) is owned here.
         """
-        task = self.ports.run_registry.tasks.get(key)
+        task = self.ports.run_registry.get_task(key)
         if task is not None:
             return task
-        admission = self.ports.run_registry.admissions.get(key)
+        admission = self.ports.run_registry.get_admission(key)
         if admission is None or admission.done():
             return None
         if admission.get_name().startswith("harness-tool-"):
@@ -177,10 +176,10 @@ class RunCancellation:
 
     def _startup_admission(self, key: str) -> asyncio.Task | None:
         """Return an in-flight ``start_run`` when no background owner exists yet."""
-        task = self.ports.run_registry.tasks.get(key)
+        task = self.ports.run_registry.get_task(key)
         if task is not None and not task.done():
             return None
-        admission = self.ports.run_registry.admissions.get(key)
+        admission = self.ports.run_registry.get_admission(key)
         if admission is None or admission.done() or admission is asyncio.current_task():
             return None
         return admission
@@ -224,7 +223,7 @@ class RunCancellation:
             log.exception("harness_abort_run_error", session_id=key)
         # The done callback may have replaced a pre-entry task. Join that
         # owner too, without cancelling it: it is already settling.
-        finalizer = self.ports.run_registry.tasks.get(key)
+        finalizer = self.ports.run_registry.get_task(key)
         if finalizer is not None and finalizer is not task and not finalizer.done():
             await self._join_owned_task(key, finalizer)
 
@@ -311,8 +310,8 @@ class RunCancellation:
         for attempt in durable_attempts:
             attempt_key = str(attempt.session_id)
             if (
-                self.ports.run_registry.tasks.get(attempt_key) is None
-                and self.ports.run_registry.admissions.get(attempt_key) is None
+                self.ports.run_registry.get_task(attempt_key) is None
+                and self.ports.run_registry.get_admission(attempt_key) is None
             ):
                 # Retry detached cleanup; recovery still fences fresh owners
                 # and requires the runner to confirm process termination.
@@ -347,7 +346,7 @@ class RunCancellation:
 
     def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
         """Drop the run task and retrieve any leftover exception."""
-        if self.ports.run_registry.tasks.get(key) is task:
+        if self.ports.run_registry.get_task(key) is task:
             self.ports.run_registry.release_task(key)
         if task.cancelled():
             return
@@ -368,16 +367,16 @@ class RunCancellation:
         while cursor and cursor not in seen:
             chain.append(cursor)
             seen.add(cursor)
-            if cursor in self.ports.run_registry.aborts:
+            if self.ports.run_registry.is_aborted(cursor):
                 for ancestor in chain:
                     self.ports.run_registry.request_abort(ancestor)
                 return True
-            cursor = self.ports.run_registry.parents.get(cursor)
-        return key in self.ports.run_registry.aborts
+            cursor = self.ports.run_registry.get_parent(cursor)
+        return self.ports.run_registry.is_aborted(key)
 
     def _parent_stop_in_progress(self, session: HarnessSession) -> bool:
         """True when user stop must end *session* instead of returning a tool error."""
         if self._user_abort_requested(session):
             return True
-        parent_task = self.ports.run_registry.tasks.get(str(session.id))
+        parent_task = self.ports.run_registry.get_task(str(session.id))
         return parent_task is not None and bool(parent_task.cancelling())

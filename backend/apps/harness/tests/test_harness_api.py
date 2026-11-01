@@ -735,7 +735,7 @@ def test_double_message_is_409_while_busy(harness_setup, monkeypatch):
 
     loop = _asyncio.new_event_loop()
     task = loop.create_task(_never())
-    service._tasks[str(session.id)] = task
+    service.run_registry.start_execution(str(session.id), task)
     try:
         client = _client(
             user=harness_setup["owner"],
@@ -848,7 +848,7 @@ def test_mode_switch_while_busy_is_409(harness_setup, fake_harness_service):
 
     loop = _asyncio.new_event_loop()
     task = loop.create_task(_never())
-    fake_harness_service._tasks[str(session.id)] = task
+    fake_harness_service.run_registry.start_execution(str(session.id), task)
     try:
         client = _client(
             user=harness_setup["owner"],
@@ -1145,8 +1145,8 @@ def active_run(fake_harness_service):
             return None
 
         channel = SteeringChannel(deliver=_deliver)
-        fake_harness_service._tasks[key] = task
-        fake_harness_service._runs[key] = {"steering": channel}
+        fake_harness_service.run_registry.start_execution(key, task)
+        fake_harness_service.run_registry.attach_context(key, {"steering": channel})
         return channel
 
     yield _start

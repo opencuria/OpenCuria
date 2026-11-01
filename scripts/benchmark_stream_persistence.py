@@ -103,10 +103,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 content=initial if kind == "text" else ""
             )
             assistant.refresh_from_db()
-            service._runs[str(session.id)] = {
-                f"{kind}_part_id": str(part.id),
-                "part_positions": {str(part.id): 0},
-            }
+            service.run_registry.attach_context(
+                str(session.id),
+                {
+                    f"{kind}_part_id": str(part.id),
+                    "part_positions": {str(part.id): 0},
+                },
+            )
             emitted.clear()
 
         async def stream() -> None:

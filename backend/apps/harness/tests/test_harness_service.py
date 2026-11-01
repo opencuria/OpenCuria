@@ -44,7 +44,7 @@ from apps.harness.repositories import (
 from apps.harness.run_events import assistant_run_finished
 from apps.harness.run_timeline import FRONTEND_EVENT_PART, tail_remainder
 from apps.harness.session_access_service import SessionAccessService
-from apps.harness.tests.helpers import parts_for_session
+from apps.harness.tests.helpers import attach_run_context, parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
 
@@ -168,7 +168,7 @@ async def test_native_run_reuses_persisted_always_allowlist(
         organization_id=session.organization_id,
         workspace_id=str(session.workspace_id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
         session.id
@@ -196,7 +196,7 @@ async def test_start_run_persists_messages_parts_and_history(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     stored = HarnessMessageRepository.list_for_session(session.id)
     assert [m.role for m in stored] == ["user", "assistant"]
@@ -286,8 +286,8 @@ async def test_manual_chat_can_start_while_scheduled_run_is_active(
 
     # Both turns are concurrently active above. Finish deterministically to
     # avoid unrelated simultaneous-write locks in SQLite's shared-memory DB.
-    scheduled_background = service._tasks[str(scheduled_session.id)]
-    manual_background = service._tasks[str(manual_session.id)]
+    scheduled_background = service.run_registry.get_task(str(scheduled_session.id))
+    manual_background = service.run_registry.get_task(str(manual_session.id))
     scheduled_gate.set()
     await scheduled_background
     manual_gate.set()
@@ -331,7 +331,7 @@ async def test_scheduled_run_rejected_after_manual_root_reservation(
     assert HarnessMessageRepository.list_for_session(scheduled_session.id) == []
 
     gate.set()
-    await service._tasks[str(manual_session.id)]
+    await service.run_registry.get_task(str(manual_session.id))
 
 
 @pytest.mark.django_db(transaction=True)
@@ -440,7 +440,7 @@ async def test_scheduled_plugin_credential_failure_finishes_run(
     )
     scheduler = ScheduledTaskService(harness=service)
     run = await scheduler._create_and_start_run(task, ledger, service)
-    background = service._tasks.get(str(run.session_id))
+    background = service.run_registry.get_task(str(run.session_id))
     if background is not None:
         await background
     await scheduler.reconcile_runs()
@@ -454,7 +454,7 @@ async def test_scheduled_plugin_credential_failure_finishes_run(
     assert "required" in run.error.lower()
     assert run.session.status == "idle"
     assert not service.is_running(run.session_id)
-    assert str(run.session_id) not in service._runs
+    assert service.run_registry.get(str(run.session_id)) is None
     assert provider_calls == []
     statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
     assert statuses[-1]["status"] == "idle"
@@ -484,7 +484,7 @@ async def test_finished_run_publishes_event_and_isolates_receivers(
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        background = service._tasks.get(str(session.id))
+        background = service.run_registry.get_task(str(session.id))
         if background is not None:
             await background
     finally:
@@ -493,7 +493,7 @@ async def test_finished_run_publishes_event_and_isolates_receivers(
 
     assert received == [assistant.id]
     assert not service.is_running(session.id)
-    assert str(session.id) not in service._runs
+    assert service.run_registry.get(str(session.id)) is None
     statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
     assert statuses[-1]["status"] == "idle"
 
@@ -528,7 +528,7 @@ async def test_double_run_rejected_with_conflict(harness_workspace) -> None:
             workspace_id=str(harness_workspace.id),
         )
     gate.set()
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert assistant_first.id is not None
 
 
@@ -840,7 +840,7 @@ async def test_start_run_settles_open_text_and_reasoning_parts(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
@@ -872,7 +872,7 @@ async def test_run_error_preserves_stream_content_and_fails_tools(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     stored = HarnessMessageRepository.list_for_session(session.id)
     assistant = [m for m in stored if m.role == "assistant"][0]
@@ -1009,7 +1009,7 @@ async def test_failed_run_persists_error_without_task_exception(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    task = service._tasks.get(str(session.id))
+    task = service.run_registry.get_task(str(session.id))
     if task is not None:
         await task
         assert task.exception() is None
@@ -1083,7 +1083,7 @@ async def test_execute_run_loads_selected_provider_without_sync_orm(
             workspace_id=str(harness_workspace.id),
             user_id=harness_workspace.created_by_id,
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     except SynchronousOnlyOperation:
         pytest.fail("_execute_run called Django ORM from an async context")
     finally:
@@ -1188,7 +1188,7 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
         workspace_id=str(harness_workspace.id),
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert captured
     opts = captured[0]
@@ -1243,7 +1243,7 @@ async def test_execute_run_todowrite_without_sync_orm(
             organization_id=org_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     except SynchronousOnlyOperation:
         pytest.fail("todowrite called Django ORM from an async context")
     finally:
@@ -1288,7 +1288,9 @@ async def test_execute_run_with_skills_without_sync_orm(
 
     async def _capture(self, **kwargs):  # type: ignore[no-untyped-def]
         key = str(kwargs["session"].id)
-        captured.append(list(self._runs.get(key, {}).get("skill_bodies") or []))
+        captured.append(
+            list(self.run_registry.get_context(key).get("skill_bodies") or [])
+        )
         await original(self, **kwargs)
 
     monkeypatch.setattr(HarnessService, "_execute_run", _capture)
@@ -1302,7 +1304,7 @@ async def test_execute_run_with_skills_without_sync_orm(
             workspace_id=str(harness_workspace.id),
             user_id=user_id,
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     except SynchronousOnlyOperation:
         pytest.fail("start_run resolved skill bodies from an async context")
     finally:
@@ -1398,14 +1400,14 @@ async def test_history_built_from_db_not_params(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     await service.start_run(
         session,
         "second",
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert len(seen) == 2
     # History contains the first turn exactly once; the active prompt is
     # appended by the runner, not replayed from persisted messages as well.
@@ -1614,7 +1616,7 @@ async def test_large_tool_payloads_are_not_emitted(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
 
     secret = "WRITE-CONTENT-SHOULD-STAY-SERVER-SIDE"
     arguments = json.dumps({"path": "/workspace/large.py", "content": secret * 4000})
@@ -1704,7 +1706,7 @@ async def test_tool_error_socket_payload_is_bounded_and_sanitized(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
     error = "ERROR-SECRET-" + "x" * 20_000
     await service._on_runner_event(
         session,
@@ -1889,7 +1891,7 @@ async def test_start_run_on_child_session_still_works(harness_workspace) -> None
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(child.id)]
+    await service.run_registry.get_task(str(child.id))
     assistant.refresh_from_db()
     assert assistant.content == "hello"
 
@@ -2125,7 +2127,7 @@ async def test_start_run_snapshots_agent_defaults_without_persisting_overrides(
     )
     assert busy["model"] == "agent-default-model"
     assert busy["reasoning_effort"] == expected_effort
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert refreshed is not None
     assert refreshed.model == ""
@@ -2254,7 +2256,7 @@ async def test_start_run_uses_accessor_factory_for_list_tool(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert wired == [str(harness_workspace.id)]
     parts = parts_for_session(session.id)
@@ -2283,7 +2285,7 @@ async def test_start_run_without_accessor_factory_errors_list_tool(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert tool_parts and tool_parts[0].state == "error"
@@ -2300,13 +2302,7 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant"
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
 
     async def start(call_id: str, title: str) -> None:
         await service._on_runner_event(
@@ -2505,7 +2501,7 @@ async def test_abort_run_cancels_child_session_task(
         await hang.wait()
 
     child_task = asyncio.create_task(never())
-    service._tasks[str(child.id)] = child_task
+    service.run_registry.start_execution(str(child.id), child_task)
     await service.abort_run(parent.id)
     assert child_task.done()
 
@@ -2543,9 +2539,9 @@ async def test_abort_busy_computeruse_leaves_parent_running(
     parent_task = asyncio.create_task(never())
     cu_task = asyncio.create_task(never())
     explore_task = asyncio.create_task(never())
-    service._tasks[str(parent.id)] = parent_task
-    service._tasks[str(computeruse.id)] = cu_task
-    service._tasks[str(explore.id)] = explore_task
+    service.run_registry.start_execution(str(parent.id), parent_task)
+    service.run_registry.start_execution(str(computeruse.id), cu_task)
+    service.run_registry.start_execution(str(explore.id), explore_task)
     await sync_to_async(HarnessSessionRepository.mark_status)(parent, "busy")
     await sync_to_async(HarnessSessionRepository.mark_status)(computeruse, "busy")
     await sync_to_async(HarnessSessionRepository.mark_status)(explore, "busy")
@@ -2575,13 +2571,7 @@ async def test_step_start_carries_part_id_and_finish_completes_it(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session, assistant, {"type": "step_start", "step": 1}
     )
@@ -2618,13 +2608,7 @@ async def test_reasoning_part_is_per_step_and_meta_carries_step(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session, assistant, {"type": "step_start", "step": 1}
     )
@@ -2633,14 +2617,19 @@ async def test_reasoning_part_is_per_step_and_meta_carries_step(
         assistant,
         {"type": "part_updated", "delta": {"reasoning": "first"}, "step": 1},
     )
-    first_id = service._runs[str(session.id)].get("reasoning_part_id")
+    first_id = service.run_registry.get_context(str(session.id)).get(
+        "reasoning_part_id"
+    )
     assert first_id
     await service._on_runner_event(
         session,
         assistant,
         {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
     )
-    assert service._runs[str(session.id)].get("reasoning_part_id") is None
+    assert (
+        service.run_registry.get_context(str(session.id)).get("reasoning_part_id")
+        is None
+    )
     await service._on_runner_event(
         session, assistant, {"type": "step_start", "step": 2}
     )
@@ -2649,7 +2638,9 @@ async def test_reasoning_part_is_per_step_and_meta_carries_step(
         assistant,
         {"type": "part_updated", "delta": {"reasoning": "second"}, "step": 2},
     )
-    second_id = service._runs[str(session.id)].get("reasoning_part_id")
+    second_id = service.run_registry.get_context(str(session.id)).get(
+        "reasoning_part_id"
+    )
     assert second_id and second_id != first_id
     parts = parts_for_session(session.id)
     by_id = {str(part.id): part for part in parts if part.type == "reasoning"}
@@ -2671,13 +2662,7 @@ async def test_text_part_is_per_step_so_final_answer_stays_after_tools(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session, assistant, {"type": "step_start", "step": 1}
     )
@@ -2686,14 +2671,14 @@ async def test_text_part_is_per_step_so_final_answer_stays_after_tools(
         assistant,
         {"type": "part_updated", "delta": {"text": "I'll look"}, "step": 1},
     )
-    first_id = service._runs[str(session.id)].get("text_part_id")
+    first_id = service.run_registry.get_context(str(session.id)).get("text_part_id")
     assert first_id
     await service._on_runner_event(
         session,
         assistant,
         {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
     )
-    assert service._runs[str(session.id)].get("text_part_id") is None
+    assert service.run_registry.get_context(str(session.id)).get("text_part_id") is None
     await service._on_runner_event(
         session,
         assistant,
@@ -2714,7 +2699,7 @@ async def test_text_part_is_per_step_so_final_answer_stays_after_tools(
         assistant,
         {"type": "part_updated", "delta": {"text": "Done"}, "step": 2},
     )
-    second_id = service._runs[str(session.id)].get("text_part_id")
+    second_id = service.run_registry.get_context(str(session.id)).get("text_part_id")
     assert second_id and second_id != first_id
     parts = parts_for_session(session.id)
     by_id = {str(part.id): part for part in parts if part.type == "text"}
@@ -2736,13 +2721,7 @@ async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session, assistant, {"type": "part_updated", "delta": {"reasoning": "x"}}
     )
@@ -2764,15 +2743,6 @@ async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
 # Reliable chat timeline regression tests (positions, live ids, boundaries)
 # ---------------------------------------------------------------------------
 
-
-def _timeline_ctx(session_id: uuid.UUID, assistant_id: uuid.UUID) -> dict[str, Any]:
-    return {
-        "session_id": str(session_id),
-        "message_id": str(assistant_id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2850,7 +2820,7 @@ async def test_text_tool_text_observed_order_and_live_ids(harness_workspace) -> 
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
 
     await service._on_runner_event(
         session, assistant,
@@ -2931,7 +2901,7 @@ async def test_tool_queued_then_started_same_part_id_pending_then_running(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
 
     await service._on_runner_event(
         session,
@@ -2980,7 +2950,7 @@ async def test_tool_result_updates_same_part_no_new_row(harness_workspace) -> No
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session,
         assistant,
@@ -3032,7 +3002,7 @@ async def test_text_reasoning_kind_transition_closes_other_stream(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session, assistant, {"type": "part_updated", "delta": {"text": "t1"}}
     )
@@ -3056,7 +3026,7 @@ async def test_non_text_part_closes_running_text(harness_workspace) -> None:
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session, assistant, {"type": "part_updated", "delta": {"text": "hello"}}
     )
@@ -3096,7 +3066,7 @@ async def test_status_busy_and_idle_carry_current_assistant_message_id(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     busy_first = [
         e for e in events
         if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
@@ -3115,7 +3085,7 @@ async def test_status_busy_and_idle_carry_current_assistant_message_id(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert str(second.id) != str(first.id)
     busy_second = [
         e for e in events
@@ -3144,7 +3114,7 @@ async def test_execute_run_tail_remainder_creates_text_part_without_duplicates(
     await sync_to_async(HarnessPartRepository.create)(
         message_id=assistant.id, type="text", state="running", output="streamed "
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
     await service.timeline.append_tail_text(session, assistant, "tail words")
     await sync_to_async(HarnessMessageRepository.append_content)(
         assistant, "tail words"
@@ -3252,7 +3222,7 @@ async def test_parallel_same_tool_provisional_ids_rebind_by_queued_id(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
     )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
+    attach_run_context(service, session, assistant)
     for queued_id, path in [("temp-1", "a.txt"), ("temp-2", "b.txt")]:
         await service._on_runner_event(session, assistant, {
             "type": "tool_queued", "step": 1, "call_id": queued_id,

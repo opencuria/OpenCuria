@@ -266,7 +266,7 @@ async def test_nested_abort_settles_before_capture_and_blocks_child_resume(
         with pytest.raises(ConflictError, match="capturing image"):
             await service.start_run(leaf, "resume", max_depth=2)
         assert HarnessMessageRepository.list_for_session(leaf.id) == before
-        assert not service._tasks and not service._admissions
+        assert not service.run_registry.records
     finally:
         if not task.done():
             await service.abort_run(root.id)

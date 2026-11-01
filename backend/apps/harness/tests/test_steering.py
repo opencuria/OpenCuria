@@ -325,7 +325,7 @@ async def test_steer_is_persisted_in_order_and_seen_by_the_model(
         "prefer tabs"
     ]
     gate.set()
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     # The model saw it after the tool result, before its next answer.
     assert provider.seen[1][-1].role == "user"
@@ -416,7 +416,7 @@ async def test_withdrawn_steer_never_reaches_the_model(harness_workspace) -> Non
     with pytest.raises(NotFoundError):
         await service.withdraw_steer(session, entry.id)
     gate.set()
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert all(message.content != "never mind" for message in provider.seen[1])
     assert not [
@@ -447,7 +447,7 @@ async def test_steer_that_arrives_too_late_starts_a_follow_up_run(
     )
     service, events = _service(provider)
     await _start(service, session, harness_workspace)
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     async def settled() -> bool:
         refreshed = HarnessSessionRepository.get_by_id(session.id)
@@ -551,16 +551,19 @@ async def test_unconfirmed_cleanup_discards_the_queue_and_tells_clients(
     key = str(session.id)
     channel, _ = _channel()
     channel.submit("will never be delivered")
-    service._runs[key] = {
-        "steering": channel,
-        "workspace_id": str(harness_workspace.id),
-    }
+    service.run_registry.attach_context(
+        key,
+        {
+            "steering": channel,
+            "workspace_id": str(harness_workspace.id),
+        },
+    )
 
     service._drop_run_tracking(key)
     await asyncio.sleep(0.05)
 
     assert channel.closed and channel.pending() == []
-    assert key not in service._runs
+    assert service.run_registry.get(key) is None
     assert _queue_snapshots(events) == [[]]
     # No follow-up run: the cleanup of the previous run is unconfirmed.
     assert not service.is_running(session.id)

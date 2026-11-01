@@ -171,7 +171,7 @@ def _account(org, user, local_openrouter, *, label: str, key: str):
 
 
 async def _wait_run(service: HarnessService, session_id: uuid.UUID) -> None:
-    task = service._tasks.get(str(session_id))
+    task = service.run_registry.get_task(str(session_id))
     if task is not None:
         try:
             await task

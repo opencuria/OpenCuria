@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import uuid
-from collections.abc import Awaitable, Callable, MutableMapping, MutableSet
+from collections.abc import Awaitable, Callable
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -140,9 +140,7 @@ class HarnessService:
         self.timeline = RunTimeline(
             messages=self.messages,
             parts=self.parts,
-            run_context=lambda session_id: self.run_registry.contexts.get(
-                session_id, {}
-            ),
+            run_context=lambda session_id: self.run_registry.get_context(session_id),
             emit=self._emit_frontend,
         )
         self._runner_factory = runner_factory
@@ -167,36 +165,6 @@ class HarnessService:
             emit=self._emit_frontend,
             conversations_changed=self.conversation_events.emit,
         )
-
-    @property
-    def _tasks(self) -> MutableMapping[str, asyncio.Task]:
-        """Compatibility projection of the authoritative run registry."""
-        return self.run_registry.tasks
-
-    @property
-    def _admissions(self) -> MutableMapping[str, asyncio.Task]:
-        """Compatibility projection of the authoritative run registry."""
-        return self.run_registry.admissions
-
-    @property
-    def _runs(self) -> MutableMapping[str, dict[str, Any]]:
-        """Compatibility projection of the authoritative run registry."""
-        return self.run_registry.contexts
-
-    @property
-    def _run_parents(self) -> MutableMapping[str, str | None]:
-        """Compatibility projection of the authoritative run registry."""
-        return self.run_registry.parents
-
-    @property
-    def _abort_requested(self) -> MutableSet[str]:
-        """Compatibility projection of the authoritative run registry."""
-        return self.run_registry.aborts
-
-    @property
-    def _event_locks(self) -> MutableMapping[str, asyncio.Lock]:
-        """Compatibility projection of the authoritative run registry."""
-        return self.run_registry.event_locks
 
     def _run_cancellation(self) -> Any:
         """Compose RunCancellation with the current application ports."""
@@ -1065,7 +1033,7 @@ class HarnessService:
             await self._ensure_external_attempt_reconciled(session, force=True)
             session = await sync_to_async(self.conversations.get_session)(session.id)
         if session.parent_id is not None:
-            child_context = self.run_registry.contexts.get(str(session.id), {})
+            child_context = self.run_registry.get_context(str(session.id))
             if child_context.get("external_projection"):
                 # The native runtime owns the child internally and has no
                 # separately addressable OpenCuria task handle. Stop the
@@ -1079,7 +1047,7 @@ class HarnessService:
 
     def _steering_channel(self, session_id: uuid.UUID | str) -> SteeringChannel | None:
         """Return the open steering channel of an active run, if any."""
-        channel = self.run_registry.contexts.get(str(session_id), {}).get("steering")
+        channel = self.run_registry.get_context(str(session_id)).get("steering")
         return channel if isinstance(channel, SteeringChannel) else None
 
     def list_pending_steers(self, session_id: uuid.UUID) -> list[SteerEntry]:
@@ -1199,7 +1167,7 @@ class HarnessService:
 
     def _close_steering(self, key: str) -> list[SteerEntry]:
         """Close the run's channel; return entries nobody consumed."""
-        channel = self.run_registry.contexts.get(key, {}).pop("steering", None)
+        channel = self.run_registry.get_context(key).pop("steering", None)
         return channel.close() if isinstance(channel, SteeringChannel) else []
 
     def _schedule_steer_followup(
@@ -1500,7 +1468,7 @@ class HarnessService:
         )
         await execute_external_run(
             ports,
-            context=self.run_registry.contexts.get(str(session.id), {}),
+            context=self.run_registry.get_context(str(session.id)),
             engine_id=engine_id,
             session=session,
             prompt=prompt,
@@ -1533,7 +1501,7 @@ class HarnessService:
                     await self.conversation_events.emit(session.workspace_id)
                     await self._schedule_summary(session, assistant)
         finally:
-            context = self.run_registry.contexts.get(key, {})
+            context = self.run_registry.get_context(key)
             await self._finish_provider_turn(context)
             root = self._provider_turn_roots.get(
                 str(context.get("provider_turn_id")), context
@@ -1626,7 +1594,7 @@ class HarnessService:
             await sync_to_async(self.sessions.mark_status)(
                 child, HarnessSessionStatus.BUSY
             )
-            root_context = self.run_registry.contexts.get(str(session.id), {})
+            root_context = self.run_registry.get_context(str(session.id))
             root_context.setdefault("external_children", {})[
                 str(event.get("subtask_id", ""))
             ] = {
@@ -1648,7 +1616,7 @@ class HarnessService:
         self, session: HarnessSession, event: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Find a projected child by task id or parent tool-use id."""
-        children = self.run_registry.contexts.get(str(session.id), {}).get(
+        children = self.run_registry.get_context(str(session.id)).get(
             "external_children", {}
         )
         task_id = str(event.get("subtask_id", ""))
@@ -1668,7 +1636,7 @@ class HarnessService:
         self, root_key: str, parent_call_id: str, event: dict[str, Any]
     ) -> None:
         """Persist native-forwarded child events into their own message timeline."""
-        root_context = self.run_registry.contexts.get(root_key, {})
+        root_context = self.run_registry.get_context(root_key)
         children = root_context.get("external_children", {})
         child_ctx = next(
             (
@@ -1726,7 +1694,7 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Close any child projections left open by a cancelled native stream."""
-        children = self.run_registry.contexts.get(str(session.id), {}).get(
+        children = self.run_registry.get_context(str(session.id)).get(
             "external_children", {}
         )
         for child_ctx in children.values():
@@ -1782,7 +1750,7 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Settle an admitted background task cancelled before execution entry."""
-        context = self.run_registry.contexts.get(str(session.id), {})
+        context = self.run_registry.get_context(str(session.id))
         ownership = context.get("ownership")
         if ownership is not None:
             # Execution never entered, so no runner lease or CLI process could
@@ -1822,7 +1790,7 @@ class HarnessService:
                 await publish_assistant_run_finished(assistant.id, session_id=key)
                 if session.parent_id is None:
                     await self._schedule_summary(session, assistant)
-                context = self.run_registry.contexts.get(key, {})
+                context = self.run_registry.get_context(key)
                 await self._finish_provider_turn(context)
                 turn_id = context.get("provider_turn_id")
                 if turn_id:
@@ -1863,7 +1831,7 @@ class HarnessService:
             self.run_registry.release_event_lock(key)
             self.run_registry.clear_abort(key)
             # Keep task ownership until all persistence/emission awaits have finished.
-            if self.run_registry.tasks.get(key) is asyncio.current_task():
+            if self.run_registry.get_task(key) is asyncio.current_task():
                 self.run_registry.release_task(key)
             self._forget_run(key)
             if followup:
@@ -2011,14 +1979,14 @@ class HarnessService:
             assistant_id = str(assistant.id)
         else:
             assistant_id = str(
-                self.run_registry.contexts.get(str(session.id), {}).get(
+                self.run_registry.get_context(str(session.id)).get(
                     "message_id", ""
                 )
                 or ""
             )
         if not user_message_id:
             user_message_id = str(
-                self.run_registry.contexts.get(str(session.id), {}).get(
+                self.run_registry.get_context(str(session.id)).get(
                     "user_message_id", ""
                 )
                 or ""
@@ -2046,9 +2014,7 @@ class HarnessService:
         # add an avoidable round trip to the streaming hot path.
         part_id = data.get("part_id")
         if part_id and event in (FRONTEND_EVENT_PART, FRONTEND_EVENT_SUBTASK_STARTED):
-            run_ctx = self.run_registry.contexts.get(
-                str(data.get("session_id", "")), {}
-            )
+            run_ctx = self.run_registry.get_context(str(data.get("session_id", "")))
             positions = run_ctx.setdefault("part_positions", {})
             position = positions.get(str(part_id))
             if position is None:
@@ -2074,7 +2040,7 @@ class HarnessService:
         """Reserve the answer snapshot before spawning its summary follower."""
         if self._background.closing:
             return
-        context = self.run_registry.contexts.get(str(session.id), {})
+        context = self.run_registry.get_context(str(session.id))
         turn_id = context.get("provider_turn_id")
         if context.get("provider_revocation_message"):
             return
@@ -2095,7 +2061,7 @@ class HarnessService:
         holder: str | None = None,
     ) -> None:
         """Generate the user-goal recap with the completed answer's accounts."""
-        context = self.run_registry.contexts.get(str(session.id), {})
+        context = self.run_registry.get_context(str(session.id))
         turn_id = context.get("provider_turn_id")
         reserved = holder is not None
         holder = holder or f"summary:{uuid.uuid4()}"

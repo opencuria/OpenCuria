@@ -43,7 +43,7 @@ async def test_shutdown_cancels_runs_without_user_abort_and_waits_for_finalizati
     await finalizing.wait()
     assert service.run_registry.get("run").phase == RunPhase.FINALIZING
     assert not stopping.done()
-    assert not service.run_registry.aborts
+    assert not any(run.abort_requested for run in service.run_registry.records.values())
     with pytest.raises(ConflictError, match="worker is stopping"):
         await service.start_run(SimpleNamespace(id="new"), "prompt")
     release.set()
@@ -127,7 +127,7 @@ async def test_shutdown_cancels_admission_and_waits_for_its_rollback():
     stopping = asyncio.create_task(service.shutdown_runs())
     await rollback.wait()
     assert not stopping.done()
-    assert not service.run_registry.aborts
+    assert not any(run.abort_requested for run in service.run_registry.records.values())
     release.set()
     await stopping
     assert task.cancelled()
@@ -185,7 +185,7 @@ async def test_metadata_shutdown_releases_holds_and_drains_callback_cleanup():
     assert holds == set()
     assert not state.active
     assert service._provider_turn_roots == {}
-    assert not service.run_registry.aborts
+    assert not any(run.abort_requested for run in service.run_registry.records.values())
 
 
 async def test_supervisor_waits_for_cleanup_spawned_by_done_callback():

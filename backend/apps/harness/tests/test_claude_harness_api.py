@@ -74,7 +74,7 @@ class _CompletedRunHarnessService(HarnessService):
 
     async def start_run(self, session, prompt, **kwargs):  # type: ignore[no-untyped-def]
         assistant = await super().start_run(session, prompt, **kwargs)
-        task = self._tasks.get(str(session.id))
+        task = self.run_registry.get_task(str(session.id))
         if task is not None:
             await task
         return assistant
@@ -210,11 +210,11 @@ async def _wait_for_completed_messages(
             and len(assistants) == len([m for m in messages if m.role == "user"])
             and all(message.completed_at is not None for message in assistants)
         ):
-            task = service._tasks.get(str(session_id))
+            task = service.run_registry.get_task(str(session_id))
             if task is not None and not task.done():
                 await task
             return await read_messages()
-        task = service._tasks.get(str(session_id))
+        task = service.run_registry.get_task(str(session_id))
         if task is not None and task.done():
             await task
         await asyncio.sleep(0.01)
@@ -339,7 +339,7 @@ async def test_claude_admission_failure_finalizes_the_owned_attempt(
 
     def fail_before_execution(**_kwargs: Any) -> None:
         if aborted:
-            service._abort_requested.add(str(session.id))
+            service.run_registry.request_abort(str(session.id))
             raise asyncio.CancelledError()
         raise RuntimeError("private admission failure")
 

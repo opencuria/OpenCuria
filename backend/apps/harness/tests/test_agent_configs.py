@@ -6,6 +6,7 @@ import uuid
 import pytest
 
 from apps.harness.agents.effort_strategy import resolve_strategy_effort
+from apps.harness.tests.helpers import attach_run_context
 
 
 def test_resolve_strategy_effort() -> None:
@@ -104,9 +105,7 @@ async def test_run_subagent_inherit_uses_parent_model(harness_workspace, monkeyp
         model="big-model", reasoning_effort="high",
     )
     parent_assistant = service.messages.create(session_id=parent.id, role="assistant", content="")
-    service._runs[str(parent.id)] = {"session_id": str(parent.id),
-                                     "message_id": str(parent_assistant.id),
-                                     "tool_parts": {}, "subtask_parts": {}}
+    attach_run_context(service, parent, parent_assistant)
     ctx = type("Ctx", (), {"session_id": str(parent.id),
                            "workspace_id": str(harness_workspace.id),
                            "model": "big-model", "depth": 0, "max_depth": 1})()

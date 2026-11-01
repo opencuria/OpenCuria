@@ -30,7 +30,7 @@ async def test_each_answer_snapshots_current_provider_account(codex_setup):
 
     async def execute(**kwargs):
         current = kwargs["session"]
-        context = service._runs[str(current.id)]
+        context = service.run_registry.get_context(str(current.id))
         service.run_registry.ensure(str(current.id)).execution_started = True
         observed.append(dict(context["account_ids"]))
         entered.set()
@@ -45,7 +45,7 @@ async def test_each_answer_snapshots_current_provider_account(codex_setup):
         await service.start_run(session, "foreign", user_id=data.owner.id + 1000)
     assert await sync_to_async(HarnessMessage.objects.count)() == 0
     first = await service.start_run(session, "answer one", user_id=data.owner.id)
-    first_task = service._tasks[str(session.id)]
+    first_task = service.run_registry.get_task(str(session.id))
     await entered.wait()
     second_account = await sync_to_async(data.accounts.save_account)(
         organization_id=data.org,
@@ -69,7 +69,7 @@ async def test_each_answer_snapshots_current_provider_account(codex_setup):
     entered.clear()
     release.clear()
     second = await service.start_run(session, "answer two", user_id=data.owner.id)
-    second_task = service._tasks[str(session.id)]
+    second_task = service.run_registry.get_task(str(session.id))
     await entered.wait()
     turn = await sync_to_async(ProviderTurn.objects.get)(assistant_message_id=second.id)
     assert turn.account_ids["chatgpt"] == str(second_account.id)
@@ -141,14 +141,17 @@ async def test_managed_task_happy_path_keeps_codex_owner_skills_and_snapshot(
         user_id=data.owner.id,
         account_ids=snapshot,
     )
-    data.service._runs[str(parent.id)] = {
-        "message_id": str(parent_assistant.id),
-        "tool_parts": {},
-        "subtask_parts": {},
-        "provider_turn_id": turn.id,
-        "initiated_by_id": data.owner.id,
-        "account_ids": snapshot,
-    }
+    data.service.run_registry.attach_context(
+        str(parent.id),
+        {
+            "message_id": str(parent_assistant.id),
+            "tool_parts": {},
+            "subtask_parts": {},
+            "provider_turn_id": turn.id,
+            "initiated_by_id": data.owner.id,
+            "account_ids": snapshot,
+        },
+    )
     # A changed selection must not affect the child being admitted now.
     await sync_to_async(data.accounts.select_account)(
         data.org, data.owner.id, "chatgpt", None

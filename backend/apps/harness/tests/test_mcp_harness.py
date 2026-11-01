@@ -324,7 +324,7 @@ async def test_harness_service_mcp_wiring_success_and_cleanup(harness_workspace)
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     finally:
         mcp_runtime_module.McpRuntime = real_mcp_runtime
 
@@ -395,7 +395,7 @@ async def test_harness_service_mcp_missing_credentials_fail_run(harness_workspac
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     finally:
         mcp_runtime_module.McpRuntime = real_mcp_runtime
     assistant.refresh_from_db()
@@ -482,7 +482,7 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service_fail._tasks[str(session2.id)]
+        await service_fail.run_registry.get_task(str(session2.id))
     finally:
         mcp_runtime_module.McpRuntime = real_mcp_runtime
     assistant.refresh_from_db()
@@ -535,7 +535,7 @@ async def test_harness_run_survives_failing_http_mcp_startup(harness_workspace):
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     finally:
         mcp_runtime_module.McpRuntime = real_mcp_runtime
     assistant.refresh_from_db()

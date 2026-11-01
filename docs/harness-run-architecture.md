@@ -24,10 +24,9 @@ explicit port bundles rather than passing itself into execution components.
 Admission and execution do not retain competing owners. Stop intent, event lock,
 ancestry and timeline context belong to that same record. Timeline dictionaries
 contain evolving engine/presentation data, not task ownership or finalization
-flags. Compatibility mapping properties project the registry; they are not
-additional dictionaries. Production components acquire, transfer and release
-ownership through named registry transitions; views preserve the prior inspection
-and test-fixture API.
+flags. Components and test fixtures acquire, transfer and release ownership
+through named registry transitions and inspect typed records. There are no
+parallel mutable dictionaries for individual run fields.
 
 Task completion callbacks retain the admitted record's identity. They must not
 look up a new record after finalization has removed the old one: doing so could

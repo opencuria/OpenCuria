@@ -1,14 +1,14 @@
 """One authoritative in-memory record for each locally owned run.
 
 Persistence owns admission across processes; this registry owns only tasks and
-cancellation inside the execution process. Mapping projections preserve the
-existing inspection API without storing a second copy of any run state.
+cancellation inside the execution process. Named transitions update the record;
+callers inspect it directly or query the registry without creating ownership.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator, Mapping, MutableMapping, MutableSet
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -69,94 +69,11 @@ class ActiveRun:
         )
 
 
-class _FieldView(MutableMapping):
-    """A projection of record fields, never an independent state map."""
-
-    def __init__(self, registry: RunRegistry, field_name: str) -> None:
-        self.registry = registry
-        self.field_name = field_name
-
-    def __getitem__(self, key: str) -> Any:
-        record = self.registry.get(key)
-        if record is None:
-            raise KeyError(key)
-        if self.field_name == "parent_id":
-            if not record.indexed:
-                raise KeyError(key)
-        elif getattr(record, self.field_name) is None:
-            raise KeyError(key)
-        return getattr(record, self.field_name)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        record = self.registry.ensure(key)
-        if self.field_name == "task":
-            record.begin_execution(value)
-        elif self.field_name == "context" and value is not None:
-            self.registry.attach_context(key, value)
-        else:
-            setattr(record, self.field_name, value)
-            if self.field_name == "admission":
-                record.phase = RunPhase.ADMITTING
-                record.execution_started = False
-            if self.field_name == "parent_id":
-                record.indexed = True
-
-    def __delitem__(self, key: str) -> None:
-        self[key]
-        record = self.registry.ensure(key)
-        setattr(record, self.field_name, None)
-        if self.field_name == "parent_id":
-            record.indexed = False
-        self.registry.prune(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter([key for key in self.registry.records if key in self])
-
-    def __len__(self) -> int:
-        return sum(1 for _ in self)
-
-
-class _AbortView(MutableSet):
-    def __init__(self, registry: RunRegistry) -> None:
-        self.registry = registry
-
-    def __contains__(self, key: object) -> bool:
-        run = self.registry.get(str(key))
-        return bool(run and run.abort_requested)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(
-            [key for key, run in self.registry.records.items() if run.abort_requested]
-        )
-
-    def __len__(self) -> int:
-        return sum(1 for _ in self)
-
-    def add(self, key: str) -> None:
-        self.registry.ensure(key).abort_requested = True
-
-    def discard(self, key: str) -> None:
-        run = self.registry.get(key)
-        if run:
-            run.abort_requested = False
-            self.registry.prune(key)
-
-    def update(self, keys: set[str] | list[str]) -> None:
-        for key in keys:
-            self.add(key)
-
-
 class RunRegistry:
     """Own records and release them only after all local obligations end."""
 
     def __init__(self) -> None:
         self._records: dict[str, ActiveRun] = {}
-        self.tasks = _FieldView(self, "task")
-        self.admissions = _FieldView(self, "admission")
-        self.contexts = _FieldView(self, "context")
-        self.parents = _FieldView(self, "parent_id")
-        self.event_locks = _FieldView(self, "event_lock")
-        self.aborts = _AbortView(self)
 
     def begin_admission(self, key: str, owner: asyncio.Task) -> None:
         """Acquire local startup ownership without replacing another owner."""
@@ -246,6 +163,31 @@ class RunRegistry:
     def get(self, key: str) -> ActiveRun | None:
         """Read local ownership without implicitly creating a run."""
         return self._records.get(str(key))
+
+    def get_task(self, key: str) -> asyncio.Task | None:
+        """Return the execution owner, including a still-settling done task."""
+        run = self.get(key)
+        return run.task if run is not None else None
+
+    def get_admission(self, key: str) -> asyncio.Task | None:
+        """Return startup ownership before transfer to execution."""
+        run = self.get(key)
+        return run.admission if run is not None else None
+
+    def get_context(self, key: str) -> dict[str, Any]:
+        """Read attached timeline data; missing runs yield an untracked empty dict."""
+        run = self.get(key)
+        return run.context if run is not None and run.context is not None else {}
+
+    def get_parent(self, key: str, default: str | None = None) -> str | None:
+        """Return indexed ancestry, preserving an explicitly linked root's None."""
+        run = self.get(key)
+        return run.parent_id if run is not None and run.indexed else default
+
+    def is_aborted(self, key: str) -> bool:
+        """Read explicit user-stop intent without allocating a run."""
+        run = self.get(key)
+        return bool(run and run.abort_requested)
 
     def ensure(self, key: str) -> ActiveRun:
         """Allocate a record before the first asynchronous admission boundary."""

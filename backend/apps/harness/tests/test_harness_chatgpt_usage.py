@@ -94,7 +94,9 @@ async def test_chatgpt_terminal_usage_persisted_and_emitted(
             organization_id=harness_workspace.runner.organization_id,
             workspace_id=str(harness_workspace.id),
         )
-        await asyncio.wait_for(service._tasks[str(session.id)], timeout=10)
+        await asyncio.wait_for(
+            service.run_registry.get_task(str(session.id)), timeout=10
+        )
 
     assert len(requests) == 1
     assistant.refresh_from_db()

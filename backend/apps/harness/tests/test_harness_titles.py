@@ -220,7 +220,7 @@ async def test_fast_answer_cannot_release_title_snapshot_before_reservation(
     turn_ids = []
 
     async def immediate_answer(**kwargs):
-        context = service._runs[str(session.id)]
+        context = service.run_registry.get_context(str(session.id))
         service.run_registry.ensure(str(session.id)).execution_started = True
         turn = await sync_to_async(service._provider_turn_service.get)(
             context["provider_turn_id"]
@@ -235,7 +235,7 @@ async def test_fast_answer_cannot_release_title_snapshot_before_reservation(
 
     monkeypatch.setattr(service, "_execute_run", immediate_answer)
     await service.start_run(session, PROMPT, user_id=harness_workspace.created_by_id)
-    task = service._tasks.get(str(session.id))
+    task = service.run_registry.get_task(str(session.id))
     if task is not None:
         await task
     await asyncio.wait_for(title_entered.wait(), 5)

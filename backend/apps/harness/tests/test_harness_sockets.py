@@ -33,7 +33,7 @@ from apps.harness.run_timeline import (
     FRONTEND_EVENT_SUBTASK_STARTED,
     FRONTEND_EVENT_TODO,
 )
-from apps.harness.tests.helpers import parts_for_session
+from apps.harness.tests.helpers import attach_run_context, parts_for_session
 
 
 class FakeProvider(ProviderAdapter):
@@ -75,7 +75,7 @@ async def test_socket_event_payloads(harness_workspace) -> None:
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     by_event: dict[str, list[dict[str, Any]]] = {}
     for item in emitted:
@@ -318,13 +318,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
         title="parent",
     )
     assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session,
         assistant,

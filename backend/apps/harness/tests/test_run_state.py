@@ -12,21 +12,21 @@ from apps.harness.run_state import RunPhase, RunRegistry
 async def test_admission_transfers_single_owner_and_resets_next_turn() -> None:
     registry = RunRegistry()
     owner = asyncio.current_task()
-    registry.admissions["session"] = owner
+    registry.begin_admission("session", owner)
     record = registry.get("session")
     assert record.admission is owner
     assert record.phase == RunPhase.ADMITTING
     task = asyncio.create_task(asyncio.sleep(0))
-    registry.tasks["session"] = task
+    registry.start_execution("session", task)
     assert record.task is task
     assert record.admission is None
-    assert "session" not in registry.admissions
+    assert registry.get_admission("session") is None
     assert record.phase == RunPhase.RUNNING
     record.begin_finalization()
     assert registry.finalizing("session")
     await task
-    registry.tasks.pop("session")
-    registry.admissions["session"] = owner
+    registry.release_task("session")
+    registry.begin_admission("session", owner)
     assert registry.get("session").phase == RunPhase.ADMITTING
     assert not registry.get("session").execution_started
 
@@ -36,9 +36,9 @@ async def test_second_live_execution_owner_is_rejected() -> None:
     first = asyncio.create_task(asyncio.sleep(100))
     second = asyncio.create_task(asyncio.sleep(100))
     try:
-        registry.tasks["session"] = first
+        registry.start_execution("session", first)
         with pytest.raises(RuntimeError, match="live execution owner"):
-            registry.tasks["session"] = second
+            registry.start_execution("session", second)
         assert registry.get("session").task is first
     finally:
         first.cancel()
@@ -46,29 +46,36 @@ async def test_second_live_execution_owner_is_rejected() -> None:
         await asyncio.gather(first, second, return_exceptions=True)
 
 
-def test_projections_share_one_record_and_cleanup_waits_for_all_obligations() -> None:
+def test_cleanup_waits_for_all_record_obligations() -> None:
     registry = RunRegistry()
-    registry.parents["child"] = "parent"
-    context = {"workspace_id": "workspace"}
-    registry.contexts["child"] = context
-    registry.aborts.add("child")
+    registry.link_parent("child", "parent")
+    context = {}
+    registry.attach_context("child", context)
+    registry.request_abort("child")
     assert len(registry.records) == 1
     record = registry.get("child")
     assert record.context is context
+    assert registry.get_context("child") is context
     assert record.parent_id == "parent"
     assert record.abort_requested
-    registry.contexts.pop("child")
-    registry.parents.pop("child")
+    registry.release_context("child")
+    registry.unlink_parent("child")
     assert registry.get("child") is record
-    registry.aborts.discard("child")
+    registry.clear_abort("child")
     assert registry.get("child") is None
 
 
 def test_registries_are_instance_local() -> None:
     first, second = RunRegistry(), RunRegistry()
-    first.aborts.add("session")
-    assert second.get("session") is None
-    assert not second.aborts
+    first.request_abort("session")
+    first.link_parent("session", None)
+    assert first.get_parent("session", "fallback") is None
+    assert second.get_task("session") is None
+    assert second.get_admission("session") is None
+    assert second.get_context("session") == {}
+    assert second.get_parent("session", "fallback") == "fallback"
+    assert not second.is_aborted("session")
+    assert not second.records
 
 
 async def test_preparation_is_owned_before_first_await_and_rejects_duplicate() -> None:
@@ -135,8 +142,8 @@ async def test_done_execution_owner_fences_readmission_until_cleanup_releases() 
 
     registry = RunRegistry()
     task = asyncio.create_task(asyncio.sleep(100))
-    registry.tasks["session"] = task
-    registry.contexts["session"] = {"message_id": "old-shell"}
+    registry.start_execution("session", task)
+    registry.attach_context("session", {"message_id": "old-shell"})
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     record = registry.get("session")
@@ -150,9 +157,9 @@ async def test_done_execution_owner_fences_readmission_until_cleanup_releases() 
         await admission.start(SimpleNamespace(id="session"), "replacement")
     preparation.prepare.assert_not_awaited()
     record.begin_finalization()
-    registry.tasks.pop("session")
+    registry.release_task("session")
     assert record.is_running  # Durable shell cleanup is still outstanding.
-    registry.contexts.pop("session")
+    registry.release_context("session")
     assert registry.get("session") is None
 
 

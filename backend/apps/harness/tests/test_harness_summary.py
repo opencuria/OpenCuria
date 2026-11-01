@@ -678,7 +678,7 @@ async def test_run_writes_summary_and_next_run_clears_it(harness_workspace) -> N
             workspace_id=str(harness_workspace.id),
             user_id=harness_workspace.created_by_id,
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
 
     async def stored_summary() -> str:
         for _ in range(40):

@@ -133,7 +133,7 @@ class SubagentCoordinator:
                 )
             except (ValueError, AuthenticationError, NotFoundError) as exc:
                 raise ToolError(str(exc), tool="task") from exc
-        parent_ctx = self.ports.run_registry.contexts.get(str(parent.id), {})
+        parent_ctx = self.ports.run_registry.get_context(str(parent.id))
         message_id = parent_ctx.get("message_id")
         if not message_id:
             raise ToolError(
@@ -250,7 +250,7 @@ class SubagentCoordinator:
                 max_depth=ctx.max_depth,
                 user_id=getattr(parent, "created_by_id", None),
             )
-            child_task = self.ports.run_registry.tasks.get(str(child.id))
+            child_task = self.ports.run_registry.get_task(str(child.id))
             if child_task is not None:
                 # Cancel execution explicitly below, not an already-settling owner.
                 await asyncio.shield(child_task)
@@ -268,7 +268,7 @@ class SubagentCoordinator:
                     error += "\n\nPartial output:\n" + output[:TASK_OUTPUT_MAX_CHARS]
                 raise ToolError(error, tool="task")
         except asyncio.CancelledError:
-            tracked = child_task or self.ports.run_registry.tasks.get(str(child.id))
+            tracked = child_task or self.ports.run_registry.get_task(str(child.id))
             if tracked is not None and not tracked.done():
                 if not tracked.cancelling() and not self.ports.run_registry.finalizing(
                     str(child.id)
@@ -280,7 +280,7 @@ class SubagentCoordinator:
                     pass
             # A task cancelled before entry installs a replacement finalizer.
             # Await that owner without cancelling it before reading its outcome.
-            finalizer = self.ports.run_registry.tasks.get(str(child.id))
+            finalizer = self.ports.run_registry.get_task(str(child.id))
             if finalizer is not None and finalizer is not tracked:
                 with anyio.CancelScope(shield=True):
                     while not finalizer.done():
@@ -293,10 +293,10 @@ class SubagentCoordinator:
             # Awaiting a cancelled child does not cancel this tool task. Only
             # cancellation of the waiting task/parent should stop the whole run.
             current = asyncio.current_task()
-            parent_task = self.ports.run_registry.tasks.get(str(parent.id))
+            parent_task = self.ports.run_registry.get_task(str(parent.id))
             if (
                 (current is not None and current.cancelling())
-                or str(parent.id) in self.ports.run_registry.aborts
+                or self.ports.run_registry.is_aborted(str(parent.id))
                 or (parent_task is not None and parent_task.cancelling())
             ):
                 raise

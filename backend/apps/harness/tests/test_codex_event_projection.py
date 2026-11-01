@@ -21,6 +21,7 @@ from apps.harness.models import HarnessMessage, HarnessPart, HarnessSession
 from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
 from apps.harness.schemas import timeline_to_out
 from apps.harness.tests.conftest import TINY_PNG
+from apps.harness.tests.helpers import attach_run_context
 from apps.harness.tests.test_codex_core_safety import auth
 from apps.harness.tools.base import ToolRegistry
 
@@ -207,13 +208,7 @@ async def test_child_start_keeps_identity_separate_from_task_instructions(
         session_id=session.id, role="assistant", harness_id="codex"
     )
     root_key = str(session.id)
-    service._runs[root_key] = {
-        "session_id": root_key,
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
 
     async def emit(event: dict[str, Any], parent: str | None) -> None:
         if parent:

@@ -28,6 +28,7 @@ from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.run_timeline import FRONTEND_EVENT_PART
 from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.helpers import attach_run_context
 from common.exceptions import AuthenticationError, ConflictError
 
 
@@ -59,7 +60,7 @@ async def test_closing_run_blocks_mutations_until_runner_release(harness_workspa
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     attempt = HarnessRunRepository.model.objects.get(assistant_message=assistant)
     assert attempt.status == "closing"
 
@@ -128,7 +129,7 @@ async def test_claude_run_uses_persisted_always_allowlist(harness_workspace):
     await service.interactions.resolve_permission(
         session=session, request_id=request.id, response="always"
     )
-    first_task = service._tasks.get(str(session.id))
+    first_task = service.run_registry.get_task(str(session.id))
     if first_task is not None:
         await first_task
 
@@ -138,7 +139,7 @@ async def test_claude_run_uses_persisted_always_allowlist(harness_workspace):
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert assistant.finish == "stop"
     assert PermissionAllowlist.objects.filter(
@@ -192,7 +193,7 @@ async def test_claude_run_still_requests_nonmatching_allowlist_action(
     await service.interactions.resolve_permission(
         session=session, request_id=request.id, response="once"
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert PermissionRequest.objects.filter(session_id=session.id).count() == 1
 
 
@@ -221,7 +222,7 @@ async def test_claude_media_permission_callback_uses_shared_allowlist(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert assistant.finish == "stop"
     assert not PermissionRequest.objects.filter(session_id=session.id).exists()
@@ -241,7 +242,7 @@ async def test_claude_max_steps_result_is_persisted_as_completed(harness_workspa
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     attempt = HarnessRunRepository.model.objects.get(assistant_message=assistant)
     assert assistant.finish == "max_steps"
@@ -296,7 +297,7 @@ async def test_claude_edit_preflights_inherited_skill_before_deleting_suffix(
             organization_id=session.organization_id,
             user_id=harness_workspace.created_by_id,
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
 
     messages_before = HarnessMessageRepository.list_for_session(session.id)
     transcript_id_before = session.external_session_id
@@ -338,7 +339,7 @@ async def test_claude_async_run_works_without_async_unsafe_escape(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert assistant.finish == "stop"
     assert assistant.content == "Claude: done"
     fresh = await asyncio.to_thread(HarnessSession.objects.get, id=session.id)
@@ -763,7 +764,7 @@ async def test_claude_start_run_generates_first_title_with_frozen_account(
     first = await service.start_run(
         session, "First root prompt", user_id=harness_workspace.created_by_id
     )
-    first_task = service._tasks[str(session.id)]
+    first_task = service.run_registry.get_task(str(session.id))
     await asyncio.wait_for(entered.wait(), 5)
     first_turn = ProviderTurn.objects.get(assistant_message_id=first.id)
     assert first_turn.account_ids == {"claude-agent": str(initial_account_id)}
@@ -815,7 +816,7 @@ async def test_claude_start_run_generates_first_title_with_frozen_account(
     second = await service.start_run(
         session, "Second root prompt", user_id=harness_workspace.created_by_id
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     await wait_until(
         lambda: sum(kind == "summary" for kind, _model, _prompt in provider.calls) >= 2
     )
@@ -853,7 +854,7 @@ async def test_claude_run_persists_engine_binding_and_secret_free_result(
         workspace_id=str(session.workspace_id),
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     await asyncio.to_thread(assistant.refresh_from_db)
     await asyncio.to_thread(session.refresh_from_db)
@@ -885,7 +886,7 @@ async def test_claude_fork_and_edit_never_resume_stale_cli_suffix(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     first_assistant.refresh_from_db()
     user_message = HarnessMessageRepository.list_for_session(session.id)[0]
     original_external_id = session.external_session_id
@@ -909,7 +910,7 @@ async def test_claude_fork_and_edit_never_resume_stale_cli_suffix(
         workspace_id=str(session.workspace_id),
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     assert session.external_session_id != original_external_id
     assert registry.created[-1][1]["external_session_id"] == ""
@@ -933,7 +934,7 @@ async def test_claude_closing_callbacks_still_finalize_success_and_error(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assistant.refresh_from_db()
     session.refresh_from_db()
     row = HarnessRunRepository.model.objects.get(assistant_message=assistant)
@@ -974,7 +975,7 @@ async def test_claude_closing_callbacks_still_finalize_success_and_error(
         organization_id=failed_session.organization_id,
         user_id=second_workspace.created_by_id,
     )
-    await failed_service._tasks[str(failed_session.id)]
+    await failed_service.run_registry.get_task(str(failed_session.id))
     failed_assistant.refresh_from_db()
     failed_session.refresh_from_db()
     failed_row = HarnessRunRepository.model.objects.get(
@@ -998,7 +999,7 @@ async def test_claude_unconfirmed_cleanup_retains_run_admission(harness_workspac
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     row = HarnessRunRepository.model.objects.get(assistant_message=assistant)
     assistant.refresh_from_db()
@@ -1048,7 +1049,7 @@ async def test_claude_transcript_error_surfaces_safe_recovery_action(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assistant.refresh_from_db()
     assert assistant.finish == "error"
@@ -1073,7 +1074,7 @@ async def test_claude_engine_error_is_generic_in_message_and_terminal_attempt(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assistant.refresh_from_db()
     assert assistant.finish == "error"
@@ -1100,7 +1101,7 @@ async def test_claude_local_bash_task_lifecycle_stays_in_root_tool_part(
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assistant.refresh_from_db()
     bash_part = HarnessPart.objects.get(
@@ -1147,7 +1148,7 @@ async def test_claude_abort_finishes_attempt_and_child_projection(harness_worksp
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     child = HarnessSession.objects.get(parent_id=session.id)
     child_assistant = HarnessMessage.objects.filter(
@@ -1181,14 +1182,7 @@ async def test_queued_tool_card_is_idempotent_and_enriched_by_later_payload(
         content="",
         harness_id="claude",
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-        "skill_bodies": [],
-    }
+    attach_run_context(service, session, assistant, skill_bodies=[])
 
     early = {
         "type": "tool_queued",
@@ -1300,7 +1294,7 @@ async def test_claude_cancellation_sets_interrupted_attempt(harness_workspace):
         organization_id=session.organization_id,
         user_id=harness_workspace.created_by_id,
     )
-    task = service._tasks[str(session.id)]
+    task = service.run_registry.get_task(str(session.id))
     await asyncio.sleep(0.05)
     await service.abort_run(session.id)
     if not task.done():
@@ -1332,7 +1326,7 @@ async def test_claude_run_hands_the_steering_channel_to_the_engine(
     entry = await service.steer_run(
         session, "also add tests", user_id=harness_workspace.created_by_id
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     parts = list(
         HarnessPart.objects.filter(message__session_id=session.id).order_by(
@@ -1368,7 +1362,7 @@ async def test_account_revocation_stops_claude_owner_and_releases_attempt(
     assistant = await service.start_run(
         session, "wait", user_id=harness_workspace.created_by_id
     )
-    owner = service._tasks[str(session.id)]
+    owner = service.run_registry.get_task(str(session.id))
     # Account revocation must target a live, bound owner, not engine construction.
     await asyncio.wait_for(registry.ready.wait(), timeout=10)
     assert registry.created
@@ -1420,7 +1414,7 @@ async def test_claude_followup_resolves_new_active_account_without_losing_resume
         payload={"label": "Second", "auth_type": "api_token", "token": "second-token"},
     )
     await service.start_run(session, "first", user_id=harness_workspace.created_by_id)
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     session.refresh_from_db()
     resume = session.external_session_id
     assert resume
@@ -1431,7 +1425,7 @@ async def test_claude_followup_resolves_new_active_account_without_losing_resume
         second.id,
     )
     await service.start_run(session, "second", user_id=harness_workspace.created_by_id)
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert registry.created[0][1]["auth_env"] == {
         "ANTHROPIC_API_KEY": "test-claude-token"
     }
@@ -1477,7 +1471,7 @@ async def test_late_claude_steer_uses_a_new_provider_turn_after_settlement(
     first = await service.start_run(
         session, "first", user_id=harness_workspace.created_by_id
     )
-    owner = service._tasks[str(session.id)]
+    owner = service.run_registry.get_task(str(session.id))
     await asyncio.wait_for(feed_ended.wait(), timeout=10)
     first_turn = ProviderTurn.objects.get(assistant_message_id=first.id)
     accounts.select_account(

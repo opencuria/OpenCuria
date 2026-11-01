@@ -115,7 +115,7 @@ async def test_skill_update_cannot_redirect_real_run_to_a_concurrently_saved_mod
             user_id=harness_workspace.created_by_id,
             skill_ids=[],
         )
-        await service.run_registry.tasks[str(current.id)]
+        await service.run_registry.get_task(str(current.id))
         assert assistant.model == "fake-model"
         stored = await sync_to_async(HarnessSessionRepository.get_by_id)(current.id)
         assert stored.model == "concurrently-saved-model"

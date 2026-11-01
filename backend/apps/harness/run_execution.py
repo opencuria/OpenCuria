@@ -93,7 +93,7 @@ class RunExecution:
         from .tools import default_tool_registry
 
         key = str(session.id)
-        run_context = self.ports.run_registry.contexts.get(key, {})
+        run_context = self.ports.run_registry.get_context(key)
         self.ports.run_registry.ensure(key).execution_started = True
         engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         mcp_runtime = None
@@ -135,7 +135,7 @@ class RunExecution:
                     )
                 except NotFoundError:
                     config = None
-                run_context = self.ports.run_registry.contexts.get(key, {})
+                run_context = self.ports.run_registry.get_context(key)
                 turn_id = run_context.get("provider_turn_id")
 
                 def register_used(account_id: str) -> None:
@@ -278,19 +278,19 @@ class RunExecution:
                 organization_id=str(organization_id),
                 small_model=small_model,
                 current_user_message_id=str(
-                    self.ports.run_registry.contexts.get(key, {}).get(
+                    self.ports.run_registry.get_context(key).get(
                         "user_message_id", ""
                     )
                 ),
                 skills=SkillService.merge_bodies(
-                    self.ports.run_registry.contexts.get(key, {}).get(
+                    self.ports.run_registry.get_context(key).get(
                         "skill_bodies", []
                     ),
                     mcp_snapshot.snapshot.plugin_skills
                     if mcp_snapshot is not None
                     else [],
                 ),
-                steering=self.ports.run_registry.contexts.get(key, {}).get("steering"),
+                steering=self.ports.run_registry.get_context(key).get("steering"),
                 context_length=context_length,
                 max_output_tokens=model_max_output_tokens,
                 last_step_prompt_tokens=last_step_prompt_tokens,

@@ -217,11 +217,14 @@ def create_session_after_reselect(data):
 def test_children_use_parent_owner_provider_and_captured_account(codex_setup):
     data = codex_setup
     root = create_session(data)
-    data.service._runs[str(root.id)] = {
-        "provider_turn_id": str(uuid.uuid4()),
-        "initiated_by_id": data.owner.id,
-        "account_ids": {"chatgpt": str(data.account.id)},
-    }
+    data.service.run_registry.attach_context(
+        str(root.id),
+        {
+            "provider_turn_id": str(uuid.uuid4()),
+            "initiated_by_id": data.owner.id,
+            "account_ids": {"chatgpt": str(data.account.id)},
+        },
+    )
     data.accounts.select_account(data.org, data.owner.id, "chatgpt", None)
     child = create_session(data, parent_id=root.id, agent_name="explore")
     assert child.harness_id == "codex"

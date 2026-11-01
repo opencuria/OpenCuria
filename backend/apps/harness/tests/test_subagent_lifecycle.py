@@ -91,7 +91,7 @@ async def start(service, session):
         organization_id=session.organization_id,
         workspace_id=str(session.workspace_id),
     )
-    return assistant, service._tasks[str(session.id)]
+    return assistant, service.run_registry.get_task(str(session.id))
 
 
 async def checkpoint(event: asyncio.Event) -> None:
@@ -115,10 +115,7 @@ def assert_settled(service, sessions) -> None:
         session.refresh_from_db()
         assert session.status == "idle"
         key = str(session.id)
-        assert key not in service._tasks
-        assert key not in service._runs
-        assert key not in service._event_locks
-        assert key not in service._abort_requested
+        assert service.run_registry.get(key) is None
 
 
 def task_parts(session, part_type="tool"):
@@ -143,8 +140,8 @@ async def test_independent_child_cancel_preserves_parent_and_sibling(
     rows = children(parent)
     child = next(row for row in rows if row.title == "child")
     sibling = next(row for row in rows if row.title == "sibling")
-    child_task = service._tasks[str(child.id)]
-    sibling_task = service._tasks[str(sibling.id)]
+    child_task = service.run_registry.get_task(str(child.id))
+    sibling_task = service.run_registry.get_task(str(sibling.id))
     # Keep terminal SQLite writes deterministic while both child tasks run.
     # The cancellation boundary must settle before releasing the sibling.
     child_finished = asyncio.Event()
@@ -253,7 +250,11 @@ async def test_user_abort_during_child_lifecycle_settles_entire_tree(
     await checkpoint(entered if phase == "startup" else provider.entered["child"])
     rows = children(parent)
     assert len(rows) == 1
-    tracked = list(service._tasks.values())
+    tracked = [
+        run.task
+        for run in service.run_registry.records.values()
+        if run.task is not None
+    ]
     await asyncio.wait_for(service.abort_run(parent.id), TIMEOUT)
     assert task.done()
     assert all(t.done() for t in tracked)
@@ -405,8 +406,8 @@ async def test_cancellation_after_admission_preserves_or_cancels_child_by_owner(
     await checkpoint(emission_entered)
     await checkpoint(provider.entered["child"])
     child = children(parent)[0]
-    child_task = service._tasks[str(child.id)]
-    parent_task = service._tasks[str(parent.id)]
+    child_task = service.run_registry.get_task(str(child.id))
+    parent_task = service.run_registry.get_task(str(parent.id))
     if child_boundary:
         await finish(caller)
         await asyncio.wait_for(service.abort_run(parent.id), TIMEOUT)
@@ -418,7 +419,7 @@ async def test_cancellation_after_admission_preserves_or_cancels_child_by_owner(
         caller.cancel()
         with pytest.raises(asyncio.CancelledError):
             await finish(caller)
-        assert service._tasks[str(parent.id)] is parent_task
+        assert service.run_registry.get_task(str(parent.id)) is parent_task
         assert not parent_task.done()
         assert not child_task.done()
         provider.release["child"].set()
@@ -454,7 +455,7 @@ async def test_user_stop_in_child_spawn_window_cancels_the_run(
     await checkpoint(window)
     await checkpoint(provider.entered["child"])
     child = children(parent)[0]
-    child_task = service._tasks[str(child.id)]
+    child_task = service.run_registry.get_task(str(child.id))
     assert not child_task.done()
     await asyncio.wait_for(service.abort_run(parent.id), TIMEOUT)
     assert child_task.done()
@@ -470,9 +471,9 @@ async def test_user_stop_in_child_spawn_window_cancels_the_run(
     finished = [e for e in events if e["event"] == "harness.subtask_finished"]
     assert finished
     assert {e["status"] for e in finished} == {"aborted"}
-    assert not service._tasks
-    assert str(parent.id) not in service._run_parents
-    assert str(child.id) not in service._run_parents
+    assert not any(run.task for run in service.run_registry.records.values())
+    assert str(parent.id) not in service.run_registry.records
+    assert str(child.id) not in service.run_registry.records
     assert_settled(service, [parent, child])
 
 
@@ -499,7 +500,7 @@ async def test_direct_root_abort_during_history_admission(
         )
     )
     await checkpoint(entered)
-    assert str(session.id) not in service._tasks
+    assert service.run_registry.get_task(str(session.id)) is None
     assistant = assistant_for(session)
     await asyncio.wait_for(service.abort_run(session.id), TIMEOUT)
     # Bound failure cleanup as well: a regression must not leave admission alive.
@@ -511,7 +512,7 @@ async def test_direct_root_abort_during_history_admission(
     assert assistant.finish == "aborted"
     assert assistant.error == "aborted by user"
     assert_settled(service, [session])
-    assert str(session.id) not in service._admissions
+    assert service.run_registry.get_admission(str(session.id)) is None
 
 
 @pytest.mark.parametrize("user_abort", [False, True])
@@ -549,7 +550,7 @@ async def test_cancelled_background_before_execution_entry_is_finalized(
             cancelled_coroutines.append(coro)
             assert len(executions) == 1
             if user_abort:
-                service._abort_requested.add(key)
+                service.run_registry.request_abort(key)
             task.cancel()
         return task
 
@@ -575,7 +576,7 @@ async def test_cancelled_background_before_execution_entry_is_finalized(
         "aborted by user" if user_abort else "Run interrupted unexpectedly"
     )
     assert_settled(service, [session])
-    assert key not in service._admissions
+    assert service.run_registry.get_admission(key) is None
     gc.collect()
     assert not [w for w in recwarn if "was never awaited" in str(w.message)]
 
@@ -615,7 +616,7 @@ async def test_completed_run_not_rewritten_by_cancelled_busy_emission(
     await checkpoint(idle)
     assistant = assistant_for(session)
     assert assistant.finish == "stop"
-    assert str(session.id) not in service._tasks
+    assert service.run_registry.get_task(str(session.id)) is None
     caller.cancel()
     with pytest.raises(asyncio.CancelledError):
         await finish(caller)
@@ -626,7 +627,7 @@ async def test_completed_run_not_rewritten_by_cancelled_busy_emission(
         "",
     )
     assert_settled(service, [session])
-    assert str(session.id) not in service._admissions
+    assert service.run_registry.get_admission(str(session.id)) is None
 
 
 async def test_real_client_session_scope_cancel_persists_before_async_teardown(
@@ -711,7 +712,7 @@ async def test_real_client_session_scope_cancel_persists_before_async_teardown(
     assert accessor.processes["first"].close_count == 1
     assert runtimes[0].connections == []
     assert_settled(service, [session])
-    assert str(session.id) not in service._admissions
+    assert service.run_registry.get_admission(str(session.id)) is None
 
 
 @pytest.mark.parametrize("parent_abort", [False, True])
@@ -751,7 +752,7 @@ async def test_parent_waits_for_child_preentry_replacement_finalizer(
     assistant, parent_task = await start(service, parent)
     await checkpoint(entered)
     child = children(parent)[0]
-    finalizer = service._tasks[str(child.id)]
+    finalizer = service.run_registry.get_task(str(child.id))
     assert finalizer is not cancelled[0]
     assert cancelled[0].cancelled()
     assert not finalizer.done()
@@ -770,7 +771,7 @@ async def test_parent_waits_for_child_preentry_replacement_finalizer(
         monkeypatch.setattr(asyncio, "shield", shield)
         abort = asyncio.create_task(service.abort_run(parent.id))
         await checkpoint(waiting)
-        assert str(child.id) in service._abort_requested
+        assert service.run_registry.is_aborted(str(child.id))
         assert not abort.done()
         assert not parent_task.done()
         assert not finalizer.done()
@@ -798,7 +799,7 @@ async def test_parent_waits_for_child_preentry_replacement_finalizer(
     assert task_parts(parent)[0].state == "error"
     assert task_parts(parent, "subtask")[0].state == "error"
     assert_settled(service, [parent, child])
-    assert not service._admissions
+    assert not any(run.admission for run in service.run_registry.records.values())
 
 
 async def test_direct_cancel_during_final_idle_emit_releases_bookkeeping(
@@ -833,7 +834,7 @@ async def test_direct_cancel_during_final_idle_emit_releases_bookkeeping(
         "",
     )
     assert_settled(service, [session])
-    assert not service._admissions
+    assert not any(run.admission for run in service.run_registry.records.values())
 
 
 async def test_repeated_abort_during_cleanup_joins_without_cancelling_owner(
@@ -897,7 +898,7 @@ async def test_repeated_abort_during_cleanup_joins_without_cancelling_owner(
     assistant.refresh_from_db()
     assert (assistant.finish, assistant.error) == ("aborted", "aborted by user")
     assert_settled(service, [session])
-    assert not service._admissions
+    assert not any(run.admission for run in service.run_registry.records.values())
 
 
 async def test_concurrent_aborts_join_blocked_interruption_persistence(
@@ -950,7 +951,7 @@ async def test_concurrent_aborts_join_blocked_interruption_persistence(
     assert not task.done()
     assert not first_abort.done() and not second_abort.done()
     assert not service.run_registry.finalizing(str(session.id))
-    assert str(session.id) in service._abort_requested
+    assert service.run_registry.is_aborted(str(session.id))
     release.set()
     results = await asyncio.wait_for(asyncio.gather(first_abort, second_abort), TIMEOUT)
     assert all(result.status == "idle" for result in results)
@@ -959,4 +960,4 @@ async def test_concurrent_aborts_join_blocked_interruption_persistence(
     assert (assistant.finish, assistant.error) == ("aborted", "aborted by user")
     assert not children(session)
     assert_settled(service, [session])
-    assert not service._admissions
+    assert not any(run.admission for run in service.run_registry.records.values())

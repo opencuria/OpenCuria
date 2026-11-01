@@ -128,7 +128,7 @@ def test_run_now_links_provider_backed_chat_and_terminal_outcome(
     async def complete_run():
         result = await ScheduledTaskService(harness=service).run_now(task)
         gate.set()
-        await service._tasks[str(result.session_id)]
+        await service.run_registry.get_task(str(result.session_id))
         return result
 
     run = asyncio.run(complete_run())
@@ -307,7 +307,7 @@ def test_real_harness_failure_and_abort_settle_before_idle(
 
     async def complete():
         run = await ScheduledTaskService(harness=harness).run_now(task)
-        running = harness._tasks[str(run.session_id)]
+        running = harness.run_registry.get_task(str(run.session_id))
         await asyncio.wait_for(entered.wait(), timeout=5)
         if outcome == "abort":
             await harness.abort_run(run.session_id)
@@ -420,7 +420,7 @@ def test_projection_failure_preserves_live_run_and_idle_cleanup_then_history_rep
     async def complete():
         run = await ScheduledTaskService(harness=harness).run_now(task)
         key = str(run.session_id)
-        background = harness._tasks[key]
+        background = harness.run_registry.get_task(key)
         await sync_to_async(run.refresh_from_db)()
         assert run.status == ScheduledTaskRun.Status.RUNNING
         assert run.error == "" and run.finished_at is None
@@ -429,10 +429,7 @@ def test_projection_failure_preserves_live_run_and_idle_cleanup_then_history_rep
         await background
         await asyncio.sleep(0)  # Let the actual completion callback execute.
         assert callbacks == [key]
-        assert key not in harness._tasks
-        assert key not in harness._runs
-        assert key not in harness._event_locks
-        assert key not in harness._admissions
+        assert harness.run_registry.get(key) is None
         return run
 
     run = asyncio.run(complete())

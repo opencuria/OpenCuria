@@ -559,7 +559,7 @@ class RunAdmission:
                         break
                     except asyncio.CancelledError:
                         continue
-            run_context = self.ports.run_registry.contexts.get(key, {})
+            run_context = self.ports.run_registry.get_context(key)
             if provider_turn_id and provider_turn_holder and spawned_task is None:
                 await sync_to_async(self.ports.provider_turn_service.finish_once)(
                     provider_turn_id, provider_turn_holder
@@ -609,5 +609,5 @@ class RunAdmission:
             self.ports.forget_run(key)
             raise
         finally:
-            if self.ports.run_registry.admissions.get(key) is owner:
+            if self.ports.run_registry.get_admission(key) is owner:
                 self.ports.run_registry.release_admission(key)

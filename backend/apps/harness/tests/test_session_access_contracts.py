@@ -48,5 +48,4 @@ async def test_external_session_rejects_nonowner_before_writing(
     assert caught.value.message == expected
     assert caught.value.code == "authentication_error"
     assert messages.mock_calls == []
-    assert service._tasks == {}
-    assert service._runs == {}
+    assert not service.run_registry.records

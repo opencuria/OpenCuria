@@ -45,7 +45,7 @@ def _stream(workspace: Any) -> tuple[Any, HarnessMessage, HarnessPart, HarnessSe
         meta={"step": 3},
     )
     service = HarnessService()
-    service._runs[str(session.id)] = {"text_part_id": str(part.id)}
+    service.run_registry.attach_context(str(session.id), {"text_part_id": str(part.id)})
     return session, message, part, service
 
 
@@ -63,7 +63,9 @@ def test_text_stream_uses_two_writes_and_one_commit_per_delta(
         emitted.append(data)
 
     service._emit = emit
-    service._runs[str(session.id)]["part_positions"] = {str(part.id): part.position}
+    service.run_registry.get_context(str(session.id))["part_positions"] = {
+        str(part.id): part.position
+    }
 
     async def stream() -> None:
         for _ in range(chunks):

@@ -112,7 +112,7 @@ async def test_persistent_tree_enforces_configured_depth(harness_workspace, over
     service, runs, events = _service(provider)
     root = await _session(harness_workspace)
     assistant = await service.start_run(root, "spawn")
-    await service._tasks[str(root.id)]
+    await service.run_registry.get_task(str(root.id))
     await sync_to_async(assistant.refresh_from_db)()
 
     assert assistant.finish == "stop"
@@ -143,13 +143,13 @@ async def test_active_tree_keeps_root_limit_when_setting_changes(harness_workspa
     service, runs, _ = _service(UpdatingProvider())
     root = await _session(harness_workspace)
     await service.start_run(root, "spawn")
-    await service._tasks[str(root.id)]
+    await service.run_registry.get_task(str(root.id))
     assert [run.depth for run in runs] == [0, 1, 2]
     assert [run.max_depth for run in runs] == [2, 2, 2]
 
     other = await _session(harness_workspace)
     await service.start_run(other, "spawn")
-    await service._tasks[str(other.id)]
+    await service.run_registry.get_task(str(other.id))
     assert [run.depth for run in runs[3:]] == [0, 1]
     assert [run.max_depth for run in runs[3:]] == [1, 1]
 
@@ -163,11 +163,14 @@ async def test_task_resume_preserves_child_depth_and_history(harness_workspace):
     parent_assistant = await sync_to_async(service.messages.create)(
         session_id=root.id, role="assistant", content=""
     )
-    service._runs[str(root.id)] = {
-        "message_id": str(parent_assistant.id),
-        "tool_parts": {},
-        "subtask_parts": {},
-    }
+    service.run_registry.attach_context(
+        str(root.id),
+        {
+            "message_id": str(parent_assistant.id),
+            "tool_parts": {},
+            "subtask_parts": {},
+        },
+    )
     ctx = ToolContext(
         session_id=str(root.id),
         workspace_id=str(harness_workspace.id),
@@ -208,7 +211,7 @@ async def test_direct_child_start_hides_and_denies_todowrite(harness_workspace):
     root = await _session(harness_workspace)
     child = await _session(harness_workspace, parent_id=root.id)
     await service.start_run(child, "todo")
-    await service._tasks[str(child.id)]
+    await service.run_registry.get_task(str(child.id))
     assert runs[0].depth == 1
     assert any("todowrite is not available" in e.get("error", "") for e in events)
     assert await sync_to_async(Todo.objects.count)() == 0
@@ -290,7 +293,9 @@ async def test_persistent_explore_cannot_launch_or_resume_writable_child(
     assistant = await sync_to_async(service.messages.create)(
         session_id=parent.id, role="assistant", content=""
     )
-    service._runs[str(parent.id)] = {"message_id": str(assistant.id)}
+    service.run_registry.attach_context(
+        str(parent.id), {"message_id": str(assistant.id)}
+    )
     task_id = None
     if resume:
         writable = await _session(harness_workspace, parent_id=parent.id)
