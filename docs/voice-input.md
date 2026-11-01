@@ -72,6 +72,11 @@ images produce no image target. Desktop pointer positions are associated with
 the latest captured frame of the same dimensions. Outside a supported surface,
 coordinates and target are null.
 
+During pointing capture, a red laser cursor marks supported image pixels and
+desktop surfaces with a matching captured frame. Controls, letterboxing and
+unlinked images keep their normal cursor. Stopping, discarding or a capture
+failure restores the normal cursor immediately.
+
 Pointer sampling targets 100 ms, with separate down/up/leave events. Desktop
 snapshots target 500 ms. Actual observation times use the recording's monotonic
 clock; browser delays are not disguised as exact sampling intervals. Capture

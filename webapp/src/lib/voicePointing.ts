@@ -33,6 +33,14 @@ let activeOwner: symbol | null = null
 const MAX_DURATION_MS = 5 * 60 * 1000
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024
+// The centered hotspot keeps recorded coordinates at the laser's bright core.
+const LASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+    '<circle cx="12" cy="12" r="10" fill="#ef4444" opacity=".18"/>' +
+    '<circle cx="12" cy="12" r="6" fill="#ef4444" opacity=".35"/>' +
+    '<circle cx="12" cy="12" r="3.5" fill="#ff2424" stroke="#fff" stroke-width="1"/>' +
+    '</svg>',
+)}") 12 12, crosshair`
 
 /** Register the persistent viewer without exposing its authentication URL in logs. */
 export function registerPointingDesktop(
@@ -173,16 +181,36 @@ export function startPointing(
   const pendingUploads = new Set<Promise<void>>()
   const uploadIds = new Set<string>()
   let totalBytes = 0
+  let cursorImage: HTMLImageElement | null = null
+  const cursorStyle = document.createElement('style')
+  cursorStyle.textContent = `[data-voice-pointing-cursor] { cursor: ${LASER_CURSOR} !important; }`
+  document.head.append(cursorStyle)
+  const showImageCursor = (image: HTMLImageElement | null): void => {
+    if (cursorImage === image) return
+    cursorImage?.removeAttribute('data-voice-pointing-cursor')
+    cursorImage = image
+    cursorImage?.setAttribute('data-voice-pointing-cursor', '')
+  }
   const originEpoch = performance.timeOrigin + originMs
   const elapsed = (): number => Math.max(0, Math.round(performance.now() - originMs))
   const fail = (error: Error): void => {
     failure = error
+    showImageCursor(null)
+    if (observedViewer) observe(observedViewer, false)
     if (activeOwner === owner) pointingError.value = error.message
   }
   const observe = (iframe: HTMLIFrameElement, enabled: boolean): void => {
     try {
+      const size = frameSizes.get(frames[frames.length - 1]?.path ?? '')
       iframe.contentWindow?.postMessage(
-        { type: 'opencuria:voice-observe', sessionId: recordingId, enabled },
+        {
+          type: 'opencuria:voice-observe',
+          sessionId: recordingId,
+          enabled,
+          cursor: LASER_CURSOR,
+          frameWidth: size?.width ?? 0,
+          frameHeight: size?.height ?? 0,
+        },
         new URL(iframe.src, window.location.href).origin,
       )
     } catch {
@@ -217,9 +245,14 @@ export function startPointing(
     return iframe
   }
   const resolvePoint = (t_ms: number): Omit<PointerSample, 'event' | 't_ms'> => {
-    const empty = { x: null, y: null, target: null }
-    if (document.visibilityState === 'hidden') return empty
+    const empty = (): Omit<PointerSample, 'event' | 't_ms'> => {
+      showImageCursor(null)
+      return { x: null, y: null, target: null }
+    }
+    if (stopped || failure || t_ms > MAX_DURATION_MS || document.visibilityState === 'hidden')
+      return empty()
     if (desktopPoint && observedViewer) {
+      showImageCursor(null)
       const frame = [...frames].reverse().find((item) => item.t_ms <= t_ms)
       const size = frame && frameSizes.get(frame.path)
       if (frame && size?.width === desktopPoint.width && size.height === desktopPoint.height)
@@ -233,9 +266,9 @@ export function startPointing(
             height: desktopPoint.height,
           },
         }
-      return empty
+      return empty()
     }
-    if (!lastPoint) return empty
+    if (!lastPoint) return empty()
     const element = document.elementFromPoint(lastPoint.x, lastPoint.y)
     const image = element?.closest<HTMLImageElement>('img[data-voice-image-path]')
     if (
@@ -250,7 +283,8 @@ export function startPointing(
         lastPoint.x,
         lastPoint.y,
       )
-      if (point)
+      if (point) {
+        showImageCursor(image)
         return {
           ...point,
           target: {
@@ -260,11 +294,17 @@ export function startPointing(
             height: image.naturalHeight,
           },
         }
+      }
     }
-    return empty
+    return empty()
   }
   const sample = (event: PointerSample['event'], t_ms = elapsed()): void => {
-    if (stopped || failure || t_ms > MAX_DURATION_MS) return
+    if (stopped || failure) return
+    if (t_ms > MAX_DURATION_MS) {
+      showImageCursor(null)
+      if (observedViewer) observe(observedViewer, false)
+      return
+    }
     if (pointers.length >= 6000) {
       fail(new Error('The pointing recording reached its event limit.'))
       return
@@ -276,10 +316,12 @@ export function startPointing(
     lastPoint = { x: event.clientX, y: event.clientY }
     if (event.type === 'pointerdown') sample('down')
     else if (event.type === 'pointerup') sample('up')
+    else resolvePoint(elapsed())
   }
   const leave = (): void => {
     lastPoint = null
     desktopPoint = null
+    showImageCursor(null)
     sample('leave')
   }
   const onOut = (event: PointerEvent): void => {
@@ -355,6 +397,7 @@ export function startPointing(
       const path = `${directory}/${filename}`
       frameSizes.set(path, { width: frame.width, height: frame.height })
       frames.push({ t_ms, path })
+      observe(iframe, !failure)
       const store = useFileExplorerStore()
       const uploadId = `voice-frame-${recordingId}-${index}`
       uploadIds.add(uploadId)
@@ -402,6 +445,8 @@ export function startPointing(
 
   const cleanup = (): void => {
     stopped = true
+    showImageCursor(null)
+    cursorStyle.remove()
     clearInterval(sampleTimer)
     clearInterval(frameTimer)
     for (const name of listeners) document.removeEventListener(name, pointer, true)

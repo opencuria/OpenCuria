@@ -140,6 +140,71 @@ describe('voice pointing', () => {
     expect(result.pointers.every((point) => point.target === null)).toBe(true)
   })
 
+  it('shows the laser only on a recordable image and restores the cursor on leave and stop', async () => {
+    const image = document.createElement('img')
+    image.dataset.voiceImagePath = '/workspace/design.png'
+    image.dataset.voiceWorkspace = 'workspace-a'
+    Object.defineProperties(image, { naturalWidth: { value: 1000 }, naturalHeight: { value: 500 } })
+    image.getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 }) as DOMRect
+    document.body.append(image)
+    hit = image
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(true)
+    const cursor = getComputedStyle(image).cursor
+    expect(cursor).toContain('data:image/svg+xml')
+    expect(cursor).toContain('12 12')
+
+    for (const path of ['blob:https://example.test/image', '/workspace/../secret.png']) {
+      image.dataset.voiceImagePath = path
+      move('pointermove')
+      expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    }
+    image.dataset.voiceImagePath = '/workspace/design.png'
+    image.dataset.voiceWorkspace = 'workspace-b'
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    image.dataset.voiceWorkspace = 'workspace-a'
+    move('pointermove', 0, 0) // Outside the actual image pixels.
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(true)
+    hit = document.createElement('button')
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    hit = image
+    move('pointermove')
+    window.dispatchEvent(new Event('blur'))
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    move('pointermove')
+    await recording.stop()
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    expect(getComputedStyle(image).cursor).not.toContain('data:image/svg+xml')
+  })
+
+  it('removes the laser immediately when capture fails or is cancelled', async () => {
+    const image = document.createElement('img')
+    image.dataset.voiceImagePath = '/workspace/design.png'
+    image.dataset.voiceWorkspace = 'workspace-a'
+    Object.defineProperties(image, { naturalWidth: { value: 1000 }, naturalHeight: { value: 500 } })
+    image.getBoundingClientRect = () => ({ left: 100, top: 50, width: 400, height: 200 }) as DOMRect
+    hit = image
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(true)
+    for (let index = 0; index < 6100; index++) move('pointerdown')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+    recording.cancel()
+    recording = startPointing('workspace-a', recordingId, performance.now())
+    move('pointermove')
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(true)
+    recording.cancel()
+    expect(image.hasAttribute('data-voice-pointing-cursor')).toBe(false)
+  })
+
   it('rejects concurrent recordings and cancels all listeners and timers', async () => {
     recording = startPointing('workspace-a', recordingId, performance.now())
     expect(() => startPointing('workspace-b', recordingId, performance.now())).toThrow(
@@ -239,6 +304,16 @@ describe('voice pointing', () => {
     frameReply(iframe, frameRequests(send)[0]!.requestId)
     await vi.advanceTimersByTimeAsync(100)
     expect(transport.track).toHaveBeenCalledOnce()
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'opencuria:voice-observe',
+        enabled: true,
+        cursor: expect.stringContaining('data:image/svg+xml'),
+        frameWidth: 1920,
+        frameHeight: 1080,
+      }),
+      'https://desktop.test',
+    )
     const point = {
       type: 'opencuria:voice-pointer',
       sessionId: recordingId,

@@ -10,6 +10,10 @@ VOICE_VIEWER_BRIDGE = b"""
   var lastMove = 0;
   var lastPoint = null;
   var pointerTimer = null;
+  var cursorStyle = null;
+  var cursorTarget = null;
+  var frameWidth = 0;
+  var frameHeight = 0;
   var now = function () { return performance.timeOrigin + performance.now(); };
   var canvas = function () {
     // KasmVNC creates auxiliary cursor canvases before the RFB framebuffer.
@@ -20,16 +24,31 @@ VOICE_VIEWER_BRIDGE = b"""
   var inputSurface = function (element, target) {
     return element === target || (element && element.id === 'noVNC_mouse_capture_elem');
   };
+  var showCursor = function (element) {
+    if (cursorTarget === element) { return; }
+    if (cursorTarget) { cursorTarget.removeAttribute('data-voice-pointing-cursor'); }
+    cursorTarget = element;
+    if (element) {
+      element.setAttribute('data-voice-pointing-cursor', '');
+      document.documentElement.setAttribute('data-voice-pointing-active', '');
+    } else {
+      document.documentElement.removeAttribute('data-voice-pointing-active');
+    }
+  };
   var sendPoint = function (kind) {
     if (!sessionId || !lastPoint || now() > expiresAt) { return; }
     var target = canvas();
-    if (!target || !target.width || !target.height) { return; }
+    if (!target || !target.width || !target.height) { showCursor(null); return; }
     var rect = target.getBoundingClientRect();
     var x = (lastPoint.x - rect.left) / rect.width;
     var y = (lastPoint.y - rect.top) / rect.height;
     var inside = rect.width > 0 && rect.height > 0 &&
       x >= 0 && x < 1 && y >= 0 && y < 1;
     if (!inside) { kind = 'leave'; }
+    var hit = document.elementFromPoint(lastPoint.x, lastPoint.y);
+    showCursor(kind !== 'leave' && cursorStyle &&
+      document.visibilityState !== 'hidden' && inputSurface(hit, target) &&
+      frameWidth === target.width && frameHeight === target.height ? hit : null);
     post({ type: 'opencuria:voice-pointer', sessionId: sessionId,
       observed_at: now(), event: kind,
       x: kind === 'leave' ? null :
@@ -58,6 +77,12 @@ VOICE_VIEWER_BRIDGE = b"""
     // Retain every position before throttling. The final move in a burst may
     // be followed by seconds of stillness, especially just after mouseup.
     lastPoint = { x: event.clientX, y: event.clientY };
+    // Cursor feedback follows every move, independently of recording throttling.
+    var rect = target.getBoundingClientRect();
+    var inside = lastPoint.x >= rect.left && lastPoint.x < rect.left + rect.width &&
+      lastPoint.y >= rect.top && lastPoint.y < rect.top + rect.height;
+    showCursor(cursorStyle && inside && document.visibilityState !== 'hidden' &&
+      frameWidth === target.width && frameHeight === target.height ? event.target : null);
     var kind = event.type === 'pointerdown' ? 'down' :
       event.type === 'pointerup' ? 'up' : 'move';
     var observed = now();
@@ -66,13 +91,31 @@ VOICE_VIEWER_BRIDGE = b"""
     sendPoint(kind);
   };
   var stopObserver = function () {
+    showCursor(null);
+    if (cursorStyle) { cursorStyle.remove(); cursorStyle = null; }
+    document.documentElement.style.removeProperty('--voice-pointing-cursor');
+    frameWidth = 0; frameHeight = 0;
     sessionId = null; lastPoint = null;
     if (pointerTimer !== null) { window.clearInterval(pointerTimer); }
     pointerTimer = null;
   };
-  var startObserver = function (id) {
+  var startObserver = function (id, data) {
     if (sessionId !== id) { stopObserver(); lastMove = 0; }
     sessionId = id; expiresAt = now() + 3000;
+    frameWidth = data.frameWidth; frameHeight = data.frameHeight;
+    if (typeof data.cursor === 'string' && data.cursor.length < 4096) {
+      document.documentElement.style.setProperty('--voice-pointing-cursor', data.cursor);
+      if (!cursorStyle) {
+        cursorStyle = document.createElement('style');
+        cursorStyle.textContent = '[data-voice-pointing-cursor] {' +
+          'cursor: var(--voice-pointing-cursor) !important; }' +
+          // Hide Kasm's auxiliary fallback cursor without changing framebuffer pixels.
+          'html[data-voice-pointing-active] body > canvas {' +
+          'visibility: hidden !important; }';
+        document.head.appendChild(cursorStyle);
+      }
+    }
+    sendPoint('move');
     if (pointerTimer !== null) { return; }
     pointerTimer = window.setInterval(function () {
       if (!sessionId || now() > expiresAt) { stopObserver(); return; }
@@ -90,7 +133,7 @@ VOICE_VIEWER_BRIDGE = b"""
     if (data.type === 'opencuria:voice-observe') {
       if (typeof data.sessionId !== 'string' ||
           !/^[a-f0-9-]{36}$/i.test(data.sessionId)) { return; }
-      if (data.enabled === true) { startObserver(data.sessionId); }
+      if (data.enabled === true) { startObserver(data.sessionId, data); }
       else if (data.sessionId === sessionId) { stopObserver(); }
       return;
     }

@@ -695,15 +695,28 @@ let time = 0;
 const replies = [];
 const listeners = {};
 const parent = { postMessage: (...args) => replies.push(args) };
+const attributes = () => ({
+  attrs: new Set(),
+  setAttribute(name) { this.attrs.add(name); },
+  removeAttribute(name) { this.attrs.delete(name); }
+});
+const root = { ...attributes(), style: {
+  setProperty() {}, removeProperty() {}
+} };
+let cursorStyle;
 let pointerTick;
 let timerCleared = false;
 const window = { parent,
   setInterval: (handler) => { pointerTick = handler; return 1; },
   clearInterval: () => { timerCleared = true; },
   addEventListener: (type, handler) => { if (type === 'message') message = handler; } };
-const framebuffer = { width: 1920, height: 1080,
+const framebuffer = { ...attributes(), width: 1920, height: 1080,
   getBoundingClientRect: () => ({ left: 40, top: 60, width: 960, height: 540 }) };
+let hit = framebuffer;
 const document = { referrer: 'https://app.example/chat',
+  documentElement: root,
+  head: { appendChild: (style) => { cursorStyle = style; } },
+  elementFromPoint: () => hit,
   addEventListener: (type, handler, options) => {
     assert.equal(options.passive, true);
     assert.equal(options.capture, true);
@@ -715,6 +728,9 @@ const document = { referrer: 'https://app.example/chat',
     return framebuffer;
   },
   createElement: (tag) => {
+    if (tag === 'style') {
+      return { textContent: '', remove() { cursorStyle = null; } };
+    }
     assert.equal(tag, 'canvas');
     return { getContext: () => ({
         drawImage: (source) => assert.equal(source, framebuffer) }),
@@ -755,9 +771,33 @@ assert.equal(replies[1][0].x, 320);
 assert.equal(replies[1][0].y, 200);
 assert.equal(replies[1][0].event, 'down');
 assert.equal(replies[1][0].observed_at, 1000);
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
+// Cursor feedback requires a captured frame of the same dimensions and a trusted parent.
+const laser = { ...observe, cursor: 'url("data:image/svg+xml,laser") 12 12, crosshair',
+  frameWidth: 1920, frameHeight: 1080 };
+message({ source: parent, origin: 'https://evil.example', data: laser });
+assert.equal(cursorStyle, undefined);
+message({ source: parent, origin: 'https://app.example', data: laser });
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), true);
+assert.ok(cursorStyle.textContent.includes('!important'));
+assert.ok(cursorStyle.textContent.includes('body > canvas'));
+// Resizing, letterboxing and viewer controls restore the normal cursor.
+framebuffer.width = 1280;
+pointerTick();
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
+framebuffer.width = 1920;
+listeners.pointermove({ ...pointer, type: 'pointermove', clientX: 10 });
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
+listeners.pointerdown(pointer);
+hit = {};
+pointerTick();
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
+hit = framebuffer;
+listeners.pointerdown(pointer);
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), true);
 // Reproduce Kasm's real mouse capture sequence followed by a final move only
 // 64ms after the previous one. It must survive throttling and remain sampled.
-const captureElement = { id: 'noVNC_mouse_capture_elem' };
+const captureElement = { ...attributes(), id: 'noVNC_mouse_capture_elem' };
 time = 10;
 listeners.pointermove({ ...pointer, type: 'pointermove' });
 const beforeTransfer = replies.length;
@@ -766,9 +806,12 @@ listeners.pointerout({ ...pointer, type: 'pointerout',
   relatedTarget: captureElement });
 assert.equal(replies.length, beforeTransfer);
 time = 21;
+hit = captureElement;
 listeners.pointerup({ ...pointer, type: 'pointerup', target: captureElement });
 assert.equal(replies[replies.length - 1][0].event, 'up');
+assert.equal(captureElement.attrs.has('data-voice-pointing-cursor'), true);
 time = 22;
+hit = framebuffer;
 listeners.pointerout({ ...pointer, type: 'pointerout', target: captureElement,
   relatedTarget: framebuffer });
 assert.equal(replies[replies.length - 1][0].event, 'up');
@@ -787,7 +830,7 @@ for (const tick of [110, 210, 1210, 2210]) {
 }
 // Keepalive renewals retain the last position rather than starting over.
 time = 2500;
-message({ source: parent, origin: 'https://app.example', data: observe });
+message({ source: parent, origin: 'https://app.example', data: laser });
 time = 3510;
 pointerTick();
 assert.equal(replies[replies.length - 1][0].x, 800);
@@ -797,6 +840,17 @@ pointerTick();
 listeners.pointerdown(pointer);
 assert.equal(replies.length, beforeExpiry);
 assert.equal(timerCleared, true); // abandoned recordings expire in the viewer
+assert.equal(cursorStyle, null);
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
+assert.equal(root.attrs.has('data-voice-pointing-active'), false);
+// Explicit stop removes the feedback immediately, without waiting for expiry.
+message({ source: parent, origin: 'https://app.example', data: laser });
+listeners.pointerdown(pointer);
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), true);
+message({ source: parent, origin: 'https://app.example',
+  data: { ...observe, enabled: false } });
+assert.equal(framebuffer.attrs.has('data-voice-pointing-cursor'), false);
+assert.equal(cursorStyle, null);
 
 
 """
