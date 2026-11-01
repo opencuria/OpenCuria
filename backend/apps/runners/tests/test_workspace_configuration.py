@@ -15,6 +15,7 @@ from apps.credentials.models import (
 )
 from apps.credentials.services import CredentialSvc
 from apps.plugins.models import Plugin, WorkspacePluginActivation
+from apps.plugins.repositories import WorkspacePluginActivationRepository
 from apps.plugins.services import PluginService
 from apps.runners.enums import TaskType
 from apps.runners.models import (
@@ -183,6 +184,106 @@ def test_late_task_failure_rolls_back_all_configuration(
         ):
             assert getattr(fresh, field) == getattr(workspace, field)
         assert not fresh.credentials.exists()
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_plugin_write_failure_rolls_back_workspace_and_selections(
+    runner: Runner,
+    user: Any,
+    workspace: Workspace,
+    selection: Selection,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Plugin persistence participates in the workspace transaction and locks."""
+    service = WorkspaceConfigurationService()
+    _, credential, plugin = selection
+    original = WorkspacePluginActivation.objects.create(
+        workspace=workspace, plugin=plugin, enabled_by=user
+    )
+    replace = WorkspacePluginActivationRepository.replace_for_workspace
+    workspace_id = uuid.uuid4() if operation == "create" else workspace.id
+
+    def replace_then_fail(*args: Any, **kwargs: Any) -> None:
+        replace(*args, **kwargs)
+        raise RuntimeError("plugin persistence failed after replacement")
+
+    monkeypatch.setattr(
+        WorkspacePluginActivationRepository, "replace_for_workspace", replace_then_fail
+    )
+    with pytest.raises(RuntimeError, match="plugin persistence failed"):
+        if operation == "create":
+            _create(service, runner, user, selection, workspace_id)
+        else:
+            service.update(
+                workspace_id=workspace_id,
+                user=user,
+                organization_id=runner.organization_id,
+                credentials=[credential],
+                plugin_ids=[],
+                name="Changed",
+                qemu_values=(4, 4096, 60),
+                desktop_values=(1280, 720),
+            )
+
+    assert not Task.objects.filter(workspace_id=workspace_id).exists()
+    assert not LifecycleCommand.objects.exists()
+    if operation == "create":
+        assert not Workspace.objects.filter(pk=workspace_id).exists()
+        assert not WorkspaceProcess.objects.filter(workspace_id=workspace_id).exists()
+        assert not WorkspacePluginActivation.objects.filter(
+            workspace_id=workspace_id
+        ).exists()
+    else:
+        fresh = Workspace.objects.get(pk=workspace_id)
+        assert fresh.updated_at == workspace.updated_at
+        for field in (
+            "name", "qemu_vcpus", "qemu_memory_mb", "qemu_disk_size_gb",
+            "desktop_width", "desktop_height",
+        ):
+            assert getattr(fresh, field) == getattr(workspace, field)
+        assert not fresh.credentials.exists()
+        assert WorkspacePluginActivation.objects.get(workspace=fresh).pk == original.pk
+
+
+@pytest.mark.parametrize("selection_change", ["omitted", "clear", "replace"])
+def test_plugin_only_update_preserves_patch_and_attribution_semantics(
+    runner: Runner,
+    user: Any,
+    workspace: Workspace,
+    selection: Selection,
+    selection_change: str,
+) -> None:
+    """Omitted selections are untouched; explicit lists replace and touch state."""
+    _, _, plugin = selection
+    original = WorkspacePluginActivation.objects.create(
+        workspace=workspace, plugin=plugin, enabled_by=user
+    )
+    plugin_ids = {
+        "omitted": None,
+        "clear": [],
+        "replace": [plugin.id, plugin.id],
+    }[selection_change]
+    updated = WorkspaceConfigurationService().update(
+        workspace_id=workspace.id,
+        user=user,
+        organization_id=runner.organization_id,
+        credentials=None,
+        plugin_ids=plugin_ids,
+    )
+    rows = list(WorkspacePluginActivation.objects.filter(workspace=workspace))
+    if selection_change == "omitted":
+        assert updated.updated_at == workspace.updated_at
+        assert [row.pk for row in rows] == [original.pk]
+    else:
+        assert updated.updated_at > workspace.updated_at
+        if selection_change == "clear":
+            assert rows == []
+        else:
+            assert len(rows) == 1
+            assert rows[0].pk != original.pk
+            assert rows[0].plugin_id == plugin.id
+            assert rows[0].enabled_by_id == user.id
 
 
 @pytest.mark.parametrize("boundary", ["owner", "organization", "capture", "task"])

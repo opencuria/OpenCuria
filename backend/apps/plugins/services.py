@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections import defaultdict
+from typing import Any
 
 import structlog
 from django.db import transaction
@@ -349,6 +350,23 @@ class PluginService:
         return self.workspace_activations.list_plugin_ids_many(workspace_ids)
 
     # -- Create / update / delete -------------------------------------------
+
+    def replace_workspace_selection(
+        self,
+        workspace_id: uuid.UUID,
+        plugin_ids: list[uuid.UUID],
+        *,
+        enabled_by: Any,
+    ) -> None:
+        """Persist an already-validated selection, deduplicating requested IDs.
+
+        The workspace configuration service validates the final credential/plugin
+        selection and holds its transaction and runner/workspace locks through
+        this call, so both contexts' writes commit or roll back together.
+        """
+        self.workspace_activations.replace_for_workspace(
+            workspace_id, list(dict.fromkeys(plugin_ids)), enabled_by=enabled_by
+        )
 
     @transaction.atomic
     def create_org_plugin(

@@ -9,18 +9,12 @@ from typing import Any
 
 from django.db import transaction
 
-from apps.plugins.repositories import WorkspacePluginActivationRepository
 from common.exceptions import NotFoundError
 
-from .enums import TaskType
 from .locking import lock_runner
-from .models import ImageInstance, Runner, Task, Workspace
+from .models import ImageInstance, Workspace
 from .process_repository import WorkspaceProcessRepository
-from .repositories import (
-    ImageGenerationRepository,
-    TaskRepository,
-    WorkspaceRepository,
-)
+from .repositories import ImageGenerationRepository, WorkspaceRepository
 
 
 class WorkspaceConfigurationRepository:
@@ -63,16 +57,11 @@ class WorkspaceConfigurationRepository:
     def initialize(
         *,
         workspace_fields: dict[str, Any],
-        runner: Runner,
         user: Any,
         credentials: list,
-        plugin_ids: list[uuid.UUID],
-        task_id: uuid.UUID,
-        task_type: TaskType,
-        operation_payload: dict | None,
         credentials_present: bool,
-    ) -> tuple[Workspace, Task]:
-        """Persist the validated workspace graph inside the creation scope."""
+    ) -> Workspace:
+        """Persist workspace-owned state inside the creation scope."""
         workspace = WorkspaceRepository.create(**workspace_fields)
         selected = workspace_fields.get("base_image_instance")
         if selected is not None:
@@ -83,14 +72,4 @@ class WorkspaceConfigurationRepository:
         if credentials_present:
             WorkspaceRepository.update_credentials_present(workspace, True)
             workspace = WorkspaceRepository.get_by_id(workspace.id)
-        WorkspacePluginActivationRepository.replace_for_workspace(
-            workspace, list(dict.fromkeys(plugin_ids)), enabled_by=user
-        )
-        task = TaskRepository.create(
-            task_id=task_id,
-            runner=runner,
-            task_type=task_type,
-            workspace=workspace,
-            operation_payload=operation_payload,
-        )
-        return WorkspaceRepository.get_by_id(workspace.id), task
+        return workspace

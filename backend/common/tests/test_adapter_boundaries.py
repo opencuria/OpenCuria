@@ -43,6 +43,10 @@ PRIVATE_REPOSITORY_CONTEXTS = {
         "check organizations and active memberships through "
         "apps.organizations.services.OrganizationService"
     ),
+    "apps.plugins": (
+        "read and replace workspace plugin selections through "
+        "apps.plugins.services.PluginService"
+    ),
 }
 
 #: Apps whose non-persistence modules reach the ORM only through repositories.

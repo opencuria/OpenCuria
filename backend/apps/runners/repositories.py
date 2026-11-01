@@ -18,8 +18,6 @@ from django.db.models import Count, F, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
-from apps.plugins.repositories import WorkspacePluginActivationRepository
-
 from .disk_usage import WorkspaceDiskUsage
 from .enums import (
     RunnerStatus,
@@ -430,12 +428,10 @@ class WorkspaceRepository:
         *,
         name: str | None,
         credentials: list | None,
-        plugin_ids: list[uuid.UUID] | None,
-        enabled_by,
         qemu_values: tuple | None = None,
         desktop_values: tuple | None = None,
-    ) -> Workspace:
-        """Replace the selected workspace associations after service validation."""
+    ) -> None:
+        """Write workspace-owned configuration after service validation."""
         if name is not None:
             workspace.name = name
             workspace.save(update_fields=["name", "updated_at"])
@@ -460,16 +456,14 @@ class WorkspaceRepository:
             workspace.save(
                 update_fields=["desktop_width", "desktop_height", "updated_at"]
             )
-        if plugin_ids is not None:
-            WorkspacePluginActivationRepository.replace_for_workspace(
-                workspace, list(dict.fromkeys(plugin_ids)), enabled_by=enabled_by
-            )
-        if credentials is not None or plugin_ids is not None:
-            workspace.save(update_fields=["updated_at"])
-            cache = getattr(workspace, "_prefetched_objects_cache", None)
-            if cache is not None:
-                cache.pop("credentials", None)
-        return WorkspaceRepository.get_by_id(workspace.id)
+
+    @staticmethod
+    def mark_configuration_updated(workspace: Workspace) -> None:
+        """Touch configuration metadata and invalidate cached credential relations."""
+        workspace.save(update_fields=["updated_at"])
+        cache = getattr(workspace, "_prefetched_objects_cache", None)
+        if cache is not None:
+            cache.pop("credentials", None)
 
     @staticmethod
     def touch_activity(

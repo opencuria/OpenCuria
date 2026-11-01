@@ -90,17 +90,23 @@ class WorkspaceConfigurationService:
                     **operation_payload,
                     "_unreproducible_credentials": True,
                 }
-            return self.repository.initialize(
+            workspace = self.repository.initialize(
                 workspace_fields=workspace_fields,
-                runner=runner,
                 user=user,
                 credentials=credentials,
-                plugin_ids=plugin_ids,
-                task_id=task_id,
-                task_type=task_type,
-                operation_payload=operation_payload,
                 credentials_present=credentials_present,
             )
+            self.plugins.replace_workspace_selection(
+                workspace.id, plugin_ids, enabled_by=user
+            )
+            task = self.tasks.create(
+                task_id=task_id,
+                runner=runner,
+                task_type=task_type,
+                workspace=workspace,
+                operation_payload=operation_payload,
+            )
+            return self.workspaces.get_by_id(workspace.id), task
 
     def update(
         self,
@@ -174,15 +180,20 @@ class WorkspaceConfigurationService:
                 if qemu_values is not None and workspace.status == "running"
                 else None
             )
-            workspace = self.workspaces.replace_configuration(
+            self.workspaces.replace_configuration(
                 workspace,
                 name=name,
                 credentials=(final_credentials if credentials is not None else None),
-                plugin_ids=plugin_ids,
-                enabled_by=user,
                 qemu_values=qemu_values,
                 desktop_values=desktop_values,
             )
+            if plugin_ids is not None:
+                self.plugins.replace_workspace_selection(
+                    workspace.id, plugin_ids, enabled_by=user
+                )
+            if credentials is not None or plugin_ids is not None:
+                self.workspaces.mark_configuration_updated(workspace)
+            workspace = self.workspaces.get_by_id(workspace.id)
             if qemu_values is not None and workspace.status == "running":
                 workspace._lifecycle_task = self.tasks.create(
                     task_id=generate_uuid(),

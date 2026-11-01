@@ -341,15 +341,15 @@ class WorkspacePluginActivationRepository:
 
     @staticmethod
     def replace_for_workspace(
-        workspace, plugin_ids: list[uuid.UUID], *, enabled_by
+        workspace_id: uuid.UUID, plugin_ids: list[uuid.UUID], *, enabled_by
     ) -> None:
-        """Atomically replace workspace activations (caller validates)."""
-        WorkspacePluginActivation.objects.filter(workspace=workspace).delete()
+        """Replace activations in the caller's validated transaction scope."""
+        WorkspacePluginActivation.objects.filter(workspace_id=workspace_id).delete()
         if plugin_ids:
             WorkspacePluginActivation.objects.bulk_create(
                 [
                     WorkspacePluginActivation(
-                        workspace=workspace,
+                        workspace_id=workspace_id,
                         plugin_id=plugin_id,
                         enabled_by=enabled_by,
                     )
