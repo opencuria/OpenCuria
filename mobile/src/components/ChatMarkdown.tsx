@@ -1,23 +1,33 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ScrollView, Linking, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Linking,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { Image } from "expo-image";
 import { VideoView, useVideoPlayer } from "expo-video";
-import { marked } from "marked";
 import { EnrichedMarkdownText } from "react-native-enriched-markdown";
 
-import {
-  classifyWorkspaceFile,
-  parseMarkdownLinkDest,
-  resolveWorkspaceLinkPath,
-  resolveWorkspaceMediaPath,
-} from "@opencuria/chat-core/workspaceFileRefs";
+import { resolveWorkspaceLinkPath } from "@opencuria/chat-core/workspaceFileRefs";
 import remend from "remend";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { NativeModal } from "../ui/primitives";
 import { NativeAction } from "../ui/controls";
 import { useTheme } from "../ui/theme";
+import {
+  isSafeExternalUrl,
+  splitMarkdownMedia,
+  type MarkdownMedia,
+} from "./markdownMedia";
+import {
+  useWorkspaceMedia,
+  type ResolvedChatMedia,
+  type WorkspaceMediaState,
+} from "./useWorkspaceMedia";
 
-export type ResolvedChatMedia = string | { uri: string; release: () => void };
+export type { ResolvedChatMedia } from "./useWorkspaceMedia";
 
 export interface ChatMarkdownProps {
   markdown: string;
@@ -33,31 +43,7 @@ export interface ChatMarkdownProps {
   testID?: string;
 }
 
-interface ImageReference {
-  start: number;
-  end: number;
-  path?: string;
-  destination: string;
-  alt: string;
-  safe: boolean;
-  linked: boolean;
-}
-type MarkdownSegment =
-  | { kind: "markdown"; text: string }
-  | {
-      kind: "image";
-      uri?: string;
-      path?: string;
-      failed?: boolean;
-      label: string;
-    }
-  | {
-      kind: "video";
-      uri?: string;
-      path?: string;
-      failed?: boolean;
-      label: string;
-    };
+type MediaPreview = Pick<MarkdownMedia, "path" | "uri" | "label">;
 
 /** Render GFM natively; workspace media is loaded only for visible chat rows. */
 export function ChatMarkdown({
@@ -71,7 +57,6 @@ export function ChatMarkdown({
   testID,
 }: ChatMarkdownProps): React.JSX.Element {
   const { theme } = useTheme();
-  const insets = useSafeAreaInsets();
   const latestMarkdown = useRef(markdown);
   latestMarkdown.current = markdown;
   const [streamText, setStreamText] = useState(markdown);
@@ -94,131 +79,28 @@ export function ChatMarkdown({
     },
     [],
   );
+  // remend drops a still-incomplete image, so partial paths are never read.
   const source = useMemo(
     () => (streaming ? remend(streamText) : markdown),
     [markdown, streamText, streaming],
   );
-  const references = useMemo(() => collectImageReferences(source), [source]);
+  const pieces = useMemo(() => splitMarkdownMedia(source), [source]);
   const paths = useMemo(
-    () => [...new Set(references.flatMap(({ path }) => (path ? [path] : [])))],
-    [references],
+    () =>
+      pieces.flatMap((piece) =>
+        piece.kind === "media" && piece.media.path ? [piece.media.path] : [],
+      ),
+    [pieces],
   );
   const scope = String(mediaScopeKey);
-  const pathKey = useMemo(() => JSON.stringify([scope, paths]), [paths, scope]);
-  const resolverRef = useRef(resolveMedia);
-  resolverRef.current = resolveMedia;
-  const scopeRef = useRef(scope);
-  scopeRef.current = scope;
-  const leaseEpoch = useRef(0);
-  const leases = useRef(new Map<string, () => void>());
-  const visibleRef = useRef(mediaVisible);
-  visibleRef.current = mediaVisible;
-  const requests = useRef(new Map<string, Promise<string | null>>());
-  const settled = useRef(new Map<string, string | null>());
-  const requestScope = useRef(scope);
-  const [media, setMedia] = useState<Record<string, string | null>>({});
-  const [preview, setPreview] = useState<{ uri: string; label: string } | null>(
-    null,
-  );
-
-  useEffect(() => {
-    return () => {
-      leaseEpoch.current += 1;
-      for (const release of leases.current.values()) release();
-      leases.current.clear();
-      requests.current.clear();
-      settled.current.clear();
-    };
-  }, [scope, mediaVisible]);
-
-  useEffect(() => {
-    let alive = true;
-    if (requestScope.current !== scope) {
-      requestScope.current = scope;
-      requests.current.clear();
-      settled.current.clear();
-      setMedia((current) => (Object.keys(current).length ? {} : current));
-      setPreview(null);
-    }
-    if (!mediaVisible) {
-      setMedia((current) => (Object.keys(current).length ? {} : current));
-      setPreview(null);
-      return () => {
-        alive = false;
-      };
-    }
-    if (!resolverRef.current || paths.length === 0)
-      return () => {
-        alive = false;
-      };
-
-    const keys = paths.map((path) => `${scope}\0${path}`);
-    const activeKeys = new Set(keys);
-    const pending = keys.map((key, index) => {
-      if (settled.current.has(key))
-        return Promise.resolve([key, settled.current.get(key)!] as const);
-      const existing = requests.current.get(key);
-      if (existing) return existing.then((uri) => [key, uri] as const);
-      const path = paths[index]!;
-      const epoch = leaseEpoch.current;
-      const request = Promise.resolve()
-        .then(
-          () =>
-            resolverRef.current?.(path) ??
-            Promise.reject(new Error("Media resolver unavailable.")),
-        )
-        .then(
-          (resolved) => {
-            if (
-              epoch !== leaseEpoch.current ||
-              !visibleRef.current ||
-              scopeRef.current !== scope
-            ) {
-              if (typeof resolved !== "string") resolved.release();
-              return null;
-            }
-            if (typeof resolved !== "string")
-              leases.current.set(key, resolved.release);
-            return (
-              (typeof resolved === "string" ? resolved : resolved.uri) || null
-            );
-          },
-          () => null,
-        );
-      requests.current.set(key, request);
-      void request.then((uri) => {
-        if (requests.current.get(key) === request) requests.current.delete(key);
-        if (scopeRef.current === scope && epoch === leaseEpoch.current)
-          settled.current.set(key, uri);
-      });
-      return request.then((uri) => [key, uri] as const);
-    });
-
-    void Promise.all(pending).then((resolved) => {
-      if (!alive || scopeRef.current !== scope) return;
-      setMedia((previous) => {
-        const next: Record<string, string | null> = {};
-        for (const [key, uri] of resolved)
-          if (activeKeys.has(key)) next[key] = uri;
-        if (
-          Object.keys(previous).length === Object.keys(next).length &&
-          Object.keys(next).every((key) => previous[key] === next[key])
-        )
-          return previous;
-        return next;
-      });
-    });
-    return () => {
-      alive = false;
-    };
-    // Media state is output, not an effect trigger. Streaming prose changes share
-    // cached and in-flight requests for unchanged workspace paths.
-  }, [pathKey, mediaVisible, Boolean(resolveMedia), scope]);
-
-  const segments = useMemo(
-    () => buildSegments(source, references, media, scope),
-    [media, references, scope, source],
-  );
+  const { media, retry, reportDisplayError } = useWorkspaceMedia({
+    paths,
+    resolve: resolveMedia,
+    scope,
+    active: mediaVisible,
+  });
+  const [preview, setPreview] = useState<MediaPreview | null>(null);
+  useEffect(() => setPreview(null), [scope]);
   const markdownStyle = useMemo(() => {
     const quiet = variant === "quiet";
     // The transcript stays uncolored: links and quotes only differ in shape.
@@ -350,95 +232,200 @@ export function ChatMarkdown({
 
   return (
     <View testID={testID} style={styles.root}>
-      {segments.map((segment, index) =>
-        segment.kind === "markdown" ? (
+      {pieces.map((piece, index) =>
+        piece.kind === "markdown" ? (
           <EnrichedMarkdownText
             key={`markdown-${index}`}
             flavor="github"
-            markdown={segment.text}
+            markdown={piece.text}
             markdownStyle={markdownStyle}
             onLinkPress={onLinkPress}
             enableTaskListItemToggle={false}
             selectable
           />
-        ) : segment.kind === "video" ? (
-          segment.uri ? (
-            <NativeVideoCard
-              key={`video-${index}`}
-              uri={segment.uri}
-              label={segment.label}
-            />
-          ) : (
-            <View
-              key={`video-pending-${index}`}
-              style={styles.inlineVideoPlaceholder}
-            >
-              <Text style={{ color: theme.subtleText, fontSize: 13 }}>
-                {segment.failed
-                  ? `${segment.label} · video unavailable`
-                  : segment.label}
-              </Text>
-            </View>
-          )
-        ) : segment.uri ? (
-          <NativeAction
-            key={`image-${index}`}
-            accessibilityRole="button"
-            accessibilityLabel={`Open image preview ${segment.label}`}
-            onPress={() =>
-              setPreview({ uri: segment.uri!, label: segment.label })
-            }
-            style={styles.inlineImageButton}
-          >
-            <Image
-              source={{ uri: segment.uri }}
-              contentFit="contain"
-              style={styles.inlineImage}
-              accessibilityLabel={segment.label}
-            />
-            <Text
-              numberOfLines={1}
-              style={{ color: theme.subtleText, fontSize: 12 }}
-            >
-              {segment.label}
-            </Text>
-          </NativeAction>
         ) : (
-          <View key={`image-pending-${index}`} style={styles.inlineImageButton}>
-            <Text style={{ color: theme.subtleText, fontSize: 13 }}>
-              {segment.failed
-                ? `${segment.label} · image unavailable`
-                : segment.label}
-            </Text>
-          </View>
+          <InlineMedia
+            key={`media-${index}`}
+            media={piece.media}
+            state={
+              piece.media.path
+                ? media[piece.media.path]
+                : { status: "ready", uri: piece.media.uri ?? "" }
+            }
+            resolvable={Boolean(resolveMedia)}
+            active={mediaVisible}
+            onOpen={() => setPreview(piece.media)}
+            onRetry={() => piece.media.path && retry(piece.media.path)}
+            onDisplayError={() =>
+              piece.media.path && reportDisplayError(piece.media.path)
+            }
+          />
         ),
       )}
-      <NativeModal
-        visible={preview !== null}
+      <MediaPreviewModal
+        preview={preview}
+        resolveMedia={resolveMedia}
+        scope={scope}
         onClose={() => setPreview(null)}
-        title={preview?.label ?? "Image preview"}
-        testID="image-preview"
-        scrollable={false}
-      >
-        <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ flexGrow: 1 }}
-          maximumZoomScale={4}
-          minimumZoomScale={1}
-          centerContent
-          accessibilityLabel="Image preview"
-        >
-          {preview ? (
-            <Image
-              source={{ uri: preview.uri }}
-              contentFit="contain"
-              style={{ width: "100%", minHeight: 500, flex: 1 }}
-              accessibilityLabel={preview.label}
-            />
-          ) : null}
-        </ScrollView>
-      </NativeModal>
+      />
     </View>
+  );
+}
+
+/**
+ * One inline picture or video. Loading, offscreen and failed media keep the
+ * loaded size, so rows do not jump when files arrive or are released.
+ */
+function InlineMedia({
+  media,
+  state,
+  resolvable,
+  active,
+  onOpen,
+  onRetry,
+  onDisplayError,
+}: {
+  media: MarkdownMedia;
+  state?: WorkspaceMediaState;
+  /** Without a resolver (e.g. answered questions) workspace media shows its label. */
+  resolvable: boolean;
+  active: boolean;
+  onOpen: () => void;
+  onRetry: () => void;
+  onDisplayError: () => void;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const video = media.kind === "video";
+  const uri = state?.status === "ready" ? state.uri : undefined;
+  const label = (
+    <Text
+      numberOfLines={1}
+      style={[styles.mediaLabel, { color: theme.subtleText }]}
+    >
+      {media.label}
+    </Text>
+  );
+  if (uri && video) return <NativeVideoCard uri={uri} label={media.label} />;
+  if (uri)
+    return (
+      <NativeAction
+        accessibilityRole="button"
+        accessibilityLabel={`Open image preview ${media.label}`}
+        onPress={onOpen}
+        style={styles.inlineImageButton}
+      >
+        <Image
+          source={{ uri }}
+          contentFit="contain"
+          style={styles.inlineImage}
+          accessibilityLabel={media.label}
+          onError={media.path ? onDisplayError : undefined}
+        />
+        {label}
+      </NativeAction>
+    );
+  if (media.path && !resolvable)
+    return <View style={styles.inlineImageButton}>{label}</View>;
+  const frame = [
+    video ? styles.inlineVideo : styles.inlineImage,
+    styles.placeholder,
+    { backgroundColor: theme.surfaceMuted },
+  ];
+  if (state?.status === "failed")
+    return (
+      <NativeAction
+        accessibilityRole="button"
+        accessibilityLabel={`Retry loading ${media.label}`}
+        onPress={onRetry}
+        style={video ? styles.inlineVideoCard : styles.inlineImageButton}
+      >
+        <View style={frame}>
+          <Text style={[styles.placeholderText, { color: theme.mutedText }]}>
+            {video ? "Video unavailable" : "Image unavailable"}
+          </Text>
+          <Text style={[styles.placeholderText, { color: theme.subtleText }]}>
+            Tap to retry
+          </Text>
+        </View>
+        {label}
+      </NativeAction>
+    );
+  return (
+    <View
+      accessibilityLabel={`Loading ${media.label}`}
+      style={video ? styles.inlineVideoCard : styles.inlineImageButton}
+    >
+      <View style={frame}>
+        {active ? <ActivityIndicator color={theme.subtleText} /> : null}
+      </View>
+      {label}
+    </View>
+  );
+}
+
+/** Full-screen preview; it holds its own lease while open. */
+function MediaPreviewModal({
+  preview,
+  resolveMedia,
+  scope,
+  onClose,
+}: {
+  preview: MediaPreview | null;
+  resolveMedia?: ChatMarkdownProps["resolveMedia"];
+  scope: string;
+  onClose: () => void;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const paths = useMemo(
+    () => (preview?.path ? [preview.path] : []),
+    [preview?.path],
+  );
+  const { media } = useWorkspaceMedia({
+    paths,
+    resolve: resolveMedia,
+    scope,
+    active: preview !== null,
+  });
+  const state = preview?.path ? media[preview.path] : undefined;
+  const uri = preview?.path
+    ? state?.status === "ready"
+      ? state.uri
+      : undefined
+    : preview?.uri;
+  return (
+    <NativeModal
+      visible={preview !== null}
+      onClose={onClose}
+      title={preview?.label ?? "Image preview"}
+      testID="image-preview"
+      scrollable={false}
+    >
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={{ flexGrow: 1 }}
+        maximumZoomScale={4}
+        minimumZoomScale={1}
+        centerContent
+        accessibilityLabel="Image preview"
+      >
+        {uri ? (
+          <Image
+            source={{ uri }}
+            contentFit="contain"
+            style={{ width: "100%", minHeight: 500, flex: 1 }}
+            accessibilityLabel={preview?.label}
+          />
+        ) : preview ? (
+          <View style={styles.previewStatus}>
+            {state?.status === "failed" ? (
+              <Text style={{ color: theme.mutedText }}>Image unavailable</Text>
+            ) : (
+              <ActivityIndicator color={theme.subtleText} />
+            )}
+          </View>
+        ) : null}
+      </ScrollView>
+    </NativeModal>
   );
 }
 
@@ -497,146 +484,6 @@ export function WorkspaceFileLabel({
   );
 }
 
-function isSafeExternalUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    const sensitiveParameter =
-      /(?:^|[_-])(token|auth|key|secret|signature|credential|password)(?:$|[_-])/i;
-    return (
-      (url.protocol === "https:" || (__DEV__ && url.protocol === "http:")) &&
-      Boolean(url.hostname) &&
-      !url.username &&
-      !url.password &&
-      ![...url.searchParams.keys()].some((key) => sensitiveParameter.test(key))
-    );
-  } catch {
-    return false;
-  }
-}
-function filename(path: string): string {
-  return path.split("/").filter(Boolean).pop() ?? "Media";
-}
-interface LexToken {
-  type?: string;
-  raw?: string;
-  href?: string;
-  text?: string;
-  tokens?: unknown[];
-  items?: unknown[];
-  [key: string]: unknown;
-}
-function asToken(value: unknown): LexToken | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as LexToken)
-    : null;
-}
-function collectImageReferences(markdown: string): ImageReference[] {
-  let tokens: unknown[];
-  try {
-    tokens = marked.lexer(markdown) as unknown[];
-  } catch {
-    return [];
-  }
-  const references: ImageReference[] = [];
-  const walk = (
-    siblings: unknown[],
-    parentStart: number,
-    insideLink = false,
-  ): number => {
-    let searchFrom = parentStart;
-    for (const value of siblings) {
-      const token = asToken(value);
-      if (!token || typeof token.raw !== "string" || !token.raw) continue;
-      const start = markdown.indexOf(token.raw, searchFrom);
-      if (start < 0) continue;
-      const end = start + token.raw.length;
-      const nestedLink =
-        insideLink || token.type === "link" || token.type === "link_ref";
-      if (token.type === "image" && !insideLink) {
-        const destination =
-          typeof token.href === "string"
-            ? parseMarkdownLinkDest(token.href)
-            : "";
-        const path = destination
-          ? resolveWorkspaceMediaPath(destination)
-          : null;
-        references.push({
-          start,
-          end,
-          path: path ?? undefined,
-          destination,
-          alt:
-            typeof token.text === "string" && token.text
-              ? token.text
-              : path
-                ? filename(path)
-                : "Media",
-          safe: Boolean(path) || isSafeExternalUrl(destination),
-          linked: false,
-        });
-      }
-      let nestedEnd = start;
-      for (const child of Object.values(token))
-        if (child !== token.raw && Array.isArray(child) && child.length)
-          nestedEnd = Math.max(nestedEnd, walk(child, start, nestedLink));
-      searchFrom = Math.max(end, nestedEnd);
-    }
-    return searchFrom;
-  };
-  walk(tokens, 0);
-  return references.sort((a, b) => a.start - b.start);
-}
-function buildSegments(
-  source: string,
-  references: ImageReference[],
-  media: Record<string, string | null>,
-  scope: string,
-): MarkdownSegment[] {
-  const segments: MarkdownSegment[] = [];
-  let cursor = 0;
-  for (const reference of references) {
-    if (reference.start < cursor || reference.end > source.length) continue;
-    if (reference.start > cursor)
-      segments.push({
-        kind: "markdown",
-        text: source.slice(cursor, reference.start),
-      });
-    if (reference.path) {
-      const kind = classifyWorkspaceFile(reference.path);
-      const uri = media[`${scope}\0${reference.path}`] ?? undefined;
-      const failed = media[`${scope}\0${reference.path}`] === null;
-      if (kind === "image")
-        segments.push({
-          kind: "image",
-          path: reference.path,
-          uri,
-          failed,
-          label: reference.alt,
-        });
-      else if (kind === "video")
-        segments.push({
-          kind: "video",
-          path: reference.path,
-          uri,
-          failed,
-          label: reference.alt,
-        });
-      else segments.push({ kind: "markdown", text: reference.alt });
-    } else if (reference.safe)
-      segments.push({
-        kind: "image",
-        uri: reference.destination,
-        label: reference.alt,
-      });
-    else segments.push({ kind: "markdown", text: reference.alt });
-    cursor = reference.end;
-  }
-  if (cursor < source.length)
-    segments.push({ kind: "markdown", text: source.slice(cursor) });
-  if (!segments.length && source)
-    segments.push({ kind: "markdown", text: source });
-  return segments;
-}
 const styles = StyleSheet.create({
   root: { minWidth: 0 },
   inlineImageButton: {
@@ -654,7 +501,10 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     backgroundColor: "#000000",
   },
-  inlineVideoPlaceholder: { minHeight: 44, justifyContent: "center" },
+  placeholder: { alignItems: "center", justifyContent: "center", gap: 4 },
+  placeholderText: { fontSize: 13, textAlign: "center" },
+  mediaLabel: { fontSize: 12 },
+  previewStatus: { flex: 1, alignItems: "center", justifyContent: "center" },
   videoLabel: { color: "#858590", fontSize: 12 },
   fileLabel: { minHeight: 44, justifyContent: "center" },
 });

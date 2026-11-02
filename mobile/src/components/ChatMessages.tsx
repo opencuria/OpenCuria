@@ -354,6 +354,10 @@ export function ChatMessages({
             testID={testID}
             data={ordered}
             renderItem={renderItem}
+            // Rendered rows update only for new item data or extraData, not for
+            // a new renderItem. Row state such as media visibility lives in its
+            // closure, so the callback itself is the extra data.
+            extraData={renderItem}
             keyExtractor={keyExtractor}
             estimatedItemSize={220}
             drawDistance={600}

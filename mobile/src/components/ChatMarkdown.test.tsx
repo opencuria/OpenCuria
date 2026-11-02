@@ -167,6 +167,125 @@ describe("ChatMarkdown media handling", () => {
     expect(release).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a failed read in the background until the image arrives", async () => {
+    jest.useFakeTimers();
+    try {
+      const resolver = jest
+        .fn()
+        .mockRejectedValueOnce(new Error("Socket is not connected"))
+        .mockRejectedValueOnce(new Error("File transfer timed out"))
+        .mockResolvedValue("file:///private/shot.png");
+      render(
+        <ThemeProvider>
+          <ChatMarkdown
+            markdown={"![shot](/workspace/shot.png)"}
+            resolveMedia={resolver}
+          />
+        </ThemeProvider>,
+      );
+      expect(screen.getByLabelText("Loading shot")).toBeTruthy();
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(1_000);
+      });
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(2_000);
+      });
+      expect(
+        await screen.findByRole("button", { name: "Open image preview shot" }),
+      ).toBeTruthy();
+      expect(resolver).toHaveBeenCalledTimes(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("offers a manual retry after a permanent failure", async () => {
+    const permanent = Object.assign(new Error("Too large"), {
+      retryable: false,
+    });
+    const resolver = jest
+      .fn()
+      .mockRejectedValueOnce(permanent)
+      .mockResolvedValue("file:///private/shot.png");
+    render(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={"![shot](/workspace/shot.png)"}
+          resolveMedia={resolver}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Retry loading shot" }),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Open image preview shot" }),
+    ).toBeTruthy();
+    expect(resolver).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the file again once when the image view cannot display it", async () => {
+    const release = jest.fn();
+    const resolver = jest
+      .fn()
+      .mockResolvedValue({ uri: "file:///private/shot.png", release });
+    render(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={"![shot](/workspace/shot.png)"}
+          resolveMedia={resolver}
+        />
+      </ThemeProvider>,
+    );
+    await screen.findByRole("button", { name: "Open image preview shot" });
+    fireEvent(screen.getByLabelText("shot"), "error");
+    await waitFor(() => expect(resolver).toHaveBeenCalledTimes(2));
+    expect(release).toHaveBeenCalledTimes(1);
+    fireEvent(await screen.findByLabelText("shot"), "error");
+    expect(
+      await screen.findByRole("button", { name: "Retry loading shot" }),
+    ).toBeTruthy();
+    expect(resolver).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the preview open with its own lease when the row scrolls away", async () => {
+    const releases: jest.Mock[] = [];
+    const resolver = jest.fn(async () => {
+      const release = jest.fn();
+      releases.push(release);
+      return { uri: "file:///private/shot.png", release };
+    });
+    const markdown = "![shot](/workspace/shot.png)";
+    const tree = render(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={markdown}
+          resolveMedia={resolver}
+          mediaVisible
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Open image preview shot" }),
+    );
+    await waitFor(() => expect(resolver).toHaveBeenCalledTimes(2));
+    tree.rerender(
+      <ThemeProvider>
+        <ChatMarkdown
+          markdown={markdown}
+          resolveMedia={resolver}
+          mediaVisible={false}
+        />
+      </ThemeProvider>,
+    );
+    expect(releases[0]).toHaveBeenCalledTimes(1);
+    expect(releases[1]).not.toHaveBeenCalled();
+    expect(screen.getByTestId("image-preview")).toBeTruthy();
+    tree.unmount();
+    expect(releases[1]).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a workspace video reference as a native video card, not an image", async () => {
     const resolver = jest.fn().mockResolvedValue("file:///private/clip.mp4");
     render(

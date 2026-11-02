@@ -24,9 +24,17 @@ jest.mock("lucide-react-native", () => {
 jest.mock("@legendapp/list/keyboard", () => {
   const React = require("react");
   const ReactNative = require("react-native");
+  // Like LegendList, a rendered row updates only for new item data or
+  // extraData; a new renderItem alone does not re-render it.
+  const MockRow = React.memo(
+    ({ item, index, renderItem }: any) => renderItem({ item, index }),
+    (previous: any, next: any) =>
+      previous.item === next.item && previous.extraData === next.extraData,
+  );
   const MockList = ({
     data,
     renderItem,
+    extraData,
     ListHeaderComponent,
     onViewableItemsChanged,
     ref: listRef,
@@ -53,11 +61,13 @@ jest.mock("@legendapp/list/keyboard", () => {
       props,
       ListHeaderComponent,
       ...data.map((item: any, index: number) =>
-        React.createElement(
-          React.Fragment,
-          { key: item.id },
-          renderItem({ item, index }),
-        ),
+        React.createElement(MockRow, {
+          key: item.id,
+          item,
+          index,
+          extraData,
+          renderItem,
+        }),
       ),
     );
   };
@@ -682,6 +692,59 @@ describe("ChatMessages", () => {
     fireEvent.press(header);
     expect(screen.getByText("first task")).toBeTruthy();
     expect(screen.getByText("second task")).toBeTruthy();
+  });
+
+  it("loads screenshots of rows that become visible after their first render", async () => {
+    // Settled rows keep their item identity; only visibility changes.
+    const settled = {
+      ...message([
+        part(
+          "shots",
+          "text",
+          "Ergebnisse:\n\n1. Start\n   ![Start](/workspace/screenshots/start.png)\n2. Login\n   ![Login](/workspace/screenshots/login.png)",
+          0,
+        ),
+      ]),
+      completed_at: "2026-10-30T10:00:05Z",
+    };
+    const resolveMedia = jest.fn(async (path: string) => ({
+      uri: `file:///cache${path}`,
+      release: jest.fn(),
+    }));
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[settled]}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="scope-a"
+        />
+      </ThemeProvider>,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Open image preview Start" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Open image preview Login" }),
+    ).toBeTruthy();
+    expect(resolveMedia.mock.calls.map(([path]) => path)).toEqual([
+      "/workspace/screenshots/start.png",
+      "/workspace/screenshots/login.png",
+    ]);
+
+    // A new media scope (e.g. after a reconnect) reaches the settled row too.
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[settled]}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="scope-b"
+        />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(resolveMedia).toHaveBeenCalledTimes(4));
+    view.unmount();
+    for (const { value } of resolveMedia.mock.results)
+      expect((await value).release).toHaveBeenCalledTimes(1);
   });
 });
 

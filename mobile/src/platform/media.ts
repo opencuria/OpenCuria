@@ -14,10 +14,22 @@ import type { OpenCuriaClient } from "@opencuria/client";
 
 const MEBIBYTE = 1024 * 1024;
 export const MEDIA_PREVIEW_MAX_BYTES = 20 * MEBIBYTE;
+/** LRU budget for media that is not on screen. */
 export const MEDIA_CACHE_MAX_BYTES = 32 * MEBIBYTE;
+/** Absolute cap, including media that is on screen and therefore pinned. */
+export const MEDIA_CACHE_HARD_MAX_BYTES = 256 * MEBIBYTE;
 const DOCUMENT_DOWNLOAD_MAX_BYTES = 100 * MEBIBYTE;
 const MAX_CONCURRENT_TRANSFERS = 2;
 const ROOT_NAME = "opencuria";
+
+/** Failures that reading the same file again cannot fix. */
+const PERMANENT_ERROR_CODES = new Set([
+  "invalid_path",
+  "unsupported_preview",
+  "invalid_mime",
+  "size_limit",
+  "disposed",
+]);
 
 export class NativeMediaError extends Error {
   readonly code: string;
@@ -27,6 +39,18 @@ export class NativeMediaError extends Error {
     this.name = "NativeMediaError";
     this.code = code;
   }
+
+  /** Whether an automatic retry may succeed (e.g. after a reconnect). */
+  get retryable(): boolean {
+    return !PERMANENT_ERROR_CODES.has(this.code);
+  }
+}
+
+export interface MediaCacheLimits {
+  /** LRU budget for unpinned media; defaults to MEDIA_CACHE_MAX_BYTES. */
+  lruBytes?: number;
+  /** Cap including pinned media; defaults to MEDIA_CACHE_HARD_MAX_BYTES. */
+  maxBytes?: number;
 }
 
 export interface OpenedWorkspaceFile {
@@ -80,11 +104,20 @@ export class MediaCache {
   private disposal: Promise<void> | null = null;
   private disposed = false;
 
+  private readonly lruBytes: number;
+  private readonly maxBytes: number;
+
   constructor(
     private readonly client: Pick<OpenCuriaClient, "files">,
     private readonly workspaceId: string,
     scopeKey: string,
+    limits: MediaCacheLimits = {},
   ) {
+    this.lruBytes = limits.lruBytes ?? MEDIA_CACHE_MAX_BYTES;
+    this.maxBytes = Math.max(
+      this.lruBytes,
+      limits.maxBytes ?? MEDIA_CACHE_HARD_MAX_BYTES,
+    );
     // The context is deliberately random: workspace, server, organization, and
     // account identifiers never appear in cache paths or filenames.
     // scopeKey signals ownership to callers; only this instance lifetime is
@@ -117,10 +150,16 @@ export class MediaCache {
       );
     }
     const generation = this.assertUsable();
-    const entry = await this.getMedia(safePath);
-    this.assertGeneration(generation);
-    const current = this.cache.get(safePath);
-    if (!current || current.uri !== entry.uri) {
+    let current: CacheEntry | undefined;
+    // Fresh reads are reserved until awaiting callers pin them; read again
+    // if the file still went away (e.g. it was deleted from the cache).
+    for (let attempt = 0; attempt < 2 && !current; attempt += 1) {
+      const entry = await this.getMedia(safePath);
+      this.assertGeneration(generation);
+      const cached = this.cache.get(safePath);
+      if (cached?.uri === entry.uri) current = cached;
+    }
+    if (!current) {
       throw new NativeMediaError(
         "The workspace media preview was evicted.",
         "file_unavailable",
@@ -203,12 +242,13 @@ export class MediaCache {
             "text",
             textKey,
           );
+          this.reserve(textEntry);
           await this.trimCache();
           this.assertGeneration(generation);
-          if (!this.cache.has(textKey)) {
+          if (this.cachedBytes() > this.maxBytes) {
             throw new NativeMediaError(
-              "This file exceeds the available cache limit.",
-              "size_limit",
+              "Too much media is open to preview this file now.",
+              "cache_full",
             );
           }
           textEntry.lastUsed = ++this.useCounter;
@@ -400,6 +440,7 @@ export class MediaCache {
     const cached = this.cache.get(path);
     if (cached && cached.kind !== "attachment" && new File(cached.uri).exists) {
       cached.lastUsed = ++this.useCounter;
+      this.reserve(cached);
       return Promise.resolve(cached);
     }
     if (cached && cached.kind !== "attachment") this.cache.delete(path);
@@ -412,6 +453,7 @@ export class MediaCache {
       const again = this.cache.get(path);
       if (again && again.kind !== "attachment" && new File(again.uri).exists) {
         again.lastUsed = ++this.useCounter;
+        this.reserve(again);
         return again;
       }
       const result = await this.client.files.readFile(
@@ -477,12 +519,15 @@ export class MediaCache {
           kind,
           path,
         );
+        this.reserve(entry);
         await this.trimCache();
         this.assertGeneration(generation);
-        if (!this.cache.has(path)) {
+        if (this.cachedBytes() > this.maxBytes) {
+          this.cache.delete(path);
+          this.deleteTemporary(entry.uri);
           throw new NativeMediaError(
-            "This media preview exceeds the available cache limit.",
-            "size_limit",
+            "Too much media is open to preview this file now.",
+            "cache_full",
           );
         }
         return entry;
@@ -626,17 +671,34 @@ export class MediaCache {
     if (file.exists) file.delete();
   }
 
-  private async trimCache(): Promise<void> {
-    let total = [...this.cache.values()].reduce(
+  /**
+   * Hold an entry for the callers awaiting it: their continuations (which pin
+   * it) run as microtasks, before this timer releases the reservation.
+   */
+  private reserve(entry: CacheEntry): void {
+    entry.pins += 1;
+    setTimeout(() => {
+      entry.pins = Math.max(0, entry.pins - 1);
+      void this.trimCache();
+    }, 0);
+  }
+
+  private cachedBytes(): number {
+    return [...this.cache.values()].reduce(
       (sum, entry) => sum + entry.bytes,
       0,
     );
-    if (total <= MEDIA_CACHE_MAX_BYTES) return;
+  }
+
+  /** Evict unpinned media beyond the LRU budget; media on screen stays. */
+  private async trimCache(): Promise<void> {
+    let total = this.cachedBytes();
+    if (total <= this.lruBytes) return;
     const lru = [...this.cache.entries()]
       .filter(([, entry]) => entry.pins === 0)
       .sort(([, left], [, right]) => left.lastUsed - right.lastUsed);
     for (const [key, entry] of lru) {
-      if (total <= MEDIA_CACHE_MAX_BYTES) break;
+      if (total <= this.lruBytes) break;
       this.cache.delete(key);
       this.savedAttachments.delete(entry.uri);
       this.temporaryFiles.delete(entry.uri);

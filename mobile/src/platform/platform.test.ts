@@ -170,6 +170,8 @@ describe("MediaCache", () => {
     );
     await media.resolve("/workspace/first.png");
     await media.resolve("/workspace/second.png");
+    // Fresh reads stay reserved for their awaiting callers until the next task.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(__files.size).toBe(1);
     expect(
       [...__files.values()].reduce(
@@ -184,7 +186,7 @@ describe("MediaCache", () => {
     await media.dispose();
   });
 
-  it("keeps pinned visible media out of LRU eviction until its release handle is called", async () => {
+  it("keeps all visible media beyond the LRU budget and trims it once released", async () => {
     const content = btoa("x".repeat(17 * 1024 * 1024));
     const readFile = vi.fn(async (_workspace: string, path: string) =>
       readResult(path, content),
@@ -194,17 +196,72 @@ describe("MediaCache", () => {
       "workspace",
       "scope",
     );
-    const pinned = await media.resolvePinned("/workspace/visible.png");
-    const pinnedFile = new File(pinned.uri);
-    await expect(media.resolve("/workspace/other.png")).rejects.toMatchObject({
-      code: "size_limit",
-    });
-    expect(pinnedFile.exists).toBe(true);
-    pinned.release();
-    const nextUri = await media.resolve("/workspace/other.png");
-    expect(nextUri).not.toBe(pinned.uri);
-    expect(pinnedFile.exists).toBe(false);
+    const first = await media.resolvePinned("/workspace/first.png");
+    const second = await media.resolvePinned("/workspace/second.png");
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+    const firstFile = new File(first.uri);
+    const secondFile = new File(second.uri);
+    expect(firstFile.exists).toBe(true);
+    expect(secondFile.exists).toBe(true);
+    first.release();
+    await tick();
+    expect(firstFile.exists).toBe(false);
+    expect(secondFile.exists).toBe(true);
+    second.release();
     await media.dispose();
+  });
+
+  it("lets concurrent visible reads pin their files before the LRU trims", async () => {
+    const readFile = vi.fn(async (_workspace: string, path: string) =>
+      readResult(path, btoa("abcd")),
+    );
+    const media = new MediaCache(
+      { files: { readFile } } as never,
+      "workspace",
+      "scope",
+      { lruBytes: 4, maxBytes: 64 },
+    );
+    const pinned = await Promise.all(
+      ["a", "b", "c"].map((name) =>
+        media.resolvePinned(`/workspace/${name}.png`),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(pinned.every(({ uri }) => new File(uri).exists)).toBe(true);
+    expect(readFile).toHaveBeenCalledTimes(3);
+    await media.dispose();
+  });
+
+  it("refuses new media above the hard cap with a retryable error", async () => {
+    const readFile = vi.fn(async (_workspace: string, path: string) =>
+      readResult(path, btoa("abcd")),
+    );
+    const media = new MediaCache(
+      { files: { readFile } } as never,
+      "workspace",
+      "scope",
+      { lruBytes: 4, maxBytes: 8 },
+    );
+    const first = await media.resolvePinned("/workspace/a.png");
+    await media.resolvePinned("/workspace/b.png");
+    const refused = await media
+      .resolvePinned("/workspace/c.png")
+      .catch((error: NativeMediaError) => error);
+    expect(refused).toMatchObject({ code: "cache_full", retryable: true });
+    first.release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(
+      media.resolvePinned("/workspace/c.png"),
+    ).resolves.toMatchObject({ uri: expect.any(String) });
+    await media.dispose();
+  });
+
+  it("marks only failures that a new read cannot fix as permanent", () => {
+    expect(new NativeMediaError("x", "size_limit").retryable).toBe(false);
+    expect(new NativeMediaError("x", "invalid_mime").retryable).toBe(false);
+    expect(new NativeMediaError("x", "read_failed").retryable).toBe(true);
+    expect(new NativeMediaError("x", "scope_changed").retryable).toBe(true);
   });
 
   it("reads bounded text and explicitly downloads bounded binary files", async () => {
