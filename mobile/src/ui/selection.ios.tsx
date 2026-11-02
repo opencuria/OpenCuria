@@ -19,8 +19,51 @@ import {
   pickerStyle,
   tag,
 } from "@expo/ui/swift-ui/modifiers";
-import type { NativeOptionProps, NativePickerProps } from "./selection.types";
+import type {
+  NativeOptionProps,
+  NativePickerProps,
+  NativeSegmentedPickerProps,
+} from "./selection.types";
 import { useTheme } from "./theme";
+
+/** UISegmentedControl for a few mutually exclusive, always visible choices. */
+export function NativeSegmentedPicker(
+  props: NativeSegmentedPickerProps,
+): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Host
+      matchContents={{ vertical: true }}
+      colorScheme={theme.scheme}
+      seedColor={theme.primary}
+      ignoreSafeArea="all"
+    >
+      <Picker
+        label={props.label}
+        selection={props.value}
+        testID={props.testID}
+        onSelectionChange={(value: string) => {
+          if (value !== props.value) props.onChange(value);
+        }}
+        modifiers={[pickerStyle("segmented")]}
+      >
+        {props.options.map((option) => (
+          <Text
+            key={option.value}
+            modifiers={[
+              tag(option.value),
+              ...(option.accessibilityLabel
+                ? [accessibilityLabel(option.accessibilityLabel)]
+                : []),
+            ]}
+          >
+            {option.label}
+          </Text>
+        ))}
+      </Picker>
+    </Host>
+  );
+}
 
 export function NativePicker(props: NativePickerProps): React.JSX.Element {
   const { theme } = useTheme();

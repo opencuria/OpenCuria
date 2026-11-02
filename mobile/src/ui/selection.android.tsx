@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import {
+  Box,
   Checkbox,
   DropdownMenuItem,
   ExposedDropdownMenu,
@@ -9,17 +10,116 @@ import {
   Host,
   ListItem,
   RadioButton,
+  Row,
   Text,
 } from "@expo/ui/jetpack-compose";
 import {
+  Shapes,
+  background,
+  clip,
+  dropShadow,
+  fillMaxHeight,
+  height,
   menuAnchor,
+  paddingAll,
   selectable,
+  selectableGroup,
+  testID,
   toggleable,
   fillMaxWidth,
   semantics,
+  tween,
+  weight,
 } from "@expo/ui/jetpack-compose/modifiers";
-import type { NativeOptionProps, NativePickerProps } from "./selection.types";
+import type {
+  NativeOptionProps,
+  NativePickerProps,
+  NativeSegmentedPickerProps,
+} from "./selection.types";
 import { useTheme } from "./theme";
+
+const SEGMENT_SHAPE = Shapes.RoundedCorner(9);
+const TRANSPARENT = "#00000000";
+
+/**
+ * Compose segmented choice: Material's SegmentedButton reserves a checkmark
+ * and a 58dp minimum per segment, so five or more labels no longer fit a
+ * phone. Each segment is a selectable radio in a selectable group.
+ */
+export function NativeSegmentedPicker(
+  props: NativeSegmentedPickerProps,
+): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Host
+      matchContents={{ vertical: true }}
+      colorScheme={theme.scheme}
+      seedColor={theme.primary}
+      ignoreSafeAreaKeyboardInsets
+    >
+      <Row
+        verticalAlignment="center"
+        horizontalArrangement={{ spacedBy: 2 }}
+        modifiers={[
+          fillMaxWidth(),
+          height(40),
+          clip(Shapes.RoundedCorner(12)),
+          background(theme.controlFill),
+          paddingAll(3),
+          selectableGroup(),
+          ...(props.testID ? [testID(props.testID)] : []),
+        ]}
+      >
+        {props.options.map((option) => {
+          const selected = option.value === props.value;
+          return (
+            <Box
+              key={option.value}
+              contentAlignment="center"
+              modifiers={[
+                weight(1),
+                fillMaxHeight(),
+                ...(selected
+                  ? [
+                      dropShadow(SEGMENT_SHAPE, {
+                        radius: 3,
+                        offsetY: 1,
+                        alpha: 0.14,
+                      }),
+                    ]
+                  : []),
+                clip(SEGMENT_SHAPE),
+                background(selected ? theme.raised : TRANSPARENT, {
+                  animationSpec: tween({ durationMillis: 150 }),
+                }),
+                selectable(
+                  selected,
+                  () => {
+                    if (!selected) props.onChange(option.value);
+                  },
+                  "radioButton",
+                ),
+                semantics({
+                  contentDescription: option.accessibilityLabel ?? option.label,
+                }),
+              ]}
+            >
+              <Text
+                color={selected ? theme.text : theme.mutedText}
+                maxLines={1}
+                softWrap={false}
+                overflow="ellipsis"
+                style={{ fontSize: 14, fontWeight: selected ? "600" : "500" }}
+              >
+                {option.label}
+              </Text>
+            </Box>
+          );
+        })}
+      </Row>
+    </Host>
+  );
+}
 
 export function NativePicker(props: NativePickerProps): React.JSX.Element {
   const { theme } = useTheme();

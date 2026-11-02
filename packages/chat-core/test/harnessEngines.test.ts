@@ -4,6 +4,7 @@ import {
   harnessEngineLabel,
   harnessSessionModels,
   formatEffort,
+  formatEffortShort,
   snapEffort,
   type HarnessEngine,
   type ProviderModel,
@@ -77,6 +78,10 @@ describe("shared engine policy", () => {
   it("uses runtime effort metadata, including ultra only on a supporting model", () => {
     expect(formatEffort("ultra")).toBe("Ultra");
     expect(formatEffort("future-token")).toBe("future-token");
+    expect(formatEffortShort("xhigh")).toBe("X-High");
+    expect(formatEffortShort("Medium")).toBe("Med");
+    expect(formatEffortShort("high")).toBe("High");
+    expect(formatEffortShort("future-token")).toBe("future-token");
     expect(snapEffort(models[0], "ultra")).toBe("ultra");
     expect(snapEffort(models[1], "ultra")).toBe("high");
   });

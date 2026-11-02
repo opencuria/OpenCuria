@@ -22,6 +22,7 @@ import {
   frame,
   listRowBackground,
   listStyle,
+  scrollContentBackground,
 } from "@expo/ui/swift-ui/modifiers";
 import type { NativeListProps, NativeListRow } from "./NativeList.types";
 import { useTheme } from "./theme";
@@ -114,6 +115,7 @@ function ListRow({ row }: { row: NativeListRow }): React.JSX.Element {
 export function NativeList({
   sections,
   sidebar,
+  plain,
 }: NativeListProps): React.JSX.Element {
   const { theme } = useTheme();
   return (
@@ -122,7 +124,13 @@ export function NativeList({
       colorScheme={theme.scheme}
       seedColor={theme.primary}
     >
-      <List modifiers={[listStyle(sidebar ? "sidebar" : "insetGrouped")]}>
+      <List
+        modifiers={
+          plain
+            ? [listStyle("plain"), scrollContentBackground("hidden")]
+            : [listStyle(sidebar ? "sidebar" : "insetGrouped")]
+        }
+      >
         {sections.map((section) => (
           <Section
             key={section.id}

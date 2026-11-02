@@ -1088,15 +1088,15 @@ it("selects Codex defaults, preserves explicit effort across catalog refresh and
   );
   await waitFor(() => expect(listEngineModels).toHaveBeenCalledWith("codex"));
   fireEvent.press(screen.getByTestId("test-settings"));
-  fireEvent.press(
-    within(screen.getByTestId("model-sheet")).getByText("Codex Build"),
-  );
+  const sheet = within(screen.getByTestId("model-sheet"));
+  fireEvent.press(sheet.getByLabelText("Engine: OpenCuria"));
+  fireEvent.press(sheet.getByRole("button", { name: "Codex" }));
   await waitFor(() =>
     expect(screen.getByTestId("chat-settings").props.children).toBe(
       "Codex Sol|Low",
     ),
   );
-  fireEvent.press(screen.getByText("Ultra"));
+  fireEvent.press(screen.getByRole("radio", { name: "Ultra" }));
   const foreground = value.registerForegroundRefresh.mock.calls[0]?.[0] as
     | (() => Promise<void>)
     | undefined;
@@ -1168,8 +1168,8 @@ it("resumes a Codex session with an immutable engine/provider and no native-mode
   expect(sheet.queryByText("Codex Sol")).toBeNull();
   expect(sheet.getByText("Router Codex")).toBeTruthy();
   // An existing chat keeps its engine; only its modes remain selectable.
-  expect(sheet.queryByText("OpenCuria Build")).toBeNull();
-  expect(sheet.getByText("Codex Plan")).toBeTruthy();
+  expect(sheet.queryByTestId("model-sheet-engine")).toBeNull();
+  expect(sheet.getByRole("radio", { name: "Plan" })).toBeTruthy();
   fireEvent.press(screen.getByTestId("test-send"));
   await waitFor(() =>
     expect(mockController.send).toHaveBeenCalledWith(
@@ -1200,12 +1200,11 @@ it("offers model, effort and agent in one sheet and applies a new agent's defaul
   fireEvent.press(screen.getByTestId("test-settings"));
   const sheet = within(screen.getByTestId("model-sheet"));
   expect(sheet.getByText("Native model")).toBeTruthy();
-  expect(sheet.getByText("Medium")).toBeTruthy();
-  expect(
-    sheet.queryByRole("button", { name: "Claude Agent Build, Not connected" }),
-  ).toBeNull();
+  expect(sheet.getByRole("radio", { name: "Medium" })).toBeTruthy();
+  // Only OpenCuria is available, so there is no engine to switch to.
+  expect(sheet.queryByTestId("model-sheet-engine")).toBeNull();
 
-  fireEvent.press(sheet.getByText("OpenCuria Plan"));
+  fireEvent.press(sheet.getByRole("radio", { name: "Plan" }));
   await waitFor(() =>
     expect(screen.getByTestId("chat-settings").props.children).toBe(
       "Native model|Medium",

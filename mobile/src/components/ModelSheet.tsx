@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import {
   formatContextLength,
   formatEffort,
+  formatEffortShort,
   providerDisplayName,
   resolveCatalogModel,
   type ProviderModel,
@@ -11,20 +12,27 @@ import type {
   HarnessId,
   HarnessSessionMode,
 } from "@opencuria/chat-core/harness";
-import type { NativeSymbol } from "../ui/controls.types";
 import { NativeList, type NativeListSection } from "../ui/NativeList";
 import { NativeSheet } from "../ui/NativeSheet";
 import { NativeTextField } from "../ui/NativeTextField";
+import { PickerPill } from "../ui/PickerPill";
+import { NativeSegmentedPicker } from "../ui/selection";
+import { useTheme } from "../ui/theme";
 
 /** Matches the webapp model picker: recents first, full catalog on demand. */
 const QUICK_MODEL_COUNT = 6;
+const MODE_LABELS: Record<HarnessSessionMode, string> = {
+  build: "Build",
+  plan: "Plan",
+};
 
-export interface ModelSheetAgent {
-  engine: HarnessId;
-  mode: HarnessSessionMode;
-  label: string;
+export interface ModelSheetEngine {
+  id: HarnessId;
+  name: string;
+  /** Supported modes in display order. */
+  modes: HarnessSessionMode[];
   disabled?: boolean;
-  /** Why the agent cannot be chosen, e.g. a disconnected engine. */
+  /** Why the engine cannot be chosen, e.g. "Not connected". */
   note?: string;
 }
 
@@ -36,7 +44,8 @@ export interface ModelSheetProps {
   recentModelIds: string[];
   model: string;
   effort: string;
-  agents: ModelSheetAgent[];
+  /** Engines offered for this chat; an existing chat offers only its own. */
+  engines: ModelSheetEngine[];
   engine: HarnessId;
   mode: HarnessSessionMode;
   /** Shown instead of model rows when the engine catalog is empty. */
@@ -46,7 +55,12 @@ export interface ModelSheetProps {
   onAgentChange: (engine: HarnessId, mode: HarnessSessionMode) => void;
 }
 
-/** One sheet for the composer's model, reasoning effort and agent choices. */
+/**
+ * One sheet for the composer's agent, model and reasoning effort: mode and
+ * engine on top, recent models in the middle and the effort pinned below, so
+ * every choice is visible without scrolling. The full catalog opens as a
+ * search in place.
+ */
 export function ModelSheet({
   visible,
   onClose,
@@ -54,7 +68,7 @@ export function ModelSheet({
   recentModelIds,
   model,
   effort,
-  agents,
+  engines,
   engine,
   mode,
   unavailableMessage,
@@ -62,6 +76,7 @@ export function ModelSheet({
   onEffortChange,
   onAgentChange,
 }: ModelSheetProps): React.JSX.Element {
+  const { theme } = useTheme();
   const [showAll, setShowAll] = useState(false);
   const [query, setQuery] = useState("");
   useEffect(() => {
@@ -74,6 +89,10 @@ export function ModelSheet({
   const quick = useMemo(
     () => quickModels(models, recentModelIds, model),
     [models, recentModelIds, model],
+  );
+  const hasRecent = useMemo(
+    () => recentModelIds.some((id) => models.some((item) => item.id === id)),
+    [models, recentModelIds],
   );
   const term = query.trim().toLowerCase();
   const matching = useMemo(
@@ -88,6 +107,10 @@ export function ModelSheet({
         : models,
     [models, term],
   );
+  const closeSearch = () => {
+    setShowAll(false);
+    setQuery("");
+  };
   const modelRow = (item: ProviderModel) => ({
     id: `model-${item.id}`,
     title: item.name,
@@ -95,103 +118,19 @@ export function ModelSheet({
     selected: item.id === model,
     onPress: () => {
       onModelChange(item.id);
-      setShowAll(false);
-      setQuery("");
+      closeSearch();
     },
   });
 
-  const sections: NativeListSection[] = showAll
-    ? [
-        {
-          id: "back",
-          rows: [
-            {
-              id: "recent-models",
-              title: "Recent models",
-              symbol: "chevron.left",
-              onPress: () => {
-                setShowAll(false);
-                setQuery("");
-              },
-            },
-          ],
-        },
-        {
-          id: "all-models",
-          title: "All models",
-          rows: matching.length
-            ? matching.map(modelRow)
-            : [{ id: "no-models-found", title: "No models found" }],
-        },
-      ]
-    : [
-        {
-          id: "model",
-          title: "Model",
-          rows: models.length
-            ? [
-                ...quick.map(modelRow),
-                ...(models.length > quick.length
-                  ? [
-                      {
-                        id: "show-all-models",
-                        title: "All models",
-                        subtitle: `${models.length} available`,
-                        symbol: "list.bullet" as const,
-                        onPress: () => setShowAll(true),
-                      },
-                    ]
-                  : []),
-              ]
-            : [
-                {
-                  id: "models-unavailable",
-                  title: unavailableMessage ?? "No models available",
-                },
-              ],
-        },
-        ...(selected?.reasoning_efforts.length
-          ? [
-              {
-                id: "effort",
-                title: "Effort",
-                rows: selected.reasoning_efforts.map((value) => ({
-                  id: `effort-${value}`,
-                  title: formatEffort(value),
-                  symbol: effortSymbol(value),
-                  selected: value === effort,
-                  onPress: () => onEffortChange(value),
-                })),
-              },
-            ]
-          : []),
-        {
-          id: "agent",
-          title: "Agent",
-          rows: agents.map((agent) => ({
-            id: `agent-${agent.engine}-${agent.mode}`,
-            title: agent.label,
-            subtitle: agent.note,
-            symbol:
-              agent.mode === "plan"
-                ? ("list.bullet.clipboard" as const)
-                : ("hammer" as const),
-            selected: agent.engine === engine && agent.mode === mode,
-            disabled: agent.disabled,
-            onPress: () => onAgentChange(agent.engine, agent.mode),
-          })),
-        },
-      ];
-
-  return (
-    <NativeSheet
-      visible={visible}
-      onClose={onClose}
-      keyboard={showAll}
-      testID="model-sheet"
-    >
-      {showAll ? (
-        <View style={{ paddingHorizontal: 16, paddingBottom: 4 }}>
+  if (showAll)
+    return (
+      <NativeSheet
+        visible={visible}
+        onClose={onClose}
+        keyboard
+        testID="model-sheet"
+      >
+        <View style={styles.search}>
           <NativeTextField
             label="Search models"
             value={query}
@@ -199,8 +138,137 @@ export function ModelSheet({
             placeholder="Search models"
           />
         </View>
+        <NativeList
+          sections={[
+            {
+              id: "back",
+              rows: [
+                {
+                  id: "recent-models",
+                  title: "Recent models",
+                  symbol: "chevron.left",
+                  onPress: closeSearch,
+                },
+              ],
+            },
+            {
+              id: "all-models",
+              title: "All models",
+              rows: matching.length
+                ? matching.map(modelRow)
+                : [{ id: "no-models-found", title: "No models found" }],
+            },
+          ]}
+        />
+      </NativeSheet>
+    );
+
+  const current = engines.find((item) => item.id === engine);
+  const modes = current?.modes ?? [];
+  const selectEngine = (id: string) => {
+    const next = engines.find((item) => item.id === id);
+    if (!next || next.disabled || next.id === engine) return;
+    onAgentChange(
+      next.id,
+      next.modes.includes(mode) ? mode : (next.modes[0] ?? mode),
+    );
+  };
+  const modelSection: NativeListSection = models.length
+    ? {
+        id: "model",
+        title: hasRecent ? "Recent" : "Models",
+        rows: [
+          ...quick.map(modelRow),
+          ...(models.length > quick.length
+            ? [
+                {
+                  id: "show-all-models",
+                  title: "All models",
+                  subtitle: `${models.length} available`,
+                  symbol: "magnifyingglass" as const,
+                  onPress: () => setShowAll(true),
+                },
+              ]
+            : []),
+        ],
+      }
+    : {
+        id: "model",
+        rows: [
+          {
+            id: "models-unavailable",
+            title: unavailableMessage ?? "No models available",
+          },
+        ],
+      };
+  const efforts = selected?.reasoning_efforts ?? [];
+
+  return (
+    <NativeSheet visible={visible} onClose={onClose} testID="model-sheet">
+      {modes.length > 1 || engines.length > 1 ? (
+        <View style={styles.agent}>
+          {modes.length > 1 ? (
+            <View style={styles.modes}>
+              <NativeSegmentedPicker
+                label="Mode"
+                value={mode}
+                options={modes.map((value) => ({
+                  value,
+                  label: MODE_LABELS[value],
+                }))}
+                onChange={(value) =>
+                  onAgentChange(engine, value as HarnessSessionMode)
+                }
+                testID="model-sheet-mode"
+              />
+            </View>
+          ) : null}
+          {engines.length > 1 ? (
+            <PickerPill
+              value={current?.name ?? engine}
+              accessibilityLabel={`Engine: ${current?.name ?? engine}`}
+              menu={{
+                title: "Engine",
+                actions: engines.map((item) => ({
+                  id: item.id,
+                  title: item.name,
+                  subtitle: item.note,
+                  disabled: item.disabled,
+                  selected: item.id === engine,
+                })),
+                onSelect: selectEngine,
+              }}
+              testID="model-sheet-engine"
+            />
+          ) : null}
+        </View>
       ) : null}
-      <NativeList sections={sections} />
+      <NativeList plain sections={[modelSection]} />
+      {efforts.length ? (
+        <View style={[styles.effort, { borderTopColor: theme.border }]}>
+          <View style={styles.effortHeader}>
+            <Text style={[styles.effortTitle, { color: theme.text }]}>
+              Effort
+            </Text>
+            {effort ? (
+              <Text style={[styles.effortValue, { color: theme.primary }]}>
+                {formatEffort(effort)}
+              </Text>
+            ) : null}
+          </View>
+          <NativeSegmentedPicker
+            label="Effort"
+            value={effort}
+            options={efforts.map((value) => ({
+              value,
+              label: formatEffortShort(value),
+              accessibilityLabel: formatEffort(value),
+            }))}
+            onChange={onEffortChange}
+            testID="model-sheet-effort"
+          />
+        </View>
+      ) : null}
     </NativeSheet>
   );
 }
@@ -235,19 +303,29 @@ function modelDetail(item: ProviderModel): string {
     .join(" · ");
 }
 
-function effortSymbol(effort: string): NativeSymbol {
-  switch (effort) {
-    case "none":
-      return "circle.slash";
-    case "minimal":
-      return "gauge.with.dots.needle.0percent";
-    case "low":
-      return "gauge.with.dots.needle.33percent";
-    case "medium":
-      return "gauge.with.dots.needle.50percent";
-    case "high":
-      return "gauge.with.dots.needle.67percent";
-    default:
-      return "gauge.with.dots.needle.100percent";
-  }
-}
+const styles = StyleSheet.create({
+  search: { paddingHorizontal: 16, paddingBottom: 4 },
+  agent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  modes: { flex: 1 },
+  effort: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 12,
+    gap: 10,
+  },
+  effortHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    paddingHorizontal: 4,
+  },
+  effortTitle: { fontSize: 15, fontWeight: "600" },
+  effortValue: { fontSize: 15 },
+});

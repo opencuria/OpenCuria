@@ -52,7 +52,7 @@ import {
   ChatMessages,
   type ComposerAttachment,
 } from "../components";
-import { ModelSheet, type ModelSheetAgent } from "../components/ModelSheet";
+import { ModelSheet, type ModelSheetEngine } from "../components/ModelSheet";
 import {
   ChatController,
   type ChatControllerSnapshot,
@@ -1026,20 +1026,18 @@ export function MainScreen(): React.JSX.Element {
 
   const chosenModels = modelsForEngine;
   const profileTitle = user?.first_name?.trim() || user?.email || "Account";
-  // A chat keeps its engine; only a new chat offers every engine's modes.
-  const agentOptions: ModelSheetAgent[] = engines
+  // A chat keeps its engine; only a new chat offers every engine.
+  const engineOptions: ModelSheetEngine[] = engines
     .filter((item) => !chat.activeSessionId || item.id === harness)
-    .flatMap((item) =>
-      (["build", "plan"] as const)
-        .filter((value) => item.modes.includes(value))
-        .map((value) => ({
-          engine: item.id,
-          mode: value,
-          label: `${item.name} ${value === "build" ? "Build" : "Plan"}`,
-          disabled: !item.connected,
-          note: item.connected ? undefined : "Not connected",
-        })),
-    );
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      modes: (["build", "plan"] as const).filter((value) =>
+        item.modes.includes(value),
+      ),
+      disabled: !item.connected,
+      note: item.connected ? undefined : "Not connected",
+    }));
   const activeConversation =
     conversations.find((row) => row.session_id === chat.activeSessionId) ??
     null;
@@ -1436,7 +1434,7 @@ export function MainScreen(): React.JSX.Element {
         recentModelIds={recentModels.map((row) => row.model)}
         model={model}
         effort={effort}
-        agents={agentOptions}
+        engines={engineOptions}
         engine={harness}
         mode={mode}
         unavailableMessage={

@@ -46,10 +46,24 @@ export const EFFORT_LABELS: Record<string, string> = {
   ultra: "Ultra",
 };
 
+/** Compact labels for controls that show every effort side by side. */
+export const EFFORT_SHORT_LABELS: Record<string, string> = {
+  minimal: "Min",
+  medium: "Med",
+  xhigh: "X-High",
+};
+
 /** Human-readable label for a reasoning effort token. */
 export function formatEffort(effort: string): string {
   const key = effort.trim().toLowerCase();
   return EFFORT_LABELS[key] ?? effort;
+}
+
+/** Compact effort label, e.g. for a segmented control; falls back to the full label. */
+export function formatEffortShort(effort: string): string {
+  return (
+    EFFORT_SHORT_LABELS[effort.trim().toLowerCase()] ?? formatEffort(effort)
+  );
 }
 
 /** Compact context size label (128000 → "128k"); empty when unknown. */

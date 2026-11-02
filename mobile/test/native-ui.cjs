@@ -76,6 +76,26 @@ exports.NativePicker = ({
       ),
     ),
   )
+exports.NativeSegmentedPicker = ({ label, value, options, onChange, testID }) =>
+  h(
+    View,
+    { testID, accessibilityRole: 'radiogroup', accessibilityLabel: label },
+    ...options.map((option) =>
+      h(
+        Pressable,
+        {
+          key: option.value,
+          accessibilityRole: 'radio',
+          accessibilityLabel: option.accessibilityLabel ?? option.label,
+          accessibilityState: { checked: value === option.value },
+          onPress: () => {
+            if (option.value !== value) onChange(option.value)
+          },
+        },
+        h(Text, null, option.label),
+      ),
+    ),
+  )
 exports.NativeOption = ({
   label,
   description,

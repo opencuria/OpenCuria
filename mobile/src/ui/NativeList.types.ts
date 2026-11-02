@@ -30,4 +30,9 @@ export interface NativeListSection {
 export interface NativeListProps {
   sections: NativeListSection[];
   sidebar?: boolean;
+  /**
+   * Edge-to-edge rows on the surrounding surface, e.g. between other controls
+   * in a sheet. Android lists are always plain.
+   */
+  plain?: boolean;
 }

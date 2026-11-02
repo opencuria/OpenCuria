@@ -12,6 +12,8 @@ import { useTheme } from "./theme";
 export interface NativeMenuAction {
   id: string;
   title: string;
+  /** Quieter detail, e.g. why the action is disabled. */
+  subtitle?: string;
   symbol?: string;
   destructive?: boolean;
   disabled?: boolean;
@@ -51,9 +53,14 @@ export function NativeMenu({
       shouldOpenOnLongPress={longPress}
       onPressAction={({ nativeEvent }) => onSelect(nativeEvent.event)}
       actions={actions.map(
-        ({ id, title, symbol, destructive, disabled, selected }) => ({
+        ({ id, title, subtitle, symbol, destructive, disabled, selected }) => ({
           id,
-          title,
+          // Android popup menus have no subtitle line.
+          title:
+            Platform.OS === "android" && subtitle
+              ? `${title} · ${subtitle}`
+              : title,
+          subtitle: Platform.OS === "ios" ? subtitle : undefined,
           image: Platform.OS === "ios" ? symbol : undefined,
           attributes: { destructive, disabled },
           state: selected === undefined ? undefined : selected ? "on" : "off",

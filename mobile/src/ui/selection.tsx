@@ -1,1 +1,5 @@
-export { NativePicker, NativeOption } from "./selection.ios";
+export {
+  NativePicker,
+  NativeOption,
+  NativeSegmentedPicker,
+} from "./selection.ios";
