@@ -146,10 +146,12 @@ describe('abortable requests', () => {
       ok: true,
     })
 
+    const signal = fetchMock.mock.calls[0]?.[1]?.signal
+    expect(signal).toBeInstanceOf(AbortSignal)
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       '/api/v1/desktop/',
-      expect.objectContaining({ signal: controller.signal, credentials: 'same-origin' }),
+      expect.objectContaining({ signal, credentials: 'same-origin' }),
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
       2, '/api/v1/auth/refresh/', expect.objectContaining({ credentials: 'same-origin' }),
@@ -157,7 +159,7 @@ describe('abortable requests', () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
       '/api/v1/desktop/',
-      expect.objectContaining({ signal: controller.signal, credentials: 'same-origin' }),
+      expect.objectContaining({ signal, credentials: 'same-origin' }),
     )
   })
 
@@ -172,7 +174,7 @@ describe('abortable requests', () => {
     await expect(get('/ordinary/')).resolves.toEqual({ ok: true })
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/ordinary/',
-      expect.objectContaining({ signal: undefined }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     )
   })
 })

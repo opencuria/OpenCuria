@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OpenCuriaClient } from "@opencuria/client";
+import { createClient, type OpenCuriaClient } from "@opencuria/client";
 import type {
   HarnessMessage,
   HarnessPermissionRequest,
@@ -169,6 +169,75 @@ async function openRoot(controller: ChatController): Promise<void> {
 }
 
 describe("ChatController", () => {
+  it.each(["sessions/", "timeline", "todos"])(
+    "stops loading and can retry when %s never responds",
+    async (endpoint) => {
+      vi.useFakeTimers();
+      const root = session("root");
+      const stalled = deferred<Response>();
+      let shouldStall = true;
+      const onAuthenticationExpired = vi.fn();
+      const client = createClient({
+        apiBaseUrl: "https://api.example/api/v1",
+        wsBaseUrl: "https://api.example",
+        getAccessToken: () => "access",
+        getRefreshToken: () => "refresh",
+        setTokens: vi.fn(),
+        getOrganizationId: () => "org-a",
+        onAuthenticationExpired,
+        requestTimeoutMs: 1_000,
+        fetch: vi.fn(async (input, init) => {
+          expect(init?.headers).toMatchObject({
+            Authorization: "Bearer access",
+            "X-Organization-Id": "org-a",
+          });
+          const url = String(input);
+          if (shouldStall && url.endsWith(endpoint)) {
+            shouldStall = false;
+            return stalled.promise;
+          }
+          const payload = url.endsWith("sessions/")
+            ? [root]
+            : url.endsWith("timeline")
+              ? timeline(root, [message("reply", "assistant", "Loaded reply")])
+              : [];
+          return new Response(JSON.stringify(payload));
+        }),
+      });
+      const controller = new ChatController(client);
+      try {
+        const opening = controller.openWorkspace("workspace-a", root.id);
+        const rejected = expect(opening).rejects.toMatchObject({
+          code: "timeout",
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await rejected;
+        expect(controller.getSnapshot()).toMatchObject({
+          loading: false,
+          error:
+            "The server request timed out. Check your connection and retry.",
+        });
+        expect(onAuthenticationExpired).not.toHaveBeenCalled();
+
+        await controller.openWorkspace("workspace-a", root.id);
+        expect(controller.getSnapshot()).toMatchObject({
+          loading: false,
+          error: null,
+          activeSessionId: root.id,
+          messages: [expect.objectContaining({ content: "Loaded reply" })],
+        });
+        const loaded = controller.getSnapshot();
+        stalled.resolve(new Response(JSON.stringify([])));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(controller.getSnapshot()).toBe(loaded);
+      } finally {
+        controller.dispose();
+        client.realtime.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("creates a separate chat while keeping the previous session running", async () => {
     const root = session("root", { status: "busy" });
     const { client } = makeClient([root]);

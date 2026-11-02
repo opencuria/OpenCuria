@@ -30,6 +30,7 @@ export interface CreateClientOptions {
   onAuthenticationExpired: () => void;
   fetch?: FetchLike;
   socketFactory?: SocketFactory;
+  requestTimeoutMs?: number;
   fileTransferTimeoutMs?: number;
   createFileRequestId?: () => string;
 }
@@ -121,6 +122,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     getOrganizationId: options.getOrganizationId,
     onAuthenticationExpired: options.onAuthenticationExpired,
     fetch: options.fetch,
+    requestTimeoutMs: options.requestTimeoutMs,
   };
   const api = new ApiClient(apiOptions) as ClientApi;
   Object.defineProperty(api, "baseUrl", {

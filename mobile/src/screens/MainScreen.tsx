@@ -359,9 +359,11 @@ export function MainScreen(): React.JSX.Element {
       } finally {
         if (
           mountedRef.current &&
-          !background &&
+          clientRef.current === client &&
           requestGeneration === overviewGeneration.current
         )
+          // The latest request owns completion, even when a background refresh
+          // superseded the initial load before it could clear the spinner.
           setLoading(false);
       }
     },

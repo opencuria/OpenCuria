@@ -15,8 +15,10 @@ it('uses the current web auth context and forwards editor cancellation through t
   await getGitRepos('ws')
 
   localStorage.setItem('kern_active_org_id', 'org-b')
-  const signal = new AbortController().signal
-  await readGitFileContent('ws', '/workspace/repo', 'a.txt', 'index', signal)
+  const controller = new AbortController()
+  fetchMock.mockImplementationOnce(() => new Promise(() => undefined))
+  const pending = readGitFileContent('ws', '/workspace/repo', 'a.txt', 'index', controller.signal)
+  const cancelled = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
 
   expect(
     fetchMock.mock.calls.map(([, init]) => {
@@ -27,7 +29,9 @@ it('uses the current web auth context and forwards editor cancellation through t
     ['Bearer access-token', 'org-a', 'same-origin'],
     ['Bearer access-token', 'org-b', 'same-origin'],
   ])
-  expect(fetchMock.mock.lastCall?.[1]?.signal).toBe(signal)
+  controller.abort()
+  await cancelled
+  expect(fetchMock.mock.lastCall?.[1]?.signal?.aborted).toBe(true)
 })
 
 it('propagates denied Git operations through the web error type', async () => {

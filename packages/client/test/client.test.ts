@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
   ApiRequestError,
@@ -372,6 +372,176 @@ describe("API authentication and errors", () => {
   });
 });
 
+describe("REST request deadlines", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.each(["headers", "body"])(
+    "bounds a stalled response's %s and allows a fresh retry",
+    async (phase) => {
+      vi.useFakeTimers();
+      const stalled = deferred<Response>();
+      const fetch = vi
+        .fn()
+        .mockImplementationOnce(() =>
+          phase === "headers"
+            ? stalled.promise
+            : Promise.resolve({
+                status: 200,
+                ok: true,
+                json: () => new Promise(() => undefined),
+              } as unknown as Response),
+        )
+        .mockResolvedValue(jsonResponse([]));
+      const setup = clientOptions();
+      const client = setup.create(fetch);
+      const pending = client.harness.timeline("session");
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "ApiRequestError",
+        code: "timeout",
+      });
+      const signal = fetch.mock.calls[0]?.[1]?.signal as AbortSignal;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(signal?.aborted).toBe(true);
+      await rejected;
+      expect(setup.onAuthenticationExpired).not.toHaveBeenCalled();
+      await expect(client.harness.timeline("session")).resolves.toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["headers", "body"])(
+    "releases stalled refresh %s without expiring auth or accepting late tokens",
+    async (phase) => {
+      vi.useFakeTimers();
+      const stalled = deferred<Response>();
+      const stalledBody = deferred<{
+        access_token: string;
+        refresh_token: string;
+      }>();
+      const started = deferred<void>();
+      let refreshCalls = 0;
+      const fetch = vi.fn(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (String(input).endsWith("/auth/refresh/")) {
+            refreshCalls += 1;
+            started.resolve();
+            return refreshCalls === 1
+              ? phase === "headers"
+                ? stalled.promise
+                : ({
+                    ok: true,
+                    status: 200,
+                    json: () => stalledBody.promise,
+                  } as Response)
+              : jsonResponse({
+                  access_token: "new-access",
+                  refresh_token: "new-refresh",
+                });
+          }
+          return (init?.headers as Record<string, string>).Authorization ===
+            "Bearer new-access"
+            ? jsonResponse([])
+            : jsonResponse({ detail: "expired" }, 401);
+        },
+      );
+      const setup = clientOptions();
+      const client = setup.create(fetch);
+      const pending = client.workspaces.list();
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "timeout",
+      });
+      await started.promise;
+      const reconnectRefresh = client.api.refreshAccessToken();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+      await expect(reconnectRefresh).resolves.toBe(false);
+      expect(setup.onAuthenticationExpired).not.toHaveBeenCalled();
+
+      stalled.resolve(
+        jsonResponse({
+          access_token: "late-access",
+          refresh_token: "late-refresh",
+        }),
+      );
+      stalledBody.resolve({
+        access_token: "late-access",
+        refresh_token: "late-refresh",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(setup.setTokens).not.toHaveBeenCalled();
+      await expect(client.workspaces.list()).resolves.toEqual([]);
+      expect(setup.setTokens).toHaveBeenCalledOnce();
+      expect(refreshCalls).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("cancels one request during shared refresh while another request still recovers", async () => {
+    vi.useFakeTimers();
+    const tokens = deferred<Response>();
+    const fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/auth/refresh/")) return tokens.promise;
+        return (init?.headers as Record<string, string>).Authorization ===
+          "Bearer new-access"
+          ? jsonResponse([])
+          : jsonResponse({ detail: "expired" }, 401);
+      },
+    );
+    const setup = clientOptions();
+    const client = setup.create(fetch);
+    const controller = new AbortController();
+    const cancelled = client.workspaces.list(undefined, controller.signal);
+    const rejected = expect(cancelled).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    const current = client.skills.list();
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await rejected;
+    tokens.resolve(
+      jsonResponse({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+      }),
+    );
+    await expect(current).resolves.toEqual([]);
+    expect(
+      fetch.mock.calls.filter(([url]) =>
+        String(url).endsWith("/auth/refresh/"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetch.mock.calls.filter(([url]) => String(url).endsWith("/workspaces/")),
+    ).toHaveLength(1);
+    expect(setup.onAuthenticationExpired).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([true, false])(
+    "honors caller cancellation (already aborted: %s)",
+    async (alreadyAborted) => {
+      vi.useFakeTimers();
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, _init?: RequestInit) =>
+          new Promise<Response>(() => undefined),
+      );
+      const client = clientOptions().create(fetch);
+      const controller = new AbortController();
+      if (alreadyAborted) controller.abort();
+      const pending = client.workspaces.list(undefined, controller.signal);
+      const rejected = expect(pending).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      if (!alreadyAborted) controller.abort();
+      await rejected;
+      if (alreadyAborted) expect(fetch).not.toHaveBeenCalled();
+      else expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+});
+
 describe("REST endpoint wrappers", () => {
   it("keeps requestWithStatus non-throwing for endpoint 404 responses", async () => {
     const client = clientOptions().create(
@@ -465,7 +635,7 @@ describe("shared harness actions", () => {
         method: "POST",
         body: JSON.stringify(input),
         credentials: "omit",
-        signal,
+        signal: expect.any(AbortSignal),
       }),
     );
     await client.harness.fork("session/id", {

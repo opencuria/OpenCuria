@@ -55,7 +55,7 @@ describe('web bindings for the shared harness API', () => {
       expect.objectContaining({
         method: 'GET',
         credentials: 'same-origin',
-        signal: controller.signal,
+        signal: expect.any(AbortSignal),
         headers: expect.objectContaining({
           Authorization: 'Bearer new-token',
           'X-Organization-Id': 'org-2',

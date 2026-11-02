@@ -26,6 +26,8 @@ export interface ApiClientOptions {
   fetch?: FetchLike;
   /** Ambient cookie policy: browser clients use same-origin; native clients omit cookies. */
   credentials?: RequestCredentials;
+  /** Deadline for a full request (including body/auth retry); defaults to 30s. */
+  requestTimeoutMs?: number;
 }
 
 export interface ApiContext {
@@ -59,6 +61,18 @@ interface RefreshUnavailable {
 type RefreshOutcome = RefreshSuccess | RefreshRejected | RefreshUnavailable;
 
 const AUTH_ENDPOINT_PREFIX = "/auth/";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
+function abortReason(signal: AbortSignal): unknown {
+  if (signal.reason !== undefined) return signal.reason;
+  const error = new Error("Request aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function assertNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -98,6 +112,7 @@ function errorPayload(data: unknown): { detail: string; code: string } {
 /** Framework-neutral REST client with context-safe single-flight token refresh. */
 export class ApiClient {
   private readonly fetchImpl: FetchLike;
+  private readonly requestTimeoutMs: number;
   private generation = 0;
   private observedContext = "";
   private contextListeners = new Set<() => void>();
@@ -107,6 +122,10 @@ export class ApiClient {
 
   constructor(private readonly options: ApiClientOptions) {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.requestTimeoutMs = Math.max(
+      1,
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    );
     this.request = this.request.bind(this);
     this.requestWithStatus = this.requestWithStatus.bind(this);
     this.get = this.get.bind(this);
@@ -148,20 +167,22 @@ export class ApiClient {
     signal?: AbortSignal,
     credentials: RequestCredentials = this.options.credentials ?? "omit",
   ): Promise<T> {
-    return this.performRequest<T>(method, path, body, credentials, signal).then(
-      (result) => {
-        if (!result.ok) {
-          const error = errorPayload(result.data);
-          throw new ApiRequestError(
-            result.status,
-            error.detail,
-            error.code,
-            result.data,
-          );
-        }
-        return result.data;
-      },
-    );
+    return this.withRequestTimeout(
+      (requestSignal) =>
+        this.performRequest<T>(method, path, body, credentials, requestSignal),
+      signal,
+    ).then((result) => {
+      if (!result.ok) {
+        const error = errorPayload(result.data);
+        throw new ApiRequestError(
+          result.status,
+          error.detail,
+          error.code,
+          result.data,
+        );
+      }
+      return result.data;
+    });
   }
 
   /** Execute with the same auth/retry behavior but preserve non-2xx payloads. */
@@ -172,14 +193,59 @@ export class ApiClient {
     signal?: AbortSignal,
     credentials: RequestCredentials = this.options.credentials ?? "omit",
   ): Promise<ApiResponse<T>> {
-    return this.performRequest<T>(
-      method,
-      path,
-      body,
-      credentials,
+    return this.withRequestTimeout(
+      (requestSignal) =>
+        this.performRequest<T>(
+          method,
+          path,
+          body,
+          credentials,
+          requestSignal,
+          true,
+        ),
       signal,
-      true,
     );
+  }
+
+  /** Settle even if a native fetch/body reader fails to react to abort. */
+  private async withRequestTimeout<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        const abort = (reason: unknown) => {
+          reject(reason);
+          controller.abort(reason);
+        };
+        if (signal) {
+          onAbort = () => abort(abortReason(signal));
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+        timer = setTimeout(
+          () =>
+            abort(
+              new ApiRequestError(
+                0,
+                "The server request timed out. Check your connection and retry.",
+                "timeout",
+              ),
+            ),
+          this.requestTimeoutMs,
+        );
+        operation(controller.signal).then(resolve, reject);
+      });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   get<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -242,6 +308,7 @@ export class ApiClient {
       initialContext,
       credentials,
     );
+    assertNotAborted(signal);
     if (initialResponse.status !== 401 || authEndpoint) {
       return this.toApiResponse<T>(initialResponse);
     }
@@ -268,6 +335,7 @@ export class ApiClient {
     }
 
     const outcome = await this.refresh(initialContext);
+    assertNotAborted(signal);
     if (preserveHttpErrors && outcome.kind !== "refreshed") {
       return this.toApiResponse<T>(initialResponse);
     }
@@ -318,47 +386,55 @@ export class ApiClient {
     if (this.rejectedRefreshes.has(key))
       return { kind: "rejected", status: 401 };
 
-    const flight = (async (): Promise<RefreshOutcome> => {
-      try {
-        const beforeRefresh = this.getContext();
-        if (!this.sameScope(context, beforeRefresh))
-          return { kind: "unavailable" };
-        const response = await this.fetchImpl(
-          `${context.baseUrl}/auth/refresh/`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ refresh_token: context.refreshToken }),
-            credentials: this.options.credentials ?? "omit",
-          },
-        );
-        if (response.status === 401 || response.status === 403) {
-          this.rejectedRefreshes.add(key);
-          return { kind: "rejected", status: response.status };
-        }
-        if (!response.ok) return { kind: "unavailable" };
-        const tokens = (await response.json()) as TokenPair;
-        if (!tokens?.access_token || !tokens?.refresh_token)
-          return { kind: "unavailable" };
-        const current = this.getContext();
-        if (!this.sameScope(context, current)) return { kind: "unavailable" };
+    // Refresh is shared by REST and realtime. Give it its own deadline so a
+    // stalled refresh cannot pin the single-flight entry for every future load.
+    const flight = this.withRequestTimeout(
+      async (signal): Promise<RefreshOutcome> => {
+        try {
+          const beforeRefresh = this.getContext();
+          if (!this.sameScope(context, beforeRefresh))
+            return { kind: "unavailable" };
+          const response = await this.fetchImpl(
+            `${context.baseUrl}/auth/refresh/`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ refresh_token: context.refreshToken }),
+              credentials: this.options.credentials ?? "omit",
+              signal,
+            },
+          );
+          assertNotAborted(signal);
+          if (response.status === 401 || response.status === 403) {
+            this.rejectedRefreshes.add(key);
+            return { kind: "rejected", status: response.status };
+          }
+          if (!response.ok) return { kind: "unavailable" };
+          const tokens = (await response.json()) as TokenPair;
+          assertNotAborted(signal);
+          if (!tokens?.access_token || !tokens?.refresh_token)
+            return { kind: "unavailable" };
+          const current = this.getContext();
+          if (!this.sameScope(context, current)) return { kind: "unavailable" };
 
-        const beforeSet = this.getContext();
-        if (!this.sameScope(context, beforeSet)) return { kind: "unavailable" };
-        await this.options.setTokens(tokens);
-        const afterSet = this.getContext();
-        if (
-          afterSet.baseUrl !== context.baseUrl ||
-          afterSet.organizationId !== context.organizationId ||
-          afterSet.refreshToken !== tokens.refresh_token
-        ) {
+          const beforeSet = this.getContext();
+          if (!this.sameScope(context, beforeSet))
+            return { kind: "unavailable" };
+          await this.options.setTokens(tokens);
+          const afterSet = this.getContext();
+          if (
+            afterSet.baseUrl !== context.baseUrl ||
+            afterSet.organizationId !== context.organizationId ||
+            afterSet.refreshToken !== tokens.refresh_token
+          ) {
+            return { kind: "unavailable" };
+          }
+          return { kind: "refreshed", tokens };
+        } catch {
           return { kind: "unavailable" };
         }
-        return { kind: "refreshed", tokens };
-      } catch {
-        return { kind: "unavailable" };
-      }
-    })();
+      },
+    ).catch((): RefreshUnavailable => ({ kind: "unavailable" }));
     this.refreshFlights.set(key, flight);
     try {
       return await flight;

@@ -662,6 +662,65 @@ it("keeps the composer mounted through initial loading, empty and existing chats
   tree.unmount();
 });
 
+it.each(["success", "failure"])(
+  "settles initial loading when a background refresh overtakes it with %s",
+  async (outcome) => {
+    const client = mockClient();
+    let finishInitial!: (value: Workspace[]) => void;
+    client.workspaces.list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishInitial = resolve;
+        }),
+    );
+    const value = sessionValue(client);
+    mockUseSession.mockReturnValue(value as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+      "Loading chat",
+    );
+    if (outcome === "failure")
+      client.workspaces.list.mockRejectedValueOnce(new Error("Offline"));
+
+    const calls = value.registerForegroundRefresh.mock.calls;
+    const foreground = calls[calls.length - 1]?.[0] as () => Promise<void>;
+    await act(async () => {
+      await foreground();
+    });
+    expect(screen.getByTestId("transcript-state")).not.toHaveTextContent(
+      "Loading chat",
+    );
+    if (outcome === "success") {
+      expect(screen.getByTestId("composer-state")).toHaveTextContent(
+        "Ask OpenCuria|ready",
+      );
+    } else {
+      expect(screen.getByText("Offline")).toBeTruthy();
+      fireEvent.press(screen.getByText("Retry"));
+      await waitFor(() =>
+        expect(screen.getByTestId("composer-state")).toHaveTextContent(
+          "Ask OpenCuria|ready",
+        ),
+      );
+    }
+
+    await act(async () => {
+      finishInitial([]);
+    });
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    );
+    expect(screen.getByTestId("transcript-state")).not.toHaveTextContent(
+      "Loading chat",
+    );
+    tree.unmount();
+  },
+);
+
 it("keeps the composer mounted when switching workspaces", async () => {
   const client = mockClient();
   client.workspaces.list.mockResolvedValue([
