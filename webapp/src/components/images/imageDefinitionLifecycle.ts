@@ -21,13 +21,6 @@ const BUILD_POLLING_STATUSES = new Set(['pending', 'building', 'pending_deletion
 
 const HIDDEN_DEFINITION_STATUSES = new Set(['deleted'])
 
-const WORKSPACE_HIDDEN_DEFINITION_STATUSES = new Set([
-  'deleted',
-  'pending_deletion',
-  'deleting',
-  'delete_failed',
-])
-
 export type RunnerBuildActionId =
   | 'build'
   | 'rebuild'
@@ -74,12 +67,8 @@ export function buildNeedsPolling(status: string | undefined): boolean {
   return BUILD_POLLING_STATUSES.has(status || '')
 }
 
-export function isDefinitionSelectableForWorkspace(definition: {
-  is_active: boolean
-  status: string
-}): boolean {
-  return definition.is_active && !WORKSPACE_HIDDEN_DEFINITION_STATUSES.has(definition.status)
-}
+// Shared with the mobile app's workspace creation.
+export { isDefinitionSelectableForWorkspace } from '@opencuria/chat-core/workspaceCreation'
 
 export function formatRunnerBuildSummary(summary?: ImageDefinitionBuildSummary | null): string {
   const counts = summary ?? EMPTY_BUILD_SUMMARY

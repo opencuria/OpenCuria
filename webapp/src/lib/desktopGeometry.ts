@@ -1,5 +1,9 @@
-export const DEFAULT_DESKTOP_WIDTH = 1920
-export const DEFAULT_DESKTOP_HEIGHT = 1080
+import {
+  DEFAULT_DESKTOP_HEIGHT,
+  DEFAULT_DESKTOP_WIDTH,
+} from '@opencuria/chat-core/workspaceCreation'
+
+export { DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH }
 
 export function workspaceDesktopSize(
   workspace?: {

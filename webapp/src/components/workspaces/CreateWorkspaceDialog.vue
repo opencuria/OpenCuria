@@ -29,20 +29,20 @@ import {
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { useImageStore } from '@/stores/images'
-import { isDefinitionSelectableForWorkspace } from '@/components/images/imageDefinitionLifecycle'
+import {
+  areQemuResourcesValid,
+  compatibleRunners,
+  defaultWorkspaceImageOption,
+  definitionArtifactForRunner,
+  fitQemuResources,
+  qemuResourceLimits,
+  workspaceImageOptions,
+  type WorkspaceImageOption,
+} from '@opencuria/chat-core/workspaceCreation'
 import { X } from '@lucide/vue'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
 
-type SelectableImageKind = 'definition' | 'captured'
-
-interface SelectableImageOption {
-  value: string
-  kind: SelectableImageKind
-  label: string
-  imageArtifact?: ImageArtifact
-  capturedImageId?: string
-  runnerBuilds?: RunnerImageBuild[]
-}
+type SelectableImageOption = WorkspaceImageOption<RunnerImageBuild, ImageArtifact>
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
@@ -121,44 +121,24 @@ watch(
   { immediate: true },
 )
 
+const groupedImageOptions = computed(() =>
+  workspaceImageOptions<RunnerImageBuild, ImageArtifact>({
+    definitions: imageStore.imageDefinitions,
+    buildsByDefinition: imageStore.runnerBuildsByDefinition,
+    capturedImages: imageStore.capturedImages,
+    runners: runnerStore.runners,
+  }),
+)
+
 const imageOptions = computed(() => {
-  const definitionOptions: SelectableImageOption[] = []
-  for (const definition of imageStore.imageDefinitions) {
-    if (!isDefinitionSelectableForWorkspace(definition)) continue
-    const activeBuilds = (imageStore.runnerBuildsByDefinition[definition.id] || []).filter(
-      (build) => {
-        if (build.status !== 'active' || !build.image_artifact_id) return false
-        return runnerStore.onlineRunners.some((runner) => runner.id === build.runner_id)
-      },
-    )
-
-    if (!activeBuilds.length) continue
-
-    definitionOptions.push({
-      value: `definition:${definition.id}`,
-      kind: 'definition',
-      label: `● ${definition.name}`,
-      runnerBuilds: activeBuilds,
-    })
-  }
-
-  const capturedOptions: SelectableImageOption[] = imageStore.capturedImages.flatMap((image) => {
-    const artifact = image.versions.find((version) => version.id === image.latest_id)
-    if (!artifact || image.status !== 'active') return []
-    const sourceRunner = artifact.source_runner_id
-      ? runnerStore.runners.find((runner) => runner.id === artifact.source_runner_id)
-      : null
-    if (artifact.status !== 'ready' || !image.runner_online || !sourceRunner) return []
-    return [
-      {
-        value: `captured:${artifact.id}`,
-        kind: 'captured' as const,
-        label: `○ ${image.name} · v${image.latest_version}`,
-        imageArtifact: artifact,
-        capturedImageId: image.id,
-      },
-    ]
-  })
+  const definitionOptions = groupedImageOptions.value.definitions.map((option) => ({
+    ...option,
+    label: `● ${option.label}`,
+  }))
+  const capturedOptions = groupedImageOptions.value.captured.map((option) => ({
+    ...option,
+    label: `○ ${option.label}`,
+  }))
 
   const options = [
     ...(definitionOptions.length
@@ -191,44 +171,18 @@ const selectedImageOption = computed<SelectableImageOption | null>(() => {
 const isFromImage = computed(() => !!selectedImageOption.value)
 const isCapturedClone = computed(() => selectedImageOption.value?.kind === 'captured')
 
-const compatibleRunnerOptions = computed(() => {
-  const option = selectedImageOption.value
-  if (!option) return []
+const compatibleRunnerOptions = computed(() =>
+  compatibleRunners(selectedImageOption.value, runnerStore.runners).map((runner) => ({
+    value: runner.id,
+    label: runner.name || runner.id.slice(0, 8),
+  })),
+)
 
-  if (option.kind === 'definition') {
-    return (option.runnerBuilds || [])
-      .map((build) => {
-        const runner = runnerStore.onlineRunners.find((entry) => entry.id === build.runner_id)
-        if (!runner) return null
-        return {
-          value: runner.id,
-          label: runner.name || runner.id.slice(0, 8),
-        }
-      })
-      .filter((entry): entry is { value: string; label: string } => entry !== null)
-  }
-
-  if (option.imageArtifact?.source_runner_id) {
-    const runner = runnerStore.runners.find(
-      (entry) => entry.id === option.imageArtifact?.source_runner_id,
-    )
-    if (!runner || runner.status !== 'online') return []
-    return [{ value: runner.id, label: runner.name || runner.id.slice(0, 8) }]
-  }
-
-  return []
-})
-
-const selectedRunnerBuild = computed(() => {
-  const option = selectedImageOption.value
-  if (!option || option.kind !== 'definition') return null
-  const selectedRunnerId = runnerId.value || compatibleRunnerOptions.value[0]?.value
-  if (!selectedRunnerId) return null
-  return (option.runnerBuilds || []).find((build) => build.runner_id === selectedRunnerId) ?? null
-})
-
-const selectedDefinitionArtifactId = computed<string | null>(
-  () => selectedRunnerBuild.value?.image_artifact_id || null,
+const selectedDefinitionArtifactId = computed<string | null>(() =>
+  definitionArtifactForRunner(
+    selectedImageOption.value,
+    runnerId.value || compatibleRunnerOptions.value[0]?.value,
+  ),
 )
 
 watch(selectedImageOption, (option, previousOption) => {
@@ -257,15 +211,7 @@ watch(
   [() => open.value, imageOptions],
   () => {
     if (!open.value) return
-    const firstSelectable = imageOptions.value.find(
-      (option) =>
-        !option.value.startsWith('__group_') &&
-        (option as SelectableImageOption).kind === 'definition',
-    )
-    const fallbackSelectable = imageOptions.value.find(
-      (option) => !option.value.startsWith('__group_'),
-    )
-    const nextDefault = firstSelectable ?? fallbackSelectable
+    const nextDefault = defaultWorkspaceImageOption(groupedImageOptions.value)
     if (!nextDefault) {
       if (!restoringDraftId.value) selectedImageValue.value = ''
       return
@@ -313,33 +259,7 @@ const advancedRunnerOptions = computed(() => {
   }))
 })
 
-const qemuLimits = computed(() => {
-  const runner = effectiveQemuRunner.value
-  if (!runner) {
-    return {
-      minVcpus: 1,
-      maxVcpus: 8,
-      defaultVcpus: 2,
-      minMemoryMb: 1024,
-      maxMemoryMb: 16384,
-      defaultMemoryMb: 4096,
-      minDiskSizeGb: 20,
-      maxDiskSizeGb: 200,
-      defaultDiskSizeGb: 50,
-    }
-  }
-  return {
-    minVcpus: runner.qemu_min_vcpus,
-    maxVcpus: runner.qemu_max_vcpus,
-    defaultVcpus: runner.qemu_default_vcpus,
-    minMemoryMb: runner.qemu_min_memory_mb,
-    maxMemoryMb: runner.qemu_max_memory_mb,
-    defaultMemoryMb: runner.qemu_default_memory_mb,
-    minDiskSizeGb: runner.qemu_min_disk_size_gb,
-    maxDiskSizeGb: runner.qemu_max_disk_size_gb,
-    defaultDiskSizeGb: runner.qemu_default_disk_size_gb,
-  }
-})
+const qemuLimits = computed(() => qemuResourceLimits(effectiveQemuRunner.value))
 
 watch(
   [() => open.value, qemuLimits, selectedImageValue],
@@ -349,40 +269,19 @@ watch(
     // A value still at the previous defaults was never customized, so it
     // follows the effective runner's defaults instead of a stale fallback.
     const previousLimits = previous?.[1] ?? limits
-    const clampOrDefault = (
-      value: number,
-      min: number,
-      max: number,
-      previousDefault: number,
-      fallback: number,
-    ) => {
-      if (Number.isNaN(value) || value === previousDefault) return fallback
-      if (value < min || value > max) return fallback
-      return value
-    }
-
     if (restorationPending.value) return
-    qemuVcpus.value = clampOrDefault(
-      qemuVcpus.value,
-      limits.minVcpus,
-      limits.maxVcpus,
-      previousLimits.defaultVcpus,
-      limits.defaultVcpus,
+    const fitted = fitQemuResources(
+      {
+        vcpus: qemuVcpus.value,
+        memoryMb: qemuMemoryMb.value,
+        diskSizeGb: qemuDiskSizeGb.value,
+      },
+      previousLimits,
+      limits,
     )
-    qemuMemoryMb.value = clampOrDefault(
-      qemuMemoryMb.value,
-      limits.minMemoryMb,
-      limits.maxMemoryMb,
-      previousLimits.defaultMemoryMb,
-      limits.defaultMemoryMb,
-    )
-    qemuDiskSizeGb.value = clampOrDefault(
-      qemuDiskSizeGb.value,
-      limits.minDiskSizeGb,
-      limits.maxDiskSizeGb,
-      previousLimits.defaultDiskSizeGb,
-      limits.defaultDiskSizeGb,
-    )
+    qemuVcpus.value = fitted.vcpus
+    qemuMemoryMb.value = fitted.memoryMb
+    qemuDiskSizeGb.value = fitted.diskSizeGb
   },
   { immediate: true },
 )
@@ -415,14 +314,14 @@ async function handleSubmit(): Promise<void> {
 
   let success: boolean
   let createdWorkspaceId: string | null = null
-  if (isCapturedClone.value) {
+  if (selectedOption.kind === 'captured') {
     const data = {
       name: name.value.trim(),
       credential_ids: selectedCredentialIds.value,
       plugin_ids: selectedPluginIds.value,
     }
     const workspaceId = await imageStore.createWorkspaceFromCapturedImage(
-      selectedOption.capturedImageId!,
+      selectedOption.capturedImageId,
       data,
     )
     success = !!workspaceId
@@ -430,10 +329,7 @@ async function handleSubmit(): Promise<void> {
   } else {
     addRepo()
 
-    const resolvedImageId =
-      selectedOption.kind === 'definition'
-        ? selectedDefinitionArtifactId.value
-        : selectedOption.imageArtifact?.id
+    const resolvedImageId = selectedDefinitionArtifactId.value
 
     if (!resolvedImageId) {
       submitting.value = false
@@ -512,7 +408,10 @@ async function navigateToCredentials(serviceId?: string, reconnectId?: string): 
     qemuMemoryMb: qemuMemoryMb.value,
     qemuDiskSizeGb: qemuDiskSizeGb.value,
     imageValue: selectedImageValue.value,
-    imageArtifactId: selectedImageOption.value?.imageArtifact?.id,
+    imageArtifactId:
+      selectedImageOption.value?.kind === 'captured'
+        ? selectedImageOption.value.imageArtifact.id
+        : undefined,
   }
   const result = saveWorkspaceDraft(
     fields,
@@ -543,18 +442,14 @@ async function navigateToCredentials(serviceId?: string, reconnectId?: string): 
   })
 }
 
-const resourceSelectionValid = computed(() => {
-  if (isCapturedClone.value) return true
-  const limits = qemuLimits.value
-  return (
-    qemuVcpus.value >= limits.minVcpus &&
-    qemuVcpus.value <= limits.maxVcpus &&
-    qemuMemoryMb.value >= limits.minMemoryMb &&
-    qemuMemoryMb.value <= limits.maxMemoryMb &&
-    qemuDiskSizeGb.value >= limits.minDiskSizeGb &&
-    qemuDiskSizeGb.value <= limits.maxDiskSizeGb
-  )
-})
+const resourceSelectionValid = computed(
+  () =>
+    isCapturedClone.value ||
+    areQemuResourcesValid(
+      { vcpus: qemuVcpus.value, memoryMb: qemuMemoryMb.value, diskSizeGb: qemuDiskSizeGb.value },
+      qemuLimits.value,
+    ),
+)
 const isValid = computed(
   () =>
     name.value.trim().length > 0 &&

@@ -327,6 +327,15 @@ function mockClient() {
     deleteSession: jest.fn().mockResolvedValue(undefined),
   };
   return {
+    runners: { list: jest.fn().mockResolvedValue([]) },
+    plugins: { list: jest.fn().mockResolvedValue([]) },
+    credentials: { list: jest.fn().mockResolvedValue([]) },
+    images: {
+      listCaptured: jest.fn().mockResolvedValue([]),
+      listDefinitions: jest.fn().mockResolvedValue([]),
+      listRunnerBuilds: jest.fn().mockResolvedValue([]),
+      createWorkspace: jest.fn(),
+    },
     api: { baseUrl: "https://curia.example/api/v1" },
     realtime: {
       isConnected: true,

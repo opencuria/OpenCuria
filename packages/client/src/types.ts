@@ -76,7 +76,29 @@ export interface AuthUser {
   organizations: Organization[];
 }
 
-/** Stable subset of a workspace useful to mobile clients. */
+/** Last observed filesystem usage inside a workspace (`/workspace`). */
+export interface WorkspaceDiskUsage {
+  used_bytes: number;
+  free_bytes: number;
+  total_bytes: number;
+  observed_at: string;
+}
+
+/** The image version a workspace is (or is being) based on. */
+export interface ImageVersionRef {
+  id: string;
+  line_kind: "captured" | "definition" | null;
+  line_id: string | null;
+  name: string;
+  version: number | null;
+  message: string;
+  status: string;
+  latest_id: string | null;
+  latest_version: number | null;
+  update_available: boolean;
+}
+
+/** Workspace as returned by `GET /workspaces/`; newer fields are optional for older servers. */
 export interface Workspace {
   id: string;
   name: string;
@@ -87,7 +109,209 @@ export interface Workspace {
   has_active_session: boolean;
   created_at: string;
   updated_at: string;
+  intervention_required?: boolean;
+  lifecycle_diagnostic?: string;
+  qemu_vcpus?: number | null;
+  qemu_memory_mb?: number | null;
+  qemu_disk_size_gb?: number | null;
+  disk_usage?: WorkspaceDiskUsage | null;
+  desktop_width?: number;
+  desktop_height?: number;
+  last_activity_at?: string;
+  auto_stop_at?: string | null;
+  delete_last_error?: string;
+  credential_ids?: string[];
+  plugin_ids?: string[];
+  credentials_present?: boolean;
+  base_image_name?: string | null;
+  base_image?: ImageVersionRef | null;
+  pending_base_image?: ImageVersionRef | null;
+  repos?: string[];
   [key: string]: unknown;
+}
+
+export interface WorkspaceCreateInput {
+  name: string;
+  /** Image artifact to start from; sent as `image_artifact_id`. */
+  image_id: string;
+  repos?: string[];
+  credential_ids?: string[];
+  plugin_ids?: string[];
+  runner_id?: string | null;
+  qemu_vcpus?: number;
+  qemu_memory_mb?: number;
+  qemu_disk_size_gb?: number;
+  desktop_width?: number;
+  desktop_height?: number;
+}
+
+export interface WorkspaceCreateResult {
+  workspace_id: string;
+  task_id: string;
+  status: string;
+  plugin_ids: string[];
+}
+
+export interface WorkspaceUpdateInput {
+  name?: string;
+  credential_ids?: string[];
+  plugin_ids?: string[];
+  qemu_vcpus?: number;
+  qemu_memory_mb?: number;
+  qemu_disk_size_gb?: number;
+  desktop_width?: number;
+  desktop_height?: number;
+}
+
+/** PATCH result; credential sync may still be pending on the runner. */
+export interface WorkspaceUpdateResult {
+  id: string;
+  name: string;
+  updated_at: string;
+  active_operation: string | null;
+  credential_ids: string[];
+  plugin_ids: string[];
+  credentials_present: boolean;
+  credential_sync_status: "synced" | "pending" | "failed" | "not_required";
+  credential_sync_detail?: string | null;
+  qemu_vcpus: number | null;
+  qemu_memory_mb: number | null;
+  qemu_disk_size_gb: number | null;
+  desktop_width: number;
+  desktop_height: number;
+}
+
+export interface WorkspaceTask {
+  id: string;
+  workspace_id: string | null;
+  type: string;
+  status: string;
+  error: string;
+}
+
+export interface WorkspaceRecreateResult {
+  workspace_id: string;
+  task_id: string;
+  active_operation: string | null;
+}
+
+/** Capture as a new image (`name`) or as the next version of `captured_image_id`. */
+export interface ImageCaptureInput {
+  name?: string;
+  captured_image_id?: string | null;
+  message?: string;
+}
+
+export interface ImageCaptureResult {
+  task_id: string;
+  workspace_id: string;
+}
+
+export interface Runner {
+  id: string;
+  name: string;
+  status: string;
+  qemu_min_vcpus: number;
+  qemu_max_vcpus: number;
+  qemu_default_vcpus: number;
+  qemu_min_memory_mb: number;
+  qemu_max_memory_mb: number;
+  qemu_default_memory_mb: number;
+  qemu_min_disk_size_gb: number;
+  qemu_max_disk_size_gb: number;
+  qemu_default_disk_size_gb: number;
+  [key: string]: unknown;
+}
+
+export interface PluginCredentialRequirement {
+  id: string;
+  key: string;
+  description: string;
+  required: boolean;
+  service_id: string;
+  service_name: string;
+  service_slug: string;
+  credential_type: string;
+}
+
+export interface Plugin {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  enabled: boolean;
+  published: boolean;
+  organization_id: string | null;
+  is_global: boolean;
+  org_enabled: boolean;
+  credential_requirements: PluginCredentialRequirement[];
+  [key: string]: unknown;
+}
+
+/** Credential metadata only; secrets never leave the server. */
+export interface Credential {
+  id: string;
+  name: string;
+  scope: "personal" | "organization";
+  service_id: string;
+  service_name: string;
+  service_slug: string;
+  credential_type: string;
+  created_by_id: number;
+  oauth_connected: boolean;
+  [key: string]: unknown;
+}
+
+export interface ImageArtifact {
+  id: string;
+  name: string;
+  status: string;
+  artifact_kind: "built" | "captured";
+  source_runner_id?: string | null;
+  captured_image_id?: string | null;
+  version?: number | null;
+  message?: string;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+/** A versioned captured image with all of its versions (newest first). */
+export interface CapturedImage {
+  id: string;
+  name: string;
+  status: string;
+  runner_id: string;
+  runner_online: boolean;
+  latest_id: string | null;
+  latest_version: number | null;
+  workspace_count: number;
+  versions: ImageArtifact[];
+  [key: string]: unknown;
+}
+
+export interface ImageDefinition {
+  id: string;
+  name: string;
+  description: string;
+  is_active: boolean;
+  status: string;
+  [key: string]: unknown;
+}
+
+export interface RunnerImageBuild {
+  id: string;
+  image_definition_id: string;
+  runner_id: string;
+  image_artifact_id?: string | null;
+  status: string;
+  [key: string]: unknown;
+}
+
+/** Workspace from the latest version of a captured image; runner and resources come from it. */
+export interface CapturedImageWorkspaceInput {
+  name?: string;
+  credential_ids?: string[];
+  plugin_ids?: string[];
 }
 
 export interface Skill {

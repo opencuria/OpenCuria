@@ -5,7 +5,11 @@ import { Button } from '@/components/ui/button'
 import { useAuthStore } from '@/stores/auth'
 import { useCredentialStore } from '@/stores/credentials'
 import { usePluginStore } from '@/stores/plugins'
-import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
+import {
+  evaluateWorkspacePluginSelection,
+  isCredentialConnected,
+  toggleWorkspaceCredentialSelection,
+} from '@/lib/workspaceCredentialSelection'
 import type { Credential, Plugin } from '@/types'
 
 const props = withDefaults(
@@ -31,19 +35,17 @@ const plugins = usePluginStore()
 const catalogReady = ref(false)
 const catalogError = ref<string | null>(null)
 
-const activeCatalog = computed(() =>
-  plugins.plugins.filter(
-    (plugin) =>
-      plugin.enabled &&
-      plugin.published &&
-      plugin.org_enabled &&
-      (plugin.organization_id === null ||
-        plugin.organization_id === authStore.activeOrganizationId),
-  ),
+const selection = computed(() =>
+  evaluateWorkspacePluginSelection({
+    plugins: plugins.plugins,
+    credentials: credentials.credentials,
+    organizationId: authStore.activeOrganizationId,
+    pluginIds: props.pluginIds,
+    credentialIds: props.credentialIds,
+  }),
 )
-const unavailableSelected = computed(() =>
-  props.pluginIds.filter((id) => !activeCatalog.value.some((p) => p.id === id)),
-)
+const activeCatalog = computed(() => selection.value.catalog)
+const unavailableSelected = computed(() => selection.value.unavailablePluginIds)
 const selectablePlugins = computed(() => [
   ...activeCatalog.value,
   ...unavailableSelected.value.map(
@@ -66,47 +68,12 @@ const selectablePlugins = computed(() => [
       }) as Plugin,
   ),
 ])
-const selectedCredentialRecords = computed(() =>
-  credentials.credentials.filter((item) => props.credentialIds.includes(item.id)),
-)
-const unavailableCredentialIds = computed(() =>
-  props.credentialIds.filter(
-    (id) => !credentials.credentials.some((credential) => credential.id === id),
-  ),
-)
-const duplicateSelectedServices = computed(() => {
-  const counts = new Map<string, number>()
-  for (const credential of selectedCredentialRecords.value) {
-    counts.set(credential.service_id, (counts.get(credential.service_id) ?? 0) + 1)
-  }
-  return [...counts.entries()].filter(([, count]) => count > 1).map(([serviceId]) => serviceId)
-})
-const requirementsForSelected = computed(() =>
-  activeCatalog.value
-    .filter((plugin) => props.pluginIds.includes(plugin.id))
-    .flatMap((plugin) =>
-      plugin.credential_requirements.map((requirement) => ({ plugin, requirement })),
-    ),
-)
-const missingRequired = computed(() =>
-  requirementsForSelected.value.filter(
-    ({ requirement }) =>
-      requirement.required &&
-      !selectedCredentialRecords.value.some(
-        (credential) =>
-          credential.service_id === requirement.service_id &&
-          (credential.credential_type !== 'mcp_oauth' || credential.oauth_connected),
-      ),
-  ),
-)
+const selectedCredentialRecords = computed(() => selection.value.selectedCredentials)
+const unavailableCredentialIds = computed(() => selection.value.unavailableCredentialIds)
+const duplicateSelectedServices = computed(() => selection.value.duplicateServiceIds)
+const missingRequired = computed(() => selection.value.missingRequired)
 const readyToSave = computed(
-  () =>
-    (!props.active || catalogReady.value) &&
-    !catalogError.value &&
-    missingRequired.value.length === 0 &&
-    unavailableSelected.value.length === 0 &&
-    unavailableCredentialIds.value.length === 0 &&
-    duplicateSelectedServices.value.length === 0,
+  () => (!props.active || catalogReady.value) && !catalogError.value && selection.value.valid,
 )
 
 async function loadCatalog(): Promise<void> {
@@ -169,7 +136,7 @@ function toggleCredential(credential: Credential): void {
   )
 }
 function credentialConnected(credential: Credential): boolean {
-  return credential.credential_type !== 'mcp_oauth' || credential.oauth_connected
+  return isCredentialConnected(credential)
 }
 function canManageOAuth(credential: Credential): boolean {
   return credential.scope === 'personal'

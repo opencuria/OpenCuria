@@ -613,6 +613,75 @@ describe("REST endpoint wrappers", () => {
     });
     expect(JSON.parse(calls[6].body!)).toEqual({ prompt: "Use pnpm" });
   });
+
+  it("manages workspaces, images and their catalogs over the webapp's REST contract", async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          method: init?.method ?? "GET",
+          body: init?.body as string | undefined,
+        });
+        return jsonResponse({});
+      },
+    ) as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch);
+    await client.workspaces.create({
+      name: "demo",
+      image_id: "artifact",
+      runner_id: "runner",
+      qemu_vcpus: 4,
+    });
+    await client.workspaces.update("ws/1", { name: "renamed" });
+    await client.workspaces.stop("ws/1");
+    await client.workspaces.resume("ws/1");
+    await client.workspaces.recreate("ws/1", "version-2");
+    await client.workspaces.captureImage("ws/1", {
+      captured_image_id: "image",
+      message: "Added Playwright",
+    });
+    await client.workspaces.delete("ws/1");
+    await client.runners.list();
+    await client.plugins.list();
+    await client.credentials.list();
+    await client.images.listCaptured();
+    await client.images.listDefinitions();
+    await client.images.listRunnerBuilds("def 1");
+    await client.images.createWorkspace("image", { name: "clone" });
+    expect(
+      calls.map(({ url, method }) => [
+        url.replace("https://api.example/api/v1", ""),
+        method,
+      ]),
+    ).toEqual([
+      ["/workspaces/", "POST"],
+      ["/workspaces/ws%2F1/", "PATCH"],
+      ["/workspaces/ws%2F1/stop/", "POST"],
+      ["/workspaces/ws%2F1/resume/", "POST"],
+      ["/workspaces/ws%2F1/recreate/", "POST"],
+      ["/workspaces/ws%2F1/image-artifacts/", "POST"],
+      ["/workspaces/ws%2F1/", "DELETE"],
+      ["/runners/", "GET"],
+      ["/plugins/", "GET"],
+      ["/credentials/", "GET"],
+      ["/captured-images/", "GET"],
+      ["/image-definitions/", "GET"],
+      ["/image-definitions/def%201/runner-builds/", "GET"],
+      ["/captured-images/image/workspaces/", "POST"],
+    ]);
+    expect(JSON.parse(calls[0].body!)).toEqual({
+      name: "demo",
+      image_artifact_id: "artifact",
+      runner_id: "runner",
+      qemu_vcpus: 4,
+    });
+    expect(JSON.parse(calls[4].body!)).toEqual({ image_id: "version-2" });
+    expect(JSON.parse(calls[5].body!)).toEqual({
+      captured_image_id: "image",
+      message: "Added Playwright",
+    });
+  });
 });
 
 describe("shared harness actions", () => {

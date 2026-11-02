@@ -21,7 +21,16 @@ import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { type Workspace, type WorkspaceUpdateIn } from '@/types'
-import { DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH } from '@/lib/desktopGeometry'
+import {
+  DEFAULT_DESKTOP_HEIGHT,
+  DEFAULT_DESKTOP_WIDTH,
+  UNLISTED_RUNNER_QEMU_LIMITS,
+  areQemuResourcesValid,
+  isDesktopSizeValid,
+  qemuResourceLimits,
+  workspaceSettingsForm,
+  workspaceUpdatePayload,
+} from '@opencuria/chat-core/workspaceCreation'
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from '@/lib/workspaceDraft'
 import type { WorkspaceDraftFields } from '@/lib/workspaceDraft'
 
@@ -85,43 +94,27 @@ function handleOpenAutoFocus(event: Event): void {
   setTimeout(settle, 2000)
 }
 const btnSize = computed(() => (props.size === 'sm' ? ('icon-sm' as const) : ('icon' as const)))
-const qemuDefaults = computed(() => {
-  const runner = runnerStore.runnerById(props.workspace.runner_id)
-  return {
-    vcpus: runner?.qemu_default_vcpus ?? 2,
-    memoryMb: runner?.qemu_default_memory_mb ?? 4096,
-    diskSizeGb: runner?.qemu_default_disk_size_gb ?? 50,
-  }
-})
-const qemuLimits = computed(() => {
-  const runner = runnerStore.runnerById(props.workspace.runner_id)
-  return runner
-    ? {
-        minVcpus: runner.qemu_min_vcpus,
-        maxVcpus: runner.qemu_max_vcpus,
-        minMemoryMb: runner.qemu_min_memory_mb,
-        maxMemoryMb: runner.qemu_max_memory_mb,
-        minDiskSizeGb: runner.qemu_min_disk_size_gb,
-        maxDiskSizeGb: runner.qemu_max_disk_size_gb,
-      }
-    : {
-        minVcpus: 1,
-        maxVcpus: 64,
-        minMemoryMb: 512,
-        maxMemoryMb: 262144,
-        minDiskSizeGb: 10,
-        maxDiskSizeGb: 2000,
-      }
-})
+const qemuLimits = computed(() =>
+  qemuResourceLimits(
+    runnerStore.runnerById(props.workspace.runner_id),
+    UNLISTED_RUNNER_QEMU_LIMITS,
+  ),
+)
+const qemuDefaults = computed(() => ({
+  vcpus: qemuLimits.value.defaultVcpus,
+  memoryMb: qemuLimits.value.defaultMemoryMb,
+  diskSizeGb: qemuLimits.value.defaultDiskSizeGb,
+}))
 function syncForm(workspace: Workspace): void {
-  name.value = workspace.name
-  selectedCredentialIds.value = [...workspace.credential_ids]
-  selectedPluginIds.value = [...workspace.plugin_ids]
-  qemuVcpus.value = workspace.qemu_vcpus ?? qemuDefaults.value.vcpus
-  qemuMemoryMb.value = workspace.qemu_memory_mb ?? qemuDefaults.value.memoryMb
-  qemuDiskSizeGb.value = workspace.qemu_disk_size_gb ?? qemuDefaults.value.diskSizeGb
-  desktopWidth.value = workspace.desktop_width || DEFAULT_DESKTOP_WIDTH
-  desktopHeight.value = workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT
+  const form = workspaceSettingsForm(workspace, qemuLimits.value)
+  name.value = form.name
+  selectedCredentialIds.value = form.credentialIds
+  selectedPluginIds.value = form.pluginIds
+  qemuVcpus.value = form.vcpus
+  qemuMemoryMb.value = form.memoryMb
+  qemuDiskSizeGb.value = form.diskSizeGb
+  desktopWidth.value = form.desktopWidth
+  desktopHeight.value = form.desktopHeight
 }
 watch(
   () => props.workspace,
@@ -187,48 +180,29 @@ async function handleOpen(): Promise<void> {
     runnerStore.runners.length ? Promise.resolve() : runnerStore.fetchRunners(),
   ])
 }
-const resourceSelectionValid = computed(() => {
-  if (
-    ![
-      qemuVcpus.value,
-      qemuMemoryMb.value,
-      qemuDiskSizeGb.value,
-      desktopWidth.value,
-      desktopHeight.value,
-    ].every(Number.isInteger)
-  )
-    return false
-  const widthValid =
-    desktopWidth.value >= 800 && desktopWidth.value <= 3840 && desktopWidth.value % 2 === 0
-  const heightValid =
-    desktopHeight.value >= 600 && desktopHeight.value <= 2160 && desktopHeight.value % 2 === 0
-  if (!widthValid || !heightValid) return false
-  return (
-    qemuVcpus.value >= qemuLimits.value.minVcpus &&
-    qemuVcpus.value <= qemuLimits.value.maxVcpus &&
-    qemuMemoryMb.value >= qemuLimits.value.minMemoryMb &&
-    qemuMemoryMb.value <= qemuLimits.value.maxMemoryMb &&
-    qemuDiskSizeGb.value >= qemuLimits.value.minDiskSizeGb &&
-    qemuDiskSizeGb.value <= qemuLimits.value.maxDiskSizeGb
-  )
-})
+const resourceSelectionValid = computed(
+  () =>
+    isDesktopSizeValid(desktopWidth.value, desktopHeight.value) &&
+    areQemuResourcesValid(
+      { vcpus: qemuVcpus.value, memoryMb: qemuMemoryMb.value, diskSizeGb: qemuDiskSizeGb.value },
+      qemuLimits.value,
+    ),
+)
 function buildPayload(): WorkspaceUpdateIn {
-  const payload: WorkspaceUpdateIn = {
-    name: name.value.trim(),
-    credential_ids: [...selectedCredentialIds.value],
-    plugin_ids: [...selectedPluginIds.value],
-  }
-  if (qemuVcpus.value !== (props.workspace.qemu_vcpus ?? qemuDefaults.value.vcpus))
-    payload.qemu_vcpus = qemuVcpus.value
-  if (qemuMemoryMb.value !== (props.workspace.qemu_memory_mb ?? qemuDefaults.value.memoryMb))
-    payload.qemu_memory_mb = qemuMemoryMb.value
-  if (qemuDiskSizeGb.value !== (props.workspace.qemu_disk_size_gb ?? qemuDefaults.value.diskSizeGb))
-    payload.qemu_disk_size_gb = qemuDiskSizeGb.value
-  if (desktopWidth.value !== (props.workspace.desktop_width || DEFAULT_DESKTOP_WIDTH))
-    payload.desktop_width = desktopWidth.value
-  if (desktopHeight.value !== (props.workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT))
-    payload.desktop_height = desktopHeight.value
-  return payload
+  return workspaceUpdatePayload(
+    props.workspace,
+    {
+      name: name.value,
+      credentialIds: selectedCredentialIds.value,
+      pluginIds: selectedPluginIds.value,
+      vcpus: qemuVcpus.value,
+      memoryMb: qemuMemoryMb.value,
+      diskSizeGb: qemuDiskSizeGb.value,
+      desktopWidth: desktopWidth.value,
+      desktopHeight: desktopHeight.value,
+    },
+    qemuLimits.value,
+  )
 }
 async function handleSubmit(): Promise<void> {
   if (

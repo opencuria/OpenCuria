@@ -19,7 +19,7 @@ import type {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { isWorkspaceReadyForChat } from '@opencuria/chat-core/workspaceReadiness'
-import { isWorkspaceLifecycleBusy } from '@/lib/workspaceLifecycle'
+import { isWorkspaceLifecycleBusy, workspaceOperationLabel } from '@/lib/workspaceLifecycle'
 import { useNotificationStore } from './notifications'
 import { useImageStore } from './images'
 
@@ -216,42 +216,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
     if (workspace?.intervention_required) return 'Checking state'
-    if (
-      pendingCaptures.value[workspaceId] ||
-      workspace?.active_operation === WorkspaceOperation.CAPTURING_IMAGE
-    )
-      return 'Capturing'
-    if (workspace?.status === WorkspaceStatus.PENDING_DELETION) return 'Removal queued'
-    switch (workspace?.active_operation) {
-      case WorkspaceOperation.CREATING:
-        return 'Creating…'
-      case WorkspaceOperation.STARTING:
-        return 'Starting…'
-      case WorkspaceOperation.STOPPING:
-        return 'Stopping…'
-      case WorkspaceOperation.RESTARTING:
-        return 'Restarting…'
-      case WorkspaceOperation.REMOVING:
-        return 'Removing…'
-      case WorkspaceOperation.RESETTING:
-        return 'Resetting…'
-      case WorkspaceOperation.UPDATING:
-        return 'Updating…'
-      case WorkspaceOperation.SYNCHRONIZING_CREDENTIALS:
-        return 'Syncing credentials…'
-    }
+    if (pendingCaptures.value[workspaceId]) return 'Capturing'
+    const persisted = workspace ? workspaceOperationLabel(workspace) : null
+    if (persisted) return persisted
 
     const pending = pendingWorkspaceOperations.value[workspaceId]
-    if (!pending) {
-      switch (workspace?.status) {
-        case WorkspaceStatus.CREATING:
-          return 'Creating…'
-        case WorkspaceStatus.DELETING:
-          return 'Removing…'
-        default:
-          return null
-      }
-    }
+    if (!pending) return null
     switch (pending.operation) {
       case 'create':
         return 'Creating…'

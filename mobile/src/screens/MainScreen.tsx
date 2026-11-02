@@ -69,7 +69,6 @@ import { Drawer } from "../ui/Drawer";
 import { useChromeTopInset } from "../ui/chromeInset";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { WorkspaceSidebar } from "../components/WorkspaceSidebar";
-import { NativeList } from "../ui/NativeList";
 import { SegmentedControl } from "@expo/ui/community/segmented-control";
 import { NativePicker } from "../ui/selection";
 import { NativeTextField } from "../ui/NativeTextField";
@@ -81,6 +80,7 @@ import { setViewedNotificationSession } from "../notifications/native";
 import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
 import { FileViewerSheet, type FileViewerTarget } from "../tools/files";
+import { WorkspacesSheet } from "../workspaces/WorkspacesSheet";
 import { releaseGitControllers } from "../tools/git";
 import { releaseTerminalSessions } from "../tools/terminal";
 
@@ -164,7 +164,6 @@ export function MainScreen(): React.JSX.Element {
   const sendingRef = useRef(false);
   const workspaceRef = useRef<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
-  const [search, setSearch] = useState("");
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [skillIds, setSkillIds] = useState<string[]>([]);
@@ -888,7 +887,6 @@ export function MainScreen(): React.JSX.Element {
     setDraft("");
     setAttachments([]);
     setSkillIds([]);
-    setSearch("");
     setSheet(null);
     setError(null);
     const isReady = isWorkspaceReadyForChat(
@@ -1027,13 +1025,7 @@ export function MainScreen(): React.JSX.Element {
   };
 
   const chosenModels = modelsForEngine;
-  const visibleWorkspaces = workspaces.filter(
-    (item) => !HIDDEN.has(item.status),
-  );
   const profileTitle = user?.first_name?.trim() || user?.email || "Account";
-  const filteredWorkspaces = visibleWorkspaces.filter((item) =>
-    item.name.toLowerCase().includes(search.toLowerCase()),
-  );
   // A chat keeps its engine; only a new chat offers every engine's modes.
   const agentOptions: ModelSheetAgent[] = engines
     .filter((item) => !chat.activeSessionId || item.id === harness)
@@ -1104,7 +1096,6 @@ export function MainScreen(): React.JSX.Element {
       };
   const chatMenuAction = (id: string) => {
     if (id === "workspace") {
-      setSearch("");
       openSheet("workspaces");
     } else if (id === "rename" && chat.activeSession) {
       rename(chat.activeSession);
@@ -1149,10 +1140,7 @@ export function MainScreen(): React.JSX.Element {
             onMarkAllRead={() => {
               void markAllRead();
             }}
-            onAllWorkspaces={() => {
-              setSearch("");
-              setSheet("workspaces");
-            }}
+            onAllWorkspaces={() => setSheet("workspaces")}
             onConversationAction={(row, action) => {
               if (action === "rename") rename(row);
               else if (action === "read") void markConversation(row);
@@ -1346,45 +1334,18 @@ export function MainScreen(): React.JSX.Element {
         />
       ) : null}
 
-      <NativeModal
+      <WorkspacesSheet
         visible={sheet === "workspaces"}
-        onClose={() => setSheet(null)}
-        title="Choose workspace"
-        scrollable={false}
-        testID="workspace-picker-sheet"
-      >
-        <SearchField
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search workspaces…"
-          label="Search workspaces"
-        />
-        <NativeList
-          sections={[
-            {
-              id: "workspaces",
-              rows: filteredWorkspaces.length
-                ? filteredWorkspaces.map((item) => ({
-                    id: item.id,
-                    title: item.name,
-                    subtitle: workspaceLabel(
-                      item,
-                      Boolean(
-                        item.active_operation || item.intervention_required,
-                      ),
-                    ),
-                    symbol: "desktopcomputer",
-                    selected: workspaceId === item.id,
-                    busy: Boolean(
-                      item.has_active_session || item.active_operation,
-                    ),
-                    onPress: () => chooseWorkspace(item),
-                  }))
-                : [{ id: "empty", title: "No workspaces found" }],
-            },
-          ]}
-        />
-      </NativeModal>
+        onClose={() =>
+          setSheet((current) => (current === "workspaces" ? null : current))
+        }
+        client={client}
+        organizationId={session?.organizationId ?? null}
+        workspaces={workspaces}
+        activeWorkspaceId={workspaceId}
+        onOpenWorkspace={chooseWorkspace}
+        onRefresh={() => loadOverview(true)}
+      />
 
       <NativeModal
         visible={sheet === "profile"}
@@ -1532,19 +1493,6 @@ export function MainScreen(): React.JSX.Element {
   );
 }
 
-function workspaceLabel(
-  item: Workspace | null,
-  transitioning: boolean,
-): string {
-  if (!item) return "Choose workspace";
-  if (item.intervention_required) return "Needs attention";
-  if (transitioning && item.active_operation)
-    return item.active_operation.replaceAll("_", " ");
-  if (item.has_active_session) return "Busy";
-  if (item.status === "running")
-    return item.runner_online ? "Running" : "Runner offline";
-  return item.status.replaceAll("_", " ");
-}
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -1583,26 +1531,6 @@ function SectionTitle({
     <Text style={[styles.section, { color: tone ?? theme.subtleText }]}>
       {title}
     </Text>
-  );
-}
-function SearchField({
-  value,
-  onChangeText,
-  placeholder,
-  label,
-}: {
-  value: string;
-  onChangeText: (value: string) => void;
-  placeholder: string;
-  label: string;
-}): React.JSX.Element {
-  return (
-    <NativeTextField
-      value={value}
-      onChangeText={onChangeText}
-      placeholder={placeholder}
-      label={label}
-    />
   );
 }
 

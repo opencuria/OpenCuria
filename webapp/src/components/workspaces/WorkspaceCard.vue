@@ -8,6 +8,7 @@ import { AlertTriangle, Container, Loader2, WifiOff } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
 import { USAGE_LEVEL_CLASSES, describeDiskUsage, isDiskUsageStale } from '@/lib/workspaceDisk'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { workspaceStatusLabel } from '@/lib/workspaceLifecycle'
 import WorkspaceActions from './WorkspaceActions.vue'
 import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
 import WorkspaceRecreateDialog from './WorkspaceRecreateDialog.vue'
@@ -74,15 +75,7 @@ const statusVariant = computed(() => {
   }
 })
 
-const statusLabel = computed(() => {
-  if (isRunnerOfflineState.value) return 'Runner offline'
-  if (props.workspace.intervention_required) return 'Checking state'
-  if (transitionLabel.value) return transitionLabel.value
-  if (props.workspace.status === WorkspaceStatus.RUNNING && props.workspace.has_active_session) {
-    return 'Busy'
-  }
-  return props.workspace.status.replace(/_/g, ' ')
-})
+const statusLabel = computed(() => workspaceStatusLabel(props.workspace, transitionLabel.value))
 const showStatusSpinner = computed(
   () =>
     !isRunnerOfflineState.value &&

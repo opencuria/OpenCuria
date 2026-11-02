@@ -14,7 +14,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { NEW_IMAGE } from '@/lib/imageVersions'
+import {
+  NEW_IMAGE,
+  captureTargetCandidates,
+  defaultCaptureTarget,
+  nextImageVersion,
+} from '@/lib/imageVersions'
 import { useImageStore } from '@/stores/images'
 import type { ImageArtifactCreateIn, Workspace } from '@/types'
 
@@ -30,28 +35,14 @@ const message = defineModel<string>('message', { default: '' })
 const imageStore = useImageStore()
 
 const candidates = computed(() =>
-  imageStore.capturedImages.filter(
-    (image) =>
-      image.status === 'active' &&
-      !!props.workspace &&
-      image.runner_id === props.workspace.runner_id &&
-      !image.versions.some((version) => version.status === 'capturing'),
-  ),
+  captureTargetCandidates(imageStore.capturedImages, props.workspace),
 )
 
-const nextVersion = (imageId: string): number => {
-  const image = imageStore.capturedImages.find((item) => item.id === imageId)
-  const highest = Math.max(0, ...(image?.versions ?? []).map((v) => v.version ?? 0))
-  return highest + 1
-}
+const nextVersion = (imageId: string): number =>
+  nextImageVersion(imageStore.capturedImages.find((item) => item.id === imageId))
 
 function preselect(): void {
-  const base = props.workspace?.base_image
-  const own =
-    base?.line_kind === 'captured'
-      ? candidates.value.find((image) => image.id === base.line_id)
-      : undefined
-  target.value = own ? own.id : NEW_IMAGE
+  target.value = defaultCaptureTarget(candidates.value, props.workspace)
 }
 
 onMounted(async () => {

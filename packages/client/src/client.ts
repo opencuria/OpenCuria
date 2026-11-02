@@ -12,12 +12,27 @@ import type {
   MobileDeviceRegistration,
   PushCapabilities,
   AuthUser,
+  CapturedImage,
+  CapturedImageWorkspaceInput,
+  Credential,
   HarnessConversation,
+  ImageCaptureInput,
+  ImageCaptureResult,
+  ImageDefinition,
+  Plugin,
+  Runner,
+  RunnerImageBuild,
   Skill,
   SkillCreateInput,
   SkillUpdateInput,
   TokenPair,
   Workspace,
+  WorkspaceCreateInput,
+  WorkspaceCreateResult,
+  WorkspaceRecreateResult,
+  WorkspaceTask,
+  WorkspaceUpdateInput,
+  WorkspaceUpdateResult,
 } from "./types";
 
 export interface CreateClientOptions {
@@ -65,22 +80,53 @@ export interface OpenCuriaClient {
     list(runnerId?: string, signal?: AbortSignal): Promise<Workspace[]>;
     get(workspaceId: string, signal?: AbortSignal): Promise<Workspace>;
     create(
-      data: Record<string, unknown>,
+      data: WorkspaceCreateInput,
       signal?: AbortSignal,
-    ): Promise<{
-      workspace_id: string;
-      task_id: string;
-      status: string;
-      plugin_ids: string[];
-    }>;
+    ): Promise<WorkspaceCreateResult>;
     update(
       workspaceId: string,
-      data: Record<string, unknown>,
+      data: WorkspaceUpdateInput,
       signal?: AbortSignal,
-    ): Promise<Workspace>;
-    delete(workspaceId: string, signal?: AbortSignal): Promise<void>;
-    stop(workspaceId: string, signal?: AbortSignal): Promise<unknown>;
-    resume(workspaceId: string, signal?: AbortSignal): Promise<unknown>;
+    ): Promise<WorkspaceUpdateResult>;
+    /** Removal is queued durably, also while the runner is offline. */
+    delete(workspaceId: string, signal?: AbortSignal): Promise<WorkspaceTask>;
+    stop(workspaceId: string, signal?: AbortSignal): Promise<WorkspaceTask>;
+    resume(workspaceId: string, signal?: AbortSignal): Promise<WorkspaceTask>;
+    /** Reset (own version) or update (latest version); workspace data is lost. */
+    recreate(
+      workspaceId: string,
+      imageId: string,
+      signal?: AbortSignal,
+    ): Promise<WorkspaceRecreateResult>;
+    /** Capture the workspace as a new image or the next version of one. */
+    captureImage(
+      workspaceId: string,
+      data: ImageCaptureInput,
+      signal?: AbortSignal,
+    ): Promise<ImageCaptureResult>;
+  };
+  runners: {
+    list(signal?: AbortSignal): Promise<Runner[]>;
+  };
+  plugins: {
+    list(signal?: AbortSignal): Promise<Plugin[]>;
+  };
+  credentials: {
+    list(signal?: AbortSignal): Promise<Credential[]>;
+  };
+  images: {
+    listCaptured(signal?: AbortSignal): Promise<CapturedImage[]>;
+    listDefinitions(signal?: AbortSignal): Promise<ImageDefinition[]>;
+    listRunnerBuilds(
+      definitionId: string,
+      signal?: AbortSignal,
+    ): Promise<RunnerImageBuild[]>;
+    /** New workspaces always start from the latest captured version. */
+    createWorkspace(
+      capturedImageId: string,
+      data: CapturedImageWorkspaceInput,
+      signal?: AbortSignal,
+    ): Promise<WorkspaceCreateResult>;
   };
   conversations: {
     list(signal?: AbortSignal): Promise<HarnessConversation[]>;
@@ -192,33 +238,71 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         api.get<Workspace>(`/workspaces/${segment(workspaceId)}/`, signal),
       create: (data, signal) => {
         const { image_id: imageId, ...rest } = data;
-        return api.post(
+        return api.post<WorkspaceCreateResult>(
           "/workspaces/",
-          {
-            ...rest,
-            ...(imageId === undefined ? {} : { image_artifact_id: imageId }),
-          },
+          { ...rest, image_artifact_id: imageId },
           signal,
         );
       },
       update: (workspaceId, data, signal) =>
-        api.patch<Workspace>(
+        api.patch<WorkspaceUpdateResult>(
           `/workspaces/${segment(workspaceId)}/`,
           data,
           signal,
         ),
       delete: (workspaceId, signal) =>
-        api.delete<void>(`/workspaces/${segment(workspaceId)}/`, signal),
+        api.delete<WorkspaceTask>(
+          `/workspaces/${segment(workspaceId)}/`,
+          signal,
+        ),
       stop: (workspaceId, signal) =>
-        api.post(
+        api.post<WorkspaceTask>(
           `/workspaces/${segment(workspaceId)}/stop/`,
           undefined,
           signal,
         ),
       resume: (workspaceId, signal) =>
-        api.post(
+        api.post<WorkspaceTask>(
           `/workspaces/${segment(workspaceId)}/resume/`,
           undefined,
+          signal,
+        ),
+      recreate: (workspaceId, imageId, signal) =>
+        api.post<WorkspaceRecreateResult>(
+          `/workspaces/${segment(workspaceId)}/recreate/`,
+          { image_id: imageId },
+          signal,
+        ),
+      captureImage: (workspaceId, data, signal) =>
+        api.post<ImageCaptureResult>(
+          `/workspaces/${segment(workspaceId)}/image-artifacts/`,
+          data,
+          signal,
+        ),
+    },
+    runners: {
+      list: (signal) => api.get<Runner[]>("/runners/", signal),
+    },
+    plugins: {
+      list: (signal) => api.get<Plugin[]>("/plugins/", signal),
+    },
+    credentials: {
+      list: (signal) => api.get<Credential[]>("/credentials/", signal),
+    },
+    images: {
+      listCaptured: (signal) =>
+        api.get<CapturedImage[]>("/captured-images/", signal),
+      listDefinitions: (signal) =>
+        api.get<ImageDefinition[]>("/image-definitions/", signal),
+      listRunnerBuilds: (definitionId, signal) =>
+        api.get<RunnerImageBuild[]>(
+          `/image-definitions/${segment(definitionId)}/runner-builds/`,
+          signal,
+        ),
+      createWorkspace: (capturedImageId, data, signal) =>
+        api.post<WorkspaceCreateResult>(
+          `/captured-images/${segment(capturedImageId)}/workspaces/`,
+          data,
           signal,
         ),
     },

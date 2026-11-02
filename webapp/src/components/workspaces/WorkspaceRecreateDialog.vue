@@ -23,7 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { recreateBlocker } from '@/lib/imageVersions'
+import { recreateBase, recreateBlocker, workspaceRecreateOptions } from '@/lib/imageVersions'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import type { Workspace } from '@/types'
 
@@ -40,28 +40,9 @@ const emit = defineEmits<{
 const workspaceStore = useWorkspaceStore()
 
 /** A failed reset keeps its target pending; retrying it is the "current" reset. */
-const base = computed(() => props.workspace.pending_base_image ?? props.workspace.base_image)
+const base = computed(() => recreateBase(props.workspace))
 
-const options = computed(() => {
-  const current = base.value
-  if (!current) return []
-  const result: { id: string; kind: 'reset' | 'update'; label: string }[] = []
-  if (current.status === 'ready') {
-    result.push({
-      id: current.id,
-      kind: 'reset',
-      label: `Reset to v${current.version ?? '?'} (current)`,
-    })
-  }
-  if (current.update_available && current.latest_id) {
-    result.push({
-      id: current.latest_id,
-      kind: 'update',
-      label: `Update to v${current.latest_version ?? '?'} (latest)`,
-    })
-  }
-  return result
-})
+const options = computed(() => workspaceRecreateOptions(props.workspace))
 
 const selectedId = ref('')
 const confirmed = ref(false)

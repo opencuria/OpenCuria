@@ -197,8 +197,8 @@ describe('WorkspacesView workspace storage', () => {
     workspaceStore.workspaces = [makeWorkspace('failed', { status: WorkspaceStatus.DELETE_FAILED })]
     const wrapper = mountView()
     await flushPromises()
-    expect(wrapper.getComponent(WorkspaceCard).get('[title="delete failed"]').text()).toBe(
-      'delete failed',
+    expect(wrapper.getComponent(WorkspaceCard).get('[title="Delete failed"]').text()).toBe(
+      'Delete failed',
     )
   })
 })
