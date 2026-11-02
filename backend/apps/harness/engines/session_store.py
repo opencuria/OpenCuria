@@ -9,6 +9,7 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
+from .claude.transcript_media import strip_transcript_media
 from .repositories import HarnessEngineRepository
 
 _PROJECT_KEY_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,255}$")
@@ -95,7 +96,11 @@ class HarnessClaudeSessionStore:
     async def append(
         self, key: Mapping[str, Any], entries: list[dict[str, Any]]
     ) -> None:
-        """Encrypt and append one SDK batch without blocking the event loop."""
+        """Encrypt and append one SDK batch without blocking the event loop.
+
+        Inline media is replaced by a notice first: images stay in the
+        workspace and never reach the encrypted transcript rows.
+        """
         _, external_id, subpath = self._validate_key(key)
         if not isinstance(entries, list):
             raise ValueError("Claude session store entries must be a list")
@@ -106,7 +111,7 @@ class HarnessClaudeSessionStore:
             self.session_id,
             external_session_id=external_id,
             subpath=subpath,
-            entries=entries,
+            entries=[strip_transcript_media(entry) for entry in entries],
         )
 
     async def load(self, key: Mapping[str, Any]) -> list[dict[str, Any]] | None:

@@ -215,10 +215,10 @@ describe('HarnessMarkdown', () => {
     expect(wrapper.get('a').attributes('target')).toBeUndefined()
     click(wrapper.get('a').element)
     expect(openPath).toHaveBeenCalledWith('ws-1', '/workspace/repo/guide.md', { revealInExplorer: false })
-    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/repo/docs/photo.png', undefined, expect.any(AbortSignal))
+    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/repo/docs/photo.png', 20 * 1024 * 1024, expect.any(AbortSignal))
 
     await wrapper.setProps({ baseDirectory: '/workspace/other' })
-    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/other/photo.png', undefined, expect.any(AbortSignal))
+    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', '/workspace/other/photo.png', 20 * 1024 * 1024, expect.any(AbortSignal))
     expect(release).toHaveBeenCalledWith(['/workspace/repo/docs/photo.png'])
     wrapper.unmount()
   })
@@ -460,7 +460,7 @@ describe('HarnessMarkdown', () => {
     expect(readWorkspaceFile).toHaveBeenCalledWith(
       'ws-1',
       '/workspace/photo.png',
-      undefined,
+      20 * 1024 * 1024,
       expect.any(AbortSignal),
     )
     store.imageCache['/workspace/photo.png'] = 'data:image/png;base64,abc'

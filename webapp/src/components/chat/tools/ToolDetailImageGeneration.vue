@@ -2,8 +2,13 @@
 import { computed, inject, ref } from 'vue'
 
 import type { HarnessPart } from '@/types/harness'
-import { isImageAttachment, toolAttachments } from '@/lib/harnessAttachments'
+import {
+  isImageAttachment,
+  toolAttachments,
+  workspaceAttachmentTokens,
+} from '@/lib/harnessAttachments'
 import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
+import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
@@ -51,7 +56,14 @@ const preview = computed(() => {
     return ''
   return truncatePreview(props.part.output || '')
 })
-const images = computed(() => toolAttachments(props.part).filter(isImageAttachment))
+const attachments = computed(() => toolAttachments(props.part).filter(isImageAttachment))
+const images = computed(() => attachments.value.filter((attachment) => attachment.url))
+const workspaceImages = computed(() =>
+  workspaceAttachmentTokens(
+    attachments.value,
+    (_attachment, index) => `Generated image ${index + 1}`,
+  ),
+)
 const lightbox = ref<{ src: string; alt: string } | null>(null)
 </script>
 
@@ -78,7 +90,7 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
         type="button"
         class="overflow-hidden rounded-md border border-border bg-muted/30 transition hover:opacity-90"
         :aria-label="`Open generated image preview ${index + 1}`"
-        @click="lightbox = { src: attachment.url, alt: `Generated image ${index + 1}` }"
+        @click="lightbox = { src: attachment.url!, alt: `Generated image ${index + 1}` }"
       >
         <img
           :src="attachment.url"
@@ -90,6 +102,11 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
         />
       </button>
     </div>
+    <HarnessMentionImages
+      v-if="workspaceImages.length"
+      :tokens="workspaceImages"
+      :workspace-id="workspaceId"
+    />
     <pre
       v-if="preview"
       data-testid="tool-detail-image-generation-output"

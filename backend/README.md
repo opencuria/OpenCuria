@@ -16,6 +16,13 @@ explanation for the agent instead of aborting input preparation. File-reading
 tools use the same preview processing and fallback. Resumed sessions and steering
 count previously referenced images toward the same limit without replaying them.
 
+Tool images and PDFs are stored once in the workspace under
+`/workspace/.opencuria/tool-media/<sha256>.<ext>`. Chat parts keep only that path,
+and the web and mobile chats load it like other workspace media. Agents see
+tool media in the turn that produced it. Later turns, restored Claude transcripts
+and Codex checkpoints contain a short path notice instead of base64, so the agent
+reads the file again when needed.
+
 ## Codex harness
 
 The [engine README](apps/harness/engines/codex/README.md) maps internal contracts.

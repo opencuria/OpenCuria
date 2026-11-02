@@ -10,8 +10,11 @@ import {
   isImageAttachment,
   isPdfAttachment,
   toolAttachments,
+  workspaceAttachmentTokens,
   type ToolAttachment,
 } from '@/lib/harnessAttachments'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
+import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
@@ -78,6 +81,13 @@ const attachments = computed<ToolAttachment[]>(() => {
   }
 })
 const images = computed(() => attachments.value.filter(isImageAttachment))
+const inlineImages = computed(() => images.value.filter((attachment) => attachment.url))
+const workspaceImages = computed(() =>
+  workspaceAttachmentTokens(
+    images.value,
+    (attachment) => attachmentFileName(attachment.filename) || safeBasename(path.value),
+  ),
+)
 const pdfs = computed(() => attachments.value.filter(isPdfAttachment))
 
 /**
@@ -113,7 +123,7 @@ function imageAlt(attachment: ToolAttachment | undefined, index: number): string
 
 function pdfLabel(attachment: ToolAttachment): string {
   try {
-    const size = attachmentSizeLabel(attachment.url)
+    const size = attachment.url ? attachmentSizeLabel(attachment.url) : null
     return size ? `PDF attachment (${size})` : 'PDF attachment'
   } catch {
     return 'PDF attachment'
@@ -124,10 +134,19 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
 
 function openLightbox(attachment: ToolAttachment, index: number): void {
   try {
-    lightbox.value = { src: attachment.url, alt: imageAlt(attachment, index) }
+    lightbox.value = attachment.url
+      ? { src: attachment.url, alt: imageAlt(attachment, index) }
+      : null
   } catch {
     lightbox.value = null
   }
+}
+
+function openPdf(attachment: ToolAttachment): void {
+  if (!attachment.path || !workspaceId.value) return
+  void useFileExplorerStore().openPath(workspaceId.value, attachment.path, {
+    revealInExplorer: false,
+  })
 }
 
 function closeLightbox(): void {
@@ -139,13 +158,13 @@ function closeLightbox(): void {
   <div data-testid="tool-detail-read" class="min-w-0 space-y-1">
     <div v-if="path" class="flex items-center gap-1.5">
       <WorkspaceFileIcon :path="path" :size="14" />
-      <code class="block min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
-        >{{ path }}</code
-      >
+      <code class="block min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">{{
+        path
+      }}</code>
     </div>
-    <div v-if="images.length" class="flex flex-wrap gap-2">
+    <div v-if="inlineImages.length" class="flex flex-wrap gap-2">
       <button
-        v-for="(attachment, index) in images"
+        v-for="(attachment, index) in inlineImages"
         :key="`${attachment.mime}-${index}`"
         type="button"
         class="overflow-hidden rounded-md border border-border bg-muted/30 transition hover:opacity-90"
@@ -162,25 +181,46 @@ function closeLightbox(): void {
         />
       </button>
     </div>
+    <HarnessMentionImages
+      v-if="workspaceImages.length"
+      :tokens="workspaceImages"
+      :workspace-id="workspaceId"
+    />
     <div v-if="pdfs.length" class="space-y-1">
-      <a
-        v-for="(attachment, index) in pdfs"
-        :key="`${attachment.mime}-${index}`"
-        :href="attachment.url"
-        :download="pdfFileNameFor(attachment)"
-        target="_blank"
-        rel="noopener noreferrer"
-        data-testid="tool-detail-read-pdf"
-        class="flex items-center gap-1.5 font-mono text-[11px] text-primary hover:underline"
-      >
-        <WorkspaceFileIcon :path="pdfFileNameFor(attachment)" :size="14" class="shrink-0" />
-        <span class="truncate">{{ pdfLabel(attachment) }} · {{ pdfFileNameFor(attachment) }}</span>
-      </a>
+      <template v-for="(attachment, index) in pdfs" :key="`${attachment.mime}-${index}`">
+        <button
+          v-if="attachment.path"
+          type="button"
+          data-testid="tool-detail-read-pdf"
+          class="flex items-center gap-1.5 font-mono text-[11px] text-primary hover:underline"
+          @click="openPdf(attachment)"
+        >
+          <WorkspaceFileIcon :path="pdfFileNameFor(attachment)" :size="14" class="shrink-0" />
+          <span class="truncate"
+            >{{ pdfLabel(attachment) }} · {{ pdfFileNameFor(attachment) }}</span
+          >
+        </button>
+        <a
+          v-else
+          :href="attachment.url"
+          :download="pdfFileNameFor(attachment)"
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="tool-detail-read-pdf"
+          class="flex items-center gap-1.5 font-mono text-[11px] text-primary hover:underline"
+        >
+          <WorkspaceFileIcon :path="pdfFileNameFor(attachment)" :size="14" class="shrink-0" />
+          <span class="truncate"
+            >{{ pdfLabel(attachment) }} · {{ pdfFileNameFor(attachment) }}</span
+          >
+        </a>
+      </template>
     </div>
     <pre
       v-if="preview"
       class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/40 px-2.5 py-2 font-mono text-[11px] text-muted-foreground"
-    >{{ preview }}</pre>
+      >{{ preview }}</pre
+    >
     <p v-else-if="part?.state === 'running'" class="text-[11px] text-muted-foreground">Reading…</p>
     <ImageLightbox
       v-if="lightbox"

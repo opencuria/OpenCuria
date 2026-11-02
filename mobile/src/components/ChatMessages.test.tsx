@@ -391,6 +391,60 @@ describe("ChatMessages", () => {
     expect(onRequestPartDetail).toHaveBeenCalledTimes(1);
   });
 
+  it("loads workspace tool media through the shared resolver and file viewer", async () => {
+    const image = "/workspace/.opencuria/tool-media/abc.png";
+    const pdf = "/workspace/.opencuria/tool-media/def.pdf";
+    const onRequestPartDetail = jest.fn().mockResolvedValue({
+      ...part("tool-1", "tool", "Image read successfully", 0),
+      input: { tool: "read" },
+      meta: {
+        attachments: [
+          { type: "file", mime: "image/png", path: image, filename: "cat.png" },
+          {
+            type: "file",
+            mime: "application/pdf",
+            path: pdf,
+            filename: "spec.pdf",
+          },
+        ],
+      },
+      detail_loaded: true,
+    });
+    const resolveMedia = jest.fn(() => new Promise<string>(() => {}));
+    const onOpenFile = jest.fn();
+    const onOpenAttachment = jest.fn();
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message([
+              {
+                ...part("tool-1", "tool", "", 0),
+                detail_loaded: false,
+                display: { tool: "read", summary: "cat.png" },
+              },
+              part("text-1", "text", "Done", 1),
+            ]),
+          ]}
+          onRequestPartDetail={onRequestPartDetail}
+          resolveMedia={resolveMedia}
+          onOpenFile={onOpenFile}
+          onOpenAttachment={onOpenAttachment}
+        />
+      </ThemeProvider>,
+    );
+
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
+    fireEvent.press(screen.getByRole("button", { name: "read" }));
+    await waitFor(() => expect(resolveMedia).toHaveBeenCalledWith(image));
+    fireEvent.press(
+      screen.getByRole("button", { name: "Open attachment spec.pdf" }),
+    );
+    expect(onOpenFile).toHaveBeenCalledWith(pdf);
+    expect(onOpenAttachment).not.toHaveBeenCalled();
+  });
+
   it("groups all contiguous work, including edits and failures, between text", () => {
     const transcript = message([
       part("think", "reasoning", "Plan", 0),

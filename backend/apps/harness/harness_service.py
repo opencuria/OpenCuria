@@ -31,6 +31,7 @@ from .agents.definitions import get_agent
 from .conversation_events import ConversationEvents
 from .conversation_service import ConversationService
 from .interaction_service import InteractionService
+from .media.tool_media import ToolMediaStore
 from .models import (
     HarnessMessage,
     HarnessRunStatus,
@@ -142,6 +143,7 @@ class HarnessService:
             parts=self.parts,
             run_context=lambda session_id: self.run_registry.get_context(session_id),
             emit=self._emit_frontend,
+            media=ToolMediaStore(accessor_factory),
         )
         self._runner_factory = runner_factory
         self._provider_factory = provider_factory

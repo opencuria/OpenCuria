@@ -1,20 +1,25 @@
 /**
  * Tool image/PDF attachments persisted in `HarnessPart.meta.attachments`.
  *
- * Mirrors `backend/apps/harness/media/attachments.py::select_persisted_tool_attachments`:
+ * Mirrors `backend/apps/harness/media/attachments.py::stored_tool_attachments`:
  * the backend stores at most `TOOL_ATTACHMENT_MAX_COUNT` entries shaped as
- * `{type: "file", mime, url: "data:...;base64,..."}` (images and PDFs alike).
- * All readers here are defensive: broken `meta` never throws, invalid entries
- * are dropped, and only `data:` URLs are returned.
+ * `{type: "file", mime, path: "/workspace/.opencuria/tool-media/..."}`; the
+ * bytes live in the workspace and load like any workspace image. Parts stored
+ * earlier carry an inline `url: "data:..."` instead. All readers here are
+ * defensive: broken `meta` never throws and invalid entries are dropped.
  */
 
 import type { HarnessPart } from "./harness";
+import { resolveWorkspaceMediaPath } from "./workspaceFileRefs";
 
 /** File attachment persisted in `HarnessPart.meta.attachments`. */
 export interface ToolAttachment {
   type: string;
   mime: string;
-  url: string;
+  /** Workspace media file (current format); load it from the workspace. */
+  path?: string;
+  /** Inline `data:` URL of parts stored before workspace media. */
+  url?: string;
   /** Original filename (backend `media/attachments.py` persists it, may be `""`). */
   filename?: string;
 }
@@ -29,8 +34,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Read sanitized attachments from `part.meta.attachments`.
  *
- * Keeps only `{type: "file", mime: non-empty, url: "data:..."}` entries and
- * returns defensive copies capped at `TOOL_ATTACHMENT_MAX_COUNT`.
+ * Keeps only `{type: "file", mime: non-empty}` entries with a canonical
+ * `/workspace/...` `path` or a `data:` `url`, and returns defensive copies
+ * capped at `TOOL_ATTACHMENT_MAX_COUNT`.
  * A non-empty string `filename` is carried over defensively (omitted
  * otherwise so downstream code can fall back to the tool path).
  */
@@ -45,9 +51,16 @@ function sanitizeAttachmentEntry(
   if (entry["type"] !== "file") return null;
   const mime = entry["mime"];
   if (typeof mime !== "string" || !mime.trim()) return null;
+  const path = entry["path"];
   const url = entry["url"];
-  if (typeof url !== "string" || !url.startsWith("data:")) return null;
-  const clean: ToolAttachment = { type: "file", mime: mime.trim(), url };
+  let clean: ToolAttachment;
+  if (typeof path === "string" && resolveWorkspaceMediaPath(path) === path) {
+    clean = { type: "file", mime: mime.trim(), path };
+  } else if (typeof url === "string" && url.startsWith("data:")) {
+    clean = { type: "file", mime: mime.trim(), url };
+  } else {
+    return null;
+  }
   const filename = entry["filename"];
   if (typeof filename === "string" && filename.trim()) {
     clean.filename = filename.trim();

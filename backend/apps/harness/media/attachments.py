@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 
 from .limits import TOOL_ATTACHMENT_MAX_CHARS, TOOL_ATTACHMENT_MAX_COUNT
+from .tool_media import is_tool_media_reference, tool_media_notice
 
 log = structlog.get_logger(__name__)
 
@@ -103,12 +104,18 @@ def build_tool_message_content(
     multimodal part, otherwise a list of ``[{"type": "text", ...},
     {"type": "image_url", ...}, {"type": "file", ...}]`` so the LLM
     receives images and PDFs (OpenCode parity: PDFs travel as file
-    parts, not text-only). *filename* is kept for backwards
-    compatibility and currently unused (PDF attachments carry their
-    own ``filename``). Callers truncating long tool output must only
-    clip the text part, never base64.
+    parts, not text-only). Workspace media references from earlier
+    turns become path notices the model can read again. *filename* is
+    kept for backwards compatibility and currently unused (PDF
+    attachments carry their own ``filename``). Callers truncating long
+    tool output must only clip the text part, never base64.
     """
     text = output or ""
+    text += "".join(
+        tool_media_notice(attachment)
+        for attachment in attachments or []
+        if is_tool_media_reference(attachment)
+    )
     image_parts = tool_message_image_parts(attachments)
     file_parts = tool_message_file_parts(attachments)
     if not image_parts and not file_parts:
@@ -124,11 +131,12 @@ def build_tool_message_content(
 def select_persisted_tool_attachments(
     attachments: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    """Sanitize attachments for ``HarnessPart.meta`` persistence.
+    """Select the data-URL attachments a tool part keeps as workspace media.
 
     Keeps at most ``TOOL_ATTACHMENT_MAX_COUNT`` entries (images and PDFs
-    alike; PDFs stay available for file-part rehydration) and drops
-    entries without a data URL or above ``TOOL_ATTACHMENT_MAX_CHARS``.
+    alike) and drops entries without a data URL or above
+    ``TOOL_ATTACHMENT_MAX_CHARS``. ``ToolMediaStore`` then replaces the
+    selected bytes with workspace path references before persistence.
     Returns defensive copies with only ``type``/``mime``/``url`` plus
     ``filename`` (non-string filenames fall back to ``""``) keys.
     """
@@ -157,4 +165,30 @@ def select_persisted_tool_attachments(
                 "filename": _attachment_filename(attachment),
             }
         )
+    return kept
+
+
+def stored_tool_attachments(
+    attachments: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Return persisted part attachments: workspace references or legacy data URLs.
+
+    Keeps at most ``TOOL_ATTACHMENT_MAX_COUNT`` entries. References must point
+    at a content-addressed tool media file; legacy entries are re-sanitized.
+    """
+    kept: list[dict[str, Any]] = []
+    for attachment in attachments or []:
+        if len(kept) >= TOOL_ATTACHMENT_MAX_COUNT:
+            break
+        if is_tool_media_reference(attachment):
+            kept.append(
+                {
+                    "type": "file",
+                    "mime": attachment["mime"],
+                    "path": attachment["path"],
+                    "filename": _attachment_filename(attachment),
+                }
+            )
+        else:
+            kept.extend(select_persisted_tool_attachments([attachment]))
     return kept

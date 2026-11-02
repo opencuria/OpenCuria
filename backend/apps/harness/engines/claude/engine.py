@@ -53,6 +53,7 @@ from .runtime_state import (
     ClaudeRuntimeState,
     validate_claude_skills,
 )
+from .transcript_media import strip_transcript_media
 from .transport import ClaudeWorkspaceTransport
 
 log = structlog.get_logger(__name__)
@@ -341,8 +342,10 @@ class ClaudeEngine:
         for entry in entries:
             if not isinstance(entry, dict):
                 raise ValueError("Claude session store entry must be an object")
+            # Rows stored before media stripping must not exceed the limit.
+            stored = strip_transcript_media(entry)
             row = (
-                json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode()
+                json.dumps(stored, ensure_ascii=False, separators=(",", ":")).encode()
                 + b"\n"
             )
             total += len(row)

@@ -21,6 +21,7 @@ from apps.harness.interaction_service import (
     FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_QUESTION,
 )
+from apps.harness.media.tool_media import tool_media_path
 from apps.harness.models import HarnessSession, QuestionRequest, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
@@ -44,6 +45,7 @@ from apps.harness.repositories import (
 from apps.harness.run_events import assistant_run_finished
 from apps.harness.run_timeline import FRONTEND_EVENT_PART, tail_remainder
 from apps.harness.session_access_service import SessionAccessService
+from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.helpers import attach_run_context, parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
@@ -102,6 +104,7 @@ def _service(
     *,
     provider: FakeProvider | None = None,
     events: list[dict[str, Any]] | None = None,
+    accessor: FakeAccessor | None = None,
 ) -> tuple[HarnessService, FakeProvider, list[dict[str, Any]]]:
     collected: list[dict[str, Any]] = events if events is not None else []
     fake = provider or FakeProvider([_text_step("hello")])
@@ -116,6 +119,7 @@ def _service(
             ),
             emit=_emit,
             provider_factory=lambda _org: fake,
+            accessor_factory=None if accessor is None else (lambda _ws: accessor),
         ),
         fake,
         collected,
@@ -1531,11 +1535,13 @@ async def test_build_history_rebuilds_tool_images_from_meta(
 async def test_tool_completed_event_persists_attachments_in_meta(
     harness_workspace,
 ) -> None:
-    """tool_completed attachments survive in HarnessPart.meta (no column)."""
+    """tool_completed media lands in the workspace; meta keeps only its path."""
+    import base64
     import os
 
     os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-    service, _, events = _service()
+    accessor = FakeAccessor()
+    service, _, events = _service(accessor=accessor)
     session = await _db_create_session(harness_workspace)
     assistant = HarnessMessageRepository.create(
         session_id=session.id, role="assistant"
@@ -1581,14 +1587,13 @@ async def test_tool_completed_event_persists_attachments_in_meta(
     assert len(parts) == 1
     assert parts[0].state == "completed"
     assert parts[0].output == "Image read successfully"
+    image = base64.b64decode(big)
+    path = tool_media_path("image/png", image)
     assert parts[0].meta.get("attachments") == [
-        {
-            "type": "file",
-            "mime": "image/png",
-            "url": f"data:image/png;base64,{big}",
-            "filename": "cat.png",
-        }
+        {"type": "file", "mime": "image/png", "path": path, "filename": "cat.png"}
     ]
+    assert accessor.written == {path: image}
+    assert big not in json.dumps(parts[0].meta)
     # tool_started meta (step) survives the completed merge (no replace).
     assert parts[0].meta.get("step") == 1
     assert parts[0].display["tool"] == "read"
@@ -1607,11 +1612,88 @@ async def test_tool_completed_event_persists_attachments_in_meta(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_tool_media_write_failure_never_persists_bytes(
+    harness_workspace,
+) -> None:
+    """An unwritable workspace drops the attachment instead of storing base64."""
+    accessor = FakeAccessor(error=OSError("workspace stopped"))
+    service, _, _ = _service(accessor=accessor)
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "call-img",
+            "tool": "read",
+            "output": "Image read successfully",
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,AAAA",
+                    "filename": "cat.png",
+                }
+            ],
+        },
+    )
+    part = next(
+        part
+        for part in await sync_to_async(parts_for_session)(session.id)
+        if part.type == "tool"
+    )
+    assert part.state == "completed"
+    assert "attachments" not in part.meta
+    assert accessor.written == {}
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_build_history_replays_tool_media_as_path_notice(
+    harness_workspace,
+) -> None:
+    """Earlier tool media is offered by path instead of replayed as bytes."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="look at cat"
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="seen"
+    )
+    path = tool_media_path("image/png", b"png-bytes")
+    HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-img",
+        title="Read cat.png",
+        input={"tool": "read", "arguments": '{"path":"cat.png"}'},
+        output="Image read successfully",
+        meta={
+            "attachments": [
+                {"type": "file", "mime": "image/png", "path": path, "filename": ""}
+            ]
+        },
+    )
+    history = await service.history.build(session)
+    tool_msg = next(message for message in history if message.role == "tool")
+    assert isinstance(tool_msg.content, str)
+    assert tool_msg.content.startswith("Image read successfully")
+    assert f"Original file: {path}." in tool_msg.content
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_large_tool_payloads_are_not_emitted(
     harness_workspace,
 ) -> None:
     """Live deltas stay small while the persisted part retains full detail."""
-    service, _, events = _service()
+    accessor = FakeAccessor()
+    service, _, events = _service(accessor=accessor)
     session = await _db_create_session(harness_workspace)
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant", content=""
@@ -1670,7 +1752,8 @@ async def test_large_tool_payloads_are_not_emitted(
     tool_part = next(part for part in stored if part.type == "tool")
     assert tool_part.input["arguments"] == arguments
     assert tool_part.output == output
-    assert tool_part.meta["attachments"][0]["url"].endswith(attachment_data)
+    assert tool_part.meta["attachments"][0]["path"] in accessor.written
+    assert attachment_data not in json.dumps(tool_part.meta)
 
     socket_json = json.dumps(events)
     assert len(socket_json) < 20_000

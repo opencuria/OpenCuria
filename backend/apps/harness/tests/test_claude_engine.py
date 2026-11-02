@@ -1168,3 +1168,40 @@ async def test_claude_mcp_child_scope_uses_approved_parent_identity(
         {"type": "subtask_finished", "parent_tool_use_id": "delegate-call"}
     )
     ended.assert_awaited_once_with(tools, "claude:delegate-call")
+
+
+def test_legacy_media_rows_restore_within_the_transcript_limit(monkeypatch) -> None:
+    """Rows stored with inline images are stripped before the size check."""
+    from apps.harness.media.tool_media import OMITTED_MEDIA_NOTICE
+
+    monkeypatch.setattr(
+        "apps.harness.engines.claude.engine.MAX_RESTORED_TRANSCRIPT_BYTES", 1024
+    )
+    encoded = "QUJD" * 4096
+    entry = {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": [
+                        {"type": "image", "data": encoded, "mimeType": "image/png"},
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": encoded,
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+
+    restored = ClaudeEngine._jsonl_bytes([entry])
+
+    assert len(restored) < 1024
+    assert encoded.encode() not in restored
+    assert restored.count(OMITTED_MEDIA_NOTICE.encode()) == 2

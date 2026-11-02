@@ -468,7 +468,13 @@ class PermissionBridge:
                 call_id,
                 output,
                 parent_id=state.get("parent_tool_use_id"),
-                attachments=list(result.attachments or []) if result else [],
+                attachments=(
+                    list(result.attachments or [])
+                    if result
+                    else ClaudeEventNormalizer.tool_attachments(
+                        hook_input.get("tool_response")
+                    )
+                ),
             )
             if state.get("tool") == "todowrite":
                 await engine._send_todos(state.get("parent_tool_use_id"))

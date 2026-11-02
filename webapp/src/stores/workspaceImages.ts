@@ -78,6 +78,7 @@ const VIDEO_MIME_MAP: Record<string, string> = {
 }
 
 const VIDEO_READ_MAX_SIZE = 100 * 1024 * 1024 // 100 MB
+const IMAGE_READ_MAX_SIZE = 20 * 1024 * 1024 // 20 MiB, as on mobile
 
 /** Maximum retained media payload size, excluding protected visible media. */
 export const MEDIA_CACHE_BUDGET_BYTES = 32 * 1024 * 1024
@@ -197,6 +198,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     try {
       const result = await readWorkspaceFile(item.workspaceId, item.path, item.maxSize, signal)
       if (generation !== mediaGeneration.value) return
+      if (result.truncated) throw new Error('The media file is too large to preview.')
       storeAssembledMedia(item.path, item.kind, result.content, result.mime_type)
     } catch (error) {
       if (generation !== mediaGeneration.value) return
@@ -255,7 +257,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   function fetchImage(workspaceId: string, path: string): void {
     if (imageCache[path] || fetchingPaths[path]) return
     fetchingPaths[path] = true
-    fetchQueue.push({ workspaceId, path, kind: 'image' })
+    fetchQueue.push({ workspaceId, path, kind: 'image', maxSize: IMAGE_READ_MAX_SIZE })
     processQueue()
   }
 

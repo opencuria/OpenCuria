@@ -1417,6 +1417,10 @@ function PartDetail({
           key={`${attachment.filename}-${index}`}
           attachment={attachment}
           onOpenAttachment={onOpenAttachment}
+          onOpenFile={onOpenFile}
+          resolveMedia={resolveMedia}
+          mediaVisible={mediaVisible}
+          mediaScopeKey={mediaScopeKey}
         />
       ))}
     </View>
@@ -1426,32 +1430,46 @@ function PartDetail({
 function ToolAttachmentCard({
   attachment,
   onOpenAttachment,
+  onOpenFile,
+  resolveMedia,
+  mediaVisible = true,
+  mediaScopeKey,
 }: {
   attachment: ReturnType<typeof toolAttachments>[number];
-  onOpenAttachment?: ChatMessagesProps["onOpenAttachment"];
-}): React.JSX.Element {
+} & Omit<PartDetailProps, "onRequestPartDetail">): React.JSX.Element {
   const { theme } = useTheme();
+  const { path, url, mime } = attachment;
   const filename =
     attachment.filename ||
-    (attachment.mime.toLowerCase() === "application/pdf"
+    (mime.toLowerCase() === "application/pdf"
       ? "PDF attachment"
       : "Tool attachment");
-  if (attachment.mime.toLowerCase().startsWith("image/")) {
+  const isImage = mime.toLowerCase().startsWith("image/");
+  // Current parts reference a workspace file; legacy parts inline a data URL.
+  if (path && isImage)
+    return (
+      <MentionImage
+        path={path}
+        name={filename}
+        resolveMedia={resolveMedia}
+        mediaVisible={mediaVisible}
+        mediaScopeKey={mediaScopeKey}
+      />
+    );
+  const open = () => {
+    if (path) onOpenFile?.(path);
+    else if (url) onOpenAttachment?.({ uri: url, filename, mime });
+  };
+  if (isImage && url) {
     return (
       <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`Open image preview ${filename}`}
-        onPress={() =>
-          onOpenAttachment?.({
-            uri: attachment.url,
-            filename,
-            mime: attachment.mime,
-          })
-        }
+        onPress={open}
         style={styles.toolAttachmentImage}
       >
         <Image
-          source={{ uri: attachment.url }}
+          source={{ uri: url }}
           contentFit="contain"
           style={styles.attachmentImage}
           accessibilityLabel={filename}
@@ -1469,13 +1487,7 @@ function ToolAttachmentCard({
     <NativeAction
       accessibilityRole="button"
       accessibilityLabel={`Open attachment ${filename}`}
-      onPress={() =>
-        onOpenAttachment?.({
-          uri: attachment.url,
-          filename,
-          mime: attachment.mime,
-        })
-      }
+      onPress={open}
       style={[styles.pdfCard, { backgroundColor: theme.surfaceMuted }]}
     >
       <FileCode2 size={18} color={theme.mutedText} />
@@ -1483,9 +1495,7 @@ function ToolAttachmentCard({
         <Text numberOfLines={1} style={{ color: theme.text, fontSize: 14 }}>
           {filename}
         </Text>
-        <Text style={{ color: theme.mutedText, fontSize: 12 }}>
-          {attachment.mime}
-        </Text>
+        <Text style={{ color: theme.mutedText, fontSize: 12 }}>{mime}</Text>
       </View>
       <ChevronRight size={17} color={theme.mutedText} />
     </NativeAction>

@@ -56,6 +56,22 @@ describe('toolAttachments', () => {
     ])
   })
 
+  it('keeps canonical workspace media paths and rejects escapes', () => {
+    const path = '/workspace/.opencuria/tool-media/abc.png'
+    const part = makePart({
+      meta: {
+        attachments: [
+          { type: 'file', mime: 'image/png', path: '/workspace/../etc/passwd' },
+          { type: 'file', mime: 'image/png', path: 'relative.png' },
+          { type: 'file', mime: 'image/png', path, filename: 'cat.png', url: IMAGE_URL },
+        ],
+      },
+    })
+    expect(toolAttachments(part)).toEqual([
+      { type: 'file', mime: 'image/png', path, filename: 'cat.png' },
+    ])
+  })
+
   it(`caps the result at ${TOOL_ATTACHMENT_MAX_COUNT} entries like the backend`, () => {
     expect(TOOL_ATTACHMENT_MAX_COUNT).toBe(2)
     const part = makePart({

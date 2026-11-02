@@ -15,6 +15,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 
 from .media.attachments import select_persisted_tool_attachments
+from .media.tool_media import ToolMediaStore
 from .models import HarnessMessage, HarnessPart, HarnessSession
 from .repositories import HarnessPartRepository
 
@@ -35,10 +36,12 @@ class ToolCallParts:
         *,
         parts: type[HarnessPartRepository],
         run_context: Callable[[str], dict[str, Any]],
+        media: ToolMediaStore,
     ) -> None:
-        """Bind the part repository and the live run-context lookup."""
+        """Bind the part repository, run-context lookup and media store."""
         self.parts = parts
         self._run_context = run_context
+        self.media = media
 
     async def record_queued(
         self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
@@ -194,15 +197,19 @@ class ToolCallParts:
         return part
 
     async def record_finished(
-        self, assistant: HarnessMessage, event: dict[str, Any], *, state: str
+        self,
+        assistant: HarnessMessage,
+        event: dict[str, Any],
+        *,
+        state: str,
+        workspace_id: str,
     ) -> HarnessPart:
         """Transition the matching tool part to completed/error.
 
-        ``tool_completed`` events persist sanitized attachments into
-        ``HarnessPart.meta["attachments"]`` and full output in ``output``;
-        image/PDF bytes survive restarts and are rehydrated in
-        ``ProviderHistoryService.build``. These full details never enter
-        socket deltas.
+        ``tool_completed`` attachments are written once into the workspace;
+        ``HarnessPart.meta["attachments"]`` keeps only their path references
+        and ``output`` keeps the full text. These details never enter socket
+        deltas.
         ``mark_state`` merges ``meta`` (existing keys like ``step`` from
         the ``tool_started`` part are preserved). Tool *results* never
         create a new part: completion only updates the queued/started row;
@@ -245,6 +252,8 @@ class ToolCallParts:
             attachments = select_persisted_tool_attachments(
                 _event_tool_attachments(event)
             )
+            if attachments:
+                attachments = await self.media.externalize(workspace_id, attachments)
             if attachments:
                 meta = {"attachments": attachments}
         await sync_to_async(self.parts.mark_state)(

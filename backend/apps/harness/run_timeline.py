@@ -16,6 +16,7 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
+from .media.tool_media import ToolMediaStore
 from .models import HarnessMessage, HarnessPart, HarnessSession
 from .providers.base import Usage
 from .repositories import HarnessMessageRepository, HarnessPartRepository
@@ -85,8 +86,9 @@ class RunTimeline:
         parts: type[HarnessPartRepository],
         run_context: Callable[[str], dict[str, Any]],
         emit: FrontendEmit,
+        media: ToolMediaStore,
     ) -> None:
-        """Bind repositories, the live run-context lookup and frontend fan-out.
+        """Bind repositories, run-context lookup, media store and fan-out.
 
         ``run_context`` returns the mutable context of the session's live run,
         or a throwaway empty dict once the run is no longer tracked.
@@ -95,7 +97,9 @@ class RunTimeline:
         self.parts = parts
         self._run_context = run_context
         self._emit = emit
-        self.tool_calls = ToolCallParts(parts=parts, run_context=run_context)
+        self.tool_calls = ToolCallParts(
+            parts=parts, run_context=run_context, media=media
+        )
 
     async def record(
         self,
@@ -288,7 +292,7 @@ class RunTimeline:
             )
         elif etype == "tool_completed":
             part = await self.tool_calls.record_finished(
-                assistant, event, state="completed"
+                assistant, event, state="completed", workspace_id=workspace_id
             )
             await self._emit(
                 FRONTEND_EVENT_PART,
@@ -324,7 +328,7 @@ class RunTimeline:
             )
         elif etype == "tool_error":
             part = await self.tool_calls.record_finished(
-                assistant, event, state="error"
+                assistant, event, state="error", workspace_id=workspace_id
             )
             await self._emit(
                 FRONTEND_EVENT_PART,

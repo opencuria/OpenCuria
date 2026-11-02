@@ -17,7 +17,7 @@ from asgiref.sync import sync_to_async
 from .compaction import CHECKPOINT_PREFIX
 from .media.attachments import (
     build_tool_message_content,
-    select_persisted_tool_attachments,
+    stored_tool_attachments,
 )
 from .models import HarnessPart, HarnessSession
 from .providers.base import LLMMessage
@@ -171,7 +171,7 @@ class ProviderHistoryService:
                 )
                 for tool_part in pending_calls:
                     clipped = truncate_tool_output(tool_part.output or "")
-                    attachments = select_persisted_tool_attachments(
+                    attachments = stored_tool_attachments(
                         _tool_part_attachments(tool_part)
                     )
                     history.append(

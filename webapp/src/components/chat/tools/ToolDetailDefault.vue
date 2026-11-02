@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 
 import type { HarnessPart } from '@/types/harness'
-import { isImageAttachment, toolAttachments } from '@/lib/harnessAttachments'
+import {
+  isImageAttachment,
+  toolAttachments,
+  workspaceAttachmentTokens,
+} from '@/lib/harnessAttachments'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { parseToolArguments, resolveToolName, truncatePreview } from '@/lib/toolDisplay'
+import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 
 const props = defineProps<{
   part: HarnessPart
 }>()
+const workspaceId = inject(harnessWorkspaceIdKey, ref(''))
 
 const toolName = computed(() => resolveToolName(props.part) || props.part.title || 'tool')
 const args = computed(() => parseToolArguments(props.part))
@@ -23,7 +30,14 @@ const preview = computed(() => {
     return truncatePreview(output)
   }
 })
-const images = computed(() => toolAttachments(props.part).filter(isImageAttachment))
+const attachments = computed(() => toolAttachments(props.part).filter(isImageAttachment))
+const images = computed(() => attachments.value.filter((attachment) => attachment.url))
+const workspaceImages = computed(() =>
+  workspaceAttachmentTokens(
+    attachments.value,
+    (_attachment, index) => `Image attachment ${index + 1}`,
+  ),
+)
 const lightbox = ref<{ src: string; alt: string } | null>(null)
 </script>
 
@@ -59,7 +73,7 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
         type="button"
         class="overflow-hidden rounded-md border border-border bg-muted/30 transition hover:opacity-90"
         :aria-label="`Open image preview ${index + 1}`"
-        @click="lightbox = { src: attachment.url, alt: `Image attachment ${index + 1}` }"
+        @click="lightbox = { src: attachment.url!, alt: `Image attachment ${index + 1}` }"
       >
         <img
           :src="attachment.url"
@@ -69,6 +83,11 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
         />
       </button>
     </div>
+    <HarnessMentionImages
+      v-if="workspaceImages.length"
+      :tokens="workspaceImages"
+      :workspace-id="workspaceId"
+    />
     <ImageLightbox
       v-if="lightbox"
       :src="lightbox.src"

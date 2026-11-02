@@ -213,7 +213,11 @@ class ClaudeMessageProjector:
                 call_id,
                 output,
                 parent_id=state.get("parent_tool_use_id"),
-                attachments=list(result.attachments or []) if result else [],
+                attachments=(
+                    list(result.attachments or [])
+                    if result
+                    else ClaudeEventNormalizer.tool_attachments(value)
+                ),
             )
             if state.get("tool") == "todowrite":
                 await engine._send_todos(state.get("parent_tool_use_id"))

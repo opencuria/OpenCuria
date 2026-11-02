@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from typing import Any
 
 import pytest
@@ -1314,3 +1315,44 @@ async def test_new_unscoped_features_never_start_or_reach_approval(
         ToolPermissionContext(tool_use_id="unscoped"),
     )
     assert isinstance(response, PermissionResultDeny)
+
+
+@pytest.mark.asyncio
+async def test_native_read_image_completes_with_attachment_not_base64_output(
+    fake_accessor,
+) -> None:
+    """Claude's native Read image becomes a tool attachment, not output text."""
+    engine, bridge, _options, events = _bridge_case(
+        fake_accessor,
+        evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
+        auto_approve=True,
+    )
+    hook_result = await _pre_hook(bridge, engine)(
+        {"tool_name": "Read", "tool_input": {"file_path": "/workspace/cat.png"}},
+        "read-image-1",
+        None,
+    )
+    assert hook_result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nfixture").decode()
+
+    await _post_hook(bridge, engine)(
+        {
+            "tool_response": {
+                "type": "image",
+                "file": {"base64": encoded, "type": "image/png", "originalSize": 9},
+            }
+        },
+        "read-image-1",
+        None,
+    )
+
+    completed = next(event for event in events if event["type"] == "tool_completed")
+    assert completed["output"] == "Image read successfully"
+    assert completed["attachments"] == [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": f"data:image/png;base64,{encoded}",
+            "filename": "",
+        }
+    ]

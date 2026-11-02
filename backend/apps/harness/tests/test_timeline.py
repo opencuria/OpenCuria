@@ -207,6 +207,7 @@ async def test_patch_event_persists_full_diff_before_emitting_preview(
     """Live events and saved timelines share the exact bounded patch projection."""
     from asgiref.sync import sync_to_async
 
+    from apps.harness.media.tool_media import ToolMediaStore
     from apps.harness.repositories import (
         HarnessMessageRepository,
         HarnessPartRepository,
@@ -237,6 +238,7 @@ async def test_patch_event_persists_full_diff_before_emitting_preview(
         parts=HarnessPartRepository,
         run_context=lambda _: {},
         emit=emit,
+        media=ToolMediaStore(None),
     )
     await run.record(
         session,

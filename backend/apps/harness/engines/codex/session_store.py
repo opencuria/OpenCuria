@@ -14,6 +14,7 @@ from asgiref.sync import sync_to_async
 from ...access.base import WorkspaceAccessor
 from ..repositories import HarnessEngineRepository
 from .errors import CodexRecoveryError
+from .rollout_media import strip_snapshot_media
 from .state_io import (
     MAX_SNAPSHOT,
     MAX_SNAPSHOT_CHUNKS,
@@ -119,15 +120,21 @@ class CodexSessionStore:
         if entry["uuid"] != entry["generation"]:
             raise ValueError("Invalid Codex checkpoint generation")
         validate_snapshot(entry["snapshot"], home)
-        return entry
+        # Checkpoints stored before media stripping restore without image bytes.
+        return {**entry, "snapshot": strip_snapshot_media(entry["snapshot"])}
 
     async def save(
         self, external_id: str, generation: str, snapshot: dict[str, Any]
     ) -> None:
-        """Validate then atomically replace a checkpoint through the repository."""
+        """Validate then atomically replace a checkpoint through the repository.
+
+        Inline rollout images are replaced by a notice first; the image files
+        stay in the workspace and never reach the encrypted checkpoint.
+        """
         uuid.UUID(external_id)
         uuid.UUID(generation)
         validate_snapshot(snapshot, home_for(str(self.session_id)))
+        snapshot = strip_snapshot_media(snapshot)
         if self.external_session_id and self.external_session_id != external_id:
             raise ValueError("Codex checkpoint thread mismatch")
         if not self.run_id or not self.owner_token:

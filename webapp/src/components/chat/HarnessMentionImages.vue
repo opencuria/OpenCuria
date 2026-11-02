@@ -12,6 +12,8 @@
  * - `removable`: show an X per thumbnail that emits `remove` (composer
  *   preview). History always leaves this false (no X in history).
  * - `onPrimary`: adjust fallback/border tones for dark primary bubbles.
+ * - `token.label`: optional display name (e.g. a tool image's source file);
+ *   defaults to the workspace-relative path.
  *
  * Emits:
  * - `remove(start, end)`: token offsets for `removeComposerToken(text,start,end)`.
@@ -33,6 +35,7 @@ export interface MentionFileToken {
   path: string
   raw?: string
   name?: string
+  label?: string
   start: number
   end: number
 }
@@ -91,7 +94,8 @@ const safeImages = computed(() =>
   ),
 )
 
-function displayName(path: string): string {
+function displayName(path: string, label?: string): string {
+  if (label) return label
   try {
     const relative = workspaceRelativePath(path)
     return relative || path.split('/').pop() || path
@@ -201,7 +205,7 @@ onUnmounted(() => {
   lightboxPath = null
 })
 
-function openLightbox(path: string): void {
+function openLightbox(path: string, label?: string): void {
   const url = imageUrl(path)
   if (!url) return
   if (lightboxPath !== path) {
@@ -212,7 +216,7 @@ function openLightbox(path: string): void {
     lightboxPath = path
     lightboxMediaGeneration = imageStore.mediaGeneration
   }
-  lightbox.value = { src: url, alt: displayName(path), path }
+  lightbox.value = { src: url, alt: displayName(path, label), path }
 }
 
 function closeLightbox(): void {
@@ -244,15 +248,17 @@ function requestRemove(token: MentionFileToken): void {
         v-if="imageUrl(token.path)"
         type="button"
         data-testid="mention-image-button"
-        :aria-label="`Open image preview ${displayName(token.path)}`"
+        :aria-label="`Open image preview ${displayName(token.path, token.label)}`"
         class="flex h-14 w-full items-center justify-center overflow-hidden rounded-lg border bg-muted/30 shadow-sm transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         :class="onPrimary ? 'border-primary-foreground/30' : 'border-border'"
-        @click="openLightbox(token.path)"
+        @click="openLightbox(token.path, token.label)"
       >
         <img
           :src="imageUrl(token.path)!"
-          :alt="displayName(token.path)"
+          :alt="displayName(token.path, token.label)"
           :data-path="token.path"
+          :data-voice-image-path="workspaceId ? token.path : undefined"
+          :data-voice-workspace="workspaceId || undefined"
           data-testid="mention-image"
           class="h-full w-full cursor-zoom-in object-contain"
           draggable="false"
@@ -276,7 +282,7 @@ function requestRemove(token: MentionFileToken): void {
         :title="token.path"
       >
         <WorkspaceFileIcon :path="token.path" :size="14" />
-        <span class="w-full truncate text-center">{{ displayName(token.path) }}</span>
+        <span class="w-full truncate text-center">{{ displayName(token.path, token.label) }}</span>
       </span>
       <button
         v-if="removable"
@@ -295,5 +301,12 @@ function requestRemove(token: MentionFileToken): void {
       </button>
     </div>
   </div>
-  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" :path="lightbox.path" :workspace-id="workspaceId" @close="closeLightbox" />
+  <ImageLightbox
+    v-if="lightbox"
+    :src="lightbox.src"
+    :alt="lightbox.alt"
+    :path="lightbox.path"
+    :workspace-id="workspaceId"
+    @close="closeLightbox"
+  />
 </template>

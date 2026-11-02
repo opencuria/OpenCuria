@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.media.tool_media import ToolMediaStore
 from apps.harness.models import HarnessMessage, HarnessPart, HarnessSession
 from apps.harness.repositories import (
     HarnessMessageRepository,
@@ -21,6 +22,7 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
 )
 from apps.harness.run_timeline import RunTimeline
+from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tool_call_parts import ToolCallParts
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
@@ -83,7 +85,9 @@ def _assistant(session: HarnessSession) -> HarnessMessage:
 
 def _tool_calls(runs: dict[str, dict[str, Any]]) -> ToolCallParts:
     return ToolCallParts(
-        parts=HarnessPartRepository, run_context=lambda key: runs.get(key, {})
+        parts=HarnessPartRepository,
+        run_context=lambda key: runs.get(key, {}),
+        media=ToolMediaStore(lambda _workspace_id: FakeAccessor()),
     )
 
 
@@ -96,6 +100,7 @@ def _timeline() -> RunTimeline:
         parts=HarnessPartRepository,
         run_context=lambda key: {},
         emit=_emit,
+        media=ToolMediaStore(lambda _workspace_id: FakeAccessor()),
     )
 
 
@@ -161,6 +166,7 @@ async def test_tool_finish_adopts_queued_part_call_id(
         assistant,
         {"call_id": "real-1", "queued_id": "tmp-1", "output": "ok"},
         state="completed",
+        workspace_id=str(session.workspace_id),
     )
 
     queued.refresh_from_db()

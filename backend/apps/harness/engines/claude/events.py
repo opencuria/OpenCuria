@@ -19,6 +19,41 @@ from claude_agent_sdk.types import ContentBlock
 from ...providers.base import Usage
 
 
+def _native_media(value: Any) -> list[tuple[str, str]]:
+    """Return ``(mime, base64)`` media of a native tool result.
+
+    Covers Read's ``tool_response`` (``{"type": "image"|"pdf", "file": ...}``)
+    and SDK tool-result content blocks with a base64 source.
+    """
+    if isinstance(value, dict):
+        file = value.get("file")
+        data = file.get("base64") if isinstance(file, dict) else None
+        if value.get("type") not in {"image", "pdf"} or not isinstance(data, str):
+            return []
+        mime = "application/pdf" if value["type"] == "pdf" else file.get("type")
+        return [(str(mime or ""), data)] if data else []
+    media: list[tuple[str, str]] = []
+    for block in value if isinstance(value, list) else []:
+        if not isinstance(block, dict):
+            continue
+        source = block.get("source")
+        if (
+            block.get("type") in {"image", "document"}
+            and isinstance(source, dict)
+            and source.get("type") == "base64"
+            and isinstance(source.get("data"), str)
+        ):
+            media.append((str(source.get("media_type") or ""), source["data"]))
+    return media
+
+
+def _media_output(media: list[tuple[str, str]]) -> str:
+    """Summarize media-only native results like OpenCuria's Read tool."""
+    if all(mime == "application/pdf" for mime, _ in media):
+        return "PDF read successfully"
+    return "Image read successfully"
+
+
 @dataclass
 class StepState:
     """Streaming state for API-message steps in one root or delegated scope."""
@@ -181,12 +216,23 @@ class ClaudeEventNormalizer:
         return block.thinking if isinstance(block, ThinkingBlock) else ""
 
     @staticmethod
+    def tool_attachments(value: Any) -> list[dict[str, Any]]:
+        """Map native image/PDF tool results to data-URL attachments."""
+        return [
+            {"type": "file", "mime": mime, "url": f"data:{mime};base64,{data}"}
+            for mime, data in _native_media(value)
+        ]
+
+    @staticmethod
     def tool_output(value: Any) -> str:
         """Normalize SDK-native tool results into bounded readable text."""
         if value is None:
             return ""
         if isinstance(value, str):
             return value
+        media = _native_media(value)
+        if isinstance(value, dict) and media:
+            return _media_output(media)
         if isinstance(value, dict):
             for key in ("content", "stdout", "output", "result", "message"):
                 if key not in value:
@@ -207,11 +253,12 @@ class ClaudeEventNormalizer:
 
             return json.dumps(value, ensure_ascii=False, default=str)
         if isinstance(value, list):
-            return "\n".join(
+            text = "\n".join(
                 str(item.get("text", ""))
                 for item in value
                 if isinstance(item, dict) and item.get("type") == "text"
             )
+            return text or (_media_output(media) if media else "")
         content = getattr(value, "content", None)
         if isinstance(content, list):
             return "\n".join(

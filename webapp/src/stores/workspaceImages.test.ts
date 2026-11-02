@@ -67,6 +67,29 @@ describe('workspace media reads', () => {
     )
   })
 
+  it('reads images with an explicit limit and never caches a truncated preview', async () => {
+    const pending = deferredRead()
+    vi.mocked(readWorkspaceFile).mockReturnValue(pending.promise)
+    const notify = vi.spyOn(useNotificationStore(), 'error')
+    const store = useWorkspaceImageStore()
+    const path = '/workspace/.opencuria/tool-media/big.png'
+    store.fetchImage('ws-1', path)
+    expect(readWorkspaceFile).toHaveBeenLastCalledWith(
+      'ws-1',
+      path,
+      20 * 1024 * 1024,
+      expect.any(AbortSignal),
+    )
+    pending.resolve({ ...result(path), truncated: true, size: 30 * 1024 * 1024 })
+    await flushPromises()
+    expect(store.getImageUrl(path)).toBeNull()
+    expect(store.isFetchingImage(path)).toBe(false)
+    expect(notify).toHaveBeenCalledWith(
+      'Media load failed',
+      'The media file is too large to preview.',
+    )
+  })
+
   it('bounds concurrency and releases a failed read so the queue and retries progress', async () => {
     const pending = deferredRead()
     vi.mocked(readWorkspaceFile).mockReturnValue(new Promise(() => {}))

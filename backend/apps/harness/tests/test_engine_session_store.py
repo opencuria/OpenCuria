@@ -111,3 +111,66 @@ async def test_session_store_rejects_invalid_project_and_path(
         )
     with pytest.raises(ValueError, match="does not match harness"):
         await store.load({"project_key": "workspace", "session_id": str(uuid.uuid4())})
+
+
+def _read_image_entry(encoded: str) -> dict:
+    """Return a native Read result row as Claude Code mirrors it."""
+    return {
+        "type": "user",
+        "uuid": "read-image",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": encoded,
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+        "toolUseResult": {
+            "type": "image",
+            "file": {"base64": encoded, "type": "image/png", "originalSize": 3},
+        },
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_session_store_never_persists_inline_media(harness_workspace) -> None:
+    """Mirrored rows keep their structure but replace base64 with a notice."""
+    from apps.harness.media.tool_media import OMITTED_MEDIA_NOTICE
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    external_id = str(uuid.uuid4())
+    store = HarnessClaudeSessionStore(
+        session_id=session.id, external_session_id=external_id
+    )
+    key = {"project_key": "workspace", "session_id": external_id}
+    encoded = "QUJD" * 1000
+    entry = _read_image_entry(encoded)
+
+    await store.append(key, [entry])
+
+    stored = (await store.load(key))[0]
+    result = stored["message"]["content"][0]
+    assert result["content"] == [{"type": "text", "text": OMITTED_MEDIA_NOTICE}]
+    assert stored["toolUseResult"]["file"] == {
+        "base64": "",
+        "type": "image/png",
+        "originalSize": 3,
+    }
+    assert encoded not in str(stored)
+    assert entry["toolUseResult"]["file"]["base64"] == encoded

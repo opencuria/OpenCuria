@@ -289,8 +289,8 @@ describe('workspace editor content states and commands', () => {
     await store.openFile(WS, '/workspace/repo/docs/README.md')
     const wrapper = mount(frame)
     await flushPromises()
-    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/repo/assets/screen shot.png', undefined, expect.any(AbortSignal))
-    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/logo.png', undefined, expect.any(AbortSignal))
+    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/repo/assets/screen shot.png', 20 * 1024 * 1024, expect.any(AbortSignal))
+    expect(readWorkspaceFile).toHaveBeenCalledWith(WS, '/workspace/logo.png', 20 * 1024 * 1024, expect.any(AbortSignal))
     expect(wrapper.findAll('[data-testid="editor-markdown-preview"] img')).toHaveLength(2)
   })
 
