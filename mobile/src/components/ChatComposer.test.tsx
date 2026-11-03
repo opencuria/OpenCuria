@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -260,6 +261,65 @@ describe("ChatComposer", () => {
       expect(screen.getByTestId("chat-composer-send")).toBeTruthy(),
     );
     expect(screen.queryByTestId("chat-composer-error")).toBeNull();
+  });
+
+  it("replaces the editor when a sent draft is cleared, so a grown composer shrinks", async () => {
+    renderComposer({ onSend: jest.fn().mockResolvedValue(undefined) });
+    const input = screen.getByTestId("chat-composer-input");
+    fireEvent.changeText(input, "line one\nline two\nline three\nline four");
+    expect(screen.getByTestId("chat-composer-input")).toBe(input);
+
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+
+    const cleared = screen.getByTestId("chat-composer-input");
+    expect(cleared).not.toBe(input);
+    expect(cleared.props.value).toBe("");
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-composer-send")).toBeTruthy(),
+    );
+    expect(screen.getByTestId("chat-composer-input")).toBe(cleared);
+  });
+
+  it("keeps the focused editor while typing and inserting a candidate", async () => {
+    const candidate = {
+      kind: "agent" as const,
+      label: "explore",
+      insert: "agent:explore",
+    };
+    renderComposer({ proposals: [candidate] });
+    const input = screen.getByTestId("chat-composer-input");
+
+    fireEvent.changeText(input, "first\nsecond @");
+    fireEvent.press(await screen.findByRole("button", { name: "Add explore" }));
+
+    expect(screen.getByTestId("chat-composer-input")).toBe(input);
+    expect(input.props.value).toBe("first\nsecond @agent:explore ");
+  });
+
+  it("replaces the editor when the host resets a long draft", () => {
+    let reset: () => void = () => undefined;
+    function Host(): React.JSX.Element {
+      const [draft, setDraft] = React.useState("");
+      reset = () => setDraft("");
+      return (
+        <ThemeProvider>
+          <ChatComposer
+            draft={draft}
+            onDraftChange={setDraft}
+            onSend={jest.fn()}
+          />
+        </ThemeProvider>
+      );
+    }
+    render(<Host />);
+    const input = screen.getByTestId("chat-composer-input");
+    fireEvent.changeText(input, "a long draft\nacross\nseveral lines");
+
+    act(() => reset());
+
+    const cleared = screen.getByTestId("chat-composer-input");
+    expect(cleared).not.toBe(input);
+    expect(cleared.props.value).toBe("");
   });
 
   it("clears a confirmed draft without invalidating an in-flight native picker", async () => {

@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -169,6 +170,9 @@ export function ChatComposer({
   const operationGeneration = useRef(0);
   const mounted = useRef(true);
   const contextKeyRef = useRef(contextKey);
+  // Text the mounted editor shows natively, and its mount generation.
+  const editorTextRef = useRef(draft);
+  const [editorKey, setEditorKey] = useState(0);
 
   attachmentsRef.current = attachments;
 
@@ -250,6 +254,7 @@ export function ChatComposer({
       nativeSelectionRef.current = false;
       nativeEditTextRef.current = null;
       draftRef.current = text;
+      editorTextRef.current = text;
       selectionRef.current = nextSelection;
       setError(null);
       onDraftChange(text, nextSelection);
@@ -277,6 +282,8 @@ export function ChatComposer({
         onSelectedSkillIdsChange?.([...selectedSkillIds, candidate.insert]);
       }
       draftRef.current = result.text;
+      // Keeps the focused editor; its next native edit corrects the height.
+      editorTextRef.current = result.text;
       const nextSelection = { start: result.cursor, end: result.cursor };
       nativeSelectionRef.current = false;
       nativeEditTextRef.current = null;
@@ -340,6 +347,17 @@ export function ChatComposer({
     setError(null);
     cancelSearch();
   }, [cancelSearch, draft]);
+
+  // Fabric sizes a multiline TextInput from the text native last reported, so
+  // text replaced from JavaScript keeps the old height (react-native#59744):
+  // a long draft cleared on send would leave a tall, empty composer. A fresh
+  // editor measures the new draft; sending closes the keyboard anyway.
+  useLayoutEffect(() => {
+    if (editorTextRef.current === draft) return;
+    editorTextRef.current = draft;
+    setInputScrolls(false);
+    setEditorKey((key) => key + 1);
+  }, [draft]);
 
   useEffect(() => {
     mounted.current = true;
@@ -746,7 +764,7 @@ export function ChatComposer({
               </ScrollView>
             ) : null}
             <ComposerEditor
-              key="message-input"
+              key={`message-input-${editorKey}`}
               ref={inputRef}
               value={draft}
               onChangeText={changeText}
