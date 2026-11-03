@@ -38,6 +38,42 @@ exports.IconButton = ({ icon, symbol, label, disabled, ...props }) =>
 exports.NativeAction = (props) => h(Pressable, props)
 exports.NativeScreen = ({ title, left, right, children }) =>
   h(View, null, h(Text, null, title), left, right, children)
+exports.MediaViewerFrame = ({
+  title,
+  chromeVisible,
+  onBack,
+  onShare,
+  shareDisabled,
+  children,
+}) =>
+  h(
+    View,
+    { style: { flex: 1 } },
+    chromeVisible
+      ? h(
+          View,
+          { testID: 'media-viewer-bar' },
+          h(
+            Pressable,
+            { accessibilityRole: 'button', accessibilityLabel: 'Back', onPress: onBack },
+            h(Text, null, 'Back'),
+          ),
+          h(Text, null, title),
+          h(
+            Pressable,
+            {
+              accessibilityRole: 'button',
+              accessibilityLabel: 'Share',
+              disabled: shareDisabled,
+              accessibilityState: { disabled: Boolean(shareDisabled) },
+              onPress: onShare,
+            },
+            h(Text, null, 'Share'),
+          ),
+        )
+      : null,
+    children,
+  )
 exports.ComposerSurface = ({ children }) => h(View, null, children)
 exports.NativeTextField = React.forwardRef(({ label, ...props }, ref) =>
   h(TextInput, {

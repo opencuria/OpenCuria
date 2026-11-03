@@ -3,6 +3,7 @@ package expo.modules.opencurianativeui
 import android.content.Context
 import android.graphics.Color
 import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
@@ -19,8 +20,10 @@ class OpenCuriaToolbarView(context: Context, appContext: AppContext) : ExpoView(
   private val onClose by EventDispatcher()
   private val onMenuAction by EventDispatcher()
   private var closeVisible = false
+  private var backNavigation = false
   private var tint = Color.BLACK
   private var menuIds = emptyList<String>()
+  private var menuItems = emptyList<Map<String, Any?>>()
 
   init {
     addView(toolbar, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -40,12 +43,18 @@ class OpenCuriaToolbarView(context: Context, appContext: AppContext) : ExpoView(
   fun setTintColor(value: String) {
     tint = Color.parseColor(value)
     updateCloseIcon()
-    toolbar.overflowIcon?.mutate()?.setTint(tint)
+    setMenuItems(menuItems)
   }
   fun setShowClose(value: Boolean) { closeVisible = value; updateCloseIcon() }
+  /** `close` (×) dismisses a dialog; `back` (←) leaves a full-screen viewer. */
+  fun setNavigationIcon(value: String) { backNavigation = value == "back"; updateCloseIcon() }
 
-  /** Overflow menu entries: `{ id, title, enabled, checked }`. */
+  /**
+   * Menu entries: `{ id, title, enabled, checked, icon? }`. Entries with a
+   * bundled `icon` sit in the bar as action buttons, the rest in the overflow.
+   */
   fun setMenuItems(items: List<Map<String, Any?>>) {
+    menuItems = items
     toolbar.menu.clear()
     menuIds = items.map { it["id"]?.toString() ?: "" }
     items.forEachIndexed { index, item ->
@@ -54,15 +63,29 @@ class OpenCuriaToolbarView(context: Context, appContext: AppContext) : ExpoView(
         val checked = item["checked"] as? Boolean ?: false
         isCheckable = checked
         isChecked = checked
+        actionIcon(item["icon"]?.toString())?.let { drawable ->
+          icon = drawable.mutate().apply {
+            setTint(tint)
+            alpha = if (isEnabled) 255 else 97
+          }
+          setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        }
       }
     }
     toolbar.overflowIcon?.mutate()?.setTint(tint)
   }
 
+  private fun actionIcon(name: String?) = when (name) {
+    "share" -> ContextCompat.getDrawable(context, R.drawable.opencuria_ic_share)
+    else -> null
+  }
+
   private fun updateCloseIcon() {
     toolbar.navigationIcon = if (closeVisible) {
-      ContextCompat.getDrawable(context, androidx.appcompat.R.drawable.abc_ic_clear_material)?.mutate()?.apply { setTint(tint) }
+      val icon = if (backNavigation) androidx.appcompat.R.drawable.abc_ic_ab_back_material else androidx.appcompat.R.drawable.abc_ic_clear_material
+      ContextCompat.getDrawable(context, icon)?.mutate()?.apply { setTint(tint) }
     } else null
+    toolbar.navigationContentDescription = if (backNavigation) "Back" else "Close"
   }
 
   override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -88,6 +111,7 @@ class OpenCuriaNativeUIModule : Module() {
       Prop("surfaceColor") { view: OpenCuriaToolbarView, value: String -> view.setSurfaceColor(value) }
       Prop("tintColor") { view: OpenCuriaToolbarView, value: String -> view.setTintColor(value) }
       Prop("showClose") { view: OpenCuriaToolbarView, value: Boolean -> view.setShowClose(value) }
+      Prop("navigationIcon") { view: OpenCuriaToolbarView, value: String? -> view.setNavigationIcon(value ?: "close") }
     }
   }
 }

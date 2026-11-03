@@ -86,6 +86,17 @@ import {
   NativeAction,
 } from "../ui/primitives";
 import { ChatMarkdown, type ResolvedChatMedia } from "./ChatMarkdown";
+import {
+  chatImages,
+  galleryFor,
+  imageMentionMarkdown,
+  type MediaGallery,
+} from "./chatGallery";
+import {
+  MediaGalleryContext,
+  MediaViewer,
+  type OpenMediaGallery,
+} from "./MediaViewer";
 
 export interface ChatMessagesProps {
   messages: HarnessMessage[];
@@ -201,6 +212,24 @@ export function ChatMessages({
   );
   // Live replies have no server position yet; the shared rule keeps them last.
   const ordered = useMemo(() => sortHarnessMessages(messages), [messages]);
+  // A tapped picture opens in a gallery of every picture in the chat, read
+  // from the messages so it also reaches rows that are not rendered.
+  const orderedRef = useRef(ordered);
+  orderedRef.current = ordered;
+  const [gallery, setGallery] = useState<MediaGallery | null>(null);
+  const openGallery = useCallback<OpenMediaGallery>(
+    (media, siblings) =>
+      setGallery(galleryFor(media, chatImages(orderedRef.current), siblings)),
+    [],
+  );
+  const viewer = gallery ? (
+    <MediaViewer
+      gallery={gallery}
+      resolveMedia={resolveMedia}
+      scope={String(mediaScopeKey ?? "")}
+      onClose={() => setGallery(null)}
+    />
+  ) : null;
   // `todos` is a fresh clone per snapshot; its content decides the to-do card.
   const todosKey = JSON.stringify(todos);
   const liveTodos = useMemo(() => todos, [todosKey]);
@@ -346,52 +375,55 @@ export function ChatMessages({
   }
 
   return (
-    <View style={styles.listRoot}>
-      <EndPullArea gesture={pull.gesture}>
-        <View style={styles.listRoot} collapsable={false}>
-          <KeyboardAwareLegendList
-            ref={listRef}
-            testID={testID}
-            data={ordered}
-            renderItem={renderItem}
-            // Rendered rows update only for new item data or extraData, not for
-            // a new renderItem. Row state such as media visibility lives in its
-            // closure, so the callback itself is the extra data.
-            extraData={renderItem}
-            keyExtractor={keyExtractor}
-            estimatedItemSize={220}
-            drawDistance={600}
-            onViewableItemsChanged={onViewableItemsChanged}
-            viewabilityConfig={VIEWABILITY}
-            initialScrollAtEnd
-            maintainScrollAtEnd={FOLLOW_END}
-            maintainVisibleContentPosition
-            recycleItems={false}
-            contentInsetEndAdjustment={layout.dockHeight}
-            keyboardOffset={layout.keyboardOffset}
-            keyboardLiftBehavior="whenAtEnd"
-            // Short transcripts must stay draggable in the inset area, so the
-            // keyboard can be pulled down from anywhere (facebook/react-native#54123).
-            applyWorkaroundForContentInsetHitTestBug={Platform.OS === "ios"}
-            keyboardDismissMode={layout.keyboardDismissMode}
-            keyboardShouldPersistTaps="handled"
-            // Insets are owned by the keyboard-aware list, never by UIKit.
-            automaticallyAdjustContentInsets={false}
-            contentInsetAdjustmentBehavior="never"
-            showsVerticalScrollIndicator={false}
-            contentContainerStyle={[
-              styles.listContent,
-              { paddingTop: styles.listContent.paddingTop + topInset },
-            ]}
-            style={{ backgroundColor: theme.background }}
-            {...scrollHandlers}
-            scrollEventThrottle={16}
-          />
-        </View>
-      </EndPullArea>
-      <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
-      {pullHint}
-    </View>
+    <MediaGalleryContext.Provider value={openGallery}>
+      <View style={styles.listRoot}>
+        <EndPullArea gesture={pull.gesture}>
+          <View style={styles.listRoot} collapsable={false}>
+            <KeyboardAwareLegendList
+              ref={listRef}
+              testID={testID}
+              data={ordered}
+              renderItem={renderItem}
+              // Rendered rows update only for new item data or extraData, not for
+              // a new renderItem. Row state such as media visibility lives in its
+              // closure, so the callback itself is the extra data.
+              extraData={renderItem}
+              keyExtractor={keyExtractor}
+              estimatedItemSize={220}
+              drawDistance={600}
+              onViewableItemsChanged={onViewableItemsChanged}
+              viewabilityConfig={VIEWABILITY}
+              initialScrollAtEnd
+              maintainScrollAtEnd={FOLLOW_END}
+              maintainVisibleContentPosition
+              recycleItems={false}
+              contentInsetEndAdjustment={layout.dockHeight}
+              keyboardOffset={layout.keyboardOffset}
+              keyboardLiftBehavior="whenAtEnd"
+              // Short transcripts must stay draggable in the inset area, so the
+              // keyboard can be pulled down from anywhere (facebook/react-native#54123).
+              applyWorkaroundForContentInsetHitTestBug={Platform.OS === "ios"}
+              keyboardDismissMode={layout.keyboardDismissMode}
+              keyboardShouldPersistTaps="handled"
+              // Insets are owned by the keyboard-aware list, never by UIKit.
+              automaticallyAdjustContentInsets={false}
+              contentInsetAdjustmentBehavior="never"
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={[
+                styles.listContent,
+                { paddingTop: styles.listContent.paddingTop + topInset },
+              ]}
+              style={{ backgroundColor: theme.background }}
+              {...scrollHandlers}
+              scrollEventThrottle={16}
+            />
+          </View>
+        </EndPullArea>
+        <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
+        {pullHint}
+      </View>
+      {viewer}
+    </MediaGalleryContext.Provider>
   );
 }
 
@@ -986,7 +1018,7 @@ function MentionImage({
 }): React.JSX.Element {
   return (
     <ChatMarkdown
-      markdown={`![${name.replace(/[\[\]]/g, "")}](<${path}>)`}
+      markdown={imageMentionMarkdown(path, name)}
       resolveMedia={resolveMedia}
       mediaVisible={mediaVisible}
       mediaScopeKey={mediaScopeKey}

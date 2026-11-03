@@ -4,7 +4,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react-native";
+import * as Sharing from "expo-sharing";
+import { State } from "react-native-gesture-handler";
+import {
+  fireGestureHandler,
+  getByGestureTestId,
+} from "react-native-gesture-handler/jest-utils";
 import { ChatMessages, UserMessageContent } from "./ChatMessages";
 import { Animated } from "react-native";
 import { ThemeProvider } from "../ui/theme";
@@ -98,6 +105,10 @@ jest.mock(
 );
 jest.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+jest.mock("expo-sharing", () => ({
+  isAvailableAsync: jest.fn().mockResolvedValue(true),
+  shareAsync: jest.fn().mockResolvedValue(undefined),
 }));
 
 const message = (parts: HarnessPart[]): HarnessMessage => ({
@@ -745,6 +756,122 @@ describe("ChatMessages", () => {
     view.unmount();
     for (const { value } of resolveMedia.mock.results)
       expect((await value).release).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a tapped picture full screen in a gallery of the whole chat", async () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: "u1",
+        session_id: "s1",
+        role: "user",
+        content: "Compare with @file:/workspace/mock.png",
+        parts: [],
+        position: 0,
+      },
+      {
+        ...message([
+          part(
+            "answer",
+            "text",
+            "Start ![Start](/workspace/start.png)\n\nLogin ![Login](/workspace/login.png)",
+            0,
+          ),
+        ]),
+        id: "a1",
+        position: 1,
+        completed_at: "2026-10-30T10:00:05Z",
+      },
+    ];
+    const releases: jest.Mock[] = [];
+    const resolveMedia = jest.fn(async (path: string) => {
+      const release = jest.fn();
+      releases.push(release);
+      return { uri: `file:///cache${path}`, release };
+    });
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={messages}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="scope"
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Open image preview Login" }),
+    );
+
+    // Every picture of the chat is one swipe or thumbnail away.
+    const viewer = await screen.findByTestId("image-preview");
+    const bar = () => screen.getByTestId("media-viewer-bar");
+    expect(within(bar()).getByText("Login")).toBeTruthy();
+    expect(
+      within(viewer).getByRole("button", {
+        name: "Show image 3 of 3, Login",
+        selected: true,
+      }),
+    ).toBeTruthy();
+    fireEvent.press(
+      within(viewer).getByRole("button", {
+        name: "Show image 1 of 3, mock.png",
+      }),
+    );
+    expect(within(bar()).getByText("mock.png")).toBeTruthy();
+    fireEvent(within(viewer).getByRole("adjustable"), "accessibilityAction", {
+      nativeEvent: { actionName: "increment" },
+    });
+    expect(within(bar()).getByText("Start")).toBeTruthy();
+
+    // Share hands the shown picture's file to the system share sheet.
+    await waitFor(() =>
+      expect(
+        within(bar()).getByRole("button", { name: "Share" }),
+      ).not.toBeDisabled(),
+    );
+    fireEvent.press(within(bar()).getByRole("button", { name: "Share" }));
+    await waitFor(() =>
+      expect(Sharing.shareAsync).toHaveBeenCalledWith(
+        "file:///cache/workspace/start.png",
+        { dialogTitle: "Start" },
+      ),
+    );
+
+    // Swiping left pages on; tapping the picture hides and shows the bars.
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("image-preview-pan"), [
+        { state: State.BEGAN, translationX: 0, velocityX: 0 },
+        { state: State.ACTIVE, translationX: -40, velocityX: -900 },
+        { state: State.ACTIVE, translationX: -160, velocityX: -900 },
+        { state: State.END, translationX: -160, velocityX: -900 },
+      ]),
+    );
+    await waitFor(() => expect(within(bar()).getByText("Login")).toBeTruthy());
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("image-preview-tap"), [
+        { state: State.BEGAN },
+        { state: State.ACTIVE },
+        { state: State.END },
+      ]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("media-viewer-bar")).toBeNull(),
+    );
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("image-preview-tap"), [
+        { state: State.BEGAN },
+        { state: State.ACTIVE },
+        { state: State.END },
+      ]),
+    );
+    await waitFor(() => expect(bar()).toBeTruthy());
+
+    // Back closes the viewer and gives up its files.
+    fireEvent.press(within(bar()).getByRole("button", { name: "Back" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("image-preview")).toBeNull(),
+    );
+    view.unmount();
+    for (const release of releases) expect(release).toHaveBeenCalledTimes(1);
   });
 });
 

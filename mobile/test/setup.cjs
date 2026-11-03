@@ -11,6 +11,7 @@ jest.mock('react-native-keyboard-controller', () =>
 jest.mock('../src/ui/controls', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/ModalFrame', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/NativeScreen', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/MediaViewerFrame', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/ComposerSurface', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/ToastSurface', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/NativeMenu', () => require('./native-ui.cjs'))

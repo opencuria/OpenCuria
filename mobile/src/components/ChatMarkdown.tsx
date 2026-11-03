@@ -1,8 +1,14 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   Linking,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -13,14 +19,15 @@ import { EnrichedMarkdownText } from "react-native-enriched-markdown";
 
 import { resolveWorkspaceLinkPath } from "@opencuria/chat-core/workspaceFileRefs";
 import remend from "remend";
-import { NativeModal } from "../ui/primitives";
 import { NativeAction } from "../ui/controls";
 import { useTheme } from "../ui/theme";
+import { galleryFor, type MediaGallery } from "./chatGallery";
 import {
   isSafeExternalUrl,
   splitMarkdownMedia,
   type MarkdownMedia,
 } from "./markdownMedia";
+import { MediaGalleryContext, MediaViewer } from "./MediaViewer";
 import {
   useWorkspaceMedia,
   type ResolvedChatMedia,
@@ -42,8 +49,6 @@ export interface ChatMarkdownProps {
   onOpenFile?: (workspacePath: string) => void;
   testID?: string;
 }
-
-type MediaPreview = Pick<MarkdownMedia, "path" | "uri" | "label">;
 
 /** Render GFM natively; workspace media is loaded only for visible chat rows. */
 export function ChatMarkdown({
@@ -99,8 +104,27 @@ export function ChatMarkdown({
     scope,
     active: mediaVisible,
   });
-  const [preview, setPreview] = useState<MediaPreview | null>(null);
-  useEffect(() => setPreview(null), [scope]);
+  const images = useMemo(
+    () =>
+      pieces.flatMap((piece) =>
+        piece.kind === "media" && piece.media.kind === "image"
+          ? [piece.media]
+          : [],
+      ),
+    [pieces],
+  );
+  // The transcript opens one gallery of the whole chat; elsewhere (e.g. a
+  // Markdown file) the pictures of this text page through on their own.
+  const openChatGallery = useContext(MediaGalleryContext);
+  const [gallery, setGallery] = useState<MediaGallery | null>(null);
+  useEffect(() => setGallery(null), [scope]);
+  const openImage = useCallback(
+    (image: MarkdownMedia) => {
+      if (openChatGallery) openChatGallery(image, images);
+      else setGallery(galleryFor(image, [], images));
+    },
+    [images, openChatGallery],
+  );
   const markdownStyle = useMemo(() => {
     const quiet = variant === "quiet";
     // The transcript stays uncolored: links and quotes only differ in shape.
@@ -254,7 +278,7 @@ export function ChatMarkdown({
             }
             resolvable={Boolean(resolveMedia)}
             active={mediaVisible}
-            onOpen={() => setPreview(piece.media)}
+            onOpen={() => openImage(piece.media)}
             onRetry={() => piece.media.path && retry(piece.media.path)}
             onDisplayError={() =>
               piece.media.path && reportDisplayError(piece.media.path)
@@ -262,12 +286,14 @@ export function ChatMarkdown({
           />
         ),
       )}
-      <MediaPreviewModal
-        preview={preview}
-        resolveMedia={resolveMedia}
-        scope={scope}
-        onClose={() => setPreview(null)}
-      />
+      {gallery ? (
+        <MediaViewer
+          gallery={gallery}
+          resolveMedia={resolveMedia}
+          scope={scope}
+          onClose={() => setGallery(null)}
+        />
+      ) : null}
     </View>
   );
 }
@@ -363,72 +389,6 @@ function InlineMedia({
   );
 }
 
-/** Full-screen preview; it holds its own lease while open. */
-function MediaPreviewModal({
-  preview,
-  resolveMedia,
-  scope,
-  onClose,
-}: {
-  preview: MediaPreview | null;
-  resolveMedia?: ChatMarkdownProps["resolveMedia"];
-  scope: string;
-  onClose: () => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  const paths = useMemo(
-    () => (preview?.path ? [preview.path] : []),
-    [preview?.path],
-  );
-  const { media } = useWorkspaceMedia({
-    paths,
-    resolve: resolveMedia,
-    scope,
-    active: preview !== null,
-  });
-  const state = preview?.path ? media[preview.path] : undefined;
-  const uri = preview?.path
-    ? state?.status === "ready"
-      ? state.uri
-      : undefined
-    : preview?.uri;
-  return (
-    <NativeModal
-      visible={preview !== null}
-      onClose={onClose}
-      title={preview?.label ?? "Image preview"}
-      testID="image-preview"
-      scrollable={false}
-    >
-      <ScrollView
-        style={{ flex: 1 }}
-        contentContainerStyle={{ flexGrow: 1 }}
-        maximumZoomScale={4}
-        minimumZoomScale={1}
-        centerContent
-        accessibilityLabel="Image preview"
-      >
-        {uri ? (
-          <Image
-            source={{ uri }}
-            contentFit="contain"
-            style={{ width: "100%", minHeight: 500, flex: 1 }}
-            accessibilityLabel={preview?.label}
-          />
-        ) : preview ? (
-          <View style={styles.previewStatus}>
-            {state?.status === "failed" ? (
-              <Text style={{ color: theme.mutedText }}>Image unavailable</Text>
-            ) : (
-              <ActivityIndicator color={theme.subtleText} />
-            )}
-          </View>
-        ) : null}
-      </ScrollView>
-    </NativeModal>
-  );
-}
-
 function NativeVideoCard({
   uri,
   label,
@@ -504,7 +464,6 @@ const styles = StyleSheet.create({
   placeholder: { alignItems: "center", justifyContent: "center", gap: 4 },
   placeholderText: { fontSize: 13, textAlign: "center" },
   mediaLabel: { fontSize: 12 },
-  previewStatus: { flex: 1, alignItems: "center", justifyContent: "center" },
   videoLabel: { color: "#858590", fontSize: 12 },
   fileLabel: { minHeight: 44, justifyContent: "center" },
 });
