@@ -15,6 +15,7 @@ from common.utils import generate_uuid
 
 from ...enums import TaskStatus, TaskType, WorkspaceStatus
 from ...exceptions import RunnerOfflineError
+from ..runner_diagnostics import failure_message
 
 if TYPE_CHECKING:
     from ...models import Workspace
@@ -198,15 +199,18 @@ class CredentialSyncService:
                             "outcome_known": response.get("outcome_known", True)
                             if response.get("ok") is not False
                             else response.get("outcome_known", False),
-                            "error": str(
-                                response.get("error") or "Credential inject failed"
-                            ),
+                            "diagnostic_code": response.get("diagnostic_code"),
                             **identity,
                         },
                     )
                 if response.get("ok") is False:
                     raise ConflictError(
-                        str(response.get("error") or "Credential inject failed")
+                        failure_message(
+                            {
+                                **response,
+                                "outcome_known": response.get("outcome_known", False),
+                            }
+                        )
                     )
                 if accepted and isinstance(acknowledged_present, bool):
                     return acknowledged_present

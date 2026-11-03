@@ -19,6 +19,12 @@ import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend, WorkspaceConfig
+from ..runtime.diagnostics import (
+    CREDENTIAL_SCRUB_UNVERIFIED,
+    IMAGE_UNAVAILABLE,
+    INVALID_RESOURCES,
+    OperationRejectedError,
+)
 from .capture_fence import CaptureFence, Method
 from .sessions.desktop import WorkspaceEndedEvidence
 from .workspace_registry import WorkspaceRegistry
@@ -146,6 +152,15 @@ class WorkspaceLifecycle:
             runtime, instance_id, env_vars, files, ssh_keys, log
         )
 
+    @staticmethod
+    async def _validate_reconfigure(
+        runtime: RuntimeBackend, instance_id: str, resources: dict[str, int]
+    ) -> None:
+        """Run the runtime's resource refusals before the first lifecycle effect."""
+        validate = getattr(runtime, "validate_reconfigure", None)
+        if validate is not None:
+            await validate(instance_id, **resources)
+
     # -- lifecycle ---------------------------------------------------------
 
     @coordinated
@@ -186,7 +201,9 @@ class WorkspaceLifecycle:
         log.info("creating_workspace", repos=repos)
 
         if not base_image_path:
-            raise RuntimeError("QEMU workspace creation requires a base image path")
+            raise OperationRejectedError(
+                IMAGE_UNAVAILABLE, "QEMU workspace creation requires a base image path"
+            )
         config = WorkspaceConfig(
             workspace_id=str(workspace_id),
             image=base_image_path,
@@ -200,16 +217,19 @@ class WorkspaceLifecycle:
         # (which can take 60 s+ for QEMU) do not drop this workspace and
         # cause the backend to mark it as failed.  instance_id is unknown at
         # this point — it will be updated once create_workspace() returns.
-        self._registry.register_new_workspace(
-            WorkspaceInfo(
-                workspace_id=workspace_id,
-                instance_id="",
-                status="creating",
-            )
+        reservation = WorkspaceInfo(
+            workspace_id=workspace_id,
+            instance_id="",
+            status="creating",
         )
+        self._registry.register_new_workspace(reservation)
 
         try:
             instance_id = await runtime.create_workspace(config)
+        except OperationRejectedError:
+            # Refused before allocation: nothing remains to reconcile or remove.
+            self._registry.discard_reservation(reservation)
+            raise
         except Exception:
             log.exception("workspace_creation_failed")
             # A thrown error need not mean runtime creation had no effects.
@@ -292,9 +312,10 @@ class WorkspaceLifecycle:
             ):
                 info.credentials_present = False
                 return False
-            raise RuntimeError(
+            raise OperationRejectedError(
+                CREDENTIAL_SCRUB_UNVERIFIED,
                 "Stopped guest has no exact scrub proof; "
-                "resume and stop to verify credential removal"
+                "resume and stop to verify credential removal",
             )
         if info.status != "running":
             raise RuntimeError("Workspace live status is unknown or not running")
@@ -329,26 +350,33 @@ class WorkspaceLifecycle:
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> bool:
-        """Resume a stopped workspace and re-inject persistent credentials."""
+        """Resume a stopped workspace and re-inject persistent credentials.
+
+        Refusals precede every effect, including revoking the scrub proof, so a
+        rejected resume leaves the stopped workspace exactly as it was.
+        """
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._registry.get_cached(workspace_id)
-        info.credentials_present = None
         runtime = self._registry.get_runtime(workspace_id)
 
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        if qemu_vcpus is None or qemu_memory_mb is None or qemu_disk_size_gb is None:
+            raise OperationRejectedError(
+                INVALID_RESOURCES, "Missing QEMU resource settings for resume"
+            )
+        resources = {
+            "qemu_vcpus": qemu_vcpus,
+            "qemu_memory_mb": qemu_memory_mb,
+            "qemu_disk_size_gb": qemu_disk_size_gb,
+        }
+        await self._validate_reconfigure(runtime, info.instance_id, resources)
 
+        info.credentials_present = None
         if self.checkpoint_hook is not None:
             await self.checkpoint_hook(workspace_id, None, "injecting")
-
-        if qemu_vcpus is None or qemu_memory_mb is None or qemu_disk_size_gb is None:
-            raise RuntimeError("Missing QEMU resource settings for resume")
         await runtime.reconfigure_workspace(
-            info.instance_id,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-            restart=False,
+            info.instance_id, **resources, restart=False
         )
 
         await runtime.start_workspace(info.instance_id)
@@ -414,18 +442,18 @@ class WorkspaceLifecycle:
         runtime = self._registry.get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        resources = {
+            "qemu_vcpus": qemu_vcpus,
+            "qemu_memory_mb": qemu_memory_mb,
+            "qemu_disk_size_gb": qemu_disk_size_gb,
+        }
+        await self._validate_reconfigure(runtime, info.instance_id, resources)
         # Reconfigure restarts the VM: all in-workspace stream processes
         # die with it, so close the tracked sessions first.
         await self._streams.close_workspace_streams(
             workspace_id, reason="reconfigure_resources"
         )
-        await runtime.reconfigure_workspace(
-            info.instance_id,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-            restart=True,
-        )
+        await runtime.reconfigure_workspace(info.instance_id, **resources, restart=True)
         # The VM rebooted: every RAM process is dead, so drop tracking.
         # Keeping entries would report stale exited rows and risk
         # signalling a reused foreign PID after the reboot.

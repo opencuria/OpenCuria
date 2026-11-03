@@ -41,6 +41,14 @@ application, independently of the WebSocket adapter. Reconnects replay committed
 outcomes; cancellation of a delivery waiter cannot cancel admitted runtime work.
 Shutdown drains effects before the application releases the journal writer lock.
 
+Failed commands publish a generic text and a stable `diagnostic_code`
+(`src/runtime/diagnostics.py`), never exception messages; the backend words the
+codes in `apps/runners/services/runner_diagnostics.py`. Refusals raised before
+the first effect (`OperationRejectedError`: invalid resources, disk shrinking,
+an existing disk or domain, a missing or invalid image, a build queue timeout)
+are known outcomes: they skip automatic recovery and retries. Failures after an
+effect keep `outcome_known: false` and remain with automatic recovery.
+
 ## VM memory reclamation
 
 VMs enable virtio-balloon [free page reporting][free-page-reporting] so the host

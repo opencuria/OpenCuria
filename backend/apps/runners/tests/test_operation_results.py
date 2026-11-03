@@ -12,6 +12,7 @@ from apps.runners.operations import OperationRepository
 from apps.runners.repositories import TaskRepository
 from apps.runners.services import RunnerService
 from apps.runners.services.operation_results import apply_result
+from apps.runners.services.runner_diagnostics import FAILED
 
 pytestmark = pytest.mark.django_db
 
@@ -157,4 +158,6 @@ def test_late_failure_needs_finished_known_execution(
     assert task.status == "failed"
     assert workspace.current_task_id == (None if accepted else task.id)
     if accepted:
-        assert task.error == "stop failed"
+        # Runner text is never shown; an uncoded known failure gets the fallback.
+        assert task.error == FAILED
+        assert workspace.lifecycle_diagnostic == FAILED

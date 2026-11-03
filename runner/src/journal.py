@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from .runtime.diagnostics import CODES, INTERRUPTED, failure_code
 from .runtime.recovery import RecoveryConflict
 
 logger = structlog.get_logger(__name__)
@@ -194,7 +195,10 @@ class Journal:
 
     @serialized
     def owns_workspace_allocation(self, workspace_id: str) -> bool:
-        """Retain newest allocation lineage, revoked by a completed removal."""
+        """Retain newest allocation lineage, revoked by a completed removal.
+
+        A create refused before any effect allocated nothing and is skipped.
+        """
         for encoded, event, result in self.db.execute(
             "SELECT identity,event,result FROM operations ORDER BY rowid DESC"
         ):
@@ -211,11 +215,12 @@ class Journal:
                 "task:create_workspace_from_image_artifact",
             }:
                 terminal = json.loads(result) if result else None
-                return (
+                if (
                     terminal is None
                     or event == "workspace:created"
                     or terminal.get("outcome_known") is False
-                )
+                ):
+                    return True
         return False
 
     @serialized
@@ -304,7 +309,11 @@ class Journal:
 
     @serialized
     def finish(self, op_id: str, event: str, data: dict) -> None:
-        """Persist terminal evidence before emitting, with sanitized errors."""
+        """Persist terminal evidence before emitting, with sanitized errors.
+
+        Raw messages may contain paths or secrets: only a generic text and a
+        stable ``diagnostic_code`` leave the runner; the backend words it.
+        """
         clean = {
             k: v
             for k, v in data.items()
@@ -312,7 +321,7 @@ class Journal:
         }
         if "error" in clean:
             interrupted = (
-                clean.get("diagnostic_code") == "interrupted"
+                clean.get("diagnostic_code") == INTERRUPTED
                 or clean.get("outcome_known") is False
             )
             clean["error"] = (
@@ -320,12 +329,8 @@ class Journal:
                 if interrupted
                 else "Operation failed; execution finished"
             )
-            clean.setdefault(
-                "diagnostic_code",
-                "insufficient_storage"
-                if "no space left" in str(data.get("error", "")).lower()
-                else "handler_failed",
-            )
+            if clean.get("diagnostic_code") not in CODES:
+                clean["diagnostic_code"] = failure_code(str(data.get("error", "")))
             clean.setdefault("outcome_known", not interrupted)
         with self.db:
             self.db.execute(
@@ -905,6 +910,7 @@ class OperationExecutor:
                         )
                     if (
                         outcome.event != "workspace:error"
+                        or not outcome.retryable
                         or execution_attempt == 2
                         or event
                         not in {

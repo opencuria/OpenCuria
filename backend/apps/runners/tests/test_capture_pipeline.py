@@ -13,6 +13,7 @@ from apps.runners.models import (
 from apps.runners.operations import OperationRepository
 from apps.runners.services.capture import CaptureService
 from apps.runners.services.operation_results import apply_result
+from apps.runners.services.runner_diagnostics import FAILED
 from apps.runners.tests.conftest import capture_version_fields, has_busy_agent
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
@@ -424,7 +425,11 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
         request.child,
         "image_artifact:failed" if capture_failed else "image_artifact:created",
         **(
-            {"error": "safe refusal"}
+            # Runners send sanitized text plus a code; users see the code's text.
+            {
+                "error": "Operation failed; execution finished",
+                "diagnostic_code": "insufficient_storage",
+            }
             if capture_failed
             else {
                 "image_artifact_id": "/capture.qcow2",
@@ -437,7 +442,7 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
     request.refresh_from_db()
     assert request.phase == "resume"
     if capture_failed:
-        assert "safe refusal" in request.diagnostic
+        assert "out of disk space" in request.diagnostic
     assert result(
         service,
         runner,
@@ -461,7 +466,7 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
     assert request.phase == ("failed" if capture_failed else "completed")
     assert request.image.status == ("failed" if capture_failed else "ready")
     assert (
-        "restart failed" if restart_failed else "safe refusal"
+        "restart failed" if restart_failed else "out of disk space"
     ) in request.diagnostic
     if not capture_failed:
         assert request.image.runner_ref == "/capture.qcow2"
@@ -473,7 +478,8 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
             "workspace_id": str(workspace.id),
             "active_operation": None,
             "intervention_required": False,
-            "lifecycle_diagnostic": "",
+            # A failed restart stays explained after its fence is released.
+            "lifecycle_diagnostic": FAILED if restart_failed else "",
         },
         str(workspace.id),
     )

@@ -196,3 +196,36 @@ def test_duplicate_interruption_does_not_repeat_notifications(
     assert not service.apply_operation_result(str(runner.id), "workspace:error", data)
     service.frontend_bus.forward_to_frontend.assert_called_once()
     service.frontend_bus.forward_workspace_operation.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_injection_reply_is_worded_from_its_code(
+    runner, workspace, service, sio_mock
+):
+    """Direct replies carry codes only; the backend words them, never runner text."""
+    sio_mock.call = AsyncMock(
+        return_value={
+            "ok": False,
+            "error": "No space left on /var/lib/opencuria/secret",
+            "diagnostic_code": "insufficient_storage",
+            "outcome_known": True,
+            "observed_status": "running",
+            "credentials_present": False,
+        }
+    )
+    message = (
+        "The runner is out of disk space. "
+        "Free up storage on the runner, then try again."
+    )
+    with pytest.raises(ConflictError) as error:
+        await service.credential_sync.dispatch_credential_inject(
+            workspace, resolved=ResolvedCredentials(), wait=True
+        )
+    assert error.value.message.endswith(message)
+    assert "secret" not in error.value.message
+    task = Task.objects.get(type="inject_credentials", workspace=workspace)
+    workspace.refresh_from_db()
+    assert task.status == "failed" and task.error == message
+    assert workspace.current_task_id is None
+    assert workspace.lifecycle_diagnostic == message
+    assert "secret" not in task.error

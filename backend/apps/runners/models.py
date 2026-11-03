@@ -235,6 +235,14 @@ class Workspace(models.Model):
     delete_confirmed_at = models.DateTimeField(null=True, blank=True)
     delete_last_error = models.TextField(blank=True, default="")
     delete_attempt_count = models.PositiveIntegerField(default=0)
+    lifecycle_error = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Why the latest lifecycle operation failed. Kept after its fence is "
+            "released and cleared when the next lifecycle operation starts."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -249,8 +257,10 @@ class Workspace(models.Model):
 
     @property
     def lifecycle_diagnostic(self) -> str:
-        """Explain why a retained fence cannot be silently cleared."""
-        return self.current_task.error if self.intervention_required else ""
+        """Explain a retained fence, otherwise the latest lifecycle failure."""
+        if self.intervention_required:
+            return self.current_task.error
+        return self.lifecycle_error
 
     def __str__(self) -> str:
         return f"Workspace({self.name}, {self.status})"

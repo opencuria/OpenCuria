@@ -16,6 +16,7 @@ import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import ImageArtifactInfo, RuntimeBackend
+from ..runtime.diagnostics import OperationRejectedError
 from .capture_fence import CaptureFence
 
 logger = structlog.get_logger(__name__)
@@ -35,6 +36,7 @@ class ImageManager:
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         store_workspace: Callable[[WorkspaceInfo], None] | None = None,
+        discard_workspace: Callable[[WorkspaceInfo], None] | None = None,
         credentials_injector: Callable[
             [RuntimeBackend, str, Any, Any, Any, Any], Awaitable[bool]
         ]
@@ -45,6 +47,7 @@ class ImageManager:
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         self._store_workspace = store_workspace
+        self._discard_workspace = discard_workspace
         self.lifecycle_context = None
         self.scrub_proof_hook = None
         self.checkpoint_hook = None
@@ -213,13 +216,19 @@ class ImageManager:
         if self._store_workspace is None:
             raise RuntimeError("ImageManager has no workspace store configured")
         self._store_workspace(info)
-        instance_id = await runtime.create_workspace_from_image_artifact(
-            image_artifact_id,
-            str(new_workspace_id),
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-        )
+        try:
+            instance_id = await runtime.create_workspace_from_image_artifact(
+                image_artifact_id,
+                str(new_workspace_id),
+                qemu_vcpus=qemu_vcpus,
+                qemu_memory_mb=qemu_memory_mb,
+                qemu_disk_size_gb=qemu_disk_size_gb,
+            )
+        except OperationRejectedError:
+            # Refused before allocation: nothing remains to reconcile or remove.
+            if self._discard_workspace is not None:
+                self._discard_workspace(info)
+            raise
 
         info.instance_id = instance_id
 

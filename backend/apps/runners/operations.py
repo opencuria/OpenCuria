@@ -67,13 +67,17 @@ class OperationRepository:
             if recreate and recreate.id != recreate_request_id:
                 raise ConflictError("Workspace is being reset")
             ws.current_task_id = task.id
+            # A new attempt supersedes the previous lifecycle failure.
+            ws.lifecycle_error = ""
             if capture:
                 ws.active_operation = "capturing_image"
             elif recreate:
                 ws.active_operation = OPERATION_BY_REASON[recreate.reason]
             else:
                 ws.active_operation = OPERATIONS.get(task.type)
-            ws.save(update_fields=["current_task", "active_operation"])
+            ws.save(
+                update_fields=["current_task", "active_operation", "lifecycle_error"]
+            )
         LifecycleCommand.objects.get_or_create(
             task=task,
             defaults={

@@ -65,6 +65,7 @@ class WorkspaceService:
             get_cached,
             get_runtime,
             store_workspace=self.registry.register_new_workspace,
+            discard_workspace=self.registry.discard_reservation,
             credentials_injector=self.credentials.inject_workspace_credentials,
         )
         self.images.lifecycle_context = self.registry.lifecycle

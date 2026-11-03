@@ -8,6 +8,7 @@ from typing import Any
 
 from ..operation_result_repository import OperationResultRepository
 from ..operations import INSPECTION_PHASES, LIFECYCLE_TYPES
+from .runner_diagnostics import failure_message
 
 RESULT_METHODS = {
     "workspace:created": (
@@ -81,6 +82,9 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
             "workspace_id", str(state.workspace_id)
         ) != str(state.workspace_id):
             return False
+        if event in FAILURE_EVENTS:
+            # Runner text is sanitized and generic; users see the coded meaning.
+            data = {**data, "error": failure_message(data)}
         if (
             event in FAILURE_EVENTS
             and data.get("outcome_known") is False
@@ -92,10 +96,7 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
             if state.phase == "attention_required":
                 # Replayed uncertainty cannot erase a proven repair requirement.
                 return False
-            reason = (
-                "Operation interrupted; automatic recovery will verify "
-                "the runner state."
-            )
+            reason = data["error"]
             newly_interrupted = (
                 state.status != "failed" or state.phase != "intervention"
             )

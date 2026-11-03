@@ -207,7 +207,11 @@ class DispositionRepository:
             workspace.current_task = None
             workspace.active_operation = None
             workspace.status = workspace_status
-            fields = ["current_task", "active_operation", "status"]
+            # Keep the disposed operation's reason visible after release.
+            workspace.lifecycle_error = (
+                self._task.error if self._task.status == "failed" else ""
+            )
+            fields = ["current_task", "active_operation", "status", "lifecycle_error"]
             if isinstance(credentials_present, bool):
                 workspace.credentials_present = credentials_present
                 fields.append("credentials_present")

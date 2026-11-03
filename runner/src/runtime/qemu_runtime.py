@@ -38,6 +38,19 @@ from .base import (
     RuntimeWorkspaceInfo,
     WorkspaceConfig,
 )
+from .diagnostics import (
+    BUILD_QUEUE_TIMEOUT,
+    BUILD_SCRIPT_FAILED,
+    BUILD_SCRIPT_TIMEOUT,
+    DISK_BELOW_IMAGE_MINIMUM,
+    DISK_SHRINK_UNSUPPORTED,
+    IMAGE_INVALID,
+    IMAGE_UNAVAILABLE,
+    INVALID_RESOURCES,
+    WORKSPACE_EXISTS,
+    OperationError,
+    OperationRejectedError,
+)
 from .inventory import RuntimeInventory, StorageResource
 from .recovery import RecoveryConflict
 from .managed_process import (
@@ -391,24 +404,36 @@ class QemuRuntime(RuntimeBackend):
         disk_size_gb: int,
         base_image: str | None = None,
     ) -> Path:
-        """Create a QCOW2 overlay backed by the base image."""
+        """Create a QCOW2 overlay backed by the base image.
+
+        Every refusal precedes the first write, so callers may rely on
+        ``OperationRejectedError`` meaning that no disk was allocated.
+        """
         disk = self._disk_path(instance_id)
         if not base_image:
-            raise RuntimeError("QEMU overlay creation requires an explicit base image")
+            raise OperationRejectedError(
+                IMAGE_UNAVAILABLE,
+                "QEMU overlay creation requires an explicit base image",
+            )
         if disk.exists() or disk.is_symlink():
-            raise FileExistsError(f"Workspace disk already exists: {disk}")
+            raise OperationRejectedError(
+                WORKSPACE_EXISTS, f"Workspace disk already exists: {disk}"
+            )
         backing = str(Path(base_image).absolute())
         if not Path(backing).exists():
-            raise RuntimeError(f"QEMU base image not found: {backing}")
+            raise OperationRejectedError(
+                IMAGE_UNAVAILABLE, f"QEMU base image not found: {backing}"
+            )
 
         info = await self._image_info(Path(backing))
         if info.get("format") != "qcow2":
-            raise RuntimeError("QEMU base image must be QCOW2")
+            raise OperationRejectedError(IMAGE_INVALID, "QEMU base image must be QCOW2")
         disk_size_bytes = disk_size_gb * 1024**3
         if disk_size_bytes < int(info["virtual-size"]):
             minimum = (int(info["virtual-size"]) + 1024**3 - 1) // 1024**3
-            raise RuntimeError(
-                f"Requested QEMU disk size is smaller than image minimum {minimum} GiB"
+            raise OperationRejectedError(
+                DISK_BELOW_IMAGE_MINIMUM,
+                f"Requested QEMU disk size is smaller than image minimum {minimum} GiB",
             )
         temp = disk.with_name(disk.name + ".tmp-" + uuid.uuid4().hex)
         cmd = [
@@ -568,7 +593,10 @@ class QemuRuntime(RuntimeBackend):
         await process.wait_closed()
         exit_code = self._require_exit_status(process)
         if exit_code != 0:
-            raise RuntimeError(f"QEMU image build failed with exit code {exit_code}")
+            raise OperationError(
+                BUILD_SCRIPT_FAILED,
+                f"QEMU image build failed with exit code {exit_code}",
+            )
 
     async def _create_cloud_init_iso(
         self,
@@ -1121,7 +1149,9 @@ class QemuRuntime(RuntimeBackend):
             domain.name() == self._domain_name(instance_id)
             for domain in self._libvirt_conn().listAllDomains(0)
         ):
-            raise FileExistsError("Workspace domain already exists")
+            raise OperationRejectedError(
+                WORKSPACE_EXISTS, "Workspace domain already exists"
+            )
 
     @staticmethod
     def _validate_workspace_resources(vcpus: int, memory_mb: int, disk_gb: int) -> None:
@@ -1131,7 +1161,9 @@ class QemuRuntime(RuntimeBackend):
         rejects values libvirt cannot represent.
         """
         if min(vcpus, memory_mb, disk_gb) <= 0:
-            raise ValueError("QEMU workspace resources must be positive")
+            raise OperationRejectedError(
+                INVALID_RESOURCES, "QEMU workspace resources must be positive"
+            )
 
     @workspace_mutation
     async def create_workspace(self, config: WorkspaceConfig) -> str:
@@ -1167,7 +1199,9 @@ class QemuRuntime(RuntimeBackend):
 
         disk = self._disk_path(instance_id)
         if await asyncio.to_thread(lambda: disk.exists() or disk.is_symlink()):
-            raise FileExistsError(f"Workspace disk already exists: {disk}")
+            raise OperationRejectedError(
+                WORKSPACE_EXISTS, f"Workspace disk already exists: {disk}"
+            )
 
         # Validate the base and publish its overlay before allocating a network.
         disk = await self._create_overlay_disk(
@@ -1291,7 +1325,7 @@ class QemuRuntime(RuntimeBackend):
         domain = await asyncio.to_thread(self._get_domain, instance_id)
         state, _ = await asyncio.to_thread(domain.state)
         was_active = state != libvirt.VIR_DOMAIN_SHUTOFF
-        await self._validate_reconfigure(
+        await self.validate_reconfigure(
             instance_id,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
@@ -1311,7 +1345,7 @@ class QemuRuntime(RuntimeBackend):
             await self._wait_for_ssh(instance_id)
 
     @storage_mutation
-    async def _validate_reconfigure(
+    async def validate_reconfigure(
         self,
         instance_id: str,
         *,
@@ -1333,7 +1367,9 @@ class QemuRuntime(RuntimeBackend):
         if current_size <= 0:
             raise RuntimeError("Could not verify existing QEMU virtual disk size")
         if qemu_disk_size_gb * 1024**3 < current_size:
-            raise RuntimeError("Reducing QEMU disk size is not supported")
+            raise OperationRejectedError(
+                DISK_SHRINK_UNSUPPORTED, "Reducing QEMU disk size is not supported"
+            )
 
     @storage_mutation
     async def _reconfigure_workspace(
@@ -2228,7 +2264,9 @@ class QemuRuntime(RuntimeBackend):
         try:
             await asyncio.wait_for(self._build_semaphore.acquire(), timeout=timeout)
         except asyncio.TimeoutError as exc:
-            raise RuntimeError("Image build queue timed out waiting for a slot") from exc
+            raise OperationRejectedError(
+                BUILD_QUEUE_TIMEOUT, "Image build queue timed out waiting for a slot"
+            ) from exc
         try:
             return await self._build_image(
                 base_distro=base_distro,
@@ -2309,8 +2347,9 @@ class QemuRuntime(RuntimeBackend):
             try:
                 await asyncio.wait_for(provision(), timeout=timeout)
             except asyncio.TimeoutError as exc:
-                raise RuntimeError(
-                    f"Image build script exceeded its {timeout:g}s execution limit"
+                raise OperationError(
+                    BUILD_SCRIPT_TIMEOUT,
+                    f"Image build script exceeded its {timeout:g}s execution limit",
                 ) from exc
 
             manifest = await self._finalize_build_image(
@@ -3280,10 +3319,14 @@ class QemuRuntime(RuntimeBackend):
         )
         snapshot_path = self._managed_image_path(artifact_id)
         if not snapshot_path.exists():
-            raise RuntimeError(f"Image artifact {artifact_id} not found")
+            raise OperationRejectedError(
+                IMAGE_UNAVAILABLE, f"Image artifact {artifact_id} not found"
+            )
 
         if not snapshot_path.with_suffix(".manifest.json").exists():
-            raise RuntimeError("Clone requires a published image manifest")
+            raise OperationRejectedError(
+                IMAGE_INVALID, "Clone requires a published image manifest"
+            )
 
         def validate_publication() -> None:
             manifest = json.loads(snapshot_path.with_suffix(".manifest.json").read_text())
@@ -3292,12 +3335,16 @@ class QemuRuntime(RuntimeBackend):
                 or manifest.get("size_bytes") != snapshot_path.stat().st_size
                 or manifest.get("sha256") != self._publication_digest(snapshot_path)
             ):
-                raise RuntimeError("Invalid published image manifest")
+                raise OperationRejectedError(
+                    IMAGE_INVALID, "Invalid published image manifest"
+                )
 
         await asyncio.to_thread(validate_publication)
         info = await self._image_info(snapshot_path)
         if info.get("backing-filename") or info.get("full-backing-filename"):
-            raise RuntimeError("Published image must be self-contained")
+            raise OperationRejectedError(
+                IMAGE_INVALID, "Published image must be self-contained"
+            )
         # Use the same exclusive sparse overlay publication as fresh guests.
         # Too-small requests fail before allocating a disk or network.
         new_disk = await self._create_overlay_disk(

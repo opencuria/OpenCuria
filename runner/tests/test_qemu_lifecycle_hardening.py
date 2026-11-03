@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from src.config import RunnerSettings
 from src.runtime.base import WorkspaceConfig
+from src.runtime.diagnostics import OperationRejectedError
 from src.runtime.storage import storage_mutation
 from tests import test_parallel_image_builds
 from tests.test_parallel_image_builds import build
@@ -79,8 +80,9 @@ async def test_duplicate_create_keeps_existing_disk_and_domain(builder):
     before = disk.stat()
     domain_uuid = r._get_domain(workspace_id).UUIDString()
     try:
-        with pytest.raises(FileExistsError, match="already exists"):
+        with pytest.raises(OperationRejectedError, match="already exists") as error:
             await r.create_workspace(config)
+        assert error.value.code == "workspace_exists"
         after = disk.stat()
         assert (after.st_ino, after.st_size) == (before.st_ino, before.st_size)
         assert r._get_domain(workspace_id).UUIDString() == domain_uuid
@@ -135,12 +137,13 @@ async def test_small_workspace_requests_reject_before_allocating_disk_or_network
         check=True,
         capture_output=True,
     )
-    with pytest.raises(RuntimeError, match="image minimum 2 GiB"):
+    with pytest.raises(OperationRejectedError, match="image minimum 2 GiB") as small:
         await r.create_workspace(
             WorkspaceConfig(
                 workspace_id="too-small", image=str(base), qemu_disk_size_gb=1
             )
         )
+    assert small.value.code == "disk_below_image_minimum"
     assert not r._disk_path("too-small").exists()
     assert not any(
         network.name().endswith("too-small")
@@ -150,8 +153,9 @@ async def test_small_workspace_requests_reject_before_allocating_disk_or_network
         "overlay", disk_size_gb=2, base_image=str(base)
     )
     assert (await r._image_info(overlay))["virtual-size"] == 2 * 1024**3
-    with pytest.raises(FileExistsError):
+    with pytest.raises(OperationRejectedError) as existing:
         await r._create_overlay_disk("overlay", disk_size_gb=2, base_image=str(base))
+    assert existing.value.code == "workspace_exists"
     target = r._snapshot_dir / "published.qcow2"
     published = await r._publish_image(overlay, target, {"operation_id": "capture"})
     assert published["min_disk_size_gb"] == 2
@@ -630,7 +634,7 @@ async def test_existing_noncanonical_domain_blocks_fresh_allocation_without_effe
     target = r._snapshot_dir / "published.qcow2"
     await r._publish_image(foreign_disk, target, {"operation_id": "capture"})
     try:
-        with pytest.raises(FileExistsError, match="domain already exists"):
+        with pytest.raises(OperationRejectedError, match="domain already exists"):
             if allocation == "create":
                 await r.create_workspace(
                     WorkspaceConfig(
@@ -710,8 +714,9 @@ async def test_build_queue_timeout_is_known_failure_without_allocation(builder):
     r = builder
     r._settings.qemu_build_queue_timeout = 0.025
     async with _occupied_build_slot(r):
-        with pytest.raises(RuntimeError, match="queue timed out waiting for a slot"):
+        with pytest.raises(OperationRejectedError, match="queue timed out") as error:
             await asyncio.wait_for(build(r), 2)
+        assert error.value.code == "build_queue_timeout"
         assert len(r._libvirt_conn().listAllDomains(0)) == 1
         assert r._resolve_build_base_image.call_count == 1
     assert r._build_semaphore._value == 1
@@ -821,8 +826,18 @@ async def test_invalid_reconfigure_preserves_running_guest(builder, failure):
         r._image_info = AsyncMock(side_effect=OSError("SSD unavailable"))
     r.stop_workspace = AsyncMock(wraps=r.stop_workspace)
     try:
-        with pytest.raises((RuntimeError, ValueError, OSError)):
+        with pytest.raises((RuntimeError, ValueError, OSError)) as error:
             await r.reconfigure_workspace(instance_id, restart=True, **resources)
+        refusal = {
+            "memory": "invalid_resources",
+            "cpu": "invalid_resources",
+            "disk": "disk_shrink_unsupported",
+        }.get(failure)
+        if refusal is None:
+            assert not isinstance(error.value, OperationRejectedError)
+        else:
+            assert isinstance(error.value, OperationRejectedError)
+            assert error.value.code == refusal
         r.stop_workspace.assert_not_awaited()
         assert domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING
         assert domain.XMLDesc(0) == old_xml
@@ -1114,7 +1129,7 @@ async def test_invalid_initial_resources_have_no_effects(builder, activation, in
             resource
         ]: values[value]
     }
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(OperationRejectedError, match="positive") as error:
         if activation == "create":
             await r.create_workspace(WorkspaceConfig(
                 workspace_id=instance_id,
@@ -1125,6 +1140,7 @@ async def test_invalid_initial_resources_have_no_effects(builder, activation, in
             await r.create_workspace_from_image_artifact(
                 "not-needed-before-validation", instance_id, **resources
             )
+    assert error.value.code == "invalid_resources"
     assert list(r._disk_dir.iterdir()) == []
     assert r._libvirt_conn().listAllDomains(0) == []
     assert not any(

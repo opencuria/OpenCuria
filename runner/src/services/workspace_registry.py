@@ -16,6 +16,7 @@ import structlog
 
 from ..models import DesktopSession, WorkspaceInfo
 from ..runtime.base import RuntimeBackend
+from ..runtime.diagnostics import WORKSPACE_EXISTS, OperationRejectedError
 
 logger = structlog.get_logger(__name__)
 
@@ -56,8 +57,15 @@ class WorkspaceRegistry:
     def register_new_workspace(self, info: WorkspaceInfo) -> None:
         """Reserve a new workspace without erasing an existing incarnation."""
         if info.workspace_id in self._cache:
-            raise ValueError(f"Workspace {info.workspace_id} already exists")
+            raise OperationRejectedError(
+                WORKSPACE_EXISTS, f"Workspace {info.workspace_id} already exists"
+            )
         self._cache[info.workspace_id] = info
+
+    def discard_reservation(self, info: WorkspaceInfo) -> None:
+        """Drop a reservation whose creation was refused before any allocation."""
+        if self._cache.get(info.workspace_id) is info:
+            del self._cache[info.workspace_id]
 
     @asynccontextmanager
     async def lifecycle(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:

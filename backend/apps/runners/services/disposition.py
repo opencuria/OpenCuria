@@ -14,6 +14,7 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from ..disposition_repository import DispositionRepository, DispositionState
 from ..operations import OperationRepository
 from .operation_results import apply_result
+from .runner_diagnostics import recovered_message
 
 #: API-key scope a retry needs, per retryable lifecycle task type.
 RETRY_PERMISSIONS = {
@@ -245,8 +246,7 @@ class DispositionService:
                 raise ConflictError("Operation already resolved")
             automatic = action == "recover_interrupted"
             repository.fail_task(
-                "Execution was interrupted. The runner verified that it has ended; "
-                "existing resources were kept. Retry the action if needed."
+                recovered_message(evidence.get("result"))
                 if automatic
                 else "Interrupted execution acknowledged after fresh runtime scan; "
                 "no resources deleted or recreated"

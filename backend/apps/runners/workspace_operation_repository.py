@@ -31,14 +31,21 @@ class WorkspaceOperationRepository:
 
     @staticmethod
     def release_workspace(task: Task) -> None:
-        """Release only this child, preserving its enclosing durable workflow."""
+        """Release only this child, preserving its enclosing durable workflow.
+
+        A failed child's reason stays on the workspace after its fence is gone.
+        """
         operation = (
             WorkspaceOperationRepository.project(task.workspace_id, None)
             if task.workspace_id
             else None
         )
+        outcome = Task.objects.filter(pk=task.pk).values("status", "error").first()
+        failed = outcome is not None and outcome["status"] == "failed"
         Workspace.objects.filter(current_task=task).update(
-            current_task=None, active_operation=operation
+            current_task=None,
+            active_operation=operation,
+            lifecycle_error=outcome["error"] if failed else "",
         )
 
     @staticmethod

@@ -10,6 +10,7 @@ from src.config import RunnerSettings
 from tests.command_support import make_interface as WebSocketInterface
 from src.models import WorkspaceInfo
 from src.runtime.base import RuntimeWorkspaceInfo
+from src.runtime.diagnostics import OperationRejectedError
 from src.runtime.inventory import RuntimeInventory, StorageResource
 from src.service import WorkspaceService
 
@@ -314,7 +315,7 @@ async def test_duplicate_create_preserves_existing_physical_registry_identity(
     runtime.create_workspace = AsyncMock()
     runtime.create_workspace_from_image_artifact = AsyncMock()
     try:
-        with pytest.raises(ValueError, match="already exists"):
+        with pytest.raises(OperationRejectedError, match="already exists"):
             if creation == "base":
                 await service.lifecycle.create_workspace(
                     [], workspace_id=ws_id, base_image_path="/managed/base.qcow2"

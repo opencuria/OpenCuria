@@ -152,6 +152,20 @@ class RuntimeBackend(abc.ABC):
             f"{self.__class__.__name__} does not support reconfigure_workspace"
         )
 
+    async def validate_reconfigure(
+        self,
+        instance_id: str,
+        *,
+        qemu_vcpus: int,
+        qemu_memory_mb: int,
+        qemu_disk_size_gb: int,
+    ) -> None:
+        """Refuse a resource change before any effect.
+
+        Raise ``OperationRejectedError`` for values ``reconfigure_workspace`` would
+        reject; the default accepts everything.
+        """
+
     async def inventory(self) -> RuntimeInventory:
         """Return a full physical graph or explicit incomplete inspection."""
         return RuntimeInventory(errors=["Inventory unsupported"])

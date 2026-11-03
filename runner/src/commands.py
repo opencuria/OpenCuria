@@ -10,19 +10,59 @@ from typing import Protocol
 
 import structlog
 
+from .runtime.diagnostics import INVALID_RESOURCES, OperationRejectedError, failure_code
 from .service import WorkspaceService
 from .workspace_evidence import WorkspaceEvidence
 
 logger = structlog.get_logger(__name__)
 
+RESOURCE_FIELDS = ("qemu_vcpus", "qemu_memory_mb", "qemu_disk_size_gb")
+
 
 @dataclass(frozen=True)
 class CommandResult:
-    """One terminal outcome and optional request acknowledgement."""
+    """One terminal outcome and optional request acknowledgement.
+
+    ``retryable`` is False when the same request would fail the same way, so
+    automatic retries cannot help.
+    """
 
     event: str
     data: dict
     response: dict | None = None
+    retryable: bool = True
+
+
+def failure_fields(exc: Exception) -> dict[str, str]:
+    """Describe a failure by stable code; the journal replaces the message."""
+    return {"error": str(exc), "diagnostic_code": failure_code(exc)}
+
+
+def workspace_failure(
+    task_id: str, exc: Exception, evidence: dict | None = None, **fields: str
+) -> CommandResult:
+    """Report a workspace failure; refusals are known outcomes and never retried."""
+    rejected = isinstance(exc, OperationRejectedError)
+    data = {
+        "task_id": task_id,
+        **fields,
+        **failure_fields(exc),
+        **(evidence if evidence is not None else {"outcome_known": False}),
+    }
+    if rejected:
+        # Nothing changed, so the observed state is the outcome.
+        data["outcome_known"] = True
+    return CommandResult("workspace:error", data, retryable=not rejected)
+
+
+def required_resources(data: dict) -> dict[str, int]:
+    """Read explicit resource settings, refusing missing or malformed values."""
+    try:
+        return {field: int(data[field]) for field in RESOURCE_FIELDS}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OperationRejectedError(
+            INVALID_RESOURCES, "Missing or malformed QEMU resource settings"
+        ) from exc
 
 
 class CommandHandler(Protocol):
@@ -133,10 +173,7 @@ class LifecycleCommands:
             )
             log.info("task_completed", workspace_id=str(ws_id))
         except Exception as exc:
-            result = CommandResult(
-                "workspace:error",
-                {"task_id": task_id, "error": str(exc), "outcome_known": False},
-            )
+            result = workspace_failure(task_id, exc)
             log.exception("task_failed")
         return result
 
@@ -179,7 +216,11 @@ class LifecycleCommands:
         except Exception as exc:
             result = CommandResult(
                 "image:build_failed",
-                {"task_id": task_id, "build_job_id": build_job_id, "error": str(exc)},
+                {
+                    "task_id": task_id,
+                    "build_job_id": build_job_id,
+                    **failure_fields(exc),
+                },
             )
             log.exception("image_build_failed")
         return result
@@ -203,13 +244,8 @@ class LifecycleCommands:
             )
             log.info("workspace_stopped")
         except Exception as exc:
-            result = CommandResult(
-                "workspace:error",
-                {
-                    "task_id": task_id,
-                    "error": str(exc),
-                    **await self._workspace_failure_evidence(workspace_id),
-                },
+            result = workspace_failure(
+                task_id, exc, await self._workspace_failure_evidence(workspace_id)
             )
             log.exception("stop_failed")
         return result
@@ -239,13 +275,8 @@ class LifecycleCommands:
             )
             log.info("workspace_resumed")
         except Exception as exc:
-            result = CommandResult(
-                "workspace:error",
-                {
-                    "task_id": task_id,
-                    "error": str(exc),
-                    **await self._workspace_failure_evidence(workspace_id),
-                },
+            result = workspace_failure(
+                task_id, exc, await self._workspace_failure_evidence(workspace_id)
             )
             log.exception("resume_failed")
         return result
@@ -257,10 +288,7 @@ class LifecycleCommands:
         log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
         try:
             await self._service.lifecycle.update_workspace_resources(
-                workspace_id,
-                qemu_vcpus=int(data["qemu_vcpus"]),
-                qemu_memory_mb=int(data["qemu_memory_mb"]),
-                qemu_disk_size_gb=int(data["qemu_disk_size_gb"]),
+                workspace_id, **required_resources(data)
             )
             result = CommandResult(
                 "workspace:updated",
@@ -268,10 +296,7 @@ class LifecycleCommands:
             )
             log.info("workspace_updated")
         except Exception as exc:
-            result = CommandResult(
-                "workspace:error",
-                {"task_id": task_id, "error": str(exc), "outcome_known": False},
-            )
+            result = workspace_failure(task_id, exc)
             log.exception("update_workspace_failed")
         return result
 
@@ -306,14 +331,25 @@ class LifecycleCommands:
             )
         except Exception as exc:
             evidence = await self._workspace_failure_evidence(workspace_id)
-            result = CommandResult(
-                "workspace:error", {"task_id": task_id, "error": str(exc), **evidence}
-            )
+            result = workspace_failure(task_id, exc, evidence)
             log.exception("inject_credentials_failed")
+            # Unlike the journal record, this reply is not sanitized later.
+            response = {
+                key: result.data[key]
+                for key in (
+                    "diagnostic_code",
+                    "outcome_known",
+                    "observed_status",
+                    "credentials_present",
+                )
+                if key in result.data
+            }
             return CommandResult(
-                result.event, result.data, {"ok": False, "error": str(exc), **evidence}
+                result.event,
+                result.data,
+                {"ok": False, **response},
+                retryable=result.retryable,
             )
-        return result
 
     async def on_remove_workspace(self, data: dict) -> CommandResult:
         """Remove workspace and return one terminal outcome."""
@@ -339,10 +375,7 @@ class LifecycleCommands:
             )
             log.info("workspace_removed", already_absent=already_absent)
         except Exception as exc:
-            result = CommandResult(
-                "workspace:error",
-                {"task_id": task_id, "error": str(exc), "outcome_known": False},
-            )
+            result = workspace_failure(task_id, exc)
             log.exception("remove_failed")
         return result
 
@@ -385,7 +418,7 @@ class LifecycleCommands:
                 {
                     "task_id": task_id,
                     "workspace_id": str(workspace_id),
-                    "error": str(exc),
+                    **failure_fields(exc),
                 },
             )
             log.exception("create_image_artifact_failed")
@@ -418,7 +451,8 @@ class LifecycleCommands:
             )
         except Exception as exc:
             result = CommandResult(
-                "image_artifact:delete_failed", {"task_id": task_id, "error": str(exc)}
+                "image_artifact:delete_failed",
+                {"task_id": task_id, **failure_fields(exc)},
             )
             log.exception("delete_image_artifact_failed")
         return result
@@ -457,14 +491,6 @@ class LifecycleCommands:
             )
             log.info("workspace_created_from_image_artifact", workspace_id=str(ws_id))
         except Exception as exc:
-            result = CommandResult(
-                "workspace:error",
-                {
-                    "task_id": task_id,
-                    "workspace_id": str(new_workspace_id),
-                    "error": str(exc),
-                    "outcome_known": False,
-                },
-            )
+            result = workspace_failure(task_id, exc, workspace_id=str(new_workspace_id))
             log.exception("clone_failed")
         return result
