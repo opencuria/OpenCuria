@@ -375,6 +375,29 @@ describe("API authentication and errors", () => {
 describe("REST request deadlines", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("waits for Run now while the server starts a stopped workspace", async () => {
+    vi.useFakeTimers();
+    const started = deferred<Response>();
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => started.promise)
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined));
+    const client = clientOptions().create(fetch);
+    const run = client.scheduledTasks.run("task-1");
+    const list = client.scheduledTasks.list();
+    const listTimedOut = expect(list).rejects.toMatchObject({
+      code: "timeout",
+    });
+    // The default deadline ends ordinary requests but not the run.
+    await vi.advanceTimersByTimeAsync(120_000);
+    await listTimedOut;
+    const runSignal = fetch.mock.calls[0]?.[1]?.signal as AbortSignal;
+    expect(runSignal.aborted).toBe(false);
+    started.resolve(jsonResponse({ id: "run-1", status: "running" }, 202));
+    await expect(run).resolves.toMatchObject({ status: "running" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each(["headers", "body"])(
     "bounds a stalled response's %s and allows a fresh retry",
     async (phase) => {
@@ -680,6 +703,94 @@ describe("REST endpoint wrappers", () => {
     expect(JSON.parse(calls[5].body!)).toEqual({
       captured_image_id: "image",
       message: "Added Playwright",
+    });
+  });
+
+  it("manages scheduled tasks and their runs with encoded ids and the active organization", async () => {
+    const calls: Array<{
+      url: string;
+      method: string;
+      body?: string;
+      organization: string | null;
+    }> = [];
+    const fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          method: init?.method ?? "GET",
+          body: init?.body as string | undefined,
+          organization: new Headers(init?.headers).get("X-Organization-Id"),
+        });
+        return init?.method === "DELETE"
+          ? new Response(null, { status: 204 })
+          : jsonResponse({});
+      },
+    ) as typeof globalThis.fetch;
+    const options = clientOptions();
+    const client = options.create(fetch);
+    const input = {
+      name: "Weekly review",
+      workspace_id: "ws-1",
+      prompt: "Review open pull requests",
+      mode: "build" as const,
+      harness_id: "native" as const,
+      model: "",
+      reasoning_effort: "",
+      skill_ids: [],
+      recurrence: "weekly" as const,
+      weekdays: [0, 4],
+      local_time: "09:00",
+      timezone_name: "Europe/Berlin",
+      enabled: true,
+    };
+    await client.scheduledTasks.list();
+    await client.scheduledTasks.create(input);
+    await client.scheduledTasks.update("task/1", { enabled: false });
+    await client.scheduledTasks.run("task/1");
+    await client.scheduledTasks.runs("task/1");
+    options.setOrganization("org-b");
+    await client.scheduledTasks.delete("task/1");
+    expect(
+      calls.map(({ url, method }) => [
+        url.replace("https://api.example/api/v1", ""),
+        method,
+      ]),
+    ).toEqual([
+      ["/scheduled-tasks/", "GET"],
+      ["/scheduled-tasks/", "POST"],
+      ["/scheduled-tasks/task%2F1/", "PATCH"],
+      ["/scheduled-tasks/task%2F1/run/", "POST"],
+      ["/scheduled-tasks/task%2F1/runs/", "GET"],
+      ["/scheduled-tasks/task%2F1/", "DELETE"],
+    ]);
+    expect(calls.map((call) => call.organization)).toEqual([
+      "org-a",
+      "org-a",
+      "org-a",
+      "org-a",
+      "org-a",
+      "org-b",
+    ]);
+    expect(JSON.parse(calls[1].body!)).toEqual(input);
+    expect(JSON.parse(calls[2].body!)).toEqual({ enabled: false });
+  });
+
+  it("surfaces a rejected scheduled task with the backend's validation message", async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse(
+        {
+          detail: "run_date and local_time must be in the future",
+          code: "validation_error",
+        },
+        400,
+      ),
+    ) as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch);
+    await expect(
+      client.scheduledTasks.update("task-1", { run_date: "2020-01-01" }),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: "run_date and local_time must be in the future",
     });
   });
 });
@@ -1408,19 +1519,32 @@ describe("workspace tools", () => {
   it("calls the git REST contract with encoded paths and typed operations", async () => {
     const urls: string[] = [];
     const bodies: unknown[] = [];
-    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      urls.push(String(input));
-      if (init?.body) bodies.push(JSON.parse(String(init.body)));
-      return jsonResponse({ ok: true, repos: [], snapshot: { path: "/workspace/r" } });
-    }) as unknown as typeof globalThis.fetch;
+    const fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        urls.push(String(input));
+        if (init?.body) bodies.push(JSON.parse(String(init.body)));
+        return jsonResponse({
+          ok: true,
+          repos: [],
+          snapshot: { path: "/workspace/r" },
+        });
+      },
+    ) as unknown as typeof globalThis.fetch;
     const client = clientOptions().create(fetch);
 
     await client.git.repos("ws 1");
     await client.git.repo("ws", "/workspace/my repo");
-    await client.git.history("ws", "/workspace/r", { skip: 50, branch: "feat/x" });
+    await client.git.history("ws", "/workspace/r", {
+      skip: 50,
+      branch: "feat/x",
+    });
     await client.git.commitDetails("ws", "/workspace/r", "abc123");
     await client.git.fileContent("ws", "/workspace/r", "src/a.ts", "abc^");
-    await client.git.operation("ws", { operation: "stage", repo_path: "/workspace/r", paths: ["a"] });
+    await client.git.operation("ws", {
+      operation: "stage",
+      repo_path: "/workspace/r",
+      paths: ["a"],
+    });
     await client.git.commitMessage("ws", "/workspace/r");
 
     expect(urls).toEqual([
@@ -1441,7 +1565,12 @@ describe("workspace tools", () => {
   it("surfaces a 409 merge conflict with its snapshot payload", async () => {
     const fetch = vi.fn(async () =>
       jsonResponse(
-        { ok: false, code: "conflict", detail: "Merge conflict", snapshot: { path: "/workspace/r" } },
+        {
+          ok: false,
+          code: "conflict",
+          detail: "Merge conflict",
+          snapshot: { path: "/workspace/r" },
+        },
         409,
       ),
     ) as unknown as typeof globalThis.fetch;
@@ -1459,20 +1588,42 @@ describe("workspace tools", () => {
 
   it("starts a terminal over REST and sends input, resize and close on the socket", async () => {
     const sockets: MockSocket[] = [];
-    const fetch = vi.fn(async () => jsonResponse({ task_id: "task-1" })) as unknown as typeof globalThis.fetch;
-    const client = clientOptions().create(fetch, { socketFactory: mockSocketFactory(sockets) });
-    await expect(client.terminal.start("ws", 100, 30)).resolves.toEqual({ task_id: "task-1" });
-    expect(JSON.parse(String((fetch as any).mock.calls[0][1].body))).toEqual({ cols: 100, rows: 30 });
+    const fetch = vi.fn(async () =>
+      jsonResponse({ task_id: "task-1" }),
+    ) as unknown as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch, {
+      socketFactory: mockSocketFactory(sockets),
+    });
+    await expect(client.terminal.start("ws", 100, 30)).resolves.toEqual({
+      task_id: "task-1",
+    });
+    expect(JSON.parse(String((fetch as any).mock.calls[0][1].body))).toEqual({
+      cols: 100,
+      rows: 30,
+    });
 
     client.realtime.connect();
     sockets[0]!.connect();
     client.terminal.input("ws", "t1", "bHM=");
     client.terminal.resize("ws", "t1", 90, 20);
     client.terminal.close("ws", "t1");
-    expect(sockets[0]!.emitted.filter((item) => item.event.startsWith("frontend:terminal"))).toEqual([
-      { event: "frontend:terminal_input", data: { workspace_id: "ws", terminal_id: "t1", data: "bHM=" } },
-      { event: "frontend:terminal_resize", data: { workspace_id: "ws", terminal_id: "t1", cols: 90, rows: 20 } },
-      { event: "frontend:terminal_close", data: { workspace_id: "ws", terminal_id: "t1" } },
+    expect(
+      sockets[0]!.emitted.filter((item) =>
+        item.event.startsWith("frontend:terminal"),
+      ),
+    ).toEqual([
+      {
+        event: "frontend:terminal_input",
+        data: { workspace_id: "ws", terminal_id: "t1", data: "bHM=" },
+      },
+      {
+        event: "frontend:terminal_resize",
+        data: { workspace_id: "ws", terminal_id: "t1", cols: 90, rows: 20 },
+      },
+      {
+        event: "frontend:terminal_close",
+        data: { workspace_id: "ws", terminal_id: "t1" },
+      },
     ]);
   });
 });

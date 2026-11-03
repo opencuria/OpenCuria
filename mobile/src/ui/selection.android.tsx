@@ -44,8 +44,87 @@ const TRANSPARENT = "#00000000";
 /**
  * Compose segmented choice: Material's SegmentedButton reserves a checkmark
  * and a 58dp minimum per segment, so five or more labels no longer fit a
- * phone. Each segment is a selectable radio in a selectable group.
+ * phone. Each segment is a selectable radio in a selectable group. Renders
+ * inside an existing Compose host, e.g. a form row.
  */
+export function SegmentedChoiceRow(
+  props: NativeSegmentedPickerProps & { disabled?: boolean },
+): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Row
+      verticalAlignment="center"
+      horizontalArrangement={{ spacedBy: 2 }}
+      modifiers={[
+        fillMaxWidth(),
+        height(40),
+        clip(Shapes.RoundedCorner(12)),
+        background(theme.controlFill),
+        paddingAll(3),
+        selectableGroup(),
+        ...(props.testID ? [testID(props.testID)] : []),
+      ]}
+    >
+      {props.options.map((option) => {
+        const selected = option.value === props.value;
+        return (
+          <Box
+            key={option.value}
+            contentAlignment="center"
+            modifiers={[
+              weight(1),
+              fillMaxHeight(),
+              ...(selected
+                ? [
+                    dropShadow(SEGMENT_SHAPE, {
+                      radius: 3,
+                      offsetY: 1,
+                      alpha: 0.14,
+                    }),
+                  ]
+                : []),
+              clip(SEGMENT_SHAPE),
+              background(selected ? theme.raised : TRANSPARENT, {
+                animationSpec: tween({ durationMillis: 150 }),
+              }),
+              ...(props.disabled
+                ? []
+                : [
+                    selectable(
+                      selected,
+                      () => {
+                        if (!selected) props.onChange(option.value);
+                      },
+                      "radioButton",
+                    ),
+                  ]),
+              semantics({
+                contentDescription: option.accessibilityLabel ?? option.label,
+              }),
+            ]}
+          >
+            <Text
+              color={
+                props.disabled
+                  ? theme.subtleText
+                  : selected
+                    ? theme.text
+                    : theme.mutedText
+              }
+              maxLines={1}
+              softWrap={false}
+              overflow="ellipsis"
+              style={{ fontSize: 14, fontWeight: selected ? "600" : "500" }}
+            >
+              {option.label}
+            </Text>
+          </Box>
+        );
+      })}
+    </Row>
+  );
+}
+
 export function NativeSegmentedPicker(
   props: NativeSegmentedPickerProps,
 ): React.JSX.Element {
@@ -57,66 +136,7 @@ export function NativeSegmentedPicker(
       seedColor={theme.primary}
       ignoreSafeAreaKeyboardInsets
     >
-      <Row
-        verticalAlignment="center"
-        horizontalArrangement={{ spacedBy: 2 }}
-        modifiers={[
-          fillMaxWidth(),
-          height(40),
-          clip(Shapes.RoundedCorner(12)),
-          background(theme.controlFill),
-          paddingAll(3),
-          selectableGroup(),
-          ...(props.testID ? [testID(props.testID)] : []),
-        ]}
-      >
-        {props.options.map((option) => {
-          const selected = option.value === props.value;
-          return (
-            <Box
-              key={option.value}
-              contentAlignment="center"
-              modifiers={[
-                weight(1),
-                fillMaxHeight(),
-                ...(selected
-                  ? [
-                      dropShadow(SEGMENT_SHAPE, {
-                        radius: 3,
-                        offsetY: 1,
-                        alpha: 0.14,
-                      }),
-                    ]
-                  : []),
-                clip(SEGMENT_SHAPE),
-                background(selected ? theme.raised : TRANSPARENT, {
-                  animationSpec: tween({ durationMillis: 150 }),
-                }),
-                selectable(
-                  selected,
-                  () => {
-                    if (!selected) props.onChange(option.value);
-                  },
-                  "radioButton",
-                ),
-                semantics({
-                  contentDescription: option.accessibilityLabel ?? option.label,
-                }),
-              ]}
-            >
-              <Text
-                color={selected ? theme.text : theme.mutedText}
-                maxLines={1}
-                softWrap={false}
-                overflow="ellipsis"
-                style={{ fontSize: 14, fontWeight: selected ? "600" : "500" }}
-              >
-                {option.label}
-              </Text>
-            </Box>
-          );
-        })}
-      </Row>
+      <SegmentedChoiceRow {...props} />
     </Host>
   );
 }

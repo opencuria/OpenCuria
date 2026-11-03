@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  harnessAgentDefaults,
   harnessEngineDefaults,
   harnessEngineLabel,
   harnessSessionModels,
@@ -56,8 +57,14 @@ describe("shared engine policy", () => {
         effort: "medium",
       }),
     ).toEqual({ model: "agent/model", effort: "medium" });
-    expect(harnessEngineDefaults("claude", engines)).toEqual({ model: "", effort: "" });
-    expect(harnessEngineDefaults("codex", [])).toEqual({ model: "", effort: "" });
+    expect(harnessEngineDefaults("claude", engines)).toEqual({
+      model: "",
+      effort: "",
+    });
+    expect(harnessEngineDefaults("codex", [])).toEqual({
+      model: "",
+      effort: "",
+    });
     expect(harnessEngineLabel("codex", [])).toBe("codex");
   });
 
@@ -84,5 +91,44 @@ describe("shared engine policy", () => {
     expect(formatEffortShort("future-token")).toBe("future-token");
     expect(snapEffort(models[0], "ultra")).toBe("ultra");
     expect(snapEffort(models[1], "ultra")).toBe("high");
+  });
+
+  it("starts chats and tasks with the mode's or engine's defaults, snapped to the catalog", () => {
+    const engines: HarnessEngine[] = [
+      {
+        id: "codex",
+        name: "Codex",
+        modes: ["build"],
+        connected: true,
+        default_model: "openrouter/vendor/model",
+        default_effort: "ultra",
+      },
+    ];
+    const agentConfigs = [
+      { agent: "build", model: "chatgpt/gpt-6.1-sol", effort: "ultra" },
+      { agent: "plan", model: "missing/model", effort: "low" },
+    ];
+    expect(
+      harnessAgentDefaults("native", "build", {
+        engines,
+        agentConfigs,
+        models,
+      }),
+    ).toEqual({ model: "chatgpt/gpt-6.1-sol", effort: "ultra" });
+    // An unknown configured model falls back to the first catalog model.
+    expect(
+      harnessAgentDefaults("native", "plan", { engines, agentConfigs, models }),
+    ).toEqual({ model: "chatgpt/gpt-6.1-sol", effort: "low" });
+    expect(
+      harnessAgentDefaults("codex", "build", { engines, agentConfigs, models }),
+    ).toEqual({ model: "openrouter/vendor/model", effort: "high" });
+    // Without a catalog the configured values are kept as they are.
+    expect(
+      harnessAgentDefaults("codex", "build", {
+        engines,
+        agentConfigs,
+        models: [],
+      }),
+    ).toEqual({ model: "openrouter/vendor/model", effort: "ultra" });
   });
 });

@@ -336,6 +336,13 @@ export interface SkillUpdateInput {
 }
 
 export type { HarnessEngine } from "@opencuria/chat-core/harnessModels";
+export type {
+  ScheduleRecurrence,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskPatch,
+  ScheduledTaskRun,
+} from "@opencuria/chat-core/scheduledTasks";
 
 export type AgentMode = "primary" | "subagent";
 export type EffortStrategy =

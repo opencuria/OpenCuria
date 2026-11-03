@@ -129,6 +129,7 @@ jest.mock("../components", () => {
       placeholder?: string;
       disabled?: boolean;
       onSettings: () => void;
+      onDraftChange: (value: string) => void;
       onSend: (value: {
         text: string;
         skillIds: string[];
@@ -149,6 +150,14 @@ jest.mock("../components", () => {
           Pressable,
           { testID: "test-settings", onPress: props.onSettings },
           ReactRuntime.createElement(Text, null, "Settings"),
+        ),
+        ReactRuntime.createElement(
+          Pressable,
+          {
+            testID: "test-draft",
+            onPress: () => props.onDraftChange("Review open Dependabot PRs"),
+          },
+          ReactRuntime.createElement(Text, null, "Draft"),
         ),
         ReactRuntime.createElement(
           Text,
@@ -350,6 +359,11 @@ function mockClient() {
     },
     conversations: { list: jest.fn().mockResolvedValue([]) },
     skills: { list: jest.fn().mockResolvedValue([]) },
+    scheduledTasks: {
+      list: jest.fn().mockResolvedValue([]),
+      runs: jest.fn().mockResolvedValue([]),
+      create: jest.fn(),
+    },
     files: {
       findFiles: jest.fn().mockResolvedValue({ paths: [] }),
       readFile: jest
@@ -729,6 +743,50 @@ it.each(["success", "failure"])(
     tree.unmount();
   },
 );
+
+it("schedules the drafted prompt in the open chat's workspace from the chat menu", async () => {
+  const client = mockClient();
+  client.scheduledTasks.list.mockResolvedValue([
+    {
+      id: "task-1",
+      name: "Nightly",
+      workspace_id: runningWorkspace.id,
+      enabled: true,
+      is_running: true,
+      recurrence: "daily",
+      weekdays: [],
+      local_time: "02:00",
+      timezone_name: "UTC",
+      next_run_at: "2099-01-01T02:00:00Z",
+    },
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  fireEvent.press(screen.getByRole("button", { name: "Open sidebar" }));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Scheduled tasks, 1, Running" }),
+    ).toBeTruthy(),
+  );
+
+  fireEvent.press(screen.getByTestId("test-draft"));
+  fireEvent.press(screen.getByTestId("chat-menu"));
+  fireEvent.press(screen.getByRole("button", { name: "Schedule this prompt" }));
+  expect(screen.getByTestId("scheduled-task-sheet")).toBeTruthy();
+  expect(screen.getByLabelText("Prompt").props.value).toBe(
+    "Review open Dependabot PRs",
+  );
+  const workspace = screen.getByRole("button", {
+    name: runningWorkspace.name,
+  });
+  expect(workspace.props.accessibilityState.selected).toBe(true);
+  tree.unmount();
+});
 
 it("keeps the composer mounted when switching workspaces", async () => {
   const client = mockClient();

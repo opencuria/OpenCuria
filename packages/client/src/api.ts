@@ -159,18 +159,23 @@ export class ApiClient {
     };
   }
 
-  /** Request with the client's cookie policy, overridable for OAuth actions. */
+  /**
+   * Request with the client's cookie policy, overridable for OAuth actions.
+   * `timeoutMs` extends the deadline for actions the server holds open.
+   */
   request<T>(
     method: string,
     path: string,
     body?: unknown,
     signal?: AbortSignal,
     credentials: RequestCredentials = this.options.credentials ?? "omit",
+    timeoutMs: number = this.requestTimeoutMs,
   ): Promise<T> {
     return this.withRequestTimeout(
       (requestSignal) =>
         this.performRequest<T>(method, path, body, credentials, requestSignal),
       signal,
+      timeoutMs,
     ).then((result) => {
       if (!result.ok) {
         const error = errorPayload(result.data);
@@ -211,6 +216,7 @@ export class ApiClient {
   private async withRequestTimeout<T>(
     operation: (signal: AbortSignal) => Promise<T>,
     signal?: AbortSignal,
+    timeoutMs: number = this.requestTimeoutMs,
   ): Promise<T> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -238,7 +244,7 @@ export class ApiClient {
                 "timeout",
               ),
             ),
-          this.requestTimeoutMs,
+          timeoutMs,
         );
         operation(controller.signal).then(resolve, reject);
       });
@@ -252,8 +258,13 @@ export class ApiClient {
     return this.request<T>("GET", path, undefined, signal);
   }
 
-  post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    return this.request<T>("POST", path, body, signal);
+  post<T>(
+    path: string,
+    body?: unknown,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<T> {
+    return this.request<T>("POST", path, body, signal, undefined, timeoutMs);
   }
 
   put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {

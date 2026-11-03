@@ -1,70 +1,19 @@
 /** Personal scheduled-task REST API. */
 import { del, get, patch, post } from './api'
-import type { HarnessId } from '@/types/harness'
+import type {
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskPatch,
+  ScheduledTaskRun,
+} from '@opencuria/chat-core/scheduledTasks'
 
-export type ScheduleRecurrence = 'once' | 'daily' | 'weekly' | 'cron'
-
-export interface ScheduledTask {
-  id: string
-  name: string
-  workspace_id: string
-  prompt: string
-  mode: 'plan' | 'build'
-  harness_id?: HarnessId
-  model: string
-  reasoning_effort: string
-  skill_ids: string[]
-  recurrence: ScheduleRecurrence
-  weekdays: number[]
-  /** `;`-separated five-field cron expressions; only used by `cron`. */
-  cron_expression?: string
-  /** Local YYYY-MM-DD date of the single run; only used by `once`. */
-  run_date?: string | null
-  local_time: string
-  timezone_name: string
-  /** A `once` task turns itself off after its run. */
-  enabled: boolean
-  /** A claimed or running dispatch, including a one-time task already disabled. */
-  is_running?: boolean
-  next_run_at: string
-  created_at: string
-  updated_at: string
-}
-
-export interface ScheduledTaskInput {
-  name: string
-  workspace_id: string
-  prompt: string
-  mode: 'plan' | 'build'
-  harness_id: HarnessId
-  model: string
-  reasoning_effort: string
-  skill_ids: string[]
-  recurrence: ScheduleRecurrence
-  weekdays: number[]
-  cron_expression?: string
-  run_date?: string | null
-  local_time: string
-  timezone_name: string
-  enabled: boolean
-}
-
-export type ScheduledTaskPatch = Partial<ScheduledTaskInput>
-
-export interface ScheduledTaskRun {
-  id: string
-  scheduled_for: string
-  /** `scheduled` or `manual` (Run now). */
-  trigger?: string
-  status: 'claimed' | 'running' | 'succeeded' | 'error' | 'skipped' | 'interrupted' | string
-  session_id: string | null
-  started_at: string | null
-  finished_at: string | null
-  error: string
-  reason: string
-  assistant_finish: string
-  assistant_error: string
-}
+export type {
+  ScheduleRecurrence,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskPatch,
+  ScheduledTaskRun,
+} from '@opencuria/chat-core/scheduledTasks'
 
 export function listScheduledTasks(): Promise<ScheduledTask[]> {
   return get<ScheduledTask[]>('/scheduled-tasks/')

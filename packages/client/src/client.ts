@@ -22,6 +22,10 @@ import type {
   Plugin,
   Runner,
   RunnerImageBuild,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskPatch,
+  ScheduledTaskRun,
   Skill,
   SkillCreateInput,
   SkillUpdateInput,
@@ -131,6 +135,27 @@ export interface OpenCuriaClient {
   conversations: {
     list(signal?: AbortSignal): Promise<HarnessConversation[]>;
   };
+  /** The signed-in user's scheduled tasks in the active organization. */
+  scheduledTasks: {
+    list(signal?: AbortSignal): Promise<ScheduledTask[]>;
+    create(
+      data: ScheduledTaskInput,
+      signal?: AbortSignal,
+    ): Promise<ScheduledTask>;
+    update(
+      taskId: string,
+      data: ScheduledTaskPatch,
+      signal?: AbortSignal,
+    ): Promise<ScheduledTask>;
+    delete(taskId: string, signal?: AbortSignal): Promise<void>;
+    /**
+     * Start a run outside the schedule; each run opens a new chat. Resolves
+     * once the run starts, after a stopped workspace has resumed.
+     */
+    run(taskId: string, signal?: AbortSignal): Promise<ScheduledTaskRun>;
+    /** Recent runs, newest first. */
+    runs(taskId: string, signal?: AbortSignal): Promise<ScheduledTaskRun[]>;
+  };
   harness: ReturnType<typeof createHarnessApi>;
   /** Workspace git integration (repos, history, typed mutations, file sides). */
   git: ReturnType<typeof createGitApi>;
@@ -152,6 +177,12 @@ export interface OpenCuriaClient {
     "findFiles" | "listFiles" | "readFile" | "downloadFile" | "uploadFile"
   >;
 }
+
+/**
+ * Run now may wait for a stopped workspace to start; the server allows two
+ * minutes, and a dropped request would cancel the run.
+ */
+const RUN_NOW_TIMEOUT_MS = 150_000;
 
 function segment(value: string): string {
   return encodeURIComponent(value);
@@ -308,6 +339,31 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     },
     conversations: {
       list: harness.listConversations,
+    },
+    scheduledTasks: {
+      list: (signal) => api.get<ScheduledTask[]>("/scheduled-tasks/", signal),
+      create: (data, signal) =>
+        api.post<ScheduledTask>("/scheduled-tasks/", data, signal),
+      update: (taskId, data, signal) =>
+        api.patch<ScheduledTask>(
+          `/scheduled-tasks/${segment(taskId)}/`,
+          data,
+          signal,
+        ),
+      delete: (taskId, signal) =>
+        api.delete<void>(`/scheduled-tasks/${segment(taskId)}/`, signal),
+      run: (taskId, signal) =>
+        api.post<ScheduledTaskRun>(
+          `/scheduled-tasks/${segment(taskId)}/run/`,
+          undefined,
+          signal,
+          RUN_NOW_TIMEOUT_MS,
+        ),
+      runs: (taskId, signal) =>
+        api.get<ScheduledTaskRun[]>(
+          `/scheduled-tasks/${segment(taskId)}/runs/`,
+          signal,
+        ),
     },
     harness,
     git: createGitApi(() => api),

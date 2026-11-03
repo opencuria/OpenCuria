@@ -4,6 +4,7 @@ import {
   Button,
   ContentUnavailableView,
   ContextMenu,
+  DatePicker,
   Form,
   Gauge,
   GlassEffectContainer,
@@ -24,6 +25,7 @@ import {
   useNativeState,
 } from "@expo/ui/swift-ui";
 import {
+  accessibilityAddTraits,
   accessibilityLabel,
   autocorrectionDisabled,
   background,
@@ -44,6 +46,7 @@ import {
   onSubmit,
   pickerStyle,
   refreshable,
+  scrollDismissesKeyboard,
   shapes,
   submitLabel,
   tag,
@@ -51,6 +54,7 @@ import {
   tint,
 } from "@expo/ui/swift-ui/modifiers";
 import type {
+  NativeFormDateRow,
   NativeFormHeaderRow,
   NativeFormItemRow,
   NativeFormProps,
@@ -58,8 +62,15 @@ import type {
   NativeFormSwipeAction,
   NativeFormTextRow,
   NativeFormTone,
+  NativeFormWeekdaysRow,
 } from "./NativeForm.types";
 import { useTheme, type OpenCuriaTheme } from "./theme";
+import {
+  WEEKDAY_TOGGLES,
+  toggleWeekday,
+  wallClockDate,
+  wallClockValue,
+} from "./wallClock";
 
 /** Quick actions are interactive liquid glass on iOS 26 and bordered before it. */
 const QUICK_ACTION_STYLE = isLiquidGlassAvailable() ? "glass" : "bordered";
@@ -107,10 +118,49 @@ function SwipeButtons({
 
 function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
   const { theme } = useTheme();
-  const label = [row.title, row.subtitle].filter(Boolean).join(", ");
+  const leading = [row.leadingText, row.leadingCaption]
+    .filter(Boolean)
+    .join(" ");
+  const label = [leading, row.title, row.subtitle].filter(Boolean).join(", ");
+  const leadingColor = toneColor(theme, row.leadingTone ?? "default");
   const content = (
     <HStack spacing={12}>
-      {row.symbol ? (
+      {row.leadingText ? (
+        // Tabular figures in a minimum width keep an agenda's times aligned;
+        // larger Dynamic Type sizes may widen the column.
+        <HStack
+          alignment="firstTextBaseline"
+          spacing={2}
+          modifiers={[
+            frame({
+              minWidth: row.leadingCaption ? 84 : 62,
+              alignment: "leading",
+            }),
+          ]}
+        >
+          <Text
+            modifiers={[
+              font({ textStyle: "title3", weight: "semibold" }),
+              monospacedDigit(),
+              foregroundStyle(leadingColor),
+              lineLimit(1),
+            ]}
+          >
+            {row.leadingText}
+          </Text>
+          {row.leadingCaption ? (
+            <Text
+              modifiers={[
+                font({ textStyle: "caption", weight: "semibold" }),
+                foregroundStyle(leadingColor),
+                lineLimit(1),
+              ]}
+            >
+              {row.leadingCaption}
+            </Text>
+          ) : null}
+        </HStack>
+      ) : row.symbol ? (
         <Image
           systemName={row.symbol}
           size={15}
@@ -369,15 +419,116 @@ function TextRow({ row }: { row: NativeFormTextRow }): React.JSX.Element {
         accessibilityLabel(row.label),
         disabled(Boolean(row.disabled)),
         keyboardType(row.keyboard === "url" ? "url" : "default"),
-        autocorrectionDisabled(),
-        textInputAutocapitalization("never"),
-        submitLabel("done"),
-        onSubmit(() => row.onSubmit?.()),
-        ...(row.multiline ? [lineLimit({ min: 2, max: 6 })] : []),
+        autocorrectionDisabled(!row.prose),
+        textInputAutocapitalization(row.prose ? "sentences" : "never"),
+        ...(row.monospace ? [font({ design: "monospaced" })] : []),
+        // Return starts a new line in multiline prose instead of submitting.
+        ...(row.multiline && row.prose
+          ? []
+          : [submitLabel("done"), onSubmit(() => row.onSubmit?.())]),
+        ...(row.multiline
+          ? [lineLimit({ min: row.lines?.[0] ?? 2, max: row.lines?.[1] ?? 6 })]
+          : []),
       ]}
     />
   );
   return field;
+}
+
+/** Seven round day toggles below the label, as in Clock and Reminders. */
+function WeekdaysRow({
+  row,
+}: {
+  row: NativeFormWeekdaysRow;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <VStack alignment="leading" spacing={10}>
+      <HStack>
+        <Text modifiers={[foregroundStyle(theme.text)]}>{row.label}</Text>
+        <Spacer />
+        {row.summary ? (
+          <Text modifiers={[foregroundStyle(theme.mutedText)]}>
+            {row.summary}
+          </Text>
+        ) : null}
+      </HStack>
+      <HStack spacing={0}>
+        {WEEKDAY_TOGGLES.map((day) => {
+          const on = row.value.includes(day.value);
+          return (
+            <Button
+              key={day.value}
+              testID={`${row.testID ?? row.id}-${day.value}`}
+              onPress={() => row.onChange(toggleWeekday(row.value, day.value))}
+              // Plain buttons keep each toggle its own tap target in a row.
+              modifiers={[
+                buttonStyle("plain"),
+                frame({ maxWidth: Infinity }),
+                disabled(Boolean(row.disabled)),
+                accessibilityLabel(day.name),
+                accessibilityAddTraits(on ? ["isSelected"] : []),
+              ]}
+            >
+              <Text
+                modifiers={[
+                  font({ size: 15, weight: "semibold" }),
+                  foregroundStyle(on ? theme.primaryForeground : theme.text),
+                  frame({ width: 34, height: 34 }),
+                  background(
+                    on ? theme.primary : theme.controlFill,
+                    shapes.circle(),
+                  ),
+                ]}
+              >
+                {day.short}
+              </Text>
+            </Button>
+          );
+        })}
+      </HStack>
+    </VStack>
+  );
+}
+
+/** Compact SwiftUI date or time picker; a red minus removes a listed entry. */
+function DateRow({ row }: { row: NativeFormDateRow }): React.JSX.Element {
+  const { theme } = useTheme();
+  const picker = (
+    <DatePicker
+      title={row.label}
+      selection={wallClockDate(row.mode, row.value)}
+      displayedComponents={[row.mode === "date" ? "date" : "hourAndMinute"]}
+      range={
+        row.minimumDate
+          ? { start: wallClockDate("date", row.minimumDate) }
+          : undefined
+      }
+      onDateChange={(date) => {
+        const value = wallClockValue(row.mode, date);
+        if (value !== row.value) row.onChange(value);
+      }}
+      testID={row.testID ?? row.id}
+      modifiers={[disabled(Boolean(row.disabled))]}
+    />
+  );
+  if (!row.onRemove) return picker;
+  return (
+    <HStack spacing={12}>
+      <Button
+        onPress={row.onRemove}
+        testID={`${row.testID ?? row.id}-remove`}
+        modifiers={[
+          buttonStyle("plain"),
+          disabled(Boolean(row.disabled)),
+          accessibilityLabel(`Remove ${row.label}`),
+        ]}
+      >
+        <Image systemName="minus.circle.fill" size={20} color={theme.danger} />
+      </Button>
+      {picker}
+    </HStack>
+  );
 }
 
 function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
@@ -494,6 +645,35 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
         </HStack>
       );
     case "value":
+      if (row.onPress)
+        return (
+          <Button
+            onPress={row.onPress}
+            testID={row.testID ?? row.id}
+            modifiers={[
+              disabled(Boolean(row.disabled)),
+              accessibilityLabel(`${row.label}, ${row.value}`),
+            ]}
+          >
+            <HStack spacing={8}>
+              <Text modifiers={[foregroundStyle(theme.text)]}>{row.label}</Text>
+              <Spacer />
+              <Text
+                modifiers={[
+                  foregroundStyle(toneColor(theme, row.tone)),
+                  lineLimit(1),
+                ]}
+              >
+                {row.value}
+              </Text>
+              <Image
+                systemName="chevron.right"
+                size={13}
+                color={theme.subtleText}
+              />
+            </HStack>
+          </Button>
+        );
       return (
         <LabeledContent label={row.label}>
           <Text
@@ -506,6 +686,40 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
           </Text>
         </LabeledContent>
       );
+    case "segmented":
+      return (
+        <Picker
+          label={row.label}
+          selection={row.value}
+          testID={row.testID ?? row.id}
+          onSelectionChange={(value: string) => {
+            if (value !== row.value) row.onChange(value);
+          }}
+          modifiers={[
+            pickerStyle("segmented"),
+            labelsHidden(),
+            disabled(Boolean(row.disabled)),
+          ]}
+        >
+          {row.options.map((option) => (
+            <Text
+              key={option.value}
+              modifiers={[
+                tag(option.value),
+                ...(option.accessibilityLabel
+                  ? [accessibilityLabel(option.accessibilityLabel)]
+                  : []),
+              ]}
+            >
+              {option.label}
+            </Text>
+          ))}
+        </Picker>
+      );
+    case "weekdays":
+      return <WeekdaysRow row={row} />;
+    case "date":
+      return <DateRow row={row} />;
     case "gauge":
       return (
         <VStack alignment="leading" spacing={6}>
@@ -614,7 +828,12 @@ export function NativeForm({
           description={empty.description}
         />
       ) : (
-        <Form modifiers={onRefresh ? [refreshable(onRefresh)] : []}>
+        <Form
+          modifiers={[
+            scrollDismissesKeyboard("interactively"),
+            ...(onRefresh ? [refreshable(onRefresh)] : []),
+          ]}
+        >
           {sections.map((section) => (
             <Section
               key={section.id}

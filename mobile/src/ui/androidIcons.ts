@@ -22,6 +22,15 @@ const ICONS: Record<string, ImageSourcePropType> = {
   "exclamationmark.triangle.fill": require("../../assets/native-icons/warning.xml"),
   "server.rack": require("../../assets/native-icons/workspace.xml"),
   ellipsis: require("../../assets/native-icons/more-vert.xml"),
+  "chevron.right": require("../../assets/native-icons/chevron-right.xml"),
+  xmark: require("../../assets/native-icons/close.xml"),
+  "calendar.badge.clock": require("../../assets/native-icons/schedule.xml"),
+  clock: require("../../assets/native-icons/schedule.xml"),
+  "pause.fill": require("../../assets/native-icons/pause.xml"),
+  "play.circle": require("../../assets/native-icons/play-circle.xml"),
+  "checkmark.circle.fill": require("../../assets/native-icons/check-circle.xml"),
+  "xmark.circle.fill": require("../../assets/native-icons/cancel.xml"),
+  "minus.circle.fill": require("../../assets/native-icons/remove-circle.xml"),
 };
 
 /** The Material icon for an SF Symbol name, if one is bundled. */

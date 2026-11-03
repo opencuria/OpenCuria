@@ -5,6 +5,7 @@ import {
   Card,
   CircularProgressIndicator,
   Column,
+  DatePickerDialog,
   DropdownMenu,
   DropdownMenuItem,
   FilledTonalIconButton,
@@ -20,6 +21,7 @@ import {
   Row,
   Switch,
   Text,
+  TimePickerDialog,
   useNativeState,
 } from "@expo/ui/jetpack-compose";
 import {
@@ -28,15 +30,20 @@ import {
   clickable,
   clip,
   combinedClickable,
+  defaultMinSize,
   fillMaxSize,
   fillMaxWidth,
   padding,
   semantics,
   size,
   testID as composeTestID,
+  toggleable,
+  tween,
+  weight,
 } from "@expo/ui/jetpack-compose/modifiers";
 import { WORKSPACE_ICON, androidIcon } from "./androidIcons";
 import type {
+  NativeFormDateRow,
   NativeFormHeaderRow,
   NativeFormItemRow,
   NativeFormPickerRow,
@@ -44,9 +51,20 @@ import type {
   NativeFormRow,
   NativeFormTextRow,
   NativeFormTone,
+  NativeFormValueRow,
+  NativeFormWeekdaysRow,
 } from "./NativeForm.types";
 import type { NativeMenuAction } from "./NativeMenu";
+import { SegmentedChoiceRow } from "./selection.android";
 import { useTheme, type OpenCuriaTheme } from "./theme";
+import {
+  WEEKDAY_TOGGLES,
+  formatWallClock,
+  toggleWeekday,
+  uses24HourClock,
+  wallClockDate,
+  wallClockValue,
+} from "./wallClock";
 
 const TRANSPARENT = "#00000000";
 
@@ -122,7 +140,11 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
         fillMaxWidth(),
         composeTestID(row.testID ?? row.id),
         semantics({
-          contentDescription: [row.title, row.subtitle]
+          contentDescription: [
+            [row.leadingText, row.leadingCaption].filter(Boolean).join(" "),
+            row.title,
+            row.subtitle,
+          ]
             .filter(Boolean)
             .join(", "),
         }),
@@ -136,7 +158,38 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
           : []),
       ]}
     >
-      {row.symbol ? (
+      {row.leadingText ? (
+        <ListItem.LeadingContent>
+          {/* Roboto figures are tabular, so a column of times aligns. */}
+          <Row
+            verticalAlignment="bottom"
+            horizontalArrangement={{ spacedBy: 3 }}
+            modifiers={[
+              defaultMinSize({ minWidth: row.leadingCaption ? 92 : 72 }),
+            ]}
+          >
+            <Text
+              color={toneColor(theme, row.leadingTone ?? "default")}
+              maxLines={1}
+              softWrap={false}
+              style={{ typography: "titleLarge", fontWeight: "500" }}
+            >
+              {row.leadingText}
+            </Text>
+            {row.leadingCaption ? (
+              <Text
+                color={toneColor(theme, row.leadingTone ?? "default")}
+                maxLines={1}
+                softWrap={false}
+                style={{ typography: "labelMedium", fontWeight: "600" }}
+                modifiers={[padding(0, 0, 0, 3)]}
+              >
+                {row.leadingCaption}
+              </Text>
+            ) : null}
+          </Row>
+        </ListItem.LeadingContent>
+      ) : row.symbol ? (
         <ListItem.LeadingContent>
           <Tile symbol={row.symbol} tint={row.tint ?? theme.primary} />
         </ListItem.LeadingContent>
@@ -319,17 +372,19 @@ function TextRow({ row }: { row: NativeFormTextRow }): React.JSX.Element {
       autoFocus={row.autoFocus}
       enabled={!row.disabled}
       singleLine={!row.multiline}
-      minLines={row.multiline ? 2 : undefined}
-      maxLines={row.multiline ? 6 : undefined}
+      minLines={row.multiline ? (row.lines?.[0] ?? 2) : undefined}
+      maxLines={row.multiline ? (row.lines?.[1] ?? 6) : undefined}
       onValueChange={(value) => {
         latest.current = value;
         row.onChange(value);
       }}
+      textStyle={row.monospace ? { fontFamily: "monospace" } : undefined}
       keyboardOptions={{
-        capitalization: "none",
-        autoCorrectEnabled: false,
+        capitalization: row.prose ? "sentences" : "none",
+        autoCorrectEnabled: Boolean(row.prose),
         keyboardType: row.keyboard === "url" ? "uri" : "text",
-        imeAction: "done",
+        // Enter starts a new line in multiline prose.
+        imeAction: row.multiline && row.prose ? "default" : "done",
       }}
       keyboardActions={row.onSubmit ? { onDone: row.onSubmit } : undefined}
       modifiers={[
@@ -432,6 +487,196 @@ function PickerRow({ row }: { row: NativeFormPickerRow }): React.JSX.Element {
   );
 }
 
+/** A row that opens another choice, like a picker: label, value, chevron. */
+function NavigationRow({
+  row,
+}: {
+  row: NativeFormValueRow & { onPress: () => void };
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <ListItem
+      colors={{ containerColor: TRANSPARENT }}
+      modifiers={[
+        fillMaxWidth(),
+        composeTestID(row.testID ?? row.id),
+        semantics({ contentDescription: `${row.label}, ${row.value}` }),
+        ...(row.disabled ? [] : [clickable(row.onPress)]),
+      ]}
+    >
+      <ListItem.HeadlineContent>
+        <Text color={row.disabled ? theme.subtleText : undefined}>
+          {row.label}
+        </Text>
+      </ListItem.HeadlineContent>
+      <ListItem.SupportingContent>
+        <Text
+          color={toneColor(theme, row.tone)}
+          maxLines={1}
+          overflow="ellipsis"
+        >
+          {row.value}
+        </Text>
+      </ListItem.SupportingContent>
+      <ListItem.TrailingContent>
+        <Icon source={androidIcon("chevron.right")!} size={24} />
+      </ListItem.TrailingContent>
+    </ListItem>
+  );
+}
+
+/** Seven round day toggles, as in the Clock app's alarm editor. */
+function WeekdaysRow({
+  row,
+}: {
+  row: NativeFormWeekdaysRow;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Column
+      verticalArrangement={{ spacedBy: 12 }}
+      modifiers={[fillMaxWidth(), padding(16, 12, 16, 14)]}
+    >
+      <Row verticalAlignment="center" modifiers={[fillMaxWidth()]}>
+        <Text
+          color={row.disabled ? theme.subtleText : undefined}
+          style={{ typography: "bodyLarge" }}
+          modifiers={[weight(1)]}
+        >
+          {row.label}
+        </Text>
+        {row.summary ? (
+          <Text color={theme.mutedText} style={{ typography: "bodyMedium" }}>
+            {row.summary}
+          </Text>
+        ) : null}
+      </Row>
+      <Row
+        horizontalArrangement="spaceBetween"
+        verticalAlignment="center"
+        modifiers={[fillMaxWidth()]}
+      >
+        {WEEKDAY_TOGGLES.map((day) => {
+          const on = row.value.includes(day.value);
+          return (
+            <Box
+              key={day.value}
+              contentAlignment="center"
+              modifiers={[
+                size(38, 38),
+                clip(Shapes.Circle),
+                background(on ? theme.primary : theme.controlFill, {
+                  animationSpec: tween({ durationMillis: 150 }),
+                }),
+                ...(row.disabled
+                  ? []
+                  : [
+                      toggleable(
+                        on,
+                        () => row.onChange(toggleWeekday(row.value, day.value)),
+                        { role: "checkbox" },
+                      ),
+                    ]),
+                semantics({ contentDescription: day.name }),
+                composeTestID(`${row.testID ?? row.id}-${day.value}`),
+              ]}
+            >
+              <Text
+                color={on ? theme.primaryForeground : theme.text}
+                style={{ fontSize: 15, fontWeight: "600" }}
+              >
+                {day.short}
+              </Text>
+            </Box>
+          );
+        })}
+      </Row>
+    </Column>
+  );
+}
+
+/**
+ * The value opens Material's date or time picker dialog. Material dates are
+ * UTC midnights; times are device-local, like the pickers' own calendars.
+ */
+function DateRow({ row }: { row: NativeFormDateRow }): React.JSX.Element {
+  const { theme } = useTheme();
+  const [open, setOpen] = useState(false);
+  const shown = formatWallClock(row.mode, row.value);
+  const close = () => setOpen(false);
+  return (
+    <>
+      <ListItem
+        colors={{ containerColor: TRANSPARENT }}
+        modifiers={[
+          fillMaxWidth(),
+          composeTestID(row.testID ?? row.id),
+          semantics({ contentDescription: `${row.label}, ${shown}` }),
+          ...(row.disabled ? [] : [clickable(() => setOpen(true))]),
+        ]}
+      >
+        <ListItem.HeadlineContent>
+          <Text color={row.disabled ? theme.subtleText : undefined}>
+            {row.label}
+          </Text>
+        </ListItem.HeadlineContent>
+        <ListItem.TrailingContent>
+          <Row verticalAlignment="center">
+            <Text
+              color={row.disabled ? theme.subtleText : theme.primary}
+              style={{ typography: "titleMedium" }}
+            >
+              {shown}
+            </Text>
+            {row.onRemove ? (
+              <IconButton
+                onClick={row.onRemove}
+                enabled={!row.disabled}
+                modifiers={[
+                  semantics({ contentDescription: `Remove ${row.label}` }),
+                  composeTestID(`${row.testID ?? row.id}-remove`),
+                ]}
+              >
+                <Icon source={androidIcon("xmark")!} size={20} />
+              </IconButton>
+            ) : null}
+          </Row>
+        </ListItem.TrailingContent>
+      </ListItem>
+      {open && row.mode === "date" ? (
+        <DatePickerDialog
+          initialDate={`${row.value}T00:00:00Z`}
+          selectableDates={
+            row.minimumDate
+              ? { start: new Date(`${row.minimumDate}T00:00:00Z`) }
+              : undefined
+          }
+          color={theme.primary}
+          onDateSelected={(date) => {
+            close();
+            const value = date.toISOString().slice(0, 10);
+            if (value !== row.value) row.onChange(value);
+          }}
+          onDismissRequest={close}
+        />
+      ) : null}
+      {open && row.mode === "time" ? (
+        <TimePickerDialog
+          initialDate={wallClockDate("time", row.value).toISOString()}
+          is24Hour={uses24HourClock()}
+          color={theme.primary}
+          onDateSelected={(date) => {
+            close();
+            const value = wallClockValue("time", date);
+            if (value !== row.value) row.onChange(value);
+          }}
+          onDismissRequest={close}
+        />
+      ) : null}
+    </>
+  );
+}
+
 function FormRow({ row }: { row: NativeFormRow }): React.JSX.Element {
   const { theme } = useTheme();
   switch (row.kind) {
@@ -527,7 +772,26 @@ function FormRow({ row }: { row: NativeFormRow }): React.JSX.Element {
           </ListItem.TrailingContent>
         </ListItem>
       );
+    case "segmented":
+      return (
+        <Box modifiers={[fillMaxWidth(), padding(16, 10, 16, 10)]}>
+          <SegmentedChoiceRow
+            label={row.label}
+            value={row.value}
+            options={row.options}
+            onChange={row.onChange}
+            disabled={row.disabled}
+            testID={row.testID ?? row.id}
+          />
+        </Box>
+      );
+    case "weekdays":
+      return <WeekdaysRow row={row} />;
+    case "date":
+      return <DateRow row={row} />;
     case "value":
+      if (row.onPress)
+        return <NavigationRow row={{ ...row, onPress: row.onPress }} />;
       return (
         <ListItem
           colors={{ containerColor: TRANSPARENT }}

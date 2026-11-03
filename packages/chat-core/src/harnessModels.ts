@@ -154,6 +154,38 @@ export function harnessEngineDefaults(
   };
 }
 
+/**
+ * Model and effort a new chat or task starts with for an engine and mode:
+ * the engine's defaults (native: the mode's agent config), else the first
+ * catalog model, with the effort snapped to what that model supports.
+ */
+export function harnessAgentDefaults(
+  engine: HarnessId,
+  mode: string,
+  {
+    engines,
+    agentConfigs,
+    models,
+  }: {
+    engines: HarnessEngine[];
+    agentConfigs: Array<{ agent: string; model?: string; effort?: string }>;
+    /** The engine's model catalog. */
+    models: ProviderModel[];
+  },
+): { model: string; effort: string } {
+  const config = agentConfigs.find((item) => item.agent === mode);
+  const defaults = harnessEngineDefaults(engine, engines, {
+    model: config?.model ?? "",
+    effort: config?.effort ?? "",
+  });
+  const selected =
+    models.find((item) => item.id === defaults.model) ?? models[0];
+  return {
+    model: selected?.id ?? defaults.model,
+    effort: selected ? snapEffort(selected, defaults.effort) : defaults.effort,
+  };
+}
+
 /** The session model is the public routing binding; never derive it from a draft model. */
 export function sessionProvider(model: string): string {
   const separator = model.indexOf("/");

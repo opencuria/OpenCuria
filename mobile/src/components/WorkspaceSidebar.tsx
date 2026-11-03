@@ -12,6 +12,7 @@ import {
 import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
+  CalendarClock,
   CheckCheck,
   ChevronDown,
   ChevronRight,
@@ -67,6 +68,9 @@ export interface WorkspaceSidebarProps {
     action: string,
   ) => void;
   onAllWorkspaces: () => void;
+  /** Scheduled tasks that have not ended, and whether one is running. */
+  scheduledTasks?: { count: number; running: boolean };
+  onScheduledTasks?: () => void;
   onMarkAllRead?: () => void;
   profileTitle: string;
   onProfile: () => void;
@@ -91,6 +95,8 @@ export function WorkspaceSidebar({
   onConversation,
   onConversationAction,
   onAllWorkspaces,
+  scheduledTasks,
+  onScheduledTasks,
   onMarkAllRead,
   profileTitle,
   onProfile,
@@ -259,6 +265,30 @@ export function WorkspaceSidebar({
           onPress={onAllWorkspaces}
           testID="all-workspaces"
         />
+        {onScheduledTasks ? (
+          <SidebarRow
+            title="Scheduled tasks"
+            icon={
+              scheduledTasks?.running ? (
+                <ActivityIndicator size="small" color={theme.mutedText} />
+              ) : (
+                <CalendarClock size={20} color={theme.text} />
+              )
+            }
+            meta={
+              scheduledTasks?.count ? String(scheduledTasks.count) : undefined
+            }
+            accessibilityLabel={[
+              "Scheduled tasks",
+              scheduledTasks?.count ? String(scheduledTasks.count) : "",
+              scheduledTasks?.running ? "Running" : "",
+            ]
+              .filter(Boolean)
+              .join(", ")}
+            onPress={onScheduledTasks}
+            testID="scheduled-tasks"
+          />
+        ) : null}
 
         {inbox.length ? (
           <View testID="section-inbox">

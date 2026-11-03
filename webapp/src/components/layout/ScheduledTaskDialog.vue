@@ -45,21 +45,26 @@ import {
   CRON_PRESETS,
   defaultScheduleDraft,
   describeScheduleDraft,
+  FREQUENT_RUNS_PER_DAY,
   INTERVAL_OPTIONS,
   isValidTimeZone,
   maxRunsPerDay,
   MAX_SCHEDULE_TIMES,
   nextDateAt,
+  nextScheduleTime,
   onceOccurrence,
+  onceScheduleError,
   scheduleDraftFromTask,
   scheduleDraftToCron,
+  scheduleDraftWithMode,
   schedulePayload,
+  scheduleRunStatusLabel,
+  upcomingScheduleRuns,
   validateSchedule,
   validateScheduleDraft,
   WEEKDAYS,
 } from '@/lib/scheduledTasks'
 import type { ScheduleDraft, ScheduleMode } from '@/lib/scheduledTasks'
-import { nextCronOccurrences } from '@/lib/cron'
 import { useNotificationStore } from '@/stores/notifications'
 import { usePolling } from '@/composables/usePolling'
 
@@ -188,28 +193,14 @@ const onceAt = computed(() =>
 const onceEnded = computed(() => onceAt.value !== null && onceAt.value <= new Date())
 /** A one-time run must exist and, while enabled, lie ahead. */
 function onceTimingError(now = new Date()): string {
-  if (
-    form.value.schedule.mode !== 'once' ||
-    !timezoneValid.value ||
-    Object.keys(scheduleErrors.value).length
-  )
-    return ''
-  if (!onceAt.value) return 'This time does not exist on that date.'
-  return form.value.enabled && onceAt.value <= now ? 'Choose a future date and time.' : ''
+  return onceScheduleError(form.value.schedule, form.value.timezone_name, form.value.enabled, now)
 }
 const onceError = computed(() => onceTimingError())
-const upcomingRuns = computed<Date[]>(() => {
-  if (!timezoneValid.value || Object.keys(scheduleErrors.value).length) return []
-  const zone = form.value.timezone_name
-  if (form.value.schedule.mode === 'once')
-    return onceAt.value && !onceEnded.value ? [onceAt.value] : []
-  if (!dirty.value && selectedTask.value) {
-    const authoritative = new Date(selectedTask.value.next_run_at)
-    if (!Number.isNaN(authoritative.getTime()))
-      return [authoritative, ...nextCronOccurrences(scheduleCron.value, zone, authoritative, 3)]
-  }
-  return nextCronOccurrences(scheduleCron.value, zone, new Date(), 4)
-})
+const upcomingRuns = computed<Date[]>(() =>
+  upcomingScheduleRuns(form.value.schedule, form.value.timezone_name, {
+    nextRunAt: !dirty.value && selectedTask.value ? selectedTask.value.next_run_at : null,
+  }),
+)
 function formatRunTime(date: Date, withDay: boolean): string {
   return new Intl.DateTimeFormat(undefined, {
     timeZone: form.value.timezone_name,
@@ -341,18 +332,10 @@ function updateSchedule<K extends keyof ScheduleDraft>(key: K, value: ScheduleDr
   apiError.value = ''
 }
 function setScheduleMode(mode: ScheduleMode): void {
-  const { schedule, timezone_name: zone } = form.value
-  if (mode === schedule.mode) return
-  // Carry the current cadence into the cron editor so it can be fine-tuned.
-  if (mode === 'cron' && !schedule.cron_expression.trim())
-    updateSchedule('cron_expression', scheduleCron.value)
-  // A one-time run starts at the next occurrence of its time.
-  if (mode === 'once') {
-    const time = schedule.times[0] ?? '09:00'
-    const at = onceOccurrence(schedule.date, time, zone)
-    if (!at || at <= new Date()) updateSchedule('date', nextDateAt(time, zone))
-  }
-  updateSchedule('mode', mode)
+  const next = scheduleDraftWithMode(form.value.schedule, mode, form.value.timezone_name)
+  updateSchedule('cron_expression', next.cron_expression)
+  updateSchedule('date', next.date)
+  updateSchedule('mode', next.mode)
 }
 function setTime(index: number, value: string): void {
   const times = [...form.value.schedule.times]
@@ -361,11 +344,7 @@ function setTime(index: number, value: string): void {
 }
 function addTime(): void {
   const times = form.value.schedule.times
-  const last = [...times].sort().pop() ?? '08:00'
-  const hour = Math.min(Number(last.slice(0, 2)) + 1, 23)
-  let candidate = `${String(hour).padStart(2, '0')}:${last.slice(3, 5) || '00'}`
-  if (times.includes(candidate)) candidate = '12:00'
-  updateSchedule('times', [...times, candidate])
+  updateSchedule('times', [...times, nextScheduleTime(times)])
 }
 function removeTime(index: number): void {
   updateSchedule(
@@ -532,20 +511,7 @@ function formatDate(value: string | null): string {
     ? '—'
     : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
-function formatRunStatus(status: string): string {
-  return (
-    (
-      {
-        claimed: 'Queued',
-        running: 'Running',
-        succeeded: 'Succeeded',
-        error: 'Failed',
-        skipped: 'Skipped',
-        interrupted: 'Interrupted',
-      } as Record<string, string>
-    )[status] ?? status
-  )
-}
+const formatRunStatus = scheduleRunStatusLabel
 function chatPath(sessionId: string, workspaceId: string): string {
   return `/workspaces/${workspaceId}?session=${encodeURIComponent(sessionId)}`
 }
@@ -1141,7 +1107,10 @@ onMounted(async () => {
                   <p v-if="laterRunsText" class="text-muted-foreground" data-testid="later-runs">
                     Then {{ laterRunsText }}
                   </p>
-                  <p v-if="runsPerDay > 48" class="text-amber-600 dark:text-amber-400">
+                  <p
+                    v-if="runsPerDay > FREQUENT_RUNS_PER_DAY"
+                    class="text-amber-600 dark:text-amber-400"
+                  >
                     This runs very often. Each run starts a new chat.
                   </p>
                 </div>

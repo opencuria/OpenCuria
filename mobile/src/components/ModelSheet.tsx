@@ -6,6 +6,7 @@ import {
   formatEffortShort,
   providerDisplayName,
   resolveCatalogModel,
+  type HarnessEngine,
   type ProviderModel,
 } from "@opencuria/chat-core/harnessModels";
 import type {
@@ -34,6 +35,21 @@ export interface ModelSheetEngine {
   disabled?: boolean;
   /** Why the engine cannot be chosen, e.g. "Not connected". */
   note?: string;
+}
+
+/** Engines as the sheet offers them; an unconnected engine stays visible but disabled. */
+export function modelSheetEngines(
+  engines: HarnessEngine[],
+): ModelSheetEngine[] {
+  return engines.map((item) => ({
+    id: item.id,
+    name: item.name,
+    modes: (["build", "plan"] as const).filter((value) =>
+      item.modes.includes(value),
+    ),
+    disabled: !item.connected,
+    note: item.connected ? undefined : "Not connected",
+  }));
 }
 
 export interface ModelSheetProps {

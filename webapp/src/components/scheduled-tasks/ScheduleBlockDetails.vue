@@ -6,7 +6,7 @@
 import { computed } from 'vue'
 import { CirclePlay, MessageSquare, Pause, Pencil, Play } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { describeSchedule, isScheduleEnded } from '@/lib/scheduledTasks'
+import { describeSchedule, isScheduleEnded, scheduleRunStatusLabel } from '@/lib/scheduledTasks'
 import { describeSeries, formatMinutes, wallClock } from '@/lib/scheduleCalendar'
 import type { CalendarBlock } from '@/lib/scheduleCalendar'
 import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
@@ -28,14 +28,6 @@ const emit = defineEmits<{
   openChat: [run: ScheduledTaskRun]
 }>()
 
-const STATUS_LABELS: Record<string, string> = {
-  claimed: 'Queued',
-  running: 'Running',
-  succeeded: 'Succeeded',
-  error: 'Failed',
-  skipped: 'Skipped',
-  interrupted: 'Interrupted',
-}
 const STATUS_CLASSES: Record<string, string> = {
   succeeded: 'text-success',
   error: 'text-destructive',
@@ -76,8 +68,8 @@ const runSummary = computed(() => {
   return [...counts].map(([status, count]) => ({
     status,
     text: isSeries.value
-      ? `${count} ${(STATUS_LABELS[status] ?? status).toLowerCase()}`
-      : (STATUS_LABELS[status] ?? status),
+      ? `${count} ${scheduleRunStatusLabel(status).toLowerCase()}`
+      : scheduleRunStatusLabel(status),
     class: STATUS_CLASSES[status] ?? 'text-muted-foreground',
   }))
 })

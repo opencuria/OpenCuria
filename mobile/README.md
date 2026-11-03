@@ -6,6 +6,7 @@ Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.
 
 - Browse existing workspaces and conversations, read history, and start or continue harness chats; follow live output, tasks/subtasks, permission and question gates, Markdown, mentions, model choices and skills.
 - Attach photos, camera images and documents; preview supported workspace files. Chat and workspace data remain on the server.
+- Plan scheduled tasks: an agenda of upcoming runs, creating and editing tasks (once, at set times, intervals or cron), Run now, pause/resume, deletion and each run's chat. A drafted prompt can be scheduled from the chat menu.
 - Receive optional native push notifications for finished/failed runs and pending approvals/questions. On iOS, follow running agents on the Lock Screen and Dynamic Island with Live Activities.
 - Sign in to an existing server. The app does **not** create/delete workspaces or provide workspace CRUD or offline chat/queue/replay. Chat refreshes from REST when brought back to the foreground; push delivery does not replay missed chat events.
 
@@ -13,7 +14,9 @@ Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.
 
 Buttons, selection rows, model/engine pickers and lists use platform controls via `@expo/ui`. Menus use `@react-native-menu/menu` (`UIMenu` / Android popup menus); no Expo bottom-sheet component is used. Modal screens use the OS presentation and native navigation bars. On iPhone and Android the sidebar slides in beneath the chat as in the Claude app; iPad keeps `NavigationSplitView`. The composer uses a native `UITextView` / `EditText`, with interactive `expo-glass-effect` liquid glass on supported iOS versions and a Material surface on Android. `react-native-keyboard-controller` keeps the composer on top of the keyboard and lets the keyboard follow the finger when the transcript or the composer is dragged down.
 
-The sidebar shares workspace eligibility, inbox and sorting rules with the webapp through `@opencuria/chat-core/conversationGroups`. Each workspace initially shows four recent chats, with independent four-chat pagination. Closing navigation retains pagination and collapsed groups; switching organization resets them. Stopped workspaces remain accessible through All workspaces. Scheduled tasks are not shown.
+The sidebar shares workspace eligibility, inbox and sorting rules with the webapp through `@opencuria/chat-core/conversationGroups`. Each workspace initially shows four recent chats, with independent four-chat pagination. Closing navigation retains pagination and collapsed groups; switching organization resets them. Stopped workspaces remain accessible through All workspaces.
+
+Scheduled tasks open from the sidebar below Workspaces. The agenda groups tasks by the day of their next run and leads each row with its time in the device's zone; running, paused and (on request) ended tasks have their own groups. The editor uses a native segmented control for how a task repeats, round weekday toggles, SwiftUI date and time pickers on iOS and Material date and time dialogs on Android, and the composer's model sheet. Schedule drafts, cron rules and previews come from `@opencuria/chat-core/scheduledTasks`, shared with the webapp.
 
 These native dependencies require rebuilding the development client after updating the branch.
 
@@ -52,6 +55,7 @@ For an iOS simulator on a Mac, from `mobile/` run `APP_VARIANT=development EXPO_
 - `src/screens/` — login, authenticated app and session lifecycle.
 - `src/state/chatController.ts` — REST hydration, live subscriptions, chat state and immutable snapshots for React.
 - `src/components/`, `src/ui/` — native chat presentation and controls.
+- `src/scheduledTasks/` — scheduled-task agenda, editor and run history.
 - `src/platform/` — secure token storage, camera/document pickers, authenticated uploads and bounded temporary media cache.
 - `src/notifications/`, `src/widgets/` — device consent, native push tokens, notification navigation and the iOS Live Activity layout.
 - `packages/chat-core/`, `packages/client/` — framework-neutral shared chat helpers/protocol and the real REST/Socket.IO client used by the web and native clients.

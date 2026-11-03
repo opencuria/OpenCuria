@@ -369,6 +369,16 @@ exports.ModalFrame = ({
     h(View, null, children),
   )
 
+const WEEKDAY_NAMES = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+]
+
 function formRow(row) {
   const key = row.id
   switch (row.kind) {
@@ -389,7 +399,11 @@ function formRow(row) {
           {
             testID: row.testID ?? row.id,
             accessibilityRole: 'button',
-            accessibilityLabel: [row.title, row.subtitle]
+            accessibilityLabel: [
+              [row.leadingText, row.leadingCaption].filter(Boolean).join(' '),
+              row.title,
+              row.subtitle,
+            ]
               .filter(Boolean)
               .join(', '),
             accessibilityState: {
@@ -400,6 +414,8 @@ function formRow(row) {
             disabled: row.disabled || !row.onPress,
             onPress: row.onPress,
           },
+          row.leadingText ? h(Text, null, row.leadingText) : null,
+          row.leadingCaption ? h(Text, null, row.leadingCaption) : null,
           h(Text, null, row.title),
           row.subtitle ? h(Text, null, row.subtitle) : null,
           row.badge ? h(Text, null, row.badge) : null,
@@ -496,7 +512,86 @@ function formRow(row) {
         }),
       )
     case 'value':
-      return h(Text, { key }, `${row.label}: ${row.value}`)
+      return row.onPress
+        ? h(
+            Pressable,
+            {
+              key,
+              testID: row.testID ?? row.id,
+              accessibilityRole: 'button',
+              accessibilityLabel: `${row.label}, ${row.value}`,
+              disabled: row.disabled,
+              onPress: row.onPress,
+            },
+            h(Text, null, `${row.label}: ${row.value}`),
+          )
+        : h(Text, { key }, `${row.label}: ${row.value}`)
+    case 'segmented':
+      return h(
+        View,
+        { key },
+        exports.NativeSegmentedPicker({
+          label: row.label,
+          value: row.value,
+          options: row.options,
+          onChange: row.onChange,
+          testID: row.testID ?? row.id,
+        }),
+      )
+    case 'weekdays':
+      return h(
+        View,
+        {
+          key,
+          testID: row.testID ?? row.id,
+          accessibilityLabel: row.label,
+        },
+        h(Text, null, row.label),
+        row.summary ? h(Text, null, row.summary) : null,
+        ...WEEKDAY_NAMES.map((name, day) => {
+          const on = row.value.includes(day)
+          return h(
+            Pressable,
+            {
+              key: name,
+              testID: `${row.testID ?? row.id}-${day}`,
+              accessibilityRole: 'checkbox',
+              accessibilityLabel: name,
+              accessibilityState: {
+                checked: on,
+                disabled: Boolean(row.disabled),
+              },
+              disabled: row.disabled,
+              onPress: () =>
+                row.onChange(
+                  on
+                    ? row.value.filter((entry) => entry !== day)
+                    : [...row.value, day].sort((a, b) => a - b),
+                ),
+            },
+            h(Text, null, name.slice(0, 1)),
+          )
+        }),
+      )
+    case 'date':
+      return h(
+        View,
+        { key },
+        h(TextInput, {
+          testID: row.testID ?? row.id,
+          accessibilityLabel: row.label,
+          value: row.value,
+          editable: !row.disabled,
+          onChangeText: row.onChange,
+        }),
+        row.onRemove
+          ? h(exports.IconButton, {
+              label: `Remove ${row.label}`,
+              disabled: row.disabled,
+              onPress: row.onRemove,
+            })
+          : null,
+      )
     case 'gauge':
       return h(Text, { key }, `${row.label}: ${row.valueLabel}`)
     case 'button':

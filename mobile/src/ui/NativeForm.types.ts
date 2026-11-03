@@ -48,6 +48,14 @@ export interface NativeFormItemRow extends RowBase {
   symbol?: NativeSymbol;
   /** Color of the leading tile. */
   tint?: string;
+  /**
+   * Short leading text in place of the tile, e.g. the time of an agenda
+   * entry, in tabular figures so that a column of them aligns.
+   */
+  leadingText?: string;
+  /** Smaller text after the leading text, e.g. "AM". */
+  leadingCaption?: string;
+  leadingTone?: NativeFormTone;
   selected?: boolean;
   busy?: boolean;
   /** Short trailing hint, e.g. "Update". */
@@ -83,6 +91,12 @@ export interface NativeFormTextRow extends RowBase {
   placeholder?: string;
   keyboard?: "default" | "url";
   multiline?: boolean;
+  /** Visible lines of a multiline field: [minimum, maximum]. */
+  lines?: [number, number];
+  /** Natural-language text such as a prompt: sentence case and autocorrection. */
+  prose?: boolean;
+  /** Code-like text such as a cron expression, set in a monospaced font. */
+  monospace?: boolean;
   autoFocus?: boolean;
   onSubmit?: () => void;
 }
@@ -120,6 +134,48 @@ export interface NativeFormValueRow extends RowBase {
   label: string;
   value: string;
   tone?: NativeFormTone;
+  /** Turns the row into a navigation row (chevron) that opens a choice. */
+  onPress?: () => void;
+}
+
+/** A few mutually exclusive, always visible choices. */
+export interface NativeFormSegmentedRow extends RowBase {
+  kind: "segmented";
+  /** Spoken name of the control, e.g. "Repeat". */
+  label: string;
+  value: string;
+  options: Array<{
+    value: string;
+    label: string;
+    /** Spoken label when the visible one is abbreviated. */
+    accessibilityLabel?: string;
+  }>;
+  onChange: (value: string) => void;
+}
+
+/** Days of the week as round toggles, Monday first. */
+export interface NativeFormWeekdaysRow extends RowBase {
+  kind: "weekdays";
+  label: string;
+  /** Short summary of the selection, e.g. "Weekdays". */
+  summary?: string;
+  /** Selected days, 0 = Monday … 6 = Sunday. */
+  value: number[];
+  onChange: (value: number[]) => void;
+}
+
+/** A native date or time picker for a wall-clock value. */
+export interface NativeFormDateRow extends RowBase {
+  kind: "date";
+  label: string;
+  mode: "date" | "time";
+  /** YYYY-MM-DD for `date`, HH:MM for `time`. */
+  value: string;
+  onChange: (value: string) => void;
+  /** Earliest selectable YYYY-MM-DD of a `date` picker. */
+  minimumDate?: string;
+  /** Removes this entry from a list, e.g. one of several run times. */
+  onRemove?: () => void;
 }
 
 /** Linear capacity meter, e.g. storage in use. */
@@ -155,6 +211,9 @@ export type NativeFormRow =
   | NativeFormPickerRow
   | NativeFormStepperRow
   | NativeFormValueRow
+  | NativeFormSegmentedRow
+  | NativeFormWeekdaysRow
+  | NativeFormDateRow
   | NativeFormGaugeRow
   | NativeFormButtonRow
   | NativeFormNoteRow;

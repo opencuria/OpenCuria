@@ -28,8 +28,8 @@ import {
   formatEffort,
   resolveCatalogModel,
   snapEffort,
+  harnessAgentDefaults,
   harnessEngineLabel,
-  harnessEngineDefaults,
   harnessSessionModels,
 } from "@opencuria/chat-core/harnessModels";
 import type {
@@ -52,7 +52,11 @@ import {
   ChatMessages,
   type ComposerAttachment,
 } from "../components";
-import { ModelSheet, type ModelSheetEngine } from "../components/ModelSheet";
+import {
+  ModelSheet,
+  modelSheetEngines,
+  type ModelSheetEngine,
+} from "../components/ModelSheet";
 import {
   ChatController,
   type ChatControllerSnapshot,
@@ -81,6 +85,12 @@ import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
 import { FileViewerSheet, type FileViewerTarget } from "../tools/files";
 import { WorkspacesSheet } from "../workspaces/WorkspacesSheet";
+import { ScheduledTaskSheet } from "../scheduledTasks/ScheduledTaskSheet";
+import { ScheduledTasksSheet } from "../scheduledTasks/ScheduledTasksSheet";
+import type { AgentCatalog } from "../scheduledTasks/scheduledTaskForm";
+import { activeTaskCount } from "../scheduledTasks/scheduledTaskPresentation";
+import { useScheduledTasks } from "../scheduledTasks/useScheduledTasks";
+import { showToast } from "../ui/toast";
 import { releaseGitControllers } from "../tools/git";
 import { releaseTerminalSessions } from "../tools/terminal";
 
@@ -107,6 +117,8 @@ type SheetName =
   | "drawer"
   | "tools"
   | "workspaces"
+  | "schedules"
+  | "schedule-prompt"
   | "profile"
   | "settings"
   | "rename"
@@ -140,6 +152,10 @@ export function MainScreen(): React.JSX.Element {
   const subscribe = controller?.subscribe ?? noopSubscribe;
   const getSnapshot = controller?.getSnapshot ?? emptySnapshot;
   const chat = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const schedules = useScheduledTasks(
+    client,
+    `${client?.api.baseUrl ?? ""}:${session?.organizationId ?? ""}`,
+  );
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [conversations, setConversations] = useState<HarnessConversation[]>([]);
@@ -211,7 +227,6 @@ export function MainScreen(): React.JSX.Element {
     chat.activeSessionId ? (chat.activeSession?.model ?? "") : undefined,
   );
   const selectedModel = resolveCatalogModel(modelsForEngine, model);
-  const modeConfig = agentConfigs.find((item) => item.agent === mode);
   const contextKey = `${client?.api.baseUrl ?? ""}:${session?.organizationId ?? ""}:${workspaceId ?? ""}:${chat.activeSessionId ?? "new"}`;
   useEffect(() => {
     setFile(null);
@@ -487,6 +502,7 @@ export function MainScreen(): React.JSX.Element {
           loadOverview(true),
           controller.refresh(),
           loadCatalogs(),
+          schedules.refresh(),
         ]);
         retryPendingNavigation();
       }),
@@ -497,6 +513,7 @@ export function MainScreen(): React.JSX.Element {
       loadCatalogs,
       registerForegroundRefresh,
       retryPendingNavigation,
+      schedules.refresh,
     ],
   );
 
@@ -594,17 +611,13 @@ export function MainScreen(): React.JSX.Element {
 
   useEffect(() => {
     if (chat.activeSessionId || selectionDirty.current) return;
-    const defaults = harnessEngineDefaults(harness, engines, {
-      model: modeConfig?.model ?? "",
-      effort: modeConfig?.effort ?? "",
+    const defaults = harnessAgentDefaults(harness, mode, {
+      engines,
+      agentConfigs,
+      models: catalogForEngine(harness),
     });
-    const catalog = catalogForEngine(harness);
-    const selected =
-      catalog.find((item) => item.id === defaults.model) ?? catalog[0];
-    setModel(selected?.id ?? defaults.model);
-    setEffort(
-      selected ? snapEffort(selected, defaults.effort) : defaults.effort,
-    );
+    setModel(defaults.model);
+    setEffort(defaults.effort);
   }, [
     chat.activeSessionId,
     workspaceId,
@@ -647,18 +660,13 @@ export function MainScreen(): React.JSX.Element {
     selectionDirty.current = false;
     setHarness(next);
     setMode(nextMode);
-    const config = agentConfigs.find((item) => item.agent === nextMode);
-    const defaults = harnessEngineDefaults(next, engines, {
-      model: config?.model ?? "",
-      effort: config?.effort ?? "",
+    const defaults = harnessAgentDefaults(next, nextMode, {
+      engines,
+      agentConfigs,
+      models: catalogForEngine(next),
     });
-    const catalog = catalogForEngine(next);
-    const selected =
-      catalog.find((item) => item.id === defaults.model) ?? catalog[0];
-    setModel(selected?.id ?? defaults.model);
-    setEffort(
-      selected ? snapEffort(selected, defaults.effort) : defaults.effort,
-    );
+    setModel(defaults.model);
+    setEffort(defaults.effort);
   };
   const selectModel = (next: string) => {
     if (!modelsForEngine.some((item) => item.id === next)) return;
@@ -883,6 +891,24 @@ export function MainScreen(): React.JSX.Element {
     requestNavigation(owner.id, { sessionId: row.session_id });
   };
 
+  /** A scheduled run's chat; its workspace may have been removed since. */
+  const openRunChat = (workspaceId: string, sessionId: string) => {
+    const owner = workspaces.find((item) => item.id === workspaceId);
+    if (!owner || HIDDEN.has(owner.status)) {
+      showToast({
+        title: "Chat unavailable",
+        message: "The workspace of this run is no longer available.",
+        tone: "error",
+      });
+      return;
+    }
+    setDraft("");
+    setAttachments([]);
+    setSheet(null);
+    setError(null);
+    requestNavigation(owner.id, { sessionId });
+  };
+
   const chooseWorkspace = (chosen: Workspace) => {
     setDraft("");
     setAttachments([]);
@@ -1027,17 +1053,20 @@ export function MainScreen(): React.JSX.Element {
   const chosenModels = modelsForEngine;
   const profileTitle = user?.first_name?.trim() || user?.email || "Account";
   // A chat keeps its engine; only a new chat offers every engine.
-  const engineOptions: ModelSheetEngine[] = engines
-    .filter((item) => !chat.activeSessionId || item.id === harness)
-    .map((item) => ({
-      id: item.id,
-      name: item.name,
-      modes: (["build", "plan"] as const).filter((value) =>
-        item.modes.includes(value),
-      ),
-      disabled: !item.connected,
-      note: item.connected ? undefined : "Not connected",
-    }));
+  const engineOptions: ModelSheetEngine[] = modelSheetEngines(
+    engines.filter((item) => !chat.activeSessionId || item.id === harness),
+  );
+  const agentCatalog = useMemo<AgentCatalog>(
+    () => ({
+      engines,
+      models,
+      engineModels,
+      agentConfigs,
+      recentModelIds: recentModels.map((row) => row.model),
+      error: catalogError,
+    }),
+    [engines, models, engineModels, agentConfigs, recentModels, catalogError],
+  );
   const activeConversation =
     conversations.find((row) => row.session_id === chat.activeSessionId) ??
     null;
@@ -1061,6 +1090,15 @@ export function MainScreen(): React.JSX.Element {
             title: "Rename chat",
             symbol: "pencil",
             disabled: isTransitioning,
+          },
+        ]
+      : []),
+    ...(workspace && !activeIsSubtask
+      ? [
+          {
+            id: "schedule",
+            title: draft.trim() ? "Schedule this prompt" : "New scheduled task",
+            symbol: "calendar.badge.clock",
           },
         ]
       : []),
@@ -1095,6 +1133,8 @@ export function MainScreen(): React.JSX.Element {
   const chatMenuAction = (id: string) => {
     if (id === "workspace") {
       openSheet("workspaces");
+    } else if (id === "schedule") {
+      openSheet("schedule-prompt");
     } else if (id === "rename" && chat.activeSession) {
       rename(chat.activeSession);
     } else if (id === "delete" && activeConversation) {
@@ -1139,6 +1179,11 @@ export function MainScreen(): React.JSX.Element {
               void markAllRead();
             }}
             onAllWorkspaces={() => setSheet("workspaces")}
+            scheduledTasks={{
+              count: activeTaskCount(schedules.tasks),
+              running: schedules.tasks.some((task) => task.is_running),
+            }}
+            onScheduledTasks={() => setSheet("schedules")}
             onConversationAction={(row, action) => {
               if (action === "rename") rename(row);
               else if (action === "read") void markConversation(row);
@@ -1343,6 +1388,46 @@ export function MainScreen(): React.JSX.Element {
         activeWorkspaceId={workspaceId}
         onOpenWorkspace={chooseWorkspace}
         onRefresh={() => loadOverview(true)}
+      />
+
+      <ScheduledTasksSheet
+        visible={sheet === "schedules"}
+        onClose={() =>
+          setSheet((current) => (current === "schedules" ? null : current))
+        }
+        client={client}
+        schedules={schedules}
+        workspaces={workspaces}
+        skills={skills}
+        catalog={agentCatalog}
+        defaultWorkspaceId={workspaceId}
+        onOpenChat={openRunChat}
+      />
+
+      <ScheduledTaskSheet
+        task={null}
+        visible={sheet === "schedule-prompt"}
+        client={client}
+        workspaces={workspaces}
+        skills={skills}
+        catalog={agentCatalog}
+        prefill={{
+          workspaceId: workspaceId ?? undefined,
+          prompt: draft.trim(),
+          mode,
+          harnessId: harness,
+          model,
+          effort,
+          skillIds,
+        }}
+        onClose={() =>
+          setSheet((current) =>
+            current === "schedule-prompt" ? null : current,
+          )
+        }
+        onSaved={schedules.upsert}
+        onDeleted={schedules.remove}
+        onOpenChat={openRunChat}
       />
 
       <NativeModal

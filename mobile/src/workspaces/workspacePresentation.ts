@@ -26,6 +26,7 @@ import type { NativeSymbol } from "../ui/controls.types";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import type { NativeFormTone } from "../ui/NativeForm.types";
 import type { OpenCuriaTheme } from "../ui/theme";
+import { tileColor } from "../ui/tileColors";
 
 export type WorkspaceGroupId =
   | "running"
@@ -141,15 +142,15 @@ export function workspaceTint(
 ): string {
   switch (tone) {
     case "running":
-      return theme.scheme === "dark" ? "#30D158" : "#34C759";
+      return tileColor("green", theme);
     case "busy":
       return theme.primary;
     case "attention":
-      return theme.scheme === "dark" ? "#FF9F0A" : "#FF9500";
+      return tileColor("orange", theme);
     case "error":
-      return theme.scheme === "dark" ? "#FF453A" : "#FF3B30";
+      return tileColor("red", theme);
     default:
-      return theme.scheme === "dark" ? "#636366" : "#8E8E93";
+      return tileColor("gray", theme);
   }
 }
 
