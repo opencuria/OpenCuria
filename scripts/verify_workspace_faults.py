@@ -1,4 +1,4 @@
-"""Opt-in real KVM resource and storage fault checks, V065/67/68/71/72.
+"""Opt-in real KVM resource and storage fault checks, V067/68/71/72.
 
 Faults are deliberately injected at named boundaries. Only guests and files below
 one fresh output root are created or removed; no deployed backend is contacted.
@@ -20,7 +20,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
 from src.runtime.base import WorkspaceConfig
-from src.runtime.qemu_runtime import GuestCapacityUnavailable, libvirt
+from src.runtime.qemu_runtime import libvirt
 from verify_workspace_lifecycle import runtime_at
 
 
@@ -52,55 +52,20 @@ async def verify(root: Path, cloud_image: Path) -> None:
         return output.strip()
 
     try:
-        # V065: simulate pressure, not a physical host OOM, while actually building.
-        release, queued = asyncio.Event(), asyncio.Event()
-        original = runtime._assert_build_memory_available
-        progress = []
-
-        def capacity() -> None:
-            if not release.is_set():
-                raise GuestCapacityUnavailable("injected temporary host RAM pressure")
-            original()
-
-        async def on_progress(message: str) -> None:
-            progress.append(message)
-            if "Waiting for host memory" in message:
-                queued.set()
-
-        with patch.object(runtime, "_assert_build_memory_available", capacity):
-            task = asyncio.create_task(
-                runtime.build_image(
-                    base_distro="ubuntu:24.04",
-                    init_script="#!/bin/bash\nset -euo pipefail\necho fault-matrix > /workspace/fault-marker\nsync\n",
-                    image_path=str(target),
-                    operation_id=operation_id,
-                    image_instance_id=image_id,
-                    progress_callback=on_progress,
-                )
-            )
-            try:
-                await asyncio.wait_for(queued.wait(), 10)
-                assert not await runtime.workspace_exists(builder_id)
-                assert not runtime._disk_path(builder_id).exists()
-                assert not any(
-                    n.name() == runtime._workspace_network_name(builder_id)
-                    for n in runtime._libvirt_conn().listAllNetworks(0)
-                )
-                assert (await asyncio.wait_for(runtime.inventory(), 5)).complete
-            finally:
-                release.set()
-                result = await asyncio.wait_for(task, 600)
+        # The guests below use a real build output and real cloud-init.
+        result = await asyncio.wait_for(
+            runtime.build_image(
+                base_distro="ubuntu:24.04",
+                init_script="#!/bin/bash\nset -euo pipefail\necho fault-matrix > /workspace/fault-marker\nsync\n",
+                image_path=str(target),
+                operation_id=operation_id,
+                image_instance_id=image_id,
+            ),
+            600,
+        )
         assert Path(result["image_path"]).exists()
         assert not await runtime.workspace_exists(builder_id)
-        record(
-            "V065",
-            operation_id=operation_id,
-            progress=progress,
-            queued_without_disk_network_domain=True,
-            automatic_completion=True,
-        )
 
-        # Both guests use the actual queued build output and real cloud-init.
         await asyncio.gather(
             *(
                 runtime.create_workspace(

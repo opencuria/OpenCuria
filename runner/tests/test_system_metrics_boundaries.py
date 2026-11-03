@@ -51,3 +51,16 @@ def test_interfaces_delegate_resource_sampling_to_the_collector() -> None:
         "Host resource probes belong to SystemMetricsCollector, not adapters: "
         f"{sorted(violations)}"
     )
+
+
+def test_runtimes_never_probe_host_capacity() -> None:
+    """Capacity admission belongs to the control plane, not guest runtimes."""
+    violations = {
+        str(path.relative_to(RUNNER_ROOT))
+        for path in (RUNNER_ROOT / "src/runtime").rglob("*.py")
+        if any(module.split(".")[0] == "psutil" for module in _imports(path))
+    }
+    assert not violations, (
+        "The backend admits workspace resources; runtimes must not reject "
+        f"guests from host observations: {sorted(violations)}"
+    )

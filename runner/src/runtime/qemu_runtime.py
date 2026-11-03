@@ -26,7 +26,6 @@ from pathlib import Path
 
 import asyncssh
 import libvirt
-import psutil
 import structlog
 
 from ..config import RunnerSettings
@@ -70,11 +69,6 @@ _GUEST_DISK_USAGE_TIMEOUT = 5.0
 
 # Publication path sent by the control plane; distinct from cloud-image cache.
 _BUILD_IMAGE_DIR = Path("/var/lib/opencuria/base-images")
-_BUILD_CAPACITY_POLL_INTERVAL = 1.0
-
-
-class GuestCapacityUnavailable(RuntimeError):
-    """Guest admission is temporarily blocked without issuing any effects."""
 
 
 def _workspace_status(state: int) -> str:
@@ -1131,11 +1125,13 @@ class QemuRuntime(RuntimeBackend):
 
     @staticmethod
     def _validate_workspace_resources(vcpus: int, memory_mb: int, disk_gb: int) -> None:
-        """Reject impossible initial and changed resources before allocation."""
+        """Reject malformed resource values before allocation.
+
+        Host capacity admission belongs to the control plane; the runner only
+        rejects values libvirt cannot represent.
+        """
         if min(vcpus, memory_mb, disk_gb) <= 0:
             raise ValueError("QEMU workspace resources must be positive")
-        if vcpus > (psutil.cpu_count() or 1):
-            raise ValueError("Workspace vCPUs exceed the host's logical CPU capacity")
 
     @workspace_mutation
     async def create_workspace(self, config: WorkspaceConfig) -> str:
@@ -1173,9 +1169,6 @@ class QemuRuntime(RuntimeBackend):
         if await asyncio.to_thread(lambda: disk.exists() or disk.is_symlink()):
             raise FileExistsError(f"Workspace disk already exists: {disk}")
 
-        await asyncio.to_thread(
-            self._assert_memory_available, qemu_memory_mb, instance_id
-        )
         # Validate the base and publish its overlay before allocating a network.
         disk = await self._create_overlay_disk(
             instance_id,
@@ -1254,14 +1247,14 @@ class QemuRuntime(RuntimeBackend):
 
     @workspace_mutation
     async def start_workspace(self, instance_id: str) -> None:
-        """Start a guest with atomic host admission and independent readiness."""
+        """Start a guest, then wait for its SSH readiness independently."""
         if await self._start_workspace(instance_id):
             await self._wait_for_ssh(instance_id)
         logger.info("vm_workspace_started", instance_id=instance_id)
 
     @storage_mutation
     async def _start_workspace(self, instance_id: str, *, upgrade: bool = True) -> bool:
-        """Reserve configured guest RAM atomically with domain activation."""
+        """Activate the domain; return whether it was not already running."""
         domain = await asyncio.to_thread(self._get_domain, instance_id)
         state, _ = await asyncio.to_thread(domain.state)
         if state in (libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_BLOCKED):
@@ -1272,8 +1265,6 @@ class QemuRuntime(RuntimeBackend):
             libvirt.VIR_DOMAIN_SHUTOFF,
         ):
             raise RuntimeError(f"Guest cannot start from libvirt state {state}")
-        memory_mb = (await asyncio.to_thread(domain.info))[1] // 1024
-        await asyncio.to_thread(self._assert_memory_available, memory_mb, instance_id)
         # An externally stopped guest may leave a silent cached transport.
         await self._invalidate_ssh(instance_id)
         if state == libvirt.VIR_DOMAIN_PAUSED:
@@ -1300,30 +1291,27 @@ class QemuRuntime(RuntimeBackend):
         domain = await asyncio.to_thread(self._get_domain, instance_id)
         state, _ = await asyncio.to_thread(domain.state)
         was_active = state != libvirt.VIR_DOMAIN_SHUTOFF
-        await self._reserve_reconfigure_capacity(
+        await self._validate_reconfigure(
             instance_id,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        try:
-            if was_active:
-                await self.stop_workspace(instance_id)
-            await self._reconfigure_workspace(
-                instance_id,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-            )
-            if (restart or was_active) and await self._start_workspace(
-                instance_id, upgrade=False
-            ):
-                await self._wait_for_ssh(instance_id)
-        finally:
-            await self._release_reconfigure_capacity(instance_id)
+        if was_active:
+            await self.stop_workspace(instance_id)
+        await self._reconfigure_workspace(
+            instance_id,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+        )
+        if (restart or was_active) and await self._start_workspace(
+            instance_id, upgrade=False
+        ):
+            await self._wait_for_ssh(instance_id)
 
     @storage_mutation
-    async def _reserve_reconfigure_capacity(
+    async def _validate_reconfigure(
         self,
         instance_id: str,
         *,
@@ -1331,7 +1319,7 @@ class QemuRuntime(RuntimeBackend):
         qemu_memory_mb: int,
         qemu_disk_size_gb: int,
     ) -> None:
-        """Reject invalid settings before stopping; reserve RAM across restart."""
+        """Reject malformed values and disk shrinking before stopping the guest."""
         self._validate_workspace_resources(
             qemu_vcpus, qemu_memory_mb, qemu_disk_size_gb
         )
@@ -1346,17 +1334,6 @@ class QemuRuntime(RuntimeBackend):
             raise RuntimeError("Could not verify existing QEMU virtual disk size")
         if qemu_disk_size_gb * 1024**3 < current_size:
             raise RuntimeError("Reducing QEMU disk size is not supported")
-        await asyncio.to_thread(
-            self._assert_memory_available, qemu_memory_mb, instance_id
-        )
-        if not hasattr(self, "_memory_reservations"):
-            self._memory_reservations = {}
-        self._memory_reservations[instance_id] = qemu_memory_mb
-
-    @storage_mutation
-    async def _release_reconfigure_capacity(self, instance_id: str) -> None:
-        """Release transient admission after the guest's restart has settled."""
-        getattr(self, "_memory_reservations", {}).pop(instance_id, None)
 
     @storage_mutation
     async def _reconfigure_workspace(
@@ -2172,66 +2149,6 @@ class QemuRuntime(RuntimeBackend):
         process.stdin.write_eof()
         await process.wait()
 
-    def _assert_memory_available(
-        self, memory_mb: int, instance_id: str | None = None
-    ) -> None:
-        """Reserve host RAM against every active domain before guest activation.
-
-        Count configured memory, including foreign guests: reclaimed pages remain
-        available to existing guests on demand. Resuming an already active paused
-        guest adds no new reservation. Call under the storage mutation lock.
-        """
-        memory = psutil.virtual_memory()
-        reserve = max(1024**3, memory.total // 10)
-        requested = memory_mb * 1024**2
-        if requested > memory.total - reserve:
-            raise RuntimeError(
-                "Insufficient host memory: requested guest memory exceeds the "
-                "host capacity including its safety margin"
-            )
-        active = {}
-        for domain in self._libvirt_conn().listAllDomains(0):
-            if not domain.isActive():
-                continue
-            configured = domain.info()[1] * 1024
-            active[domain.name()] = configured
-        reservations = {
-            self._domain_name(key): value * 1024**2
-            for key, value in getattr(self, "_memory_reservations", {}).items()
-        }
-        allocated = sum(active.values()) + sum(
-            max(0, reserved - active.get(name, 0))
-            for name, reserved in reservations.items()
-        )
-        name = self._domain_name(instance_id) if instance_id is not None else None
-        existing = active.get(name, 0)
-        additional = max(0, requested - max(existing, reservations.get(name, 0)))
-        physical_additional = max(0, requested - existing)
-        if not additional and not physical_additional:
-            return
-        if (
-            allocated + additional > memory.total - reserve
-            or (
-                physical_additional > 0
-                and physical_additional > memory.available - reserve
-            )
-        ):
-            raise GuestCapacityUnavailable(
-                "Insufficient host memory for guest activation; stop a guest, "
-                "reduce guest memory/concurrency, or retry when memory is available"
-            )
-
-    def _assert_build_memory_available(self) -> None:
-        """Apply the shared guest admission policy to a temporary build VM."""
-        self._assert_memory_available(
-            getattr(self._settings, "qemu_build_memory_mb", self._settings.qemu_memory_mb)
-        )
-
-    @storage_mutation
-    async def _probe_build_capacity(self) -> None:
-        """Observe admission without creating disks, networks or domains."""
-        await asyncio.to_thread(self._assert_build_memory_available)
-
     @staticmethod
     def _build_instance_id(operation_id: str) -> str:
         """Map one durable operation to exactly one disposable build guest."""
@@ -2251,7 +2168,6 @@ class QemuRuntime(RuntimeBackend):
     @storage_mutation
     async def _prepare_build_instance(self, instance_id: str, base_image: Path) -> Path:
         """Allocate subnet, disk and domain atomically against storage scans."""
-        await asyncio.to_thread(self._assert_build_memory_available)
         disk = await self._create_overlay_disk(
             instance_id,
             disk_size_gb=self._settings.qemu_disk_size_gb,
@@ -2297,61 +2213,31 @@ class QemuRuntime(RuntimeBackend):
         image_instance_id: str | None = None,
         progress_callback=None,
     ) -> dict[str, str | int]:
-        """Queue builds within the host budget before issuing physical effects."""
+        """Queue builds for a configured build slot before issuing physical effects."""
         self._build_instance_id(operation_id)
         if not image_instance_id:
             raise RuntimeError("Build requires operation and image identity")
         self._managed_image_path(image_path)
-        vcpus = getattr(self._settings, "qemu_build_vcpus", self._settings.qemu_vcpus)
-        host_cpus = psutil.cpu_count() or 1
-        if vcpus > host_cpus:
-            raise RuntimeError("Build vCPUs exceed the host's logical CPU capacity")
         if not hasattr(self, "_build_semaphore"):
             self._build_semaphore = asyncio.Semaphore(
-                min(
-                    getattr(self._settings, "qemu_build_concurrency", 2),
-                    host_cpus // vcpus,
-                )
+                getattr(self._settings, "qemu_build_concurrency", 2)
             )
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + getattr(
-            self._settings, "qemu_build_queue_timeout", 1800
-        )
+        timeout = getattr(self._settings, "qemu_build_queue_timeout", 1800)
         if self._build_semaphore.locked() and progress_callback is not None:
             await progress_callback("Waiting for an image build slot")
         try:
-            await asyncio.wait_for(
-                self._build_semaphore.acquire(), timeout=max(0, deadline - loop.time())
-            )
+            await asyncio.wait_for(self._build_semaphore.acquire(), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise RuntimeError("Image build queue timed out waiting for a slot") from exc
         try:
-            waiting = False
-            while True:
-                try:
-                    await self._probe_build_capacity()
-                    return await self._build_image(
-                        base_distro=base_distro,
-                        init_script=init_script,
-                        image_path=image_path,
-                        operation_id=operation_id,
-                        image_instance_id=image_instance_id,
-                        progress_callback=progress_callback,
-                    )
-                except GuestCapacityUnavailable as exc:
-                    remaining = deadline - loop.time()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Image build queue timed out waiting for host memory"
-                        ) from exc
-                    if not waiting:
-                        waiting = True
-                        logger.info("qemu_image_build_queued", reason=str(exc))
-                        if progress_callback is not None:
-                            await progress_callback(
-                                "Waiting for host memory before image build"
-                            )
-                    await asyncio.sleep(min(_BUILD_CAPACITY_POLL_INTERVAL, remaining))
+            return await self._build_image(
+                base_distro=base_distro,
+                init_script=init_script,
+                image_path=image_path,
+                operation_id=operation_id,
+                image_instance_id=image_instance_id,
+                progress_callback=progress_callback,
+            )
         finally:
             self._build_semaphore.release()
 
@@ -2366,7 +2252,7 @@ class QemuRuntime(RuntimeBackend):
         image_instance_id: str | None,
         progress_callback,
     ) -> dict[str, str | int]:
-        """Provision and publish a temporary guest after admission."""
+        """Provision and publish a temporary guest in an acquired build slot."""
         target_path = self._managed_image_path(image_path)
         if not operation_id or not image_instance_id:
             raise RuntimeError("Build requires operation and image identity")
@@ -2393,7 +2279,6 @@ class QemuRuntime(RuntimeBackend):
         if progress_callback is not None:
             await progress_callback(f"Using base image {base_image.name}")
 
-        cleanup = True
         try:
             disk = await self._prepare_build_instance(instance_id, base_image)
             await self._wait_for_ssh(instance_id)
@@ -2449,12 +2334,8 @@ class QemuRuntime(RuntimeBackend):
                 "min_disk_size_gb": manifest["min_disk_size_gb"],
                 "virtual_size_bytes": manifest["virtual_size_bytes"],
             }
-        except GuestCapacityUnavailable:
-            cleanup = False
-            raise
         finally:
-            if cleanup:
-                await self._cleanup_build_instance(instance_id)
+            await self._cleanup_build_instance(instance_id)
 
     # ── Image artifact operations ─────────────────────────────────────
 
@@ -3417,11 +3298,6 @@ class QemuRuntime(RuntimeBackend):
         info = await self._image_info(snapshot_path)
         if info.get("backing-filename") or info.get("full-backing-filename"):
             raise RuntimeError("Published image must be self-contained")
-        await asyncio.to_thread(
-            self._assert_memory_available,
-            qemu_memory_mb,
-            new_instance_id,
-        )
         # Use the same exclusive sparse overlay publication as fresh guests.
         # Too-small requests fail before allocating a disk or network.
         new_disk = await self._create_overlay_disk(

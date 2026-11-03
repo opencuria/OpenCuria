@@ -2,6 +2,7 @@ from tests.command_support import make_executor
 """Guest lifecycle isolation and durable publication failure regressions."""
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -299,60 +300,6 @@ def test_build_budget_rejects_non_positive_values(field, value):
         RunnerSettings(_env_file=None, **{field: value})
 
 
-@pytest.mark.parametrize("pressure", ["configured", "available"])
-async def test_build_memory_pressure_rejects_before_allocating_resources(
-    tmp_path, monkeypatch, pressure
-):
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from src.runtime import qemu_runtime
-
-    r = runtime(tmp_path)
-    r._settings.qemu_memory_mb = 4096
-    r._settings.qemu_build_memory_mb = 2048
-    guest = MagicMock()
-    guest.isActive.return_value = True
-    guest.info.return_value = (libvirt.VIR_DOMAIN_RUNNING, 6 * 1024**2, 0, 1, 0)
-    r._libvirt_conn.return_value.listAllDomains.return_value = (
-        [guest] if pressure == "configured" else []
-    )
-    monkeypatch.setattr(
-        qemu_runtime.psutil,
-        "virtual_memory",
-        lambda: SimpleNamespace(
-            total=8 * 1024**3,
-            available=(7 if pressure == "configured" else 2) * 1024**3,
-        ),
-    )
-    r._create_workspace_network = AsyncMock()
-    with pytest.raises(RuntimeError, match="Insufficient host memory"):
-        await r._prepare_build_instance("new-build", tmp_path / "base.qcow2")
-    r._create_workspace_network.assert_not_awaited()
-    assert list(r._disk_dir.iterdir()) == []
-
-
-async def test_build_memory_budget_ignores_stopped_domains(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from src.runtime import qemu_runtime
-
-    r = runtime(tmp_path)
-    r._settings.qemu_memory_mb = 4096
-    r._settings.qemu_build_memory_mb = 2048
-    guest = MagicMock()
-    guest.isActive.return_value = False
-    r._libvirt_conn.return_value.listAllDomains.return_value = [guest]
-    monkeypatch.setattr(
-        qemu_runtime.psutil,
-        "virtual_memory",
-        lambda: SimpleNamespace(total=8 * 1024**3, available=7 * 1024**3),
-    )
-    await asyncio.to_thread(r._assert_build_memory_available)
-    guest.info.assert_not_called()
-
-
 async def test_cloud_init_readonly_probe_retries_running_and_ssh_restart(
     tmp_path, monkeypatch
 ):
@@ -555,92 +502,6 @@ def test_cloud_cache_publication_preserves_concurrently_published_inode(
     assert not list(target.parent.glob("*.tmp"))
 
 
-async def test_concurrent_starts_atomically_reserve_memory_against_other_guests(
-    builder, monkeypatch
-):
-    from src.runtime import qemu_runtime
-
-    r = builder
-    monkeypatch.setattr(
-        qemu_runtime.psutil,
-        "virtual_memory",
-        lambda: SimpleNamespace(total=4 * 1024**3, available=4 * 1024**3),
-    )
-    r._settings.qemu_memory_mb = 2048
-    base = r._resolve_build_base_image.return_value
-    instances = [str(uuid.uuid4()), str(uuid.uuid4())]
-    try:
-        for instance_id in instances:
-            await r.create_workspace(
-                WorkspaceConfig(workspace_id=instance_id, image=str(base))
-            )
-            await r.stop_workspace(instance_id)
-        results = await asyncio.gather(
-            *(r.start_workspace(instance_id) for instance_id in instances),
-            return_exceptions=True,
-        )
-        assert len([result for result in results if result is None]) == 1
-        failures = [result for result in results if isinstance(result, RuntimeError)]
-        assert len(failures) == 1
-        assert "Insufficient host memory" in str(failures[0])
-        assert (
-            sum(domain.isActive() for domain in r._libvirt_conn().listAllDomains(0))
-            == 1
-        )
-    finally:
-        for instance_id in instances:
-            await r.remove_workspace(instance_id)
-
-
-async def test_paused_resume_does_not_reserve_existing_guest_ram_twice(
-    tmp_path, monkeypatch
-):
-    from unittest.mock import MagicMock
-
-    from src.runtime import qemu_runtime
-
-    r = runtime(tmp_path)
-    guest = MagicMock()
-    guest.isActive.return_value = True
-    guest.name.return_value = r._domain_name("paused")
-    guest.info.return_value = (libvirt.VIR_DOMAIN_PAUSED, 2 * 1024**2, 0, 1, 0)
-    r._libvirt_conn.return_value.listAllDomains.return_value = [guest]
-    monkeypatch.setattr(
-        qemu_runtime.psutil,
-        "virtual_memory",
-        lambda: SimpleNamespace(total=4 * 1024**3, available=512 * 1024**2),
-    )
-    # No additional memory is allocated when resuming this 2 GiB guest.
-    r._assert_memory_available(2048, "paused")
-    with pytest.raises(RuntimeError, match="Insufficient host memory"):
-        r._assert_memory_available(1024, "new-guest")
-
-
-@pytest.mark.parametrize("activation", ["create", "clone"])
-async def test_workspace_memory_rejection_precedes_disk_and_network_allocation(
-    builder, activation
-):
-    from unittest.mock import MagicMock
-
-    r = builder
-    r._assert_memory_available = MagicMock(side_effect=RuntimeError("memory pressure"))
-    r._create_workspace_network = AsyncMock()
-    base = r._resolve_build_base_image.return_value
-    target = r._snapshot_dir / "published.qcow2"
-    await r._publish_image(base, target, {"operation_id": "capture"})
-    instance_id = str(uuid.uuid4())
-    with pytest.raises(RuntimeError, match="memory pressure"):
-        if activation == "create":
-            await r.create_workspace(
-                WorkspaceConfig(workspace_id=instance_id, image=str(base))
-            )
-        else:
-            await r.create_workspace_from_image_artifact("published", instance_id)
-    r._create_workspace_network.assert_not_awaited()
-    assert not r._disk_path(instance_id).exists()
-    assert r._libvirt_conn().listAllDomains(0) == []
-
-
 @pytest.mark.parametrize(
     "failure", ["enumeration", "xml", "host", "malformed-host", "unknown-prefix"]
 )
@@ -807,73 +668,9 @@ def _queue_build(r, *, operation_id=None, progress_callback=None):
     )
 
 
-def _memory_pressure(monkeypatch, release):
-    """Keep physical host memory deterministic without consuming host RAM."""
-    from src.runtime import qemu_runtime
-
-    monkeypatch.setattr(qemu_runtime, "_BUILD_CAPACITY_POLL_INTERVAL", 0.005)
-    monkeypatch.setattr(
-        qemu_runtime.psutil,
-        "virtual_memory",
-        lambda: SimpleNamespace(
-            total=8 * 1024**3,
-            available=(7 if release.is_set() else 1) * 1024**3,
-        ),
-    )
-
-
-async def test_build_waits_for_memory_then_runs_without_allocating_while_queued(
-    builder, monkeypatch
-):
-    r = builder
-    release, queued = asyncio.Event(), asyncio.Event()
-    _memory_pressure(monkeypatch, release)
-    progress = []
-
-    async def report(message):
-        progress.append(message)
-        if "Waiting for host memory" in message:
-            queued.set()
-
-    task = _queue_build(r, progress_callback=report)
-    try:
-        await asyncio.wait_for(queued.wait(), 2)
-        assert not r._libvirt_conn().listAllDomains(0)
-        assert list(r._disk_dir.iterdir()) == []
-        r._resolve_build_base_image.assert_not_called()
-        assert (await asyncio.wait_for(r.inventory(), 2)).complete
-    finally:
-        release.set()
-    result = await asyncio.wait_for(task, 5)
-    assert Path(result["image_path"]).exists()
-    assert progress.count("Waiting for host memory before image build") == 1
-    assert not r._libvirt_conn().listAllDomains(0)
-
-
-async def test_build_queue_cancel_removes_waiter_without_guest(builder, monkeypatch):
-    r = builder
-    release, queued = asyncio.Event(), asyncio.Event()
-    _memory_pressure(monkeypatch, release)
-
-    async def report(message):
-        if "Waiting for host memory" in message:
-            queued.set()
-
-    task = _queue_build(r, progress_callback=report)
-    await asyncio.wait_for(queued.wait(), 2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 2)
-    release.set()
-    await asyncio.sleep(0.02)
-    assert not r._libvirt_conn().listAllDomains(0)
-    assert list(r._disk_dir.iterdir()) == []
-    r._resolve_build_base_image.assert_not_called()
-    assert r._build_semaphore._value == 2
-
-
-async def test_build_slot_wait_cancel_never_starts_second_guest(builder):
-    r = builder
+@contextlib.asynccontextmanager
+async def _occupied_build_slot(r):
+    """Hold the only configured build slot with one running guest."""
     r._settings.qemu_build_concurrency = 1
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -883,110 +680,41 @@ async def test_build_slot_wait_cancel_never_starts_second_guest(builder):
 
     r._stream_ssh_process.side_effect = provision
     first = build(r)
-    second = None
     try:
         await asyncio.wait_for(entered.wait(), 3)
-        second = build(r)
-        await asyncio.sleep(0.02)
-        second.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(second, 2)
-        assert len(r._libvirt_conn().listAllDomains(0)) == 1
+        yield
     finally:
         release.set()
         await first
-        if second is not None and not second.done():
-            await second
+
+
+async def test_build_slot_wait_cancel_never_starts_second_guest(builder):
+    r = builder
+    second = None
+    async with _occupied_build_slot(r):
+        try:
+            second = build(r)
+            await asyncio.sleep(0.02)
+            second.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(second, 2)
+            assert len(r._libvirt_conn().listAllDomains(0)) == 1
+        finally:
+            if second is not None and not second.done():
+                await second
     assert r._stream_ssh_process.await_count == 1
     assert r._build_semaphore._value == 1
 
 
-async def test_build_queue_timeout_is_known_failure_without_allocation(
-    builder, monkeypatch
-):
+async def test_build_queue_timeout_is_known_failure_without_allocation(builder):
     r = builder
     r._settings.qemu_build_queue_timeout = 0.025
-    _memory_pressure(monkeypatch, asyncio.Event())
-    with pytest.raises(RuntimeError, match="queue timed out waiting for host memory"):
-        await asyncio.wait_for(build(r), 2)
-    assert list(r._disk_dir.iterdir()) == []
-    assert not r._libvirt_conn().listAllDomains(0)
-    r._resolve_build_base_image.assert_not_called()
-    assert r._build_semaphore._value == 2
-
-
-async def test_build_impossible_memory_fails_immediately(builder, monkeypatch):
-    r = builder
-    r._settings.qemu_build_memory_mb = 8192
-    _memory_pressure(monkeypatch, asyncio.Event())
-    with pytest.raises(RuntimeError, match="exceeds the host capacity"):
-        await asyncio.wait_for(build(r), 2)
-    r._resolve_build_base_image.assert_not_called()
-    assert list(r._disk_dir.iterdir()) == []
-
-
-async def test_build_cpu_budget_limits_parallelism(builder, monkeypatch):
-    from src.runtime import qemu_runtime
-
-    r = builder
-    monkeypatch.setattr(qemu_runtime.psutil, "cpu_count", lambda: 1)
-    r._settings.qemu_build_concurrency = 4
-    r._settings.qemu_build_vcpus = 1
-    entered, release = asyncio.Event(), asyncio.Event()
-    observed = []
-
-    async def provision(instance_id, *args):
-        observed.append(instance_id)
-        entered.set()
-        await release.wait()
-
-    r._stream_ssh_process.side_effect = provision
-    first, second = build(r), build(r)
-    try:
-        await asyncio.wait_for(entered.wait(), 3)
-        await asyncio.sleep(0.02)
-        assert len(observed) == 1
+    async with _occupied_build_slot(r):
+        with pytest.raises(RuntimeError, match="queue timed out waiting for a slot"):
+            await asyncio.wait_for(build(r), 2)
         assert len(r._libvirt_conn().listAllDomains(0)) == 1
-    finally:
-        release.set()
-        await asyncio.gather(first, second)
-    assert len(observed) == 2
-
-
-async def test_build_impossible_cpu_fails_immediately(builder, monkeypatch):
-    from src.runtime import qemu_runtime
-
-    r = builder
-    monkeypatch.setattr(qemu_runtime.psutil, "cpu_count", lambda: 1)
-    r._settings.qemu_build_vcpus = 2
-    with pytest.raises(RuntimeError, match="logical CPU capacity"):
-        await asyncio.wait_for(build(r), 2)
-    r._resolve_build_base_image.assert_not_called()
-    assert list(r._disk_dir.iterdir()) == []
-
-
-async def test_build_rechecks_memory_after_capacity_race(builder, monkeypatch):
-    from src.runtime import qemu_runtime
-    from src.runtime.qemu_runtime import GuestCapacityUnavailable
-
-    r = builder
-    monkeypatch.setattr(qemu_runtime, "_BUILD_CAPACITY_POLL_INTERVAL", 0.005)
-    prepare = r._prepare_build_instance
-    attempts = 0
-
-    async def racing_prepare(instance_id, base_image):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            assert not r._libvirt_conn().listAllDomains(0)
-            raise GuestCapacityUnavailable("memory claimed by another activation")
-        return await prepare(instance_id, base_image)
-
-    r._prepare_build_instance = AsyncMock(side_effect=racing_prepare)
-    result = await asyncio.wait_for(build(r), 5)
-    assert Path(result["image_path"]).exists()
-    assert attempts == 2
-    assert r._stream_ssh_process.await_count == 1
+        assert r._resolve_build_base_image.call_count == 1
+    assert r._build_semaphore._value == 1
     assert not r._libvirt_conn().listAllDomains(0)
 
 
@@ -1028,15 +756,15 @@ async def test_build_invalid_operation_identity_has_no_effects(builder):
     assert list(r._disk_dir.iterdir()) == []
 
 
-async def test_build_queue_progress_failure_does_not_allocate(builder, monkeypatch):
+async def test_build_queue_progress_failure_does_not_allocate(builder):
     r = builder
-    _memory_pressure(monkeypatch, asyncio.Event())
     callback = AsyncMock(side_effect=ConnectionError("progress delivery unavailable"))
-    with pytest.raises(ConnectionError, match="delivery unavailable"):
-        await asyncio.wait_for(_queue_build(r, progress_callback=callback), 2)
-    r._resolve_build_base_image.assert_not_called()
-    assert list(r._disk_dir.iterdir()) == []
-    assert not r._libvirt_conn().listAllDomains(0)
+    async with _occupied_build_slot(r):
+        with pytest.raises(ConnectionError, match="delivery unavailable"):
+            await asyncio.wait_for(_queue_build(r, progress_callback=callback), 2)
+        assert len(r._libvirt_conn().listAllDomains(0)) == 1
+        assert r._resolve_build_base_image.call_count == 1
+    assert r._build_semaphore._value == 1
 
 
 async def test_build_cancel_during_effect_drains_and_releases_slot(builder):
@@ -1069,11 +797,7 @@ async def test_build_cancel_during_effect_drains_and_releases_slot(builder):
 
 
 @pytest.mark.parametrize("failure", ["memory", "cpu", "disk", "disk-inspection"])
-async def test_invalid_reconfigure_preserves_running_guest(
-    builder, monkeypatch, failure
-):
-    from src.runtime import qemu_runtime
-
+async def test_invalid_reconfigure_preserves_running_guest(builder, failure):
     r = builder
     instance_id = str(uuid.uuid4())
     base = r._resolve_build_base_image.return_value
@@ -1083,11 +807,7 @@ async def test_invalid_reconfigure_preserves_running_guest(
     old_size = (await r._image_info(r._disk_path(instance_id)))["virtual-size"]
     resources = {"qemu_vcpus": 1, "qemu_memory_mb": 128, "qemu_disk_size_gb": 1}
     if failure == "memory":
-        resources["qemu_memory_mb"] = 16384
-        monkeypatch.setattr(
-            qemu_runtime.psutil, "virtual_memory",
-            lambda: SimpleNamespace(total=8 * 1024**3, available=7 * 1024**3),
-        )
+        resources["qemu_memory_mb"] = 0
     elif failure == "cpu":
         resources["qemu_vcpus"] = 0
     elif failure == "disk":
@@ -1108,54 +828,40 @@ async def test_invalid_reconfigure_preserves_running_guest(
         assert domain.XMLDesc(0) == old_xml
         if failure != "disk-inspection":
             assert (await r._image_info(r._disk_path(instance_id)))["virtual-size"] == old_size
-        assert not getattr(r, "_memory_reservations", {})
     finally:
         if failure == "disk-inspection":
             del r._image_info
         await r.remove_workspace(instance_id)
 
 
-async def test_reconfigure_reserves_ram_during_stop_start_gap(builder, monkeypatch):
-    from src.runtime import qemu_runtime
-    from src.runtime.qemu_runtime import GuestCapacityUnavailable
-
+async def test_runner_leaves_capacity_admission_to_the_control_plane(builder):
+    """Guests larger than this host still activate; only the backend admits."""
     r = builder
     instance_id = str(uuid.uuid4())
     base = r._resolve_build_base_image.return_value
-    monkeypatch.setattr(
-        qemu_runtime.psutil, "virtual_memory",
-        lambda: SimpleNamespace(total=4 * 1024**3, available=3 * 1024**3),
-    )
-    await r.create_workspace(WorkspaceConfig(workspace_id=instance_id, image=str(base)))
-    stopped, release = asyncio.Event(), asyncio.Event()
-    original = r._reconfigure_workspace
-
-    async def paused_reconfigure(*args, **kwargs):
-        stopped.set()
-        await release.wait()
-        return await original(*args, **kwargs)
-
-    r._reconfigure_workspace = AsyncMock(side_effect=paused_reconfigure)
-    task = asyncio.create_task(r.reconfigure_workspace(
-        instance_id, qemu_vcpus=1, qemu_memory_mb=2048,
-        qemu_disk_size_gb=1, restart=True,
-    ))
+    oversized = {
+        "qemu_vcpus": (os.cpu_count() or 1) + 1,
+        "qemu_memory_mb": 1024 * 1024,
+        "qemu_disk_size_gb": 1,
+    }
     try:
-        await asyncio.wait_for(stopped.wait(), 3)
-        assert r._get_domain(instance_id).state()[0] == libvirt.VIR_DOMAIN_SHUTOFF
-        assert r._memory_reservations == {instance_id: 2048}
-        with pytest.raises(GuestCapacityUnavailable):
-            await asyncio.to_thread(r._assert_memory_available, 2048, "other")
-        await asyncio.to_thread(r._assert_memory_available, 2048, instance_id)
+        await r.create_workspace(
+            WorkspaceConfig(workspace_id=instance_id, image=str(base), **oversized)
+        )
+        await r.stop_workspace(instance_id)
+        await r.reconfigure_workspace(
+            instance_id, restart=False, **{**oversized, "qemu_memory_mb": 2 * 1024**2}
+        )
+        await r.start_workspace(instance_id)
+        domain = r._get_domain(instance_id)
+        assert domain.state()[0] == libvirt.VIR_DOMAIN_RUNNING
+        assert domain.info()[1] == 2 * 1024**3
+        assert domain.maxVcpus() == oversized["qemu_vcpus"]
     finally:
-        release.set()
-        await task
         await r.remove_workspace(instance_id)
-    assert not r._memory_reservations
-    await asyncio.to_thread(r._assert_memory_available, 2048, "other")
 
 
-async def test_reconfigure_failure_releases_transient_reservation(builder):
+async def test_reconfigure_failure_leaves_guest_stopped(builder):
     r = builder
     instance_id = str(uuid.uuid4())
     base = r._resolve_build_base_image.return_value
@@ -1167,7 +873,6 @@ async def test_reconfigure_failure_releases_transient_reservation(builder):
                 instance_id, qemu_vcpus=1, qemu_memory_mb=128,
                 qemu_disk_size_gb=1, restart=True,
             )
-        assert not r._memory_reservations
         assert r._get_domain(instance_id).state()[0] == libvirt.VIR_DOMAIN_SHUTOFF
     finally:
         await r.remove_workspace(instance_id)
@@ -1195,7 +900,6 @@ def _state_runtime(tmp_path, state):
     domain.state.side_effect = lambda: (current[0], 0)
     domain.info.return_value = (state, 128 * 1024, 128 * 1024, 1, 0)
     r._get_domain = lambda _: domain
-    r._assert_memory_available = MagicMock()
     r._ensure_memory_reclaim = MagicMock()
     r._invalidate_ssh = AsyncMock()
     r._wait_for_ssh = AsyncMock()
@@ -1213,7 +917,6 @@ async def test_hypervisor_state_start(tmp_path, name, state):
         with pytest.raises(RuntimeError, match="cannot start from libvirt state"):
             await r.start_workspace("guest")
         assert current[0] == state
-        r._assert_memory_available.assert_not_called()
     else:
         await r.start_workspace("guest")
         assert current[0] == (
@@ -1397,7 +1100,7 @@ async def test_partial_interruption_rejects_incomplete_inventory(builder):
 
 
 @pytest.mark.parametrize("invalid", [
-    "cpu-zero", "cpu-negative", "cpu-capacity", "memory-zero", "memory-negative",
+    "cpu-zero", "cpu-negative", "memory-zero", "memory-negative",
     "disk-zero", "disk-negative",
 ])
 @pytest.mark.parametrize("activation", ["create", "clone"])
@@ -1405,13 +1108,13 @@ async def test_invalid_initial_resources_have_no_effects(builder, activation, in
     r = builder
     instance_id = str(uuid.uuid4())
     resource, value = invalid.split("-")
-    values = {"zero": 0, "negative": -1, "capacity": 9}
+    values = {"zero": 0, "negative": -1}
     resources = {
         {"cpu": "qemu_vcpus", "memory": "qemu_memory_mb", "disk": "qemu_disk_size_gb"}[
             resource
         ]: values[value]
     }
-    with pytest.raises(ValueError, match="positive|logical CPU capacity"):
+    with pytest.raises(ValueError, match="positive"):
         if activation == "create":
             await r.create_workspace(WorkspaceConfig(
                 workspace_id=instance_id,

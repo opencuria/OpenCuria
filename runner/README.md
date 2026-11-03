@@ -95,23 +95,16 @@ to 1 vCPU and 2048 MiB, with at most two active builds per runner. Configure
 `RUNNER_QEMU_BUILD_VCPUS`, `RUNNER_QEMU_BUILD_MEMORY_MB` and
 `RUNNER_QEMU_BUILD_CONCURRENCY` to match the host's available resources and build
 workloads; these positive values are independent of workspace resource defaults.
-The effective build concurrency also respects the host's logical CPU count.
-Builds wait for a slot or temporary host RAM pressure to clear, reporting the
-queue reason without allocating a guest. `RUNNER_QEMU_BUILD_QUEUE_TIMEOUT`
-(default 1800 seconds) bounds admission waiting. Requests exceeding the host's
-physical CPU/RAM budget fail immediately with a configuration diagnostic.
+Builds wait for a free slot, reporting the queue reason without allocating a
+guest. `RUNNER_QEMU_BUILD_QUEUE_TIMEOUT` (default 1800 seconds) bounds that wait.
 `RUNNER_QEMU_BUILD_SCRIPT_TIMEOUT` (default 7200 seconds) bounds script upload
 and execution. A hanging recipe fails, removes its temporary guest and releases
 the build slot; previous published versions remain available.
-Every guest activation (create, clone, build, start and resource-change restart)
-checks available host RAM and the configured RAM of every active libvirt guest.
-Workspace activations that would consume the host margin (at least 1 GiB or 10%
-of host RAM) fail before starting a guest and can be retried after memory becomes
-available; image builds wait automatically within their queue deadline.
-Creation and cloning check admission before allocating disks or networks; paused
-guests retain their existing reservation when resumed.
-Create, clone and resource changes reject nonpositive CPU/RAM/disk settings and
-vCPU requests exceeding host capacity; explicit zero never selects a default.
+The runner does not check host CPU or RAM before activating a guest. Workspace
+capacity admission is owned by the backend through the runner's active resource
+limits (`qemu_max_active_*`); the runner starts whatever the backend admits.
+Create, clone and resource changes reject only nonpositive CPU/RAM/disk settings
+and disk shrinking; explicit zero never selects a default.
 Queued builds do not allocate guests. Guest disk overlays remain sparse and
 published images are flattened, verified and durably committed before readiness.
 Workspace readiness and graceful shutdown hold only the affected guest's lifecycle

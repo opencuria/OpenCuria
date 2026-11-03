@@ -20,7 +20,6 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
         self.runtime = object.__new__(QemuRuntime)
         self.runtime._disk_dir = Path(self.directory.name)
         self.runtime._ssh_states = {}
-        self.runtime._assert_memory_available = MagicMock()
         self.runtime._get_ssh_public_key = MagicMock(
             return_value="ssh-ed25519 test-runner-key"
         )
