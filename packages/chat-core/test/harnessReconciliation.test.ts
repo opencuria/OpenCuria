@@ -331,4 +331,30 @@ describe("timeline ordering and settlement", () => {
     ).toHaveLength(1);
     expect(echoed.some((m) => m.id === "local-user-session-1-9")).toBe(false);
   });
+
+  it("drops an optimistic upload prompt when the server echoes it stripped", () => {
+    const prompt = "look\n@file:/workspace/.opencuria/user-uploaded/a.png ";
+    const merged = mergeBusyFetchedMessages(
+      [
+        {
+          id: "local-user-session-1",
+          session_id: "session-1",
+          role: "user",
+          content: prompt,
+          parts: [],
+        },
+      ],
+      [
+        {
+          id: "msg-user-1",
+          session_id: "session-1",
+          role: "user",
+          content: prompt.trim(),
+          parts: [],
+          position: 0,
+        },
+      ],
+    );
+    expect(merged.map((m) => m.id)).toEqual(["msg-user-1"]);
+  });
 });

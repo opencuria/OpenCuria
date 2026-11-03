@@ -263,6 +263,39 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
+  it("replaces the optimistic first prompt with an attachment once the server echoes it", async () => {
+    const { client, rows } = makeClient();
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a");
+    // Upload mentions end with a separator space; the backend stores the
+    // prompt stripped, so the echoed row differs only in surrounding space.
+    const prompt =
+      "What is shown here?\n@file:/workspace/.opencuria/user-uploaded/photo.jpg ";
+    vi.mocked(client.harness.timeline).mockImplementation(async (id) =>
+      timeline(rows.get(id)!, [
+        {
+          ...message("server-user", "user", prompt.trim()),
+          session_id: id,
+          position: 0,
+        },
+        {
+          ...message("server-assistant", "assistant", ""),
+          session_id: id,
+          position: 1,
+          completed_at: null,
+        },
+      ]),
+    );
+
+    await controller.send(prompt);
+
+    const users = controller
+      .getSnapshot()
+      .messages.filter((row) => row.role === "user");
+    expect(users.map((row) => row.id)).toEqual(["server-user"]);
+    controller.dispose();
+  });
+
   it("preserves the running chat when creating another chat is forbidden", async () => {
     const root = session("root", { status: "busy" });
     const { client } = makeClient([root]);

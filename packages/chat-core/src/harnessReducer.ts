@@ -734,11 +734,14 @@ export function mergeBusyFetchedMessages(
           .filter((m) => m.role === "user" && !isLocalId(m.id))
           .map((m) => messagePosition(m) ?? -1),
       );
+      // The backend persists prompts stripped; upload mentions end with a
+      // separator space, so compare the same normalized text.
+      const prompt = live.content.trim();
       const echoed = incoming.some(
         (m) =>
           m.role === "user" &&
           !isLocalId(m.id) &&
-          m.content === live.content &&
+          m.content.trim() === prompt &&
           (messagePosition(m) ?? -1) > lastKnownUserPosition,
       );
       if (!echoed) extras.push(live);
