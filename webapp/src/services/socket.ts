@@ -121,6 +121,8 @@ export interface TerminalOutputEvent {
 export interface TerminalClosedEvent {
   workspace_id: string
   terminal_id: string
+  /** Why the server ended it, e.g. `idle` or `evicted`. */
+  reason?: string
 }
 
 export interface DesktopStartedEvent {
@@ -199,6 +201,11 @@ export function disconnect(): void {
 /** Hold a workspace room until the returned release callback is called. */
 export function subscribeToWorkspace(workspaceId: string): () => void {
   return getClient().subscribeWorkspace(workspaceId)
+}
+
+/** Id of the live connection; terminals started with it close when it ends. */
+export function getConnectionId(): string | null {
+  return client?.connectionId ?? null
 }
 
 /** Register a typed frontend event listener. */

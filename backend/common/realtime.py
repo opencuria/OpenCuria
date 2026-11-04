@@ -26,6 +26,8 @@ _sio: socketio.AsyncServer | None = None
 _frontend_subscriptions: dict[str, set[str]] = defaultdict(set)
 # Reverse mapping: frontend sid -> set of workspace_ids
 _frontend_sid_workspaces: dict[str, set[str]] = defaultdict(set)
+# Authenticated user of every connected frontend sid
+_frontend_users: dict[str, str] = {}
 
 
 def get_sio_server() -> socketio.AsyncServer:
@@ -59,6 +61,25 @@ def get_sio_server() -> socketio.AsyncServer:
     return _sio
 
 
+def register_frontend(sid: str, user_id: str) -> None:
+    """Record the authenticated user of a connected frontend client."""
+    _frontend_users[sid] = user_id
+
+
+def frontend_user(sid: str) -> str | None:
+    """Return the user of a connected frontend client, if it is connected."""
+    return _frontend_users.get(sid)
+
+
+def workspace_subscribers(workspace_id: str, user_id: str) -> set[str]:
+    """Return the connected frontend sids of *user_id* watching a workspace."""
+    return {
+        sid
+        for sid in _frontend_subscriptions.get(workspace_id, ())
+        if _frontend_users.get(sid) == user_id
+    }
+
+
 def subscribe_frontend(sid: str, workspace_id: str) -> None:
     """Subscribe frontend client *sid* to events of *workspace_id*."""
     _frontend_subscriptions[workspace_id].add(sid)
@@ -74,7 +95,8 @@ def unsubscribe_frontend(sid: str, workspace_id: str) -> None:
 
 
 def drop_frontend(sid: str) -> None:
-    """Remove every workspace subscription of a disconnected client."""
+    """Remove the identity and every workspace subscription of a client."""
+    _frontend_users.pop(sid, None)
     workspace_ids = _frontend_sid_workspaces.pop(sid, set())
     for ws_id in workspace_ids:
         _frontend_subscriptions[ws_id].discard(sid)

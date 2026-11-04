@@ -6,6 +6,10 @@ to users. Exception messages stay in runner logs and never leave the host.
 
 from __future__ import annotations
 
+#: Interactive (non-lifecycle) failures caused by the guest transport, e.g. an
+#: exhausted SSH session limit or a dropped connection, not by the command.
+WORKSPACE_UNREACHABLE = "workspace_unreachable"
+
 INVALID_RESOURCES = "invalid_resources"
 DISK_SHRINK_UNSUPPORTED = "disk_shrink_unsupported"
 DISK_BELOW_IMAGE_MINIMUM = "disk_below_image_minimum"

@@ -4,22 +4,35 @@ import { createPinia, setActivePinia } from 'pinia'
 import type { VueWrapper } from '@vue/test-utils'
 
 import WorkspaceTerminal from './WorkspaceTerminal.vue'
+import * as socket from '@/services/socket'
 import * as workspacesApi from '@/services/workspaces.api'
+import { useTerminalStore } from '@/stores/terminal'
 
 type Handler = (data: Record<string, string>) => void
 const handlers = new Map<string, Set<Handler>>()
+const reconnects = new Set<() => void>()
+const rooms = new Map<string, number>()
 
 function emit(event: string, data: Record<string, string>): void {
   handlers.get(event)?.forEach((handler) => handler(data))
 }
 
 vi.mock('@/services/socket', () => ({
+  isConnected: { value: true },
+  getConnectionId: vi.fn(() => 'connection-1'),
+  subscribeToWorkspace: vi.fn((workspaceId: string) => {
+    rooms.set(workspaceId, (rooms.get(workspaceId) ?? 0) + 1)
+    return () => rooms.set(workspaceId, (rooms.get(workspaceId) ?? 1) - 1)
+  }),
   onEvent: vi.fn((event: string, handler: Handler) => {
     if (!handlers.has(event)) handlers.set(event, new Set())
     handlers.get(event)!.add(handler)
     return () => handlers.get(event)?.delete(handler)
   }),
-  onReconnect: vi.fn(() => () => {}),
+  onReconnect: vi.fn((callback: () => void) => {
+    reconnects.add(callback)
+    return () => reconnects.delete(callback)
+  }),
   sendTerminalInput: vi.fn(),
   sendTerminalResize: vi.fn(),
   sendTerminalClose: vi.fn(),
@@ -51,6 +64,7 @@ vi.mock('@xterm/addon-fit', () => ({
 }))
 
 const startTerminal = vi.mocked(workspacesApi.startTerminal)
+const sendTerminalClose = vi.mocked(socket.sendTerminalClose)
 const wrappers: VueWrapper[] = []
 
 function mountTerminal(): VueWrapper {
@@ -65,6 +79,30 @@ function mountTerminal(): VueWrapper {
   })
   wrappers.push(wrapper)
   return wrapper
+}
+
+function setup(): void {
+  setActivePinia(createPinia())
+  handlers.clear()
+  reconnects.clear()
+  rooms.clear()
+  vi.clearAllMocks()
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe(): void {}
+      disconnect(): void {}
+    },
+  )
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    callback(0)
+    return 0
+  })
+}
+
+function teardown(): void {
+  wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
+  vi.unstubAllGlobals()
 }
 
 describe('WorkspaceTerminal start failures', () => {
@@ -132,5 +170,91 @@ describe('WorkspaceTerminal start failures', () => {
     await flushPromises()
     expect(wrapper.text()).not.toContain('Starting terminal')
     expect(wrapper.text()).not.toContain('Retry')
+  })
+})
+
+describe('WorkspaceTerminal shell ownership', () => {
+  beforeEach(setup)
+  afterEach(teardown)
+
+  it('binds the shell to this connection and adopts only its own start', async () => {
+    let resolve!: (value: { task_id: string }) => void
+    startTerminal.mockReturnValue(new Promise((done) => (resolve = done)))
+    const wrapper = mountTerminal()
+    await flushPromises()
+    expect(startTerminal).toHaveBeenCalledWith('ws-1', 80, 24, 'connection-1')
+
+    // Another tab's shell of the same workspace, then this start, both early.
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'theirs', task_id: 'other' })
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'mine', task_id: 'task-1' })
+    resolve({ task_id: 'task-1' })
+    await flushPromises()
+    expect(useTerminalStore().terminalId).toBe('mine')
+
+    wrapper.unmount()
+    expect(sendTerminalClose.mock.calls).toEqual([['ws-1', 'mine']])
+    expect(rooms.get('ws-1')).toBe(0)
+  })
+
+  it('closes its shell on unmount even after the shared store was reset', async () => {
+    startTerminal.mockResolvedValue({ task_id: 'task-1' })
+    const wrapper = mountTerminal()
+    await flushPromises()
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'term-1', task_id: 'task-1' })
+    await flushPromises()
+
+    // A workspace switch resets the tool stores before the panel unmounts.
+    useTerminalStore().reset()
+    wrapper.unmount()
+
+    expect(sendTerminalClose).toHaveBeenCalledWith('ws-1', 'term-1')
+  })
+
+  it('closes a shell that only starts after the panel unmounted', async () => {
+    let resolve!: (value: { task_id: string }) => void
+    startTerminal.mockReturnValue(new Promise((done) => (resolve = done)))
+    const wrapper = mountTerminal()
+    await flushPromises()
+
+    wrapper.unmount()
+    resolve({ task_id: 'task-1' })
+    await flushPromises()
+    expect(sendTerminalClose).not.toHaveBeenCalled()
+
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'late', task_id: 'task-1' })
+    expect(sendTerminalClose.mock.calls).toEqual([['ws-1', 'late']])
+  })
+
+  it('replaces the shell after a reconnect instead of leaking it', async () => {
+    startTerminal.mockResolvedValueOnce({ task_id: 'task-1' })
+    startTerminal.mockResolvedValueOnce({ task_id: 'task-2' })
+    mountTerminal()
+    await flushPromises()
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'first', task_id: 'task-1' })
+    await flushPromises()
+
+    reconnects.forEach((callback) => callback())
+    await flushPromises()
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'second', task_id: 'task-2' })
+    await flushPromises()
+
+    expect(sendTerminalClose.mock.calls).toEqual([['ws-1', 'first']])
+    expect(useTerminalStore().terminalId).toBe('second')
+  })
+
+  it('tells the user when the server closed an idle shell', async () => {
+    startTerminal.mockResolvedValue({ task_id: 'task-1' })
+    const wrapper = mountTerminal()
+    await flushPromises()
+    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'term-1', task_id: 'task-1' })
+    await flushPromises()
+
+    emit('terminal:closed', { workspace_id: 'ws-1', terminal_id: 'term-1', reason: 'idle' })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Terminal closed after inactivity')
+    expect(wrapper.find('[data-testid="terminal-reconnect"]').exists()).toBe(true)
+    wrapper.unmount()
+    expect(sendTerminalClose).not.toHaveBeenCalled()
   })
 })

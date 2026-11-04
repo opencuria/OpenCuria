@@ -1111,6 +1111,9 @@ class GitService:
                 "stderr": "", "exit_code": None,
             }
         except Exception as exc:  # noqa: BLE001 - contract is structured errors
+            is_transport_failure = getattr(runtime, "is_transport_failure", None)
+            if is_transport_failure is not None and is_transport_failure(exc):
+                return git_ops.git_unreachable_payload()
             return git_ops.git_error_payload(exc)
 
     async def _execute_git_operation_inner(

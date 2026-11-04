@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -21,11 +22,12 @@ from ...exceptions import (
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
+from ..session_state import TerminalRoute, TerminalStart
 
 if TYPE_CHECKING:
     from apps.accounts.models import User
 
-    from ...models import Task, Workspace
+    from ...models import Runner, Task, Workspace
 
 if TYPE_CHECKING:
     from ...repositories import TaskRepository, WorkspaceRepository
@@ -36,6 +38,9 @@ if TYPE_CHECKING:
     from ..session_state import InteractiveSessionState
 
 logger = logging.getLogger(__name__)
+
+#: Requests whose runner never confirmed a PTY are forgotten after this long.
+TERMINAL_START_RETENTION_SECONDS = 600
 
 
 class InteractiveSessionsService:
@@ -70,10 +75,15 @@ class InteractiveSessionsService:
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
+        *,
+        user_id: uuid.UUID | str | None = None,
+        client_id: str | None = None,
     ) -> Task:
         """Dispatch a start_terminal task to the runner.
 
-        Returns the Task record.
+        ``client_id`` is the requesting frontend connection; the terminal is
+        bound to it once the runner confirms the PTY (see
+        :meth:`handle_terminal_started`). Returns the Task record.
         """
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
@@ -101,6 +111,15 @@ class InteractiveSessionsService:
             workspace=workspace,
         )
 
+        self._remember_terminal_start(
+            str(task_id),
+            TerminalStart(
+                workspace_id=str(workspace_id),
+                user_id=str(user_id) if user_id is not None else None,
+                client_id=client_id or None,
+                requested_at=time.monotonic(),
+            ),
+        )
         await self.runner_transport.emit_to_runner(
             runner,
             "task:start_terminal",
@@ -122,6 +141,32 @@ class InteractiveSessionsService:
         await sync_to_async(self.workspaces.touch_activity)(workspace)
         return task
 
+    def _remember_terminal_start(self, task_id: str, start: TerminalStart) -> None:
+        """Track a requester until the runner confirms; forget stale requests."""
+        starts = self.state.terminal_starts
+        cutoff = start.requested_at - TERMINAL_START_RETENTION_SECONDS
+        stale = [key for key, item in starts.items() if item.requested_at < cutoff]
+        for key in stale:
+            starts.pop(key, None)
+        starts[task_id] = start
+
+    @staticmethod
+    def _terminal_owners(start: TerminalStart | None, workspace_id: str) -> set[str]:
+        """Resolve the connected frontend clients that requested a terminal.
+
+        A named requesting connection owns it while it is connected and
+        belongs to the requester; without one, the requester's clients
+        watching the workspace do. Unknown requesters own nothing, so nobody
+        can keep such a terminal alive.
+        """
+        if start is None or start.user_id is None:
+            return set()
+        if start.client_id:
+            if realtime.frontend_user(start.client_id) == start.user_id:
+                return {start.client_id}
+            return set()
+        return realtime.workspace_subscribers(workspace_id, start.user_id)
+
     async def handle_terminal_started(
         self,
         task_id: str,
@@ -129,17 +174,36 @@ class InteractiveSessionsService:
         terminal_id: str,
         runner_id: str | None = None,
     ) -> None:
-        """Handle terminal:started event from a runner."""
+        """Bind a confirmed PTY to its requester, or close it when none is left."""
         task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
         if task:
             if not self.ownership.validate_task_runner(task, runner_id):
                 return
             await sync_to_async(self.tasks.complete)(task)
 
-        self.state.terminals[workspace_id] = terminal_id
-        # Cache runner ownership so terminal:output validation is O(1)
-        if runner_id:
-            self.state.terminal_runners[workspace_id] = runner_id
+        start = self.state.terminal_starts.pop(task_id, None)
+        owners = self._terminal_owners(start, workspace_id)
+        if not owners:
+            logger.info(
+                "Closing unowned terminal: workspace=%s, terminal=%s",
+                workspace_id,
+                terminal_id,
+            )
+            await self._close_runner_terminal(workspace_id, terminal_id)
+            await realtime.emit_to_frontend(
+                "workspace:error",
+                {
+                    "workspace_id": workspace_id,
+                    "task_id": task_id,
+                    "error": "Terminal client disconnected before the shell started",
+                },
+                workspace_id,
+            )
+            return
+
+        self.state.terminals[terminal_id] = TerminalRoute(
+            workspace_id=workspace_id, runner_id=runner_id, owners=owners
+        )
         logger.info(
             "Terminal started: workspace=%s, terminal=%s",
             workspace_id,
@@ -169,17 +233,14 @@ class InteractiveSessionsService:
         when the terminal session was started, so no DB lookup is required
         on the hot path.
         """
-        if runner_id:
-            cached = self.state.terminal_runners.get(workspace_id)
-            if cached is not None and cached != runner_id:
-                logger.warning(
-                    "terminal:output rejected: workspace %s is owned by "
-                    "runner %s, not %s",
-                    workspace_id,
-                    cached,
-                    runner_id,
-                )
-                return
+        if not self._route_accepts(terminal_id, workspace_id, runner_id):
+            logger.warning(
+                "terminal:output rejected for terminal %s (workspace=%s, runner=%s)",
+                terminal_id,
+                workspace_id,
+                runner_id,
+            )
+            return
 
         await realtime.emit_to_frontend(
             "terminal:output",
@@ -191,39 +252,107 @@ class InteractiveSessionsService:
             workspace_id,
         )
 
+    def _route_accepts(
+        self, terminal_id: str, workspace_id: str, runner_id: str | None
+    ) -> bool:
+        """Reject runner events that contradict a known terminal route."""
+        route = self.state.terminals.get(terminal_id)
+        if route is None:
+            return True
+        if route.workspace_id != workspace_id:
+            return False
+        return not (runner_id and route.runner_id and route.runner_id != runner_id)
+
     async def handle_terminal_closed(
         self,
         workspace_id: str,
         terminal_id: str,
         runner_id: str | None = None,
+        reason: str | None = None,
     ) -> None:
-        """Handle terminal:closed from runner."""
-        if runner_id:
-            cached = self.state.terminal_runners.get(workspace_id)
-            if cached is not None and cached != runner_id:
-                logger.warning(
-                    "terminal:closed rejected: workspace %s is owned by "
-                    "runner %s, not %s",
-                    workspace_id,
-                    cached,
-                    runner_id,
-                )
-                return
+        """Drop the route of a PTY the runner ended and tell its clients why."""
+        if not self._route_accepts(terminal_id, workspace_id, runner_id):
+            logger.warning(
+                "terminal:closed rejected for terminal %s (workspace=%s, runner=%s)",
+                terminal_id,
+                workspace_id,
+                runner_id,
+            )
+            return
 
-        self.state.terminals.pop(workspace_id, None)
-        self.state.terminal_runners.pop(workspace_id, None)
+        self.state.terminals.pop(terminal_id, None)
         logger.info(
-            "Terminal closed: workspace=%s, terminal=%s",
+            "Terminal closed: workspace=%s, terminal=%s, reason=%s",
             workspace_id,
             terminal_id,
+            reason,
         )
-        await realtime.emit_to_frontend(
-            "terminal:closed",
-            {
-                "workspace_id": workspace_id,
-                "terminal_id": terminal_id,
-            },
-            workspace_id,
+        payload = {"workspace_id": workspace_id, "terminal_id": terminal_id}
+        if reason:
+            payload["reason"] = reason
+        await realtime.emit_to_frontend("terminal:closed", payload, workspace_id)
+
+    async def release_frontend_terminals(
+        self, sid: str, workspace_id: str | None = None
+    ) -> None:
+        """Detach a frontend client; close terminals it was the last owner of.
+
+        Called when the client disconnects (all workspaces) or unsubscribes
+        from one workspace, so terminals never outlive the client using them.
+        """
+        orphaned: list[tuple[str, str]] = []
+        for terminal_id, route in list(self.state.terminals.items()):
+            if sid not in route.owners:
+                continue
+            if workspace_id is not None and route.workspace_id != workspace_id:
+                continue
+            route.owners.discard(sid)
+            if not route.owners:
+                self.state.terminals.pop(terminal_id, None)
+                orphaned.append((route.workspace_id, terminal_id))
+        for orphan_workspace_id, terminal_id in orphaned:
+            logger.info(
+                "Closing detached terminal: workspace=%s, terminal=%s",
+                orphan_workspace_id,
+                terminal_id,
+            )
+            try:
+                await self._close_runner_terminal(orphan_workspace_id, terminal_id)
+            except Exception:
+                # The runner closes it on its own once lease renewals stop.
+                logger.warning(
+                    "Could not close detached terminal %s", terminal_id, exc_info=True
+                )
+
+    async def renew_terminal_leases(self, runner: Runner) -> None:
+        """Renew the runner-side leases of terminals that still have owners.
+
+        Terminals missing from renewals (no owner, backend restart, lost
+        routes) are closed by the runner after its lease timeout.
+        """
+        runner_id = str(runner.id)
+        leases = [
+            {"terminal_id": terminal_id, "workspace_id": route.workspace_id}
+            for terminal_id, route in self.state.terminals.items()
+            if route.runner_id == runner_id and route.owners
+        ]
+        if not leases:
+            return
+        await self.runner_transport.emit_to_runner(
+            runner, "terminal:renew", {"terminals": leases}
+        )
+
+    async def _close_runner_terminal(self, workspace_id: str, terminal_id: str) -> None:
+        """Ask the owning runner to close a PTY without client-facing checks."""
+        workspace = await sync_to_async(self.workspaces.get_by_id)(
+            uuid.UUID(workspace_id)
+        )
+        if workspace is None or not workspace.runner.is_online:
+            return
+        await self.runner_transport.emit_to_runner(
+            workspace.runner,
+            "terminal:close",
+            {"workspace_id": workspace_id, "terminal_id": terminal_id},
         )
 
     async def forward_terminal_input(
@@ -298,6 +427,10 @@ class InteractiveSessionsService:
             return
 
         self.ownership.ensure_workspace_available(workspace)
+        route = self.state.terminals.get(terminal_id)
+        if route is not None and route.workspace_id == workspace_id:
+            # Stop renewing at once; the runner still confirms the close.
+            self.state.terminals.pop(terminal_id, None)
         runner = workspace.runner
         if not runner.is_online:
             return

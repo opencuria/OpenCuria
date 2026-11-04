@@ -3903,3 +3903,26 @@ class GitOutputRedactionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+async def test_guest_transport_failures_are_not_reported_as_git_failures() -> None:
+    """An exhausted SSH session limit is a workspace, not a git, problem."""
+    refused = RuntimeError("open failed")
+    runtime = AsyncMock()
+    runtime.exec_command_wait.side_effect = refused
+    runtime.is_transport_failure = lambda error: error is refused
+    service = WorkspaceService(runtime=runtime, settings=RunnerSettings())
+    workspace_id = uuid.uuid4()
+    service.registry._cache[workspace_id] = WorkspaceInfo(
+        workspace_id=workspace_id, instance_id="guest", status="running"
+    )
+
+    payload = await service.git.execute_git_operation(workspace_id, "list_repos")
+
+    assert payload["ok"] is False
+    assert payload["code"] == "workspace_unreachable"
+    assert "open failed" not in payload["message"]
+    runtime.is_transport_failure = lambda error: False
+    payload = await service.git.execute_git_operation(workspace_id, "list_repos")
+    assert payload["code"] == "git_failed"

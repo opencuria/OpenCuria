@@ -61,12 +61,18 @@ export function recreateWorkspace(id: string, imageId: string): Promise<Workspac
 
 // --- Terminal API ---
 
+/** `clientId` is the realtime connection that owns the shell; it closes with it. */
 export function startTerminal(
   id: string,
   cols: number = 80,
   rows: number = 24,
+  clientId: string | null = null,
 ): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/terminal/`, { cols, rows })
+  return post<{ task_id: string }>(`/workspaces/${id}/terminal/`, {
+    cols,
+    rows,
+    client_id: clientId ?? undefined,
+  })
 }
 
 // --- Desktop API ---

@@ -107,8 +107,9 @@ export function createGitApi(api: () => ApiClient) {
 
 /**
  * Interactive PTY of one workspace. `start` dispatches the runner task; the
- * session id arrives as `terminal:started` on the workspace room. Input and
- * output are base64 encoded bytes.
+ * session id arrives as `terminal:started` on the workspace room. The server
+ * binds the shell to this client's connection and closes it when that ends.
+ * Input and output are base64 encoded bytes.
  */
 export function createTerminalApi(
   api: () => ApiClient,
@@ -123,7 +124,7 @@ export function createTerminalApi(
     ) =>
       api().post<{ task_id: string }>(
         workspacePath(workspaceId, "terminal/"),
-        { cols, rows },
+        { cols, rows, client_id: realtime.connectionId ?? undefined },
         signal,
       ),
     input: (workspaceId: string, terminalId: string, data: string) =>

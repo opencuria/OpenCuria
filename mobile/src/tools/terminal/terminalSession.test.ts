@@ -143,6 +143,7 @@ describe("TerminalSession", () => {
     fake.reconnect();
     expect(session.getSnapshot().status).toBe("starting");
     expect(fake.terminal.start).toHaveBeenCalledTimes(3);
+    expect(fake.terminal.close).toHaveBeenCalledWith("ws", "mine");
   });
 
   it("marks the shell ended when its terminal closes", async () => {

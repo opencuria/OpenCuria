@@ -436,7 +436,13 @@ async def start_terminal(
 
         cols = payload.cols if payload else 80
         rows = payload.rows if payload else 24
-        task = await service.start_terminal(workspace_id, cols=cols, rows=rows)
+        task = await service.start_terminal(
+            workspace_id,
+            cols=cols,
+            rows=rows,
+            user_id=request.user.id,
+            client_id=payload.client_id if payload else None,
+        )
         return 202, TerminalStartOut(task_id=task.id)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -1049,8 +1055,9 @@ def _git_result_to_response(result: dict):
     re-validates/strips runner keys). Success (``ok`` truthy) → 200.
     Runner domain failures (``ok: False``) map by code: ``conflict``
     → 409 with the runner payload intact (incl. fresh ``snapshot``);
-    ``timeout`` → 504 with ``code``/``message`` intact; everything
-    else → 400 intact.
+    ``timeout`` → 504 with ``code``/``message`` intact;
+    ``workspace_unreachable`` (guest transport refused or lost) → 503;
+    everything else → 400 intact.
     """
     if not isinstance(result, dict):
         return 502, ErrorOut(
@@ -1063,6 +1070,8 @@ def _git_result_to_response(result: dict):
         return 409, result
     if code == "timeout" or "timeout" in code:
         return 504, result
+    if code == "workspace_unreachable":
+        return 503, result
     return 400, result
 
 
@@ -1080,6 +1089,7 @@ _GIT_RESPONSES: dict = {
     404: ErrorOut,
     409: dict | ErrorOut,
     502: ErrorOut,
+    503: dict,
     504: dict | ErrorOut,
 }
 

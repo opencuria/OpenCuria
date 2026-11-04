@@ -189,6 +189,24 @@ unrelated agent streams. Protocol keepalives run after 30 seconds of inactivity
 and tolerate five unanswered requests (about three minutes without incoming
 traffic before failure detection; not a hard deadline under continuing traffic).
 
+Every channel counts against the guest's `MaxSessions`. New guests get 64 via
+cloud-init; older guests get the same drop-in, validated with `sshd -t`, on the
+runner's next connection, which is then replaced once because a connection keeps
+the limits it was accepted with. Refused channels are reported to the backend as
+`workspace_unreachable`, not as a command failure.
+
+Interactive terminals hold one session each, so the runner bounds them itself
+and never relies on clients to close them. The backend renews a terminal's
+lease on every heartbeat only while the client that opened it stays connected
+and subscribed to the workspace. Terminals are closed when their lease lapses
+(`RUNNER_TERMINAL_LEASE_TIMEOUT`, default 90 seconds), after
+`RUNNER_TERMINAL_IDLE_TIMEOUT` without input, output or resize (default 3600
+seconds; 0 disables), and least recently used first beyond
+`RUNNER_TERMINAL_MAX_PER_WORKSPACE` (default 4). Expiry runs every
+`RUNNER_TERMINAL_SWEEP_INTERVAL` seconds (default 15), also while the backend
+is unreachable. `terminal:closed` carries the reason (`closed`, `exited`,
+`detached`, `idle` or `evicted`).
+
 Stopping, removing or reconfiguring a workspace invalidates connection ownership
 before cleanup; late connections cannot repopulate the cache. Small per-instance
 generation/lock tombstones remain stable for queued callers and same-ID recreation. Genuine

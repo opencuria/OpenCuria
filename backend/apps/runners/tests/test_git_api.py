@@ -667,6 +667,29 @@ def test_git_runner_timeout_result_maps_to_504(client: Client, monkeypatch):
 
 
 @pytest.mark.django_db
+def test_git_unreachable_workspace_maps_to_503(client: Client, monkeypatch):
+    """A refused guest transport is a retryable outage, not a git failure."""
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_read_perms())
+    _install_fake(
+        monkeypatch,
+        run_return={
+            "ok": False,
+            "code": "workspace_unreachable",
+            "message": "Workspace connection is unavailable",
+        },
+    )
+
+    response = client.get(
+        f"/api/v1/workspaces/{workspace.id}/git/repos/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "workspace_unreachable"
+
+
+@pytest.mark.django_db
 def test_git_runner_other_error_maps_to_400(client: Client, monkeypatch):
     """Runner ok:false with a generic code maps to 400 intact."""
     user, org, runner, workspace = _make_context()

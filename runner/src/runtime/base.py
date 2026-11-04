@@ -327,6 +327,16 @@ class RuntimeBackend(abc.ABC):
             f"{self.__class__.__name__} does not support process_close"
         )
 
+    def is_transport_failure(self, error: BaseException) -> bool:
+        """Whether *error* means the guest transport refused or lost the call.
+
+        Such failures (e.g. an exhausted guest session limit) say nothing
+        about the command itself and are reported as an unreachable
+        workspace instead of a command failure.
+        """
+        del error
+        return False
+
     # --- PTY / interactive terminal -----------------------------------------
 
     @abc.abstractmethod

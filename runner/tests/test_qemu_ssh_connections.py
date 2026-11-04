@@ -252,3 +252,82 @@ async def test_public_lifecycle_fences_late_and_queued_connections(
                 await task
     candidate.close.assert_called_once()
     assert runtime._ssh_state("vm").connection is None
+
+
+def _probe_result(stdout: str = "", exit_status: int = 0) -> MagicMock:
+    return MagicMock(stdout=stdout, exit_status=exit_status)
+
+
+async def test_older_guest_gets_session_cap_on_a_replaced_transport(
+    runtime, monkeypatch
+) -> None:
+    """Guests seeded before the cap existed get it without a VM restart.
+
+    sshd keeps an accepted connection's limits, so the transport that applied
+    the cap is replaced before anything else can share it.
+    """
+    from src.runtime import qemu_runtime
+
+    monkeypatch.setattr(qemu_runtime, "_GUEST_SSH_RELOAD_DIAL_DELAY", 0)
+    applied, fresh = connection(), connection()
+    applied.run = AsyncMock(
+        return_value=_probe_result(qemu_runtime._GUEST_SSH_SESSIONS_RELOADED)
+    )
+    fresh.run = AsyncMock(return_value=_probe_result())
+    runtime._load_tofu_key = MagicMock(return_value="pinned-key")
+    runtime._save_tofu_key = AsyncMock()
+    with patch(
+        "src.runtime.qemu_runtime.asyncssh.connect",
+        new=AsyncMock(side_effect=[applied, OSError("sshd restarting"), fresh]),
+    ) as connect:
+        assert await runtime._get_ssh("vm") is fresh
+        assert await runtime._get_ssh("vm") is fresh
+
+    assert connect.await_count == 3
+    script = applied.run.await_args.args[0]
+    assert qemu_runtime._GUEST_SSH_SESSIONS_CONF in script
+    assert f"MaxSessions {qemu_runtime._GUEST_SSH_MAX_SESSIONS}" in script
+    assert "sshd -t" in script
+    applied.close.assert_called_once()
+    fresh.run.assert_not_awaited()
+    fresh.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        AsyncMock(return_value=_probe_result()),
+        AsyncMock(return_value=_probe_result(exit_status=1)),
+        AsyncMock(side_effect=asyncssh.ChannelOpenError(4, "no more sessions")),
+    ],
+    ids=["already-capped", "not-applicable", "probe-refused"],
+)
+async def test_session_cap_probe_never_blocks_the_connection(runtime, probe) -> None:
+    conn = connection()
+    conn.run = probe
+    runtime._load_tofu_key = MagicMock(return_value="pinned-key")
+    runtime._save_tofu_key = AsyncMock()
+    with patch(
+        "src.runtime.qemu_runtime.asyncssh.connect", new=AsyncMock(return_value=conn)
+    ) as connect:
+        assert await runtime._get_ssh("vm") is conn
+    connect.assert_awaited_once()
+    conn.close.assert_not_called()
+
+
+def test_refused_channels_and_lost_connections_are_transport_failures(runtime):
+    refused = asyncssh.ChannelOpenError(4, "open failed")
+    try:
+        try:
+            raise refused
+        except asyncssh.ChannelOpenError as exc:
+            raise RuntimeError("list_repos failed") from exc
+    except RuntimeError as wrapped:
+        chained = wrapped
+
+    for error in (refused, chained, asyncssh.ConnectionLost("lost")):
+        assert runtime.is_transport_failure(error)
+    assert not runtime.is_transport_failure(RuntimeError("git exited 128"))
+    assert not runtime.is_transport_failure(
+        asyncssh.ProcessError(None, "git", None, 1, None, None, 1, "", "")
+    )

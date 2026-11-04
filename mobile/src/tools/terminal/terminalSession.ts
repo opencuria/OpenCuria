@@ -108,9 +108,11 @@ export class TerminalSession {
         this.set({ status: "ended", terminalId: null });
       }),
       realtime.onReconnect(() => {
-        // The server-side PTY does not survive a reconnect.
-        const { status } = this.snapshot;
+        // The server closes the shell of the dropped connection; close it
+        // explicitly too in case the server has not noticed the drop yet.
+        const { status, terminalId } = this.snapshot;
         if (status !== "running" && status !== "starting") return;
+        if (terminalId) client.terminal.close(workspaceId, terminalId);
         this.append(NOTICE_RECONNECTED);
         this.launch();
       }),

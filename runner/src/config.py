@@ -61,6 +61,14 @@ class RunnerSettings(BaseSettings):
     desktop_lease_workers: int = 4
     stream_shutdown_timeout: float = 10
 
+    # Each interactive terminal holds one guest SSH session. The backend renews
+    # the lease of terminals with a connected client on every heartbeat; the
+    # runner closes unrenewed, idle (0 disables) and surplus terminals itself.
+    terminal_lease_timeout: float = Field(default=90, gt=0)
+    terminal_idle_timeout: float = Field(default=3600, ge=0)
+    terminal_max_per_workspace: int = Field(default=4, gt=0)
+    terminal_sweep_interval: float = Field(default=15, gt=0)
+
     # Logging
     log_level: str = "INFO"
     log_format: Literal["json", "console"] = "console"

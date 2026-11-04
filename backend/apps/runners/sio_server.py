@@ -24,6 +24,7 @@ from common.exceptions import ConflictError
 from common.realtime import (
     drop_frontend,
     get_sio_server,
+    register_frontend,
     subscribe_frontend,
     unsubscribe_frontend,
 )
@@ -315,10 +316,12 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
+        reason = data.get("reason")
         await service.handle_terminal_closed(
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             runner_id=runner_id,
+            reason=reason if isinstance(reason, str) else None,
         )
 
     # --- Desktop session events from runner ---
@@ -581,6 +584,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
         # Refresh transport liveness before potentially slow reconciliation.
         await sync_to_async(service.record_runner_heartbeat)(runner)
+        # Leases lapse on the runner unless an attached client is confirmed.
+        try:
+            await service.renew_terminal_leases(runner)
+        except Exception:
+            logger.exception("Terminal lease renewal failed for runner %s", runner_id)
         if data.get("workspace_states_observed") is False:
             return
 
@@ -687,6 +695,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
                 {"user_id": str(user.id), "email": user.email},
                 namespace="/frontend",
             )
+            register_frontend(sid, str(user.id))
             logger.info("Frontend client connected (sid=%s, user=%s)", sid, user.email)
         except Exception as exc:
             logger.warning(
@@ -698,8 +707,12 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
 
     @sio.on("disconnect", namespace="/frontend")
     async def frontend_disconnect(sid: str):
-        """Clean up subscriptions when a frontend client disconnects."""
+        """Clean up subscriptions and terminals when a frontend disconnects."""
         drop_frontend(sid)
+        try:
+            await get_runner_service().release_frontend_terminals(sid)
+        except Exception:
+            logger.exception("Releasing terminals of frontend %s failed", sid)
         logger.info("Frontend client disconnected (sid=%s)", sid)
 
     @sio.on("frontend:subscribe_workspace", namespace="/frontend")
@@ -727,6 +740,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
 
         await sio.leave_room(sid, f"workspace:{workspace_id}", namespace="/frontend")
         unsubscribe_frontend(sid, workspace_id)
+        await get_runner_service().release_frontend_terminals(sid, workspace_id)
         logger.debug("Frontend %s unsubscribed from workspace %s", sid, workspace_id)
 
     # --- Terminal events from frontend ---

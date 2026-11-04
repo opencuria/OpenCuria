@@ -27,6 +27,7 @@ from ..git import GIT_OPERATIONS, git_timeout_for
 from ..journal import COMMANDS, OperationExecutor
 from ..runtime.artifacts import ArtifactRequestError
 from ..service import WorkspaceService
+from ..services.sessions.terminals import CLOSED, EXITED
 from ..services.system_metrics import SystemMetricsCollector
 from .base import Interface
 from .desktop_proxy import DesktopProxy
@@ -82,6 +83,7 @@ class WebSocketInterface(Interface):
         self._last_inventory_at = 0.0
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
         self._desktop_lease_task: asyncio.Task | None = None
+        self._terminal_sweep_task: asyncio.Task | None = None
         self._observation_task: asyncio.Task | None = None
         self._inventory_lock = asyncio.Lock()
         self._cached_heartbeat_workspaces: list[dict] = []
@@ -100,9 +102,42 @@ class WebSocketInterface(Interface):
             capture_fence=getattr(service, "capture_fence", None),
         )
         self._uploads = UploadTransfers()
+        terminals = getattr(self._service, "terminal_manager", None)
+        if terminals is not None:
+            terminals.on_closed = self._emit_terminal_closed
         self._setup_handlers()
         desktop = getattr(self._service, "desktop", None)
         self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
+
+    async def _emit_terminal_closed(
+        self, terminal_id: str, workspace_id: uuid.UUID | str | None, reason: str
+    ) -> None:
+        """Stop the PTY pump and tell the backend, which drops the route."""
+        reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
+        if reader is not None and reader is not asyncio.current_task():
+            reader.cancel()
+        if not self._sio.connected:
+            # Undelivered closes are reconciled by the next lease renewal.
+            return
+        await self._sio.emit(
+            "terminal:closed",
+            {
+                "workspace_id": str(workspace_id or ""),
+                "terminal_id": terminal_id,
+                "reason": reason,
+            },
+        )
+
+    async def _terminal_sweep_loop(self) -> None:
+        """Close unrenewed and idle terminals, also while disconnected."""
+        while True:
+            try:
+                await self._service.terminal_manager.expire_terminals()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("terminal_sweep_failed")
+            await asyncio.sleep(self._settings.terminal_sweep_interval)
 
     def _desktop_lifecycle_payload(self, workspace_id: uuid.UUID) -> dict | None:
         """Return a desktop:process payload for *workspace_id*, if any."""
@@ -487,6 +522,10 @@ class WebSocketInterface(Interface):
                     self._desktop_lease_task = asyncio.create_task(
                         self._desktop_lease_loop()
                     )
+            if self._terminal_sweep_task is None or self._terminal_sweep_task.done():
+                self._terminal_sweep_task = asyncio.create_task(
+                    self._terminal_sweep_loop()
+                )
             # Start system metrics loop
             if self._metrics_task is None or self._metrics_task.done():
                 self._metrics_task = asyncio.create_task(self._metrics_loop())
@@ -581,40 +620,43 @@ class WebSocketInterface(Interface):
                     },
                 )
 
-                # Start background reader task
+                # Pump output until the PTY ends; whoever closes it first
+                # (shell exit, client, lease/idle expiry) notifies once.
                 async def _read_pty() -> None:
                     try:
                         async for chunk in self._service.terminal_manager.read_terminal(
                             terminal_id
                         ):
-                            await sio.emit(
-                                "terminal:output",
-                                {
-                                    "workspace_id": str(workspace_id),
-                                    "terminal_id": terminal_id,
-                                    "data": base64.b64encode(chunk).decode("ascii"),
-                                },
-                            )
+                            # Output during a backend outage is dropped; the
+                            # lease decides whether the terminal survives it.
+                            with contextlib.suppress(socketio.exceptions.SocketIOError):
+                                await sio.emit(
+                                    "terminal:output",
+                                    {
+                                        "workspace_id": str(workspace_id),
+                                        "terminal_id": terminal_id,
+                                        "data": base64.b64encode(chunk).decode(
+                                            "ascii"
+                                        ),
+                                    },
+                                )
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
                         log.exception("pty_read_failed")
                     finally:
                         try:
                             await self._service.terminal_manager.close_terminal(
-                                terminal_id
+                                terminal_id, EXITED
                             )
                         except Exception:
                             log.exception("terminal_cleanup_failed")
-                        await sio.emit(
-                            "terminal:closed",
-                            {
-                                "workspace_id": str(workspace_id),
-                                "terminal_id": terminal_id,
-                            },
-                        )
-                        self._running_tasks.pop(f"terminal:{terminal_id}", None)
+                        if self._running_tasks.get(reader_key) is asyncio.current_task():
+                            self._running_tasks.pop(reader_key, None)
 
+                reader_key = f"terminal:{terminal_id}"
                 reader = asyncio.create_task(_read_pty())
-                self._running_tasks[f"terminal:{terminal_id}"] = reader
+                self._running_tasks[reader_key] = reader
 
                 log.info("terminal_started", terminal_id=terminal_id)
             except Exception as exc:
@@ -624,18 +666,37 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("start_terminal_failed")
 
+        async def _open_terminal(data: dict) -> str | None:
+            """Return the addressed terminal, or report it closed to the backend."""
+            terminal_id = str(data.get("terminal_id") or "")
+            workspace_id = str(data.get("workspace_id") or "")
+            try:
+                owned = self._service.terminal_manager.belongs_to(
+                    terminal_id, uuid.UUID(workspace_id)
+                )
+            except ValueError:
+                owned = False
+            if owned:
+                return terminal_id
+            await self._emit_terminal_closed(terminal_id, workspace_id, EXITED)
+            return None
+
         @sio.on("terminal:input")
         async def on_terminal_input(data: dict) -> None:
-            terminal_id = data["terminal_id"]
-            raw = base64.b64decode(data["data"])
+            terminal_id = await _open_terminal(data)
+            if terminal_id is None:
+                return
             try:
+                raw = base64.b64decode(data["data"])
                 await self._service.terminal_manager.write_terminal(terminal_id, raw)
             except Exception:
                 logger.exception("terminal_write_failed", terminal_id=terminal_id)
 
         @sio.on("terminal:resize")
         async def on_terminal_resize(data: dict) -> None:
-            terminal_id = data["terminal_id"]
+            terminal_id = await _open_terminal(data)
+            if terminal_id is None:
+                return
             cols = data.get("cols", 80)
             rows = data.get("rows", 24)
             try:
@@ -647,23 +708,30 @@ class WebSocketInterface(Interface):
 
         @sio.on("terminal:close")
         async def on_terminal_close(data: dict) -> None:
-            terminal_id = data["terminal_id"]
-            workspace_id = data.get("workspace_id", "")
+            terminal_id = await _open_terminal(data)
+            if terminal_id is None:
+                return
             try:
-                # Cancel the reader task
-                reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
-                if reader:
-                    reader.cancel()
-                await self._service.terminal_manager.close_terminal(terminal_id)
-                await sio.emit(
-                    "terminal:closed",
-                    {
-                        "workspace_id": workspace_id,
-                        "terminal_id": terminal_id,
-                    },
+                await self._service.terminal_manager.close_terminal(
+                    terminal_id, CLOSED
                 )
             except Exception:
                 logger.exception("terminal_close_failed", terminal_id=terminal_id)
+
+        @sio.on("terminal:renew")
+        async def on_terminal_renew(data: dict) -> None:
+            """Extend leases of attached terminals; report unknown ones closed."""
+            leases: list[tuple[str, uuid.UUID]] = []
+            for lease in (data or {}).get("terminals", []):
+                try:
+                    leases.append(
+                        (str(lease["terminal_id"]), uuid.UUID(lease["workspace_id"]))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("terminal_renew_invalid_lease")
+            unknown = self._service.terminal_manager.renew_terminals(leases)
+            for terminal_id, workspace_id in unknown:
+                await self._emit_terminal_closed(terminal_id, workspace_id, EXITED)
 
         # -- desktop session events --------------------------------------------
 
@@ -2477,6 +2545,7 @@ class WebSocketInterface(Interface):
                 self._delivery_task,
                 self._observation_task,
                 self._metrics_task,
+                self._terminal_sweep_task,
             )
             if task is not None
         ]

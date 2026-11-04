@@ -290,6 +290,14 @@ class TerminalStartIn(Schema):
 
     cols: int = 80
     rows: int = 24
+    client_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Socket.IO connection id of the client that uses the terminal. "
+            "The terminal closes when that connection ends."
+        ),
+    )
 
 
 class TerminalStartOut(Schema):

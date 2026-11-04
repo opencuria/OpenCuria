@@ -429,8 +429,9 @@ async def test_reconnect_rejects_a_real_changed_host_key(ssh_harness) -> None:
 
 async def test_keepalive_survives_exec_channel_refusals(ssh_harness) -> None:
     runtime, control = ssh_harness
-    control.max_sessions = 0
+    # A fresh transport runs its session-cap probe before any refusal.
     shared_connection = await runtime._get_ssh("vm")
+    control.max_sessions = 0
     shared_connection.set_keepalive(0.02, 1)
 
     with pytest.raises(asyncssh.ChannelOpenError):

@@ -72,7 +72,12 @@ export interface RealtimeEventMap {
     terminal_id: string;
     data: string;
   };
-  "terminal:closed": { workspace_id: string; terminal_id: string };
+  /** `reason` is `idle`, `evicted`, `detached`, `closed` or `exited`. */
+  "terminal:closed": {
+    workspace_id: string;
+    terminal_id: string;
+    reason?: string;
+  };
 }
 
 export type RealtimeEventName = keyof RealtimeEventMap | (string & {});
@@ -83,6 +88,8 @@ export type SocketAuth = (
 /** Small Socket.IO subset that also permits deterministic mock sockets in tests. */
 export interface RealtimeSocket {
   connected: boolean;
+  /** Server-assigned connection id while connected. */
+  id?: string;
   active?: boolean;
   volatile?: { emit(event: string, ...args: any[]): RealtimeSocket };
   on(event: string, callback: (...args: any[]) => void): this;
@@ -372,6 +379,11 @@ export class RealtimeClient {
    */
   get isConnected(): boolean {
     return Boolean(this.socket?.connected);
+  }
+
+  /** Id of the live connection; the server binds per-client sessions to it. */
+  get connectionId(): string | null {
+    return this.socket?.connected ? (this.socket.id ?? null) : null;
   }
 
   get status(): "connected" | "connecting" | "disconnected" | "disposed" {

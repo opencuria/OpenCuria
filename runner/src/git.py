@@ -14,6 +14,8 @@ import os
 import re
 from typing import Any
 
+from .runtime.diagnostics import WORKSPACE_UNREACHABLE
+
 # --- protocol limits ----------------------------------------------------------
 
 #: Max repositories discovered under ``/workspace`` (fail-closed limit).
@@ -270,6 +272,21 @@ def git_error_payload(exc: BaseException) -> dict[str, Any]:
         "ok": False,
         "code": "git_failed",
         "message": f"{type(exc).__name__}: {exc}",
+        "stderr": "",
+        "exit_code": None,
+    }
+
+
+def git_unreachable_payload() -> dict[str, Any]:
+    """Error dict for a guest transport failure (not a git failure).
+
+    The runtime classifies the failure (e.g. an exhausted SSH session limit);
+    the backend maps the code to a retryable "workspace unavailable" answer.
+    """
+    return {
+        "ok": False,
+        "code": WORKSPACE_UNREACHABLE,
+        "message": "Workspace connection is unavailable",
         "stderr": "",
         "exit_code": None,
     }

@@ -59,6 +59,9 @@ class WorkspaceService:
             get_runtime,
             lambda workspace_id: self.registry._cache.pop(workspace_id, None),
             WORKSPACE_CREDENTIAL_ENV_FILE,
+            lease_timeout=settings.terminal_lease_timeout,
+            idle_timeout=settings.terminal_idle_timeout,
+            max_per_workspace=settings.terminal_max_per_workspace,
         )
         self.images = ImageManager(
             runtime,

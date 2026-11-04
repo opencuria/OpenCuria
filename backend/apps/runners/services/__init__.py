@@ -490,10 +490,18 @@ class RunnerService:
         return await self.image_lifecycle.activate_image_definition(definition_id)
 
     async def start_terminal(
-        self, workspace_id: uuid.UUID, cols: int = 80, rows: int = 24
+        self,
+        workspace_id: uuid.UUID,
+        cols: int = 80,
+        rows: int = 24,
+        *,
+        user_id: uuid.UUID | str | None = None,
+        client_id: str | None = None,
     ) -> Task:
         """Delegate to :class:`InteractiveSessionsService`."""
-        return await self.interactive_sessions.start_terminal(workspace_id, cols, rows)
+        return await self.interactive_sessions.start_terminal(
+            workspace_id, cols, rows, user_id=user_id, client_id=client_id
+        )
 
     async def handle_terminal_started(
         self,
@@ -520,12 +528,28 @@ class RunnerService:
         )
 
     async def handle_terminal_closed(
-        self, workspace_id: str, terminal_id: str, runner_id: str | None = None
+        self,
+        workspace_id: str,
+        terminal_id: str,
+        runner_id: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Delegate to :class:`InteractiveSessionsService`."""
         return await self.interactive_sessions.handle_terminal_closed(
-            workspace_id, terminal_id, runner_id
+            workspace_id, terminal_id, runner_id, reason
         )
+
+    async def release_frontend_terminals(
+        self, sid: str, workspace_id: str | None = None
+    ) -> None:
+        """Delegate to :class:`InteractiveSessionsService`."""
+        return await self.interactive_sessions.release_frontend_terminals(
+            sid, workspace_id
+        )
+
+    async def renew_terminal_leases(self, runner: Runner) -> None:
+        """Delegate to :class:`InteractiveSessionsService`."""
+        return await self.interactive_sessions.renew_terminal_leases(runner)
 
     async def forward_terminal_input(
         self, workspace_id: str, terminal_id: str, data: str

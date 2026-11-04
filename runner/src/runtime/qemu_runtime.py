@@ -139,6 +139,28 @@ local-hostname: opencuria-workspace
 # raised. write_files runs before sshd starts: the runner's first connection
 # predates runcmd's ssh restart and keeps its boot-time limits. sshd uses the
 # first value it reads, so the drop-in sorts before the image's own files.
+# Guests seeded before the drop-in existed receive it on the runner's next
+# connection (see ``_ensure_guest_session_cap``).
+_GUEST_SSH_MAX_SESSIONS = 64
+_GUEST_SSH_SESSIONS_CONF = "/etc/ssh/sshd_config.d/10-opencuria-sessions.conf"
+_GUEST_SSH_SESSIONS_TIMEOUT = 15.0
+_GUEST_SSH_SESSIONS_RELOADED = "opencuria-sshd-reloaded"
+_GUEST_SSH_RELOAD_DIAL_ATTEMPTS = 5
+_GUEST_SSH_RELOAD_DIAL_DELAY = 0.5
+# Install the drop-in once, validate it, and reload sshd. Reloading keeps open
+# connections (and their limits); only connections opened afterwards get it.
+_GUEST_SSH_SESSIONS_SCRIPT = f"""\
+PATH="$PATH:/usr/sbin:/sbin"
+conf={_GUEST_SSH_SESSIONS_CONF}
+[ -f "$conf" ] && exit 0
+[ -d "${{conf%/*}}" ] || exit 0
+printf 'MaxSessions {_GUEST_SSH_MAX_SESSIONS}\\n' > "$conf.tmp" || exit 1
+chmod 0644 "$conf.tmp" && mv -f "$conf.tmp" "$conf" || exit 1
+sshd -t >/dev/null 2>&1 || {{ rm -f "$conf"; exit 1; }}
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || exit 1
+echo {_GUEST_SSH_SESSIONS_RELOADED}
+"""
+
 _CLOUD_INIT_USER = """\
 #cloud-config
 users:
@@ -154,10 +176,10 @@ write_files:
     permissions: '0600'
     content: |
       {ssh_public_key}
-  - path: /etc/ssh/sshd_config.d/10-opencuria-sessions.conf
+  - path: {sessions_conf}
     permissions: '0644'
     content: |
-      MaxSessions 64
+      MaxSessions {max_sessions}
 runcmd:
   - mkdir -p /workspace
   - mkdir -p /root/.ssh
@@ -620,7 +642,11 @@ class QemuRuntime(RuntimeBackend):
 
         meta = _CLOUD_INIT_META.format(bootstrap_id=str(uuid.uuid4()))
         public_key = await asyncio.to_thread(self._get_ssh_public_key)
-        user = _CLOUD_INIT_USER.format(ssh_public_key=public_key)
+        user = _CLOUD_INIT_USER.format(
+            ssh_public_key=public_key,
+            sessions_conf=_GUEST_SSH_SESSIONS_CONF,
+            max_sessions=_GUEST_SSH_MAX_SESSIONS,
+        )
 
         def write_seed() -> None:
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -989,6 +1015,78 @@ class QemuRuntime(RuntimeBackend):
         return conn
 
     async def _open_ssh_transport(
+        self,
+        instance_id: str,
+        state: _SSHState,
+        generation: int,
+        timeout: float,
+    ) -> asyncssh.SSHClientConnection:
+        """Open a fenced transport that carries the guest's raised session cap.
+
+        A connection keeps the limits sshd had when it was accepted, so after
+        installing the cap on an older guest the fresh, still unshared
+        transport is replaced once.
+        """
+        conn = await self._dial_ssh(instance_id, state, generation, timeout)
+        try:
+            reloaded = await self._ensure_guest_session_cap(instance_id, conn)
+            self._check_ssh_generation(state, generation)
+        except BaseException:
+            await self._close_ssh_connection(conn)
+            raise
+        if not reloaded:
+            return conn
+        await self._close_ssh_connection(conn)
+        # sshd re-executes on reload; give it a moment to listen again.
+        attempts = _GUEST_SSH_RELOAD_DIAL_ATTEMPTS
+        while True:
+            await asyncio.sleep(_GUEST_SSH_RELOAD_DIAL_DELAY)
+            self._check_ssh_generation(state, generation)
+            try:
+                return await self._dial_ssh(instance_id, state, generation, timeout)
+            except (OSError, asyncssh.Error, asyncio.TimeoutError):
+                attempts -= 1
+                if attempts <= 0:
+                    raise
+
+    @staticmethod
+    async def _ensure_guest_session_cap(
+        instance_id: str, conn: asyncssh.SSHClientConnection
+    ) -> bool:
+        """Install the session cap once; return whether sshd was reloaded.
+
+        Best effort: guests that cannot take the drop-in keep working with
+        their own limits, so failures never block the connection.
+        """
+        try:
+            result = await asyncio.wait_for(
+                conn.run(_GUEST_SSH_SESSIONS_SCRIPT, check=False),
+                _GUEST_SSH_SESSIONS_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "vm_ssh_session_cap_unverified", instance_id=instance_id, exc_info=True
+            )
+            return False
+        if result.exit_status != 0:
+            logger.warning(
+                "vm_ssh_session_cap_not_applied",
+                instance_id=instance_id,
+                exit_status=result.exit_status,
+            )
+            return False
+        reloaded = _GUEST_SSH_SESSIONS_RELOADED in str(result.stdout or "")
+        if reloaded:
+            logger.info(
+                "vm_ssh_session_cap_applied",
+                instance_id=instance_id,
+                max_sessions=_GUEST_SSH_MAX_SESSIONS,
+            )
+        return reloaded
+
+    async def _dial_ssh(
         self,
         instance_id: str,
         state: _SSHState,
@@ -1741,6 +1839,20 @@ class QemuRuntime(RuntimeBackend):
             metadata={"cols": cols, "rows": rows},
         )
 
+    def is_transport_failure(self, error: BaseException) -> bool:
+        """Refused SSH channels and lost connections are transport failures."""
+        seen: set[int] = set()
+        current: BaseException | None = error
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(
+                current,
+                (asyncssh.ChannelOpenError, asyncssh.DisconnectError, ConnectionError),
+            ):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     async def pty_read(self, handle: PtyHandle, size: int = 4096) -> bytes:
         """Read raw bytes from the PTY. Returns b'' on EOF."""
         process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
@@ -1765,10 +1877,13 @@ class QemuRuntime(RuntimeBackend):
         handle.metadata["rows"] = rows
 
     async def pty_close(self, handle: PtyHandle) -> None:
-        """Close the PTY SSH session."""
+        """Close the PTY SSH session and release its guest session slot."""
         process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
-        try:
+        handle.closed = True
+        # A half-closed channel rejects EOF; it must still be closed.
+        with contextlib.suppress(Exception):
             process.stdin.write_eof()
+        try:
             process.close()
             await process.wait_closed()
         except Exception:

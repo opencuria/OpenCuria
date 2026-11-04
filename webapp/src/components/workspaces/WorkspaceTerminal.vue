@@ -4,17 +4,24 @@
  *
  * Uses xterm.js to render a full terminal connected to the workspace
  * container via Socket.IO. Data is base64-encoded for safe transport.
+ *
+ * The component owns exactly one shell: it adopts only the shell of its own
+ * start request and closes it on unmount, even when it starts afterwards.
+ * The server also closes it once this connection ends or the shell idles.
  */
 
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useTerminalStore } from '@/stores/terminal'
 import * as workspacesApi from '@/services/workspaces.api'
 import {
+  isConnected,
+  getConnectionId,
   onEvent,
   onReconnect,
+  subscribeToWorkspace,
   sendTerminalInput,
   sendTerminalResize,
   sendTerminalClose,
@@ -33,14 +40,107 @@ const terminalRef = ref<HTMLDivElement | null>(null)
 const connecting = ref(false)
 const error = ref<string | null>(null)
 const hadConnection = ref(false)
+const endedNotice = ref('Terminal session ended')
 
 let terminal: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
 const cleanupFns: (() => void)[] = []
 let pendingResize: { cols: number; rows: number } | null = null
-// Task of the in-flight start; null until the start request resolves.
-let startTaskId: string | null = null
+// The shell this component owns; the shared store only mirrors its state.
+let terminalId: string | null = null
+// Each start attempt supersedes the previous one.
+let attempt = 0
+let request: TerminalRequest | null = null
+
+const CLOSED_NOTICES: Record<string, string> = {
+  idle: 'Terminal closed after inactivity',
+  evicted: 'Terminal closed: too many open terminals',
+}
+// How long an abandoned start is watched so a late shell is still closed.
+const ABANDONED_START_TIMEOUT_MS = 120_000
+
+interface TerminalRequest {
+  /** Resolves with the terminal id once the runner started this shell. */
+  started: Promise<string>
+  /** Stop waiting; a shell that still starts is closed on arrival. */
+  abandon: () => void
+}
+
+/** Start a shell and follow only the events of this start request. */
+function requestTerminal(workspaceId: string, cols: number, rows: number): TerminalRequest {
+  // Events can arrive before the start request resolves; keep them by task.
+  const early = new Map<string, { terminalId?: string; error?: string }>()
+  let taskId: string | null = null
+  let abandoned = false
+  let settled = false
+  let abandonTimer: ReturnType<typeof setTimeout> | null = null
+  let resolveStarted!: (id: string) => void
+  let rejectStarted!: (reason: Error) => void
+  const started = new Promise<string>((resolve, reject) => {
+    resolveStarted = resolve
+    rejectStarted = reject
+  })
+
+  function settle(result: { terminalId?: string; error?: string }): void {
+    if (settled) return
+    settled = true
+    offStarted()
+    offError()
+    if (abandonTimer) clearTimeout(abandonTimer)
+    if (abandoned) {
+      if (result.terminalId) sendTerminalClose(workspaceId, result.terminalId)
+    } else if (result.terminalId) {
+      resolveStarted(result.terminalId)
+    } else {
+      rejectStarted(new Error(result.error || 'Failed to start terminal'))
+    }
+  }
+
+  function track(task: string | undefined, result: { terminalId?: string; error?: string }): void {
+    if (!task) return
+    if (taskId === null) early.set(task, result)
+    else if (task === taskId) settle(result)
+  }
+
+  const offStarted = onEvent('terminal:started', (data) => {
+    if (data.workspace_id === workspaceId) track(data.task_id, { terminalId: data.terminal_id })
+  })
+  // The runner reports a failed PTY start as workspace:error for the task.
+  const offError = onEvent('workspace:error', (data) => {
+    if (data.workspace_id === workspaceId) track(data.task_id, { error: data.error })
+  })
+
+  workspacesApi
+    .startTerminal(workspaceId, cols, rows, getConnectionId())
+    .then(({ task_id }) => {
+      taskId = task_id
+      const result = early.get(task_id)
+      early.clear()
+      if (result) settle(result)
+    })
+    .catch((err: unknown) => settle({ error: err instanceof Error ? err.message : undefined }))
+
+  return {
+    started,
+    abandon: () => {
+      if (settled || abandoned) return
+      abandoned = true
+      abandonTimer = setTimeout(() => settle({}), ABANDONED_START_TIMEOUT_MS)
+    },
+  }
+}
+
+function whenSocketConnected(): Promise<void> {
+  if (isConnected.value) return Promise.resolve()
+  return new Promise((resolve) => {
+    const stop = watch(isConnected, (connected) => {
+      if (!connected) return
+      stop()
+      resolve()
+    })
+  })
+}
 
 // --- Helpers ---
 
@@ -69,16 +169,11 @@ function queueResize(cols: number, rows: number): void {
 }
 
 function flushPendingResize(): void {
-  if (!pendingResize || !terminalStore.terminalId) {
+  if (!pendingResize || !terminalId) {
     return
   }
 
-  sendTerminalResize(
-    props.workspaceId,
-    terminalStore.terminalId,
-    pendingResize.cols,
-    pendingResize.rows,
-  )
+  sendTerminalResize(props.workspaceId, terminalId, pendingResize.cols, pendingResize.rows)
   pendingResize = null
 }
 
@@ -145,12 +240,8 @@ function initTerminal(): void {
 
   // Send user input to backend
   terminal.onData((data: string) => {
-    if (terminalStore.terminalId) {
-      sendTerminalInput(
-        props.workspaceId,
-        terminalStore.terminalId,
-        base64Encode(data),
-      )
+    if (terminalId) {
+      sendTerminalInput(props.workspaceId, terminalId, base64Encode(data))
     }
   })
 
@@ -167,59 +258,59 @@ function initTerminal(): void {
 }
 
 async function connectTerminal(): Promise<void> {
+  const current = ++attempt
+  request?.abandon()
+  request = null
   connecting.value = true
   error.value = null
-  startTaskId = null
 
   try {
+    // The shell is bound to this connection, so it must exist first.
+    await whenSocketConnected()
     await fitTerminal(true)
-    const cols = terminal?.cols ?? 80
-    const rows = terminal?.rows ?? 24
-    const { task_id } = await workspacesApi.startTerminal(props.workspaceId, cols, rows)
-    startTaskId = task_id
-    // terminal:started (or workspace:error for this task) arrives via Socket.IO
+    if (current !== attempt) return
+    const own = requestTerminal(props.workspaceId, terminal?.cols ?? 80, terminal?.rows ?? 24)
+    request = own
+    const id = await own.started
+    if (current !== attempt) return
+    request = null
+    adoptTerminal(id)
   } catch (err: unknown) {
+    if (current !== attempt) return
+    request = null
     error.value = err instanceof Error ? err.message : 'Failed to start terminal'
     connecting.value = false
   }
 }
 
-function setupSocketListeners(): void {
-  cleanupFns.push(
-    onEvent('terminal:started', (data) => {
-      if (data.workspace_id === props.workspaceId) {
-        terminalStore.setConnected(data.terminal_id, props.workspaceId)
-        hadConnection.value = true
-        flushPendingResize()
-        void fitTerminal(true)
-        connecting.value = false
-        error.value = null
-        terminal?.focus()
-      }
-    }),
-  )
+function adoptTerminal(id: string): void {
+  terminalId = id
+  terminalStore.setConnected(id, props.workspaceId)
+  hadConnection.value = true
+  connecting.value = false
+  error.value = null
+  flushPendingResize()
+  void fitTerminal(true)
+  terminal?.focus()
+}
 
-  // The runner reports a failed PTY start as workspace:error for the start
-  // task. It may arrive before the start request resolves.
-  cleanupFns.push(
-    onEvent('workspace:error', (data) => {
-      if (
-        data.workspace_id === props.workspaceId &&
-        connecting.value &&
-        (startTaskId === null || data.task_id === startTaskId)
-      ) {
-        error.value = data.error || 'Failed to start terminal'
-        connecting.value = false
-      }
-    }),
-  )
+function releaseTerminal(): void {
+  attempt += 1
+  request?.abandon()
+  request = null
+  if (terminalId) sendTerminalClose(props.workspaceId, terminalId)
+  terminalId = null
+  terminalStore.setDisconnected()
+}
+
+function setupSocketListeners(): void {
+  // Hold the room while mounted: output arrives there, and leaving it lets
+  // the server release this connection's shell even if a close is lost.
+  cleanupFns.push(subscribeToWorkspace(props.workspaceId))
 
   cleanupFns.push(
     onEvent('terminal:output', (data) => {
-      if (
-        data.workspace_id === props.workspaceId &&
-        data.terminal_id === terminalStore.terminalId
-      ) {
+      if (data.workspace_id === props.workspaceId && data.terminal_id === terminalId) {
         const bytes = base64Decode(data.data)
         terminal?.write(bytes)
       }
@@ -228,39 +319,33 @@ function setupSocketListeners(): void {
 
   cleanupFns.push(
     onEvent('terminal:closed', (data) => {
-      if (
-        data.workspace_id === props.workspaceId &&
-        data.terminal_id === terminalStore.terminalId
-      ) {
+      if (data.workspace_id === props.workspaceId && data.terminal_id === terminalId) {
+        terminalId = null
         terminalStore.setDisconnected()
-        terminal?.writeln('\r\n\x1b[33m[Terminal session ended]\x1b[0m')
+        endedNotice.value = CLOSED_NOTICES[data.reason ?? ''] ?? 'Terminal session ended'
+        terminal?.writeln(`\r\n\x1b[33m[${endedNotice.value}]\x1b[0m`)
       }
     }),
   )
 
-  // Auto-reconnect terminal when the WebSocket drops and comes back up.
-  // The backend-side PTY session is gone after a reconnect, so we start a fresh one.
+  // The server closes this connection's shell when the WebSocket drops, so
+  // start a fresh one once it is back.
   cleanupFns.push(
     onReconnect(() => {
-      if ((terminalStore.isConnected || connecting.value) && !connecting.value) {
-        terminalStore.setDisconnected()
-        terminal?.writeln('\r\n\x1b[33m[WebSocket reconnected — reconnecting terminal…]\x1b[0m')
-        connectTerminal()
-      }
+      if (!terminalId && !connecting.value) return
+      releaseTerminal()
+      terminal?.writeln('\r\n\x1b[33m[WebSocket reconnected — reconnecting terminal…]\x1b[0m')
+      void connectTerminal()
     }),
   )
 }
 
 function cleanup(): void {
-  // Remove Socket.IO listeners
+  releaseTerminal()
+
+  // Remove Socket.IO listeners and release the workspace room
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
-
-  // Close terminal on backend if connected
-  if (terminalStore.terminalId) {
-    sendTerminalClose(props.workspaceId, terminalStore.terminalId)
-    terminalStore.setDisconnected()
-  }
 
   // Dispose resize observer
   resizeObserver?.disconnect()
@@ -307,7 +392,7 @@ onBeforeUnmount(() => {
       class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card/80"
     >
       <TerminalSquare :size="28" class="text-muted-foreground" />
-      <p class="text-sm text-muted-foreground">Terminal session ended</p>
+      <p class="text-sm text-muted-foreground">{{ endedNotice }}</p>
       <Button size="sm" data-testid="terminal-reconnect" @click="connectTerminal">
         Reconnect
       </Button>
