@@ -123,9 +123,14 @@ jest.mock("../components", () => {
   const { Pressable, Text, View } =
     require("react-native") as typeof import("react-native");
   return {
-    ChatComposer: (props: {
+    ChatComposer: function MockComposer(props: {
+      draft: string;
       settings?: { model?: string; effort?: string };
-      workspaceName?: string;
+      workspace?: {
+        name: string;
+        actions: Array<{ id: string; title: string; selected?: boolean }>;
+        onSelect: (id: string) => void;
+      };
       placeholder?: string;
       disabled?: boolean;
       onSettings: () => void;
@@ -135,17 +140,46 @@ jest.mock("../components", () => {
         skillIds: string[];
         attachments: [];
       }) => Promise<void>;
-    }) =>
-      ReactRuntime.createElement(
+    }) {
+      const [menuOpen, setMenuOpen] = ReactRuntime.useState(false);
+      return ReactRuntime.createElement(
         View,
         null,
-        props.workspaceName
+        props.workspace
           ? ReactRuntime.createElement(
-              Text,
-              { testID: "composer-workspace" },
-              props.workspaceName,
+              View,
+              { testID: "composer-workspace-menu" },
+              ReactRuntime.createElement(
+                Pressable,
+                {
+                  testID: "composer-workspace",
+                  onPress: () => setMenuOpen(true),
+                },
+                ReactRuntime.createElement(Text, null, props.workspace.name),
+              ),
+              ...(menuOpen
+                ? props.workspace.actions.map((action) =>
+                    ReactRuntime.createElement(Pressable, {
+                      key: action.id,
+                      accessibilityRole: "button",
+                      accessibilityLabel: action.title,
+                      accessibilityState: {
+                        selected: Boolean(action.selected),
+                      },
+                      onPress: () => {
+                        setMenuOpen(false);
+                        props.workspace?.onSelect(action.id);
+                      },
+                    }),
+                  )
+                : []),
             )
           : null,
+        ReactRuntime.createElement(
+          Text,
+          { testID: "composer-draft" },
+          props.draft,
+        ),
         ReactRuntime.createElement(
           Pressable,
           { testID: "test-settings", onPress: props.onSettings },
@@ -184,7 +218,8 @@ jest.mock("../components", () => {
           },
           ReactRuntime.createElement(Text, null, "Send"),
         ),
-      ),
+      );
+    },
     ChatGates: () => ReactRuntime.createElement(View),
     ChatLayout: ({
       children,
@@ -447,7 +482,9 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
   await waitFor(() =>
     expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
   );
-  expect(screen.queryByTestId("composer-workspace")).toBeNull();
+  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+    runningWorkspace.name,
+  );
   expect(client.harness.listEngineModels).not.toHaveBeenCalledWith("claude");
   expect(client.harness.listEngineModels).toHaveBeenCalledWith("native");
   expect(client.harness.listAgentConfigs).toHaveBeenCalled();
@@ -809,6 +846,70 @@ it("keeps the composer mounted when switching workspaces", async () => {
     expect(mockController.newChat).toHaveBeenLastCalledWith("workspace-b"),
   );
   expect(screen.getByTestId("test-settings")).toBe(composer);
+  tree.unmount();
+});
+
+it("moves a new chat's draft and model choice to the workspace picked in the composer", async () => {
+  const client = mockClient();
+  client.workspaces.list.mockResolvedValue([
+    runningWorkspace,
+    { ...runningWorkspace, id: "workspace-b", name: "Other workspace" },
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+      "Ready workspace",
+    ),
+  );
+  const menu = () => {
+    fireEvent.press(screen.getByTestId("composer-workspace"));
+    return within(screen.getByTestId("composer-workspace-menu"));
+  };
+  expect(
+    menu().getByRole("button", { name: "Ready workspace" }).props
+      .accessibilityState.selected,
+  ).toBe(true);
+  fireEvent.press(screen.getByTestId("test-draft"));
+  fireEvent.press(screen.getByTestId("test-settings"));
+  fireEvent.press(screen.getByRole("radio", { name: "Low" }));
+  await waitFor(() =>
+    expect(screen.getByTestId("chat-settings").props.children).toBe(
+      "Native model|Low",
+    ),
+  );
+
+  fireEvent.press(menu().getByRole("button", { name: "Other workspace" }));
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenLastCalledWith("workspace-b"),
+  );
+  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+    "Other workspace",
+  );
+  expect(screen.getByTestId("composer-draft")).toHaveTextContent(
+    "Review open Dependabot PRs",
+  );
+  expect(screen.getByTestId("chat-settings").props.children).toBe(
+    "Native model|Low",
+  );
+  fireEvent.press(screen.getByTestId("test-send"));
+  await waitFor(() =>
+    expect(mockController.send).toHaveBeenCalledWith(
+      "hello from mobile",
+      expect.objectContaining({ reasoningEffort: "low" }),
+    ),
+  );
+
+  // Once the chat exists, its workspace is fixed.
+  act(() => {
+    snapshot = { ...snapshot, activeSessionId: "new-chat" };
+    listeners.forEach((listener) => listener());
+  });
+  expect(screen.queryByTestId("composer-workspace")).toBeNull();
   tree.unmount();
 });
 

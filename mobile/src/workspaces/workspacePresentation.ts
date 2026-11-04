@@ -135,6 +135,32 @@ export function groupWorkspaces(
   );
 }
 
+/** Workspaces whose chats can no longer be opened. */
+const CLOSED_STATUSES = new Set(["deleted", "deleting", "pending_deletion"]);
+
+/**
+ * The new-chat workspace menu: the list's order, and a workspace's status
+ * only when it is not simply running.
+ */
+export function workspacePickerActions(
+  workspaces: readonly Workspace[],
+  activeWorkspaceId: string | null,
+): NativeMenuAction[] {
+  return groupWorkspaces(workspaces).flatMap((group) =>
+    group.workspaces
+      .filter((workspace) => !CLOSED_STATUSES.has(workspace.status))
+      .map((workspace) => {
+        const state = workspaceState(workspace);
+        return {
+          id: workspace.id,
+          title: workspace.name,
+          subtitle: state.tone === "running" ? undefined : state.label,
+          selected: workspace.id === activeWorkspaceId,
+        };
+      }),
+  );
+}
+
 /** Tile color per status; muted tones stay neutral so problems stand out. */
 export function workspaceTint(
   tone: WorkspaceStatusTone,

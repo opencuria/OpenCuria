@@ -6,6 +6,7 @@ import {
   groupWorkspaces,
   memoryStep,
   workspaceMenuActions,
+  workspacePickerActions,
   workspaceState,
   workspaceStorage,
   workspaceSubtitle,
@@ -92,6 +93,21 @@ describe("workspace list presentation", () => {
       label: "4.0 GiB free of 50.0 GiB",
       tone: "warning",
     });
+  });
+
+  it("offers open workspaces for a new chat, with their status when not running", () => {
+    const rows = [
+      workspace({ name: "zeta" }),
+      workspace({ name: "Alpha", has_active_session: true }),
+      workspace({ name: "idle", status: "stopped" }),
+      workspace({ name: "leaving", status: "deleting" }),
+      workspace({ name: "gone", status: "deleted" }),
+    ];
+    expect(workspacePickerActions(rows, "zeta")).toEqual([
+      { id: "Alpha", title: "Alpha", subtitle: "Busy", selected: false },
+      { id: "zeta", title: "zeta", subtitle: undefined, selected: true },
+      { id: "idle", title: "idle", subtitle: "Stopped", selected: false },
+    ]);
   });
 
   it("marks transitions and busy chats as busy", () => {

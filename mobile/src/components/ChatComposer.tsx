@@ -36,7 +36,7 @@ import {
   type MentionCandidate,
 } from "@opencuria/chat-core/harnessMentions";
 import { Banner, NativeAction } from "../ui/primitives";
-import { NativeMenu } from "../ui/NativeMenu";
+import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerAction, ComposerActionContent } from "../ui/ComposerAction";
@@ -67,6 +67,13 @@ export interface ComposerSettingsSummary {
   model?: string;
   effort?: string;
 }
+/** The workspace a new chat's prompt goes to, and the menu to change it. */
+export interface ComposerWorkspace {
+  name: string;
+  /** One action per workspace; `selected` marks the current one. */
+  actions: NativeMenuAction[];
+  onSelect: (id: string) => void;
+}
 
 export interface ChatComposerProps {
   draft: string;
@@ -83,6 +90,8 @@ export interface ChatComposerProps {
   busy?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  /** Workspace picker above the editor; hosts pass it only for new chats. */
+  workspace?: ComposerWorkspace;
   /** Summary shown on the model control; pressing it calls `onSettings`. */
   settings?: ComposerSettingsSummary;
   onSettings?: () => void;
@@ -130,6 +139,7 @@ export function ChatComposer({
   busy = false,
   disabled = false,
   placeholder = "Ask OpenCuria",
+  workspace,
   settings,
   onSettings,
   skills = [],
@@ -579,6 +589,24 @@ export function ChatComposer({
         testID="chat-composer-settings"
       />
     ) : null;
+  const workspacePicker = workspace ? (
+    <View style={styles.workspace}>
+      <PickerPill
+        value={workspace.name}
+        maxWidth={Math.max(64, windowWidth - 88)}
+        accessibilityLabel={`Workspace: ${workspace.name}`}
+        menu={{
+          title: "Workspace",
+          // A prompt on its way stays with the workspace it was sent to.
+          actions: sending
+            ? workspace.actions.map((action) => ({ ...action, disabled: true }))
+            : workspace.actions,
+          onSelect: workspace.onSelect,
+        }}
+        testID="chat-composer-workspace"
+      />
+    </View>
+  ) : null;
   const sendDisabled = busy ? !onStop || stopping : !canSubmit || sending;
   const sendButton = (
     <ComposerAction
@@ -675,6 +703,7 @@ export function ChatComposer({
           style={styles.core}
         >
           <ComposerSurface>
+            {workspacePicker}
             {activeSkills.length ? (
               <ScrollView
                 horizontal
@@ -833,6 +862,8 @@ const INPUT_MAX_HEIGHT = 170;
 const styles = StyleSheet.create({
   root: { paddingHorizontal: 12 },
   core: { paddingTop: 6 },
+  // The name lines up with the editor's text below it.
+  workspace: { flexDirection: "row", marginHorizontal: 8, marginBottom: -6 },
   input: {
     minWidth: 0,
     minHeight: 36,

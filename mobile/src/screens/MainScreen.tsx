@@ -85,6 +85,7 @@ import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
 import { FileViewerSheet, type FileViewerTarget } from "../tools/files";
 import { WorkspacesSheet } from "../workspaces/WorkspacesSheet";
+import { workspacePickerActions } from "../workspaces/workspacePresentation";
 import { ScheduledTaskSheet } from "../scheduledTasks/ScheduledTaskSheet";
 import { ScheduledTasksSheet } from "../scheduledTasks/ScheduledTasksSheet";
 import type { AgentCatalog } from "../scheduledTasks/scheduledTaskForm";
@@ -201,6 +202,8 @@ export function MainScreen(): React.JSX.Element {
   const overviewGeneration = useRef(0);
   const catalogGeneration = useRef(0);
   const selectionDirty = useRef(false);
+  /** The next workspace change carries the new chat's model choice along. */
+  const keepSelection = useRef(false);
   const mountedRef = useRef(false);
   const clientRef = useRef(client);
   const loadOverviewRef = useRef<(background?: boolean) => Promise<void>>(
@@ -588,6 +591,9 @@ export function MainScreen(): React.JSX.Element {
   }, [controller, navigation]);
 
   useEffect(() => {
+    const keep = keepSelection.current;
+    keepSelection.current = false;
+    if (keep && !chat.activeSessionId) return;
     selectionDirty.current = false;
     const selected = chat.activeSession;
     if (selected) {
@@ -909,11 +915,7 @@ export function MainScreen(): React.JSX.Element {
     requestNavigation(owner.id, { sessionId });
   };
 
-  const chooseWorkspace = (chosen: Workspace) => {
-    setDraft("");
-    setAttachments([]);
-    setSkillIds([]);
-    setSheet(null);
+  const openWorkspace = (chosen: Workspace) => {
     setError(null);
     const isReady = isWorkspaceReadyForChat(
       chosen,
@@ -922,6 +924,22 @@ export function MainScreen(): React.JSX.Element {
     requestNavigation(chosen.id, {
       newChat: isReady,
     });
+  };
+
+  const chooseWorkspace = (chosen: Workspace) => {
+    setDraft("");
+    setAttachments([]);
+    setSkillIds([]);
+    setSheet(null);
+    openWorkspace(chosen);
+  };
+
+  /** A new chat keeps its draft, attachments, skills and model in another workspace. */
+  const moveNewChat = (id: string) => {
+    const chosen = workspaces.find((item) => item.id === id);
+    if (!chosen || chosen.id === workspaceId) return;
+    keepSelection.current = true;
+    openWorkspace(chosen);
   };
 
   const newChat = () => {
@@ -1070,6 +1088,15 @@ export function MainScreen(): React.JSX.Element {
   const activeConversation =
     conversations.find((row) => row.session_id === chat.activeSessionId) ??
     null;
+  /** Until its first message, a new chat can still change workspace. */
+  const newChatWorkspace =
+    workspace && !chat.activeSessionId && !navigation?.sessionId
+      ? {
+          name: workspace.name,
+          actions: workspacePickerActions(workspaces, workspace.id),
+          onSelect: moveNewChat,
+        }
+      : undefined;
   /** Git, Terminal and Files need the workspace's VM and runner. */
   const toolsAvailable = Boolean(
     workspace &&
@@ -1208,6 +1235,7 @@ export function MainScreen(): React.JSX.Element {
               busy={navigationReady && chat.busy}
               disabled={chatUnavailable}
               placeholder="Ask OpenCuria"
+              workspace={newChatWorkspace}
               settings={{
                 harness: harnessEngineLabel(harness, engines),
                 mode,

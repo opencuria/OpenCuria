@@ -115,6 +115,40 @@ describe("ChatComposer", () => {
     expect(screen.getByTestId("chat-composer-send")).toBeEnabled();
   });
 
+  it("names a new chat's workspace above the input and changes it from a menu", async () => {
+    const onSelect = jest.fn();
+    let finishSend: () => void = () => undefined;
+    const workspace = {
+      name: "Study-Guru",
+      actions: [
+        { id: "a", title: "Study-Guru", selected: true },
+        { id: "b", title: "Docs", subtitle: "Stopped", selected: false },
+      ],
+      onSelect,
+    };
+    const { rerenderComposer } = renderComposer({
+      workspace,
+      onSend: () => new Promise<void>((resolve) => (finishSend = resolve)),
+    });
+    const picker = screen.getByRole("button", {
+      name: "Workspace: Study-Guru",
+    });
+    expect(picker).toHaveTextContent("Study-Guru");
+    fireEvent.press(picker);
+    fireEvent.press(screen.getByRole("button", { name: "Docs" }));
+    expect(onSelect).toHaveBeenCalledWith("b");
+
+    // A prompt on its way cannot move to another workspace.
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "ship it");
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    fireEvent.press(picker);
+    expect(screen.getByRole("button", { name: "Docs" })).toBeDisabled();
+    await act(async () => finishSend());
+
+    rerenderComposer({});
+    expect(screen.queryByTestId("chat-composer-workspace")).toBeNull();
+  });
+
   it("asks for a model when none is selected", () => {
     renderComposer({
       settings: { model: "", mode: "build" },

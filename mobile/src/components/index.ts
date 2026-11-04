@@ -4,6 +4,7 @@ export type {
   ComposerAttachment,
   ComposerSettingsSummary,
   ComposerSkill,
+  ComposerWorkspace,
 } from "./ChatComposer";
 export { ChatGates, PermissionGate, QuestionGate } from "./ChatGates";
 export {
