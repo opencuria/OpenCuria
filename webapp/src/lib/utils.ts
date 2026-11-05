@@ -41,16 +41,5 @@ export function formatRelativeTime(date: string | null | undefined): string {
   return `${Math.floor(diffSec / 86400)}d ago`
 }
 
-/**
- * Format a minute value into a compact duration label.
- */
-export function formatMinutesAsDuration(minutes: number | null | undefined): string {
-  if (minutes == null) return 'Disabled'
-  if (minutes < 60) return `${minutes} min`
-  if (minutes % 1440 === 0) return `${minutes / 1440}d`
-  if (minutes % 60 === 0) return `${minutes / 60}h`
-
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return `${hours}h ${remainingMinutes}m`
-}
+/** Compact duration label for minutes; shared with the native client. */
+export { formatMinutesAsDuration } from '@opencuria/chat-core/workspaceLifecycle'

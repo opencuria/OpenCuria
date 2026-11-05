@@ -1,5 +1,13 @@
-import React, { createContext, useContext, useMemo, useState } from "react";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useColorScheme } from "react-native";
+import * as SecureStore from "expo-secure-store";
 
 /** User preference for resolving the native appearance. */
 export type ThemeMode = "system" | "light" | "dark";
@@ -97,23 +105,55 @@ interface ThemeContextValue {
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
+const APPEARANCE_KEY = "opencuria.appearance.v1";
+
+function isThemeMode(value: unknown): value is ThemeMode {
+  return value === "system" || value === "light" || value === "dark";
+}
 
 /**
  * Provides the chat's light, dark, and system theme. Place once near the mobile
- * app root; the selected mode is intentionally controlled by this provider,
- * not persisted by a presentation component.
+ * app root; the selected mode is controlled by this provider, which (with
+ * `persist`) restores the user's Appearance choice on the next launch.
  */
 export function ThemeProvider({
   children,
   initialMode = "system",
-}: React.PropsWithChildren<{ initialMode?: ThemeMode }>): React.JSX.Element {
+  persist = false,
+}: React.PropsWithChildren<{
+  initialMode?: ThemeMode;
+  /** Remember the Appearance setting on this device. */
+  persist?: boolean;
+}>): React.JSX.Element {
   const systemScheme = useColorScheme();
-  const [mode, setMode] = useState<ThemeMode>(initialMode);
+  const [mode, setModeState] = useState<ThemeMode>(initialMode);
+  useEffect(() => {
+    if (!persist) return;
+    let active = true;
+    SecureStore.getItemAsync(APPEARANCE_KEY)
+      .then((saved) => {
+        if (active && isThemeMode(saved)) setModeState(saved);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [persist]);
+  const setMode = useCallback(
+    (next: ThemeMode) => {
+      setModeState(next);
+      if (persist)
+        void SecureStore.setItemAsync(APPEARANCE_KEY, next).catch(
+          () => undefined,
+        );
+    },
+    [persist],
+  );
   const scheme: ColorScheme =
     mode === "system" ? (systemScheme === "dark" ? "dark" : "light") : mode;
   const value = useMemo<ThemeContextValue>(
     () => ({ mode, setMode, theme: THEMES[scheme] }),
-    [mode, scheme],
+    [mode, scheme, setMode],
   );
   return (
     <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>

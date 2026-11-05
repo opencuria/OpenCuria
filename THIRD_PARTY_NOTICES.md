@@ -162,6 +162,7 @@ The native client is under `mobile/`; the root `package-lock.json` pins the npm 
 - **`remend` 1.3.0** (Vercel, [upstream](https://github.com/vercel/streamdown)): Apache-2.0.
 - **`lucide-react-native` 1.58.0** ([upstream](https://github.com/lucide-icons/lucide)): ISC. Its upstream license also identifies the Feather-derived icons and their MIT copyright notice; see the installed package's `LICENSE`.
 - **`socket.io-client` 4.8.3**: MIT.
+- **Material Symbols / Material Icons** (Google, [upstream](https://github.com/google/material-design-icons)): Apache-2.0. The Android vector drawables in `mobile/assets/native-icons/` are their path data, converted to the Android vector format without changing the paths.
 - `@opencuria/client` and `@opencuria/chat-core` are in-repository OpenCuria packages licensed AGPL-3.0-only, like the surrounding project.
 
 The native Markdown package has additional bundled components:

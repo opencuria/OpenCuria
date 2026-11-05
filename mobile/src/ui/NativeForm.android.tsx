@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import {
   Box,
+  Button,
   Card,
   CircularProgressIndicator,
   Column,
@@ -42,11 +43,15 @@ import {
   weight,
 } from "@expo/ui/jetpack-compose/modifiers";
 import { WORKSPACE_ICON, androidIcon } from "./androidIcons";
+import { useFormNavigation } from "./formNavigation";
 import type {
+  NativeFormCardRow,
   NativeFormDateRow,
   NativeFormHeaderRow,
   NativeFormItemRow,
+  NativeFormLinkRow,
   NativeFormPickerRow,
+  NativeFormProfileRow,
   NativeFormProps,
   NativeFormRow,
   NativeFormTextRow,
@@ -379,10 +384,19 @@ function TextRow({ row }: { row: NativeFormTextRow }): React.JSX.Element {
         row.onChange(value);
       }}
       textStyle={row.monospace ? { fontFamily: "monospace" } : undefined}
+      visualTransformation={row.secure ? "password" : "none"}
       keyboardOptions={{
         capitalization: row.prose ? "sentences" : "none",
         autoCorrectEnabled: Boolean(row.prose),
-        keyboardType: row.keyboard === "url" ? "uri" : "text",
+        keyboardType: row.secure
+          ? "password"
+          : row.keyboard === "url"
+            ? "uri"
+            : row.keyboard === "email"
+              ? "email"
+              : row.keyboard === "number"
+                ? "number"
+                : "text",
         // Enter starts a new line in multiline prose.
         imeAction: row.multiline && row.prose ? "default" : "done",
       }}
@@ -426,6 +440,11 @@ function PickerRow({ row }: { row: NativeFormPickerRow }): React.JSX.Element {
             ...(row.disabled ? [] : [clickable(() => setOpen(true))]),
           ]}
         >
+          {row.symbol ? (
+            <ListItem.LeadingContent>
+              <LeadingIcon symbol={row.symbol} />
+            </ListItem.LeadingContent>
+          ) : null}
           <ListItem.HeadlineContent>
             <Text color={row.disabled ? theme.subtleText : undefined}>
               {row.label}
@@ -677,6 +696,187 @@ function DateRow({ row }: { row: NativeFormDateRow }): React.JSX.Element {
   );
 }
 
+/** A plain Material icon in the text color, when one is bundled. */
+function LeadingIcon({
+  symbol,
+}: {
+  symbol?: string;
+}): React.JSX.Element | null {
+  const { theme } = useTheme();
+  const icon = androidIcon(symbol);
+  return icon ? <Icon source={icon} tint={theme.text} size={24} /> : null;
+}
+
+/** Opens another settings page: icon, title, supporting text, value, chevron. */
+function LinkRow({ row }: { row: NativeFormLinkRow }): React.JSX.Element {
+  const { theme } = useTheme();
+  const navigation = useFormNavigation();
+  const icon = androidIcon(row.symbol);
+  return (
+    <ListItem
+      colors={{ containerColor: TRANSPARENT }}
+      modifiers={[
+        fillMaxWidth(),
+        composeTestID(row.testID ?? row.id),
+        semantics({
+          contentDescription: [row.title, row.subtitle, row.value]
+            .filter(Boolean)
+            .join(", "),
+        }),
+        ...(row.disabled || !navigation
+          ? []
+          : [clickable(() => navigation.push(row.route))]),
+      ]}
+    >
+      {icon ? (
+        <ListItem.LeadingContent>
+          {row.tint ? (
+            <Tile symbol={row.symbol} tint={row.tint} />
+          ) : (
+            <Icon source={icon} tint={theme.text} size={24} />
+          )}
+        </ListItem.LeadingContent>
+      ) : null}
+      <ListItem.HeadlineContent>
+        <Text
+          maxLines={1}
+          overflow="ellipsis"
+          color={row.disabled ? theme.subtleText : undefined}
+        >
+          {row.title}
+        </Text>
+      </ListItem.HeadlineContent>
+      {row.subtitle ? (
+        <ListItem.SupportingContent>
+          <Text
+            maxLines={1}
+            overflow="ellipsis"
+            color={toneColor(theme, row.subtitleTone)}
+          >
+            {row.subtitle}
+          </Text>
+        </ListItem.SupportingContent>
+      ) : null}
+      <ListItem.TrailingContent>
+        <Row verticalAlignment="center">
+          {row.busy ? (
+            <CircularProgressIndicator modifiers={[size(18, 18)]} />
+          ) : null}
+          {row.value ? (
+            <Text
+              color={toneColor(theme, row.valueTone)}
+              maxLines={1}
+              modifiers={[padding(8, 0, 4, 0)]}
+            >
+              {row.value}
+            </Text>
+          ) : null}
+          <Icon source={androidIcon("chevron.right")!} size={24} />
+        </Row>
+      </ListItem.TrailingContent>
+    </ListItem>
+  );
+}
+
+/** The account's large initials avatar and name, centered above the cards. */
+function ProfileRow({ row }: { row: NativeFormProfileRow }): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Column
+      horizontalAlignment="center"
+      verticalArrangement={{ spacedBy: 10 }}
+      modifiers={[
+        fillMaxWidth(),
+        padding(16, 8, 16, 12),
+        semantics({
+          contentDescription: [row.title, row.subtitle]
+            .filter(Boolean)
+            .join(", "),
+        }),
+      ]}
+    >
+      <Box
+        contentAlignment="center"
+        modifiers={[size(88, 88), clip(Shapes.Circle), background(row.tint)]}
+      >
+        <Text color="#FFFFFF" style={{ typography: "headlineMedium" }}>
+          {row.initials}
+        </Text>
+      </Box>
+      <Text style={{ typography: "headlineSmall", textAlign: "center" }}>
+        {row.title}
+      </Text>
+      {row.subtitle ? (
+        <Text color={theme.mutedText} style={{ typography: "bodyMedium" }}>
+          {row.subtitle}
+        </Text>
+      ) : null}
+    </Column>
+  );
+}
+
+/** A highlighted card with a filled action button or a menu. */
+function CardRow({ row }: { row: NativeFormCardRow }): React.JSX.Element {
+  const { theme } = useTheme();
+  const [open, setOpen] = useState(false);
+  const button = (
+    <Button
+      onClick={() =>
+        row.onAction ? row.onAction() : row.actions?.length && setOpen(true)
+      }
+      enabled={!row.disabled}
+      colors={{ containerColor: theme.text, contentColor: theme.background }}
+      modifiers={[composeTestID(row.testID ?? row.id)]}
+    >
+      <Text style={{ fontWeight: "600" }}>{row.actionTitle}</Text>
+    </Button>
+  );
+  return (
+    <Row
+      verticalAlignment="center"
+      horizontalArrangement={{ spacedBy: 12 }}
+      modifiers={[fillMaxWidth(), padding(16, 14, 16, 14)]}
+    >
+      <Column verticalArrangement={{ spacedBy: 2 }} modifiers={[weight(1)]}>
+        <Text style={{ typography: "titleMedium" }}>{row.title}</Text>
+        {row.subtitle ? (
+          <Text color={theme.mutedText} style={{ typography: "bodyMedium" }}>
+            {row.subtitle}
+          </Text>
+        ) : null}
+      </Column>
+      {row.onAction || !row.actions?.length ? (
+        button
+      ) : (
+        <DropdownMenu expanded={open} onDismissRequest={() => setOpen(false)}>
+          <DropdownMenu.Trigger>{button}</DropdownMenu.Trigger>
+          <DropdownMenu.Items>
+            {row.actions.map((action) => (
+              <DropdownMenuItem
+                key={action.id}
+                enabled={!action.disabled}
+                elementColors={
+                  action.destructive ? { textColor: theme.danger } : undefined
+                }
+                onClick={() => {
+                  setOpen(false);
+                  row.onSelect?.(action.id);
+                }}
+              >
+                <DropdownMenuItem.Text>
+                  <Text style={{ fontWeight: action.selected ? "600" : "400" }}>
+                    {action.selected ? `✓  ${action.title}` : action.title}
+                  </Text>
+                </DropdownMenuItem.Text>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenu.Items>
+        </DropdownMenu>
+      )}
+    </Row>
+  );
+}
+
 function FormRow({ row }: { row: NativeFormRow }): React.JSX.Element {
   const { theme } = useTheme();
   switch (row.kind) {
@@ -684,6 +884,12 @@ function FormRow({ row }: { row: NativeFormRow }): React.JSX.Element {
       return <ItemRow row={row} />;
     case "header":
       return <HeaderRow row={row} />;
+    case "link":
+      return <LinkRow row={row} />;
+    case "profile":
+      return <ProfileRow row={row} />;
+    case "card":
+      return <CardRow row={row} />;
     case "text":
       return <TextRow row={row} />;
     case "picker":
@@ -705,6 +911,11 @@ function FormRow({ row }: { row: NativeFormRow }): React.JSX.Element {
               : [clickable(() => row.onChange(!row.value))]),
           ]}
         >
+          {row.symbol ? (
+            <ListItem.LeadingContent>
+              <LeadingIcon symbol={row.symbol} />
+            </ListItem.LeadingContent>
+          ) : null}
           <ListItem.HeadlineContent>
             <Text color={row.disabled ? theme.subtleText : undefined}>
               {row.label}
@@ -792,11 +1003,47 @@ function FormRow({ row }: { row: NativeFormRow }): React.JSX.Element {
     case "value":
       if (row.onPress)
         return <NavigationRow row={{ ...row, onPress: row.onPress }} />;
+      if (row.monospace || row.stacked)
+        return (
+          <ListItem
+            colors={{ containerColor: TRANSPARENT }}
+            modifiers={[
+              fillMaxWidth(),
+              composeTestID(row.testID ?? row.id),
+              semantics({ contentDescription: `${row.label}, ${row.value}` }),
+            ]}
+          >
+            {row.symbol ? (
+              <ListItem.LeadingContent>
+                <LeadingIcon symbol={row.symbol} />
+              </ListItem.LeadingContent>
+            ) : null}
+            <ListItem.HeadlineContent>
+              <Text>{row.label}</Text>
+            </ListItem.HeadlineContent>
+            <ListItem.SupportingContent>
+              <Text
+                color={toneColor(
+                  theme,
+                  row.tone ?? (row.monospace ? "default" : "muted"),
+                )}
+                style={row.monospace ? { fontFamily: "monospace" } : undefined}
+              >
+                {row.value}
+              </Text>
+            </ListItem.SupportingContent>
+          </ListItem>
+        );
       return (
         <ListItem
           colors={{ containerColor: TRANSPARENT }}
-          modifiers={[fillMaxWidth()]}
+          modifiers={[fillMaxWidth(), composeTestID(row.testID ?? row.id)]}
         >
+          {row.symbol ? (
+            <ListItem.LeadingContent>
+              <LeadingIcon symbol={row.symbol} />
+            </ListItem.LeadingContent>
+          ) : null}
           <ListItem.HeadlineContent>
             <Text>{row.label}</Text>
           </ListItem.HeadlineContent>
@@ -912,8 +1159,12 @@ export function NativeForm({
     >
       {sections.map((section) => {
         // The hero header sits on the screen background, not in a card.
-        const header = section.rows.filter((row) => row.kind === "header");
-        const rows = section.rows.filter((row) => row.kind !== "header");
+        const header = section.rows.filter(
+          (row) => row.kind === "header" || row.kind === "profile",
+        );
+        const rows = section.rows.filter(
+          (row) => row.kind !== "header" && row.kind !== "profile",
+        );
         return (
           <Column key={section.id} modifiers={[fillMaxWidth()]}>
             {header.map((row) => (
@@ -921,8 +1172,10 @@ export function NativeForm({
             ))}
             {section.title ? (
               <Text
-                color={theme.primary}
-                style={{ typography: "titleSmall" }}
+                color={section.prominent ? theme.mutedText : theme.primary}
+                style={{
+                  typography: section.prominent ? "titleMedium" : "titleSmall",
+                }}
                 modifiers={[padding(28, 16, 28, 8)]}
               >
                 {section.title}

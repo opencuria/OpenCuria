@@ -16,12 +16,19 @@ import ComputerUseConfigPanel from './ComputerUseConfigPanel.vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsSection from './SettingsSection.vue'
 import {
+  AGENT_HINTS,
   CONFIGURABLE_AGENTS,
+  INHERITED_EFFORT_OPTIONS,
   PRIMARY_AGENTS,
   SUBAGENT_IDS,
+  agentConfigsValid,
   agentDisplayName,
+  agentStatesFromConfigs,
+  changedAgentConfigs,
+  parseMaxDepth,
   type AgentConfig,
   type AgentConfigId,
+  type AgentState,
   type EffortStrategy,
 } from '@/lib/harnessAgents'
 import { invalidateAgentConfigs, loadAgentConfigsCached } from '@/lib/agentConfigs'
@@ -43,24 +50,11 @@ const loaded = ref<AgentConfig[]>([])
 const loadedMaxDepth = ref(2)
 const maxDepth = ref<string | number>('2')
 
-const parsedMaxDepth = computed(() => {
-  const raw = String(maxDepth.value).trim()
-  const value = Number(raw)
-  return /^\d+$/.test(raw) && Number.isSafeInteger(value) && value >= 1 && value <= 2147483647
-    ? value
-    : null
-})
+const parsedMaxDepth = computed(() => parseMaxDepth(maxDepth.value))
 const depthError = computed(() =>
   parsedMaxDepth.value === null ? 'Enter an integer 1–2147483647.' : '',
 )
 const depthDirty = computed(() => parsedMaxDepth.value !== loadedMaxDepth.value)
-
-interface AgentState {
-  model: string
-  effort: string
-  inherit: boolean
-  strategy: EffortStrategy
-}
 
 const state = ref<Record<AgentConfigId, AgentState>>(
   Object.fromEntries(CONFIGURABLE_AGENTS.map((a) => [a, defaultState()])) as Record<
@@ -75,19 +69,7 @@ function defaultState(): AgentState {
 
 function applyConfigs(next: AgentConfig[]): void {
   loaded.value = next
-  const byAgent = new Map(next.map((c) => [c.agent, c]))
-  const out = {} as Record<AgentConfigId, AgentState>
-  for (const agent of CONFIGURABLE_AGENTS) {
-    const cfg = byAgent.get(agent)
-    out[agent] = {
-      model: cfg?.model ?? '',
-      effort: cfg?.effort ?? '',
-      inherit: cfg?.inherit_model ?? SUBAGENT_IDS.includes(agent),
-      strategy:
-        cfg?.effort_strategy && cfg.effort_strategy !== 'fixed' ? cfg.effort_strategy : 'inherit',
-    }
-  }
-  state.value = out
+  state.value = agentStatesFromConfigs(next)
 }
 
 function agentState(agent: AgentConfigId): AgentState {
@@ -114,19 +96,8 @@ async function loadState(): Promise<void> {
   }
 }
 
-const agentHints: Record<AgentConfigId, string> = {
-  build: 'Write and run code.',
-  plan: 'Plan before making changes.',
-  general: 'Delegated tasks.',
-  explore: 'Read-only research.',
-  computeruse: 'Desktop automation.',
-}
-const inheritedEfforts = [
-  { value: 'inherit', label: 'Inherit' },
-  { value: 'lowest', label: 'Lowest' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'highest', label: 'Highest' },
-]
+const agentHints = AGENT_HINTS
+const inheritedEfforts = INHERITED_EFFORT_OPTIONS
 
 function setSubagentModel(agent: AgentConfigId, model: string): void {
   const current = agentState(agent)
@@ -144,29 +115,9 @@ function setSubagentEffort(agent: AgentConfigId, effort: string): void {
   }
 }
 
-const changedConfigs = computed<AgentConfigIn[]>(() => {
-  const byAgent = new Map(loaded.value.map((config) => [config.agent, config]))
-  return CONFIGURABLE_AGENTS.map((agent): AgentConfigIn => {
-    const current = agentState(agent)
-    const inherit = !PRIMARY_AGENTS.includes(agent) && current.inherit
-    return {
-      agent,
-      model: inherit ? '' : current.model.trim(),
-      effort: inherit ? '' : current.effort.trim(),
-      inherit_model: inherit,
-      effort_strategy: inherit ? current.strategy : 'fixed',
-    }
-  }).filter((next) => {
-    const previous = byAgent.get(next.agent)
-    const inherited = previous?.inherit_model ?? SUBAGENT_IDS.includes(next.agent as AgentConfigId)
-    return (
-      next.model !== (previous?.model ?? '') ||
-      next.effort !== (previous?.effort ?? '') ||
-      next.inherit_model !== inherited ||
-      next.effort_strategy !== (previous?.effort_strategy ?? (inherited ? 'inherit' : 'fixed'))
-    )
-  })
-})
+const changedConfigs = computed<AgentConfigIn[]>(() =>
+  changedAgentConfigs(loaded.value, state.value),
+)
 
 const primaryMissing = computed(() =>
   (PRIMARY_AGENTS as string[]).some((a) => !agentState(a as AgentConfigId).model.trim()),
@@ -176,10 +127,7 @@ const modelsAutosave = useAutosave({
   source: () => state.value,
   dirty: () => changedConfigs.value.length > 0,
   enabled: () => !loading.value && !error.value,
-  valid: () =>
-    changedConfigs.value.every(
-      (config) => !PRIMARY_AGENTS.includes(config.agent as AgentConfigId) || !!config.model,
-    ),
+  valid: () => agentConfigsValid(changedConfigs.value),
   errorMessage: 'Failed to save agent models',
   save: async (isCurrent) => {
     const saved = await saveAgentConfigs(changedConfigs.value)

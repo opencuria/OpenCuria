@@ -145,3 +145,15 @@ export function workspaceStatusTone(
     return workspace.has_active_session ? "busy" : "running";
   return "stopped";
 }
+
+/** "30 min", "4h", "2d" or "1h 30m"; `null` means auto-stop is off. */
+export function formatMinutesAsDuration(
+  minutes: number | null | undefined,
+): string {
+  if (minutes == null) return "Disabled";
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}

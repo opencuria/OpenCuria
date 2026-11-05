@@ -4,6 +4,7 @@
  */
 
 import { Bot, Cloud, Globe, Plug } from '@lucide/vue'
+import { providerAccountInfo } from '@opencuria/chat-core/providerAccounts'
 import type { ProviderId } from '@/lib/harnessModels'
 
 /** Settings-only Claude connection row, not a native catalog ProviderId. */
@@ -21,37 +22,34 @@ export interface ProviderMeta {
   icon: typeof Globe
 }
 
+/** Id, name and row description shared with the native settings. */
+function shared(id: SettingsProviderId): Pick<ProviderMeta, 'id' | 'name' | 'description'> {
+  const info = providerAccountInfo(id)!
+  return { id, name: info.name, description: info.description }
+}
+
 export const PROVIDER_META: ProviderMeta[] = [
   {
-    id: 'openrouter',
-    name: 'OpenRouter',
-    description: 'Route requests through OpenRouter with your API key.',
+    ...shared('openrouter'),
     dialogDescription: 'Enter your OpenRouter API key and optional custom base URL.',
     disconnectConfirm: 'Disconnect OpenRouter? The harness will stop using this API key.',
     icon: Globe,
   },
   {
-    id: 'chatgpt',
-    name: 'OpenAI ChatGPT',
-    description: 'Use your ChatGPT Plus or Pro subscription via device login.',
+    ...shared('chatgpt'),
     dialogDescription:
       'Use your ChatGPT Plus or Pro subscription. You will authorize via OpenAI device login.',
     disconnectConfirm: 'Disconnect ChatGPT? Subscription access will be removed.',
     icon: Bot,
   },
   {
-    id: 'amazon-bedrock',
-    name: 'Amazon Bedrock',
-    description: 'Connect AWS credentials or a bearer token for Bedrock models.',
+    ...shared('amazon-bedrock'),
     dialogDescription: 'Connect with IAM access keys or a bearer token for your Bedrock region.',
     disconnectConfirm: 'Disconnect Amazon Bedrock? The harness will stop using these credentials.',
     icon: Cloud,
   },
   {
-    id: 'openai-compatible',
-    name: 'OpenAI Compatible',
-    description:
-      'Custom OpenAI-compatible endpoint for self-hosted models (e.g. HuggingFace UI-TARS).',
+    ...shared('openai-compatible'),
     dialogDescription:
       'Connect a custom OpenAI-compatible endpoint and list its model ids manually.',
     disconnectConfirm:
@@ -59,9 +57,7 @@ export const PROVIDER_META: ProviderMeta[] = [
     icon: Plug,
   },
   {
-    id: 'claude-agent',
-    name: 'Claude Agent',
-    description: 'Run the separate Claude Agent harness with an Anthropic account.',
+    ...shared('claude-agent'),
     dialogDescription:
       'Use your own Anthropic API token or subscription token. Usage is billed or governed by Anthropic.',
     disconnectConfirm:

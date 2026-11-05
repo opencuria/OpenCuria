@@ -8,7 +8,7 @@ Wrap the chat root in `<ThemeProvider initialMode="system" | "light" | "dark">`;
 
 `Button`, `IconButton`, `NativeAction` and `Banner` are exported by `src/ui/primitives.tsx`. Interactive controls use platform implementations: SwiftUI buttons on iOS, Material buttons/surfaces on Android. The OS owns highlighting, disabled appearance and hit testing. `NativeModal` uses system modal presentation with a native navigation bar, without a hand-drawn sheet handle, backdrop or gesture. `NativeList`, `NativePicker`, `NativeOption` and `NativeTextField` map directly to platform controls. `Drawer` slides the chat aside to reveal the sidebar (`SlideDrawer`, gesture and spring on the UI thread) on iPhone and Android and keeps the adaptive split view on iPad. `NativeContextMenu` adds a long-press menu to tappable content.
 
-`WorkspaceSidebar` renders compact Claude-style rows with shared `conversationGroups` rules and owns the sidebar header, search, account button and New chat pill. Its per-workspace pagination and collapse state are retained while navigation is closed and cleared when the organization/server scope changes. Each workspace starts with four chats; an older active chat reveals its containing page.
+`WorkspaceSidebar` renders compact Claude-style rows with shared `conversationGroups` rules and owns the sidebar header, search, Settings button and New chat button; those controls and the search field are native (`ui/SidebarControls`: SwiftUI liquid glass on iOS, Material on Android). Its per-workspace pagination and collapse state are retained while navigation is closed and cleared when the organization/server scope changes. Each workspace starts with four chats; an older active chat reveals its containing page.
 
 ## Transcript
 

@@ -415,6 +415,28 @@ const WEEKDAY_NAMES = [
   'Sunday',
 ]
 
+// Link rows push through the settings navigator, as NavigationLink does.
+function LinkRow({ row }) {
+  const { useFormNavigation } = require('../src/ui/formNavigation')
+  const navigation = useFormNavigation()
+  return h(
+    Pressable,
+    {
+      testID: row.testID ?? row.id,
+      accessibilityRole: 'link',
+      accessibilityLabel: [row.title, row.subtitle, row.value]
+        .filter(Boolean)
+        .join(', '),
+      accessibilityState: { disabled: Boolean(row.disabled), busy: Boolean(row.busy) },
+      disabled: row.disabled,
+      onPress: () => navigation?.push(row.route),
+    },
+    h(Text, null, row.title),
+    row.subtitle ? h(Text, null, row.subtitle) : null,
+    row.value ? h(Text, null, row.value) : null,
+  )
+}
+
 function formRow(row) {
   const key = row.id
   switch (row.kind) {
@@ -491,6 +513,40 @@ function formRow(row) {
           }),
         ),
       )
+    case 'link':
+      return h(LinkRow, { key, row })
+    case 'profile':
+      return h(
+        View,
+        { key, testID: row.testID ?? row.id, accessibilityLabel: row.title },
+        h(Text, null, row.initials),
+        h(Text, null, row.title),
+        row.subtitle ? h(Text, null, row.subtitle) : null,
+      )
+    case 'card':
+      return h(
+        View,
+        { key },
+        h(Text, null, row.title),
+        row.subtitle ? h(Text, null, row.subtitle) : null,
+        row.onAction || !row.actions?.length
+          ? h(exports.Button, {
+              title: row.actionTitle,
+              disabled: row.disabled,
+              testID: row.testID ?? row.id,
+              onPress: row.onAction,
+            })
+          : h(
+              exports.NativeMenu,
+              {
+                label: row.actionTitle,
+                actions: row.actions,
+                onSelect: row.onSelect,
+                testID: row.testID ?? row.id,
+              },
+              h(Text, null, row.actionTitle),
+            ),
+      )
     case 'text':
       return h(TextInput, {
         key,
@@ -499,6 +555,7 @@ function formRow(row) {
         placeholder: row.placeholder,
         value: row.value,
         editable: !row.disabled,
+        secureTextEntry: Boolean(row.secure),
         onChangeText: row.onChange,
         onSubmitEditing: row.onSubmit,
       })
@@ -561,7 +618,7 @@ function formRow(row) {
             },
             h(Text, null, `${row.label}: ${row.value}`),
           )
-        : h(Text, { key }, `${row.label}: ${row.value}`)
+        : h(Text, { key, testID: row.testID ?? row.id }, `${row.label}: ${row.value}`)
     case 'segmented':
       return h(
         View,
@@ -668,3 +725,115 @@ exports.NativeForm = ({ sections, empty, testID }) =>
         )),
   )
 exports.ToastSurface = ({ children }) => h(View, null, children)
+
+// Sidebar controls: SwiftUI glass buttons / Material buttons and search field.
+exports.SidebarIconButton = ({ label, onPress, testID }) =>
+  h(Pressable, {
+    accessibilityRole: 'button',
+    accessibilityLabel: label,
+    onPress,
+    testID,
+  })
+exports.AccountButton = ({ initials, label, onPress, testID }) =>
+  h(
+    Pressable,
+    { accessibilityRole: 'button', accessibilityLabel: label, onPress, testID },
+    h(Text, null, initials),
+  )
+exports.NewChatButton = ({ onPress, disabled, testID }) =>
+  h(
+    Pressable,
+    {
+      accessibilityRole: 'button',
+      accessibilityLabel: 'New chat',
+      accessibilityState: { disabled: Boolean(disabled) },
+      disabled,
+      onPress,
+      testID,
+    },
+    h(Text, null, 'New chat'),
+  )
+exports.SidebarSearchField = ({
+  value,
+  onChange,
+  onCancel,
+  placeholder,
+  accessibilityLabel,
+  testID,
+}) =>
+  h(
+    View,
+    { testID },
+    h(TextInput, {
+      accessibilityLabel,
+      placeholder,
+      value,
+      onChangeText: onChange,
+    }),
+    h(
+      Pressable,
+      { accessibilityRole: 'button', accessibilityLabel: 'Cancel', onPress: onCancel },
+      h(Text, null, 'Cancel'),
+    ),
+  )
+
+// Settings navigation: the top page only, pushed through link rows.
+exports.SettingsNavigator = ({ path, onPathChange, root, renderRoute }) => {
+  const { FormNavigationContext } = require('../src/ui/formNavigation')
+  const top = path[path.length - 1]
+  return h(
+    FormNavigationContext.Provider,
+    { value: { push: (next) => onPathChange([...path, next]) } },
+    top ? h(View, { key: top, testID: `settings-route-${top}` }, renderRoute(top)) : root,
+  )
+}
+exports.SettingsPage = ({
+  title,
+  sections,
+  root,
+  primaryAction,
+  actions,
+  onAction,
+  empty,
+  loading,
+  search,
+  testID,
+}) => {
+  const { useSettingsNavigation } = require('../src/settings/SettingsContext')
+  const navigation = useSettingsNavigation()
+  return h(
+    View,
+    { testID },
+    h(Text, { accessibilityRole: 'header' }, title),
+    h(exports.IconButton, {
+      label: root ? 'Close settings' : 'Back',
+      onPress: root ? navigation.close : navigation.pop,
+    }),
+    primaryAction
+      ? h(exports.Button, {
+          title: primaryAction.title,
+          onPress: primaryAction.onPress,
+          disabled: primaryAction.disabled,
+          busy: primaryAction.busy,
+          testID: primaryAction.testID,
+        })
+      : null,
+    actions?.length
+      ? h(
+          exports.NativeMenu,
+          { label: `More for ${title}`, actions, onSelect: onAction },
+          h(Text, null, 'More'),
+        )
+      : null,
+    search
+      ? h(TextInput, {
+          accessibilityLabel: search.placeholder,
+          value: search.value,
+          onChangeText: search.onChange,
+        })
+      : null,
+    loading && !sections.length
+      ? h(Text, null, 'Loading')
+      : exports.NativeForm({ sections, empty }),
+  )
+}

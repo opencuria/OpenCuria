@@ -17,7 +17,6 @@ import {
 import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { Settings2 } from "lucide-react-native";
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
 import {
   filterMentionCandidates,
@@ -73,13 +72,10 @@ import { Drawer } from "../ui/Drawer";
 import { useChromeTopInset } from "../ui/chromeInset";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { WorkspaceSidebar } from "../components/WorkspaceSidebar";
-import { SegmentedControl } from "@expo/ui/community/segmented-control";
-import { NativePicker } from "../ui/selection";
 import { NativeTextField } from "../ui/NativeTextField";
 import { useTheme } from "../ui/theme";
 import { useSession } from "./SessionContext";
 import { useNotifications } from "../notifications/NotificationContext";
-import { NotificationSettings } from "../notifications/NotificationSettings";
 import { setViewedNotificationSession } from "../notifications/native";
 import type { NotificationTarget } from "../notifications/target";
 import { WorkspaceToolsSheet } from "../tools/WorkspaceToolsSheet";
@@ -92,6 +88,8 @@ import type { AgentCatalog } from "../scheduledTasks/scheduledTaskForm";
 import { activeTaskCount } from "../scheduledTasks/scheduledTaskPresentation";
 import { useScheduledTasks } from "../scheduledTasks/useScheduledTasks";
 import { showToast } from "../ui/toast";
+import { profileInitials, profileName } from "../settings/profile";
+import { SettingsScreen } from "../settings/SettingsScreen";
 import { releaseGitControllers } from "../tools/git";
 import { releaseTerminalSessions } from "../tools/terminal";
 
@@ -135,7 +133,7 @@ type NavigationRequest = {
 
 export function MainScreen(): React.JSX.Element {
   const notifications = useNotifications();
-  const { theme, mode: themeMode, setMode: setThemeMode } = useTheme();
+  const { theme } = useTheme();
   const {
     client,
     session,
@@ -143,6 +141,7 @@ export function MainScreen(): React.JSX.Element {
     organizations,
     signOut,
     selectOrganization,
+    createOrganization,
     registerResource,
     registerForegroundRefresh,
   } = useSession();
@@ -449,6 +448,14 @@ export function MainScreen(): React.JSX.Element {
     );
   }, [client]);
   loadCatalogsRef.current = loadCatalogs;
+  /** Settings changed providers, models or agent defaults. */
+  const reloadCatalogs = useCallback(() => {
+    void loadCatalogs();
+  }, [loadCatalogs]);
+  const refreshWorkspaces = useCallback(
+    () => loadOverview(true),
+    [loadOverview],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1069,7 +1076,7 @@ export function MainScreen(): React.JSX.Element {
   };
 
   const chosenModels = modelsForEngine;
-  const profileTitle = user?.first_name?.trim() || user?.email || "Account";
+  const profileTitle = user ? profileName(user) : "Account";
   // A chat keeps its engine; only a new chat offers every engine.
   const engineOptions: ModelSheetEngine[] = modelSheetEngines(
     engines.filter((item) => !chat.activeSessionId || item.id === harness),
@@ -1217,6 +1224,7 @@ export function MainScreen(): React.JSX.Element {
               else sessionMenu(row);
             }}
             profileTitle={profileTitle}
+            profileInitials={user ? profileInitials(user) : "?"}
             onProfile={() => setSheet("profile")}
             error={drawerError}
             onDismissError={() => setDrawerError(null)}
@@ -1458,85 +1466,33 @@ export function MainScreen(): React.JSX.Element {
         onOpenChat={openRunChat}
       />
 
-      <NativeModal
+      <SettingsScreen
         visible={sheet === "profile"}
-        onClose={() => setSheet(null)}
-        title="Profile & settings"
-        testID="profile-sheet"
-      >
-        <View
-          style={[styles.accountCard, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <View style={[styles.avatar, { backgroundColor: theme.primary }]}>
-            <Text style={{ color: theme.primaryForeground, fontWeight: "700" }}>
-              {profileTitle.slice(0, 1).toUpperCase()}
-            </Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text
-              style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
-            >
-              {profileTitle}
-            </Text>
-            <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-              {user.email}
-            </Text>
-          </View>
-        </View>
-        <SectionTitle title="ORGANIZATION" />
-        <NativePicker
-          label="Organization"
-          value={session?.organizationId ?? ""}
-          options={organizations.map((org) => ({
-            value: org.id,
-            label: org.name,
-          }))}
-          onChange={(id) => {
-            setSheet(null);
-            void selectOrganization(id);
-          }}
-        />
-        <SectionTitle title="NOTIFICATIONS" />
-        <NotificationSettings />
-        <SectionTitle title="APPEARANCE" />
-        <SegmentedControl
-          values={["System", "Light", "Dark"]}
-          selectedIndex={["system", "light", "dark"].indexOf(themeMode)}
-          appearance={theme.scheme}
-          onChange={({ nativeEvent }) =>
-            setThemeMode(
-              (["system", "light", "dark"] as const)[
-                nativeEvent.selectedSegmentIndex
-              ]!,
-            )
-          }
-        />
-
-        <Button
-          title="Sign out"
-          variant="danger"
-          symbol="rectangle.portrait.and.arrow.right"
-          onPress={() => {
-            Alert.alert(
-              "Sign out?",
-              "Your secure sign-in token will be removed from this device.",
-              [
-                { text: "Cancel", style: "cancel" },
-                {
-                  text: "Sign out",
-                  style: "destructive",
-                  onPress: () => {
-                    setSheet(null);
-                    void signOut();
-                  },
-                },
-              ],
-            );
-          }}
-          style={{ alignSelf: "stretch", marginTop: 8 }}
-          testID="sign-out"
-        />
-      </NativeModal>
+        onClose={() =>
+          setSheet((current) => (current === "profile" ? null : current))
+        }
+        client={client}
+        user={user}
+        organizations={organizations}
+        organizationId={session?.organizationId ?? null}
+        serverUrl={session?.serverUrl ?? client.api.baseUrl}
+        workspaces={workspaces}
+        refreshWorkspaces={refreshWorkspaces}
+        onCatalogChanged={reloadCatalogs}
+        onOpenWorkspace={chooseWorkspace}
+        selectOrganization={(id) => {
+          setSheet(null);
+          void selectOrganization(id);
+        }}
+        createOrganization={async (name) => {
+          await createOrganization(name);
+          setSheet(null);
+        }}
+        signOut={() => {
+          setSheet(null);
+          void signOut();
+        }}
+      />
 
       <ModelSheet
         visible={sheet === "settings"}
@@ -1630,45 +1586,9 @@ function ChromeOverlay({
   );
 }
 
-function SectionTitle({
-  title,
-  tone,
-}: {
-  title: string;
-  tone?: string;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  return (
-    <Text style={[styles.section, { color: tone ?? theme.subtleText }]}>
-      {title}
-    </Text>
-  );
-}
-
 const styles = StyleSheet.create({
   root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   notice: { paddingHorizontal: 12, paddingTop: 7 },
   overlay: { position: "absolute", left: 0, right: 0, zIndex: 3 },
-  section: {
-    fontSize: 13,
-    fontWeight: "500",
-    marginTop: 18,
-    marginBottom: 6,
-  },
-  accountCard: {
-    minHeight: 72,
-    borderRadius: 16,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 11,
-  },
-  avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 15,
-    alignItems: "center",
-    justifyContent: "center",
-  },
 });

@@ -1,5 +1,17 @@
 import { ApiClient, type ApiClientOptions, type FetchLike } from "./api";
 import { createHarnessApi } from "./harness";
+import {
+  createAgentSettingsApi,
+  createApiKeysApi,
+  createCredentialServicesApi,
+  createCredentialsApi,
+  createDeletionsApi,
+  createImagesApi,
+  createOrganizationsApi,
+  createPluginsApi,
+  createProviderAccountsApi,
+  createRunnersApi,
+} from "./settings";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
 import {
   RealtimeClient,
@@ -14,13 +26,10 @@ import type {
   AuthUser,
   CapturedImage,
   CapturedImageWorkspaceInput,
-  Credential,
   HarnessConversation,
   ImageCaptureInput,
   ImageCaptureResult,
   ImageDefinition,
-  Plugin,
-  Runner,
   RunnerImageBuild,
   ScheduledTask,
   ScheduledTaskInput,
@@ -109,16 +118,25 @@ export interface OpenCuriaClient {
       signal?: AbortSignal,
     ): Promise<ImageCaptureResult>;
   };
-  runners: {
-    list(signal?: AbortSignal): Promise<Runner[]>;
-  };
-  plugins: {
-    list(signal?: AbortSignal): Promise<Plugin[]>;
-  };
-  credentials: {
-    list(signal?: AbortSignal): Promise<Credential[]>;
-  };
-  images: {
+  /** Registration, QEMU limits, metrics, storage inventory and operations. */
+  runners: ReturnType<typeof createRunnersApi>;
+  /** The plugin catalog; edits and activation need an organization admin. */
+  plugins: ReturnType<typeof createPluginsApi>;
+  /** Credentials, their services and OAuth grants. */
+  credentials: ReturnType<typeof createCredentialsApi>;
+  /** Organization-owned credential services (admins only). */
+  credentialServices: ReturnType<typeof createCredentialServicesApi>;
+  /** Organization profile, creation and workspace policy. */
+  organizations: ReturnType<typeof createOrganizationsApi>;
+  /** Model provider accounts, selection and ChatGPT device login. */
+  providerAccounts: ReturnType<typeof createProviderAccountsApi>;
+  /** Subagent depth, Computer Use limits and voice models. */
+  agentSettings: ReturnType<typeof createAgentSettingsApi>;
+  /** The signed-in user's API keys. */
+  apiKeys: ReturnType<typeof createApiKeysApi>;
+  /** Deferred or forced removal of images, builds and definitions. */
+  deletions: ReturnType<typeof createDeletionsApi>;
+  images: ReturnType<typeof createImagesApi> & {
     listCaptured(signal?: AbortSignal): Promise<CapturedImage[]>;
     listDefinitions(signal?: AbortSignal): Promise<ImageDefinition[]>;
     listRunnerBuilds(
@@ -311,16 +329,17 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
           signal,
         ),
     },
-    runners: {
-      list: (signal) => api.get<Runner[]>("/runners/", signal),
-    },
-    plugins: {
-      list: (signal) => api.get<Plugin[]>("/plugins/", signal),
-    },
-    credentials: {
-      list: (signal) => api.get<Credential[]>("/credentials/", signal),
-    },
+    runners: createRunnersApi(() => api),
+    plugins: createPluginsApi(() => api),
+    credentials: createCredentialsApi(() => api),
+    credentialServices: createCredentialServicesApi(() => api),
+    organizations: createOrganizationsApi(() => api),
+    providerAccounts: createProviderAccountsApi(() => api),
+    agentSettings: createAgentSettingsApi(() => api),
+    apiKeys: createApiKeysApi(() => api),
+    deletions: createDeletionsApi(() => api),
     images: {
+      ...createImagesApi(() => api),
       listCaptured: (signal) =>
         api.get<CapturedImage[]>("/captured-images/", signal),
       listDefinitions: (signal) =>

@@ -21,6 +21,12 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import { providerMeta, type SettingsProviderId } from './providerMeta'
 import {
+  DEFAULT_BEDROCK_REGION,
+  DEFAULT_OPENROUTER_BASE_URL,
+  providerAccountPayload,
+  unsharePayload,
+} from '@opencuria/chat-core/providerAccounts'
+import {
   cancelChatGptOAuth,
   createProviderAccount,
   deleteProviderAccount,
@@ -32,9 +38,6 @@ import {
   type ProviderAccount,
   type ProviderAccountPayload,
 } from '@/services/harness.api'
-
-const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
-const DEFAULT_BEDROCK_REGION = 'us-east-1'
 
 const props = withDefaults(
   defineProps<{
@@ -123,80 +126,33 @@ function openEditForm(account: ProviderAccount): void {
   resetForm(account)
 }
 
-function parseModels(text: string): string[] {
-  return [
-    ...new Set(
-      text
-        .split('\n')
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  ]
-}
-
 function payloadForAccount(): ProviderAccountPayload | null {
   if (!props.provider) return null
-  const base: ProviderAccountPayload = {
-    label: label.value.trim(),
-    shared: props.isAdmin && shared.value,
-  }
-  if (!base.label) {
-    dialogError.value = 'Account name is required.'
+  const openRouter = props.provider === 'openrouter'
+  const result = providerAccountPayload(
+    props.provider,
+    {
+      label: label.value,
+      shared: shared.value,
+      apiKey: openRouter ? openRouterApiKey.value : compatApiKey.value,
+      baseUrl: openRouter ? openRouterBaseUrl.value : compatBaseUrl.value,
+      modelsText: compatModelsText.value,
+      bedrockAuthMethod: bedrockAuthMethod.value,
+      region: bedrockRegion.value,
+      accessKeyId: bedrockAccessKeyId.value,
+      secretAccessKey: bedrockSecretAccessKey.value,
+      sessionToken: bedrockSessionToken.value,
+      bearerToken: bedrockBearerToken.value,
+      claudeAuthType: claudeAuthType.value,
+      claudeToken: claudeToken.value,
+    },
+    { isAdmin: props.isAdmin, account: selectedAccount.value },
+  )
+  if ('error' in result) {
+    dialogError.value = result.error
     return null
   }
-  switch (props.provider) {
-    case 'openrouter':
-      return {
-        ...base,
-        api_key: openRouterApiKey.value,
-        base_url: openRouterBaseUrl.value.trim() || DEFAULT_OPENROUTER_BASE_URL,
-      }
-    case 'openai-compatible':
-      if (!compatBaseUrl.value.trim()) {
-        dialogError.value = 'Base URL is required.'
-        return null
-      }
-      return {
-        ...base,
-        api_key: compatApiKey.value,
-        base_url: compatBaseUrl.value.trim(),
-        models: parseModels(compatModelsText.value),
-      }
-    case 'amazon-bedrock':
-      return bedrockAuthMethod.value === 'bearer'
-        ? {
-            ...base,
-            auth_method: 'bearer',
-            region: bedrockRegion.value.trim() || DEFAULT_BEDROCK_REGION,
-            bearer_token: bedrockBearerToken.value,
-          }
-        : {
-            ...base,
-            auth_method: 'access_keys',
-            region: bedrockRegion.value.trim() || DEFAULT_BEDROCK_REGION,
-            access_key_id: bedrockAccessKeyId.value,
-            secret_access_key: bedrockSecretAccessKey.value,
-            session_token: bedrockSessionToken.value,
-          }
-    case 'claude-agent': {
-      const token = claudeToken.value.trim()
-      if (!selectedAccount.value?.connected && !token) {
-        dialogError.value = 'Enter an Anthropic token to connect this account.'
-        return null
-      }
-      if (
-        selectedAccount.value?.connected &&
-        selectedAccount.value.auth_type !== claudeAuthType.value &&
-        !token
-      ) {
-        dialogError.value = 'Enter a token when changing the authentication type.'
-        return null
-      }
-      return { ...base, auth_type: claudeAuthType.value, token }
-    }
-    case 'chatgpt':
-      return base
-  }
+  return result.payload
 }
 
 async function saveAccount(): Promise<void> {
@@ -273,17 +229,7 @@ async function confirmUnshare(): Promise<void> {
   try {
     const payload = payloadForAccount()
     if (!payload) return
-    if (props.provider === 'openrouter') payload.api_key = ''
-    if (props.provider === 'openai-compatible') payload.api_key = ''
-    if (props.provider === 'amazon-bedrock') {
-      delete payload.access_key_id
-      delete payload.secret_access_key
-      delete payload.session_token
-      delete payload.bearer_token
-    }
-    if (props.provider === 'claude-agent') payload.token = ''
-    payload.shared = false
-    await updateProviderAccount(props.provider, account.id, payload)
+    await updateProviderAccount(props.provider, account.id, unsharePayload(props.provider, payload))
     notifyProviderAccountsChanged()
     emit('changed')
     resetForm()
@@ -479,7 +425,9 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else>
-          <Button size="sm" variant="ghost" class="-ml-2" :disabled="saving" @click="resetForm()">← Accounts</Button>
+          <Button size="sm" variant="ghost" class="-ml-2" :disabled="saving" @click="resetForm()"
+            >← Accounts</Button
+          >
           <div class="space-y-2">
             <Label for="account-label">Account name</Label>
             <Input

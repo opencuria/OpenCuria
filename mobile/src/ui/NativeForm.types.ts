@@ -89,7 +89,9 @@ export interface NativeFormTextRow extends RowBase {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
-  keyboard?: "default" | "url";
+  keyboard?: "default" | "url" | "email" | "number";
+  /** Masks the value, e.g. an API key or password. */
+  secure?: boolean;
   multiline?: boolean;
   /** Visible lines of a multiline field: [minimum, maximum]. */
   lines?: [number, number];
@@ -104,6 +106,7 @@ export interface NativeFormTextRow extends RowBase {
 export interface NativeFormToggleRow extends RowBase {
   kind: "toggle";
   label: string;
+  symbol?: NativeSymbol;
   subtitle?: string;
   subtitleTone?: NativeFormTone;
   value: boolean;
@@ -113,6 +116,7 @@ export interface NativeFormToggleRow extends RowBase {
 export interface NativeFormPickerRow extends RowBase {
   kind: "picker";
   label: string;
+  symbol?: NativeSymbol;
   value: string;
   groups: NativeFormOptionGroup[];
   onChange: (value: string) => void;
@@ -134,6 +138,11 @@ export interface NativeFormValueRow extends RowBase {
   label: string;
   value: string;
   tone?: NativeFormTone;
+  symbol?: NativeSymbol;
+  /** Shows the value wrapped below the label, e.g. an email address. */
+  stacked?: boolean;
+  /** Code-like values such as tokens: stacked, monospaced and selectable. */
+  monospace?: boolean;
   /** Turns the row into a navigation row (chevron) that opens a choice. */
   onPress?: () => void;
 }
@@ -197,6 +206,50 @@ export interface NativeFormButtonRow extends RowBase {
   onPress: () => void;
 }
 
+/**
+ * A row that pushes another settings page, as in the Settings app: plain
+ * leading symbol, title, optional second line, trailing value and chevron.
+ * Only valid inside the settings navigator.
+ */
+export interface NativeFormLinkRow extends RowBase {
+  kind: "link";
+  title: string;
+  /** Second line below the title, e.g. an email address. */
+  subtitle?: string;
+  subtitleTone?: NativeFormTone;
+  /** Short trailing value, e.g. "Admin" or "3". */
+  value?: string;
+  valueTone?: NativeFormTone;
+  symbol?: NativeSymbol;
+  /** A colored tile around the symbol instead of a plain one. */
+  tint?: string;
+  busy?: boolean;
+  /** Route of the pushed page. */
+  route: string;
+}
+
+/** Large centered avatar with the user's initials and name, as in ChatGPT. */
+export interface NativeFormProfileRow extends RowBase {
+  kind: "profile";
+  initials: string;
+  title: string;
+  subtitle?: string;
+  /** Avatar color. */
+  tint: string;
+}
+
+/** A highlighted card with a capsule action or menu, e.g. the organization. */
+export interface NativeFormCardRow extends RowBase {
+  kind: "card";
+  title: string;
+  subtitle?: string;
+  actionTitle: string;
+  /** A plain action; without it the capsule opens `actions` as a menu. */
+  onAction?: () => void;
+  actions?: NativeMenuAction[];
+  onSelect?: (id: string) => void;
+}
+
 export interface NativeFormNoteRow extends RowBase {
   kind: "note";
   text: string;
@@ -206,6 +259,9 @@ export interface NativeFormNoteRow extends RowBase {
 export type NativeFormRow =
   | NativeFormItemRow
   | NativeFormHeaderRow
+  | NativeFormLinkRow
+  | NativeFormProfileRow
+  | NativeFormCardRow
   | NativeFormTextRow
   | NativeFormToggleRow
   | NativeFormPickerRow
@@ -221,6 +277,8 @@ export type NativeFormRow =
 export interface NativeFormSection {
   id: string;
   title?: string;
+  /** Larger section title, as in ChatGPT's settings. */
+  prominent?: boolean;
   footer?: string;
   footerTone?: NativeFormTone;
   rows: NativeFormRow[];

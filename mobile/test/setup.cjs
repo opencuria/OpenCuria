@@ -22,6 +22,9 @@ jest.mock('../src/ui/selection', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/NativeTextField', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/Drawer', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/NativeSheet', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/SidebarControls', () => require('./native-ui.cjs'))
+jest.mock('../src/settings/SettingsNavigator', () => require('./native-ui.cjs'))
+jest.mock('../src/settings/SettingsPage', () => require('./native-ui.cjs'))
 jest.mock('@expo/ui/community/segmented-control', () => ({
   SegmentedControl: () => null,
 }))

@@ -64,8 +64,18 @@ export interface Organization {
   id: string;
   name: string;
   slug: string;
+  /** "admin" or "member" in this organization. */
   role: string;
   created_at: string;
+  /** Workspace policy; returned by `GET /organizations/{id}/`. */
+  workspace_auto_stop_timeout_minutes?: number | null;
+  image_versions_to_keep?: number;
+}
+
+export interface WorkspacePolicyInput {
+  /** `null` keeps inactive workspaces running. */
+  workspace_auto_stop_timeout_minutes: number | null;
+  image_versions_to_keep: number;
 }
 
 export interface AuthUser {
@@ -210,6 +220,7 @@ export interface ImageCaptureResult {
 export interface Runner {
   id: string;
   name: string;
+  /** "online" or "offline". */
   status: string;
   qemu_min_vcpus: number;
   qemu_max_vcpus: number;
@@ -220,33 +231,73 @@ export interface Runner {
   qemu_min_disk_size_gb: number;
   qemu_max_disk_size_gb: number;
   qemu_default_disk_size_gb: number;
+  /** Totals across active workspaces; `null` is unlimited. */
+  qemu_max_active_vcpus?: number | null;
+  qemu_max_active_memory_mb?: number | null;
+  qemu_max_active_disk_size_gb?: number | null;
+  organization_id?: string;
+  connected_at?: string | null;
+  disconnected_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
   [key: string]: unknown;
 }
 
-export interface PluginCredentialRequirement {
-  id: string;
-  key: string;
-  description: string;
-  required: boolean;
-  service_id: string;
-  service_name: string;
-  service_slug: string;
-  credential_type: string;
+export interface RunnerCreateInput {
+  name: string;
 }
 
-export interface Plugin {
+/** The API token is returned once and cannot be retrieved again. */
+export interface RunnerCreateResult {
   id: string;
   name: string;
-  slug: string;
-  description: string;
-  enabled: boolean;
-  published: boolean;
-  organization_id: string | null;
-  is_global: boolean;
-  org_enabled: boolean;
-  credential_requirements: PluginCredentialRequirement[];
-  [key: string]: unknown;
+  api_token: string;
 }
+
+export interface RunnerUpdateInput {
+  qemu_min_vcpus?: number;
+  qemu_max_vcpus?: number;
+  qemu_default_vcpus?: number;
+  qemu_min_memory_mb?: number;
+  qemu_max_memory_mb?: number;
+  qemu_default_memory_mb?: number;
+  qemu_min_disk_size_gb?: number;
+  qemu_max_disk_size_gb?: number;
+  qemu_default_disk_size_gb?: number;
+  qemu_max_active_vcpus?: number | null;
+  qemu_max_active_memory_mb?: number | null;
+  qemu_max_active_disk_size_gb?: number | null;
+}
+
+export interface RunnerSystemMetrics {
+  runner_id: string;
+  timestamp: string;
+  cpu_usage_percent: number;
+  ram_used_bytes: number;
+  ram_total_bytes: number;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
+}
+
+export type {
+  CredentialService,
+  DesktopActivation,
+  Plugin,
+  PluginCreateIn,
+  PluginCredentialRequirement,
+  PluginCredentialRequirementIn,
+  PluginCredentialServiceType,
+  PluginMcpAuthType,
+  PluginMcpServer,
+  PluginMcpServerIn,
+  PluginMcpServerTransport,
+  PluginMcpToolPolicy,
+  PluginMcpTransport,
+  PluginResources,
+  PluginSkill,
+  PluginSkillIn,
+  PluginUpdateIn,
+} from "@opencuria/chat-core/plugins";
 
 /** Credential metadata only; secrets never leave the server. */
 export interface Credential {
@@ -256,11 +307,83 @@ export interface Credential {
   service_id: string;
   service_name: string;
   service_slug: string;
+  /** "env", "file", "ssh_key" or "mcp_oauth". */
   credential_type: string;
-  created_by_id: number;
+  created_by_id: number | null;
   oauth_connected: boolean;
+  env_var_name?: string;
+  target_path?: string;
+  has_public_key?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  /** "connected", "reconnect_required", "disconnected" or "" (not OAuth). */
+  oauth_status?: string;
+  oauth_reconnect_required?: boolean;
+  oauth_expires_at?: string | null;
   [key: string]: unknown;
 }
+
+export interface CredentialCreateInput {
+  service_id: string;
+  name?: string;
+  /** Omitted for SSH keys, which the server generates. */
+  value?: string;
+  organization_credential?: boolean;
+}
+
+/** Only changed fields; an empty value keeps the stored secret. */
+export interface CredentialUpdateInput {
+  name?: string;
+  value?: string;
+}
+
+export interface CredentialPublicKey {
+  public_key: string;
+}
+
+export interface CredentialServiceCreateInput {
+  name: string;
+  slug?: string;
+  description?: string;
+  credential_type: "env" | "file" | "ssh_key" | "mcp_oauth";
+  env_var_name?: string;
+  target_path?: string;
+  label?: string;
+  oauth_server_url?: string;
+}
+
+export interface ApiKeyPermission {
+  value: string;
+  label: string;
+  description: string;
+  group: string;
+}
+
+/** An API key's metadata; the secret is only returned once on creation. */
+export interface ApiKey {
+  id: string;
+  name: string;
+  key_prefix: string;
+  is_active: boolean;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  permissions: string[];
+}
+
+export interface ApiKeyCreated extends ApiKey {
+  key: string;
+}
+
+export interface ApiKeyCreateInput {
+  name: string;
+  /** ISO 8601 with an offset; `null` never expires. */
+  expires_at: string | null;
+  /** Empty grants every permission that exists at creation. */
+  permissions: string[];
+}
+
+export type ImageVersionRetention = "latest" | "kept" | "expires_when_unused";
 
 export interface ImageArtifact {
   id: string;
@@ -272,6 +395,16 @@ export interface ImageArtifact {
   version?: number | null;
   message?: string;
   created_at: string;
+  size_bytes?: number | null;
+  is_latest?: boolean;
+  retention?: ImageVersionRetention | null;
+  workspace_count?: number;
+  workspaces?: Array<{
+    id: string;
+    name: string;
+    created_by_id: number | null;
+  }>;
+  delete_last_error?: string;
   [key: string]: unknown;
 }
 
@@ -279,14 +412,26 @@ export interface ImageArtifact {
 export interface CapturedImage {
   id: string;
   name: string;
+  /** "active", "pending_deletion" or "deleted". */
   status: string;
   runner_id: string;
   runner_online: boolean;
   latest_id: string | null;
   latest_version: number | null;
   workspace_count: number;
+  total_size_bytes?: number;
+  created_by_id?: number | null;
+  created_at?: string;
   versions: ImageArtifact[];
   [key: string]: unknown;
+}
+
+export interface ImageDefinitionBuildSummary {
+  active: number;
+  building: number;
+  failed: number;
+  inactive: number;
+  removing: number;
 }
 
 export interface ImageDefinition {
@@ -294,8 +439,29 @@ export interface ImageDefinition {
   name: string;
   description: string;
   is_active: boolean;
+  /** "active", "deactivated", "pending_deletion", "deleting", "deleted" or "delete_failed". */
   status: string;
+  organization_id?: string | null;
+  /** A global recipe; only custom definitions can be edited. */
+  is_standard?: boolean;
+  base_distro?: string;
+  packages?: string[];
+  env_vars?: Record<string, string>;
+  custom_init_script?: string;
+  runner_build_summary?: ImageDefinitionBuildSummary;
+  delete_last_error?: string;
+  created_at?: string;
+  updated_at?: string;
   [key: string]: unknown;
+}
+
+export interface ImageDefinitionInput {
+  name: string;
+  description: string;
+  base_distro: string;
+  packages: string[];
+  env_vars: Record<string, string>;
+  custom_init_script: string;
 }
 
 export interface RunnerImageBuild {
@@ -303,8 +469,175 @@ export interface RunnerImageBuild {
   image_definition_id: string;
   runner_id: string;
   image_artifact_id?: string | null;
+  /** "pending", "building", "active", "failed", "deactivated", "pending_deletion", "deleting", "deleted" or "delete_failed". */
   status: string;
+  current_generation_id?: string | null;
+  pending_generation_id?: string | null;
+  build_log_size?: number;
+  built_at?: string | null;
+  delete_last_error?: string;
+  created_at?: string;
+  updated_at?: string;
+  versions?: ImageArtifact[];
   [key: string]: unknown;
+}
+
+export type DeletionTargetType =
+  | "image"
+  | "assignment"
+  | "definition"
+  | "captured_image";
+
+export interface DeletionTarget {
+  target_type: DeletionTargetType;
+  target_id: string;
+}
+
+/** Everything a forced deletion would remove, and what blocks it. */
+export interface DeletionGraph {
+  fingerprint: string;
+  blockers: string[];
+  counts: { images: number; workspaces: number };
+  images: Array<{
+    id: string;
+    name: string;
+    owner_id: string | null;
+    owner_label?: string;
+    runner_id: string;
+  }>;
+  workspaces: Array<{
+    id: string;
+    name: string;
+    owner_id: string | null;
+    owner_label?: string;
+    runner_id: string;
+  }>;
+}
+
+export interface DeletionRequest extends DeletionTarget {
+  id: string;
+  mode: "deferred" | "force";
+  /** e.g. "waiting_dependency", "executing", "reconfirmation_required", "completed". */
+  phase: string;
+  diagnostic: string;
+  can_cancel: boolean;
+  approval: DeletionGraph;
+  fingerprint: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RunnerStorageWorkspace {
+  id: string;
+  name: string;
+  owner_id: string | null;
+  owner_label: string;
+  status: string;
+  observed_state?: string;
+  base_image_instance_id?: string | null;
+  pending_base_image_instance_id?: string | null;
+  allocated_bytes?: number | null;
+  last_activity_at: string | null;
+}
+
+export interface RunnerStorageResource {
+  physical_id: string;
+  kind: string;
+  managed: boolean;
+  state: string;
+  allocated_bytes: number | null;
+  logical_bytes: number | null;
+  virtual_bytes: number | null;
+  shared_bytes: number | null;
+  reclaimable_bytes: number | null;
+  aliases: string[];
+  dependencies: string[];
+  image_id: string | null;
+  workspace: RunnerStorageWorkspace | null;
+  provenance: string;
+}
+
+export interface RunnerStorageRuntime {
+  fresh: boolean;
+  snapshot_id: number | null;
+  collected_at: string | null;
+  received_at: string | null;
+  filesystems: Array<{
+    path: string;
+    capacity_bytes: number | null;
+    used_bytes: number | null;
+    available_bytes: number | null;
+  }>;
+  resources: RunnerStorageResource[];
+  diagnostics: {
+    complete: boolean;
+    errors: string[];
+    foreign_resource_count: number;
+    collected_at: string;
+  } | null;
+}
+
+/** One image generation on a runner and the workspaces that depend on it. */
+export interface RunnerStorageGeneration {
+  id: string;
+  name: string;
+  owner_label: string;
+  definition_id: string | null;
+  definition_name: string | null;
+  build_job_id: string | null;
+  generation: number | null;
+  captured_image_id?: string | null;
+  line_name?: string | null;
+  message?: string;
+  is_latest?: boolean;
+  retention?: ImageVersionRetention | null;
+  status: string;
+  assignment_status: string | null;
+  size_bytes: number | null;
+  size_source: string;
+  is_legacy: boolean;
+  is_current: boolean;
+  is_pending: boolean;
+  observed_state: string;
+  dependencies: RunnerStorageWorkspace[];
+}
+
+export interface RunnerActivity {
+  id: string;
+  kind: "operation" | "capture" | "recreate" | "deletion";
+  title: string;
+  target_name: string;
+  state: "attention" | "active" | "history";
+  outcome: string;
+  summary: string;
+  diagnostic: string;
+  operation_ids: string[];
+  created_at: string;
+}
+
+export interface RunnerStorage {
+  runner_id: string;
+  runner_online: boolean;
+  latest_snapshot_id: number | null;
+  latest_complete: boolean;
+  runtimes: RunnerStorageRuntime[];
+  generations: RunnerStorageGeneration[];
+  activities?: RunnerActivity[];
+}
+
+export type OperationDisposition =
+  | "reconcile"
+  | "retry"
+  | "acknowledge_interrupted";
+
+export interface OperationInspection {
+  operation_id: string;
+  status: string;
+  diagnostic: string;
+  review_message?: string;
+  phase: string;
+  permitted_actions: OperationDisposition[];
+  evidence: Record<string, unknown>;
 }
 
 /** Workspace from the latest version of a captured image; runner and resources come from it. */
@@ -344,32 +677,12 @@ export type {
   ScheduledTaskRun,
 } from "@opencuria/chat-core/scheduledTasks";
 
-export type AgentMode = "primary" | "subagent";
-export type EffortStrategy =
-  | "fixed"
-  | "inherit"
-  | "lowest"
-  | "medium"
-  | "highest";
-
-export interface AgentConfig {
-  agent: string;
-  mode: AgentMode;
-  description: string;
-  model: string;
-  effort: string;
-  inherit_model: boolean;
-  effort_strategy: EffortStrategy;
-}
-
-export interface AgentConfigInput {
-  agent: string;
-  description?: string;
-  model?: string;
-  effort?: string;
-  inherit_model?: boolean;
-  effort_strategy?: string;
-}
+export type {
+  AgentConfig,
+  AgentConfigInput,
+  AgentMode,
+  EffortStrategy,
+} from "@opencuria/chat-core/harnessAgents";
 
 export interface ProviderConfig {
   small_model: string;
@@ -381,6 +694,52 @@ export interface ProviderConfig {
 }
 
 export type ProviderConfigInput = Partial<ProviderConfig>;
+
+export type {
+  ChatGptOAuthStatus,
+  ProviderAccount,
+  ProviderAccountInput,
+  ProviderAccountProvider,
+} from "@opencuria/chat-core/providerAccounts";
+
+export interface ChatGptOAuthStart {
+  flow_id: string;
+  user_code: string;
+  verification_url: string;
+  /** Seconds between status polls. */
+  interval: number;
+  expires_in: number;
+}
+
+export interface ChatGptOAuthStartInput {
+  label?: string;
+  shared?: boolean;
+  /** Reconnect this existing account. */
+  account_id?: string;
+}
+
+/** Org-wide nesting limit for subagents (default 2). */
+export interface SubagentConfig {
+  max_depth: number;
+}
+
+/** Org-wide Computer Use limits and optional desktop recording. */
+export interface ComputerUseConfig {
+  max_steps: number;
+  enable_recording: boolean;
+  screenshot_max_dimension: number;
+}
+
+/** Organization voice capabilities, without a workspace. */
+export interface VoiceSettings {
+  available: boolean;
+  reason?: string;
+  models: Array<{ id: string; name: string }>;
+  default_model: string;
+  cleanup_model: string;
+  max_duration_ms: number;
+  max_audio_bytes: number;
+}
 
 export interface RecentModelUsage {
   model: string;

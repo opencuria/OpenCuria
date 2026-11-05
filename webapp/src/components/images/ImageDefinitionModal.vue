@@ -20,6 +20,11 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import type { ImageDefinition } from '@/types'
+import {
+  imageDefinitionPayload,
+  isImageDefinitionFormValid,
+  type ImageDefinitionForm,
+} from './imageDefinitionLifecycle'
 
 const props = withDefaults(
   defineProps<{
@@ -58,40 +63,20 @@ const distroOptions = [
 const title = computed(() =>
   props.imageDefinition ? 'Edit Image Definition' : 'Create Image Definition',
 )
-const baseDistro = computed(() =>
-  baseDistroPreset.value === '__custom__' ? customBaseDistro.value.trim() : baseDistroPreset.value,
-)
-const isValid = computed(
-  () =>
-    !!name.value.trim() &&
-    !!baseDistro.value.trim() &&
-    envVars.value.split('\n').every((line) => !line.trim() || line.indexOf('=') > 0),
-)
-
-function parseEnvVars(raw: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const idx = trimmed.indexOf('=')
-    if (idx <= 0) continue
-    out[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim()
-  }
-  return out
-}
+/** The modal's fields in the shared form shape. */
+const form = computed<ImageDefinitionForm>(() => ({
+  name: name.value,
+  description: description.value,
+  baseDistroPreset: baseDistroPreset.value === '__custom__' ? 'custom' : baseDistroPreset.value,
+  customBaseDistro: customBaseDistro.value,
+  packages: packages.value,
+  envVars: envVars.value,
+  customInitScript: customInitScript.value,
+}))
+const isValid = computed(() => isImageDefinitionFormValid(form.value))
 
 function payload(): Partial<ImageDefinition> {
-  return {
-    name: name.value.trim(),
-    description: description.value.trim(),
-    base_distro: baseDistro.value.trim(),
-    packages: packages.value
-      .split(',')
-      .map((v) => v.trim())
-      .filter(Boolean),
-    env_vars: parseEnvVars(envVars.value),
-    custom_init_script: customInitScript.value,
-  }
+  return imageDefinitionPayload(form.value)
 }
 
 watch(

@@ -30,6 +30,8 @@ export interface CreateWorkspaceSheetProps {
   onClose: () => void;
   /** The server accepted the workspace; it is provisioning now. */
   onCreated: (workspaceId: string) => Promise<void>;
+  /** Preselected image option, e.g. `captured:<latest version id>`. */
+  initialImageValue?: string;
 }
 
 function repoName(url: string): string {
@@ -56,9 +58,10 @@ function CreateSheet({
   organizationId,
   onClose,
   onCreated,
+  initialImageValue = "",
 }: CreateWorkspaceSheetProps): React.JSX.Element {
   const [name, setName] = useState("");
-  const [imageValue, setImageValue] = useState("");
+  const [imageValue, setImageValue] = useState(initialImageValue);
   const [runnerId, setRunnerId] = useState("");
   const [resources, setResources] = useState<QemuResources | null>(null);
   const [repos, setRepos] = useState<string[]>([]);

@@ -50,6 +50,7 @@ function setup(
     onConversationAction: jest.fn(),
     onAllWorkspaces,
     profileTitle: "Demo",
+    profileInitials: "D",
     onProfile: jest.fn(),
     ...overrides,
   };

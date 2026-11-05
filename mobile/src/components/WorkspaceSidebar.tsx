@@ -6,7 +6,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { KeyboardController } from "react-native-keyboard-controller";
@@ -20,8 +19,6 @@ import {
   Layers,
   MessageCircle,
   MessageCircleQuestion,
-  Plus,
-  Search,
   ShieldAlert,
   SquarePen,
 } from "lucide-react-native";
@@ -41,6 +38,12 @@ import { NativeContextMenu } from "../ui/ContextMenu";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { OpenCuriaMark } from "../ui/OpenCuriaMark";
 import { Banner } from "../ui/primitives";
+import {
+  AccountButton,
+  NewChatButton,
+  SidebarIconButton,
+  SidebarSearchField,
+} from "../ui/SidebarControls";
 import { useTheme, type OpenCuriaTheme } from "../ui/theme";
 
 /** Chat titles use the platform body size, as in the Claude app. */
@@ -72,7 +75,10 @@ export interface WorkspaceSidebarProps {
   scheduledTasks?: { count: number; running: boolean };
   onScheduledTasks?: () => void;
   onMarkAllRead?: () => void;
+  /** The signed-in user's name or email, spoken with the Settings control. */
   profileTitle: string;
+  /** Up to two letters on the Settings control, e.g. "AL". */
+  profileInitials: string;
   onProfile: () => void;
   error?: string | null;
   onDismissError?: () => void;
@@ -99,6 +105,7 @@ export function WorkspaceSidebar({
   onScheduledTasks,
   onMarkAllRead,
   profileTitle,
+  profileInitials,
   onProfile,
   error,
   onDismissError,
@@ -192,38 +199,14 @@ export function WorkspaceSidebar({
     >
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         {searching ? (
-          <>
-            <View
-              style={[
-                styles.searchField,
-                { backgroundColor: theme.controlFill },
-              ]}
-            >
-              <Search size={17} color={theme.mutedText} />
-              <TextInput
-                value={search}
-                onChangeText={setSearch}
-                autoFocus
-                placeholder="Search chats"
-                placeholderTextColor={theme.subtleText}
-                returnKeyType="search"
-                autoCorrect={false}
-                clearButtonMode="while-editing"
-                accessibilityLabel="Search workspaces and conversations"
-                style={[styles.searchInput, { color: theme.text }]}
-              />
-            </View>
-            <Pressable
-              accessibilityRole="button"
-              onPress={closeSearch}
-              hitSlop={8}
-              style={styles.cancel}
-            >
-              <Text style={[styles.cancelText, { color: theme.text }]}>
-                Cancel
-              </Text>
-            </Pressable>
-          </>
+          <SidebarSearchField
+            value={search}
+            onChange={setSearch}
+            onCancel={closeSearch}
+            placeholder="Search chats"
+            accessibilityLabel="Search workspaces and conversations"
+            testID="sidebar-search-field"
+          />
         ) : (
           <>
             <View style={styles.brand} accessibilityRole="header">
@@ -232,13 +215,12 @@ export function WorkspaceSidebar({
                 OpenCuria
               </Text>
             </View>
-            <CircleButton
+            <SidebarIconButton
+              symbol="magnifyingglass"
               label="Search chats"
               onPress={() => setSearching(true)}
-              theme={theme}
-            >
-              <Search size={21} color={theme.text} />
-            </CircleButton>
+              testID="sidebar-search"
+            />
           </>
         )}
       </View>
@@ -397,36 +379,17 @@ export function WorkspaceSidebar({
           },
         ]}
       >
-        <CircleButton
-          label={`Account and settings, ${profileTitle}`}
+        <AccountButton
+          initials={profileInitials}
+          label={`Settings, ${profileTitle}`}
           onPress={onProfile}
-          theme={theme}
-          size={48}
           testID="drawer-profile"
-        >
-          <Text style={[styles.avatarText, { color: theme.text }]}>
-            {profileTitle.slice(0, 1).toUpperCase()}
-          </Text>
-        </CircleButton>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="New chat"
-          accessibilityState={{ disabled: !canCreate }}
-          disabled={!canCreate}
+        />
+        <NewChatButton
           onPress={onCreate}
+          disabled={!canCreate}
           testID="drawer-new-chat"
-          style={({ pressed }) => [
-            styles.newChat,
-            { backgroundColor: theme.text },
-            !canCreate && styles.disabled,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Plus size={20} color={theme.background} />
-          <Text style={[styles.newChatText, { color: theme.background }]}>
-            New chat
-          </Text>
-        </Pressable>
+        />
       </View>
     </View>
   );
@@ -747,44 +710,6 @@ function HeaderAction({
   );
 }
 
-function CircleButton({
-  label,
-  onPress,
-  theme,
-  size = 44,
-  testID,
-  children,
-}: React.PropsWithChildren<{
-  label: string;
-  onPress: () => void;
-  theme: OpenCuriaTheme;
-  size?: number;
-  testID?: string;
-}>): React.JSX.Element {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      onPress={onPress}
-      testID={testID}
-      android_ripple={{ color: theme.controlFill, foreground: true }}
-      style={({ pressed }) => [
-        styles.circle,
-        {
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: theme.raised,
-          borderColor: theme.border,
-        },
-        pressed && styles.pressed,
-      ]}
-    >
-      {children}
-    </Pressable>
-  );
-}
-
 function attentionLabel(conversation: HarnessConversation): string {
   if (conversation.attention_kind === "question") return "Question waiting";
   if (conversation.attention_kind === "permission")
@@ -806,18 +731,6 @@ const styles = StyleSheet.create({
   },
   brand: { flex: 1, flexDirection: "row", alignItems: "center", gap: 10 },
   brandText: { fontSize: 26, fontWeight: "700", letterSpacing: -0.4 },
-  searchField: {
-    flex: 1,
-    height: 44,
-    borderRadius: 22,
-    paddingHorizontal: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  searchInput: { flex: 1, fontSize: 16, paddingVertical: 0 },
-  cancel: { height: 44, justifyContent: "center" },
-  cancelText: { fontSize: 16 },
   notice: { paddingHorizontal: 12, paddingBottom: 8 },
   row: {
     minHeight: 46,
@@ -898,23 +811,5 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
   },
-  circle: {
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  avatarText: { fontSize: 18, fontWeight: "600" },
-  newChat: {
-    height: 48,
-    borderRadius: 24,
-    paddingLeft: 18,
-    paddingRight: 22,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  newChatText: { fontSize: 16, fontWeight: "600" },
   disabled: { opacity: 0.35 },
-  pressed: { opacity: 0.7 },
 });

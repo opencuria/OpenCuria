@@ -8,11 +8,16 @@ Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.
 - Attach photos, camera images and documents; preview supported workspace files. Chat and workspace data remain on the server.
 - Plan scheduled tasks: an agenda of upcoming runs, creating and editing tasks (once, at set times, intervals or cron), Run now, pause/resume, deletion and each run's chat. A drafted prompt can be scheduled from the chat menu.
 - Receive optional native push notifications for finished/failed runs and pending approvals/questions. On iOS, follow running agents on the Lock Screen and Dynamic Island with Live Activities.
-- Sign in to an existing server. The app does **not** create/delete workspaces or provide workspace CRUD or offline chat/queue/replay. Chat refreshes from REST when brought back to the foreground; push delivery does not replay missed chat events.
+- Change every setting the webapp offers: provider accounts (including ChatGPT device login), small, voice and agent models, Computer Use limits, skills, plugins, credentials and credential services, API keys, the workspace policy, captured images, image definitions and runners, plus organization, appearance and notifications. Admin-only areas follow the organization role. MCP OAuth credentials finish connecting in the webapp in the browser, because the server binds that flow to a browser session.
+- Sign in to an existing server. The app has no offline chat/queue/replay. Chat refreshes from REST when brought back to the foreground; push delivery does not replay missed chat events.
 
 ## Native interface
 
 Buttons, selection rows, model/engine pickers and lists use platform controls via `@expo/ui`. Menus use `@react-native-menu/menu` (`UIMenu` / Android popup menus); no Expo bottom-sheet component is used. Modal screens use the OS presentation and native navigation bars. Chat pictures open full screen, as in messaging apps: back and share in the native bar, swipe through every picture of the chat, thumbnails below. PDFs open in the platform document view (PDFKit on iOS, `PdfRenderer` on Android; `modules/opencuria-pdf`) with continuous pages and zoom. On iPhone and Android the sidebar slides in beneath the chat as in the Claude app; iPad keeps `NavigationSplitView`. The composer uses a native `UITextView` / `EditText`, with interactive `expo-glass-effect` liquid glass on supported iOS versions and a Material surface on Android. `react-native-keyboard-controller` keeps the composer on top of the keyboard and lets the keyboard follow the finger when the transcript or the composer is dragged down.
+
+Search, Settings and New chat in the sidebar are SwiftUI buttons with liquid glass on iOS 26 (bordered before) and Material buttons on Android; searching shows a native SwiftUI text field in a glass capsule on iOS and a Material docked search bar on Android.
+
+Settings follow ChatGPT's layout: the account's initials and name, an organization card, then grouped pages with large section titles. On iOS it is a SwiftUI `NavigationStack` with `Form` pages, `NavigationLink` rows, system pickers, toggles, steppers and secure fields, and liquid-glass bar buttons; on Android the same pages are Material 3 lists with a toolbar and back stack. Every page is described once as `NativeForm` sections (`src/settings/`).
 
 The sidebar shares workspace eligibility, inbox and sorting rules with the webapp through `@opencuria/chat-core/conversationGroups`. Each workspace initially shows four recent chats, with independent four-chat pagination. Closing navigation retains pagination and collapsed groups; switching organization resets them. Stopped workspaces remain accessible through All workspaces.
 
@@ -56,6 +61,7 @@ For an iOS simulator on a Mac, from `mobile/` run `APP_VARIANT=development EXPO_
 - `src/state/chatController.ts` — REST hydration, live subscriptions, chat state and immutable snapshots for React.
 - `src/components/`, `src/ui/` — native chat presentation and controls.
 - `src/scheduledTasks/` — scheduled-task agenda, editor and run history.
+- `src/settings/` — the settings sheet, its navigation stack and one page per settings area (see its README).
 - `src/platform/` — secure token storage, camera/document pickers, authenticated uploads and bounded temporary media cache.
 - `src/notifications/`, `src/widgets/` — device consent, native push tokens, notification navigation and the iOS Live Activity layout.
 - `packages/chat-core/`, `packages/client/` — framework-neutral shared chat helpers/protocol and the real REST/Socket.IO client used by the web and native clients.

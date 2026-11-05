@@ -31,6 +31,8 @@ interface SessionContextValue {
   retry: () => Promise<void>;
   signOut: () => Promise<void>;
   selectOrganization: (id: string) => Promise<void>;
+  /** Creates an organization and switches to it. */
+  createOrganization: (name: string) => Promise<void>;
   registerResource: RegisterResource;
   registerSignOutCleanup: (cleanup: () => Promise<void>) => () => void;
   registerForegroundRefresh: (
@@ -457,15 +459,11 @@ export function SessionProvider({
     }
   }, [disposeScope, revokeDevices, setCurrentSession]);
 
-  const selectOrganization = useCallback(
+  /** Switches the session to `id`; the fresh profile must list it. */
+  const switchOrganization = useCallback(
     async (id: string) => {
       const current = sessionRef.current;
-      if (
-        !current ||
-        !organizations.some((organization) => organization.id === id) ||
-        current.organizationId === id
-      )
-        return;
+      if (!current || current.organizationId === id) return;
       if (!(await revokeDevices())) return;
       const generation = ++generationRef.current;
       disposeScope();
@@ -494,14 +492,25 @@ export function SessionProvider({
         if (generation === generationRef.current) setBooting(false);
       }
     },
-    [
-      disposeScope,
-      makeClient,
-      organizations,
-      readProfile,
-      revokeDevices,
-      setCurrentSession,
-    ],
+    [disposeScope, makeClient, readProfile, revokeDevices, setCurrentSession],
+  );
+
+  const selectOrganization = useCallback(
+    async (id: string) => {
+      if (!organizations.some((organization) => organization.id === id)) return;
+      await switchOrganization(id);
+    },
+    [organizations, switchOrganization],
+  );
+
+  const createOrganization = useCallback(
+    async (name: string) => {
+      const active = clientRef.current;
+      if (!active) throw new Error("Sign in to create an organization.");
+      const created = await active.organizations.create(name);
+      await switchOrganization(created.id);
+    },
+    [switchOrganization],
   );
 
   const clearError = useCallback(() => setError(null), []);
@@ -518,6 +527,7 @@ export function SessionProvider({
       retry,
       signOut,
       selectOrganization,
+      createOrganization,
       registerResource,
       registerSignOutCleanup,
       registerForegroundRefresh,
@@ -535,6 +545,7 @@ export function SessionProvider({
       retry,
       signOut,
       selectOrganization,
+      createOrganization,
       registerResource,
       registerSignOutCleanup,
       registerForegroundRefresh,

@@ -1627,3 +1627,185 @@ describe("workspace tools", () => {
     ]);
   });
 });
+
+describe("settings API", () => {
+  function recordingFetch(
+    respond: (url: string, init?: RequestInit) => Response = () =>
+      new Response(null, { status: 204 }),
+  ) {
+    return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      respond(String(input), init),
+    );
+  }
+  const calls = (fetch: ReturnType<typeof recordingFetch>) =>
+    fetch.mock.calls.map(([input, init]) => [
+      String(input).replace("https://api.example/api/v1", ""),
+      init?.method ?? "GET",
+      init?.body ? JSON.parse(String(init.body)) : undefined,
+    ]);
+
+  it("manages provider accounts with encoded ids and an explicit empty selection", async () => {
+    const fetch = recordingFetch(() => jsonResponse({ id: "a/b" }));
+    const client = clientOptions().create(fetch);
+    await client.providerAccounts.create("openrouter", {
+      label: "Work",
+      shared: true,
+      api_key: "sk-or-1",
+    });
+    await client.providerAccounts.update("amazon-bedrock", "a/b", {
+      label: "AWS",
+      shared: false,
+      auth_method: "bearer",
+      bearer_token: "",
+    });
+    await client.providerAccounts.select("chatgpt", null);
+    await client.providerAccounts.delete("claude-agent", "a/b");
+    expect(calls(fetch)).toEqual([
+      [
+        "/provider-config/accounts/openrouter/",
+        "POST",
+        { label: "Work", shared: true, api_key: "sk-or-1" },
+      ],
+      [
+        "/provider-config/accounts/amazon-bedrock/a%2Fb/",
+        "PUT",
+        {
+          label: "AWS",
+          shared: false,
+          auth_method: "bearer",
+          bearer_token: "",
+        },
+      ],
+      ["/provider-config/selection/chatgpt/", "PUT", { account_id: null }],
+      ["/provider-config/accounts/claude-agent/a%2Fb/", "DELETE", undefined],
+    ]);
+  });
+
+  it("maps expired, denied and unknown ChatGPT device logins to statuses", async () => {
+    const responses = [
+      jsonResponse({ status: "pending" }),
+      jsonResponse({ status: "denied", account_id: "" }, 410),
+      jsonResponse({ detail: "gone" }, 410),
+      jsonResponse({ detail: "No flow" }, 404),
+      jsonResponse({ detail: "Upstream failed", code: "oauth" }, 502),
+    ];
+    const fetch = recordingFetch(() => responses.shift()!);
+    const client = clientOptions().create(fetch);
+    const status = () => client.providerAccounts.chatGptOAuthStatus("f 1");
+    await expect(status()).resolves.toEqual({ status: "pending" });
+    await expect(status()).resolves.toMatchObject({ status: "denied" });
+    await expect(status()).resolves.toMatchObject({ status: "expired" });
+    await expect(status()).resolves.toMatchObject({ status: "no_flow" });
+    await expect(status()).rejects.toMatchObject({
+      status: 502,
+      message: "Upstream failed",
+    });
+    expect(calls(fetch)[0]![0]).toBe(
+      "/provider-config/providers/chatgpt/oauth/status/?flow_id=f%201",
+    );
+  });
+
+  it("covers credentials, services, plugins, API keys and organization policy", async () => {
+    const fetch = recordingFetch(() => jsonResponse({}));
+    const client = clientOptions().create(fetch);
+    await client.credentials.create({
+      service_id: "svc",
+      value: "secret",
+      organization_credential: true,
+    });
+    await client.credentials.update("c1", { name: "Renamed" });
+    await client.credentials.publicKey("c1");
+    await client.credentials.disconnectOAuth("c1");
+    await client.credentialServices.setActive("svc", false);
+    await client.plugins.setActive("p1", true);
+    await client.plugins.update("p1", { name: "Tools", skills: null });
+    await client.apiKeys.create({
+      name: "n8n",
+      expires_at: "2026-12-31T23:59:00Z",
+      permissions: [],
+    });
+    await client.apiKeys.updatePermissions("k1", ["skills:read"]);
+    await client.apiKeys.revoke("k1");
+    await client.organizations.updateWorkspacePolicy("org-a", {
+      workspace_auto_stop_timeout_minutes: null,
+      image_versions_to_keep: 3,
+    });
+    await client.agentSettings.saveComputerUseConfig({ max_steps: 20 });
+    expect(calls(fetch)).toEqual([
+      [
+        "/credentials/",
+        "POST",
+        { service_id: "svc", value: "secret", organization_credential: true },
+      ],
+      ["/credentials/c1/", "PATCH", { name: "Renamed" }],
+      ["/credentials/c1/public-key/", "GET", undefined],
+      ["/credentials/c1/oauth/disconnect/", "DELETE", undefined],
+      ["/org-credential-services/svc/activation/", "POST", { active: false }],
+      ["/plugins/p1/activation/", "POST", { active: true }],
+      ["/plugins/p1/", "PATCH", { name: "Tools", skills: null }],
+      [
+        "/auth/api-keys/",
+        "POST",
+        { name: "n8n", expires_at: "2026-12-31T23:59:00Z", permissions: [] },
+      ],
+      ["/auth/api-keys/k1/", "PATCH", { permissions: ["skills:read"] }],
+      ["/auth/api-keys/k1/", "DELETE", undefined],
+      [
+        "/organizations/org-a/workspace-policy/",
+        "PATCH",
+        {
+          workspace_auto_stop_timeout_minutes: null,
+          image_versions_to_keep: 3,
+        },
+      ],
+      ["/computer-use-config/", "PUT", { max_steps: 20 }],
+    ]);
+  });
+
+  it("drives runners, image builds and deletions", async () => {
+    const fetch = recordingFetch((url) =>
+      url.endsWith("/metrics/latest/")
+        ? jsonResponse({ detail: "No metrics" }, 404)
+        : jsonResponse({}),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(client.runners.latestMetrics("r1")).resolves.toBeNull();
+    await client.runners.update("r1", { qemu_max_active_vcpus: null });
+    await client.runners.disposeOperation("op 1", "acknowledge_interrupted");
+    await client.images.updateRunnerBuild("d1", "r1", {
+      action: "rebuild",
+      message: "Added Playwright",
+    });
+    await client.images.duplicateDefinition("d1");
+    await client.deletions.request(
+      { target_type: "captured_image", target_id: "img" },
+      "force",
+      "fp",
+    );
+    expect(calls(fetch)).toEqual([
+      ["/runners/r1/metrics/latest/", "GET", undefined],
+      ["/runners/r1/", "PATCH", { qemu_max_active_vcpus: null }],
+      [
+        "/runners/operations/op%201/acknowledge_interrupted/",
+        "POST",
+        undefined,
+      ],
+      [
+        "/image-definitions/d1/runner-builds/r1/",
+        "PATCH",
+        { action: "rebuild", message: "Added Playwright" },
+      ],
+      ["/image-definitions/d1/duplicate/", "POST", {}],
+      [
+        "/image-artifacts/deletions/",
+        "POST",
+        {
+          target_type: "captured_image",
+          target_id: "img",
+          mode: "force",
+          fingerprint: "fp",
+        },
+      ],
+    ]);
+  });
+});

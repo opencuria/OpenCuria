@@ -18,7 +18,7 @@ export default function RootLayout(): React.JSX.Element {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider initialMetrics={initialWindowMetrics}>
         <KeyboardProvider>
-          <ThemeProvider initialMode="system">
+          <ThemeProvider initialMode="system" persist>
             <NativeStatusBar />
             <SessionProvider>
               <NotificationProvider>
