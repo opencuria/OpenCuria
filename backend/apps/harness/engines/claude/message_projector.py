@@ -20,6 +20,7 @@ from claude_agent_sdk.types import Message
 from ...agents.definitions import canonical_subagent_type
 from ...providers.base import Usage
 from ...redaction import redact_text
+from ..base import RunOptions
 from .events import ClaudeEventNormalizer, StepState
 from .runtime_state import CLI_TOTAL_COST_KEY
 
@@ -61,6 +62,12 @@ class ClaudeMessageProjector:
             return None
         if isinstance(message, TaskStartedMessage):
             data = message.data if isinstance(message.data, dict) else {}
+            run = engine._workflow_runs.get(str(message.tool_use_id or ""))
+            if run is not None:
+                # Remember the run's task id; later task updates may omit
+                # the Workflow call id.
+                run.task_id = str(message.task_id or "")
+                return None
             await self.start_subtask(
                 str(message.task_id or ""),
                 str(message.tool_use_id or ""),
@@ -226,6 +233,11 @@ class ClaudeMessageProjector:
         """Project SDK task progress while its parent task remains active."""
         engine = self.engine
         task = str(message.task_id or "")
+        workflow = self._workflow_call(task, str(message.tool_use_id or ""))
+        if workflow:
+            data = message.data if isinstance(message.data, dict) else {}
+            await self.handle_workflow_progress(workflow, data.get("workflow_progress"))
+            return
         parent_tool = self._subtask_tool(
             task, str(getattr(message, "tool_use_id", None) or "")
         )
@@ -251,16 +263,14 @@ class ClaudeMessageProjector:
         """Map task notifications to one terminal subtask status."""
         engine = self.engine
         task = str(message.task_id or "")
+        status = self._terminal_status(str(message.status or ""))
+        workflow = self._workflow_call(task, str(message.tool_use_id or ""))
+        if workflow:
+            await self.close_workflow(workflow, status, str(message.summary or ""))
+            return
         tool = self._subtask_tool(task, str(message.tool_use_id or ""))
         if not tool or task in engine._finished_subtasks:
             return
-        status = (
-            "completed"
-            if message.status == "completed"
-            else "aborted"
-            if message.status in {"stopped", "killed"}
-            else "error"
-        )
         await self.finish_sdk_subtask(task, tool, status, str(message.summary or ""))
 
     async def handle_task_updated(self, message: Any) -> None:
@@ -282,15 +292,18 @@ class ClaudeMessageProjector:
         if status not in {"completed", "failed", "killed", "stopped"}:
             return
         task = str(data.get("task_id") or "")
+        status = self._terminal_status(str(patch.get("status") or ""))
+        workflow = self._workflow_call(task, str(data.get("tool_use_id") or ""))
+        if workflow:
+            await self.close_workflow(
+                workflow,
+                status,
+                ClaudeEventNormalizer.tool_output(
+                    patch.get("result") or patch.get("error")
+                ),
+            )
+            return
         tool = self._subtask_tool(task, str(data.get("tool_use_id") or ""))
-        terminal_status = str(patch.get("status") or "")
-        status = (
-            "completed"
-            if terminal_status == "completed"
-            else "aborted"
-            if terminal_status in {"killed", "stopped"}
-            else "error"
-        )
         if not tool:
             return
         if task in engine._finished_subtasks:
@@ -306,6 +319,88 @@ class ClaudeMessageProjector:
                 patch.get("result") or patch.get("error")
             ),
         )
+
+    @staticmethod
+    def _terminal_status(value: str) -> str:
+        """Map an SDK terminal task status to a subtask status."""
+        if value == "completed":
+            return "completed"
+        if value in {"killed", "stopped"}:
+            return "aborted"
+        return "error"
+
+    def _workflow_call(self, task: str, tool: str) -> str:
+        """Return the authorized Workflow call a task frame belongs to."""
+        runs = self.engine._workflow_runs
+        if tool in runs:
+            return tool
+        if not task:
+            return ""
+        return next((call for call, run in runs.items() if run.task_id == task), "")
+
+    async def start_workflow_agent(self, agent_id: str) -> None:
+        """Admit a dynamic-workflow agent under the latest authorized Workflow.
+
+        SubagentStart names no workflow, so an agent is admitted only while a
+        root Workflow call OpenCuria authorized is running; otherwise it stays
+        unmapped and its tool calls fail closed. It runs with the general
+        subagent's scope and is keyed by its own agent id, because one
+        Workflow call fans out to many agents with separate transcripts.
+        """
+        engine = self.engine
+        if (
+            not agent_id
+            or agent_id in engine._started_subtasks
+            or agent_id in engine._finished_subtasks
+            or not engine._workflow_runs
+        ):
+            return
+        run = engine._workflow_runs[next(reversed(engine._workflow_runs))]
+        run.agents.append(agent_id)
+        options = engine._options or RunOptions()
+        engine._agent_parent_tool[agent_id] = agent_id
+        engine._agent_kind[agent_id] = "general"
+        engine._agent_type_raw[agent_id] = "general"
+        engine._agent_depth[agent_id] = options.depth + 1
+        engine._started_subtasks.add(agent_id)
+        await engine._send(
+            {
+                "type": "subtask_started",
+                "subtask_id": agent_id,
+                "child_session_id": "",
+                "agent": "general",
+                "description": f"{run.label or 'Workflow'} · agent {len(run.agents)}",
+                "model": engine._model,
+                "parent_tool_use_id": agent_id,
+            }
+        )
+
+    async def handle_workflow_progress(self, workflow: str, entries: Any) -> None:
+        """Finish workflow agents the run reports as done or failed."""
+        run = self.engine._workflow_runs.get(workflow)
+        if run is None or not isinstance(entries, list):
+            return
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "workflow_agent":
+                continue
+            agent_id = str(entry.get("agentId") or "")
+            state = str(entry.get("state") or "")
+            if agent_id not in run.agents or state not in {"done", "error"}:
+                continue
+            await self.finish_sdk_subtask(
+                agent_id,
+                agent_id,
+                "completed" if state == "done" else "error",
+                str(entry.get("resultPreview") or entry.get("error") or ""),
+            )
+
+    async def close_workflow(self, workflow: str, status: str, summary: str) -> None:
+        """End a Workflow run and settle agents that reported no outcome."""
+        run = self.engine._workflow_runs.pop(workflow, None)
+        if run is None:
+            return
+        for agent_id in run.agents:
+            await self.finish_sdk_subtask(agent_id, agent_id, status, summary)
 
     async def finish_sdk_subtask(
         self, task: str, tool: str, status: str, summary: str

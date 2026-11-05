@@ -20,6 +20,8 @@ from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_claude_engine import (
     FixtureSessionStore,
     WriteNoteTool,
+    _api_final_message,
+    _api_tool_message,
     _run_local_cli_fixture,
 )
 from apps.harness.tests.test_claude_engine import (
@@ -756,3 +758,157 @@ async def test_real_cli_max_steps_uses_turn_limit_and_records_tool_completion(
         accessor.opened[0]["argv"][accessor.opened[0]["argv"].index("--max-turns") + 1]
         == "1"
     )
+
+
+_WORKFLOW_SCRIPT = """export const meta = {
+  name: 'count-notes', description: 'Count notes', phases: [{ title: 'Count' }],
+}
+phase('Count')
+return await parallel([
+  () => agent('WORKFLOW-AGENT-A read a.txt', { label: 'count-a' }),
+  () => agent('WORKFLOW-AGENT-B read b.txt', { label: 'count-b' }),
+])
+"""
+
+
+def _ultracode_responder(payload: dict[str, Any], index: int) -> bytes:
+    """Root launches one Workflow; each of its two agents reads one file."""
+    messages = payload.get("messages") or []
+    history = json.dumps(messages)
+    first = json.dumps(messages[:1])
+    tools = {str(item.get("name") or "") for item in payload.get("tools") or []}
+    for marker, name in (("WORKFLOW-AGENT-A", "a.txt"), ("WORKFLOW-AGENT-B", "b.txt")):
+        if marker in first:
+            if '"tool_result"' in history:
+                return _api_final_message(f"agent-{index}")
+            return _api_tool_message(
+                "Read",
+                f"read-{marker[-1]}-{index}",
+                {"file_path": f"/workspace/{name}"},
+            )
+    if "Workflow" in tools and '"tool_result"' not in history:
+        return _api_tool_message(
+            "Workflow", "workflow-call", {"script": _WORKFLOW_SCRIPT}
+        )
+    return _api_final_message(f"root-{index}")
+
+
+@pytest.mark.asyncio
+async def test_real_cli_ultracode_projects_each_workflow_agent_as_scoped_child(
+    tmp_path: Path,
+) -> None:
+    """Ultracode offers Workflow and admits its agents with general scope."""
+    _require_pinned_cli()
+    child_events: list[tuple[str, dict[str, Any]]] = []
+    (
+        result,
+        events,
+        _questions,
+        requests,
+        _permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="",
+        tool_arguments={},
+        tools=default_tool_registry(),
+        prompt="Count both notes.",
+        cwd="/workspace",
+        effort="ultracode",
+        responder=_ultracode_responder,
+        child_events=child_events,
+        fixture_files={"a.txt": b"one\ntwo\n", "b.txt": b"three\n"},
+    )
+
+    argv = accessor.opened[0]["argv"]
+    assert argv[argv.index("--effort") + 1] == "ultracode"
+    assert "Workflow" in argv[argv.index("--tools") + 1].split(",")
+    assert result.metadata["reasoning_effort"] == "ultracode"
+    assert result.output == "fixture answer"
+
+    # The streamed tool_use is queued before its input arrives; the hook-time
+    # start carries the resolved title.
+    workflow = [
+        event
+        for event in events
+        if event.get("type") == "tool_started"
+        and event.get("call_id") == "workflow-call"
+    ]
+    assert workflow and workflow[0]["title"] == "Workflow: count-notes"
+    assert any(
+        event.get("type") == "tool_completed"
+        and event.get("call_id") == "workflow-call"
+        for event in events
+    )
+
+    started = [event for event in events if event.get("type") == "subtask_started"]
+    finished = [event for event in events if event.get("type") == "subtask_finished"]
+    agent_ids = {event["subtask_id"] for event in started}
+    assert len(agent_ids) == 2
+    assert all(event["agent"] == "general" for event in started)
+    assert all(event["parent_tool_use_id"] == event["subtask_id"] for event in started)
+    assert {event["description"] for event in started} == {
+        "count-notes · agent 1",
+        "count-notes · agent 2",
+    }
+    assert {event["subtask_id"] for event in finished} == agent_ids
+    assert all(event["status"] == "completed" for event in finished)
+
+    # Each agent's Read passes OpenCuria's gate in its own child transcript
+    # (the host-side fixture CLI then reports the guest path as missing).
+    reads = [
+        (parent, event)
+        for parent, event in child_events
+        if event.get("type") == "tool_started"
+        and str(event.get("call_id", "")).startswith("read-")
+    ]
+    assert {parent for parent, _event in reads} == agent_ids
+    assert not [
+        event
+        for _parent, event in child_events
+        if event.get("type") == "tool_error"
+        and any(
+            reason in str(event.get("error", ""))
+            for reason in ("Unmapped", "Denied", "unavailable")
+        )
+    ]
+    agent_requests = [
+        request
+        for request in requests
+        if "WORKFLOW-AGENT" in json.dumps(request["messages"][:1])
+    ]
+    assert len(agent_requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_real_cli_without_ultracode_does_not_offer_workflow(
+    tmp_path: Path,
+) -> None:
+    """Other efforts keep Workflow out of the CLI tool allowlist."""
+    _require_pinned_cli()
+    (
+        result,
+        _events,
+        _questions,
+        requests,
+        _permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="",
+        tool_arguments={},
+        tools=default_tool_registry(),
+        prompt="Answer fixture without calling tools.",
+        cwd="/workspace",
+        effort="max",
+    )
+    argv = accessor.opened[0]["argv"]
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert "Workflow" not in argv[argv.index("--tools") + 1].split(",")
+    assert all(
+        "Workflow" not in {str(tool.get("name")) for tool in request.get("tools") or []}
+        for request in requests
+    )
+    assert result.output == "fixture answer"

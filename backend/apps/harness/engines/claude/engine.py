@@ -37,16 +37,23 @@ from ..base import RunOptions, RunResult
 from ..catalog import (
     CLAUDE_AGENT_SDK_VERSION,
     CLAUDE_CODE_CLI_VERSION,
+    CLAUDE_ULTRACODE_EFFORT,
+    claude_model_effort,
     normalize_claude_effort,
     resolve_claude_sdk_model,
 )
 from .errors import ClaudeTranscriptError
-from .events import ClaudeEventNormalizer, StepState
+from .events import ClaudeEventNormalizer, StepState, WorkflowRun
 from .mcp_bridge import mcp_attachment_content, sanitize_mcp_attachments
 from .message_projection import FileSnapshot, NativeFileChangeTracker
 from .message_projector import ClaudeMessageProjector
 from .permissionbridge import PermissionBridge
-from .policy import NATIVE_TOOL_KEYS, native_tools_for_claude, tool_schemas_for_claude
+from .policy import (
+    NATIVE_TOOL_KEYS,
+    native_tools_for_claude,
+    tool_schemas_for_claude,
+    workflow_label,
+)
 from .runtime_state import (
     CLI_TOTAL_COST_KEY,
     MANAGED_STATE_PREFIX,
@@ -112,6 +119,8 @@ class ClaudeEngine:
         if self._artifact_ensurer is not None and not callable(self._artifact_ensurer):
             raise TypeError("runtime_artifact_ensurer must be callable")
         self._default_effort = normalize_claude_effort(effort)
+        # Set per run: only an ultracode run offers the root Workflow tool.
+        self._ultracode = False
         self._options: RunOptions | None = None
         self._image_history: list[LLMMessage] = []
         self._agent: AgentDefinition | None = None
@@ -144,6 +153,7 @@ class ClaudeEngine:
         self._subtask_terminal_summary: dict[str, str] = {}
         self._stopped_subagents: set[str] = set()
         self._pending_task_tool_ids: set[str] = set()
+        self._workflow_runs: dict[str, WorkflowRun] = {}
         self._root_text: list[str] = []
         self._root_reasoning: list[str] = []
         self._stream_redactors: dict[tuple[str, str, int, str], StreamingRedactor] = {}
@@ -831,6 +841,14 @@ class ClaudeEngine:
         self._step_states.setdefault(parent_id or "", StepState()).active_calls.add(
             call_id
         )
+        if state.get("source_tool") == "Workflow" and not parent_id:
+            # Authorized and executing: its background agents may be admitted.
+            self._workflow_runs[call_id] = WorkflowRun(
+                label=redact_text(
+                    workflow_label(self._tool_arguments.get(call_id, {})),
+                    self._event_secrets(),
+                )
+            )
         await self._publish(
             {
                 "type": "tool_started",
@@ -906,6 +924,10 @@ class ClaudeEngine:
         self._early_queued_calls.discard(call_id)
         self._tool_arguments.pop(call_id, None)
         self._tool_results.pop(call_id, None)
+        run = self._workflow_runs.get(call_id)
+        if run is not None and not run.agents:
+            # A failed Workflow call launched nothing to admit.
+            self._workflow_runs.pop(call_id, None)
         if state is None:
             self._clear_native_snapshot(call_id)
             return
@@ -1422,6 +1444,7 @@ class ClaudeEngine:
         self._subtask_terminal_summary.clear()
         self._stopped_subagents.clear()
         self._pending_task_tool_ids.clear()
+        self._workflow_runs.clear()
         self._root_text.clear()
         self._root_reasoning.clear()
         self._child_text.clear()
@@ -1477,6 +1500,7 @@ class ClaudeEngine:
             or getattr(options, "claude_effort", "")
             or self._default_effort
         )
+        self._ultracode = effort == CLAUDE_ULTRACODE_EFFORT
         settings = self._runtime_state.settings(mode)
         settings_path = f"{root}/settings.json"
         await self._runtime_state.write_managed_file(
@@ -1501,6 +1525,7 @@ class ClaudeEngine:
                 depth=depth,
                 max_depth=max_depth,
                 selected_skills=list(self._managed_skill_names),
+                ultracode=self._ultracode,
             ),
             external_session_id=self.external_session_id,
             fresh_session_id=transcript,
@@ -1530,6 +1555,7 @@ class ClaudeEngine:
             depth=depth,
             max_depth=max_depth,
             selected_skills=list(self._managed_skill_names),
+            ultracode=self._ultracode,
         )
         self._runtime_state.auth_env = self.auth_env
         mirror_env = self._runtime_state.cli_environment(config)
@@ -1554,7 +1580,9 @@ class ClaudeEngine:
             strict_mcp_config=True,
             settings=settings_path,
             model=self._model,
-            effort=effort,
+            # The CLI argv carries ``--effort ultracode``; the SDK option is
+            # typed to model efforts, so give it the level the CLI runs at.
+            effort=claude_model_effort(effort),
             max_turns=max_turns,
             permission_mode="plan" if mode == "plan" else "default",
             system_prompt=self._runtime_state.sdk_system_prompt(),
@@ -1881,6 +1909,8 @@ class ClaudeEngine:
                     )
                 else:
                     await self._finish_subtask_from_tool(call_id, reason, "error")
+        for call_id in list(self._workflow_runs):
+            await self._message_projector.close_workflow(call_id, "error", reason)
 
     def _reconcile_closed_root_usage(
         self, root: StepState | None, usage: Usage

@@ -8,6 +8,7 @@ from apps.harness.engines.catalog import (
     CLAUDE_AGENT_SDK_VERSION,
     CLAUDE_CODE_CLI_VERSION,
     ENGINE_IDS,
+    claude_model_effort,
     list_claude_models,
     normalize_claude_effort,
     normalize_claude_model,
@@ -36,6 +37,14 @@ def test_claude_catalog_is_separate_and_constrained() -> None:
         "claude-opus-4-6-20250514"
     )
     assert normalize_claude_effort(" HIGH ") == "high"
+    assert normalize_claude_effort("Ultracode") == "ultracode"
+    assert claude_model_effort("ultracode") == "xhigh"
+    assert claude_model_effort("max") == "max"
+    assert all(
+        model.reasoning_efforts
+        == ("low", "medium", "high", "xhigh", "max", "ultracode")
+        for model in models
+    )
     for bad in ("", "openrouter/anthropic/claude", "some-random-model"):
         with pytest.raises(ValueError):
             normalize_claude_model(bad)
@@ -78,9 +87,12 @@ def test_transcript_batches_are_ordered_encrypted_and_idempotent(
     assert first.id == duplicate.id
     assert first.position == 0
     assert second.position == 1
-    assert HarnessEngineRepository.get_transcript_mtime(
-        session.id, external_session_id="sdk-session-123"
-    ) is not None
+    assert (
+        HarnessEngineRepository.get_transcript_mtime(
+            session.id, external_session_id="sdk-session-123"
+        )
+        is not None
+    )
     assert "hello" not in first.payload_encrypted
     assert decrypt_value(first.payload_encrypted).find('"hello"') >= 0
     assert HarnessEngineRepository.list_transcript_entries(

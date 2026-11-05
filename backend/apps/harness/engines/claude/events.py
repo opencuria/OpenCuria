@@ -74,6 +74,23 @@ class StepState:
     reasoning: list[str] = field(default_factory=list)
 
 
+#: Hook ``agent_type`` of the agents an ultracode Workflow run spawns.
+WORKFLOW_AGENT_TYPE = "workflow-subagent"
+
+
+@dataclass
+class WorkflowRun:
+    """A root Workflow call OpenCuria authorized and the agents it admitted.
+
+    One call fans out to many background agents; each agent is projected as
+    its own subtask keyed by its agent id, so child transcripts never mix.
+    """
+
+    label: str
+    task_id: str = ""
+    agents: list[str] = field(default_factory=list)
+
+
 class ClaudeEventNormalizer:
     """Stateless conversion from Claude SDK payloads to harness primitives."""
 

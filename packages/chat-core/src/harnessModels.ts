@@ -44,6 +44,8 @@ export const EFFORT_LABELS: Record<string, string> = {
   xhigh: "Extra High",
   max: "Max",
   ultra: "Ultra",
+  // Claude Code: dynamic workflow orchestration at X-High effort.
+  ultracode: "Ultracode",
 };
 
 /** Compact labels for controls that show every effort side by side. */
@@ -51,6 +53,7 @@ export const EFFORT_SHORT_LABELS: Record<string, string> = {
   minimal: "Min",
   medium: "Med",
   xhigh: "X-High",
+  ultracode: "Ultra",
 };
 
 /** Human-readable label for a reasoning effort token. */

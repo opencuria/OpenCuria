@@ -12,7 +12,12 @@ CLAUDE_AGENT_SDK_VERSION = "0.2.176"
 CLAUDE_CODE_CLI_VERSION = "2.1.316"
 DEFAULT_CLAUDE_MODEL = "sonnet"
 DEFAULT_CLAUDE_EFFORT = "high"
-CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# Ultracode is a Claude Code session setting, not a model effort: the CLI's
+# ``--effort ultracode`` turns on dynamic workflow orchestration and runs the
+# model at ``xhigh``. It is offered as the last step so one picker covers it.
+CLAUDE_ULTRACODE_EFFORT = "ultracode"
+CLAUDE_ULTRACODE_MODEL_EFFORT = "xhigh"
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max", CLAUDE_ULTRACODE_EFFORT)
 
 # Pass SDK aliases through unchanged so Claude Code selects its current model
 # alias rather than pinning a stale model version in OpenCuria.
@@ -132,4 +137,11 @@ def normalize_claude_effort(value: str | None) -> str:
         effort = value.strip().lower()
     if effort not in CLAUDE_EFFORTS:
         raise ValueError(f"Invalid Claude reasoning effort {value!r}")
+    return effort
+
+
+def claude_model_effort(effort: str) -> str:
+    """Return the model effort the CLI runs a normalized engine effort at."""
+    if effort == CLAUDE_ULTRACODE_EFFORT:
+        return CLAUDE_ULTRACODE_MODEL_EFFORT
     return effort

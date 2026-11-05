@@ -14,7 +14,7 @@ from ...redaction import redact_action, redact_arguments, redact_title
 from ...tools.base import ToolRegistry
 from ..base import RunOptions
 from ..shared.shellpolicy import shell_command_is_explore_safe
-from .events import ClaudeEventNormalizer, StepState
+from .events import WORKFLOW_AGENT_TYPE, ClaudeEventNormalizer, StepState
 from .policy import (
     NATIVE_TOOL_KEYS,
     combine_decisions,
@@ -211,6 +211,9 @@ class PermissionBridge:
             max_depth=self.max_depth,
             selected_skills=selected,
             cwd=getattr(self.engine, "_cwd", None),
+            # Workflow is a root-only tool of ultracode runs.
+            ultracode=bool(getattr(self.engine, "_ultracode", False))
+            and depth == self.options.depth,
         )
         if effective_agent.name == "explore":
             if source_name in {"Task", "Agent"}:
@@ -498,6 +501,10 @@ class PermissionBridge:
 
         async def subagent_start(hook_input, tool_use_id, _context):
             agent_id = str(hook_input.get("agent_id") or "")
+            if str(hook_input.get("agent_type") or "") == WORKFLOW_AGENT_TYPE:
+                # Workflow agents have no Task call; never guess one for them.
+                await engine._message_projector.start_workflow_agent(agent_id)
+                return {}
             parent_tool = str(
                 tool_use_id or engine._agent_parent_tool.get(agent_id) or ""
             )

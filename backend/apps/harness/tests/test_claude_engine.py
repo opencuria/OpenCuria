@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -703,6 +704,9 @@ async def _run_local_cli_fixture(
     steering: Any | None = None,
     question_hook: Any | None = None,
     execution_environment: dict[str, str] | None = None,
+    effort: str = "high",
+    responder: Callable[[dict[str, Any], int], bytes] | None = None,
+    child_events: list[tuple[str, dict[str, Any]]] | None = None,
 ) -> tuple[
     Any,
     list[dict[str, Any]],
@@ -730,7 +734,9 @@ async def _run_local_cli_fixture(
         can_call = tool_name in available or any(
             name == fixture or name.endswith("__" + fixture) for name in available
         )
-        if tool_name and not sent_tool and can_call:
+        if responder is not None:
+            body = responder(payload, len(requests))
+        elif tool_name and not sent_tool and can_call:
             sent_tool = True
             body = _api_tool_message(tool_name, f"call-{len(requests)}", tool_arguments)
         else:
@@ -782,6 +788,10 @@ async def _run_local_cli_fixture(
         permissions.append(dict(kwargs))
         return permission_response
 
+    async def on_child_event(parent_tool_use_id: str, event: dict[str, Any]) -> None:
+        if child_events is not None:
+            child_events.append((parent_tool_use_id, event))
+
     fixture_store = store or FixtureSessionStore()
     if execution_environment is not None:
         from apps.harness.access.environment import ExecutionEnvironmentAccessor
@@ -795,6 +805,8 @@ async def _run_local_cli_fixture(
         evaluator=evaluator,
         external_session_id=external_session_id,
         session_store=fixture_store,
+        on_child_event=on_child_event,
+        effort=effort,
         runtime_artifact_ensurer=lambda *_args: asyncio.sleep(
             0,
             result={

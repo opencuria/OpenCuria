@@ -1356,3 +1356,178 @@ async def test_native_read_image_completes_with_attachment_not_base64_output(
             "filename": "",
         }
     ]
+
+
+async def _start_authorized_workflow(engine: ClaudeEngine, call_id: str) -> None:
+    """Mirror the root Workflow call state an allowed PreToolUse installs."""
+    engine._tool_events[call_id] = {
+        "tool": "task",
+        "source_tool": "Workflow",
+        "title": "Workflow: audit",
+        "event_arguments": {"name": "audit"},
+        "step": 1,
+        "parent_tool_use_id": None,
+        "depth": 0,
+        "started": False,
+    }
+    engine._tool_arguments[call_id] = {"name": "audit"}
+    await engine._start_tool(call_id, parent_id=None)
+
+
+def _workflow_agent_start(bridge: PermissionBridge, engine: ClaudeEngine):
+    return bridge.hooks(engine)["SubagentStart"][0].hooks[0]
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_without_authorized_workflow_fails_closed(
+    fake_accessor,
+) -> None:
+    engine, bridge, _options, events = _bridge_case(fake_accessor)
+    start = _workflow_agent_start(bridge, engine)
+
+    await start(
+        {"agent_id": "stray-agent", "agent_type": "workflow-subagent"}, "random", None
+    )
+    denied = await _pre_hook(bridge, engine)(
+        {
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/workspace/a.txt"},
+            "agent_id": "stray-agent",
+            "agent_type": "workflow-subagent",
+        },
+        "stray-read",
+        None,
+    )
+
+    assert "stray-agent" not in engine._agent_parent_tool
+    assert not [event for event in events if event["type"] == "subtask_started"]
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_workflow_agents_get_own_general_scope_until_the_run_ends(
+    fake_accessor,
+) -> None:
+    engine, bridge, options, events = _bridge_case(fake_accessor)
+    await _start_authorized_workflow(engine, "workflow-call")
+    start = _workflow_agent_start(bridge, engine)
+    for agent_id in ("agent-one", "agent-two"):
+        await start(
+            {"agent_id": agent_id, "agent_type": "workflow-subagent"}, "random", None
+        )
+
+    started = [event for event in events if event["type"] == "subtask_started"]
+    assert [event["description"] for event in started] == [
+        "audit · agent 1",
+        "audit · agent 2",
+    ]
+    # Each agent routes its own child transcript; none shares the call id.
+    assert [event["parent_tool_use_id"] for event in started] == [
+        "agent-one",
+        "agent-two",
+    ]
+    assert bridge.scope(engine, {"agent_id": "agent-one"}) == (
+        "agent-one",
+        get_agent("general"),
+        options.depth + 1,
+    )
+    allowed = await _pre_hook(bridge, engine)(
+        {
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/workspace/a.txt"},
+            "agent_id": "agent-one",
+            "agent_type": "workflow-subagent",
+        },
+        "agent-read",
+        None,
+    )
+    assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    progress = type(
+        "TaskProgress",
+        (),
+        {
+            "task_id": "workflow-task",
+            "tool_use_id": "workflow-call",
+            "data": {
+                "workflow_progress": [
+                    {"type": "workflow_phase", "index": 1},
+                    {
+                        "type": "workflow_agent",
+                        "agentId": "agent-one",
+                        "state": "done",
+                        "resultPreview": "a.txt has 2 lines",
+                    },
+                    {
+                        "type": "workflow_agent",
+                        "agentId": "agent-two",
+                        "state": "start",
+                    },
+                ]
+            },
+        },
+    )()
+    await engine._message_projector.handle_task_progress(progress)
+    await engine._message_projector.handle_task_notification(
+        type(
+            "TaskNotification",
+            (),
+            {
+                "task_id": "workflow-task",
+                "tool_use_id": "workflow-call",
+                "status": "killed",
+                "summary": "Workflow stopped",
+            },
+        )()
+    )
+
+    finished = {
+        event["subtask_id"]: (event["status"], event["summary"])
+        for event in events
+        if event["type"] == "subtask_finished"
+    }
+    assert finished == {
+        "agent-one": ("completed", "a.txt has 2 lines"),
+        "agent-two": ("aborted", "Workflow stopped"),
+    }
+    assert "workflow-call" not in engine._workflow_runs
+    with pytest.raises(ValueError):
+        bridge.scope(engine, {"agent_id": "agent-two"})
+
+
+@pytest.mark.asyncio
+async def test_failed_workflow_call_admits_no_agents(fake_accessor) -> None:
+    engine, bridge, _options, events = _bridge_case(fake_accessor)
+    await _start_authorized_workflow(engine, "workflow-call")
+    await engine._finish_tool_error(
+        "workflow-call", "Script has a syntax error", parent_id=None
+    )
+    await _workflow_agent_start(bridge, engine)(
+        {"agent_id": "late-agent", "agent_type": "workflow-subagent"}, "random", None
+    )
+
+    assert not engine._workflow_runs
+    assert "late-agent" not in engine._agent_parent_tool
+
+
+@pytest.mark.asyncio
+async def test_workflow_hook_gate_follows_run_ultracode_and_root_scope(
+    fake_accessor,
+) -> None:
+    engine, bridge, _options, _events = _bridge_case(fake_accessor)
+    pre_tool = _pre_hook(bridge, engine)
+    call = {"tool_name": "Workflow", "tool_input": {"name": "audit"}}
+
+    denied = await pre_tool(call, "workflow-off", None)
+    engine._ultracode = True
+    allowed = await pre_tool(call, "workflow-on", None)
+    engine._agent_parent_tool["child"] = "task-call"
+    engine._agent_type_raw["child"] = "general"
+    engine._agent_depth["child"] = 1
+    engine._started_subtasks.add("child")
+    child = await pre_tool({**call, "agent_id": "child"}, "workflow-child", None)
+
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert child["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "workflow-on" in engine._workflow_runs

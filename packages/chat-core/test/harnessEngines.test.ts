@@ -93,6 +93,12 @@ describe("shared engine policy", () => {
     expect(snapEffort(models[1], "ultra")).toBe("high");
   });
 
+  it("labels Claude's ultracode step distinctly from Codex ultra", () => {
+    expect(formatEffort("ultracode")).toBe("Ultracode");
+    expect(formatEffortShort("ultracode")).toBe("Ultra");
+    expect(formatEffort("ultra")).toBe("Ultra");
+  });
+
   it("starts chats and tasks with the mode's or engine's defaults, snapped to the catalog", () => {
     const engines: HarnessEngine[] = [
       {

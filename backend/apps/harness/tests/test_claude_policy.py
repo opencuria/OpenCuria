@@ -275,3 +275,59 @@ def test_unexposed_native_tools_cannot_borrow_an_allowed_permission_key(
         max_depth=2,
     )
     assert decision == "deny"
+
+
+def _decide_workflow(**overrides):
+    kwargs = {
+        "source_name": "Workflow",
+        "arguments": {"name": "audit-routes"},
+        "tools": default_tool_registry(),
+        "agent": get_agent("build"),
+        "evaluator": PermissionEvaluator(global_rules={"*": "allow"}),
+        "mode": "build",
+        "depth": 0,
+        "max_depth": 2,
+        "ultracode": True,
+    }
+    kwargs.update(overrides)
+    return decide_tool(**kwargs)
+
+
+def test_workflow_is_offered_only_at_the_root_of_ultracode_runs() -> None:
+    decision, event_tool, action, title = _decide_workflow()
+    assert (decision, event_tool, action, title) == (
+        "allow",
+        "task",
+        "audit-routes",
+        "Workflow: audit-routes",
+    )
+    assert _decide_workflow(ultracode=False)[0] == "deny"
+    assert _decide_workflow(agent=get_agent("explore"))[0] == "deny"
+    assert _decide_workflow(depth=2)[0] == "deny"
+    # Workflow shares the task permission: a task deny also blocks it.
+    assert (
+        _decide_workflow(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow", "task": "deny"})
+        )[0]
+        == "deny"
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "label"),
+    [
+        ({"name": "deep-research", "script": "name: 'ignored'"}, "deep-research"),
+        ({"scriptPath": "/tmp/run/wf_1/script.js"}, "script.js"),
+        (
+            {"script": "export const meta = { name: 'audit', description: 'x' }"},
+            "audit",
+        ),
+        ({"script": "phase('x')"}, ""),
+    ],
+)
+def test_workflow_label_prefers_name_then_script_path_then_meta(
+    arguments: dict[str, str], label: str
+) -> None:
+    from apps.harness.engines.claude.policy import workflow_label
+
+    assert workflow_label(arguments) == label

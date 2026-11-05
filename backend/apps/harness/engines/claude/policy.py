@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from ...access.base import HARNESS_WORKSPACE_ROOT
@@ -27,6 +28,9 @@ NATIVE_TOOL_KEYS: dict[str, str] = {
     "TaskGet": "task",
     "TaskList": "task",
     "TaskOutput": "task",
+    # Ultracode's dynamic workflows orchestrate subagents, so they share the
+    # task permission and are offered only when ultracode is on.
+    "Workflow": "task",
     "AskUserQuestion": "question",
     "WebFetch": "webfetch",
     "WebSearch": "websearch",
@@ -117,12 +121,18 @@ def tool_identity(
         except KeyError:
             registered = None
         if registered is None:
+            if raw_name == "Workflow":
+                return raw_name, key, workflow_label(arguments)
             return raw_name, key, _action(key, arguments, None)
         # Normalize native edit paths while retaining the harness event and
         # permission identity (notably Write -> write, Edit -> edit).
         event_tool = registered.name
         permission_key = registered.permission_key or key
-        action = _action(key, arguments, registered)
+        action = (
+            workflow_label(arguments)
+            if raw_name == "Workflow"
+            else _action(key, arguments, registered)
+        )
         if permission_key.lower() in {"read", "edit", "write", "list", "glob", "grep"}:
             path = (
                 arguments.get("file_path")
@@ -171,6 +181,21 @@ def _action(name: str, arguments: dict[str, Any], registered: Any | None) -> str
     if key in ("todowrite", "skill", "exit_plan_mode"):
         return str(arguments.get("skill", "") or "")
     return ""
+
+
+_WORKFLOW_META_NAME = re.compile(r"""\bname\s*:\s*(['"`])([^'"`\n]{1,120})\1""")
+
+
+def workflow_label(arguments: dict[str, Any]) -> str:
+    """Name a Workflow call by its saved name, script file or script meta name."""
+    name = str(arguments.get("name") or "").strip()
+    if name:
+        return name
+    script_path = str(arguments.get("scriptPath") or "").strip()
+    if script_path:
+        return os.path.basename(script_path)
+    match = _WORKFLOW_META_NAME.search(str(arguments.get("script") or "")[:4000])
+    return match.group(2).strip() if match else ""
 
 
 def _resolve_registered_tool(source_name: str, tools: ToolRegistry) -> Any | None:
@@ -226,8 +251,13 @@ def decide_tool(
     max_depth: int,
     selected_skills: list[str] | None = None,
     cwd: str | None = None,
+    ultracode: bool = False,
 ) -> tuple[str, str, str, str]:
-    """Return decision, event tool, safe action and human-readable title."""
+    """Return decision, event tool, safe action and human-readable title.
+
+    ``ultracode`` is true only for the root scope of an ultracode run, the one
+    place where the native Workflow tool is offered.
+    """
     raw_source = str(source_name or "")
     # Explicit hook routing prevents native names such as Write being treated
     # as similarly named registry tools, and MCP wire identities stay exact.
@@ -267,6 +297,7 @@ def decide_tool(
             depth=depth,
             max_depth=max_depth,
             selected_skills=selected_skills,
+            ultracode=ultracode,
         ):
             return DENY, event_tool, action, "Native tool is unavailable in this scope"
     if key == "todowrite" and depth > 0:
@@ -310,7 +341,10 @@ def decide_tool(
         )
         return decision, event_tool, action, title
 
-    if registered is not None:
+    if raw == "Workflow":
+        # Shares the task registry entry for permissions, not its argument shape.
+        title = f"Workflow: {action}"[:240] if action else "Workflow"
+    elif registered is not None:
         normalized_arguments = dict(arguments)
         if "path" in registered.args_schema.model_fields:
             path = (
@@ -405,8 +439,13 @@ def native_tools_for_claude(
     depth: int,
     max_depth: int,
     selected_skills: list[str] | None = None,
+    ultracode: bool = False,
 ) -> list[str]:
-    """Build a small allowlist of Claude Code built-ins for this registry."""
+    """Build a small allowlist of Claude Code built-ins for this registry.
+
+    Workflow is offered only with ``ultracode`` (root scope of an ultracode
+    run) and, as it spawns subagents, under the same limits as Task.
+    """
     names: list[str] = []
     agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
     for cli_name, registry_name in (
@@ -419,13 +458,16 @@ def native_tools_for_claude(
         ("Grep", "grep"),
         ("Task", "task"),
         ("TaskStop", "task"),
+        ("Workflow", "task"),
         ("WebFetch", "webfetch"),
         ("WebSearch", "websearch"),
         ("Skill", "skill"),
     ):
-        if cli_name == "Task" and depth >= max_depth:
+        if cli_name == "Workflow" and not ultracode:
             continue
-        if cli_name in {"Task", "TaskStop"} and agent.name == "explore":
+        if cli_name in {"Task", "Workflow"} and depth >= max_depth:
+            continue
+        if cli_name in {"Task", "TaskStop", "Workflow"} and agent.name == "explore":
             continue
         if cli_name == "Skill" and agent.name == "explore":
             continue
@@ -457,6 +499,7 @@ __all__ = [
     "combine_decisions",
     "decide_tool",
     "native_tools_for_claude",
+    "workflow_label",
     "registry_tool_identity",
     "tool_identity",
     "tool_schemas_for_claude",
