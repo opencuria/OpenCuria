@@ -15,6 +15,7 @@ import { ThemeProvider } from "../../ui/theme";
 import type { ToolDetailSheetProps } from "../ToolDetailSheet";
 import { FileViewerSheet, type FileViewerTarget } from "./FileViewerSheet";
 import { FilesPanel } from "./FilesPanel";
+import { hasNativePdfView } from "./PdfPreview";
 
 jest.mock(
   "lucide-react-native",
@@ -32,6 +33,29 @@ jest.mock("expo-sharing", () => ({
   isAvailableAsync: jest.fn().mockResolvedValue(true),
   shareAsync: jest.fn().mockResolvedValue(undefined),
 }));
+// Test boundary for the PDFKit / PdfRenderer view.
+jest.mock("./PdfPreview", () => {
+  const { Pressable } =
+    require("react-native") as typeof import("react-native");
+  return {
+    hasNativePdfView: jest.fn(() => true),
+    PdfPreview: ({
+      uri,
+      name,
+      onError,
+    }: {
+      uri: string;
+      name: string;
+      onError: (message: string) => void;
+    }) => (
+      <Pressable
+        testID="file-pdf"
+        accessibilityLabel={`${name} ${uri}`}
+        onPress={() => onError("This PDF is password-protected.")}
+      />
+    ),
+  };
+});
 jest.mock("../ToolDetailSheet", () => {
   const { View, Text, Pressable } =
     require("react-native") as typeof import("react-native");
@@ -113,7 +137,10 @@ function setup(
   };
 }
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.mocked(hasNativePdfView).mockReturnValue(true);
+});
 
 it("opens an explorer file in the same viewer and returns to the file tree", async () => {
   const readFile = jest.fn().mockResolvedValue({
@@ -219,18 +246,84 @@ it("shows permission errors in the viewer and can retry", async () => {
 
 it("offers sharing for binary files without displaying them as text", async () => {
   const { rerender, element, readFile, media } = setup(null);
-  readFile.mockResolvedValueOnce({ content: btoa("%PDF\0"), size: 5 });
-  rerender(element("/workspace/report.pdf"));
+  readFile.mockResolvedValueOnce({ content: btoa("PK\0"), size: 3 });
+  media.openFile.mockResolvedValueOnce({
+    uri: "file:///download",
+    mimeType: "application/zip",
+  });
+  rerender(element("/workspace/archive.zip"));
   await screen.findByText("This file can't be shown as text.");
+  expect(screen.queryByRole("button", { name: "Word wrap" })).toBeNull();
   // One Share button in the body, one action in the header.
   fireEvent.press(screen.getAllByRole("button", { name: "Share" })[0]!);
+  await waitFor(() =>
+    expect(Sharing.shareAsync).toHaveBeenCalledWith("file:///download", {
+      mimeType: "application/zip",
+      dialogTitle: "archive.zip",
+    }),
+  );
+  expect(media.openFile).toHaveBeenCalledWith("/workspace/archive.zip");
+});
+
+it("shows workspace PDFs in the native document view and shares the same file", async () => {
+  const { readFile, media } = setup("/workspace/docs/report.pdf");
+  await screen.findByLabelText("report.pdf file:///download");
+  expect(media.openFile).toHaveBeenCalledWith("/workspace/docs/report.pdf");
+  expect(readFile).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Word wrap" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Copy contents" })).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Share" }));
   await waitFor(() =>
     expect(Sharing.shareAsync).toHaveBeenCalledWith("file:///download", {
       mimeType: "application/pdf",
       dialogTitle: "report.pdf",
     }),
   );
-  expect(media.openFile).toHaveBeenCalledWith("/workspace/report.pdf");
+  expect(media.openFile).toHaveBeenCalledTimes(1);
+});
+
+it("offers sharing when a PDF can't be displayed", async () => {
+  const { media } = setup("/workspace/locked.pdf");
+  fireEvent.press(await screen.findByTestId("file-pdf"));
+  await screen.findByText("This PDF is password-protected.");
+  fireEvent.press(screen.getAllByRole("button", { name: "Share" })[0]!);
+  await waitFor(() => expect(Sharing.shareAsync).toHaveBeenCalled());
+  expect(media.openFile).toHaveBeenLastCalledWith("/workspace/locked.pdf");
+});
+
+it("reports PDF download failures with a retry", async () => {
+  const { rerender, element, media } = setup(null);
+  media.openFile.mockRejectedValueOnce(new Error("Workspace is offline"));
+  rerender(element("/workspace/report.pdf"));
+  await screen.findByText("Workspace is offline");
+  fireEvent.press(screen.getByRole("button", { name: "Try again" }));
+  await screen.findByTestId("file-pdf");
+});
+
+it("keeps PDFs shareable in app builds without the native document view", async () => {
+  jest.mocked(hasNativePdfView).mockReturnValue(false);
+  const { media } = setup("/workspace/report.pdf");
+  await screen.findByText("This app version can't preview PDFs.");
+  expect(screen.queryByTestId("file-pdf")).toBeNull();
+  fireEvent.press(screen.getAllByRole("button", { name: "Share" })[0]!);
+  await waitFor(() =>
+    expect(media.openFile).toHaveBeenCalledWith("/workspace/report.pdf"),
+  );
+});
+
+it("shows PDF attachments in the native document view", async () => {
+  const attachment = {
+    uri: "data:application/pdf;base64,JVBERg==",
+    mime: "application/pdf",
+    filename: "report.pdf",
+  };
+  const { media } = setup(attachment);
+  await screen.findByLabelText("report.pdf file:///attachment");
+  expect(media.saveAttachment).toHaveBeenCalledWith(attachment.uri);
+  fireEvent.press(screen.getByRole("button", { name: "Share" }));
+  await waitFor(() =>
+    expect(media.shareAttachment).toHaveBeenCalledWith(attachment.uri),
+  );
 });
 
 it("requires a workspace media cache for image previews", async () => {
@@ -255,6 +348,7 @@ it("opens inline image attachments in the same viewer without workspace-path act
 });
 
 it("shares PDF attachments through the media cache and reports failures", async () => {
+  jest.mocked(hasNativePdfView).mockReturnValue(false);
   const attachment = {
     uri: "data:application/pdf;base64,JVBERg==",
     mime: "application/pdf",

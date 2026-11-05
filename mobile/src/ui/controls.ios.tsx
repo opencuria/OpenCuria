@@ -21,7 +21,11 @@ import type {
   IconButtonProps,
   NativeActionProps,
 } from "./controls.types";
-import { controlContentStyle, controlLayout } from "./controlLayout";
+import {
+  controlContentStyle,
+  controlLayout,
+  hugsContent,
+} from "./controlLayout";
 import { useTheme } from "./theme";
 
 /** Floating controls are liquid glass on iOS 26 and bordered before it. */
@@ -42,13 +46,15 @@ export function Button({
   testID,
 }: ButtonProps): React.JSX.Element {
   const { theme } = useTheme();
+  const layout = controlLayout(style);
+  const hug = hugsContent(layout);
   return (
     <Host
-      matchContents={{ vertical: true }}
+      matchContents={{ vertical: true, horizontal: hug }}
       colorScheme={theme.scheme}
       seedColor={theme.primary}
       ignoreSafeArea="all"
-      style={[{ alignSelf: "stretch" }, controlLayout(style)]}
+      style={[{ alignSelf: "stretch" }, layout]}
     >
       <SwiftButton
         label={busy ? `${title}…` : title}
@@ -66,7 +72,9 @@ export function Button({
           ),
           controlSize(compact ? "regular" : "large"),
           ...(shape ? [buttonBorderShape(shape)] : []),
-          frame({ maxWidth: Infinity, minHeight: 44 }),
+          frame(
+            hug ? { minHeight: 44 } : { maxWidth: Infinity, minHeight: 44 },
+          ),
           disabled(Boolean(inactive || busy)),
           accessibilityLabel(label ?? title),
         ]}

@@ -24,7 +24,11 @@ import type {
   IconButtonProps,
   NativeActionProps,
 } from "./controls.types";
-import { controlContentStyle, controlLayout } from "./controlLayout";
+import {
+  controlContentStyle,
+  controlLayout,
+  hugsContent,
+} from "./controlLayout";
 import { useTheme } from "./theme";
 
 /** Material buttons retain their native sizing, shape, ripple and disabled colors. */
@@ -47,13 +51,12 @@ export function Button({
         : variant === "secondary"
           ? FilledTonalButton
           : ComposeButton;
+  const layout = controlLayout(style);
+  const hug = hugsContent(layout);
   return (
-    <View
-      testID={testID}
-      style={[{ alignSelf: "stretch" }, controlLayout(style)]}
-    >
+    <View testID={testID} style={[{ alignSelf: "stretch" }, layout]}>
       <Host
-        matchContents={{ vertical: true }}
+        matchContents={{ vertical: true, horizontal: hug }}
         colorScheme={theme.scheme}
         seedColor={theme.primary}
         ignoreSafeAreaKeyboardInsets
@@ -70,7 +73,7 @@ export function Button({
               : undefined
           }
           modifiers={[
-            fillMaxWidth(),
+            ...(hug ? [] : [fillMaxWidth()]),
             defaultMinSize({ minHeight: 48 }),
             semantics({ contentDescription: accessibilityLabel ?? title }),
           ]}

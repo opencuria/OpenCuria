@@ -104,6 +104,10 @@ export function isImagePath(path: string): boolean {
   return /\.(png|jpe?g|gif|webp|bmp|heic|heif|avif|ico)$/i.test(path);
 }
 
+export function isPdfPath(path: string): boolean {
+  return /\.pdf$/i.test(path);
+}
+
 export function isSvgPath(path: string): boolean {
   return /\.svg$/i.test(path);
 }

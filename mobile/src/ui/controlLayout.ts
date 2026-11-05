@@ -41,6 +41,20 @@ export function controlLayout(style: PressableProps["style"]): ViewStyle {
   ) as ViewStyle;
 }
 
+/**
+ * Whether a control sized by the caller's layout gets no width from it (e.g.
+ * `alignSelf: "center"`). Native hosts then size it to its own label instead.
+ */
+export function hugsContent(layout: ViewStyle): boolean {
+  return (
+    layout.alignSelf !== undefined &&
+    layout.alignSelf !== "stretch" &&
+    layout.width === undefined &&
+    layout.flex === undefined &&
+    layout.flexGrow === undefined
+  );
+}
+
 /** Rich labels lay out normally, independently of their native hit surface. */
 export function controlContentStyle(style: PressableProps["style"]): ViewStyle {
   const resolved =

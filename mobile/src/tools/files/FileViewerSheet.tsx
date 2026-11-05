@@ -24,12 +24,14 @@ import {
   delimiterFor,
   isImagePath,
   isMarkdownPath,
+  isPdfPath,
   isSvgPath,
   isVideoPath,
   parseDelimited,
   readWorkspaceText,
   type WorkspaceText,
 } from "./fileContent";
+import { hasNativePdfView, PdfPreview } from "./PdfPreview";
 import { SourceView } from "./SourceView";
 
 type Mode = "preview" | "source";
@@ -40,9 +42,9 @@ export type FileViewerTarget =
 
 type Content =
   | { phase: "loading" }
-  | { phase: "error"; message: string; binary?: boolean }
+  | { phase: "error"; message: string; shareable?: boolean }
   | { phase: "text"; file: WorkspaceText }
-  | { phase: "image" | "video"; uri: string }
+  | { phase: "image" | "video" | "pdf"; uri: string }
   | { phase: "attachment" };
 
 /** Source wrap preference for this app session. */
@@ -89,7 +91,9 @@ export function FileViewerSheet({
   useEffect(() => {
     if (!path && !attachment) return;
     setMode(
-      !path || previewable(path) || isVideoPath(path) ? "preview" : "source",
+      !path || previewable(path) || isVideoPath(path) || isPdfPath(path)
+        ? "preview"
+        : "source",
     );
     setContent({ phase: "loading" });
     let live = true;
@@ -102,11 +106,14 @@ export function FileViewerSheet({
         });
         return;
       }
-      const phase = attachment.mime.startsWith("image/")
+      const mime = attachment.mime.toLowerCase();
+      const phase = mime.startsWith("image/")
         ? "image"
-        : attachment.mime.startsWith("video/")
+        : mime.startsWith("video/")
           ? "video"
-          : "attachment";
+          : mime === "application/pdf" && hasNativePdfView()
+            ? "pdf"
+            : "attachment";
       if (phase === "attachment") setContent({ phase });
       else
         media
@@ -148,6 +155,30 @@ export function FileViewerSheet({
                   : "Could not load the media",
             });
         });
+    } else if (path && isPdfPath(path)) {
+      if (!media || !hasNativePdfView()) {
+        setContent({
+          phase: "error",
+          message: media
+            ? "This app version can't preview PDFs."
+            : "Documents need a connected workspace.",
+          shareable: true,
+        });
+        return;
+      }
+      media
+        .openFile(path)
+        .then((opened) => live && setContent({ phase: "pdf", uri: opened.uri }))
+        .catch((error: unknown) => {
+          if (live)
+            setContent({
+              phase: "error",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Could not load the PDF",
+            });
+        });
     } else if (path) {
       readWorkspaceText(client, workspaceId, path)
         .then((file) => live && setContent({ phase: "text", file }))
@@ -155,7 +186,7 @@ export function FileViewerSheet({
           if (!live) return;
           setContent({
             phase: "error",
-            binary: error instanceof BinaryFileError,
+            shareable: error instanceof BinaryFileError,
             message:
               error instanceof BinaryFileError
                 ? "This file can't be shown as text."
@@ -189,7 +220,11 @@ export function FileViewerSheet({
         return;
       }
       if (!path) return;
-      const opened = await media.openFile(path);
+      // A PDF on screen is already downloaded.
+      const opened =
+        content.phase === "pdf"
+          ? { uri: content.uri, mimeType: "application/pdf" }
+          : await media.openFile(path);
       if (await Sharing.isAvailableAsync())
         await Sharing.shareAsync(opened.uri, {
           mimeType: opened.mimeType,
@@ -220,7 +255,7 @@ export function FileViewerSheet({
           },
         ]
       : []),
-    ...(mode === "source"
+    ...(mode === "source" && text !== null
       ? [
           {
             id: "wrap",
@@ -280,7 +315,7 @@ export function FileViewerSheet({
         <Text style={[styles.detail, { color: theme.mutedText }]}>
           {content.message}
         </Text>
-        {content.binary && media ? (
+        {content.shareable && media ? (
           <Button
             title="Share"
             symbol="square.and.arrow.up"
@@ -308,6 +343,17 @@ export function FileViewerSheet({
       </View>
     );
   else if (content.phase === "video") body = <VideoPreview uri={content.uri} />;
+  else if (content.phase === "pdf")
+    body = (
+      <PdfPreview
+        uri={content.uri}
+        name={name}
+        bottomInset={bottomInset}
+        onError={(message) =>
+          setContent({ phase: "error", message, shareable: true })
+        }
+      />
+    );
   else if (content.phase === "image")
     body = (
       <ScrollView
