@@ -47,7 +47,9 @@ jest.mock("@expo/ui/swift-ui", () => {
   ContextMenu.Items = Items;
   return {
     Host: Container,
-    RNHostView: Container,
+    RNHostView: ({ children }: React.PropsWithChildren) => (
+      <View testID="rn-host-view">{children}</View>
+    ),
     Section: Container,
     ContextMenu,
     Button: ({
@@ -115,6 +117,34 @@ it("lets a tap reach the chat without opening its context menu", async () => {
   expect(onPress).toHaveBeenCalledTimes(1);
   expect(onSelect).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
+});
+
+it("hosts the content in a margin-free root so row insets stay in React Native layout", () => {
+  render(
+    <ThemeProvider>
+      <NativeContextMenu label="Inset chat" actions={[]} onSelect={jest.fn()}>
+        {() => (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Inset chat"
+            onPress={() => undefined}
+            style={{ marginHorizontal: 8 }}
+          >
+            <Text>Inset chat</Text>
+          </Pressable>
+        )}
+      </NativeContextMenu>
+    </ThemeProvider>,
+  );
+  const [root] = screen.getByTestId("rn-host-view").children;
+  expect(typeof root).not.toBe("string");
+  if (typeof root === "string") return;
+  // SwiftUI frames this root itself; a margin on it would shift the row.
+  expect(root.props.collapsable).toBe(false);
+  expect(root.props.style).toBeUndefined();
+  expect(screen.getByRole("button", { name: "Inset chat" })).toHaveStyle({
+    marginHorizontal: 8,
+  });
 });
 
 it("dispatches native long-press menu actions without opening the chat", async () => {

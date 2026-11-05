@@ -1,4 +1,5 @@
 import React from "react";
+import { View } from "react-native";
 import {
   Button,
   ContextMenu,
@@ -32,7 +33,13 @@ export function NativeContextMenu({
         <ContextMenu.Trigger>
           {/* RNHostView preserves the row's touch target and intrinsic height. */}
           <RNHostView matchContents={fitContent ? true : { vertical: true }}>
-            {children()}
+            {/*
+              RNHostView lays out its first child as a separate Yoga root that
+              SwiftUI also frames, so a margin on it would race between both
+              and shift the row. A plain, unflattened root keeps the content's
+              own margins inside Yoga.
+            */}
+            <View collapsable={false}>{children()}</View>
           </RNHostView>
         </ContextMenu.Trigger>
         <ContextMenu.Items>
