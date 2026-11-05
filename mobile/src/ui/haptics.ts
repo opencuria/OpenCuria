@@ -32,3 +32,14 @@ export function gestureThresholdHaptic(): void {
       : module.impactAsync(module.ImpactFeedbackStyle.Medium);
   void feedback.catch(() => undefined);
 }
+
+/** A light tick for a discrete action under the finger, such as a click. */
+export function lightTapHaptic(): void {
+  const module = haptics();
+  if (!module) return;
+  const feedback =
+    Platform.OS === "android"
+      ? module.performAndroidHapticsAsync(module.AndroidHaptics.Clock_Tick)
+      : module.impactAsync(module.ImpactFeedbackStyle.Light);
+  void feedback.catch(() => undefined);
+}

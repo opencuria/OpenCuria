@@ -13,6 +13,9 @@ import {
   createRunnersApi,
 } from "./settings";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
+import { createDesktopApi } from "./desktop";
+import { buildDesktopViewerUrl } from "@opencuria/chat-core/desktopSurface";
+import type { DesktopViewerIntent } from "@opencuria/chat-core/desktopViewer";
 import {
   RealtimeClient,
   type RealtimeOptions,
@@ -177,6 +180,11 @@ export interface OpenCuriaClient {
   harness: ReturnType<typeof createHarnessApi>;
   /** Workspace git integration (repos, history, typed mutations, file sides). */
   git: ReturnType<typeof createGitApi>;
+  /** KasmVNC desktop: viewer lease, Computer Use takeover and clipboard. */
+  desktop: ReturnType<typeof createDesktopApi> & {
+    /** Authenticated KasmVNC client URL for a ready desktop route. */
+    viewerUrl(proxyUrl: string, intent?: DesktopViewerIntent): string;
+  };
   /** Workspace PTY: REST start plus Socket.IO input/resize/close. */
   terminal: ReturnType<typeof createTerminalApi>;
   skills: {
@@ -386,6 +394,16 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     },
     harness,
     git: createGitApi(() => api),
+    desktop: {
+      ...createDesktopApi(() => api),
+      viewerUrl: (proxyUrl, intent) =>
+        buildDesktopViewerUrl(
+          options.wsBaseUrl,
+          proxyUrl,
+          options.getAccessToken() ?? "",
+          intent,
+        ),
+    },
     terminal: createTerminalApi(() => api, realtime),
     skills: {
       list: (signal) => api.get<Skill[]>("/skills/", signal),

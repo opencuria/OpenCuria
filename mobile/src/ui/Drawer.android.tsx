@@ -47,7 +47,7 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
               testID="new-chat"
             />
             <IconButton
-              label="Git, Terminal & Files"
+              label="Git, Desktop, Terminal & Files"
               icon={<GitBranch color={theme.text} size={22} />}
               onPress={props.onTools}
               disabled={!props.canOpenTools}

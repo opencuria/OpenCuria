@@ -6,10 +6,12 @@ import * as workspacesApi from '@/services/workspaces.api'
 import { copyWithExecCommand } from '@/lib/clipboardWrite'
 import { copyToClipboard } from '@/lib/clipboard'
 import { onEvent } from '@/services/socket'
+import { computerUseRunId } from '@opencuria/chat-core/desktopSurface'
 import {
   acquireDesktopViewer,
   closeDesktopViewer,
   desktopViewerSession,
+  reconnectDesktopViewer,
   refreshDesktopViewer,
   releaseDesktopViewer,
   retainDesktopViewer,
@@ -139,16 +141,12 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     if (reconnectPending) return reconnectPending
     const id = workspaceId.value
     reconnectPending = (async () => {
-      if (!desktopStore.isConnected || desktopStore.workspaceId !== id) {
-        // Recovery restores only a still-wanted intent; never restart a
-        // desktop this tab stopped (or never asked for) once its route ends.
-        if (session.value.wanted) await startDesktop()
-        return
-      }
-
-      const status = await refreshDesktopViewer(id, true)
-      if (disposed || workspaceId.value !== id || !status?.active || !status.proxy_url) return
-      desktopStore.bumpViewer()
+      const remount = await reconnectDesktopViewer(
+        id,
+        desktopStore.isConnected && desktopStore.workspaceId === id,
+        startDesktop,
+      )
+      if (remount && !disposed && workspaceId.value === id) desktopStore.bumpViewer()
     })().finally(() => {
       reconnectPending = null
     })
@@ -346,13 +344,13 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     cleanupFns.push(
       onEvent('harness.subtask_started', (data) => {
         if (data.workspace_id !== workspaceId.value) return
-        if ((data.agent || '').toLowerCase() !== 'computeruse') return
-        desktopStore.markComputerUseStarted(data.child_session_id || data.subtask_id)
+        const runId = computerUseRunId(data)
+        if (runId) desktopStore.markComputerUseStarted(runId)
       }),
       onEvent('harness.subtask_finished', (data) => {
         if (data.workspace_id !== workspaceId.value) return
-        if ((data.agent || '').toLowerCase() !== 'computeruse') return
-        desktopStore.markComputerUseFinished(data.child_session_id || data.subtask_id)
+        const runId = computerUseRunId(data)
+        if (runId) desktopStore.markComputerUseFinished(runId)
       }),
     )
   }

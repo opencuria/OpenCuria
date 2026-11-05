@@ -45,6 +45,7 @@ function mockPanel(name: string) {
 jest.mock("./panels", () => ({
   TOOL_PANELS: {
     git: mockPanel("git"),
+    desktop: mockPanel("desktop"),
     terminal: mockPanel("terminal"),
     files: mockPanel("files"),
   },
@@ -73,17 +74,20 @@ beforeEach(() => {
 it("opens on Git with the sections trailing and mounts others on first use", () => {
   renderSheet();
   expect(screen.getByTestId("sections").props.children).toBe(
-    "Git|Terminal|Files@0",
+    "Git|Desktop|Terminal|Files@0",
   );
   expect(screen.getByTestId("panel-git").props.children).toBe(
     "git:active:demo-app",
   );
+  expect(screen.queryByTestId("panel-desktop")).toBeNull();
   expect(screen.queryByTestId("panel-terminal")).toBeNull();
 
-  React.act(() => mockSegmentChange?.(1));
+  React.act(() => mockSegmentChange?.(2));
   expect(screen.getByTestId("panel-terminal").props.children).toBe(
     "terminal:active:demo-app",
   );
+  // The desktop between Git and Terminal starts only once it is shown.
+  expect(screen.queryByTestId("panel-desktop")).toBeNull();
   // Git stays mounted (and keeps its state) while another section shows.
   // Git stays mounted (and keeps its state), hidden from assistive technology.
   expect(screen.queryByTestId("panel-git")).toBeNull();

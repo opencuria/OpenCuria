@@ -16,13 +16,19 @@ const apiMocks = vi.hoisted(() => ({ postDuringClipboardGesture: vi.fn() }))
 
 const postDuringClipboardGesture = apiMocks.postDuringClipboardGesture
 
-vi.mock('./api', () => ({
-  get: vi.fn(),
-  post: vi.fn(),
-  postDuringClipboardGesture: apiMocks.postDuringClipboardGesture,
-  patch: vi.fn(),
-  del: vi.fn(),
-}))
+vi.mock('./api', () => {
+  const get = vi.fn()
+  const post = vi.fn()
+  return {
+    get,
+    post,
+    // The shared desktop API resolves the same transport per request.
+    getApiClient: () => ({ get, post }),
+    postDuringClipboardGesture: apiMocks.postDuringClipboardGesture,
+    patch: vi.fn(),
+    del: vi.fn(),
+  }
+})
 
 beforeEach(() => vi.clearAllMocks())
 describe('desktop viewer transport', () => {
@@ -32,7 +38,7 @@ describe('desktop viewer transport', () => {
     stopDesktop('ws', intent)
     renewDesktop('ws', intent)
     expect(post).toHaveBeenNthCalledWith(1, '/workspaces/ws/desktop/', intent, undefined)
-    expect(post).toHaveBeenNthCalledWith(2, '/workspaces/ws/desktop/stop/', intent)
+    expect(post).toHaveBeenNthCalledWith(2, '/workspaces/ws/desktop/stop/', intent, undefined)
     expect(post).toHaveBeenNthCalledWith(
       3,
       '/workspaces/ws/desktop/renew/',

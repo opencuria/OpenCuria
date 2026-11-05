@@ -132,7 +132,7 @@ export interface ChatMessagesProps {
    * arms the pull; scrolling to the end never opens it.
    */
   onPullUpAtEnd?: () => void;
-  /** Hint shown while pulling, such as "Git, Terminal & Files". */
+  /** Hint shown while pulling, such as "Git, Desktop, Terminal & Files". */
   pullUpLabel?: string;
   testID?: string;
 }

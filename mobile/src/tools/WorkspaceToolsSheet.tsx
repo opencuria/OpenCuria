@@ -1,11 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { Modal, Platform, StyleSheet, View } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SegmentedControl } from "@expo/ui/community/segmented-control";
 import { X } from "lucide-react-native";
 import type { OpenCuriaClient } from "@opencuria/client";
 import type { MediaCache } from "../platform";
 import { IconButton } from "../ui/controls";
+import { NativeSegmentedPicker } from "../ui/selection";
 import { ToastHost } from "../ui/ToastHost";
 import { useTheme } from "../ui/theme";
 import { TOOL_PANELS } from "./panels";
@@ -13,11 +16,16 @@ import type { WorkspaceToolId, WorkspaceToolProps } from "./types";
 
 const TOOLS: { id: WorkspaceToolId; label: string }[] = [
   { id: "git", label: "Git" },
+  { id: "desktop", label: "Desktop" },
   { id: "terminal", label: "Terminal" },
   { id: "files", label: "Files" },
 ];
-/** The sections hug the trailing edge; Android's segmented buttons need room. */
-const SEGMENTS_MAX_WIDTH = Platform.OS === "ios" ? 240 : 300;
+const SUPPORTED_ORIENTATIONS: ("portrait" | "landscape")[] = [
+  "portrait",
+  "landscape",
+];
+/** The sections hug the trailing edge. */
+const SEGMENTS_MAX_WIDTH = Platform.OS === "ios" ? 320 : 400;
 
 export interface WorkspaceToolsSheetProps {
   visible: boolean;
@@ -30,10 +38,10 @@ export interface WorkspaceToolsSheetProps {
 }
 
 /**
- * Git, Terminal and Files of the chat's workspace in a full-screen native
- * sheet: UIKit full-screen presentation on iOS, a system dialog on Android.
- * Close sits leading, the sections trailing; Git opens first. Sections mount
- * on first use and stay alive while the sheet is open.
+ * Git, Desktop, Terminal and Files of the chat's workspace in a full-screen
+ * native sheet: UIKit full-screen presentation on iOS, a system dialog on
+ * Android. Close sits leading, the sections trailing; Git opens first.
+ * Sections mount on first use and stay alive while the sheet is open.
  */
 export function WorkspaceToolsSheet({
   visible,
@@ -74,9 +82,13 @@ export function WorkspaceToolsSheet({
       navigationBarTranslucent
       animationType="slide"
       presentationStyle={Platform.OS === "ios" ? "fullScreen" : undefined}
+      // The desktop also works in landscape.
+      supportedOrientations={SUPPORTED_ORIENTATIONS}
       onRequestClose={onClose}
     >
-      <View
+      <StatusBar style={theme.scheme === "dark" ? "light" : "dark"} />
+      {/* Android modals need their own gesture root (desktop trackpad). */}
+      <GestureHandlerRootView
         testID="workspace-tools-sheet"
         accessibilityViewIsModal
         onAccessibilityEscape={onClose}
@@ -96,16 +108,33 @@ export function WorkspaceToolsSheet({
             onPress={onClose}
             testID="workspace-tools-close"
           />
-          <SegmentedControl
-            values={TOOLS.map((item) => item.label)}
-            selectedIndex={TOOLS.findIndex((item) => item.id === tool)}
-            appearance={theme.scheme}
-            onChange={({ nativeEvent }) =>
-              select(nativeEvent.selectedSegmentIndex)
-            }
-            style={styles.segments}
-            testID="workspace-tools-sections"
-          />
+          {Platform.OS === "android" ? (
+            // Material's SegmentedButton reserves a checkmark per segment, so
+            // four labels wrap on phones; the app's Compose row does not.
+            <View style={styles.segments}>
+              <NativeSegmentedPicker
+                label="Workspace tools"
+                value={tool}
+                options={TOOLS.map((item) => ({
+                  value: item.id,
+                  label: item.label,
+                }))}
+                onChange={(value) => setTool(value as WorkspaceToolId)}
+                testID="workspace-tools-sections"
+              />
+            </View>
+          ) : (
+            <SegmentedControl
+              values={TOOLS.map((item) => item.label)}
+              selectedIndex={TOOLS.findIndex((item) => item.id === tool)}
+              appearance={theme.scheme}
+              onChange={({ nativeEvent }) =>
+                select(nativeEvent.selectedSegmentIndex)
+              }
+              style={styles.segments}
+              testID="workspace-tools-sections"
+            />
+          )}
         </View>
         <View style={styles.content}>
           {TOOLS.filter((item) => mounted.has(item.id)).map((item) => {
@@ -139,7 +168,7 @@ export function WorkspaceToolsSheet({
           })}
         </View>
         <ToastHost />
-      </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

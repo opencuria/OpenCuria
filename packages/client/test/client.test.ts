@@ -1626,6 +1626,76 @@ describe("workspace tools", () => {
       },
     ]);
   });
+
+  it("calls the desktop REST contract with this viewer's intent", async () => {
+    const calls: Array<{ method: string; url: string; body: unknown }> = [];
+    const fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          method: init?.method ?? "GET",
+          url: String(input),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        return jsonResponse({ task_id: "t", text: "x", active: true });
+      },
+    ) as unknown as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch);
+    const intent = { viewer_client_id: "viewer", intent_revision: 3 };
+
+    await client.desktop.start("ws 1", intent);
+    await client.desktop.renew("ws", intent);
+    await client.desktop.status("ws", "viewer");
+    await client.desktop.status("ws");
+    await client.desktop.stop("ws", intent);
+    await client.desktop.takeControl("ws");
+    await client.desktop.readClipboard("ws");
+    await client.desktop.writeClipboard("ws", "hello");
+
+    const base = "https://api.example/api/v1/workspaces";
+    expect(calls).toEqual([
+      { method: "POST", url: `${base}/ws%201/desktop/`, body: intent },
+      { method: "POST", url: `${base}/ws/desktop/renew/`, body: intent },
+      {
+        method: "GET",
+        url: `${base}/ws/desktop/status/?viewer_client_id=viewer`,
+        body: undefined,
+      },
+      { method: "GET", url: `${base}/ws/desktop/status/`, body: undefined },
+      { method: "POST", url: `${base}/ws/desktop/stop/`, body: intent },
+      { method: "POST", url: `${base}/ws/desktop/take-control/`, body: undefined },
+      {
+        method: "POST",
+        url: `${base}/ws/desktop/clipboard/read/`,
+        body: undefined,
+      },
+      {
+        method: "POST",
+        url: `${base}/ws/desktop/clipboard/write/`,
+        body: { text: "hello" },
+      },
+    ]);
+  });
+
+  it("builds the authenticated KasmVNC viewer URL for a desktop route", () => {
+    const client = clientOptions().create(
+      vi.fn() as unknown as typeof globalThis.fetch,
+    );
+    const url = new URL(
+      client.desktop.viewerUrl("/ws/desktop/ws-1/", {
+        viewer_client_id: "viewer",
+        intent_revision: 2,
+      }),
+    );
+    expect(url.origin + url.pathname).toBe(
+      "https://api.example/ws/desktop/ws-1/",
+    );
+    expect(url.searchParams.get("token")).toBe("old-access");
+    expect(url.searchParams.get("resize")).toBe("scale");
+    expect(url.searchParams.get("intent_revision")).toBe("2");
+    expect(url.searchParams.get("path")).toBe(
+      "ws/desktop/ws-1/?token=old-access&viewer_client_id=viewer&intent_revision=2",
+    );
+  });
 });
 
 describe("settings API", () => {

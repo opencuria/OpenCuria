@@ -2,7 +2,7 @@ import type { OpenCuriaClient } from "@opencuria/client";
 import type { MediaCache } from "../platform";
 
 /** The workspace tools sheet's sections, in header order. */
-export type WorkspaceToolId = "git" | "terminal" | "files";
+export type WorkspaceToolId = "git" | "desktop" | "terminal" | "files";
 
 /**
  * Props every tools-sheet panel receives. Panels stay mounted while the sheet

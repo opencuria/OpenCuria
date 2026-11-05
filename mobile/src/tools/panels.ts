@@ -1,5 +1,6 @@
 import type React from "react";
 import { GitPanel } from "./git";
+import { DesktopPanel } from "./desktop";
 import { FilesPanel } from "./files";
 import { TerminalPanel } from "./terminal";
 import type { WorkspaceToolId, WorkspaceToolProps } from "./types";
@@ -10,6 +11,7 @@ export const TOOL_PANELS: Record<
   React.ComponentType<WorkspaceToolProps>
 > = {
   git: GitPanel,
+  desktop: DesktopPanel,
   terminal: TerminalPanel,
   files: FilesPanel,
 };

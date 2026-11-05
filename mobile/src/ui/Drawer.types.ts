@@ -12,7 +12,7 @@ export interface DrawerProps {
   children: React.ReactNode;
   onCreate: () => void;
   canCreate: boolean;
-  /** Opens Git, Terminal & Files; sits between New chat and the overflow menu. */
+  /** Opens Git, Desktop, Terminal & Files; sits between New chat and the overflow menu. */
   onTools: () => void;
   /** The workspace can run its tools (running VM, online runner). */
   canOpenTools: boolean;

@@ -78,6 +78,19 @@ export interface RealtimeEventMap {
     terminal_id: string;
     reason?: string;
   };
+  /** Desktop summaries never convey this client's own viewer lease. */
+  "desktop:started": {
+    workspace_id: string;
+    task_id: string;
+    proxy_url: string;
+    computer_use_active?: boolean;
+  };
+  "desktop:stopped": { workspace_id: string; task_id: string };
+  "desktop:viewer_released": {
+    workspace_id: string;
+    task_id: string;
+    computer_use_active: boolean;
+  };
 }
 
 export type RealtimeEventName = keyof RealtimeEventMap | (string & {});

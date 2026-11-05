@@ -11,8 +11,6 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
-  Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -20,14 +18,14 @@ import {
 import {
   KeyboardController,
   KeyboardEvents,
-  KeyboardStickyView,
   useKeyboardState,
 } from "react-native-keyboard-controller";
 import * as Clipboard from "expo-clipboard";
-import { ChevronDown, Ellipsis, Keyboard } from "lucide-react-native";
+import { Ellipsis, Keyboard } from "lucide-react-native";
 import { Button, IconButton } from "../../ui/controls";
 import { NativeMenu } from "../../ui/NativeMenu";
 import { useTheme } from "../../ui/theme";
+import { KEY_ACCESSORY_HEIGHT, KeyAccessoryBar } from "../KeyAccessoryBar";
 import type { WorkspaceToolProps } from "../types";
 import { hasNativeTerminalSurface } from "./nativeTerminalModule";
 import {
@@ -43,7 +41,6 @@ export const DEFAULT_TERMINAL_FONT_SIZE = 10.5;
 export const TERMINAL_FONT_SIZE_STEP = 0.5;
 export const MIN_TERMINAL_FONT_SIZE = 6;
 export const MAX_TERMINAL_FONT_SIZE = 14;
-const ACCESSORY_HEIGHT = 52;
 
 /** Text size for this app session (shared by every workspace terminal). */
 let terminalFontSize = DEFAULT_TERMINAL_FONT_SIZE;
@@ -156,7 +153,7 @@ export function TerminalPanel({
   const keyboardOpen = active && keyboard.isVisible;
   const surfaceBottom =
     (keyboardOpen ? keyboard.height : 0) +
-    (accessoryVisible ? ACCESSORY_HEIGHT : 0);
+    (accessoryVisible ? KEY_ACCESSORY_HEIGHT : 0);
 
   const write = async (data: string) => session.write(data);
   const paste = () =>
@@ -382,85 +379,23 @@ export function TerminalPanel({
       ) : null}
 
       {accessoryVisible ? (
-        <KeyboardStickyView
-          style={styles.accessoryDock}
-          offset={{ closed: 0, opened: 0 }}
-        >
-          <View
-            style={[
-              styles.accessory,
-              {
-                backgroundColor: terminalTheme.background,
-                borderTopColor: theme.border,
-              },
-            ]}
-            testID="terminal-accessory"
-          >
-            <ScrollView
-              horizontal
-              keyboardShouldPersistTaps="always"
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.keys}
-            >
-              {TOOLBAR.map((action) => {
-                const selected =
-                  action.kind === "modifier" &&
-                  pendingModifier === action.modifier;
-                return (
-                  <Pressable
-                    key={action.key}
-                    accessibilityRole="button"
-                    accessibilityLabel={action.label}
-                    accessibilityState={{ selected }}
-                    onPress={() => onToolbarAction(action)}
-                    testID={`terminal-key-${action.key}`}
-                    android_ripple={{
-                      color: theme.controlFill,
-                      borderless: false,
-                    }}
-                    style={({ pressed }) => [
-                      styles.key,
-                      {
-                        minWidth: action.label.length > 1 ? 52 : 42,
-                        backgroundColor: selected
-                          ? theme.text
-                          : pressed
-                            ? theme.border
-                            : theme.controlFill,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.keyLabel,
-                        {
-                          color: selected
-                            ? theme.background
-                            : terminalTheme.foreground,
-                          textTransform:
-                            action.kind === "modifier" ||
-                            action.kind === "clear"
-                              ? "uppercase"
-                              : "none",
-                        },
-                      ]}
-                    >
-                      {action.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-            <IconButton
-              label="Dismiss keyboard"
-              symbol="keyboard.chevron.compact.down"
-              icon={<ChevronDown size={20} color={theme.text} />}
-              tone="quiet"
-              onPress={dismissKeyboard}
-              testID="terminal-dismiss-keyboard"
-            />
-          </View>
-        </KeyboardStickyView>
+        <KeyAccessoryBar
+          keys={TOOLBAR.map((action) => ({
+            id: action.key,
+            label: action.label,
+            selected:
+              action.kind === "modifier" && pendingModifier === action.modifier,
+            uppercase: action.kind === "modifier" || action.kind === "clear",
+          }))}
+          onPress={(id) => {
+            const action = TOOLBAR.find((item) => item.key === id);
+            if (action) onToolbarAction(action);
+          }}
+          onDismiss={dismissKeyboard}
+          background={terminalTheme.background}
+          foreground={terminalTheme.foreground}
+          testIDPrefix="terminal"
+        />
       ) : active && isRunning && !keyboard.isVisible ? (
         <View
           style={[styles.showKeyboard, { bottom: bottomInset + 16 }]}
@@ -523,28 +458,6 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-  },
-  accessoryDock: { position: "absolute", left: 0, right: 0, bottom: 0 },
-  accessory: {
-    minHeight: ACCESSORY_HEIGHT,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingLeft: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  keys: { gap: 6, alignItems: "center", paddingRight: 4 },
-  key: {
-    height: 36,
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  keyLabel: {
-    fontSize: 14,
-    fontWeight: "600",
-    fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
   },
   showKeyboard: { position: "absolute", right: 16 },
 });

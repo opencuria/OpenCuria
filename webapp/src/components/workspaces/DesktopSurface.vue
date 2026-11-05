@@ -20,6 +20,7 @@ import {
   workspaceDesktopSize,
 } from '@/lib/desktopGeometry'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
+import { DESKTOP_CONNECTION_TIMEOUT_MS } from '@opencuria/chat-core/desktopSurface'
 import {
   createDesktopReconnectBackoff,
   createPausableTimer,
@@ -256,7 +257,7 @@ const connectionTimeout = createPausableTimer(() => {
 })
 
 function startConnectionTimeout(): void {
-  if (!connectionTimeout.pending) connectionTimeout.start(15_000)
+  if (!connectionTimeout.pending) connectionTimeout.start(DESKTOP_CONNECTION_TIMEOUT_MS)
   if (document.visibilityState !== 'visible') connectionTimeout.pause()
 }
 

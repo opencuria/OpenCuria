@@ -1104,7 +1104,7 @@ export function MainScreen(): React.JSX.Element {
           onSelect: moveNewChat,
         }
       : undefined;
-  /** Git, Terminal and Files need the workspace's VM and runner. */
+  /** Git, Desktop, Terminal and Files need the workspace's VM and runner. */
   const toolsAvailable = Boolean(
     workspace &&
     workspace.status === "running" &&
@@ -1374,7 +1374,7 @@ export function MainScreen(): React.JSX.Element {
             onPullUpAtEnd={
               toolsAvailable ? () => openSheet("tools") : undefined
             }
-            pullUpLabel="Git, Terminal & Files"
+            pullUpLabel="Git, Desktop, Terminal & Files"
             testID="chat-transcript"
           />
         </ChatLayout>

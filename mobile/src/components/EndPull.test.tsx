@@ -49,7 +49,7 @@ function renderTranscript(onPullUpAtEnd = jest.fn()) {
       <ChatMessages
         messages={[]}
         onPullUpAtEnd={onPullUpAtEnd}
-        pullUpLabel="Git, Terminal & Files"
+        pullUpLabel="Git, Desktop, Terminal & Files"
         testID="transcript"
       />
     </ThemeProvider>,

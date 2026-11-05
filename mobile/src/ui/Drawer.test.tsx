@@ -83,7 +83,7 @@ it("opens workspace tools from a native branch button", () => {
   const { props } = setup();
   const { options } = mockScreen.mock.calls.at(-1)![0];
   const tools = (options.unstable_headerRightItems() as NativeStackHeaderItem[])
-    .find((item) => item.type === "button" && item.label === "Git, Terminal & Files");
+    .find((item) => item.type === "button" && item.label === "Git, Desktop, Terminal & Files");
   expect(tools).toMatchObject({
     type: "button",
     icon: { type: "sfSymbol", name: "arrow.triangle.branch" },

@@ -1418,7 +1418,7 @@ it("puts workspace and chat actions in the header menu", async () => {
   tree.unmount();
 });
 
-it("opens Git, Terminal and Files by pulling up at the end or from the header button", async () => {
+it("opens Git, Desktop, Terminal and Files by pulling up at the end or from the header button", async () => {
   const client = mockClient();
   mockUseSession.mockReturnValue(sessionValue(client) as never);
   const tree = render(

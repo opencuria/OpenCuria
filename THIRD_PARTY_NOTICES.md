@@ -162,6 +162,7 @@ The native client is under `mobile/`; the root `package-lock.json` pins the npm 
 - **`remend` 1.3.0** (Vercel, [upstream](https://github.com/vercel/streamdown)): Apache-2.0.
 - **`lucide-react-native` 1.58.0** ([upstream](https://github.com/lucide-icons/lucide)): ISC. Its upstream license also identifies the Feather-derived icons and their MIT copyright notice; see the installed package's `LICENSE`.
 - **`socket.io-client` 4.8.3**: MIT.
+- **`react-native-webview` 13.16.1** ([upstream](https://github.com/react-native-webview/react-native-webview)): MIT. It hosts the workspace's KasmVNC client, which the workspace serves itself and is not bundled with the app.
 - **Material Symbols / Material Icons** (Google, [upstream](https://github.com/google/material-design-icons)): Apache-2.0. The Android vector drawables in `mobile/assets/native-icons/` are their path data, converted to the Android vector format without changing the paths.
 - `@opencuria/client` and `@opencuria/chat-core` are in-repository OpenCuria packages licensed AGPL-3.0-only, like the surrounding project.
 

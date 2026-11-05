@@ -20,7 +20,9 @@ import type {
   CapturedImage,
   WorkspaceRecreateOut,
 } from '@/types'
-import { get, post, del, patch, postDuringClipboardGesture } from './api'
+import { createDesktopApi } from '@opencuria/client/desktop'
+import type { DesktopStatus, DesktopViewerIntent } from '@opencuria/client/desktop'
+import { get, post, del, patch, getApiClient, postDuringClipboardGesture } from './api'
 
 export function listWorkspaces(runnerId?: string): Promise<Workspace[]> {
   const query = runnerId ? `?runner_id=${runnerId}` : ''
@@ -75,36 +77,22 @@ export function startTerminal(
   })
 }
 
-// --- Desktop API ---
+// --- Desktop API (shared with mobile: `@opencuria/client/desktop`) ---
 
-export interface DesktopViewerIntent {
-  viewer_client_id: string
-  intent_revision: number
-}
+export type { DesktopStatus, DesktopViewerIntent }
 
-export interface DesktopStatus {
-  active: boolean
-  proxy_url: string | null
-  viewer_held: boolean
-  computer_use_active: boolean
-  mcp_active?: boolean
-  holder_count?: number
-  viewer_lease_state?: string
-  revision?: number
-  intent_revision?: number
-  epoch?: string | null
-}
+const desktopApi = createDesktopApi(getApiClient)
 
 export function startDesktop(
   id: string,
   intent: DesktopViewerIntent,
   signal?: AbortSignal,
 ): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, intent, signal)
+  return desktopApi.start(id, intent, signal)
 }
 
 export function stopDesktop(id: string, intent: DesktopViewerIntent): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/stop/`, intent)
+  return desktopApi.stop(id, intent)
 }
 
 export function renewDesktop(
@@ -112,7 +100,7 @@ export function renewDesktop(
   intent: DesktopViewerIntent,
   signal?: AbortSignal,
 ): Promise<DesktopStatus> {
-  return post<DesktopStatus>(`/workspaces/${id}/desktop/renew/`, intent, signal)
+  return desktopApi.renew(id, intent, signal)
 }
 
 export function getDesktopStatus(
@@ -120,34 +108,19 @@ export function getDesktopStatus(
   viewerClientId?: string,
   signal?: AbortSignal,
 ): Promise<DesktopStatus> {
-  const query = viewerClientId
-    ? `?${new URLSearchParams({ viewer_client_id: viewerClientId })}`
-    : ''
-  return get<DesktopStatus>(`/workspaces/${id}/desktop/status/${query}`, signal)
+  return desktopApi.status(id, viewerClientId, signal)
 }
 
-export function takeDesktopControl(
-  id: string,
-): Promise<{ aborted_session_ids: string[] }> {
-  return post<{ aborted_session_ids: string[] }>(
-    `/workspaces/${id}/desktop/take-control/`,
-  )
+export function takeDesktopControl(id: string): Promise<{ aborted_session_ids: string[] }> {
+  return desktopApi.takeControl(id)
 }
 
-export function writeDesktopClipboard(
-  id: string,
-  text: string,
-): Promise<{ text: string }> {
-  return post<{ text: string }>(
-    `/workspaces/${id}/desktop/clipboard/write/`,
-    { text },
-  )
+export function writeDesktopClipboard(id: string, text: string): Promise<{ text: string }> {
+  return desktopApi.writeClipboard(id, text)
 }
 
 export function readDesktopClipboard(id: string): Promise<{ text: string }> {
-  return post<{ text: string }>(
-    `/workspaces/${id}/desktop/clipboard/read/`,
-  )
+  return desktopApi.readClipboard(id)
 }
 
 /** Atomically copy the VM selection without leaving the browser's copy gesture. */
