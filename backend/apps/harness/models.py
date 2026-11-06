@@ -867,4 +867,5 @@ from .provider_oauth_models import ProviderOAuthFlow  # noqa: E402,F401
 from .provider_refresh_models import ProviderRefreshLease  # noqa: E402,F401
 from .provider_turn_models import ProviderTurn, ProviderTurnMutex  # noqa: E402,F401
 from .command_models import HarnessCommand  # noqa: E402,F401
+from .command_models import HarnessExecutionHeartbeat  # noqa: E402,F401
 from .command_models import HarnessSteeringSnapshot  # noqa: E402,F401

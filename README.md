@@ -253,6 +253,9 @@ authorized workspace events between that gateway and the execution worker.
 
 One execution worker owns the native task registry, scheduler, notifications and
 recovery. Its durable command queue separates admitted work from HTTP requests.
+The worker renews a database heartbeat every 2 s. If an agent request finds no
+live worker within a few seconds, the API withdraws the request and answers 503
+`execution_unavailable` instead of waiting.
 A process-lifetime file lock excludes another live execution owner; SQLite places
 it next to its database. PostgreSQL deployments with multiple hosts must set
 `EXECUTION_PROCESS_LOCK_PATH` on shared execution storage. The scheduler also holds

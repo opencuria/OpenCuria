@@ -48,3 +48,13 @@ class AuthenticationError(ServiceError):
 
     def __init__(self, message: str = "Authentication failed") -> None:
         super().__init__(message=message, code="authentication_error")
+
+
+class ServiceUnavailableError(ServiceError):
+    """Raised when a required backend process is temporarily unreachable.
+
+    The REST API answers it with HTTP 503 so clients can retry later.
+    """
+
+    def __init__(self, message: str, code: str = "service_unavailable") -> None:
+        super().__init__(message=message, code=code)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Collection
+from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Exists, OuterRef, Q
@@ -15,7 +16,9 @@ from common.utils import decrypt_value, encrypt_value
 from .command_models import (
     ADMISSION_COMMAND_KINDS,
     CONTROL_COMMAND_KINDS,
+    EXECUTION_HEARTBEAT_TTL_SECONDS,
     HarnessCommand,
+    HarnessExecutionHeartbeat,
 )
 
 
@@ -46,6 +49,17 @@ class HarnessCommandRepository:
     def get(command_id: uuid.UUID) -> HarnessCommand:
         """Read the request's durable state without touching the execution process."""
         return HarnessCommand.objects.get(pk=command_id)
+
+    @staticmethod
+    def withdraw(command_id: uuid.UUID) -> bool:
+        """Remove a request before any execution owner claimed it.
+
+        Returns False once the request is claimed; its owner then decides the outcome.
+        """
+        deleted, _ = HarnessCommand.objects.filter(
+            pk=command_id, state=HarnessCommand.State.QUEUED
+        ).delete()
+        return deleted > 0
 
     @staticmethod
     def decode_payload(command: HarnessCommand) -> dict:
@@ -178,6 +192,42 @@ class HarnessCommandRepository:
             )
             for row in rows
         )
+
+
+class ExecutionHeartbeatRepository:
+    """Presence of execution worker lifetimes, judged by heartbeat age."""
+
+    @staticmethod
+    def beat(owner_id: uuid.UUID) -> None:
+        """Renew this lifetime's presence."""
+        HarnessExecutionHeartbeat.objects.update_or_create(
+            owner_id=owner_id, defaults={"beat_at": timezone.now()}
+        )
+
+    @staticmethod
+    def remove(owner_id: uuid.UUID) -> None:
+        """Withdraw presence once this lifetime stops accepting commands."""
+        HarnessExecutionHeartbeat.objects.filter(owner_id=owner_id).delete()
+
+    @staticmethod
+    def prune() -> int:
+        """Delete presence left behind by lifetimes that ended without cleanup."""
+        deleted, _ = HarnessExecutionHeartbeat.objects.filter(
+            beat_at__lt=timezone.now()
+            - timedelta(seconds=EXECUTION_HEARTBEAT_TTL_SECONDS)
+        ).delete()
+        return deleted
+
+    @staticmethod
+    def is_alive(owner_id: uuid.UUID | None = None) -> bool:
+        """Whether a worker (or the given owner) renewed its presence recently."""
+        fresh = HarnessExecutionHeartbeat.objects.filter(
+            beat_at__gte=timezone.now()
+            - timedelta(seconds=EXECUTION_HEARTBEAT_TTL_SECONDS)
+        )
+        if owner_id is not None:
+            fresh = fresh.filter(owner_id=owner_id)
+        return fresh.exists()
 
 
 class SteeringSnapshotRepository:

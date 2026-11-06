@@ -39,6 +39,7 @@ from apps.runners.api import (
 )
 from apps.scheduled_tasks.api import scheduled_task_router
 from apps.skills.api import skill_router
+from common.exceptions import ServiceUnavailableError
 
 api = NinjaAPI(
     title="opencuria API",
@@ -46,6 +47,14 @@ api = NinjaAPI(
     urls_namespace="api",
     auth=[JWTAuth(), APIKeyBearer(), APIKeyInHeader()],
 )
+
+
+@api.exception_handler(ServiceUnavailableError)
+def service_unavailable(request, exc: ServiceUnavailableError):
+    """Report an unreachable backend process as retryable on every endpoint."""
+    return api.create_response(
+        request, {"detail": exc.message, "code": exc.code}, status=503
+    )
 
 
 # ---------------------------------------------------------------------------

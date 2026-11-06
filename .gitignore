@@ -6,6 +6,7 @@
 !.env.example
 *.sqlite3
 *.asgi.lock
+*.execution.lock
 
 # Docker volumes (created by docker compose on dev machines)
 certs/

@@ -19,6 +19,12 @@ CONTROL_COMMAND_KINDS = frozenset(
     }
 )
 
+EXECUTION_HEARTBEAT_SECONDS = 2.0
+"""How often a live execution worker renews its presence."""
+
+EXECUTION_HEARTBEAT_TTL_SECONDS = 10.0
+"""Presence older than this means the worker can no longer claim or finish work."""
+
 
 class HarnessCommand(models.Model):
     """One durable request; claimed effects are never automatically executed twice."""
@@ -72,6 +78,19 @@ class HarnessCommand(models.Model):
                 name="harness_command_valid_state",
             )
         ]
+
+
+class HarnessExecutionHeartbeat(models.Model):
+    """Presence of one execution worker lifetime while it accepts commands.
+
+    API waiters use it to tell an absent worker apart from intended backpressure.
+    """
+
+    owner_id = models.UUIDField(primary_key=True, editable=False)
+    beat_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        db_table = "harness_execution_heartbeat"
 
 
 class HarnessSteeringSnapshot(models.Model):

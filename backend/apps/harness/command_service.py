@@ -16,10 +16,15 @@ from common.exceptions import (
     ConflictError,
     NotFoundError,
     ServiceError,
+    ServiceUnavailableError,
 )
 
-from .command_models import HarnessCommand
-from .command_repository import HarnessCommandRepository, SteeringSnapshotRepository
+from .command_models import EXECUTION_HEARTBEAT_SECONDS, HarnessCommand
+from .command_repository import (
+    ExecutionHeartbeatRepository,
+    HarnessCommandRepository,
+    SteeringSnapshotRepository,
+)
 from .repositories import HarnessMessageRepository, HarnessSessionRepository
 from .run_settings_snapshot import RunSettingsSnapshot
 from .steering import SteerEntry
@@ -30,16 +35,25 @@ if TYPE_CHECKING:
 
 
 class HarnessCommandClient:
-    """Wait for a durable reply; request cancellation never cancels committed work."""
+    """Wait for a durable reply; request cancellation never cancels committed work.
+
+    A request that is still pending after ``liveness_interval`` seconds is checked
+    against the execution heartbeat. Without a live worker it fails with
+    ``ServiceUnavailableError`` instead of waiting indefinitely.
+    """
 
     def __init__(
         self,
         *,
         repository: type[HarnessCommandRepository] = HarnessCommandRepository,
+        heartbeats: type[ExecutionHeartbeatRepository] = ExecutionHeartbeatRepository,
         interval: float = 0.05,
+        liveness_interval: float = EXECUTION_HEARTBEAT_SECONDS,
     ) -> None:
         self.repository = repository
+        self.heartbeats = heartbeats
         self.interval = interval
+        self.liveness_interval = liveness_interval
 
     async def call(
         self, kind: str, payload: dict, *, session_id: uuid.UUID | None = None
@@ -50,6 +64,8 @@ class HarnessCommandClient:
             sync_to_async(self.repository.enqueue)(kind, encoded, session_id)
         )
         row = await asyncio.shield(admission)
+        loop = asyncio.get_running_loop()
+        liveness_due = loop.time() + self.liveness_interval
         while True:
             state = await sync_to_async(self.repository.get)(row.id)
             if state.state == HarnessCommand.State.COMPLETED:
@@ -57,7 +73,37 @@ class HarnessCommandClient:
                 if not result["ok"]:
                     self._raise_error(result["error"])
                 return result.get("value")
+            if loop.time() >= liveness_due:
+                await self._require_execution(state)
+                liveness_due = loop.time() + self.liveness_interval
             await asyncio.sleep(self.interval)
+
+    async def _require_execution(self, command: HarnessCommand) -> None:
+        """Fail when no live worker can complete a pending request.
+
+        A queued request without any worker is withdrawn, so it never runs later.
+        Queued requests behind a live worker are backpressure and keep waiting. A
+        claimed request whose owner died keeps its row for startup recovery.
+        """
+        if command.state == HarnessCommand.State.QUEUED:
+            if await sync_to_async(self.heartbeats.is_alive)():
+                return
+            if await sync_to_async(self.repository.withdraw)(command.id):
+                raise ServiceUnavailableError(
+                    "Agent execution is unavailable. Try again shortly.",
+                    code="execution_unavailable",
+                )
+            return  # Claimed in the meantime; its owner reports the outcome.
+        if await sync_to_async(self.heartbeats.is_alive)(command.owner_id):
+            return
+        current = await sync_to_async(self.repository.get)(command.id)
+        if current.state == HarnessCommand.State.COMPLETED:
+            return  # Its owner published the reply before withdrawing presence.
+        raise ServiceUnavailableError(
+            "Agent execution stopped before finishing this request. "
+            "Check the chat before retrying.",
+            code="execution_lost",
+        )
 
     @staticmethod
     def _raise_error(error: dict) -> None:

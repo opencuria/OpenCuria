@@ -17,9 +17,14 @@ from common.process_ownership import ExecutionProcessGuard, execution_process_lo
 from .command_models import (
     ADMISSION_COMMAND_KINDS,
     CONTROL_COMMAND_KINDS,
+    EXECUTION_HEARTBEAT_SECONDS,
     HarnessCommand,
 )
-from .command_repository import HarnessCommandRepository, SteeringSnapshotRepository
+from .command_repository import (
+    ExecutionHeartbeatRepository,
+    HarnessCommandRepository,
+    SteeringSnapshotRepository,
+)
 from .command_service import HarnessCommandDispatcher
 
 if TYPE_CHECKING:
@@ -66,6 +71,7 @@ class ExecutionWorker:
         service: HarnessService,
         *,
         repository: type[HarnessCommandRepository] = HarnessCommandRepository,
+        heartbeats: type[ExecutionHeartbeatRepository] = ExecutionHeartbeatRepository,
         guard: ExecutionProcessGuard | None = None,
         scheduler: ExecutionScheduler,
         notifications: BackgroundWorker,
@@ -73,6 +79,7 @@ class ExecutionWorker:
         start_transport: Callable[[], Awaitable[None]] = _start_transport,
         stop_transport: Callable[[], Awaitable[None]] = _stop_transport,
         interval: float = 0.05,
+        heartbeat_interval: float = EXECUTION_HEARTBEAT_SECONDS,
         max_admissions: int = 8,
         max_controls: int = 32,
     ) -> None:
@@ -82,6 +89,8 @@ class ExecutionWorker:
         self.max_controls = max_controls
         self.service = service
         self.repository = repository
+        self.heartbeats = heartbeats
+        self.heartbeat_interval = heartbeat_interval
         self.guard = guard or ExecutionProcessGuard(execution_process_lock_path())
         self.scheduler = scheduler
         self.notifications = notifications
@@ -92,6 +101,7 @@ class ExecutionWorker:
         self.stop_transport = stop_transport
         self.interval = interval
         self._poller: asyncio.Task | None = None
+        self._heartbeat: asyncio.Task | None = None
         self._commands: dict[asyncio.Task, HarnessCommand] = {}
         self._started = False
 
@@ -104,6 +114,11 @@ class ExecutionWorker:
             await self.start_transport()
             await self.scheduler.start(before_dispatch=self._recover)
             await self.notifications.start()
+            # Publish presence before claiming so API waiters see a live owner.
+            await sync_to_async(self.heartbeats.beat)(self.owner_id)
+            self._heartbeat = asyncio.create_task(
+                self._beat(), name="harness-execution-heartbeat"
+            )
             self._poller = asyncio.create_task(
                 self._run(), name="harness-command-worker"
             )
@@ -121,6 +136,7 @@ class ExecutionWorker:
         await self.recovery.start()
         await sync_to_async(self.repository.interrupt_claimed)()
         await sync_to_async(SteeringSnapshotRepository.clear)()
+        await sync_to_async(self.heartbeats.prune)()
 
     async def stop(self) -> None:
         """Stop admission and supervised jobs, then settle the worker's task trees."""
@@ -135,10 +151,35 @@ class ExecutionWorker:
         # Commands are independently supervised so an abort/question can proceed
         # while another request is awaiting workspace or provider preparation.
         await self._cancel_commands(tuple(self._commands.items()))
+        # Every claimed command has its reply now; queued ones fail fast instead
+        # of waiting for this lifetime while native runs drain.
+        await self._stop_heartbeat()
         await self.service.shutdown_runs()
         await self.stop_transport()
         self._started = False
         # Process exclusion deliberately lasts until exit, including cleanup.
+
+    async def _beat(self) -> None:
+        """Renew presence for as long as this lifetime accepts commands."""
+        while True:
+            await asyncio.sleep(self.heartbeat_interval)
+            try:
+                await sync_to_async(self.heartbeats.beat)(self.owner_id)
+            except Exception:
+                log.exception("harness_execution_heartbeat_failed")
+
+    async def _stop_heartbeat(self) -> None:
+        if self._heartbeat is None:
+            return
+        self._heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._heartbeat
+        self._heartbeat = None
+        try:
+            await sync_to_async(self.heartbeats.remove)(self.owner_id)
+        except Exception:
+            # The presence expires on its own; shutdown must still settle runs.
+            log.exception("harness_execution_heartbeat_remove_failed")
 
     async def _run(self) -> None:
         while True:

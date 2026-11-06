@@ -202,3 +202,44 @@ def test_desktop_action_availability_contract(desktop_access, action, blocked_by
         assert response.json()["code"] == "conflict"
         gateway.abort_busy_computeruse.assert_not_awaited()
     service.runner_transport.call_runner.assert_not_awaited()
+
+
+@pytest.mark.django_db
+def test_take_control_without_execution_worker_answers_unavailable(
+    desktop_access, monkeypatch
+):
+    """A missing execution worker fails fast and leaves no request to run later."""
+    from apps.harness.command_models import HarnessCommand
+    from apps.harness.command_service import (
+        HarnessCommandClient,
+        RemoteHarnessService,
+    )
+    from apps.harness.harness_service import HarnessService
+    from apps.harness.runner_gateway import RunnerHarnessGateway
+
+    service, _, workspace, user, org = desktop_access
+    service._harness_gateway = RunnerHarnessGateway()
+    monkeypatch.setattr(
+        "apps.harness.harness_service._default_harness_service",
+        RemoteHarnessService(
+            HarnessService(),
+            client=HarnessCommandClient(interval=0.001, liveness_interval=0.01),
+        ),
+    )
+    client = _make_client(
+        user=user,
+        org=org,
+        permissions=[
+            APIKeyPermission.TERMINAL_ACCESS.value,
+            APIKeyPermission.HARNESS_RUN.value,
+        ],
+    )
+
+    response = _desktop_request(client, workspace.id, "take-control")
+
+    assert response.status_code == 503, response.content
+    assert response.json() == {
+        "detail": "Agent execution is unavailable. Try again shortly.",
+        "code": "execution_unavailable",
+    }
+    assert not HarnessCommand.objects.exists()
