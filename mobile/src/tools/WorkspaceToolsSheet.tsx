@@ -58,11 +58,14 @@ export function WorkspaceToolsSheet({
   const [mounted, setMounted] = useState<Set<WorkspaceToolId>>(
     () => new Set(["git"]),
   );
+  // Set by the visible panel, e.g. the desktop on a phone turned sideways.
+  const [fullscreen, setFullscreen] = useState(false);
   useEffect(() => {
     if (visible) return;
     // Every presentation starts on Git again.
     setTool("git");
     setMounted(new Set(["git"]));
+    setFullscreen(false);
   }, [visible]);
   useEffect(() => {
     setMounted((current) =>
@@ -86,7 +89,13 @@ export function WorkspaceToolsSheet({
       supportedOrientations={SUPPORTED_ORIENTATIONS}
       onRequestClose={onClose}
     >
-      <StatusBar style={theme.scheme === "dark" ? "light" : "dark"} />
+      {/* Android keeps its bar: keyboard-controller's status bar module hides
+          only the activity window's, not this modal's (content stays below). */}
+      <StatusBar
+        hidden={fullscreen}
+        style={theme.scheme === "dark" ? "light" : "dark"}
+        animated
+      />
       {/* Android modals need their own gesture root (desktop trackpad). */}
       <GestureHandlerRootView
         testID="workspace-tools-sheet"
@@ -94,48 +103,52 @@ export function WorkspaceToolsSheet({
         onAccessibilityEscape={onClose}
         style={[styles.root, { backgroundColor: theme.background }]}
       >
-        <View
-          style={[
-            styles.header,
-            { paddingTop: insets.top + (Platform.OS === "ios" ? 4 : 6) },
-          ]}
-        >
-          <IconButton
-            label="Close"
-            symbol="xmark"
-            icon={<X size={22} color={theme.text} />}
-            tone="floating"
-            onPress={onClose}
-            testID="workspace-tools-close"
-          />
-          {Platform.OS === "android" ? (
-            // Material's SegmentedButton reserves a checkmark per segment, so
-            // four labels wrap on phones; the app's Compose row does not.
-            <View style={styles.segments}>
-              <NativeSegmentedPicker
-                label="Workspace tools"
-                value={tool}
-                options={TOOLS.map((item) => ({
-                  value: item.id,
-                  label: item.label,
-                }))}
-                onChange={(value) => setTool(value as WorkspaceToolId)}
+        {/* A full-screen panel keeps its place (no remount, e.g. desktop). */}
+        {fullscreen ? null : (
+          <View
+            testID="workspace-tools-header"
+            style={[
+              styles.header,
+              { paddingTop: insets.top + (Platform.OS === "ios" ? 4 : 6) },
+            ]}
+          >
+            <IconButton
+              label="Close"
+              symbol="xmark"
+              icon={<X size={22} color={theme.text} />}
+              tone="floating"
+              onPress={onClose}
+              testID="workspace-tools-close"
+            />
+            {Platform.OS === "android" ? (
+              // Material's SegmentedButton reserves a checkmark per segment, so
+              // four labels wrap on phones; the app's Compose row does not.
+              <View style={styles.segments}>
+                <NativeSegmentedPicker
+                  label="Workspace tools"
+                  value={tool}
+                  options={TOOLS.map((item) => ({
+                    value: item.id,
+                    label: item.label,
+                  }))}
+                  onChange={(value) => setTool(value as WorkspaceToolId)}
+                  testID="workspace-tools-sections"
+                />
+              </View>
+            ) : (
+              <SegmentedControl
+                values={TOOLS.map((item) => item.label)}
+                selectedIndex={TOOLS.findIndex((item) => item.id === tool)}
+                appearance={theme.scheme}
+                onChange={({ nativeEvent }) =>
+                  select(nativeEvent.selectedSegmentIndex)
+                }
+                style={styles.segments}
                 testID="workspace-tools-sections"
               />
-            </View>
-          ) : (
-            <SegmentedControl
-              values={TOOLS.map((item) => item.label)}
-              selectedIndex={TOOLS.findIndex((item) => item.id === tool)}
-              appearance={theme.scheme}
-              onChange={({ nativeEvent }) =>
-                select(nativeEvent.selectedSegmentIndex)
-              }
-              style={styles.segments}
-              testID="workspace-tools-sections"
-            />
-          )}
-        </View>
+            )}
+          </View>
+        )}
         <View style={styles.content}>
           {TOOLS.filter((item) => mounted.has(item.id)).map((item) => {
             const Panel = TOOL_PANELS[item.id];
@@ -147,6 +160,7 @@ export function WorkspaceToolsSheet({
               media,
               bottomInset: insets.bottom,
               onInsertIntoChat,
+              onFullscreenChange: setFullscreen,
             };
             return (
               <View

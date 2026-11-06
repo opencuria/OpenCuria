@@ -1,14 +1,17 @@
 import React from "react";
-import { StyleSheet } from "react-native";
+import { Dimensions, StyleSheet } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import {
   act,
   cleanup,
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react-native";
 import type { OpenCuriaClient } from "@opencuria/client";
 import { ThemeProvider } from "../../ui/theme";
+import { currentToast, dismissToast } from "../../ui/toast";
 import { DesktopPanel } from "./DesktopPanel";
 
 jest.mock(
@@ -25,6 +28,7 @@ jest.mock("expo-clipboard", () => ({
 
 const mockInjected: string[] = [];
 let mockPageMessage: ((data: string) => void) | null = null;
+let mockPageLoads = 0;
 jest.mock("react-native-webview", () => {
   const React = require("react");
   const { View } = require("react-native");
@@ -37,6 +41,9 @@ jest.mock("react-native-webview", () => {
         React.useImperativeHandle(ref, () => ({
           injectJavaScript: (script: string) => mockInjected.push(script),
         }));
+        React.useEffect(() => {
+          mockPageLoads += 1;
+        }, []);
         mockPageMessage = (data: string) =>
           props.onMessage({ nativeEvent: { data } });
         return (
@@ -110,31 +117,55 @@ async function flush() {
     });
 }
 
-async function renderConnected() {
+/** The panel's area below its status bar, as laid out natively. */
+function layoutBody(width: number, height: number) {
+  fireEvent(screen.getByTestId("desktop-body"), "layout", {
+    nativeEvent: { layout: { width, height } },
+  });
+}
+
+const initialWindow = Dimensions.get("window");
+const initialScreen = Dimensions.get("screen");
+/** Turn the device: the window takes this size. */
+function setWindow(width: number, height: number) {
+  act(() => Dimensions.set({ window: { ...initialWindow, width, height } }));
+}
+
+async function renderConnected({
+  area = { width: 390, height: 700 },
+  insets = { top: 0, left: 0, right: 0, bottom: 0 },
+  onFullscreenChange,
+}: {
+  area?: { width: number; height: number };
+  insets?: { top: number; left: number; right: number; bottom: number };
+  onFullscreenChange?: (fullscreen: boolean) => void;
+} = {}) {
   const fake = fakeClient();
   render(
-    <ThemeProvider>
-      <DesktopPanel
-        client={fake.client}
-        workspaceId="ws"
-        workspaceName="demo"
-        active
-        media={null}
-        bottomInset={0}
-      />
-    </ThemeProvider>,
+    <SafeAreaProvider
+      initialMetrics={{ frame: { x: 0, y: 0, ...area }, insets }}
+    >
+      <ThemeProvider>
+        <DesktopPanel
+          client={fake.client}
+          workspaceId="ws"
+          workspaceName="demo"
+          active
+          media={null}
+          bottomInset={0}
+          onFullscreenChange={onFullscreenChange}
+        />
+      </ThemeProvider>
+    </SafeAreaProvider>,
   );
-  fireEvent(
-    screen.getByTestId("desktop-panel").children[1] as never,
-    "layout",
-    {
-      nativeEvent: { layout: { width: 390, height: 700 } },
-    },
-  );
+  layoutBody(area.width, area.height);
   await flush();
   act(() => mockPageMessage?.('{"type":"state","state":"connected"}'));
   return fake;
 }
+
+const screenStyle = () =>
+  StyleSheet.flatten(screen.getByTestId("desktop-screen").props.style);
 
 beforeEach(() => {
   // Lease renewals and release grace periods must not outlive a test.
@@ -143,12 +174,14 @@ beforeEach(() => {
   });
   mockInjected.length = 0;
   mockPageMessage = null;
+  mockPageLoads = 0;
 });
 
 afterEach(() => {
   cleanup();
   jest.clearAllTimers();
   jest.useRealTimers();
+  Dimensions.set({ window: initialWindow, screen: initialScreen });
 });
 
 it("starts the desktop when shown and loads the viewer once the lease is held", async () => {
@@ -189,8 +222,7 @@ it("sends typed text and backspaces from the hidden keyboard input", async () =>
   expect(mockInjected).toEqual([expect.stringContaining('"Backspace"')]);
 });
 
-it("is read-only while Computer Use drives the desktop until control is taken", async () => {
-  const fake = await renderConnected();
+function startComputerUse(fake: ReturnType<typeof fakeClient>) {
   act(() =>
     fake.emit("harness.subtask_started", {
       workspace_id: "ws",
@@ -199,13 +231,42 @@ it("is read-only while Computer Use drives the desktop until control is taken", 
       agent: "ComputerUse",
     }),
   );
-  expect(screen.getByTestId("desktop-computer-use")).toBeTruthy();
+}
+
+it("leaves the screen uncovered and read-only while Computer Use drives it, with Take control in the bar", async () => {
+  const fake = await renderConnected();
+  startComputerUse(fake);
+  expect(screen.getByTestId("desktop-status").props.children).toBe(
+    "Computer Use is in control",
+  );
+  // Nothing is laid over the screen; the action sits in the status bar.
+  const remote = within(screen.getByTestId("desktop-screen"));
+  expect(remote.queryByText(/Computer Use/)).toBeNull();
+  expect(remote.queryByTestId("desktop-take-control")).toBeNull();
   expect(screen.queryByTestId("desktop-show-keyboard")).toBeNull();
+
   await act(async () => {
     fireEvent.press(screen.getByTestId("desktop-take-control"));
   });
   expect(fake.desktop.takeControl).toHaveBeenCalledWith("ws");
-  expect(screen.queryByTestId("desktop-computer-use")).toBeNull();
+  expect(screen.queryByTestId("desktop-take-control")).toBeNull();
+  expect(screen.getByTestId("desktop-status").props.children).toBe("Connected");
+  expect(screen.getByTestId("desktop-show-keyboard")).toBeTruthy();
+});
+
+it("keeps Take control when Computer Use cannot be stopped", async () => {
+  const fake = await renderConnected();
+  fake.desktop.takeControl.mockRejectedValueOnce(new Error("busy"));
+  startComputerUse(fake);
+  await act(async () => {
+    fireEvent.press(screen.getByTestId("desktop-take-control"));
+  });
+  expect(currentToast()?.title).toBe("Could not take control");
+  expect(screen.getByTestId("desktop-take-control")).toBeTruthy();
+  expect(screen.getByTestId("desktop-status").props.children).toBe(
+    "Computer Use is in control",
+  );
+  dismissToast();
 });
 
 it("pastes the phone clipboard and stops the desktop from the menu", async () => {
@@ -237,18 +298,63 @@ it("pastes the phone clipboard and stops the desktop from the menu", async () =>
 
 it("runs the screen edge to edge in portrait while the trackpad keeps its room", async () => {
   await renderConnected();
-  const style = () =>
-    StyleSheet.flatten(screen.getByTestId("desktop-screen").props.style);
-  // 1280x720 across the full 390 points, no rounded frame.
-  expect(style()).toMatchObject({ width: 390, height: 219.375 });
-  expect(style().borderRadius).toBeUndefined();
+  // 1280x720 across the full 390 points, no frame (the 1 point radius
+  // only makes Android clip the zoomed page).
+  expect(screenStyle()).toMatchObject({
+    width: 390,
+    height: 219.375,
+    borderRadius: 1,
+  });
+  expect(screenStyle().borderWidth).toBeUndefined();
 
   // Too little height for the full width: a framed pane fitted to it.
-  fireEvent(
-    screen.getByTestId("desktop-panel").children[1] as never,
-    "layout",
-    { nativeEvent: { layout: { width: 390, height: 360 } } },
-  );
-  expect(style().width).toBeLessThan(390 - 2 * 12);
-  expect(style().borderRadius).toBe(12);
+  layoutBody(390, 360);
+  expect(screenStyle().width).toBeLessThan(390 - 2 * 12);
+  expect(screenStyle().borderRadius).toBe(12);
+});
+
+it("shows the screen alone, like a full-screen video, while a phone is turned sideways", async () => {
+  const onFullscreenChange = jest.fn();
+  await renderConnected({ onFullscreenChange });
+  expect(onFullscreenChange).not.toHaveBeenCalled();
+
+  setWindow(844, 390);
+  layoutBody(844, 390);
+  expect(onFullscreenChange).toHaveBeenLastCalledWith(true);
+  expect(screen.queryByTestId("desktop-status")).toBeNull();
+  expect(screen.queryByTestId("desktop-trackpad")).toBeNull();
+  expect(screen.queryByTestId("desktop-show-keyboard")).toBeNull();
+  // 1280x720 fitted to the full height, without a frame.
+  expect(screenStyle()).toMatchObject({ width: 693, height: 390 });
+  expect(screenStyle().borderWidth).toBeUndefined();
+
+  setWindow(390, 844);
+  layoutBody(390, 700);
+  expect(onFullscreenChange).toHaveBeenLastCalledWith(false);
+  expect(screen.getByTestId("desktop-status").props.children).toBe("Connected");
+  expect(screen.getByTestId("desktop-trackpad")).toBeTruthy();
+  expect(screen.getByTestId("desktop-show-keyboard")).toBeTruthy();
+  // Turning the phone never reloads the desktop page.
+  expect(mockPageLoads).toBe(1);
+});
+
+it("keeps the full-screen desktop clear of the notch", async () => {
+  setWindow(844, 390);
+  await renderConnected({
+    area: { width: 844, height: 390 },
+    insets: { top: 0, left: 100, right: 100, bottom: 21 },
+  });
+  expect(screenStyle()).toMatchObject({ width: 644, height: 362 });
+});
+
+it("keeps screen and trackpad side by side on a tablet in landscape", async () => {
+  const onFullscreenChange = jest.fn();
+  setWindow(1180, 820);
+  await renderConnected({
+    area: { width: 1180, height: 760 },
+    onFullscreenChange,
+  });
+  expect(onFullscreenChange).not.toHaveBeenCalled();
+  expect(screen.getByTestId("desktop-status")).toBeTruthy();
+  expect(screen.getByTestId("desktop-trackpad")).toBeTruthy();
 });

@@ -204,6 +204,22 @@ describe('WorkspaceDesktop modal', () => {
     expect(typeof vi.mocked(workspacesApi.writeDesktopClipboard).mock.calls[0]?.[1]).toBe('string')
   })
 
+  it('offers Take control in the header while computer use drives the desktop', async () => {
+    const store = useDesktopStore()
+    store.open()
+    store.setConnected(workspaceId, `/ws/desktop/${workspaceId}/`)
+    store.setComputerUseActive(true)
+    vi.mocked(workspacesApi.takeDesktopControl).mockResolvedValue({ aborted_session_ids: [] })
+    const wrapper = mountDesktop()
+
+    expect(wrapper.get('[data-testid="desktop-modal-host"]').text()).toBe('')
+    await wrapper.get('[data-testid="desktop-take-control"]').trigger('click')
+    await flushPromises()
+
+    expect(workspacesApi.takeDesktopControl).toHaveBeenCalledWith(workspaceId)
+    expect(wrapper.find('[data-testid="desktop-take-control"]').exists()).toBe(false)
+  })
+
   it('shows the not-active state with a start button when disconnected', () => {
     const store = useDesktopStore()
     store.open()

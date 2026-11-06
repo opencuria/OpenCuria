@@ -30,11 +30,17 @@ jest.mock("@expo/ui/community/segmented-control", () => ({
 }));
 
 const mockMounts: string[] = [];
+const mockFullscreen = new Map<string, (fullscreen: boolean) => void>();
 function mockPanel(name: string) {
-  return function Panel({ active, workspaceName }: WorkspaceToolProps) {
+  return function Panel({
+    active,
+    workspaceName,
+    onFullscreenChange,
+  }: WorkspaceToolProps) {
     React.useEffect(() => {
       mockMounts.push(name);
     }, []);
+    if (onFullscreenChange) mockFullscreen.set(name, onFullscreenChange);
     return (
       <Text
         testID={`panel-${name}`}
@@ -68,6 +74,7 @@ function renderSheet(visible = true, onClose = jest.fn()) {
 
 beforeEach(() => {
   mockMounts.length = 0;
+  mockFullscreen.clear();
   mockSegmentChange = null;
 });
 
@@ -96,6 +103,22 @@ it("opens on Git with the sections trailing and mounts others on first use", () 
       .children,
   ).toBe("git:hidden:demo-app");
   expect(mockMounts).toEqual(["git", "terminal"]);
+});
+
+it("hides its header while a panel is full screen, without remounting it", () => {
+  renderSheet();
+  React.act(() => mockSegmentChange?.(1));
+  expect(screen.getByTestId("workspace-tools-header")).toBeTruthy();
+
+  React.act(() => mockFullscreen.get("desktop")?.(true));
+  expect(screen.queryByTestId("workspace-tools-header")).toBeNull();
+  expect(screen.getByTestId("panel-desktop").props.children).toBe(
+    "desktop:active:demo-app",
+  );
+
+  React.act(() => mockFullscreen.get("desktop")?.(false));
+  expect(screen.getByTestId("workspace-tools-header")).toBeTruthy();
+  expect(mockMounts).toEqual(["git", "desktop"]);
 });
 
 it("closes from the leading close button and renders nothing while hidden", () => {

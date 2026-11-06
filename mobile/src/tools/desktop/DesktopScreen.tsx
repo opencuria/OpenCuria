@@ -89,7 +89,9 @@ export interface DesktopScreenProps {
   visible: boolean;
   cursor: DesktopCursorImage | null;
   showCursor: boolean;
-  /** Taps and zoom are ignored while Computer Use drives the desktop. */
+  /** Zoom and pan the view; also while only watching Computer Use. */
+  zoomable: boolean;
+  /** Taps click; off while Computer Use drives the desktop. */
   interactive: boolean;
   onMessage: (data: string) => void;
   onLoadEnd: () => void;
@@ -144,6 +146,7 @@ export const DesktopScreen = forwardRef<
     visible,
     cursor,
     showCursor,
+    zoomable,
     interactive,
     onMessage,
     onLoadEnd,
@@ -225,6 +228,7 @@ export const DesktopScreen = forwardRef<
         panX.value = pan.x;
         panY.value = pan.y;
       } else if (action.type === "tap") {
+        if (!interactive) continue;
         const at = screenToFramebuffer(
           { x: action.x, y: action.y },
           fb.value,
@@ -260,7 +264,7 @@ export const DesktopScreen = forwardRef<
   };
 
   const gesture = Gesture.Manual()
-    .enabled(interactive)
+    .enabled(zoomable)
     .onTouchesDown((event, manager) => {
       manager.activate();
       run(screenDown(machine.value, event.changedTouches, performance.now()));
@@ -287,7 +291,7 @@ export const DesktopScreen = forwardRef<
         accessibilityLabel="Remote desktop"
         style={[
           styles.box,
-          inset ? styles.inset : null,
+          inset ? styles.inset : styles.edge,
           { width: box.width, height: box.height },
         ]}
         collapsable={false}
@@ -395,6 +399,9 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: "rgba(255, 255, 255, 0.12)",
   } satisfies ViewStyle,
+  // Android does not hold a zoomed WebView inside a plain rectangular clip:
+  // the page spills over the panel. Any rounded clip, even this one, holds it.
+  edge: { borderRadius: 1 } satisfies ViewStyle,
   content: { position: "absolute", left: 0, top: 0 },
   hidden: { opacity: 0 },
   webView: { flex: 1, backgroundColor: "#000000" },

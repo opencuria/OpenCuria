@@ -159,9 +159,10 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     desktopStore.setComputerUseActive(false)
     try {
       await workspacesApi.takeDesktopControl(workspaceId.value)
-    } catch (err: unknown) {
+    } catch {
       desktopStore.setComputerUseActive(true)
-      error.value = err instanceof Error ? err.message : String(err)
+      // Not `error`: toolbars show it in place of the still-running viewer.
+      notifications.error('Could not take control', 'Computer Use is still running. Try again.')
     } finally {
       takeControlBusy.value = false
     }

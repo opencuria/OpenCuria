@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import SidePanelDesktop from './SidePanelDesktop.vue'
 import { useDesktopStore } from '@/stores/desktop'
+import { useNotificationStore } from '@/stores/notifications'
 import { sidebarDesktopHost } from '@/lib/desktopSurfaceHost'
 import {
   desktopViewerClientId,
@@ -123,6 +124,48 @@ describe('SidePanelDesktop', () => {
     await flushPromises()
 
     expect(sidebarDesktopHost.value).toBeInstanceOf(HTMLElement)
+  })
+
+  it('offers Take control in the toolbar while computer use drives the desktop', async () => {
+    const store = useDesktopStore()
+    store.setConnected(workspaceId, `/ws/desktop/${workspaceId}/`)
+    vi.mocked(workspacesApi.takeDesktopControl).mockResolvedValue({ aborted_session_ids: ['s'] })
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="desktop-take-control"]').exists()).toBe(false)
+
+    store.setComputerUseActive(true)
+    await flushPromises()
+    const action = wrapper.get('[data-testid="desktop-take-control"]')
+    // The viewer host stays free: nothing is placed over the desktop.
+    expect(wrapper.get('[data-testid="side-panel-desktop-host"]').text()).toBe('')
+    await action.trigger('click')
+    await flushPromises()
+
+    expect(workspacesApi.takeDesktopControl).toHaveBeenCalledWith(workspaceId)
+    expect(store.computerUseActive).toBe(false)
+    expect(wrapper.find('[data-testid="desktop-take-control"]').exists()).toBe(false)
+  })
+
+  it('keeps the viewer and reports a toast when taking control fails', async () => {
+    const store = useDesktopStore()
+    store.setConnected(workspaceId, `/ws/desktop/${workspaceId}/`)
+    store.setComputerUseActive(true)
+    vi.mocked(workspacesApi.takeDesktopControl).mockRejectedValue(new Error('busy'))
+    const notify = vi.spyOn(useNotificationStore(), 'error')
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="desktop-take-control"]').trigger('click')
+    await flushPromises()
+
+    expect(notify).toHaveBeenCalledWith(
+      'Could not take control',
+      'Computer Use is still running. Try again.',
+    )
+    expect(store.computerUseActive).toBe(true)
+    expect(wrapper.find('[data-testid="desktop-take-control"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="side-panel-desktop-host"]').exists()).toBe(true)
   })
 
   it('does not open the modal when clicking the interactive viewport', async () => {

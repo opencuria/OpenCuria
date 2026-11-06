@@ -25,6 +25,7 @@ import {
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import VoiceCaptureBar from '@/components/chat/VoiceCaptureBar.vue'
+import DesktopTakeControl from './DesktopTakeControl.vue'
 import { Monitor, RefreshCw, Square, Copy, ClipboardPaste, X } from '@lucide/vue'
 
 const props = defineProps<{
@@ -35,10 +36,12 @@ const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
 const {
   error,
+  takeControlBusy,
   clipboardBusy,
   startDesktop,
   stopDesktop,
   handleReconnect,
+  takeControl,
   copyFromVmClipboard,
   pasteToVmClipboard,
 } = useDesktopSession(toRef(props, 'workspaceId'))
@@ -102,6 +105,7 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
           />
         </div>
         <div class="flex items-center gap-1">
+          <DesktopTakeControl :busy="takeControlBusy" @take-control="takeControl" />
           <Button
             variant="ghost"
             size="icon-sm"

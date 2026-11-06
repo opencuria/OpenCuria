@@ -14,6 +14,7 @@ import { useDesktopSession } from '@/composables/useDesktopSession'
 import { sidebarDesktopHost } from '@/lib/desktopSurfaceHost'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import DesktopTakeControl from './DesktopTakeControl.vue'
 import { Monitor, Maximize2, RefreshCw, Square } from '@lucide/vue'
 
 const props = defineProps<{
@@ -23,9 +24,11 @@ const props = defineProps<{
 const desktopStore = useDesktopStore()
 const {
   error,
+  takeControlBusy,
   startDesktop,
   stopDesktop,
   handleReconnect,
+  takeControl,
 } = useDesktopSession(toRef(props, 'workspaceId'))
 
 onMounted(() => {
@@ -61,6 +64,7 @@ function setSidebarHost(el: Element | ComponentPublicInstance | null): void {
         />
       </div>
       <div class="flex items-center gap-1">
+        <DesktopTakeControl :busy="takeControlBusy" @take-control="takeControl" />
         <Button
           v-if="desktopStore.isConnected"
           variant="ghost"

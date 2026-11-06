@@ -271,14 +271,34 @@ describe('DesktopSurface', () => {
     )
   })
 
-  it('shows the computer-use overlay over the fixed surface', async () => {
+  it('keeps the desktop fully visible but read-only while computer use drives it', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
     mountSurface()
     await nextTick()
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    iframe.focus()
+    expect(document.activeElement).toBe(iframe)
 
-    expect(document.body.textContent).toContain('Computer-use is controlling this desktop')
+    store.setComputerUseActive(true)
+    await flushPromises()
+    const shield = document.querySelector<HTMLElement>(
+      '[data-testid="desktop-surface-input-shield"]',
+    )!
+    // Nothing dims or covers the screen; the shield only takes its input,
+    // including keys of a viewer that still had focus.
+    expect(shield.className).not.toMatch(/\bbg-/)
+    expect(shield.textContent).toBe('')
+    expect(iframe.classList.contains('opacity-0')).toBe(false)
+    expect(document.activeElement).toBe(shield)
+    // Take control lives in the toolbars, not on the screen.
+    expect(document.body.textContent).not.toContain('Take control')
+
+    store.setComputerUseActive(false)
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-input-shield"]')).toBeNull()
   })
 
   it('requires KasmVNC connection status after iframe load', async () => {

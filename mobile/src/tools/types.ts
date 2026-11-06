@@ -21,6 +21,11 @@ export interface WorkspaceToolProps {
   /** Bottom safe-area inset the panel's scrollables should pad by. */
   bottomInset: number;
   /**
+   * The panel takes the whole screen (the desktop on a phone turned
+   * sideways): the sheet hides its header and the status bar meanwhile.
+   */
+  onFullscreenChange?: (fullscreen: boolean) => void;
+  /**
    * Appends text (terminal output, an `@file:` mention) to the chat composer
    * draft and closes the sheet; undefined while the chat cannot take input.
    */

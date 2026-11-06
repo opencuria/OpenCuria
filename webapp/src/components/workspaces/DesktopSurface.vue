@@ -5,7 +5,7 @@
  * placement is aligned with the active sidebar/modal viewport. Keeping the
  * browsing context stationary avoids WebKit/Chrome resetting VNC on moves.
  * This component also owns session lifecycle, viewer recovery, scaling,
- * computer-use overlay and clipboard shortcuts.
+ * the computer-use input shield and clipboard shortcuts.
  */
 import { ref, computed, onMounted, onBeforeUnmount, watch, toRef, nextTick } from 'vue'
 import type { CSSProperties } from 'vue'
@@ -29,7 +29,6 @@ import {
 } from '@/lib/desktopSurfaceRecovery'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { MousePointerClick } from '@lucide/vue'
 import { registerPointingDesktop } from '@/lib/voicePointing'
 
 const props = defineProps<{ workspaceId: string }>()
@@ -37,12 +36,10 @@ const props = defineProps<{ workspaceId: string }>()
 const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
 const {
-  takeControlBusy,
   clipboardBusy,
   startDesktop,
   handleReconnect,
   stopDesktopIfActive,
-  takeControl,
   copyFromVmClipboard,
   copySelectionDuringGesture,
   pasteToVmClipboard,
@@ -52,6 +49,7 @@ const {
 
 const surfaceRef = ref<HTMLElement | null>(null)
 const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
+const inputShieldRef = ref<HTMLElement | null>(null)
 let unregisterPointingDesktop = registerPointingDesktop(
   props.workspaceId,
   () => desktopIframeRef.value,
@@ -457,6 +455,17 @@ watch(
   },
 )
 
+// While Computer Use drives the desktop, keys typed into a focused viewer
+// would still reach it: move focus onto the read-only shield.
+watch(
+  inputShieldRef,
+  (shield) => {
+    if (shield && document.activeElement === desktopIframeRef.value)
+      shield.focus({ preventScroll: true })
+  },
+  { flush: 'post' },
+)
+
 watch(surfaceRef, refreshHostBounds)
 watch(desktopIframeRef, () => {
   clearIframeListeners()
@@ -525,18 +534,15 @@ watch(desktopIframeRef, () => {
       </Button>
     </div>
 
+    <!-- Computer Use drives the desktop: fully visible, but read-only. Take
+      control lives in the toolbar (DesktopTakeControl). -->
     <div
       v-if="desktopStore.computerUseActive"
-      class="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-black/55 px-4 text-center"
-      tabindex="0"
-      @keydown.prevent
-    >
-      <MousePointerClick :size="28" class="text-white" />
-      <p class="max-w-md text-sm text-white">
-        Computer-use is controlling this desktop. Watching is read-only. Taking control aborts the
-        computer-use agent.
-      </p>
-      <Button size="sm" :disabled="takeControlBusy" @click="takeControl"> Take control </Button>
-    </div>
+      ref="inputShieldRef"
+      class="absolute inset-0 z-30 cursor-not-allowed outline-none"
+      tabindex="-1"
+      title="Computer Use is in control"
+      data-testid="desktop-surface-input-shield"
+    />
   </div>
 </template>

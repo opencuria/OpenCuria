@@ -22,8 +22,9 @@ import {
   useKeyboardState,
 } from "react-native-keyboard-controller";
 import { runOnUI, withTiming } from "react-native-reanimated";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Clipboard from "expo-clipboard";
-import { Ellipsis, Keyboard, MousePointerClick } from "lucide-react-native";
+import { Ellipsis, Keyboard } from "lucide-react-native";
 import {
   DESKTOP_CONNECTION_TIMEOUT_MS,
   createDesktopReconnectBackoff,
@@ -54,7 +55,7 @@ import {
   type KeyboardInputAction,
 } from "./desktopKeys";
 import { useDesktopViewer } from "./desktopSession";
-import { clamp, fitBox, type Size } from "./pointerMath";
+import { clamp, clampPan, fitBox, type Size } from "./pointerMath";
 import {
   NO_MODIFIERS,
   keyCommand,
@@ -74,10 +75,14 @@ const TRACKPAD_MIN_HEIGHT = 140;
 const KEYBOARD_BUTTON_SIZE = 52;
 /** Trackpad height kept while the keyboard covers the lower half. */
 const TRACKPAD_MIN_KEYBOARD = 96;
+/** Landscape windows lower than this are phones: the desktop goes full screen. */
+const FULLSCREEN_MAX_HEIGHT = 600;
+const FULLSCREEN_BACKGROUND = "#000000";
 
 /**
  * The workspace's KasmVNC desktop: the remote screen on top, a trackpad for
- * the pointer below and a keyboard button at the bottom right. The viewer
+ * the pointer below and a keyboard button at the bottom right. A phone turned
+ * sideways shows the screen alone, like a full-screen video. The viewer
  * lease and recovery follow the webapp's shared rules; the desktop keeps
  * running while other sections of the tools sheet are shown.
  */
@@ -86,11 +91,23 @@ export function DesktopPanel({
   workspaceId,
   active,
   bottomInset,
+  onFullscreenChange,
 }: WorkspaceToolProps): React.JSX.Element {
   const { theme } = useTheme();
   const dimensions = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const viewer = useDesktopViewer(client, workspaceId, active);
   const { coordinator, snapshot, computerUseActive } = viewer;
+
+  const landscape = dimensions.width > dimensions.height;
+  // Tablets keep screen and trackpad side by side in landscape.
+  const fullscreen =
+    active && landscape && dimensions.height < FULLSCREEN_MAX_HEIGHT;
+  useEffect(() => {
+    if (!fullscreen || !onFullscreenChange) return;
+    onFullscreenChange(true);
+    return () => onFullscreenChange(false);
+  }, [fullscreen, onFullscreenChange]);
 
   // --- Framebuffer size: workspace setting until the viewer reports it ---
   const [fb, setFb] = useState<Size>(() => workspaceDesktopSize(null));
@@ -419,7 +436,8 @@ export function DesktopPanel({
     height: state.height,
     isVisible: state.isVisible,
   }));
-  const keyboardOpen = active && inputFocused && keyboard.isVisible;
+  const keyboardOpen =
+    active && !fullscreen && inputFocused && keyboard.isVisible;
   const sendInput = (actions: KeyboardInputAction[]) => {
     if (!canControl || actions.length === 0) return;
     const held = consumeModifiers();
@@ -460,8 +478,8 @@ export function DesktopPanel({
     void KeyboardController.dismiss().catch(() => undefined);
   };
   useEffect(() => {
-    if (!active || !canControl) inputRef.current?.blur();
-  }, [active, canControl]);
+    if (!active || !canControl || fullscreen) inputRef.current?.blur();
+  }, [active, canControl, fullscreen]);
 
   const onAccessoryKey = (id: string) => {
     const entry = DESKTOP_ACCESSORY_KEYS.find((item) => item.id === id);
@@ -593,7 +611,6 @@ export function DesktopPanel({
         : { width, height },
     );
   };
-  const landscape = dimensions.width > dimensions.height;
   const bottom = keyboardOpen
     ? keyboard.height + KEY_ACCESSORY_HEIGHT
     : bottomInset;
@@ -608,19 +625,43 @@ export function DesktopPanel({
   const fullHeight = fb.width > 0 ? (area.width * fb.height) / fb.width : 0;
   const edgeToEdge =
     !landscape && area.width > 0 && fullHeight <= body - GAP - trackpadMin;
-  const box: Size = edgeToEdge
-    ? { width: area.width, height: fullHeight }
-    : landscape
-      ? fitBox(fb, {
-          width: (area.width - GAP * 2) * 0.62,
-          height: Math.max(0, body - GAP),
-        })
-      : fitBox(fb, {
-          width: area.width - GAP * 2,
-          height: Math.max(0, body - GAP * 2 - trackpadMin),
-        });
+  const box: Size = fullscreen
+    ? // Clear of notch and system bars; the home indicator may overlap.
+      fitBox(fb, {
+        width: area.width - insets.left - insets.right,
+        height: area.height - insets.top,
+      })
+    : edgeToEdge
+      ? { width: area.width, height: fullHeight }
+      : landscape
+        ? fitBox(fb, {
+            width: (area.width - GAP * 2) * 0.62,
+            height: Math.max(0, body - GAP),
+          })
+        : fitBox(fb, {
+            width: area.width - GAP * 2,
+            height: Math.max(0, body - GAP * 2 - trackpadMin),
+          });
   useEffect(() => {
-    viewport.box.value = box;
+    const { box: shown, zoom, panX, panY } = viewport;
+    runOnUI(() => {
+      "worklet";
+      // A resized screen (rotation, keyboard) keeps showing the same part of
+      // a zoomed desktop.
+      const previous = shown.value;
+      shown.value = box;
+      if (previous.width <= 0 || previous.height <= 0) return;
+      const pan = clampPan(
+        {
+          x: (panX.value * box.width) / previous.width,
+          y: (panY.value * box.height) / previous.height,
+        },
+        box,
+        zoom.value,
+      );
+      panX.value = pan.x;
+      panY.value = pan.y;
+    })();
   }, [box.width, box.height, viewport]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Presentation ---
@@ -670,23 +711,6 @@ export function DesktopPanel({
       }
       testID="desktop-connecting"
     />
-  ) : computerUseActive ? (
-    <View style={styles.computerUse} testID="desktop-computer-use">
-      <MousePointerClick size={26} color="#FFFFFF" />
-      <Text style={styles.computerUseText}>
-        Computer Use is controlling this desktop. Taking control stops the
-        agent.
-      </Text>
-      <Button
-        title="Take control"
-        variant="secondary"
-        compact
-        busy={viewer.takeControlBusy}
-        onPress={takeControl}
-        style={styles.messageAction}
-        testID="desktop-take-control"
-      />
-    </View>
   ) : null;
 
   const trackpadStyle = landscape
@@ -699,57 +723,109 @@ export function DesktopPanel({
         minHeight: Math.min(trackpadMin, Math.max(0, body - GAP)),
       };
 
+  const pillStyle = ({ pressed }: { pressed: boolean }) => [
+    styles.pill,
+    { backgroundColor: theme.controlFill, opacity: pressed ? 0.6 : 1 },
+  ];
+
+  // Slots stay in place across full screen (null instead of removal), so the
+  // screen's WebView is never remounted when the phone turns.
   return (
     <View
       testID="desktop-panel"
-      style={[styles.root, { backgroundColor: theme.background }]}
+      style={[
+        styles.root,
+        {
+          backgroundColor: fullscreen
+            ? FULLSCREEN_BACKGROUND
+            : theme.background,
+        },
+      ]}
     >
-      <View style={[styles.bar, { borderBottomColor: theme.border }]}>
-        <View style={[styles.dot, { backgroundColor: status.color }]} />
-        <Text
-          style={[styles.status, { color: theme.mutedText }]}
-          numberOfLines={1}
-          testID="desktop-status"
-        >
-          {status.label}
-        </Text>
-        {busy ? (
-          <ActivityIndicator size="small" color={theme.subtleText} />
-        ) : null}
-        <View style={styles.spacer} />
-        {zoomLevel > 1 ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Zoom ${zoomLevel.toFixed(1)} times. Fit to screen`}
-            onPress={fitToScreen}
-            style={[styles.zoom, { backgroundColor: theme.controlFill }]}
-            testID="desktop-zoom"
+      {fullscreen ? null : (
+        <View style={[styles.bar, { borderBottomColor: theme.border }]}>
+          <View style={[styles.dot, { backgroundColor: status.color }]} />
+          <Text
+            style={[styles.status, { color: theme.mutedText }]}
+            numberOfLines={1}
+            testID="desktop-status"
           >
-            <Text style={[styles.zoomLabel, { color: theme.text }]}>
-              {`${zoomLevel.toFixed(1)}×`}
-            </Text>
-          </Pressable>
-        ) : null}
-        <NativeMenu
-          label="Desktop options"
-          actions={menuActions}
-          onSelect={onMenu}
-          style={styles.menu}
-          testID="desktop-menu"
-        >
-          <View style={styles.menuIcon}>
-            <Ellipsis size={20} color={theme.text} />
-          </View>
-        </NativeMenu>
-      </View>
+            {status.label}
+          </Text>
+          {busy ? (
+            <ActivityIndicator size="small" color={theme.subtleText} />
+          ) : null}
+          <View style={styles.spacer} />
+          {zoomLevel > 1 ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Zoom ${zoomLevel.toFixed(1)} times. Fit to screen`}
+              onPress={fitToScreen}
+              style={pillStyle}
+              testID="desktop-zoom"
+            >
+              <Text
+                style={[
+                  styles.pillLabel,
+                  styles.zoomLabel,
+                  { color: theme.text },
+                ]}
+              >
+                {`${zoomLevel.toFixed(1)}×`}
+              </Text>
+            </Pressable>
+          ) : null}
+          {connected && computerUseActive ? (
+            // The screen stays fully visible and read-only meanwhile.
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Take control"
+              accessibilityHint="Stops Computer Use so you can use the desktop"
+              accessibilityState={{ disabled: viewer.takeControlBusy }}
+              disabled={viewer.takeControlBusy}
+              onPress={takeControl}
+              style={pillStyle}
+              testID="desktop-take-control"
+            >
+              <Text style={[styles.pillLabel, { color: theme.primary }]}>
+                Take control
+              </Text>
+            </Pressable>
+          ) : null}
+          <NativeMenu
+            label="Desktop options"
+            actions={menuActions}
+            onSelect={onMenu}
+            style={styles.menu}
+            testID="desktop-menu"
+          >
+            <View style={styles.menuIcon}>
+              <Ellipsis size={20} color={theme.text} />
+            </View>
+          </NativeMenu>
+        </View>
+      )}
 
       <View
-        style={[
-          styles.body,
-          landscape ? styles.row : styles.column,
-          { paddingBottom: bottom + GAP },
-          edgeToEdge ? styles.edgeToEdge : null,
-        ]}
+        testID="desktop-body"
+        style={
+          fullscreen
+            ? [
+                styles.body,
+                styles.fullscreen,
+                {
+                  paddingLeft: insets.left,
+                  paddingRight: insets.right,
+                  paddingTop: insets.top,
+                },
+              ]
+            : [
+                styles.body,
+                landscape ? styles.row : styles.column,
+                { paddingBottom: bottom + GAP },
+                edgeToEdge ? styles.edgeToEdge : null,
+              ]
+        }
         onLayout={onLayout}
       >
         {box.width > 0 ? (
@@ -758,12 +834,13 @@ export function DesktopPanel({
             viewport={viewport}
             framebuffer={fb}
             box={box}
-            inset={!edgeToEdge}
+            inset={!edgeToEdge && !fullscreen}
             url={url}
             viewerKey={viewerKey}
             visible={connected}
             cursor={cursor}
             showCursor={canControl}
+            zoomable={connected}
             interactive={canControl}
             onMessage={onMessage}
             onLoadEnd={() => {
@@ -780,15 +857,17 @@ export function DesktopPanel({
             {overlay}
           </DesktopScreen>
         ) : null}
-        <DesktopTrackpad
-          viewport={viewport}
-          enabled={canControl}
-          onMove={onMove}
-          onClick={click}
-          onButton={setLeftButton}
-          onScroll={onScroll}
-          style={trackpadStyle}
-        />
+        {fullscreen ? null : (
+          <DesktopTrackpad
+            viewport={viewport}
+            enabled={canControl}
+            onMove={onMove}
+            onClick={click}
+            onButton={setLeftButton}
+            onScroll={onScroll}
+            style={trackpadStyle}
+          />
+        )}
       </View>
 
       <TextInput
@@ -838,7 +917,7 @@ export function DesktopPanel({
           foreground={theme.text}
           testIDPrefix="desktop"
         />
-      ) : active && canControl && !keyboard.isVisible ? (
+      ) : active && canControl && !fullscreen && !keyboard.isVisible ? (
         <View
           style={[styles.keyboardButton, { bottom: bottomInset + GAP + 10 }]}
           pointerEvents="box-none"
@@ -908,7 +987,8 @@ const styles = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4 },
   status: { fontSize: 13, fontWeight: "500", flexShrink: 1 },
   spacer: { flex: 1 },
-  zoom: {
+  /** Small inline actions of the bar: zoom level, Take control. */
+  pill: {
     height: 28,
     minWidth: 44,
     paddingHorizontal: 10,
@@ -916,7 +996,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  zoomLabel: { fontSize: 13, fontWeight: "600", fontVariant: ["tabular-nums"] },
+  pillLabel: { fontSize: 13, fontWeight: "600" },
+  zoomLabel: { fontVariant: ["tabular-nums"] },
   menu: { width: 44, height: 44 },
   menuIcon: {
     width: 44,
@@ -927,6 +1008,8 @@ const styles = StyleSheet.create({
   body: { flex: 1, padding: GAP, gap: GAP },
   // The screen runs edge to edge; the trackpad keeps its own margins.
   edgeToEdge: { paddingTop: 0, paddingHorizontal: 0 },
+  // The screen alone, centered like a video.
+  fullscreen: { padding: 0, alignItems: "center", justifyContent: "center" },
   column: { flexDirection: "column", alignItems: "center" },
   row: { flexDirection: "row", alignItems: "flex-start" },
   message: {
@@ -951,24 +1034,6 @@ const styles = StyleSheet.create({
     color: "rgba(255, 255, 255, 0.72)",
     fontSize: 13,
     textAlign: "center",
-  },
-  computerUse: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    paddingHorizontal: 20,
-    backgroundColor: "rgba(0, 0, 0, 0.55)",
-  },
-  computerUseText: {
-    color: "#FFFFFF",
-    fontSize: 13,
-    textAlign: "center",
-    maxWidth: 320,
   },
   hiddenInput: {
     position: "absolute",
