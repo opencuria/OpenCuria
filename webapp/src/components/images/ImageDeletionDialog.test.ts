@@ -59,7 +59,7 @@ describe('durable deletion confirmation', () => {
     await flushPromises()
     await w
       .findAll('button')
-      .find((b) => b.text() === 'Store deferred deletion intent')!
+      .find((b) => b.text() === 'Delete')!
       .trigger('click')
     await flushPromises()
     expect(api.requestDeletion).toHaveBeenCalledWith(
@@ -67,15 +67,34 @@ describe('durable deletion confirmation', () => {
       'deferred',
       '',
     )
+    expect(w.text()).toContain('Waiting until unused')
     expect(w.text()).toContain('Waiting on pins')
+    // A pending request cannot be requested again; the dialog only closes.
+    const labels = () => w.findAll('button').map((b) => b.text())
+    expect(labels()).not.toContain('Delete')
+    expect(labels()).toContain('Close')
     api.cancelDeletion.mockResolvedValue({ id: 'd', phase: 'cancelled', can_cancel: false })
     await w
       .findAll('button')
-      .find((b) => b.text() === 'Cancel pending request')!
+      .find((b) => b.text() === 'Cancel deletion')!
       .trigger('click')
     await flushPromises()
     expect(api.cancelDeletion).toHaveBeenCalledWith('d')
-    expect(w.text()).not.toContain('Cancel pending request')
+    expect(w.text()).not.toContain('Cancel deletion')
+    expect(labels()).toContain('Delete')
+    w.unmount()
+  })
+  it('names what is deleted and removes runner images instead of deleting them', async () => {
+    const w = mount(ImageDeletionDialog, {
+      props: { target: { target_type: 'assignment', target_id: 'b' }, name: 'Python on edge-1' },
+      global: { stubs },
+    })
+    await flushPromises()
+    expect(w.text()).toContain('Remove Python on edge-1?')
+    expect(w.text()).toContain(
+      'It is removed from the runner once no workspace uses it. Workspaces are kept.',
+    )
+    expect(w.findAll('button').map((b) => b.text())).toEqual(['Force delete…', 'Cancel', 'Remove'])
     w.unmount()
   })
   it('requires explicit fingerprint approval and a second approval for a changed graph', async () => {
@@ -83,11 +102,10 @@ describe('durable deletion confirmation', () => {
     await flushPromises()
     await w
       .findAll('button')
-      .find((b) => b.text() === 'Review force deletion…')!
+      .find((b) => b.text() === 'Force delete…')!
       .trigger('click')
     expect(w.text()).toContain('Other owner data')
-    const confirm = () =>
-      w.findAll('button').find((b) => b.text() === 'Confirm permanent deletion')!
+    const confirm = () => w.findAll('button').find((b) => b.text() === 'Delete permanently')!
     expect(confirm().attributes('disabled')).toBeDefined()
     await w
       .findAll('button')
@@ -123,13 +141,13 @@ describe('durable deletion confirmation', () => {
     await flushPromises()
     await w
       .findAll('button')
-      .find((b) => b.text() === 'Review force deletion…')!
+      .find((b) => b.text() === 'Force delete…')!
       .trigger('click')
     expect(w.text()).toContain('Runner offline / stale scan')
     expect(
       w
         .findAll('button')
-        .find((b) => b.text() === 'Confirm permanent deletion')!
+        .find((b) => b.text() === 'Delete permanently')!
         .attributes('disabled'),
     ).toBeDefined()
     w.unmount()

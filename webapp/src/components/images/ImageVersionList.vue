@@ -2,6 +2,7 @@
 /**
  * Version history of one image (captured image or runner build), newest first:
  * version, message, size, retention state and the workspaces based on it.
+ * Missing messages and sizes are left out rather than shown as placeholders.
  */
 import { Trash2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
@@ -32,6 +33,20 @@ function deletable(version: ImageArtifact): boolean {
     !['capturing', 'building', 'pending_deletion', 'deleting', 'deleted'].includes(version.status)
   )
 }
+
+/** "Sep 6, 07:07 AM · 2.1 GiB · Used by api, web"; unknown sizes are left out. */
+function details(version: ImageArtifact): string {
+  const used = version.workspace_count
+    ? `Used by ${(version.workspaces ?? []).map((ws) => ws.name).join(', ') || version.workspace_count}`
+    : ''
+  return [
+    formatDate(version.created_at),
+    version.size_bytes == null ? '' : storageBytes(version.size_bytes),
+    used,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+}
 </script>
 
 <template>
@@ -44,7 +59,9 @@ function deletable(version: ImageArtifact): boolean {
     >
       <div class="min-w-0 space-y-0.5">
         <div class="flex flex-wrap items-center gap-1.5 text-sm">
-          <span class="font-medium text-foreground">v{{ version.version ?? '?' }}</span>
+          <span v-if="version.version" class="font-medium text-foreground"
+            >v{{ version.version }}</span
+          >
           <Badge v-if="retentionLabel(version)" :variant="badgeVariant(version)">
             {{ retentionLabel(version) }}
           </Badge>
@@ -52,23 +69,18 @@ function deletable(version: ImageArtifact): boolean {
             {{ version.status === 'building' ? 'Building…' : 'Capturing…' }}
           </Badge>
         </div>
-        <p class="text-xs text-foreground/80 break-words">
-          {{ version.message || 'No description' }}
+        <p v-if="version.message" class="text-xs text-foreground/80 break-words">
+          {{ version.message }}
         </p>
-        <p class="text-xs text-muted-foreground">
-          {{ formatDate(version.created_at) }} · {{ storageBytes(version.size_bytes) }}
-          <template v-if="version.workspace_count">
-            · Used by
-            {{ (version.workspaces ?? []).map((ws) => ws.name).join(', ') || version.workspace_count }}
-          </template>
-        </p>
+        <p class="text-xs text-muted-foreground">{{ details(version) }}</p>
       </div>
       <Button
         v-if="canDelete && deletable(version)"
         variant="ghost"
         size="icon-sm"
         class="text-destructive hover:text-destructive"
-        :title="`Delete v${version.version}`"
+        :title="version.version ? `Delete v${version.version}` : 'Delete version'"
+        :aria-label="version.version ? `Delete v${version.version}` : 'Delete version'"
         data-testid="image-version-delete"
         @click="emit('delete', version)"
       >

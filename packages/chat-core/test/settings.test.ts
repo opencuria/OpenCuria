@@ -205,6 +205,11 @@ describe("image definition form", () => {
       envVars: "A=1",
     });
     expect(isImageDefinitionFormValid({ ...form, envVars: "=x" })).toBe(false);
+    // QEMU builds need an Ubuntu cloud image.
+    expect(isImageDefinitionFormValid(form)).toBe(false);
+    expect(
+      isImageDefinitionFormValid({ ...form, customBaseDistro: "ubuntu:25.04" }),
+    ).toBe(true);
     expect(imageDefinitionPayload(form)).toEqual({
       name: "Dev",
       description: "",

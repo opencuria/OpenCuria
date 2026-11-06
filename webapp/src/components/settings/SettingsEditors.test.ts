@@ -217,7 +217,9 @@ describe('image definition editor', () => {
       props: { open: true, imageDefinition: definition },
       global,
     })
-    await wrapper.findAll('textarea')[1]!.setValue('INCOMPLETE')
+    await wrapper.get('[data-testid="image-definition-advanced"]').trigger('click')
+    await wrapper.get('#image-definition-env').setValue('INCOMPLETE')
+    expect(wrapper.text()).toContain('One KEY=value per line.')
     await wrapper.get('#image-definition-form').trigger('submit')
     expect(wrapper.emitted('saved')).toBeUndefined()
     await wrapper
@@ -227,6 +229,28 @@ describe('image definition editor', () => {
     expect(wrapper.emitted('update:open')).toEqual([[false]])
     wrapper.unmount()
     expect(updateImageDefinition).not.toHaveBeenCalled()
+  })
+
+  it('opens Advanced for recipes that use it and rejects non-Ubuntu bases', async () => {
+    const wrapper = mount(ImageDefinitionModal, {
+      props: {
+        open: true,
+        imageDefinition: { ...definition, base_distro: 'debian:12', env_vars: { LANG: 'C' } },
+      },
+      global,
+    })
+    expect((wrapper.get('#image-definition-env').element as HTMLTextAreaElement).value).toBe(
+      'LANG=C',
+    )
+    expect(wrapper.text()).toContain('Use ubuntu:<version>.')
+    await wrapper.get('#image-definition-form').trigger('submit')
+    expect(wrapper.emitted('saved')).toBeUndefined()
+
+    await wrapper.get('#image-definition-custom-base').setValue('ubuntu:25.04')
+    await wrapper.get('#image-definition-form').trigger('submit')
+    expect(wrapper.emitted('saved')).toEqual([
+      [expect.objectContaining({ base_distro: 'ubuntu:25.04', env_vars: { LANG: 'C' } })],
+    ])
   })
 
   it('retains failed edits inside the dialog and closes after a successful retry', async () => {

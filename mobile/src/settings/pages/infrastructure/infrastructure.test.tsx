@@ -249,7 +249,7 @@ describe("image definitions", () => {
       admin: false,
       client: definitionClient(),
     });
-    expect(await screen.findByText("Status: Active")).toBeTruthy();
+    expect(await screen.findByText("Status: Ready")).toBeTruthy();
     expect(screen.queryByTestId("r1-deactivate")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "More for Python" }),

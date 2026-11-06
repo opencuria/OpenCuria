@@ -3,17 +3,15 @@ import {
   buildNeedsPolling,
   definitionNeedsPolling,
   getDefinitionActions,
+  getDefinitionStatus,
   getRunnerBuildActions,
-  getRunnerBuildStatusLabel,
+  getRunnerBuildStatus,
   isDefinitionLocked,
   visibleImageDefinitions,
   type RunnerBuildActionId,
 } from "@opencuria/chat-core/imageDefinitionLifecycle";
 import type { Runner, RunnerImageBuild } from "@opencuria/client";
-import type {
-  NativeFormSection,
-  NativeFormTone,
-} from "../../../ui/NativeForm.types";
+import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import type { NativeMenuAction } from "../../../ui/NativeMenu";
 import type { NativeSymbol } from "../../../ui/controls.types";
 import { showToast } from "../../../ui/toast";
@@ -23,14 +21,11 @@ import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { usePolling } from "../../usePolling";
 import { deletionRoute } from "../DeletionPage";
-import {
-  IMAGE_DEFINITIONS,
-  RUNNERS,
-  definitionSubtitle,
-} from "./ImageDefinitionsPage";
+import { IMAGE_DEFINITIONS, RUNNERS } from "./ImageDefinitionsPage";
 import {
   canDeleteVersion,
   isVersionBusy,
+  nativeTone,
   versionSubtitle,
   versionTitle,
 } from "./images";
@@ -45,12 +40,6 @@ const ACTION_SYMBOLS: Record<RunnerBuildActionId, NativeSymbol> = {
   retry_remove: "trash",
   view_log: "doc.text",
 };
-
-function statusTone(status: string | undefined): NativeFormTone {
-  if (status === "active") return "success";
-  if (status === "failed" || status === "delete_failed") return "danger";
-  return "muted";
-}
 
 /**
  * One image definition: its recipe and, per runner, the build status,
@@ -75,8 +64,8 @@ export function ImageDefinitionPage({
   );
   const [busy, setBusy] = useState<string | null>(null);
   const inFlight =
-    definitionNeedsPolling(definition?.status) ||
-    (builds.data ?? []).some((build) => buildNeedsPolling(build.status));
+    definitionNeedsPolling(definition) ||
+    (builds.data ?? []).some((build) => buildNeedsPolling(build));
   usePolling(
     async () => {
       await Promise.allSettled([builds.reload(), definitions.reload()]);
@@ -101,6 +90,7 @@ export function ImageDefinitionPage({
     );
 
   const locked = isDefinitionLocked(definition.status);
+  const definitionStatus = getDefinitionStatus(definition);
   const actions = getDefinitionActions({
     is_standard: Boolean(definition.is_standard),
     status: definition.status,
@@ -177,11 +167,11 @@ export function ImageDefinitionPage({
   const runnerSection = (runner: Runner): NativeFormSection => {
     const build = builds.data?.find((entry) => entry.runner_id === runner.id);
     const online = runner.status === "online";
-    const status = build?.status;
+    const status = getRunnerBuildStatus(build, online);
     const current = build?.versions?.find(
       (version) => version.id === build.current_generation_id,
     );
-    const available = getRunnerBuildActions(status, {
+    const available = getRunnerBuildActions(build, {
       definitionLocked: locked,
     }).filter((action) => isAdmin || action.id === "view_log");
     return {
@@ -192,8 +182,8 @@ export function ImageDefinitionPage({
           kind: "value",
           id: `status-${runner.id}`,
           label: "Status",
-          value: getRunnerBuildStatusLabel(status, online),
-          tone: statusTone(status),
+          value: status.label,
+          tone: nativeTone(status.tone),
         },
         ...(current
           ? [
@@ -202,15 +192,6 @@ export function ImageDefinitionPage({
                 id: `latest-${runner.id}`,
                 label: "Latest",
                 value: `v${current.version ?? "?"}`,
-              },
-            ]
-          : []),
-        ...(build?.pending_generation_id
-          ? [
-              {
-                kind: "note" as const,
-                id: `pending-${runner.id}`,
-                text: "New version building",
               },
             ]
           : []),
@@ -260,16 +241,6 @@ export function ImageDefinitionPage({
             onAction: () => navigation.push(target),
           };
         }),
-        ...(isAdmin
-          ? [
-              {
-                kind: "link" as const,
-                id: `storage-${runner.id}`,
-                title: "Storage & generation history",
-                route: route("runner", runner.id),
-              },
-            ]
-          : []),
       ],
     };
   };
@@ -287,6 +258,9 @@ export function ImageDefinitionPage({
           : []),
         ...(actions.canEdit
           ? [{ id: "edit", title: "Edit", symbol: "pencil" }]
+          : []),
+        ...(actions.canEnable
+          ? [{ id: "enable", title: "Enable", symbol: "play.fill" }]
           : []),
         ...(actions.canRestore
           ? [
@@ -322,11 +296,11 @@ export function ImageDefinitionPage({
         },
         "Definition duplicated",
       );
-    else if (id === "restore")
+    else if (id === "restore" || id === "enable")
       void run(
-        "restore",
+        id,
         () => client.images.activateDefinition(definition.id),
-        "Definition restored",
+        id === "enable" ? "Definition enabled" : "Definition restored",
       );
     else if (id === "delete")
       navigation.push(
@@ -349,7 +323,8 @@ export function ImageDefinitionPage({
           kind: "value",
           id: "summary",
           label: "Status",
-          value: definitionSubtitle(definition),
+          value: definitionStatus.label,
+          tone: nativeTone(definitionStatus.tone),
         },
         {
           kind: "value",
@@ -370,15 +345,9 @@ export function ImageDefinitionPage({
       ],
     },
     ...runnerList.map(runnerSection),
-    {
-      id: "runners-footer",
-      footer: runnerList.length
-        ? locked
-          ? undefined
-          : "Deactivate only hides this image from new workspaces on that runner. Existing workspaces keep running."
-        : "No runners are registered in this organization.",
-      rows: [],
-    },
+    ...(runnerList.length
+      ? []
+      : [{ id: "runners-footer", footer: "No runners yet.", rows: [] }]),
   ];
 
   return (

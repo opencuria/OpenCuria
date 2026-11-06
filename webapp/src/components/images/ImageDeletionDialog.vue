@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+/**
+ * Deletes an image, version, runner image or definition. By default the
+ * deletion waits until no workspace uses it; admins can force a reviewed,
+ * permanent deletion of exactly the previewed images and workspaces.
+ */
+import { computed, ref, watch } from 'vue'
+import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -18,17 +24,50 @@ const props = defineProps<{ target: DeletionTarget | null; name?: string }>()
 const emit = defineEmits<{ close: []; requested: [request: DeletionRequest] }>()
 const isAdmin = () => useAuthStore().isAdmin
 const KIND_LABELS: Record<DeletionTarget['target_type'], string> = {
-  image: 'image version',
-  captured_image: 'image with all versions',
-  assignment: 'runner build',
-  definition: 'image definition',
+  image: 'this version',
+  captured_image: 'this image',
+  assignment: 'this runner image',
+  definition: 'this image definition',
 }
+/** What a deferred deletion does; it never deletes workspaces. */
+const KIND_EFFECTS: Record<DeletionTarget['target_type'], string> = {
+  image: 'It is deleted once no workspace uses it.',
+  captured_image: 'All versions are deleted once no workspace uses them.',
+  assignment: 'It is removed from the runner once no workspace uses it.',
+  definition: 'Its images are deleted from all runners once no workspace uses them.',
+}
+const PHASE_LABELS: Record<string, string> = {
+  intent: 'Deletion requested',
+  waiting_inventory: 'Waiting for the runner',
+  waiting_dependency: 'Waiting until unused',
+  executing: 'Deleting…',
+  reconfirmation_required: 'Needs your confirmation',
+  attention_required: 'Needs attention',
+  intervention: 'Needs attention',
+  completed: 'Deleted',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+}
+/** Phases in which asking again does something; otherwise a request is underway. */
+const REQUESTABLE_PHASES = new Set(['cancelled', 'failed', 'reconfirmation_required'])
 const graph = ref<DeletionGraph | null>(null),
   result = ref<DeletionRequest | null>(null)
 const error = ref(''),
   busy = ref(false),
   force = ref(false),
   approved = ref(false)
+/** Runner images are removed from a runner; everything else is deleted. */
+const verb = computed(() => (props.target?.target_type === 'assignment' ? 'Remove' : 'Delete'))
+const subject = computed(() =>
+  props.name ? props.name : props.target ? KIND_LABELS[props.target.target_type] : '',
+)
+const canRequest = computed(() => !result.value || REQUESTABLE_PHASES.has(result.value.phase))
+const forceBlocked = computed(
+  () => !approved.value || !graph.value || !!graph.value.blockers.length,
+)
+function phaseLabel(phase: string): string {
+  return PHASE_LABELS[phase] ?? phase.replace(/_/g, ' ')
+}
 let version = 0
 watch(
   () => props.target,
@@ -65,11 +104,7 @@ watch(
   { immediate: true },
 )
 async function request() {
-  if (
-    !props.target ||
-    (force.value && (!approved.value || !graph.value || graph.value.blockers.length))
-  )
-    return
+  if (!props.target || (force.value && forceBlocked.value)) return
   busy.value = true
   error.value = ''
   try {
@@ -114,69 +149,98 @@ async function cancel() {
 </script>
 <template>
   <Dialog :open="!!target" @update:open="(v) => !v && emit('close')">
-    <DialogContent class="sm:max-w-2xl">
-      <DialogHeader
-        ><DialogTitle>{{
-          force ? 'Force deletion — permanent data loss' : 'Request deletion'
-        }}</DialogTitle>
-        <DialogDescription
-          >{{ name }} · {{ target ? KIND_LABELS[target.target_type] : '' }}. Ordinary deletion
-          stores intent now and waits until no workspace uses it. It does not delete dependent
-          workspaces.</DialogDescription
-        ></DialogHeader
-      >
-      <DialogBody class="space-y-4">
-        <p v-if="error" role="alert" class="text-destructive">{{ error }}</p>
-        <p v-if="busy" role="status">Contacting server…</p>
-        <div v-if="result" role="status" class="rounded-md border p-3">
-          <p class="font-medium">{{ result.phase }}</p>
-          <p>{{ result.diagnostic }}</p>
-          <Button v-if="result.can_cancel" variant="outline" :disabled="busy" @click="cancel"
-            >Cancel pending request</Button
+    <DialogContent :class="force ? 'sm:max-w-2xl' : 'sm:max-w-lg'">
+      <DialogHeader>
+        <DialogTitle class="break-words">
+          {{ force ? `Permanently delete ${subject}?` : `${verb} ${subject}?` }}
+        </DialogTitle>
+        <DialogDescription>
+          {{
+            force
+              ? "Everything listed is deleted now, including other users' workspaces."
+              : target
+                ? `${KIND_EFFECTS[target.target_type]} Workspaces are kept.`
+                : ''
+          }}
+        </DialogDescription>
+      </DialogHeader>
+      <DialogBody class="space-y-3">
+        <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
+        <p v-if="busy" role="status" class="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 class="size-4 animate-spin" aria-hidden="true" />
+          Checking…
+        </p>
+        <div
+          v-if="result"
+          role="status"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
+        >
+          <div class="min-w-0 space-y-0.5">
+            <p class="text-sm font-medium">{{ phaseLabel(result.phase) }}</p>
+            <p v-if="result.diagnostic" class="text-xs text-muted-foreground">
+              {{ result.diagnostic }}
+            </p>
+          </div>
+          <Button
+            v-if="result.can_cancel"
+            variant="outline"
+            size="sm"
+            :disabled="busy"
+            @click="cancel"
+            >Cancel deletion</Button
           >
         </div>
-        <template v-if="force">
-          <p class="text-destructive font-medium">
-            All listed images and workspaces will be permanently removed, including other owners'
-            data.
-          </p>
-          <p v-if="graph">
+        <template v-if="force && graph">
+          <p class="text-sm font-medium">
             {{ graph.counts.images }} images · {{ graph.counts.workspaces }} workspaces
           </p>
-          <div v-if="graph" class="max-h-64 overflow-auto space-y-2 rounded-md border p-3">
+          <div
+            class="max-h-64 space-y-1.5 overflow-auto rounded-md border border-border p-3 text-xs"
+          >
             <p v-for="i in graph.images" :key="i.id">
-              Image: {{ i.name }} · Owner {{ i.owner_label || i.owner_id || 'unknown' }} ·
-              {{ i.id }}
+              Image: {{ i.name }} · {{ i.owner_label || i.owner_id || 'unknown owner' }}
+              <span class="text-muted-foreground">· {{ i.id }}</span>
             </p>
             <p v-for="w in graph.workspaces" :key="w.id">
-              Workspace: {{ w.name }} · Owner {{ w.owner_label || w.owner_id || 'unknown' }} ·
-              {{ w.id }}
+              Workspace: {{ w.name }} · {{ w.owner_label || w.owner_id || 'unknown owner' }}
+              <span class="text-muted-foreground">· {{ w.id }}</span>
             </p>
             <p v-for="blocker in graph.blockers" :key="blocker" class="text-destructive">
               {{ blocker }}
             </p>
           </div>
-          <label class="flex items-start gap-2"
-            ><Checkbox v-model="approved" :disabled="!graph || !!graph.blockers.length" />I
-            explicitly approve permanent deletion of exactly this preview.</label
+          <label class="flex items-start gap-2 text-sm"
+            ><Checkbox v-model="approved" :disabled="!!graph.blockers.length" />Delete exactly these
+            items permanently</label
           >
-          <Button variant="outline" :disabled="busy" @click="rePreview">Revalidate preview</Button>
         </template>
       </DialogBody>
       <DialogFooter class="flex-wrap">
-        <Button variant="outline" @click="emit('close')">Close</Button>
         <Button
           v-if="target && isAdmin() && !force"
-          variant="outline"
+          variant="ghost"
+          class="text-muted-foreground sm:mr-auto"
           :disabled="busy"
           @click="force = true"
-          >Review force deletion…</Button
+          >Force delete…</Button
         >
         <Button
-          :variant="force ? 'destructive' : 'default'"
-          :disabled="busy || (force && (!approved || !graph || !!graph.blockers.length))"
+          v-if="force"
+          variant="ghost"
+          class="text-muted-foreground sm:mr-auto"
+          :disabled="busy"
+          @click="rePreview"
+          >Refresh list</Button
+        >
+        <Button variant="outline" @click="emit('close')">{{
+          canRequest || force ? 'Cancel' : 'Close'
+        }}</Button>
+        <Button
+          v-if="force || canRequest"
+          variant="destructive"
+          :disabled="busy || (force && forceBlocked)"
           @click="request"
-          >{{ force ? 'Confirm permanent deletion' : 'Store deferred deletion intent' }}</Button
+          >{{ force ? 'Delete permanently' : verb }}</Button
         >
       </DialogFooter>
     </DialogContent>

@@ -1,7 +1,21 @@
+import type { ImageStatusTone } from "@opencuria/chat-core/imageDefinitionLifecycle";
 import { retentionLabel } from "@opencuria/chat-core/imageVersions";
 import { formatStorageBytes } from "@opencuria/chat-core/workspaceDisk";
 import type { CapturedImage, ImageArtifact } from "@opencuria/client";
+import type { NativeFormTone } from "../../../ui/NativeForm.types";
 import { count, formatDate } from "../../format";
+
+const NATIVE_TONES: Record<ImageStatusTone, NativeFormTone> = {
+  success: "success",
+  progress: "accent",
+  danger: "danger",
+  muted: "muted",
+};
+
+/** The row color of an image definition or runner build status. */
+export function nativeTone(tone: ImageStatusTone): NativeFormTone {
+  return NATIVE_TONES[tone];
+}
 
 const BUSY = new Set(["capturing", "building"]);
 const UNDELETABLE = new Set([

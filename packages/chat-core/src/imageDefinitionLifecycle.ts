@@ -19,6 +19,28 @@ export const EMPTY_BUILD_SUMMARY: ImageDefinitionBuildSummary = {
   removing: 0,
 };
 
+/** How a status reads at a glance. */
+export type ImageStatusTone = "success" | "progress" | "danger" | "muted";
+
+/** A lifecycle state as people see it: one short label and its tone. */
+export interface ImageStatus {
+  label: string;
+  tone: ImageStatusTone;
+}
+
+/** The fields of a runner build that decide its status and actions. */
+export interface RunnerBuildState {
+  status?: string | null;
+  /** Set while a new version builds; the current version stays in use. */
+  pending_generation_id?: string | null;
+}
+
+/** The fields of a definition that decide its overall status. */
+export interface DefinitionState {
+  status: string;
+  runner_build_summary?: ImageDefinitionBuildSummary | null;
+}
+
 const DEFINITION_LOCKED_STATUSES = new Set([
   "pending_deletion",
   "deleting",
@@ -37,6 +59,25 @@ const BUILD_POLLING_STATUSES = new Set([
 
 const HIDDEN_DEFINITION_STATUSES = new Set(["deleted"]);
 
+const NOT_BUILT: ImageStatus = { label: "Not built", tone: "muted" };
+const BUILDING: ImageStatus = { label: "Building", tone: "progress" };
+const READY: ImageStatus = { label: "Ready", tone: "success" };
+const DISABLED: ImageStatus = { label: "Disabled", tone: "muted" };
+const FAILED: ImageStatus = { label: "Failed", tone: "danger" };
+const REMOVING: ImageStatus = { label: "Removing", tone: "progress" };
+
+const RUNNER_BUILD_STATUSES: Record<string, ImageStatus> = {
+  // An online runner starts a requested build right away.
+  pending: BUILDING,
+  building: BUILDING,
+  active: READY,
+  deactivated: DISABLED,
+  failed: FAILED,
+  pending_deletion: REMOVING,
+  deleting: REMOVING,
+  delete_failed: { label: "Removal failed", tone: "danger" },
+};
+
 export type RunnerBuildActionId =
   | "build"
   | "rebuild"
@@ -47,6 +88,7 @@ export type RunnerBuildActionId =
   | "retry_remove"
   | "view_log";
 
+/** `primary` is the one next step; the rest are secondary choices. */
 export type RunnerBuildActionKind =
   | "primary"
   | "secondary"
@@ -69,6 +111,8 @@ export interface DefinitionActions {
   canDelete: boolean;
   canRetryDelete: boolean;
   canRestore: boolean;
+  /** Make a disabled definition available for new workspaces again. */
+  canEnable: boolean;
 }
 
 export function isDefinitionHidden(status: string | undefined): boolean {
@@ -79,36 +123,76 @@ export function isDefinitionLocked(status: string | undefined): boolean {
   return DEFINITION_LOCKED_STATUSES.has(status || "active");
 }
 
-export function definitionNeedsPolling(status: string | undefined): boolean {
-  return DEFINITION_POLLING_STATUSES.has(status || "");
+/** Whether a definition changes on its own: it is deleted, built or removed. */
+export function definitionNeedsPolling(
+  definition: DefinitionState | null | undefined,
+): boolean {
+  if (!definition) return false;
+  if (DEFINITION_POLLING_STATUSES.has(definition.status)) return true;
+  const counts = definition.runner_build_summary;
+  return Boolean(counts && (counts.building || counts.removing));
 }
 
-export function buildNeedsPolling(status: string | undefined): boolean {
-  return BUILD_POLLING_STATUSES.has(status || "");
+/** Whether a runner build changes on its own, including a new version. */
+export function buildNeedsPolling(
+  build: RunnerBuildState | null | undefined,
+): boolean {
+  return (
+    BUILD_POLLING_STATUSES.has(build?.status || "") ||
+    Boolean(build?.pending_generation_id)
+  );
+}
+
+/** A ready build whose next version is being built. */
+export function isBuildUpdating(
+  build: RunnerBuildState | null | undefined,
+): boolean {
+  return build?.status === "active" && Boolean(build.pending_generation_id);
 }
 
 export { isDefinitionSelectableForWorkspace } from "./workspaceCreation";
 
-export function formatRunnerBuildSummary(
-  summary?: ImageDefinitionBuildSummary | null,
-): string {
-  const counts = summary ?? EMPTY_BUILD_SUMMARY;
-  const total =
-    counts.active +
-    counts.building +
-    counts.failed +
-    counts.inactive +
-    counts.removing;
-  if (total === 0) return "Not built on any runner";
+/**
+ * The state of one runner build: "Ready" can start new workspaces,
+ * "Disabled" is built but hidden from new workspaces.
+ */
+export function getRunnerBuildStatus(
+  build: RunnerBuildState | null | undefined,
+  runnerOnline: boolean,
+): ImageStatus {
+  const status = build?.status;
+  if (!status || status === "deleted") return NOT_BUILT;
+  if (status === "pending" && !runnerOnline) {
+    return { label: "Waiting for runner", tone: "muted" };
+  }
+  if (status === "building" && !runnerOnline) {
+    return { label: "Runner offline", tone: "muted" };
+  }
+  if (isBuildUpdating(build)) return { label: "Updating", tone: "progress" };
+  return RUNNER_BUILD_STATUSES[status] ?? { label: status, tone: "muted" };
+}
 
-  const parts = [
-    `${counts.active} active`,
-    `${counts.building} building`,
-    `${counts.failed} failed`,
-  ];
-  if (counts.inactive) parts.push(`${counts.inactive} inactive`);
-  if (counts.removing) parts.push(`${counts.removing} removing`);
-  return parts.join(", ");
+/**
+ * One status for a definition across all runners. The definition's own
+ * deletion wins, then work in progress, then failures that need attention.
+ */
+export function getDefinitionStatus(definition: DefinitionState): ImageStatus {
+  switch (definition.status) {
+    case "pending_deletion":
+    case "deleting":
+      return { label: "Deleting", tone: "progress" };
+    case "delete_failed":
+      return { label: "Delete failed", tone: "danger" };
+    case "deactivated":
+      return DISABLED;
+  }
+  const counts = definition.runner_build_summary ?? EMPTY_BUILD_SUMMARY;
+  if (counts.building) return BUILDING;
+  if (counts.failed) return FAILED;
+  if (counts.active) return READY;
+  if (counts.removing) return REMOVING;
+  if (counts.inactive) return DISABLED;
+  return NOT_BUILT;
 }
 
 export function getDefinitionActions(definition: {
@@ -122,99 +206,85 @@ export function getDefinitionActions(definition: {
       canDelete: false,
       canRetryDelete: true,
       canRestore: true,
+      canEnable: false,
     };
   }
 
   const locked = isDefinitionLocked(definition.status);
+  const owned = !definition.is_standard && !locked;
   return {
     canDuplicate: !locked,
-    canEdit: !definition.is_standard && !locked,
-    canDelete: !definition.is_standard && !locked,
+    canEdit: owned,
+    canDelete: owned,
     canRetryDelete: false,
     canRestore: false,
+    canEnable: owned && definition.status === "deactivated",
   };
 }
 
-export function getRunnerBuildStatusLabel(
-  status: string | null | undefined,
-  runnerOnline: boolean,
-): string {
-  if (!status || status === "deleted") return "Not built";
-  if (status === "pending" && !runnerOnline) return "Waiting for runner";
-  if (status === "building" && !runnerOnline) return "Runner offline";
-  if (status === "pending") return "Queued";
-  if (status === "building") return "Building";
-  if (status === "active") return "Active";
-  if (status === "deactivated") return "Inactive";
-  if (status === "failed") return "Failed";
-  if (status === "pending_deletion" || status === "deleting") return "Removing";
-  if (status === "delete_failed") return "Remove failed";
-  return status;
-}
+const BUILD: RunnerBuildAction = {
+  id: "build",
+  label: "Build",
+  kind: "primary",
+};
+const BUILD_LOG: RunnerBuildAction = {
+  id: "view_log",
+  label: "Build log",
+  kind: "ghost",
+};
+const REMOVE: RunnerBuildAction = {
+  id: "remove",
+  label: "Remove",
+  kind: "destructive",
+  confirm: "remove",
+};
 
+/**
+ * Actions on one runner build. The first `primary` action is the next step;
+ * while a new version builds, its log replaces Rebuild.
+ */
 export function getRunnerBuildActions(
-  status: string | null | undefined,
+  build: RunnerBuildState | null | undefined,
   options: { definitionLocked?: boolean } = {},
 ): RunnerBuildAction[] {
   if (options.definitionLocked) return [];
-  if (!status || status === "deleted") {
-    return [{ id: "build", label: "Build", kind: "primary" }];
-  }
+  const status = build?.status;
+  if (!status || status === "deleted") return [BUILD];
+
+  const rebuild = (kind: RunnerBuildActionKind): RunnerBuildAction =>
+    build?.pending_generation_id
+      ? BUILD_LOG
+      : { id: "rebuild", label: "Rebuild", kind, confirm: "rebuild" };
 
   switch (status) {
     case "pending":
     case "building":
-      return [{ id: "view_log", label: "View log", kind: "ghost" }];
+      return [BUILD_LOG];
     case "active":
       return [
-        {
-          id: "rebuild",
-          label: "Rebuild",
-          kind: "primary",
-          confirm: "rebuild",
-        },
-        { id: "deactivate", label: "Deactivate", kind: "secondary" },
-        {
-          id: "remove",
-          label: "Remove",
-          kind: "destructive",
-          confirm: "remove",
-        },
+        rebuild("primary"),
+        { id: "deactivate", label: "Disable", kind: "secondary" },
+        REMOVE,
       ];
     case "deactivated":
       return [
-        { id: "activate", label: "Activate", kind: "primary" },
-        {
-          id: "rebuild",
-          label: "Rebuild",
-          kind: "secondary",
-          confirm: "rebuild",
-        },
-        {
-          id: "remove",
-          label: "Remove",
-          kind: "destructive",
-          confirm: "remove",
-        },
+        { id: "activate", label: "Enable", kind: "primary" },
+        rebuild("secondary"),
+        REMOVE,
       ];
     case "failed":
       return [
         { id: "retry", label: "Retry", kind: "primary" },
-        { id: "view_log", label: "View log", kind: "ghost" },
-        {
-          id: "remove",
-          label: "Remove",
-          kind: "destructive",
-          confirm: "remove",
-        },
+        BUILD_LOG,
+        REMOVE,
       ];
     case "pending_deletion":
     case "deleting":
       return [];
     case "delete_failed":
-      return [{ id: "retry_remove", label: "Retry remove", kind: "primary" }];
+      return [{ id: "retry_remove", label: "Retry removal", kind: "primary" }];
     default:
-      return [{ id: "build", label: "Build", kind: "primary" }];
+      return [BUILD];
   }
 }
 
@@ -226,13 +296,12 @@ export function visibleImageDefinitions<T extends { status: string }>(
   );
 }
 
-export function isInFlightBuild(
-  build: { status?: string } | null | undefined,
-): boolean {
-  return buildNeedsPolling(build?.status);
-}
-
 export const BASE_DISTRO_PRESETS = ["ubuntu:22.04", "ubuntu:24.04"];
+
+/** QEMU builds start from Ubuntu cloud images (`ubuntu:<version>`) only. */
+export function isBaseDistroSupported(value: string): boolean {
+  return /^ubuntu:\S+$/i.test(value.trim());
+}
 
 /** The editable fields of an image definition. */
 export interface ImageDefinitionForm {
@@ -288,10 +357,12 @@ export function envVarsTextValid(text: string): boolean {
     .every((line) => !line.trim() || line.indexOf("=") > 0);
 }
 
-/** A name, a base distro and valid environment lines. */
+/** A name, a supported base distro and valid environment lines. */
 export function isImageDefinitionFormValid(form: ImageDefinitionForm): boolean {
   return Boolean(
-    form.name.trim() && formBaseDistro(form) && envVarsTextValid(form.envVars),
+    form.name.trim() &&
+    isBaseDistroSupported(formBaseDistro(form)) &&
+    envVarsTextValid(form.envVars),
   );
 }
 

@@ -157,7 +157,7 @@ describe('CapturedImagesPanel', () => {
       await flushPromises()
       await wrapper
         .findAll('button')
-        .find((b) => b.text() === 'Store deferred deletion intent')!
+        .find((b) => b.text() === 'Delete')!
         .trigger('click')
       await flushPromises()
       expect(requestDeletion).toHaveBeenCalledWith(
@@ -179,11 +179,9 @@ describe('CapturedImagesPanel', () => {
       await wrapper.get('button[title="Delete image"]').trigger('click')
       await flushPromises()
       expect(confirmSpy).not.toHaveBeenCalled()
-      expect(wrapper.text()).toContain('image with all versions')
+      expect(wrapper.text()).toContain('All versions are deleted once no workspace uses them.')
 
-      const deleteBtn = wrapper
-        .findAll('button')
-        .find((b) => b.text() === 'Store deferred deletion intent')
+      const deleteBtn = wrapper.findAll('button').find((b) => b.text() === 'Delete')
       expect(deleteBtn).toBeTruthy()
       await deleteBtn!.trigger('click')
       await flushPromises()
@@ -193,7 +191,7 @@ describe('CapturedImagesPanel', () => {
         'deferred',
         '',
       )
-      expect(wrapper.text()).toContain('waiting_dependency')
+      expect(wrapper.text()).toContain('Waiting until unused')
       expect(wrapper.text()).toContain('Pinned workspace')
     } finally {
       wrapper.unmount()
