@@ -1,20 +1,38 @@
 import React, { forwardRef, useImperativeHandle, useRef } from "react";
-import { Image, StyleSheet, View, type ViewStyle } from "react-native";
+import {
+  Image,
+  PixelRatio,
+  StyleSheet,
+  View,
+  type ViewStyle,
+} from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
+  cancelAnimation,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withDecay,
+  withTiming,
   type SharedValue,
 } from "react-native-reanimated";
 import Svg, { Path } from "react-native-svg";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
+import {
+  screenCancel,
+  screenDown,
+  screenIdle,
+  screenMove,
+  screenUp,
+  type ScreenStep,
+} from "./desktopGestures";
 import {
   clamp,
   clampPan,
   maxZoomFor,
   pointerOnScreen,
   screenToFramebuffer,
+  viewerPageSize,
   zoomAround,
   type Size,
 } from "./pointerMath";
@@ -24,10 +42,8 @@ import { DESKTOP_VIEWER_BRIDGE } from "./viewerBridge";
 export interface DesktopViewport {
   fb: SharedValue<Size>;
   box: SharedValue<Size>;
-  /** Zoom the WebView is laid out at. */
+  /** Visual zoom (≥ 1); the page is scaled natively, never re-laid out. */
   zoom: SharedValue<number>;
-  /** Extra scale while a pinch is in progress. */
-  pinch: SharedValue<number>;
   panX: SharedValue<number>;
   panY: SharedValue<number>;
   pointerX: SharedValue<number>;
@@ -39,7 +55,6 @@ export function useDesktopViewport(initialFb: Size): DesktopViewport {
     fb: useSharedValue(initialFb),
     box: useSharedValue({ width: 0, height: 0 }),
     zoom: useSharedValue(1),
-    pinch: useSharedValue(1),
     panX: useSharedValue(0),
     panY: useSharedValue(0),
     pointerX: useSharedValue(initialFb.width / 2),
@@ -62,7 +77,11 @@ export interface DesktopScreenHandle {
 
 export interface DesktopScreenProps {
   viewport: DesktopViewport;
+  /** Remote framebuffer size in pixels. */
+  framebuffer: Size;
   box: Size;
+  /** A framed pane with rounded corners instead of edge to edge. */
+  inset: boolean;
   url: string;
   /** Remount key: a new viewer session loads a fresh page. */
   viewerKey: string;
@@ -77,9 +96,13 @@ export interface DesktopScreenProps {
   onLoadError: () => void;
   /** A tap on the screen: click at this framebuffer pixel. */
   onTapAt: (x: number, y: number) => void;
+  /** The zoom after the fingers left the screen. */
   onZoomChange: (zoom: number) => void;
   children?: React.ReactNode;
 }
+
+/** Below this zoom a released pinch snaps back to the fitted view. */
+const SNAP_ZOOM = 1.05;
 
 /** Longest side of the native cursor, whatever the remote image size. */
 const CURSOR_MAX_POINTS = 26;
@@ -100,10 +123,12 @@ function cursorSize(cursor: DesktopCursorImage | null) {
 }
 
 /**
- * The remote screen: KasmVNC in a WebView laid out at the committed zoom and
- * panned natively, so panning and the pointer never wait for the page. The
- * page itself takes no touches; pinch zooms, one or two fingers pan a zoomed
- * view and a tap clicks at the touched pixel.
+ * The remote screen: KasmVNC in a WebView laid out once at the framebuffer's
+ * detail (`viewerPageSize`) and zoomed and panned purely natively, so zoom,
+ * pan and the pointer never wait for the page or re-lay it out. The page
+ * itself takes no touches; two fingers zoom around their midpoint and pan,
+ * one finger pans a zoomed view (with momentum) and a tap clicks at the
+ * touched pixel.
  */
 export const DesktopScreen = forwardRef<
   DesktopScreenHandle,
@@ -111,7 +136,9 @@ export const DesktopScreen = forwardRef<
 >(function DesktopScreen(
   {
     viewport,
+    framebuffer,
     box,
+    inset,
     url,
     viewerKey,
     visible,
@@ -131,25 +158,21 @@ export const DesktopScreen = forwardRef<
   useImperativeHandle(ref, () => ({
     inject: (script: string) => webViewRef.current?.injectJavaScript(script),
   }));
-  const { fb, zoom, pinch, panX, panY, pointerX, pointerY } = viewport;
-  const pinchStart = useSharedValue(1);
-  const focal = useSharedValue({ x: 0, y: 0 });
+  const { fb, zoom, panX, panY, pointerX, pointerY } = viewport;
+  const machine = useSharedValue(screenIdle());
+  const page = viewerPageSize(framebuffer, box, PixelRatio.get());
 
   const content = useAnimatedStyle(() => {
-    const width = viewport.box.value.width * zoom.value;
-    const height = viewport.box.value.height * zoom.value;
-    const scale = pinch.value;
+    const scale = page.width > 0 ? (box.width / page.width) * zoom.value : 1;
     // Scale around the top-left corner: RN transforms scale around the center.
     return {
-      width,
-      height,
       transform: [
-        { translateX: -panX.value - (width / 2) * (1 - scale) },
-        { translateY: -panY.value - (height / 2) * (1 - scale) },
+        { translateX: -panX.value - (page.width / 2) * (1 - scale) },
+        { translateY: -panY.value - (page.height / 2) * (1 - scale) },
         { scale },
       ],
     };
-  });
+  }, [box.width, page.width, page.height]);
 
   const size = cursorSize(cursor);
   const cursorStyle = useAnimatedStyle(() => {
@@ -157,7 +180,7 @@ export const DesktopScreen = forwardRef<
       { x: pointerX.value, y: pointerY.value },
       fb.value,
       viewport.box.value,
-      zoom.value * pinch.value,
+      zoom.value,
       { x: panX.value, y: panY.value },
     );
     return {
@@ -168,87 +191,114 @@ export const DesktopScreen = forwardRef<
     };
   }, [size.hotX, size.hotY]);
 
-  const pinchGesture = Gesture.Pinch()
+  const run = (step: ScreenStep) => {
+    "worklet";
+    machine.value = step.state;
+    const area = viewport.box.value;
+    for (const action of step.actions) {
+      if (action.type === "stop") {
+        cancelAnimation(zoom);
+        cancelAnimation(panX);
+        cancelAnimation(panY);
+      } else if (action.type === "pan") {
+        const pan = clampPan(
+          { x: panX.value - action.dx, y: panY.value - action.dy },
+          area,
+          zoom.value,
+        );
+        panX.value = pan.x;
+        panY.value = pan.y;
+      } else if (action.type === "zoom") {
+        const next = clamp(
+          zoom.value * action.scale,
+          1,
+          maxZoomFor(fb.value, area),
+        );
+        const pan = zoomAround(
+          zoom.value,
+          next,
+          { x: panX.value, y: panY.value },
+          { x: action.x, y: action.y },
+          area,
+        );
+        zoom.value = next;
+        panX.value = pan.x;
+        panY.value = pan.y;
+      } else if (action.type === "tap") {
+        const at = screenToFramebuffer(
+          { x: action.x, y: action.y },
+          fb.value,
+          area,
+          zoom.value,
+          { x: panX.value, y: panY.value },
+        );
+        runOnJS(onTapAt)(at.x, at.y);
+      } else if (action.type === "fling") {
+        const maxX = Math.max(0, area.width * zoom.value - area.width);
+        const maxY = Math.max(0, area.height * zoom.value - area.height);
+        // Velocities are finger movement in points/ms; the pan runs opposite.
+        panX.value = withDecay({
+          velocity: -action.vx * 1000,
+          clamp: [0, maxX],
+        });
+        panY.value = withDecay({
+          velocity: -action.vy * 1000,
+          clamp: [0, maxY],
+        });
+        runOnJS(onZoomChange)(zoom.value);
+      } else if (zoom.value < SNAP_ZOOM) {
+        // Settled almost fitted: snap back to the whole screen.
+        const timing = { duration: 180 };
+        zoom.value = withTiming(1, timing);
+        panX.value = withTiming(0, timing);
+        panY.value = withTiming(0, timing);
+        runOnJS(onZoomChange)(1);
+      } else {
+        runOnJS(onZoomChange)(zoom.value);
+      }
+    }
+  };
+
+  const gesture = Gesture.Manual()
     .enabled(interactive)
-    .onStart((event) => {
-      pinchStart.value = zoom.value;
-      focal.value = { x: event.focalX, y: event.focalY };
+    .onTouchesDown((event, manager) => {
+      manager.activate();
+      run(screenDown(machine.value, event.changedTouches, performance.now()));
     })
-    .onUpdate((event) => {
-      const max = maxZoomFor(fb.value, viewport.box.value);
-      const previous = zoom.value * pinch.value;
-      const next = clamp(pinchStart.value * event.scale, 1, max);
-      const pan = zoomAround(
-        previous,
-        next,
-        { x: panX.value, y: panY.value },
-        { x: event.focalX, y: event.focalY },
-        viewport.box.value,
-      );
-      pinch.value = next / zoom.value;
-      panX.value = pan.x;
-      panY.value = pan.y;
+    .onTouchesMove((event) => {
+      run(screenMove(machine.value, event.allTouches, performance.now()));
     })
-    .onEnd(() => {
-      let next = zoom.value * pinch.value;
-      if (next < 1.08) next = 1;
-      const pan = clampPan(
-        { x: panX.value, y: panY.value },
-        viewport.box.value,
-        next,
-      );
-      zoom.value = next;
-      pinch.value = 1;
-      panX.value = pan.x;
-      panY.value = pan.y;
-      runOnJS(onZoomChange)(next);
+    .onTouchesUp((event, manager) => {
+      run(screenUp(machine.value, event.changedTouches, performance.now()));
+      if (machine.value.down.length === 0) manager.end();
+    })
+    .onTouchesCancelled((_event, manager) => {
+      run(screenCancel(machine.value));
+      manager.end();
+    })
+    .onFinalize(() => {
+      if (machine.value.phase !== "idle") run(screenCancel(machine.value));
     });
-
-  const panGesture = Gesture.Pan()
-    .enabled(interactive)
-    .maxPointers(2)
-    .minDistance(6)
-    .onChange((event) => {
-      const pan = clampPan(
-        { x: panX.value - event.changeX, y: panY.value - event.changeY },
-        viewport.box.value,
-        zoom.value * pinch.value,
-      );
-      panX.value = pan.x;
-      panY.value = pan.y;
-    });
-
-  const tapGesture = Gesture.Tap()
-    .enabled(interactive)
-    .maxDuration(300)
-    .maxDistance(12)
-    .onEnd((event, success) => {
-      if (!success) return;
-      const at = screenToFramebuffer(
-        { x: event.x, y: event.y },
-        fb.value,
-        viewport.box.value,
-        zoom.value * pinch.value,
-        { x: panX.value, y: panY.value },
-      );
-      runOnJS(onTapAt)(at.x, at.y);
-    });
-
-  const gesture = Gesture.Race(
-    Gesture.Simultaneous(pinchGesture, panGesture),
-    tapGesture,
-  );
 
   return (
     <GestureDetector gesture={gesture}>
       <View
         testID="desktop-screen"
         accessibilityLabel="Remote desktop"
-        style={[styles.box, { width: box.width, height: box.height }]}
+        style={[
+          styles.box,
+          inset ? styles.inset : null,
+          { width: box.width, height: box.height },
+        ]}
         collapsable={false}
       >
         <Animated.View
-          style={[styles.content, content, visible ? null : styles.hidden]}
+          style={[
+            styles.content,
+            { width: page.width, height: page.height },
+            content,
+            visible ? null : styles.hidden,
+          ]}
           pointerEvents="none"
         >
           {url ? (
@@ -336,9 +386,11 @@ function ArrowCursor(): React.JSX.Element {
 const styles = StyleSheet.create({
   box: {
     overflow: "hidden",
-    // A dark glass pane that reads as a screen in both themes, also while
-    // nothing is connected.
+    // A dark pane that reads as a screen in both themes, also while nothing
+    // is connected.
     backgroundColor: "#111113",
+  } satisfies ViewStyle,
+  inset: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: "rgba(255, 255, 255, 0.12)",

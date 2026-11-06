@@ -13,8 +13,18 @@ import Animated, {
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
+import { gestureThresholdHaptic, lightTapHaptic } from "../../ui/haptics";
 import { useTheme } from "../../ui/theme";
 import type { DesktopViewport } from "./DesktopScreen";
+import {
+  trackpadCancel,
+  trackpadDown,
+  trackpadIdle,
+  trackpadMove,
+  trackpadUp,
+  trackpadWake,
+  type TrackpadStep,
+} from "./desktopGestures";
 import { followPointer, movePointer } from "./pointerMath";
 
 export type MouseButton = "left" | "right";
@@ -25,59 +35,55 @@ export interface DesktopTrackpadProps {
   /** The pointer moved to this framebuffer pixel. */
   onMove: (x: number, y: number) => void;
   onClick: (button: MouseButton) => void;
-  /** Press or release the left button for a drag. */
-  onDrag: (down: boolean) => void;
+  /** Press or release the left button (double tap or hold, then drag). */
+  onButton: (down: boolean) => void;
   /** Scroll by pixel deltas (natural direction, like iOS). */
   onScroll: (deltaX: number, deltaY: number) => void;
   style?: StyleProp<ViewStyle>;
   children?: React.ReactNode;
 }
 
-/** Hold this long without moving to grab (left button down) for a drag. */
-const DRAG_HOLD_MS = 320;
 const SCROLL_GAIN = 2.2;
 
 /**
  * A laptop trackpad for the remote pointer. One finger moves with
- * acceleration, a tap clicks, a two-finger tap right-clicks, two fingers
- * scroll and holding still before moving drags (left button held).
+ * acceleration; a quick tap clicks on release, a two-finger tap
+ * right-clicks and two fingers scroll. Double tap and slide (or hold still)
+ * to drag with the left button held. Recognition is the pure state machine
+ * of `desktopGestures`, run on the UI thread.
  */
 export function DesktopTrackpad({
   viewport,
   enabled,
   onMove,
   onClick,
-  onDrag,
+  onButton,
   onScroll,
   style,
   children,
 }: DesktopTrackpadProps): React.JSX.Element {
   const { theme } = useTheme();
-  const { fb, box, zoom, pinch, panX, panY, pointerX, pointerY } = viewport;
+  const { fb, box, zoom, panX, panY, pointerX, pointerY } = viewport;
+  const machine = useSharedValue(trackpadIdle());
+  const timer = useSharedValue(-1);
+  /** 0 idle, 1 touched, 2 left button held. */
   const pressed = useSharedValue(0);
   const [hint, setHint] = useState(true);
   const used = () => setHint(false);
 
-  const move = (
-    deltaX: number,
-    deltaY: number,
-    velocityX: number,
-    velocityY: number,
-  ) => {
+  const move = (deltaX: number, deltaY: number, speed: number) => {
     "worklet";
-    const speed = Math.hypot(velocityX, velocityY) / 1000;
-    const scale = zoom.value * pinch.value;
     const next = movePointer(
       { x: pointerX.value, y: pointerY.value },
       { x: deltaX, y: deltaY },
       speed,
       fb.value,
       box.value,
-      scale,
+      zoom.value,
     );
     pointerX.value = next.x;
     pointerY.value = next.y;
-    const pan = followPointer(next, fb.value, box.value, scale, {
+    const pan = followPointer(next, fb.value, box.value, zoom.value, {
       x: panX.value,
       y: panY.value,
     });
@@ -86,84 +92,60 @@ export function DesktopTrackpad({
     runOnJS(onMove)(next.x, next.y);
   };
 
-  const pointerPan = Gesture.Pan()
+  const apply = (step: TrackpadStep) => {
+    "worklet";
+    const before = machine.value.phase;
+    machine.value = step.state;
+    for (const action of step.actions) {
+      if (action.type === "move") move(action.dx, action.dy, action.speed);
+      else if (action.type === "scroll")
+        runOnJS(onScroll)(-action.dx * SCROLL_GAIN, -action.dy * SCROLL_GAIN);
+      else if (action.type === "click") runOnJS(onClick)(action.button);
+      else if (action.type === "button") runOnJS(onButton)(action.down);
+      else if (action.kind === "grab") runOnJS(gestureThresholdHaptic)();
+      else runOnJS(lightTapHaptic)();
+    }
+    const phase = step.state.phase;
+    if (phase === before) return;
+    if (before === "idle") runOnJS(used)();
+    const target =
+      phase === "press" || phase === "drag" ? 2 : phase === "idle" ? 0 : 1;
+    pressed.value = withTiming(target, { duration: target ? 100 : 180 });
+  };
+
+  const run = (step: TrackpadStep) => {
+    "worklet";
+    apply(step);
+    if (step.wakeIn < 0) return;
+    if (timer.value >= 0) clearTimeout(timer.value);
+    const sequence = step.state.sequence;
+    timer.value = setTimeout(() => {
+      timer.value = -1;
+      apply(trackpadWake(machine.value, sequence, performance.now()));
+    }, step.wakeIn);
+  };
+
+  const gesture = Gesture.Manual()
     .enabled(enabled)
-    .maxPointers(1)
-    .minDistance(3)
-    .onBegin(() => {
-      pressed.value = withTiming(1, { duration: 120 });
+    .onTouchesDown((event, manager) => {
+      manager.activate();
+      run(trackpadDown(machine.value, event.changedTouches, performance.now()));
     })
-    .onStart(() => {
-      runOnJS(used)();
+    .onTouchesMove((event) => {
+      run(trackpadMove(machine.value, event.allTouches, performance.now()));
     })
-    .onChange((event) => {
-      move(event.changeX, event.changeY, event.velocityX, event.velocityY);
+    .onTouchesUp((event, manager) => {
+      run(trackpadUp(machine.value, event.changedTouches, performance.now()));
+      if (machine.value.down.length === 0) manager.end();
+    })
+    .onTouchesCancelled((_event, manager) => {
+      run(trackpadCancel(machine.value));
+      manager.end();
     })
     .onFinalize(() => {
-      pressed.value = withTiming(0, { duration: 180 });
+      // Ended from outside (disabled, view hidden): never keep a button down.
+      if (machine.value.phase !== "idle") run(trackpadCancel(machine.value));
     });
-
-  const dragPan = Gesture.Pan()
-    .enabled(enabled)
-    .maxPointers(1)
-    .activateAfterLongPress(DRAG_HOLD_MS)
-    .onStart(() => {
-      pressed.value = withTiming(2, { duration: 120 });
-      runOnJS(onDrag)(true);
-      runOnJS(used)();
-    })
-    .onChange((event) => {
-      move(event.changeX, event.changeY, event.velocityX, event.velocityY);
-    })
-    .onFinalize((_event, success) => {
-      pressed.value = withTiming(0, { duration: 180 });
-      if (success) runOnJS(onDrag)(false);
-    });
-
-  const tap = Gesture.Tap()
-    .enabled(enabled)
-    .maxDuration(260)
-    .maxDistance(12)
-    .onBegin(() => {
-      pressed.value = withTiming(1, { duration: 80 });
-    })
-    .onEnd((_event, success) => {
-      if (success) runOnJS(onClick)("left");
-    })
-    .onFinalize(() => {
-      pressed.value = withTiming(0, { duration: 180 });
-    });
-
-  const rightTap = Gesture.Tap()
-    .enabled(enabled)
-    .minPointers(2)
-    .maxDuration(320)
-    .maxDistance(20)
-    .onEnd((_event, success) => {
-      if (success) runOnJS(onClick)("right");
-    });
-
-  const scroll = Gesture.Pan()
-    .enabled(enabled)
-    .minPointers(2)
-    .maxPointers(2)
-    .minDistance(4)
-    .onStart(() => {
-      runOnJS(used)();
-    })
-    .onChange((event) => {
-      runOnJS(onScroll)(
-        -event.changeX * SCROLL_GAIN,
-        -event.changeY * SCROLL_GAIN,
-      );
-    });
-
-  const gesture = Gesture.Race(
-    scroll,
-    rightTap,
-    dragPan,
-    Gesture.Simultaneous(pointerPan, tap),
-  );
 
   const idle = theme.border;
   const touched = theme.subtleText;
@@ -196,7 +178,7 @@ export function DesktopTrackpad({
               Tap to click · Two fingers to scroll or right-click
             </Text>
             <Text style={[styles.hintText, { color: theme.subtleText }]}>
-              Hold, then move to drag
+              Double-tap and slide to drag
             </Text>
           </View>
         ) : null}

@@ -1,4 +1,5 @@
 import React from "react";
+import { StyleSheet } from "react-native";
 import {
   act,
   cleanup,
@@ -232,4 +233,22 @@ it("pastes the phone clipboard and stops the desktop from the menu", async () =>
   });
   expect(screen.getByTestId("desktop-status").props.children).toBe("Stopped");
   expect(screen.getByTestId("desktop-stopped")).toBeTruthy();
+});
+
+it("runs the screen edge to edge in portrait while the trackpad keeps its room", async () => {
+  await renderConnected();
+  const style = () =>
+    StyleSheet.flatten(screen.getByTestId("desktop-screen").props.style);
+  // 1280x720 across the full 390 points, no rounded frame.
+  expect(style()).toMatchObject({ width: 390, height: 219.375 });
+  expect(style().borderRadius).toBeUndefined();
+
+  // Too little height for the full width: a framed pane fitted to it.
+  fireEvent(
+    screen.getByTestId("desktop-panel").children[1] as never,
+    "layout",
+    { nativeEvent: { layout: { width: 390, height: 360 } } },
+  );
+  expect(style().width).toBeLessThan(390 - 2 * 12);
+  expect(style().borderRadius).toBe(12);
 });

@@ -174,6 +174,8 @@ export const DESKTOP_VIEWER_BRIDGE = String.raw`(function () {
     '#noVNC_container{position:fixed!important;left:0!important;top:0!important;' +
     'width:100%!important;height:100%!important;background:#000!important}' +
     '#noVNC_container>div{background:#000!important}' +
+    // A shrinking page must not be held wide by the previous canvas size.
+    '#noVNC_container canvas{max-width:100%!important;max-height:100%!important}' +
     '#noVNC_keyboardinput{display:none!important}';
   var styled = false;
   var addStyle = function () {
@@ -187,6 +189,16 @@ export const DESKTOP_VIEWER_BRIDGE = String.raw`(function () {
   };
   addStyle();
   document.addEventListener('DOMContentLoaded', addStyle);
+  // Without shrink-to-fit=no WebKit widens the layout viewport to content
+  // that overflows while the view shrinks, and the page stays enlarged.
+  var fitViewport = function () {
+    var meta = document.querySelector('meta[name="viewport"]');
+    if (meta && meta.content.indexOf('shrink-to-fit') === -1) {
+      meta.content = meta.content + ',shrink-to-fit=no';
+    }
+  };
+  fitViewport();
+  document.addEventListener('DOMContentLoaded', fitViewport);
 
   var screen = function () {
     return document.querySelector('#noVNC_container > div > canvas');

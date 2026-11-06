@@ -5,7 +5,8 @@
  *
  * Coordinates: the framebuffer (`fb`) is the remote desktop in pixels. The
  * screen box shows it at `box` points; `zoom` ≥ 1 enlarges the content to
- * `box * zoom` and `panX/panY` is the visible window's offset into it.
+ * `box * zoom` and `panX/panY` is the visible window's offset into it. The
+ * viewer page keeps one layout size (`viewerPageSize`); zoom only scales it.
  */
 
 export interface Size {
@@ -151,6 +152,21 @@ export function zoomAround(
     box,
     next,
   );
+}
+
+/**
+ * Layout size of the viewer page, in the box's aspect ratio. Zooming only
+ * scales this page natively, so it never re-lays out the WebView. One device
+ * pixel per framebuffer pixel is all the detail the remote screen has; the
+ * page is at least the box and at most twice its width, so a fitted view is
+ * never scaled down far enough to shimmer.
+ */
+export function viewerPageSize(fb: Size, box: Size, pixelRatio: number): Size {
+  "worklet";
+  if (fb.width <= 0 || box.width <= 0 || box.height <= 0 || pixelRatio <= 0)
+    return { width: box.width, height: box.height };
+  const width = clamp(fb.width / pixelRatio, box.width, box.width * 2);
+  return { width, height: (width * box.height) / box.width };
 }
 
 /** The largest box of the framebuffer's aspect ratio inside `area`. */

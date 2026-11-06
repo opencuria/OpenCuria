@@ -8,6 +8,7 @@ import {
   pointerGain,
   pointerOnScreen,
   screenToFramebuffer,
+  viewerPageSize,
   zoomAround,
 } from "./pointerMath";
 
@@ -106,5 +107,16 @@ describe("zoomed viewport", () => {
       width: 0,
       height: 0,
     });
+  });
+
+  it("lays the viewer page out once at the framebuffer's detail", () => {
+    // 3x phone: 1920 px fit into 640 points, one device pixel each.
+    expect(viewerPageSize(fb, { width: 390, height: 219.375 }, 3)).toEqual({
+      width: 640,
+      height: 360,
+    });
+    // Never smaller than the box, never more than twice its width.
+    expect(viewerPageSize(fb, box, 10).width).toBe(box.width);
+    expect(viewerPageSize(fb, box, 1).width).toBe(box.width * 2);
   });
 });

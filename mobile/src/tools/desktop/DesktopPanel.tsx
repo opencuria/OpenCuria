@@ -358,6 +358,7 @@ export function DesktopPanel({
     };
     schedule();
   };
+  // The trackpad gives its own haptic feedback (click, grab).
   const click = (button: MouseButton) => {
     flush();
     const mask = button === "left" ? 1 : 2;
@@ -365,10 +366,10 @@ export function DesktopPanel({
     const held = consumeModifiers();
     inject(pointerCommand(x, y, mask, held));
     inject(pointerCommand(x, y, 0, held));
-    lightTapHaptic();
   };
-  const drag = (down: boolean) => {
+  const setLeftButton = (down: boolean) => {
     flush();
+    if (down === (buttons.current === 1)) return;
     if (down) dragModifiers.current = consumeModifiers();
     buttons.current = down ? 1 : 0;
     inject(
@@ -379,13 +380,13 @@ export function DesktopPanel({
         dragModifiers.current,
       ),
     );
-    if (down) lightTapHaptic();
-    else dragModifiers.current = NO_MODIFIERS;
+    if (!down) dragModifiers.current = NO_MODIFIERS;
   };
   const tapAt = (x: number, y: number) => {
     setPointer(x, y);
     pendingMove.current = { x, y };
     click("left");
+    lightTapHaptic();
   };
   // A drag must never outlive the panel's control of the desktop.
   useEffect(() => {
@@ -477,18 +478,15 @@ export function DesktopPanel({
   // --- Zoom ---
   const [zoomLevel, setZoomLevel] = useState(1);
   const fitToScreen = () => {
-    const { zoom, pinch, panX, panY } = viewport;
+    const { zoom, panX, panY } = viewport;
     runOnUI(() => {
       "worklet";
-      const current = zoom.value * pinch.value;
-      if (current <= 1) return;
-      panX.value = withTiming(0, { duration: 220 });
-      panY.value = withTiming(0, { duration: 220 });
-      pinch.value = withTiming(1 / zoom.value, { duration: 220 }, (done) => {
-        if (!done) return;
-        zoom.value = 1;
-        pinch.value = 1;
-      });
+      if (zoom.value <= 1) return;
+      // Same timing for both keeps the pan inside the shrinking content.
+      const timing = { duration: 220 };
+      zoom.value = withTiming(1, timing);
+      panX.value = withTiming(0, timing);
+      panY.value = withTiming(0, timing);
     })();
     setZoomLevel(1);
   };
@@ -599,23 +597,28 @@ export function DesktopPanel({
   const bottom = keyboardOpen
     ? keyboard.height + KEY_ACCESSORY_HEIGHT
     : bottomInset;
-  // The body's frame includes its padding: GAP on top, bottom + GAP below.
-  const usable = {
-    width: area.width - GAP * 2,
-    height: Math.max(0, area.height - bottom - GAP * 2),
-  };
   const trackpadMin = keyboardOpen
     ? TRACKPAD_MIN_KEYBOARD
     : TRACKPAD_MIN_HEIGHT;
-  const box = landscape
-    ? fitBox(fb, {
-        width: usable.width * 0.62,
-        height: usable.height,
-      })
-    : fitBox(fb, {
-        width: usable.width,
-        height: Math.max(0, usable.height - GAP - trackpadMin),
-      });
+  // Height of the body without its bottom padding (bottom inset + GAP).
+  const body = Math.max(0, area.height - bottom - GAP);
+  // Portrait: the screen spans the phone's full width, flush under the
+  // status bar, whenever the trackpad keeps its minimum height below it;
+  // otherwise it is a framed pane fitted to the height.
+  const fullHeight = fb.width > 0 ? (area.width * fb.height) / fb.width : 0;
+  const edgeToEdge =
+    !landscape && area.width > 0 && fullHeight <= body - GAP - trackpadMin;
+  const box: Size = edgeToEdge
+    ? { width: area.width, height: fullHeight }
+    : landscape
+      ? fitBox(fb, {
+          width: (area.width - GAP * 2) * 0.62,
+          height: Math.max(0, body - GAP),
+        })
+      : fitBox(fb, {
+          width: area.width - GAP * 2,
+          height: Math.max(0, body - GAP * 2 - trackpadMin),
+        });
   useEffect(() => {
     viewport.box.value = box;
   }, [box.width, box.height, viewport]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -691,7 +694,9 @@ export function DesktopPanel({
     : {
         flex: 1,
         alignSelf: "stretch" as const,
-        minHeight: Math.min(trackpadMin, usable.height),
+        // Edge to edge the body has no side padding; the pad keeps its inset.
+        marginHorizontal: edgeToEdge ? GAP : 0,
+        minHeight: Math.min(trackpadMin, Math.max(0, body - GAP)),
       };
 
   return (
@@ -743,6 +748,7 @@ export function DesktopPanel({
           styles.body,
           landscape ? styles.row : styles.column,
           { paddingBottom: bottom + GAP },
+          edgeToEdge ? styles.edgeToEdge : null,
         ]}
         onLayout={onLayout}
       >
@@ -750,7 +756,9 @@ export function DesktopPanel({
           <DesktopScreen
             ref={screenRef}
             viewport={viewport}
+            framebuffer={fb}
             box={box}
+            inset={!edgeToEdge}
             url={url}
             viewerKey={viewerKey}
             visible={connected}
@@ -777,7 +785,7 @@ export function DesktopPanel({
           enabled={canControl}
           onMove={onMove}
           onClick={click}
-          onDrag={drag}
+          onButton={setLeftButton}
           onScroll={onScroll}
           style={trackpadStyle}
         />
@@ -917,6 +925,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   body: { flex: 1, padding: GAP, gap: GAP },
+  // The screen runs edge to edge; the trackpad keeps its own margins.
+  edgeToEdge: { paddingTop: 0, paddingHorizontal: 0 },
   column: { flexDirection: "column", alignItems: "center" },
   row: { flexDirection: "row", alignItems: "flex-start" },
   message: {

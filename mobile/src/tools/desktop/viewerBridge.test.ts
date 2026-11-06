@@ -95,9 +95,13 @@ afterEach(() => {
 
 describe("KasmVNC page bridge", () => {
   it("reduces the page to the framebuffer and reports state and size", async () => {
-    expect(
-      document.querySelector("style[data-opencuria-mobile]")?.textContent,
-    ).toContain("body>*:not(#noVNC_container){display:none!important}");
+    const css = document.querySelector(
+      "style[data-opencuria-mobile]",
+    )?.textContent;
+    expect(css).toContain(
+      "body>*:not(#noVNC_container){display:none!important}",
+    );
+    expect(css).toContain("canvas{max-width:100%!important");
     expect(navigator.platform).toBe("Linux x86_64");
     document.documentElement.className = "noVNC_connected";
     await vi.waitFor(() =>
@@ -108,6 +112,18 @@ describe("KasmVNC page bridge", () => {
       width: 1920,
       height: 1080,
     });
+  });
+
+  it("keeps the page from staying wide while the view shrinks", () => {
+    const meta = document.createElement("meta");
+    meta.name = "viewport";
+    meta.content = "width=device-width,initial-scale=1";
+    document.head.append(meta);
+    delete (window as { __opencuriaDesktop?: unknown }).__opencuriaDesktop;
+    run(DESKTOP_VIEWER_BRIDGE);
+    expect(meta.content).toBe(
+      "width=device-width,initial-scale=1,shrink-to-fit=no",
+    );
   });
 
   it("replays a click as canvas mouse events at the framebuffer pixel", () => {
