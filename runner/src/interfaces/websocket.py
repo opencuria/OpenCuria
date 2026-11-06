@@ -1113,21 +1113,46 @@ class WebSocketInterface(Interface):
                             await asyncio.sleep(0.01)
 
             async def _sender_loop() -> None:
-                """Emit queued chunks with ACK/backpressure; EOF after both."""
+                """Emit queued chunks with ACK/backpressure; EOF after both.
+
+                Same-stream chunks that queued up behind a pending ACK
+                leave as one emit of at most ``STREAM_OUTPUT_CHUNK`` bytes,
+                so a burst of small reads costs one backend round trip
+                instead of one per read. Nothing waits to batch, and arrival
+                order across stdout/stderr is preserved.
+                """
                 eofs = 0
-                while True:
-                    item = await sender_queue.get()
+                held: tuple[str, bytes] | None = None
+                while held is not None or eofs < 2:
+                    item = held if held is not None else await sender_queue.get()
+                    held = None
                     if item is None:
                         eofs += 1
-                        if eofs >= 2:
-                            return
                         continue
                     stream_name, payload = item
+                    parts = [payload]
+                    size = len(payload)
+                    while size < STREAM_OUTPUT_CHUNK:
+                        try:
+                            queued = sender_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if queued is None:
+                            eofs += 1
+                        elif (
+                            queued[0] == stream_name
+                            and size + len(queued[1]) <= STREAM_OUTPUT_CHUNK
+                        ):
+                            parts.append(queued[1])
+                            size += len(queued[1])
+                        else:
+                            held = queued
+                            break
                     await _emit_stream_output(
                         connection_id=connection_id,
                         workspace_id=workspace_id,
                         stream=stream_name,
-                        payload_b64=_b64.b64encode(payload).decode("ascii"),
+                        payload_b64=_b64.b64encode(b"".join(parts)).decode("ascii"),
                     )
 
             readers: list[asyncio.Task] = []

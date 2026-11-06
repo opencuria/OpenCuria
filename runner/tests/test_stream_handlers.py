@@ -472,3 +472,112 @@ class StreamPumpConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         # Idempotent second close: no second kill.
         await runtime.process_close(handle)
         runtime._kill_stream_tree.assert_awaited_once()
+
+
+class StreamPumpCoalescingTests(unittest.IsolatedAsyncioTestCase):
+    """Chunks queued behind a pending ACK share one backend round trip."""
+
+    async def _run_pump(
+        self, interface, handlers, ws_id, connection_id: str
+    ) -> list[tuple[str, bytes]]:
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": connection_id,
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["agent-cli"],
+            }
+        )
+        pump = interface._running_tasks.get(f"stream:{connection_id}")
+        self.assertIsNotNone(pump)
+        await asyncio.wait_for(pump, timeout=10)
+        return [
+            (c.args[1]["stream"], base64.b64decode(c.args[1]["data"]))
+            for c in interface._sio.call.await_args_list
+            if c.args[0] == "workspace:stream_output"
+        ]
+
+    @staticmethod
+    def _gate_first_ack(interface, released: asyncio.Event) -> None:
+        """Hold the first ACK until *released*, then ACK immediately."""
+
+        async def _call(event, payload, timeout=None):
+            await released.wait()
+            return {"ok": True}
+
+        interface._sio.call = AsyncMock(side_effect=_call)
+
+    async def test_backlog_is_sent_in_one_round_trip(self) -> None:
+        _svc, rt, ws_id, interface, handlers = _setup()
+        lines = [b'{"type":"stream_event","n":%d}\n' % n for n in range(100)]
+        stdout_done = asyncio.Event()
+
+        async def _read(handle, stream="stdout", size=65536):
+            if stream == "stdout":
+                pending = handle.metadata.setdefault("lines", list(lines))
+                if pending:
+                    return pending.pop(0)
+                stdout_done.set()
+            return b""
+
+        rt.process_read = _read  # type: ignore[method-assign]
+        self._gate_first_ack(interface, stdout_done)
+
+        emitted = await self._run_pump(interface, handlers, ws_id, "co1")
+
+        # One ACK may already be in flight; everything queued behind it
+        # leaves together instead of costing 99 more round trips.
+        self.assertLessEqual(len(emitted), 2)
+        self.assertEqual({stream for stream, _ in emitted}, {"stdout"})
+        self.assertEqual(b"".join(data for _, data in emitted), b"".join(lines))
+
+    async def test_coalescing_keeps_chunk_limit_and_stream_order(self) -> None:
+        _svc, rt, ws_id, interface, handlers = _setup()
+        big = 40 * 1024
+        stdout_chunks = [b"a1", b"a2", b"b" * big, b"c" * big, b"d1"]
+        stdout_progress = asyncio.Event()
+        stderr_queued = asyncio.Event()
+        stdout_done = asyncio.Event()
+
+        async def _read(handle, stream="stdout", size=65536):
+            if stream == "stderr":
+                reads = handle.metadata.setdefault("stderr_reads", 0)
+                handle.metadata["stderr_reads"] = reads + 1
+                if reads == 0:
+                    # Arrive strictly after a1/a2 and before the big chunks.
+                    await stdout_progress.wait()
+                    return b"err"
+                stderr_queued.set()
+                return b""
+            reads = handle.metadata.setdefault("stdout_reads", 0)
+            handle.metadata["stdout_reads"] = reads + 1
+            if reads == 2:
+                stdout_progress.set()
+                await stderr_queued.wait()
+            if reads < len(stdout_chunks):
+                return stdout_chunks[reads]
+            stdout_done.set()
+            return b""
+
+        rt.process_read = _read  # type: ignore[method-assign]
+        self._gate_first_ack(interface, stdout_done)
+
+        emitted = await self._run_pump(interface, handlers, ws_id, "co2")
+
+        for _stream, data in emitted:
+            self.assertLessEqual(len(data), 64 * 1024)
+        self.assertEqual(
+            b"".join(data for stream, data in emitted if stream == "stdout"),
+            b"".join(stdout_chunks),
+        )
+        streams = [stream for stream, _ in emitted]
+        self.assertEqual(streams.count("stderr"), 1)
+        err_at = streams.index("stderr")
+        before = b"".join(data for _, data in emitted[:err_at])
+        self.assertEqual(before, b"a1a2")
+        # The two 40 KiB chunks cannot share one 64 KiB emit; the small
+        # tail queued behind the second one rides along with it.
+        self.assertEqual(
+            [data for _, data in emitted[err_at + 1 :]],
+            [b"b" * big, b"c" * big + b"d1"],
+        )
