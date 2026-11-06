@@ -1,9 +1,17 @@
+import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
+from apps.harness.models import HarnessSession
 from apps.scheduled_tasks.services import ScheduledTaskService
+from common.exceptions import AuthenticationError, NotFoundError
+
+CLAUDE_RESOLVE = "apps.harness.engines.connections.EngineConnectionService.resolve"
+CODEX_VALIDATE = (
+    "apps.harness.engines.service.EngineCatalogService.validate_codex_config"
+)
 
 
 @pytest.mark.parametrize(
@@ -180,3 +188,148 @@ def test_cron_schedule_rejects_missing_or_invalid_expression(expression):
         ScheduledTaskService._validate_schedule(
             {"recurrence": "cron", "cron_expression": expression}
         )
+
+
+class CapturingRepository:
+    """Record created schedule values without touching the database."""
+
+    def __init__(self):
+        self.created = None
+
+    def create(self, **values):
+        self.created = values
+        return SimpleNamespace(**values)
+
+
+def _create_schedule(service, **engine):
+    """Create a daily schedule for owner 7 with the given engine settings."""
+    return service.create(
+        organization_id=engine.pop("organization_id", uuid.uuid4()),
+        owner_id=7,
+        workspace=engine.pop("workspace", SimpleNamespace(id=uuid.uuid4())),
+        values={
+            "name": "Engine review",
+            "prompt": "Review the repository",
+            "recurrence": "daily",
+            "local_time": "09:00",
+            "timezone_name": "UTC",
+            **engine,
+        },
+    )
+
+
+def test_native_schedule_checks_owner_provider_with_an_unsaved_session():
+    checked = []
+
+    class Harness:
+        def validate_provider_for_run(self, organization_id, session):
+            checked.append((organization_id, session))
+            return "openrouter/resolved-default"
+
+    repo = CapturingRepository()
+    org_id, workspace = uuid.uuid4(), SimpleNamespace(id=uuid.uuid4())
+    _create_schedule(
+        ScheduledTaskService(repository=repo, harness=Harness()),
+        organization_id=org_id,
+        workspace=workspace,
+        mode=" Plan ",
+        model=" openrouter/test ",
+        reasoning_effort=" HIGH ",
+    )
+
+    [(checked_org, session)] = checked
+    assert checked_org == org_id
+    # No database access is allowed here: the session only carries the
+    # candidate settings into the owner's provider readiness check.
+    assert isinstance(session, HarnessSession)
+    assert (session.workspace_id, session.organization_id) == (workspace.id, org_id)
+    assert (session.created_by_id, session.mode, session.agent_name) == (
+        7,
+        "plan",
+        "plan",
+    )
+    assert (session.model, session.reasoning_effort, session.skill_ids) == (
+        "openrouter/test",
+        "high",
+        [],
+    )
+    # The schedule keeps the owner's selection, not the resolved default.
+    assert (
+        repo.created["harness_id"],
+        repo.created["model"],
+        repo.created["reasoning_effort"],
+    ) == ("native", "openrouter/test", "high")
+
+
+def test_codex_schedule_stores_catalog_normalized_settings(monkeypatch):
+    calls = []
+
+    def validate(self, organization_id, user_id, model, effort, **scope):
+        calls.append((organization_id, user_id, model, effort, scope))
+        return "chatgpt/normalized", "medium"
+
+    monkeypatch.setattr(CODEX_VALIDATE, validate)
+    repo = CapturingRepository()
+    org_id = uuid.uuid4()
+    _create_schedule(
+        ScheduledTaskService(repository=repo),
+        organization_id=org_id,
+        harness_id=" CODEX ",
+        model=" chatgpt/raw ",
+        reasoning_effort=" Medium ",
+    )
+
+    assert calls == [(org_id, 7, "chatgpt/raw", "Medium", {})]
+    assert (
+        repo.created["harness_id"],
+        repo.created["model"],
+        repo.created["reasoning_effort"],
+    ) == ("codex", "chatgpt/normalized", "medium")
+
+
+@pytest.mark.parametrize(
+    ("harness_id", "target", "error", "message"),
+    [
+        (
+            "claude",
+            CLAUDE_RESOLVE,
+            NotFoundError("ProviderAccount", "7"),
+            "Connect your personal Claude authorization before scheduling Claude tasks",
+        ),
+        (
+            "codex",
+            CODEX_VALIDATE,
+            NotFoundError("ProviderAccount", "7"),
+            "Connect your selected ChatGPT or OpenRouter account before "
+            "scheduling Codex tasks",
+        ),
+        (
+            "codex",
+            CODEX_VALIDATE,
+            AuthenticationError("ChatGPT authorization expired"),
+            "Connect your selected ChatGPT or OpenRouter account before "
+            "scheduling Codex tasks",
+        ),
+        # Only a missing Claude authorization becomes an actionable hint.
+        ("claude", CLAUDE_RESOLVE, AuthenticationError("Not a member"), None),
+    ],
+)
+def test_external_engine_schedule_requires_owner_authorization(
+    monkeypatch, harness_id, target, error, message
+):
+    def unavailable(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(target, unavailable)
+    repo = CapturingRepository()
+    service = ScheduledTaskService(repository=repo)
+
+    with pytest.raises(ValueError if message else type(error)) as excinfo:
+        _create_schedule(service, harness_id=harness_id)
+
+    if message:
+        assert str(excinfo.value) == message
+        assert excinfo.value.__cause__ is error
+    else:
+        assert excinfo.value is error
+    assert repo.created is None

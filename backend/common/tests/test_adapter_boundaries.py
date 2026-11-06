@@ -942,6 +942,38 @@ def test_scheduled_restart_recovery_reaches_harness_only_through_its_service(
     assert not violations, "\n".join(sorted(violations))
 
 
+def test_scheduled_tasks_reach_the_harness_only_through_its_services(
+    dependencies,
+) -> None:
+    """Engine, model and provider rules stay behind harness services."""
+    services = {
+        "apps.harness.conversation_service",
+        "apps.harness.run_events",
+        "apps.harness.run_recovery_service",
+        "apps.harness.run_settings_service",
+    }
+    # The orchestration module also re-exports models; allow only its service.
+    orchestration = {
+        "apps.harness.harness_service",
+        "apps.harness.harness_service.HarnessService",
+        "apps.harness.harness_service.get_harness_service",
+    }
+    assert (
+        "apps.harness.run_settings_service"
+        in dependencies["apps.scheduled_tasks.services"]
+    )
+    violations = sorted(
+        f"{module} -> {imported}"
+        for module, imported_modules in dependencies.items()
+        if _within(module, {"apps.scheduled_tasks"})
+        for imported in imported_modules
+        if _within(imported, {"apps.harness"})
+        and imported not in orchestration
+        and not _within(imported, services)
+    )
+    assert not violations, "\n".join(violations)
+
+
 def test_scheduled_tasks_persist_only_their_ledger(trees, dependencies) -> None:
     """Schedules reach workspaces, chats and members through their services."""
     package = APPS_ROOT / "scheduled_tasks"

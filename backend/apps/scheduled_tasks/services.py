@@ -16,10 +16,11 @@ from django.utils import timezone
 
 from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService, get_harness_service
+from apps.harness.run_settings_service import RunSettingsService
 from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
 from apps.runners.services import get_runner_service
 from apps.skills.services import SkillService
-from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.exceptions import ConflictError, NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun
 from .recovery import ScheduledTaskRecoveryService
@@ -39,12 +40,14 @@ class ScheduledTaskService:
         runner: Any | None = None,
         skills: SkillService | None = None,
         conversations: ConversationService | None = None,
+        run_settings: RunSettingsService | None = None,
     ) -> None:
         self.repository = repository or ScheduledTaskRepository
         self.harness = harness
         self.runner = runner
         self.skills = skills or SkillService()
         self.conversations = conversations or ConversationService()
+        self.run_settings = run_settings or RunSettingsService(harness=self._harness)
 
     def _harness(self) -> HarnessService:
         return self.harness or get_harness_service()
@@ -75,17 +78,6 @@ class ScheduledTaskService:
             raise NotFoundError("ScheduledTask", str(task_id))
         return task
 
-    @staticmethod
-    def _normalize_harness_id(value: Any) -> str:
-        from apps.harness.engines.catalog import ENGINE_IDS
-
-        if not isinstance(value, str):
-            raise ValueError("harness_id must be native, claude or codex")
-        harness_id = value.strip().lower()
-        if harness_id not in ENGINE_IDS:
-            raise ValueError("harness_id must be native, claude or codex")
-        return harness_id
-
     def _validate_engine_config(
         self,
         *,
@@ -98,73 +90,28 @@ class ScheduledTaskService:
         reasoning_effort: Any,
         skill_ids: Any,
     ) -> tuple[str, str, str, list[str]]:
-        """Normalize engine-specific schedule fields and check run readiness."""
-        harness_id = self._normalize_harness_id(harness_id)
+        """Normalize the schedule's engine fields and check run readiness."""
+        harness_id = self.run_settings.normalize_harness_id(harness_id)
         if not isinstance(model, str) or not isinstance(reasoning_effort, str):
             raise ValueError("model and reasoning_effort must be strings")
-        raw_model = model.strip()
-        raw_effort = reasoning_effort.strip()
         skills = self._validate_skill_ids(skill_ids)
         if skills:
             # The same ownership and organization-visibility rules apply to
-            # both engines; only the engine consuming the skill bodies differs.
+            # every engine; only the engine consuming the skill bodies differs.
             self.skills.resolve_bodies(
                 skills, user_id=owner_id, organization_id=organization_id
             )
-
-        if harness_id == "native":
-            from apps.harness.harness_service import HarnessSession
-            from apps.harness.providers.models_catalog import normalize_reasoning_effort
-
-            effort = normalize_reasoning_effort(raw_effort)
-            validation_session = HarnessSession(
-                workspace_id=workspace_id,
-                organization_id=organization_id,
-                # Provider accounts are personal: validate the owner's selection.
-                created_by_id=owner_id,
-                mode=mode,
-                agent_name=mode,
-                model=raw_model,
-                reasoning_effort=effort,
-                skill_ids=skills,
-            )
-            self._harness().validate_provider_for_run(
-                organization_id, validation_session
-            )
-            return harness_id, raw_model, effort, skills
-
-        if harness_id == "codex":
-            from apps.harness.engines.service import EngineCatalogService
-
-            try:
-                normalized_model, effort = EngineCatalogService().validate_codex_config(
-                    organization_id, owner_id, raw_model, raw_effort
-                )
-            except (AuthenticationError, NotFoundError) as exc:
-                raise ValueError(
-                    "Connect your selected ChatGPT or OpenRouter account "
-                    "before scheduling Codex tasks"
-                ) from exc
-            return harness_id, normalized_model, effort, skills
-
-        from apps.harness.engines.catalog import (
-            normalize_claude_effort,
-            normalize_claude_model,
+        model, effort = self.run_settings.validate_scheduled(
+            organization_id=organization_id,
+            owner_id=owner_id,
+            workspace_id=workspace_id,
+            mode=mode,
+            harness_id=harness_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            skill_ids=skills,
         )
-        from apps.harness.engines.connections import EngineConnectionService
-
-        normalized_model = normalize_claude_model(raw_model or None)
-        effort = normalize_claude_effort(raw_effort or None)
-        # Resolve only to verify the owner's personal authorization. The token
-        # is never copied into a task or occurrence snapshot; the engine resolves
-        # the connection again for each actual run.
-        try:
-            EngineConnectionService().resolve(organization_id, owner_id)
-        except NotFoundError as exc:
-            raise ValueError(
-                "Connect your personal Claude authorization before scheduling Claude tasks"
-            ) from exc
-        return harness_id, normalized_model, effort, skills
+        return harness_id, model, effort, skills
 
     def create(
         self,
@@ -287,7 +234,9 @@ class ScheduledTaskService:
             changes["reasoning_effort"] = changes["reasoning_effort"].strip()
             combined["reasoning_effort"] = changes["reasoning_effort"]
         if "harness_id" in changes:
-            changes["harness_id"] = self._normalize_harness_id(changes["harness_id"])
+            changes["harness_id"] = self.run_settings.normalize_harness_id(
+                changes["harness_id"]
+            )
             combined["harness_id"] = changes["harness_id"]
             if changes["harness_id"] != getattr(task, "harness_id", "native"):
                 # Model IDs and effort enums are engine-specific. Do not carry
