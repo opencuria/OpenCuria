@@ -181,6 +181,20 @@ it("shows repository, branch and outgoing commits in one row and commits like VS
   expect(await screen.findByLabelText("Committed on main")).toBeTruthy();
 });
 
+it("shows the empty state instead of loading forever without repositories", async () => {
+  const { client, git } = fakeClient();
+  git.repos.mockResolvedValue({ ok: true, repos: [] });
+  renderPanel(client);
+  expect(
+    await screen.findByText("No git repositories found in this workspace."),
+  ).toBeTruthy();
+  expect(screen.queryByTestId("git-loading")).toBeNull();
+
+  fireEvent.press(screen.getByTestId("git-retry"));
+  await waitFor(() => expect(git.repos).toHaveBeenCalledTimes(2));
+  expect(await screen.findByTestId("git-empty")).toBeTruthy();
+});
+
 it("offers to stage every change when nothing is staged", async () => {
   const alert = jest.spyOn(Alert, "alert").mockImplementation(() => undefined);
   const { client, git } = fakeClient(snapshot({ changes: [modified] }));

@@ -83,6 +83,21 @@ describe("GitController", () => {
     expect(repo?.changes).toHaveLength(1);
   });
 
+  it("finishes loading when the workspace has no repositories", async () => {
+    const { client, git } = fakeClient();
+    git.repos.mockResolvedValue({ ok: true, repos: [] });
+    const controller = new GitController(client, "ws");
+    expect(controller.getSnapshot().loaded).toBe(false);
+    await controller.refresh();
+    expect(controller.getSnapshot()).toMatchObject({
+      repos: [],
+      loading: false,
+      loaded: true,
+      error: null,
+    });
+    expect(git.repo).not.toHaveBeenCalled();
+  });
+
   it("still loads details when activation joins a silent summaries poll", async () => {
     const { client, git } = fakeClient();
     const controller = new GitController(client, "ws");

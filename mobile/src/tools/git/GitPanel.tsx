@@ -866,8 +866,8 @@ export function GitPanel({
 
   // -- states -----------------------------------------------------------------------
   if (
-    (state.loading || (!state.repos.length && !state.error)) &&
-    !state.repos.length
+    !state.repos.length &&
+    (state.loading || (!state.loaded && !state.error))
   ) {
     return (
       <View style={styles.center} testID="git-loading">

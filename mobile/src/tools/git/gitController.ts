@@ -40,6 +40,8 @@ export interface GitSnapshot {
   selectedRepoId: string;
   /** First load of the summaries. */
   loading: boolean;
+  /** Summaries arrived at least once, so an empty list means no repositories. */
+  loaded: boolean;
   /** Load error while no repository is known yet. */
   error: string | null;
   /** Label of the running mutation; mutations are serialized. */
@@ -64,6 +66,7 @@ const INITIAL: GitSnapshot = {
   detailsLoading: {},
   selectedRepoId: "",
   loading: false,
+  loaded: false,
   error: null,
   busyOperation: null,
   generatingCommitMessage: false,
@@ -199,6 +202,7 @@ export class GitController {
     const changed = selectedRepoId !== this.snapshot.selectedRepoId;
     this.set({
       repos: next,
+      loaded: true,
       repoDetails,
       selectedRepoId,
       ...(changed ? { expandedCommitHash: null } : {}),
