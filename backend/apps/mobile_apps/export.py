@@ -161,7 +161,11 @@ def _icon(files: ExportFiles, config: dict[str, Any]) -> bytes | None:
     icon = config.get("icon")
     if not isinstance(icon, str) or not icon or "://" in icon:
         return None
-    content = files.files.get(relative_path(icon.removeprefix("./")))
+    try:
+        path = relative_path(icon.removeprefix("./"))
+    except ExportError:
+        return None  # Outside the project (e.g. a monorepo path): no icon.
+    content = files.files.get(path)
     if not content or len(content) > MAX_ICON_BYTES:
         return None
     return content if content.startswith(_PNG_SIGNATURE) else None

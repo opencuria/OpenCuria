@@ -157,69 +157,94 @@ export function useApps(
   );
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
-
-  const install = useCallback(
-    async (appId: string): Promise<boolean> => {
-      const row = rowsRef.current.find((item) => item.appId === appId);
-      const app = row?.published;
-      const version = app?.latest_version;
-      if (!client || !app || !version) return false;
-      const updating = Boolean(row?.installed);
-      setProgress((current) => ({ ...current, [appId]: 0 }));
+  // Apps with an install or open running; `progress` only shows after the
+  // next render, too late for a quick second tap.
+  const pending = useRef(new Set<string>());
+  const once = useCallback(
+    async <T>(appId: string, idle: T, task: () => Promise<T>): Promise<T> => {
+      if (pending.current.has(appId)) return idle;
+      pending.current.add(appId);
       try {
-        const manifest = await client.apps.manifest(app.id, version.id, PLATFORM);
-        await installer.install(manifest, {
-          scope,
-          fileRequest: (sha256) =>
-            client.apps.fileRequest(app.id, version.id, sha256),
-          onProgress: ({ done, total }) =>
-            setProgress((current) => ({
-              ...current,
-              [appId]: total ? done / total : 1,
-            })),
-        });
-        await reloadInstalled();
-        showToast({
-          title: updating ? `${app.name} updated` : `${app.name} installed`,
-          message: updating ? undefined : "Open it from Apps.",
-          tone: "success",
-        });
-        return true;
-      } catch (cause) {
-        showToast({
-          title: updating
-            ? `Could not update ${app.name}`
-            : `Could not install ${app.name}`,
-          message: errorText(cause, "Check the connection and try again."),
-          tone: "error",
-        });
-        return false;
+        return await task();
       } finally {
-        setProgress(({ [appId]: _done, ...rest }) => rest);
+        pending.current.delete(appId);
       }
     },
-    [client, installer, reloadInstalled, scope],
+    [],
+  );
+
+  const install = useCallback(
+    (appId: string): Promise<boolean> =>
+      once(appId, false, async () => {
+        const row = rowsRef.current.find((item) => item.appId === appId);
+        const app = row?.published;
+        const version = app?.latest_version;
+        if (!client || !app || !version) return false;
+        const updating = Boolean(row?.installed);
+        setProgress((current) => ({ ...current, [appId]: 0 }));
+        try {
+          const manifest = await client.apps.manifest(
+            app.id,
+            version.id,
+            PLATFORM,
+          );
+          await installer.install(manifest, {
+            scope,
+            fileRequest: (sha256) =>
+              client.apps.fileRequest(app.id, version.id, sha256),
+            onProgress: ({ done, total }) =>
+              setProgress((current) => ({
+                ...current,
+                [appId]: total ? done / total : 1,
+              })),
+          });
+          await reloadInstalled();
+          showToast({
+            title: updating ? `${app.name} updated` : `${app.name} installed`,
+            message: updating ? undefined : "Open it from Apps.",
+            tone: "success",
+          });
+          return true;
+        } catch (cause) {
+          showToast({
+            title: updating
+              ? `Could not update ${app.name}`
+              : `Could not install ${app.name}`,
+            message: errorText(cause, "Check the connection and try again."),
+            tone: "error",
+          });
+          return false;
+        } finally {
+          setProgress(({ [appId]: _done, ...rest }) => rest);
+        }
+      }),
+    [client, installer, once, reloadInstalled, scope],
   );
 
   const open = useCallback(
-    async (appId: string) => {
-      const copy = rowsRef.current.find((row) => row.appId === appId)?.installed;
-      if (!copy) return;
-      try {
-        const [request, gateway] = await Promise.all([
-          installer.launchRequest(copy),
-          appGateway(client, appId),
-        ]);
-        await openInstalledApp(gateway ? { ...request, gateway } : request);
-      } catch (cause) {
-        showToast({
-          title: `Could not open ${copy.name}`,
-          message: errorText(cause, "Install it again."),
-          tone: "error",
-        });
-      }
-    },
-    [client, installer],
+    (appId: string): Promise<void> =>
+      once(appId, undefined, async () => {
+        // From the registry, not the last render: right after an update the
+        // rows still show the previous version, whose files are already gone.
+        const copy = (await installer.installed()).find(
+          (app) => app.appId === appId && app.scope === scope,
+        );
+        if (!copy) return;
+        try {
+          const [request, gateway] = await Promise.all([
+            installer.launchRequest(copy),
+            appGateway(client, appId),
+          ]);
+          await openInstalledApp(gateway ? { ...request, gateway } : request);
+        } catch (cause) {
+          showToast({
+            title: `Could not open ${copy.name}`,
+            message: errorText(cause, "Install it again."),
+            tone: "error",
+          });
+        }
+      }),
+    [client, installer, once, scope],
   );
 
   const uninstall = useCallback(
@@ -262,7 +287,9 @@ export function useApps(
 
   const iconUri = useCallback(
     (appId: string) => {
-      const copy = rowsRef.current.find((row) => row.appId === appId)?.installed;
+      const copy = rowsRef.current.find(
+        (row) => row.appId === appId,
+      )?.installed;
       return copy ? installer.iconUri(copy) : null;
     },
     [installer],

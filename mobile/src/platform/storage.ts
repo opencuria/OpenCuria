@@ -8,6 +8,8 @@ export interface NativeAuthSession {
   refreshToken: string;
   serverUrl: string;
   organizationId: string | null;
+  /** Account of the session; installed apps open with it while offline. */
+  userId?: number;
 }
 
 export interface SecureStoreAdapter {
@@ -43,6 +45,7 @@ export class NativeSessionStorage {
         refreshToken: parsed.refreshToken,
         serverUrl: parsed.serverUrl,
         organizationId: parsed.organizationId,
+        ...(Number.isInteger(parsed.userId) ? { userId: parsed.userId } : {}),
       };
     });
   }
@@ -83,7 +86,10 @@ function validateSession(value: NativeAuthSession): NativeAuthSession {
     !value.refreshToken ||
     typeof value.serverUrl !== "string" ||
     !value.serverUrl ||
-    !(typeof value.organizationId === "string" || value.organizationId === null)
+    !(
+      typeof value.organizationId === "string" || value.organizationId === null
+    ) ||
+    !(value.userId === undefined || Number.isInteger(value.userId))
   ) {
     throw new TypeError("Invalid native auth session.");
   }
@@ -92,6 +98,7 @@ function validateSession(value: NativeAuthSession): NativeAuthSession {
     refreshToken: value.refreshToken,
     serverUrl: value.serverUrl,
     organizationId: value.organizationId,
+    ...(value.userId === undefined ? {} : { userId: value.userId }),
   };
 }
 

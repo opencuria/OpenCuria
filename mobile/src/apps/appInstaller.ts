@@ -1,6 +1,11 @@
 import type { AppFileRequest, AppManifest } from "@opencuria/client";
 import type { AppLaunchRequest } from "./appRuntime";
-import { filePath, joinUri, type AppFileSystem } from "./appStorage";
+import {
+  filePath,
+  joinUri,
+  temporaryUri,
+  type AppFileSystem,
+} from "./appStorage";
 
 /**
  * An app installed on this device. Installed apps stay usable offline; the
@@ -63,6 +68,17 @@ export function appLayout(root: string, appId: string) {
     asset: (key: string, extension: string) =>
       joinUri(app, "assets", extension ? `${key}.${extension}` : key),
   };
+}
+
+function parseRegistry(text: string): Registry | null {
+  try {
+    const parsed = JSON.parse(text) as Partial<Registry> | null;
+    return parsed && Array.isArray(parsed.apps)
+      ? { version: 1, apps: parsed.apps }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Only server-issued identifiers may become path segments. */
@@ -209,21 +225,24 @@ export class AppInstaller {
   }
 
   private registry(): Promise<Registry> {
-    this.registryCache ??= this.loadRegistry();
+    // A failed read is not cached: saving over it would forget every app.
+    this.registryCache ??= this.loadRegistry().catch((cause: unknown) => {
+      this.registryCache = null;
+      throw cause;
+    });
     return this.registryCache;
   }
 
   private async loadRegistry(): Promise<Registry> {
     const uri = joinUri(this.fs.root, REGISTRY);
-    if (!this.fs.exists(uri)) return { version: 1, apps: [] };
-    try {
-      const parsed = JSON.parse(await this.fs.readText(uri)) as Registry;
-      return Array.isArray(parsed.apps)
-        ? { version: 1, apps: parsed.apps }
-        : { version: 1, apps: [] };
-    } catch {
-      return { version: 1, apps: [] };
+    // A replacement interrupted after the old file was removed leaves the
+    // complete new registry in the temporary file (see `writeText`).
+    for (const candidate of [uri, temporaryUri(uri)]) {
+      if (!this.fs.exists(candidate)) continue;
+      const registry = parseRegistry(await this.fs.readText(candidate));
+      if (registry) return registry;
     }
+    return { version: 1, apps: [] };
   }
 
   private async saveRegistry(registry: Registry): Promise<void> {
@@ -294,21 +313,35 @@ export class AppInstaller {
     );
   }
 
+  /**
+   * Download in a few parallel workers. The first failure stops the others
+   * from starting files and is thrown once they finished, so no download
+   * (or progress report) outlives the install that started it.
+   */
   private async downloadAll(
     files: Download[],
     options: InstallOptions,
     onFile: (bytes: number) => void,
   ): Promise<void> {
     const pending = [...files];
+    const failures: unknown[] = [];
     const worker = async () => {
-      for (let file = pending.shift(); file; file = pending.shift()) {
-        await this.downloadOne(file, options);
-        onFile(file.size);
+      while (!failures.length) {
+        const file = pending.shift();
+        if (!file) return;
+        try {
+          await this.downloadOne(file, options);
+        } catch (cause) {
+          failures.push(cause);
+          return;
+        }
+        if (!failures.length) onFile(file.size);
       }
     };
     await Promise.all(
       Array.from({ length: Math.min(PARALLEL_DOWNLOADS, files.length) }, worker),
     );
+    if (failures.length) throw failures[0];
   }
 
   private async downloadOne(file: Download, options: InstallOptions) {

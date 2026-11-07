@@ -36,6 +36,7 @@ import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import com.facebook.react.runtime.ReactHostImpl
 import com.facebook.react.runtime.hermes.HermesInstance
+import java.io.File
 import java.lang.ref.WeakReference
 
 private const val TAG = "OpenCuriaAppRuntime"
@@ -57,6 +58,8 @@ class AppRuntimeActivity :
   private lateinit var container: FrameLayout
   private var host: ReactHostImpl? = null
   private var surface: ReactSurface? = null
+  /** Identifies the running instance; callbacks of a stopped one are ignored. */
+  private var instance = 0
   private var loading: View? = null
   private var permissionListener: PermissionListener? = null
   private var dialog: AlertDialog? = null
@@ -66,7 +69,7 @@ class AppRuntimeActivity :
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(null)
     launch = try {
-      AppLaunch.parse(intent.getStringExtra(EXTRA_LAUNCH) ?: "")
+      AppLaunch.parse(File(intent.getStringExtra(EXTRA_LAUNCH_FILE) ?: "").readText())
     } catch (e: Exception) {
       Log.e(TAG, "Invalid app launch", e)
       Toast.makeText(this, e.message ?: "The app cannot be opened.", Toast.LENGTH_LONG).show()
@@ -102,14 +105,18 @@ class AppRuntimeActivity :
 
   @OptIn(UnstableReactNativeAPI::class)
   private fun start() {
+    val id = ++instance
+    // A stopped instance may still report errors or reloads while React
+    // Native tears it down; they must not end its successor.
+    fun whileCurrent(action: () -> Unit) = runOnUiThread { if (id == instance) action() }
     val delegate = DefaultReactHostDelegate(
       jsMainModulePath = "index",
       jsBundleLoader = JSBundleLoader.createFileLoader(launch.bundlePath),
       reactPackages = AppRuntimePackages.create(application, sandbox) {
-        runOnUiThread { restart() }
+        whileCurrent(::restart)
       },
       jsRuntimeFactory = HermesInstance(),
-      exceptionHandler = { error -> runOnUiThread { onAppFailed(error) } },
+      exceptionHandler = { error -> whileCurrent { onAppFailed(error) } },
       turboModuleManagerDelegateBuilder = DefaultTurboModuleManagerDelegate.Builder()
     )
     val componentFactory = ComponentFactory()
@@ -172,11 +179,16 @@ class AppRuntimeActivity :
     )
   }
 
+  /**
+   * End the instance. The host's own teardown stops the surface before it
+   * destroys the instance; stopping the surface here first is not safe: after
+   * a JavaScript error React Native is already destroying the instance, so
+   * the surface would be detached but its stop dropped, and the instance
+   * destroyed with a running surface (an assertion that aborts debug builds).
+   */
   private fun stop() {
-    surface?.let { reactSurface ->
-      reactSurface.stop()
-      reactSurface.view?.let(container::removeView)
-    }
+    instance++
+    surface?.view?.let(container::removeView)
     surface = null
     loading?.let(container::removeView)
     loading = null
@@ -209,12 +221,17 @@ class AppRuntimeActivity :
       .show()
   }
 
-  /** The JavaScript error message without React Native's prefix and stack. */
+  /**
+   * The JavaScript error message without React Native's prefix, stack and
+   * component stack (iOS shows the same `originalMessage`).
+   */
   private fun describe(error: Exception): String {
     val message = error.message?.takeIf { it.isNotBlank() } ?: return error.javaClass.simpleName
     return message
       .replace(Regex("^\\[[^\\]]*\\]:\\s*"), "")
       .substringBefore(", stack:")
+      .substringBefore(COMPONENT_STACK)
+      .trim()
       .take(MAX_ERROR_CHARS)
   }
 
@@ -315,21 +332,31 @@ class AppRuntimeActivity :
   }
 
   companion object {
-    private const val EXTRA_LAUNCH = "opencuria.app.launch"
+    private const val EXTRA_LAUNCH_FILE = "opencuria.app.launch-file"
     private const val MAIN_COMPONENT = "main"
     private const val MENU_FINGERS = 3
     private const val MENU_PRESS_MS = 600L
     private const val MAX_ERROR_CHARS = 600
+    /** What React Native's ExceptionsManager appends to render errors. */
+    private const val COMPONENT_STACK = "\n\nThis error is located at:"
     private const val HINT_PREFERENCES = "opencuria-app-runtime"
     private const val HINT_KEY = "menu-hint-shown"
 
     private var current: WeakReference<AppRuntimeActivity>? = null
 
-    /** Open an app; an app that is already open closes first. */
+    /**
+     * Open an app; an app that is already open closes first. The request
+     * goes by file: with many assets it exceeds what an Intent may carry,
+     * and the file lets Android restore the app after process death.
+     */
     fun open(from: Activity, launch: AppLaunch) {
       current?.get()?.finish()
+      val file = AppSandbox.launchFile(from, launch.appId)
+      file.parentFile?.mkdirs()
+      file.writeText(launch.json)
       from.startActivity(
-        Intent(from, AppRuntimeActivity::class.java).putExtra(EXTRA_LAUNCH, launch.json)
+        Intent(from, AppRuntimeActivity::class.java)
+          .putExtra(EXTRA_LAUNCH_FILE, file.absolutePath)
       )
     }
   }

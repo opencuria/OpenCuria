@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from collections.abc import Callable
@@ -125,7 +126,12 @@ class AppService:
         files, package_json = await self.reader.read(
             workspace_id, project_path, output_dir
         )
-        export = parse_export(files, app_runtime(), package_dependencies(package_json))
+        export = await asyncio.to_thread(
+            parse_export,
+            files,
+            app_runtime(),
+            package_dependencies(package_json),
+        )
         version = await sync_to_async(self._store)(
             export,
             owner_id=owner_id,

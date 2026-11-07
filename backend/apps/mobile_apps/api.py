@@ -7,9 +7,12 @@ and open gateway sessions that route a running app to its workspace backends.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import AsyncIterator
 
-from django.http import FileResponse, HttpRequest
+from django.core.files import File
+from django.http import HttpRequest, StreamingHttpResponse
 from ninja import Router
 
 from apps.accounts.api_auth import check_api_key_permission
@@ -37,6 +40,21 @@ app_router = Router(tags=["apps"])
 
 #: Version files never change; devices may cache them for good.
 IMMUTABLE_CACHE = "private, max-age=31536000, immutable"
+#: Read size when streaming a version file to a device.
+FILE_CHUNK_BYTES = 256 * 1024
+
+
+async def _file_chunks(handle: File) -> AsyncIterator[bytes]:
+    """Stream an open file without blocking the event loop.
+
+    Under ASGI Django buffers a synchronous iterator (such as a
+    ``FileResponse``) completely before sending it; bundles reach 100 MiB.
+    """
+    try:
+        while chunk := await asyncio.to_thread(handle.read, FILE_CHUNK_BYTES):
+            yield chunk
+    finally:
+        await asyncio.to_thread(handle.close)
 
 
 def _service() -> AppService:
@@ -234,7 +252,9 @@ def download_file(
         return 404, ErrorOut(detail=exc.message, code=exc.code)
     except FileNotFoundError:
         return 404, ErrorOut(detail="App file not found", code="not_found")
-    response = FileResponse(handle, content_type="application/octet-stream")
+    response = StreamingHttpResponse(
+        _file_chunks(handle), content_type="application/octet-stream"
+    )
     response["Content-Length"] = str(blob.size)
     response["Cache-Control"] = IMMUTABLE_CACHE
     response["ETag"] = f'"{blob.sha256}"'

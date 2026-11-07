@@ -10,12 +10,23 @@ import asyncio
 import json
 
 import pytest
+from wsproto import ConnectionType, WSConnection
+from wsproto.events import (
+    AcceptConnection,
+    CloseConnection,
+    Ping,
+    Pong,
+    Request,
+    TextMessage,
+)
 
 from apps.harness.access.base import StreamClosedError, WorkspaceByteStream
 from apps.mobile_apps.gateway_protocol import BackendAddress
 from apps.mobile_apps.proxy import (
+    _MAX_CHUNK,
     Upstream,
     UpstreamError,
+    _UpstreamSocket,
     forward_http,
     forward_websocket,
     rewrite_location,
@@ -179,6 +190,118 @@ async def test_websocket_messages_flow_both_ways(workspace_process):
     assert sent[0]["subprotocol"] == "chat"
     assert {"type": "websocket.send", "text": "echo:hi"} in sent
     assert {"type": "websocket.send", "bytes": b"cba"} in sent
+
+
+def _ws_scope() -> dict:
+    return {
+        "type": "websocket",
+        "headers": [],
+        "query_string": b"",
+        "subprotocols": [],
+        "extensions": {"websocket.http.response": {}},
+    }
+
+
+@pytest.mark.parametrize("answer", [b"", b"SSH-2.0-OpenSSH_9.6\r\n"])
+async def test_websocket_process_without_a_handshake_is_unreachable(answer):
+    async def hang_up(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(answer)
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(hang_up, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async with server:
+        with pytest.raises(UpstreamError):
+            await asyncio.wait_for(
+                forward_websocket(
+                    _ws_scope(), asyncio.Queue().get, send, upstream_for(port), "/"
+                ),
+                5,
+            )
+    assert sent == []  # The gateway answers the app (502), not the proxy.
+
+
+async def test_websocket_without_a_close_frame_closes_as_going_away():
+    async def accept_then_crash(reader, writer):
+        process = WSConnection(ConnectionType.SERVER)
+        process.receive_data(await reader.readuntil(b"\r\n\r\n"))
+        assert any(isinstance(event, Request) for event in process.events())
+        writer.write(process.send(AcceptConnection()))
+        await writer.drain()
+        writer.close()  # The process died: no close frame.
+
+    server = await asyncio.start_server(accept_then_crash, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    sent: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async with server:
+        await asyncio.wait_for(
+            forward_websocket(
+                _ws_scope(), asyncio.Queue().get, send, upstream_for(port), "/"
+            ),
+            5,
+        )
+    assert sent[0]["type"] == "websocket.accept"
+    # Apps reconnect on 1001; a normal 1000 would hide the crash.
+    assert sent[-1] == {"type": "websocket.close", "code": 1001}
+
+
+async def test_websocket_frames_never_interleave():
+    class SlowStream(WorkspaceByteStream):
+        """Every chunk waits for its acknowledgement, like a runner stream."""
+
+        def __init__(self) -> None:
+            super().__init__("ws-1", "c-1")
+            self.data = bytearray()
+
+        async def receive(self) -> bytes:
+            return b""
+
+        async def send(self, data: bytes) -> None:
+            self.data += data
+            await asyncio.sleep(0)
+
+        async def send_eof(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        async def wait_closed(self) -> int | None:
+            return None
+
+    stream = SlowStream()
+    socket = _UpstreamSocket(stream)
+    process = WSConnection(ConnectionType.SERVER)
+    await socket.send(Request(host="localhost", target="/"))
+    process.receive_data(bytes(stream.data))
+    list(process.events())
+    socket.ws.receive_data(process.send(AcceptConnection()))
+    list(socket.ws.events())
+    stream.data.clear()
+    big = "x" * (3 * _MAX_CHUNK)
+
+    # A large message from the app while the process's ping is answered.
+    await asyncio.gather(
+        socket.send(TextMessage(data=big)), socket.send(Ping(b"p").response())
+    )
+
+    process.receive_data(bytes(stream.data))
+    events = list(process.events())
+    text = "".join(e.data for e in events if isinstance(e, TextMessage))
+    assert text == big
+    assert any(isinstance(e, Pong) for e in events)
+    assert not any(isinstance(e, CloseConnection) for e in events)
 
 
 async def test_websocket_refused_by_the_process_gets_its_status(workspace_process):

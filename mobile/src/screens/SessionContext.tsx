@@ -248,7 +248,7 @@ export function SessionProvider({
           : orgs.some((org) => org.id === current.organizationId)
             ? current.organizationId
             : (orgs[0]?.id ?? null);
-      const next = { ...current, organizationId: selected };
+      const next = { ...current, organizationId: selected, userId: profile.id };
       setCurrentSession(next);
       setUser(profile);
       setOrganizations(orgs);

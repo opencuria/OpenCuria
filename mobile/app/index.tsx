@@ -2,13 +2,22 @@ import React from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { Banner, Button } from "../src/ui/primitives";
 import { useTheme } from "../src/ui/theme";
+import { OfflineAppsButton } from "../src/apps/OfflineAppsButton";
 import { LoginScreen } from "../src/screens/LoginScreen";
 import { MainScreen } from "../src/screens/MainScreen";
 import { useSession } from "../src/screens/SessionContext";
 
 export default function IndexRoute(): React.JSX.Element {
-  const { booting, session, user, error, sessionExpired, retry, signOut } =
-    useSession();
+  const {
+    booting,
+    session,
+    client,
+    user,
+    error,
+    sessionExpired,
+    retry,
+    signOut,
+  } = useSession();
   const { theme } = useTheme();
   if (booting && (!session || !user)) {
     return (
@@ -36,6 +45,7 @@ export default function IndexRoute(): React.JSX.Element {
             busy={booting}
             testID="session-retry"
           />
+          <OfflineAppsButton client={client} session={session} />
           <Button
             title="Sign out"
             variant="outline"
@@ -59,10 +69,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 22,
     gap: 18,
   },
-  actions: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "center",
-    gap: 12,
-  },
+  // Stacked: native buttons stretch across their container; in a row they
+  // would get no width and stay invisible.
+  actions: { gap: 12 },
 });

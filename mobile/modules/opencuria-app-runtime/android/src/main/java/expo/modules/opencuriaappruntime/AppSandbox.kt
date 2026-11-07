@@ -27,18 +27,27 @@ class AppSandbox(base: Context, val launch: AppLaunch) {
 
   companion object {
     private const val ROOT = "opencuria-apps"
+    private const val LAUNCHES = "opencuria-app-launches"
     private val SHARED_PREFERENCES = listOf("SecureStore")
 
     fun cacheDir(context: Context, appId: String) = File(File(context.cacheDir, ROOT), appId)
 
     fun preferencesPrefix(appId: String) = "opencuria-app-$appId-"
 
+    /**
+     * The launch request of an app on its way to the runtime activity. It
+     * holds the gateway token, so it lives outside every app's sandbox.
+     */
+    fun launchFile(context: Context, appId: String) =
+      File(File(context.noBackupFilesDir, LAUNCHES), "$appId.json")
+
     private val APP_ID = Regex("^[A-Za-z0-9-]{1,64}$")
 
-    /** Remove cache and SecureStore entries of an uninstalled app. */
+    /** Remove cache, SecureStore entries and the launch of an uninstalled app. */
     fun clear(context: Context, appId: String) {
       require(APP_ID.matches(appId)) { "Invalid app id" }
       cacheDir(context, appId).deleteRecursively()
+      launchFile(context, appId).delete()
       for (name in SHARED_PREFERENCES) {
         context.deleteSharedPreferences(preferencesPrefix(appId) + name)
       }

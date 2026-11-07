@@ -2,6 +2,7 @@ package expo.modules.opencuriaappruntime
 
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.exception.Exceptions
+import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -13,6 +14,7 @@ class OpenCuriaAppRuntimeModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("OpenCuriaAppRuntime")
 
+    // On the main queue, so a failing start rejects instead of crashing OpenCuria.
     AsyncFunction("open") { request: String ->
       val activity = appContext.currentActivity ?: throw Exceptions.MissingActivity()
       val launch = try {
@@ -20,8 +22,8 @@ class OpenCuriaAppRuntimeModule : Module() {
       } catch (e: Exception) {
         throw InvalidLaunchException(e)
       }
-      activity.runOnUiThread { AppRuntimeActivity.open(activity, launch) }
-    }
+      AppRuntimeActivity.open(activity, launch)
+    }.runOnQueue(Queues.MAIN)
 
     AsyncFunction("clearData") { appId: String ->
       val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()

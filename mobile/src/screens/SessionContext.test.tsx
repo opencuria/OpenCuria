@@ -135,6 +135,11 @@ describe("SessionProvider", () => {
       expect.stringContaining('\"accessToken\":\"access\"'),
     );
     expect(current.mock.lastCall?.[0].user.email).toBe("user@example.test");
+    // The account id lets installed apps open while the server is offline.
+    expect(SecureStore.setItemAsync).toHaveBeenLastCalledWith(
+      "opencuria.auth-session.v1",
+      expect.stringContaining('"userId":7'),
+    );
     expect(client.realtime.connect).toHaveBeenCalled();
 
     const secondClient = makeClient();

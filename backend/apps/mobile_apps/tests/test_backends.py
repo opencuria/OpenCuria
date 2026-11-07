@@ -287,6 +287,47 @@ async def test_process_that_died_since_the_heartbeat_restarts(monkeypatch):
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_start_in_flight_is_awaited_not_restarted(monkeypatch):
+    world = await _world()
+    app = await _app(world)
+    api = process(pid=None)  # An agent's restart: RUNNING until the pid confirms.
+    runners = FakeRunners(api)
+    real_get = runners.get_process
+    polls = 0
+
+    async def confirms_later(workspace_id, process_id, **_):
+        nonlocal polls
+        polls += 1
+        current = await real_get(workspace_id, process_id)
+        if polls >= 3:
+            current.pid = 1200
+        return current
+
+    runners.get_process = confirms_later
+    monkeypatch.setattr(backends.asyncio, "sleep", _instant)
+    service = service_for(runners, FakeWorkspace(ALIVE))
+
+    target = await service.resolve(claims_for(world, app), BackendAddress("api", 80))
+
+    assert runners.restarted == []
+    assert target.port == 3000
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_start_that_never_confirms_is_restarted(monkeypatch):
+    world = await _world()
+    app = await _app(world)
+    api = process(pid=None)
+    runners = FakeRunners(api)
+    monkeypatch.setattr(backends, "PROCESS_START_WAIT_SECONDS", 0.0)
+    service = service_for(runners, FakeWorkspace(ALIVE))
+
+    await service.resolve(claims_for(world, app), BackendAddress("api", 80))
+
+    assert runners.restarted == [api.id]
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_offline_runner_answers_at_once():
     world = await _world()
     app = await _app(world)

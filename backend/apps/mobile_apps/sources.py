@@ -7,13 +7,15 @@ into one archive inside the workspace and transfers it in a single read.
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 import io
 import json
 import posixpath
 import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, BinaryIO
 
 import structlog
 
@@ -34,6 +36,8 @@ ARCHIVE_TIMEOUT_SECONDS = 90.0
 #: Unpacked archive bound: the build plus package.json and the icon.
 MAX_UNPACKED_BYTES = MAX_VERSION_BYTES + 8 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 20_000
+#: Decompressed archive bound, with room for every member's header and padding.
+MAX_DECOMPRESSED_BYTES = MAX_UNPACKED_BYTES + MAX_ARCHIVE_MEMBERS * 2048
 #: Chunked runner transfers occasionally drop a chunk; the archive stays in
 #: place until cleanup, so one more read usually succeeds.
 READ_ATTEMPTS = 2
@@ -65,31 +69,58 @@ def _tail(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else f"…{text[-limit:]}"
 
 
+def _too_large() -> ExportError:
+    return ExportError(
+        f"The build is larger than {MAX_VERSION_BYTES // (1024 * 1024)} MiB."
+    )
+
+
+class _BoundedStream(io.RawIOBase):
+    """Reads *inner* up to *limit* bytes; more is a decompression bomb."""
+
+    def __init__(self, inner: BinaryIO, limit: int) -> None:
+        self._inner = inner
+        self._left = limit
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        data = self._inner.read(len(buffer))
+        self._left -= len(data)
+        if self._left < 0:
+            raise _too_large()
+        buffer[: len(data)] = data
+        return len(data)
+
+
 def unpack_archive(data: bytes) -> dict[str, bytes]:
     """Return regular files of a ``.tar.gz`` keyed by normalized path.
 
-    Links, devices and paths escaping the root are skipped; the unpacked size
-    and member count are bounded.
+    Links, devices and paths escaping the root are skipped; the decompressed
+    size, the unpacked size (skipped members included, since they are
+    decompressed too) and the member count are bounded. The archive comes
+    from the workspace, so none of its sizes are trusted.
     """
     files: dict[str, bytes] = {}
     total = 0
+    stream = _BoundedStream(
+        gzip.GzipFile(fileobj=io.BytesIO(data)), MAX_DECOMPRESSED_BYTES
+    )
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
             for count, member in enumerate(archive, start=1):
                 if count > MAX_ARCHIVE_MEMBERS:
                     raise ExportError("The build contains too many files.")
+                total += member.size
+                if total > MAX_UNPACKED_BYTES:
+                    raise _too_large()
                 if not member.isreg():
                     continue
                 try:
                     path = relative_path(member.name.removeprefix("./"))
                 except ExportError:
                     continue
-                total += member.size
-                if total > MAX_UNPACKED_BYTES:
-                    raise ExportError(
-                        f"The build is larger than "
-                        f"{MAX_VERSION_BYTES // (1024 * 1024)} MiB."
-                    )
                 handle = archive.extractfile(member)
                 if handle is not None:
                     files[path] = handle.read()
@@ -165,12 +196,22 @@ class WorkspaceExportReader:
                     f"Could not pack {posixpath.join(project, output)}: "
                     f"{_tail(packed.stderr)}"
                 )
+            too_large = ExportError(
+                f"The build in {output} is larger than "
+                f"{HARNESS_READ_MAX_BYTES // (1024 * 1024)} MiB compressed."
+            )
+            # The runner refuses bigger reads outright; check before transferring.
+            size = await accessor.exec_wait(
+                ["stat", "-c", "%s", "--", archive_path],
+                timeout=ARCHIVE_TIMEOUT_SECONDS,
+            )
+            reported = size.stdout.strip()
+            if size.exit_code == 0 and reported.isdigit():
+                if int(reported) > HARNESS_READ_MAX_BYTES:
+                    raise too_large
             archive = await self._read_archive(accessor, archive_path)
             if archive.truncated:
-                raise ExportError(
-                    f"The build in {output} is larger than "
-                    f"{HARNESS_READ_MAX_BYTES // (1024 * 1024)} MiB compressed."
-                )
+                raise too_large
         finally:
             try:
                 await accessor.exec_wait(
@@ -180,6 +221,7 @@ class WorkspaceExportReader:
                 log.warning(
                     "app_archive_cleanup_failed", workspace_id=str(workspace_id)
                 )
-        files = unpack_archive(archive.content)
+        # Decompressing up to ~100 MiB must not stall the event loop.
+        files = await asyncio.to_thread(unpack_archive, archive.content)
         export = ExportFiles(config=config, output_dir=output, files=files)
         return export, files.get("package.json")

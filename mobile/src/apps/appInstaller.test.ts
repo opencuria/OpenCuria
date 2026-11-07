@@ -15,6 +15,8 @@ class MemoryFileSystem implements AppFileSystem {
   remote = new Map<string, string>();
   downloads: string[] = [];
   corrupt = new Set<string>();
+  /** Downloads of these sha256 take a few milliseconds. */
+  slow = new Set<string>();
 
   exists(uri: string) {
     return this.files.has(uri) || this.directories.has(uri);
@@ -61,6 +63,7 @@ class MemoryFileSystem implements AppFileSystem {
     expect(headers.Authorization).toBe("Bearer token");
     const sha = url.split("/").filter(Boolean).pop()!;
     this.downloads.push(sha);
+    if (this.slow.has(sha)) await new Promise((done) => setTimeout(done, 5));
     const body = this.remote.get(sha);
     if (body === undefined) throw new Error("404");
     this.files.set(to, this.corrupt.has(sha) ? `${body}!` : body);
@@ -204,6 +207,30 @@ describe("AppInstaller", () => {
     );
   });
 
+  it("stops all downloads before a failed install rejects", async () => {
+    const assets = ["a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+    const v1 = manifest(fs, { id: "v1", number: 1, bundle: "b1", assets });
+    fs.remote.delete(v1.bundle.sha256);
+    for (const asset of v1.assets) fs.slow.add(asset.sha256);
+    const onProgress = vi.fn();
+
+    await expect(
+      installer.install(v1, { ...options(fs), onProgress }),
+    ).rejects.toThrow("404");
+    const downloads = fs.downloads.length;
+    const reports = onProgress.mock.calls.length;
+    await new Promise((done) => setTimeout(done, 30));
+
+    // Nothing keeps downloading or reporting progress after the rejection.
+    expect(fs.downloads).toHaveLength(downloads);
+    expect(downloads).toBeLessThan(assets.length + 2);
+    expect(onProgress).toHaveBeenCalledTimes(reports);
+    expect([...fs.files.keys()].some((key) => key.endsWith(".part"))).toBe(
+      false,
+    );
+    expect(await installer.installed()).toEqual([]);
+  });
+
   it("rejects manifests whose ids would escape the app directory", async () => {
     const bad = {
       ...manifest(fs, { id: "v1", number: 1, bundle: "b", assets: [] }),
@@ -213,6 +240,42 @@ describe("AppInstaller", () => {
       /Invalid version id/,
     );
     expect(fs.downloads).toEqual([]);
+  });
+
+  it("recovers the registry from an interrupted replacement", async () => {
+    await installer.install(
+      manifest(fs, { id: "v1", number: 1, bundle: "b", assets: [] }),
+      options(fs),
+    );
+    // Android removes the old file before renaming the new one into place.
+    const registry = `${ROOT}/registry.json`;
+    fs.files.set(`${registry}.tmp`, fs.files.get(registry)!);
+    fs.files.delete(registry);
+
+    const [recovered] = await new AppInstaller(fs).installed();
+    expect(recovered?.versionId).toBe("v1");
+  });
+
+  it("never saves over a registry it could not read", async () => {
+    await installer.install(
+      manifest(fs, { id: "v1", number: 1, bundle: "b", assets: [] }),
+      options(fs),
+    );
+    const reloaded = new AppInstaller(fs);
+    const readText = vi
+      .spyOn(fs, "readText")
+      .mockRejectedValueOnce(new Error("I/O error"));
+    await expect(reloaded.installed()).rejects.toThrow("I/O error");
+    readText.mockRestore();
+
+    await reloaded.install(
+      { ...manifest(fs, { id: "w1", number: 1, bundle: "c", assets: [] }), app_id: "app-2" },
+      options(fs),
+    );
+    expect((await reloaded.installed()).map((app) => app.appId).sort()).toEqual([
+      "app-1",
+      "app-2",
+    ]);
   });
 
   it("uninstalls an app with its data and survives a reload", async () => {

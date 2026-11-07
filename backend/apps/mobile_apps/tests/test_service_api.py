@@ -28,6 +28,16 @@ def publish(world: AppWorld, owner=None, notes: str = "", **build):
     return result
 
 
+def body(response) -> bytes:
+    """Read a streamed file response the way the ASGI handler does."""
+    assert response.is_async  # Sync iterators are buffered whole under ASGI.
+
+    async def read() -> bytes:
+        return b"".join([chunk async for chunk in response.streaming_content])
+
+    return async_to_sync(read)()
+
+
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -93,10 +103,11 @@ def test_list_detail_manifest_and_download(app_world):
 
     response = client.get(f"{base}/files/{manifest['bundle']['sha256']}/")
     assert response.status_code == 200
-    assert b"".join(response.streaming_content) == b"bundle-android"
+    assert body(response) == b"bundle-android"
+    assert response["Content-Length"] == str(len(b"bundle-android"))
     assert response["Cache-Control"].endswith("immutable")
     icon = client.get(f"{base}/files/{sha(PNG)}/")
-    assert b"".join(icon.streaming_content) == PNG
+    assert body(icon) == PNG
 
 
 def test_files_of_other_versions_or_users_are_not_served(app_world):

@@ -32,14 +32,30 @@ async def test_reads_config_and_build_in_one_archive():
     assert export.config == files.config
     assert export.files["dist/metadata.json"] == files.files["dist/metadata.json"]
     assert raw_package == package
-    config_cmd, tar_cmd, cleanup_cmd = accessor.commands
+    config_cmd, tar_cmd, stat_cmd, cleanup_cmd = accessor.commands
     assert config_cmd[:3] == ["npx", "--no-install", "expo"]
     archive_path = tar_cmd[2]
     assert tar_cmd[:2] == ["tar", "-czhf"] and archive_path.startswith("/tmp/")
     assert tar_cmd[-3:] == ["dist", "package.json", "assets/icon.png"]
     assert "/workspace/todo-app" in tar_cmd
+    assert stat_cmd == ["stat", "-c", "%s", "--", archive_path]
     assert accessor.read_paths == [archive_path]
     assert cleanup_cmd == ["rm", "-f", archive_path]
+
+
+async def test_oversized_build_is_reported_before_the_transfer():
+    from apps.harness.access.runner_accessor import HARNESS_READ_MAX_BYTES
+
+    files, package = build_files()
+    accessor = FakeAccessor(
+        config=files.config,
+        archive=tarball({**files.files, "package.json": package}),
+        archive_size=HARNESS_READ_MAX_BYTES + 1,
+    )
+    with pytest.raises(ExportError, match="larger than 100 MiB compressed"):
+        await reader_for(accessor).read(WORKSPACE, "todo-app")
+    assert accessor.read_paths == []
+    assert accessor.commands[-1][:2] == ["rm", "-f"]
 
 
 async def test_config_failure_explains_and_skips_transfer():
@@ -73,6 +89,40 @@ def test_unpack_skips_links_and_escapes():
     assert unpack_archive(buffer.getvalue()) == {"dist/a": b"a"}
     with pytest.raises(ExportError, match="corrupt"):
         unpack_archive(b"not a tarball")
+
+
+def _archive(members: dict[str, bytes]) -> bytes:
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_unpack_counts_skipped_members_against_the_size_limit(monkeypatch):
+    from apps.mobile_apps import sources
+
+    monkeypatch.setattr(sources, "MAX_UNPACKED_BYTES", 1000)
+    # The escaping member is skipped but still decompressed.
+    data = _archive({"dist/a": b"a", "../evil": b"x" * 2000})
+    with pytest.raises(ExportError, match="larger than"):
+        unpack_archive(data)
+
+
+def test_unpack_bounds_decompressed_bytes(monkeypatch):
+    from apps.mobile_apps import sources
+
+    # Tar pads archives to 10 KiB records.
+    monkeypatch.setattr(sources, "MAX_DECOMPRESSED_BYTES", 16 * 1024)
+    small = {"dist/a": b"a" * 100}
+    assert unpack_archive(_archive(small)) == small
+    with pytest.raises(ExportError, match="larger than"):
+        unpack_archive(_archive({"dist/a": b"\0" * 32 * 1024}))
 
 
 async def test_interrupted_transfer_is_retried_once_then_reported():

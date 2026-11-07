@@ -85,6 +85,10 @@ def test_invalid_slug_and_icon_fallbacks():
     files, _ = build_files()
     files.files["assets/icon.png"] = b"not a png"
     assert parse_export(files, RUNTIME, {}).icon is None
+    for outside in ("../shared/icon.png", "/repo/assets/icon.png", "./"):
+        files, _ = build_files()
+        files.config["icon"] = outside
+        assert parse_export(files, RUNTIME, {}).icon is None
 
 
 @pytest.mark.parametrize(

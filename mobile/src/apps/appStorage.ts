@@ -10,7 +10,10 @@ export interface AppFileSystem {
   readonly root: string;
   exists(uri: string): boolean;
   readText(uri: string): Promise<string>;
-  /** Write a whole file, replacing it only once the new content is complete. */
+  /**
+   * Write a whole file, replacing it only once the new content is complete.
+   * Until the replacement finished, the new content is at `temporaryUri`.
+   */
   writeText(uri: string, text: string): void;
   makeDirectory(uri: string): void;
   /** Delete a file or a directory with its contents; missing is fine. */
@@ -26,6 +29,11 @@ export interface AppFileSystem {
 /** Strip the scheme for native code that expects a file system path. */
 export function filePath(uri: string): string {
   return decodeURI(uri.replace(/^file:\/\//, ""));
+}
+
+/** Where `writeText` stages a file's new content. */
+export function temporaryUri(uri: string): string {
+  return `${uri}.tmp`;
 }
 
 export function joinUri(base: string, ...parts: string[]): string {
@@ -45,7 +53,7 @@ export function createExpoAppFileSystem(): AppFileSystem {
     readText: (uri) => new File(uri).text(),
     writeText: (uri, text) => {
       const target = new File(uri);
-      const temporary = new File(`${uri}.tmp`);
+      const temporary = new File(temporaryUri(uri));
       if (temporary.exists) temporary.delete();
       temporary.create({ intermediates: true });
       temporary.write(text);

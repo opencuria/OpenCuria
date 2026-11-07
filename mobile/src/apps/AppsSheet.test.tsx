@@ -18,7 +18,7 @@ import type { AppInstaller, InstalledApp } from "./appInstaller";
 import { appRows, appScope } from "./appPresentation";
 import { AppsSheet } from "./AppsSheet";
 import { PublishedAppCard } from "./PublishedAppCard";
-import { useApps, type AppsState } from "./useApps";
+import { runPrimaryAction, useApps, type AppsState } from "./useApps";
 
 const mockOpenInstalledApp = jest.fn(async () => undefined);
 const mockClearData = jest.fn(async () => undefined);
@@ -319,6 +319,64 @@ describe("useApps", () => {
     expect(local.uninstall).toHaveBeenCalledWith("game");
     expect(mockClearData).toHaveBeenCalledWith("game");
     expect(result.current.rows[0]?.state).toBe("available");
+  });
+
+  it("opens the new version right after updating it", async () => {
+    const api = client([published("game", "Game", 2)]);
+    const local = installer([installed("game", "Game", 1)]);
+    local.install.mockImplementation(async () => {
+      const copy = installed("game", "Game", 2);
+      local.installed.mockResolvedValue([copy]);
+      return copy;
+    });
+    const { result } = renderHook(() =>
+      useApps(
+        api as unknown as OpenCuriaClient,
+        SCOPE,
+        local as unknown as AppInstaller,
+      ),
+    );
+    await waitFor(() => expect(result.current.rows[0]?.state).toBe("update"));
+
+    // One tap: no render between the update and the open.
+    await act(async () =>
+      runPrimaryAction(result.current, result.current.rows[0]!),
+    );
+
+    expect(local.launchRequest).toHaveBeenCalledTimes(1);
+    expect(local.launchRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ versionId: "game-v2" }),
+    );
+  });
+
+  it("ignores a second tap while an install or open is running", async () => {
+    const api = client([published("game", "Game")]);
+    const local = installer();
+    const { result } = renderHook(() =>
+      useApps(
+        api as unknown as OpenCuriaClient,
+        SCOPE,
+        local as unknown as AppInstaller,
+      ),
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+
+    await act(async () => {
+      const results = await Promise.all([
+        result.current.install("game"),
+        result.current.install("game"),
+      ]);
+      expect(results).toEqual([true, false]);
+    });
+    await act(async () => {
+      await Promise.all([result.current.open("game"), result.current.open("game")]);
+    });
+
+    expect(local.install).toHaveBeenCalledTimes(1);
+    expect(local.launchRequest).toHaveBeenCalledTimes(1);
+    // Once finished, the app can be opened again.
+    await act(async () => result.current.open("game"));
+    expect(local.launchRequest).toHaveBeenCalledTimes(2);
   });
 
   it("opens installed apps without a backend route when offline", async () => {

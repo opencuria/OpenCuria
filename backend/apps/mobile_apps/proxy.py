@@ -34,6 +34,7 @@ from wsproto.events import (
     Request,
     TextMessage,
 )
+from wsproto.utilities import ProtocolError
 
 from apps.harness.access.base import StreamClosedError, WorkspaceByteStream
 
@@ -357,7 +358,9 @@ async def forward_http(
         headers=headers,
         content=body() if has_body else None,
         # No read timeout: event streams and long polls may idle for long.
-        extensions={"timeout": {"connect": 30.0, "read": None, "write": 60.0}},
+        # No connect timeout: opening a stream bounds its own wait for a free
+        # connection and answers 503 when there is none.
+        extensions={"timeout": {"connect": None, "read": None, "write": 60.0}},
     )
 
     async def watch() -> None:
@@ -451,11 +454,15 @@ class _UpstreamSocket:
     def __init__(self, stream: WorkspaceByteStream) -> None:
         self.stream = stream
         self.ws = WSConnection(ConnectionType.CLIENT)
+        # Both directions send (messages, pongs, closes); a frame's chunks
+        # must not interleave with another frame's.
+        self._sending = asyncio.Lock()
 
     async def send(self, event: Any) -> None:
-        data = self.ws.send(event)
-        for start in range(0, len(data), _MAX_CHUNK):
-            await self.stream.send(data[start : start + _MAX_CHUNK])
+        async with self._sending:
+            data = self.ws.send(event)
+            for start in range(0, len(data), _MAX_CHUNK):
+                await self.stream.send(data[start : start + _MAX_CHUNK])
 
     async def events(self) -> AsyncIterator[Any]:
         """Protocol events until the stream ends."""
@@ -509,7 +516,9 @@ async def forward_websocket(
         )
         if accepted:
             await _bridge(socket, events, receive, send)
-    except (RuntimeError, OSError, TimeoutError) as exc:
+    except (RuntimeError, OSError, TimeoutError, ProtocolError) as exc:
+        # ProtocolError: the stream ended or the process answered something
+        # other than a WebSocket handshake.
         raise UpstreamError(str(exc) or "The process closed the connection.") from exc
     finally:
         with contextlib.suppress(Exception):
@@ -614,7 +623,8 @@ async def _bridge(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-    # 1005/1006 mean "no code" and cannot be sent; the app sees a normal close.
-    code = 1000 if close_code in (1005, 1006) else close_code
+    # 1005 (a close frame without code) and 1006 (no close frame: the process
+    # went away, e.g. it was restarted) cannot be sent.
+    code = {1005: 1000, 1006: 1001}.get(close_code, close_code)
     with contextlib.suppress(Exception):
         await send({"type": "websocket.close", "code": code})

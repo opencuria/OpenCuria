@@ -13,8 +13,10 @@ websockets>=13.0,<18.0
 # Socket.IO (Runner WebSocket protocol)
 python-socketio>=5.0,<6.0
 
-# WebSocket proxy (desktop sessions)
+# WebSocket proxy (desktop sessions; wsproto: app backend gateway, imported
+# directly, so explicit)
 aiohttp>=3.9,<4.0
+wsproto>=1.2,<2.0
 
 # HTTP client (LLM provider streaming)
 httpx[http2]>=0.27,<1.0

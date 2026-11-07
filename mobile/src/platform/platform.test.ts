@@ -516,6 +516,30 @@ describe("NativeSessionStorage", () => {
     expect(store.deleteItemAsync).toHaveBeenCalledOnce();
   });
 
+  it("keeps the account id for offline apps and loads sessions saved without it", async () => {
+    const values = new Map<string, string>();
+    const storage = new NativeSessionStorage({
+      getItemAsync: async (key: string) => values.get(key) ?? null,
+      setItemAsync: async (key: string, value: string) => {
+        values.set(key, value);
+      },
+      deleteItemAsync: async () => undefined,
+    });
+    const session = {
+      accessToken: "access",
+      refreshToken: "refresh",
+      serverUrl: "https://server",
+      organizationId: "org",
+    };
+    await storage.save({ ...session, userId: 7 });
+    expect(await storage.load()).toEqual({ ...session, userId: 7 });
+    await storage.save(session);
+    expect(await storage.load()).toEqual(session);
+    await expect(
+      storage.save({ ...session, userId: "7" as unknown as number }),
+    ).rejects.toThrow("Invalid native auth session");
+  });
+
   it("propagates SecureStore errors without logging or masking them", async () => {
     const storage = new NativeSessionStorage({
       getItemAsync: async () => {

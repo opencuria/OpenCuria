@@ -36,6 +36,8 @@ final class AppRuntimeViewController: UIViewController {
   private var rootView: UIView?
   private var loadingView: UIView?
   private var contentObserver: NSObjectProtocol?
+  /// Identifies the running instance; callbacks of a stopped one are ignored.
+  private var instance = 0
 
   init(launch: AppLaunch) {
     self.launch = launch
@@ -89,11 +91,19 @@ final class AppRuntimeViewController: UIViewController {
     delegate.dependencyProvider = RCTAppDependencyProvider()
     let factory = AppRuntimeFactory(delegate: delegate, releaseLevel: releaseLevel)
     let sandbox = self.sandbox
+    instance += 1
+    let id = instance
+    // A stopped instance may still report errors or reloads while React
+    // Native tears it down; they must not end its successor (main thread).
     factory.makeAppContext = { [weak self] in
-      sandbox.makeAppContext(reload: { self?.restart() })
+      sandbox.makeAppContext(reload: {
+        guard let self, self.instance == id else { return }
+        self.restart()
+      })
     }
     factory.onFatalError = { [weak self] message in
-      self?.showError(message)
+      guard let self, self.instance == id else { return }
+      self.showError(message)
     }
     let root = factory.rootViewFactory.view(
       withModuleName: "main",
@@ -111,6 +121,7 @@ final class AppRuntimeViewController: UIViewController {
   }
 
   private func stop() {
+    instance += 1
     if let contentObserver {
       NotificationCenter.default.removeObserver(contentObserver)
     }
@@ -197,7 +208,15 @@ final class AppRuntimeViewController: UIViewController {
     alert.addAction(UIAlertAction(title: "Reload", style: .default) { [weak self] _ in
       self?.start()
     })
-    present(alert, animated: true)
+    // The app menu or a modal of the app would keep the alert from showing,
+    // leaving a blank screen without a way to close the app.
+    if let presented = presentedViewController {
+      presented.dismiss(animated: false) { [weak self] in
+        self?.present(alert, animated: true)
+      }
+    } else {
+      present(alert, animated: true)
+    }
   }
 
   @objc private func openMenu(_ gesture: UILongPressGestureRecognizer) {

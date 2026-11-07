@@ -3,7 +3,7 @@
  * Writes the native runtime that apps published by agents can rely on to
  * backend/apps/mobile_apps/runtime.json: the Expo SDK, React Native and every
  * native package of this app with its installed version. The backend checks
- * published builds against it; `appRuntime.test.ts` keeps it in sync.
+ * published builds against it; `src/apps/appRuntimeSpec.test.ts` keeps it in sync.
  *
  * Usage: node mobile/scripts/sync-app-runtime.mjs [--check]
  */

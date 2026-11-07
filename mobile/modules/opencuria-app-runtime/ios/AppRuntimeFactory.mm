@@ -47,12 +47,16 @@
                    isFatal:(BOOL)isFatal
                  extraData:(NSDictionary<NSString *, id> *)extraData
 {
-  if (!isFatal || !self.onFatalError) {
+  if (!isFatal) {
     return;
   }
   NSString *text = originalMessage ?: message;
   dispatch_async(dispatch_get_main_queue(), ^{
-    self.onFatalError(text);
+    // Read on the main thread, where it is set; calling a nil block crashes.
+    void (^onFatalError)(NSString *) = self.onFatalError;
+    if (onFatalError) {
+      onFatalError(text);
+    }
   });
 }
 #pragma clang diagnostic pop

@@ -45,6 +45,8 @@ SESSION_TTL = timedelta(hours=12)
 WORKSPACE_WAIT_SECONDS = 40.0
 #: How long one request waits for a started process to listen.
 PORT_WAIT_SECONDS = 25.0
+#: How long one request waits for another start of the process to confirm.
+PROCESS_START_WAIT_SECONDS = 10.0
 #: Detected ports are reused this long (a failed connection forgets them).
 PORT_CACHE_SECONDS = 15.0
 #: Gateway traffic keeps the workspace from stopping for inactivity.
@@ -461,6 +463,18 @@ class AppBackendService:
             return process
         async with self._lock("process", str(process.id)):
             current = await self._runners().get_process(workspace_id, process.id)
+            # RUNNING without a pid is a start in flight (e.g. an agent's
+            # restart); restarting would kill that run. Only a start that
+            # never confirms is restarted.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + PROCESS_START_WAIT_SECONDS
+            while (
+                current.status == ProcessStatus.RUNNING
+                and current.pid is None
+                and loop.time() < deadline
+            ):
+                await asyncio.sleep(0.5)
+                current = await self._runners().get_process(workspace_id, process.id)
             if current.status == ProcessStatus.RUNNING and current.pid is not None:
                 return current
             try:

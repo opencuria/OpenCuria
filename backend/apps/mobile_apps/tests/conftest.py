@@ -103,9 +103,11 @@ class FakeAccessor:
         archive: bytes = b"",
         config_exit: int = 0,
         read_failures: int = 0,
+        archive_size: int | None = None,
     ) -> None:
         self.config = config or {}
         self.archive = archive
+        self.archive_size = len(archive) if archive_size is None else archive_size
         self.config_exit = config_exit
         self.read_failures = read_failures
         self.commands: list[list[str]] = []
@@ -119,6 +121,8 @@ class FakeAccessor:
             return ExecResult(
                 exit_code=0, stdout=f"warning: noise\n{json.dumps(self.config)}\n"
             )
+        if command[0] == "stat":
+            return ExecResult(exit_code=0, stdout=f"{self.archive_size}\n")
         return ExecResult(exit_code=0)
 
     async def read_file(self, path, max_size=None):
