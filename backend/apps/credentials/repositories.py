@@ -13,6 +13,7 @@ from django.utils import timezone
 
 from common.exceptions import ConflictError
 
+from .enums import SERVER_SIDE_CREDENTIAL_TYPES
 from .models import (
     Credential,
     CredentialService,
@@ -172,6 +173,15 @@ class CredentialRepository:
         for workspace_id, credential_id in rows:
             grouped[workspace_id].append(credential_id)
         return grouped
+
+    @staticmethod
+    def material_ids_for_workspace(workspace_id: uuid.UUID) -> set[uuid.UUID]:
+        """Read attached IDs a runner writes to disk, without secret values."""
+        return set(
+            Credential.objects.filter(workspaces__id=workspace_id)
+            .exclude(service__credential_type__in=SERVER_SIDE_CREDENTIAL_TYPES)
+            .values_list("id", flat=True)
+        )
 
     @staticmethod
     def list_for_workspace(

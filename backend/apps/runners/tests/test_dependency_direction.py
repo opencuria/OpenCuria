@@ -2,8 +2,8 @@
 
 ``harness``, ``scheduled_tasks`` and ``mcp_app`` build on ``runners``; runners
 reaches the harness only through the ``HarnessGateway`` port. The scan covers
-module-level and function-local imports as well as app-registry lookups, so
-cycles cannot be hidden behind lazy imports or ``get_model`` strings.
+module-level and function-local imports, so cycles cannot be hidden behind lazy
+imports; ``common/tests`` bans ``get_model`` registry lookups in all apps.
 Runner services also delegate ORM queries to repositories, including filtering
 and existence checks on querysets returned by a repository.
 Lifecycle result policy belongs to its service; journal persistence never
@@ -77,20 +77,6 @@ def _imported_apps(node: ast.AST) -> set[str]:
     return set()
 
 
-def _registry_lookup_app(node: ast.AST) -> str | None:
-    """Return the app label of a ``get_model("<app>", ...)`` call, if any."""
-    if not isinstance(node, ast.Call) or not node.args:
-        return None
-    func = node.func
-    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-    first = node.args[0]
-    if name != "get_model" or not isinstance(first, ast.Constant):
-        return None
-    if not isinstance(first.value, str):
-        return None
-    return first.value.split(".")[0]
-
-
 def test_runners_never_depends_on_its_dependents():
     violations = []
     for path in _runner_modules():
@@ -99,24 +85,19 @@ def test_runners_never_depends_on_its_dependents():
         for node in ast.walk(tree):
             for app in _imported_apps(node) & FORBIDDEN_APPS:
                 violations.append(f"{relative}:{node.lineno} imports apps.{app}")
-            app = _registry_lookup_app(node)
-            if app in FORBIDDEN_APPS:
-                violations.append(f"{relative}:{node.lineno} looks up {app} models")
     assert violations == []
 
 
-def test_guard_detects_function_local_imports_and_registry_lookups():
+def test_guard_detects_function_local_imports():
     source = (
         "def f():\n"
         "    from apps.harness.models import HarnessSession\n"
         "    import apps.scheduled_tasks.services\n"
         "    import apps.mcp_app.server\n"
         "    from apps import scheduled_tasks\n"
-        "    apps.get_model('harness', 'HarnessSession')\n"
     )
     nodes = list(ast.walk(ast.parse(source)))
     assert set().union(*map(_imported_apps, nodes)) == FORBIDDEN_APPS
-    assert [app for app in map(_registry_lookup_app, nodes) if app] == ["harness"]
 
 
 def _dependent_modules() -> list[Path]:
@@ -173,8 +154,6 @@ def test_dependents_never_touch_runner_persistence_or_locks() -> None:
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
             for module in sorted(_runner_persistence_imports(node, persistence)):
                 violations.append(f"{relative}:{node.lineno} imports {module}")
-            if _registry_lookup_app(node) == "runners":
-                violations.append(f"{relative}:{node.lineno} looks up runners models")
     assert violations == [], (
         "Use runners services (e.g. WorkspaceAdmissionService for interaction "
         "fences and run admission, WorkspacePluginRuntimeService for a run's "

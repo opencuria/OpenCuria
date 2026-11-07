@@ -2036,10 +2036,9 @@ class TestPersistentWorkspaceCredentials:
         workspace.refresh_from_db()
         assert workspace.credentials_present is False
 
-    @pytest.mark.asyncio
-    async def test_oauth_only_attachment_does_not_require_runner_sync(
-        self, service, sio_mock, workspace, user
-    ):
+    @staticmethod
+    def _connected_oauth_credential(workspace, user):
+        """Create a connected MCP OAuth grant required by a workspace plugin."""
         from apps.credentials.enums import CredentialType
         from apps.credentials.models import Credential, McpOAuthClientRegistration
         from apps.plugins.models import (
@@ -2049,9 +2048,6 @@ class TestPersistentWorkspaceCredentials:
         )
         from common.utils import encrypt_value
 
-        sio_mock.call = AsyncMock(
-            return_value={"ok": True, "credentials_present": False}
-        )
         plugin = Plugin.objects.create(
             name="OAuth only",
             slug="oauth-only",
@@ -2095,7 +2091,7 @@ class TestPersistentWorkspaceCredentials:
             "service_id": str(oauth_service.id),
             "registration_id": str(registration.id),
         }
-        oauth_credential = Credential.objects.create(
+        return Credential.objects.create(
             user=user,
             service=oauth_service,
             name="Connected",
@@ -2106,6 +2102,15 @@ class TestPersistentWorkspaceCredentials:
             oauth_registration=registration,
             oauth_status="connected",
         )
+
+    @pytest.mark.asyncio
+    async def test_oauth_only_attachment_does_not_require_runner_sync(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": False}
+        )
+        oauth_credential = self._connected_oauth_credential(workspace, user)
         workspace.credentials.add(oauth_credential)
         # OAuth grants are backend-side only; this workspace has no ordinary
         # credential material on disk, so selecting the grant needs no runner IO.
@@ -2119,6 +2124,39 @@ class TestPersistentWorkspaceCredentials:
         assert updated.credentials_present is False
         workspace.refresh_from_db()
         assert workspace.credentials_present is False
+        sio_mock.call.assert_not_awaited()
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_adding_oauth_grant_keeps_delivered_material_unsynced(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": True}
+        )
+        env_credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Delivered token",
+            env_var="DELIVERED_TOKEN",
+            value="on-disk",
+        )
+        oauth_credential = self._connected_oauth_credential(workspace, user)
+        workspace.credentials.add(env_credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        updated = await service.update_workspace(
+            workspace.id,
+            credential_ids=[env_credential.id, oauth_credential.id],
+        )
+
+        # The delivered material is unchanged; the grant stays server-side.
+        assert set(updated.credentials.values_list("id", flat=True)) == {
+            env_credential.id,
+            oauth_credential.id,
+        }
+        assert updated.credentials_present is True
         sio_mock.call.assert_not_awaited()
         sio_mock.emit.assert_not_called()
 

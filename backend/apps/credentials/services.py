@@ -20,7 +20,7 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
 from .deletion_guards import collect_deletion_blockers
-from .enums import CredentialType
+from .enums import SERVER_SIDE_CREDENTIAL_TYPES, CredentialType
 from .models import Credential, CredentialService
 from .oauth_errors import OAuthError
 from .oauth_grant_service import OAuthGrantService
@@ -43,6 +43,20 @@ class ResolvedCredentials:
     ssh_keys: list[str] = field(default_factory=list)
     credentials: list = field(default_factory=list)
     oauth_credentials: list[uuid.UUID] = field(default_factory=list, repr=False)
+
+    @property
+    def has_material(self) -> bool:
+        """Return whether a runner writes anything into the workspace."""
+        return bool(self.env_vars or self.files or self.ssh_keys)
+
+    @property
+    def material_ids(self) -> set[uuid.UUID]:
+        """Return IDs of resolved credentials a runner writes into the workspace."""
+        return {
+            credential.id
+            for credential in self.credentials
+            if credential.service.credential_type not in SERVER_SIDE_CREDENTIAL_TYPES
+        }
 
 
 @dataclass(frozen=True)
@@ -267,6 +281,16 @@ class CredentialSvc:
     ) -> dict[uuid.UUID, list[uuid.UUID]]:
         """Return ordinary attachment IDs for already-authorized workspaces."""
         return self.credentials.ids_for_workspaces(workspace_ids)
+
+    def workspace_material_credential_ids(
+        self, workspace_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        """Return attached IDs a runner writes into the workspace.
+
+        Server-side types (MCP OAuth grants, provider secrets) are excluded;
+        compare with :attr:`ResolvedCredentials.material_ids` of a new selection.
+        """
+        return self.credentials.material_ids_for_workspace(workspace_id)
 
     # -- Create -------------------------------------------------------------
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from asgiref.sync import async_to_sync, sync_to_async
 from django.utils import timezone
 
+from apps.credentials.services import CredentialSvc
 from common.exceptions import ConflictError
 
 from ...enums import WorkspaceStatus
@@ -274,12 +275,8 @@ class HeartbeatReconcilerService:
                 credentials_resolved = False
                 has_credentials = False
                 try:
-                    from apps.credentials.services import CredentialSvc
-
                     resolved = CredentialSvc().resolve_workspace_credentials(ws)
-                    has_credentials = bool(
-                        resolved.env_vars or resolved.files or resolved.ssh_keys
-                    )
+                    has_credentials = resolved.has_material
                     credentials_resolved = True
                 except Exception:
                     logger.exception(

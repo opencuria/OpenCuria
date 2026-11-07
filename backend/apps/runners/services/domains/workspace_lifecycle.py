@@ -309,7 +309,7 @@ class WorkspaceLifecycleService:
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
             operation_payload=command.payload,
-            credentials_present=self.credential_sync.has_credential_material(resolved),
+            credentials_present=resolved is not None and resolved.has_material,
             task_type=command.task_type,
         )
         # Dispatch to runner — include workspace_id so the runner
@@ -379,22 +379,14 @@ class WorkspaceLifecycleService:
                 raise ValueError("Workspace name must not be empty")
 
         credential_records = resolved.credentials if resolved is not None else None
-        has_ordinary_selection_change = False
         needs_disk_sync = False
-        if credential_records is not None:
-            current_ordinary_ids = await sync_to_async(
-                self.workspaces.list_ordinary_credential_ids
-            )(workspace.id)
-            new_ordinary_ids = {
-                credential.id
-                for credential in credential_records
-                if credential.service.credential_type != "mcp_oauth"
-            }
-            has_ordinary_selection_change = current_ordinary_ids != new_ordinary_ids
+        if resolved is not None:
+            material_changed = await self.credential_sync.material_selection_changed(
+                workspace.id, resolved
+            )
             needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
-                has_ordinary_selection_change
-                or bool(workspace.credentials_present)
-                != self.credential_sync.has_credential_material(resolved)
+                material_changed
+                or bool(workspace.credentials_present) != resolved.has_material
             )
 
         qemu_fields_requested = any(
@@ -1288,7 +1280,7 @@ class WorkspaceLifecycleService:
             credentials=list(resolved.credentials) if resolved is not None else [],
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
-            credentials_present=self.credential_sync.has_credential_material(resolved),
+            credentials_present=resolved is not None and resolved.has_material,
             task_type=TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
             operation_payload={
                 "workspace_id": str(workspace_id),

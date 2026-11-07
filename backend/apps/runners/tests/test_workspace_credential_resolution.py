@@ -7,8 +7,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
-from apps.credentials.services import CredentialSvc
+from apps.credentials.models import (
+    Credential,
+    CredentialService,
+    OrgCredentialServiceActivation,
+)
+from apps.credentials.services import CredentialSvc, ResolvedCredentials
 from apps.runners.models import ImageInstance
 from apps.runners.services import RunnerService
 from common.exceptions import ConflictError, NotFoundError
@@ -203,3 +207,46 @@ async def test_create_workspace_validates_credential_ownership(runner, user):
         )
 
     assert not service.workspaces.list_all().filter(name="Foreign credential").exists()
+
+
+@pytest.mark.django_db
+def test_material_credential_ids_exclude_server_side_types(workspace):
+    """Only env, file and SSH credentials count as runner-delivered material."""
+    organization = workspace.runner.organization
+    attached = {}
+    for credential_type in ("env", "file", "ssh_key", "mcp_oauth", "provider_secret"):
+        credential_service = CredentialService.objects.create(
+            name=f"{credential_type} service",
+            slug=f"{credential_type}-{uuid.uuid4().hex[:8]}",
+            credential_type=credential_type,
+            organization=organization,
+        )
+        attached[credential_type] = Credential.objects.create(
+            organization=organization,
+            service=credential_service,
+            name=f"{credential_type} credential",
+            encrypted_value="ciphertext",
+        )
+    workspace.credentials.set(attached.values())
+    material = {
+        attached[credential_type].id for credential_type in ("env", "file", "ssh_key")
+    }
+
+    assert CredentialSvc().workspace_material_credential_ids(workspace.id) == material
+    # A resolved selection classifies its credentials by the same rule.
+    selection = ResolvedCredentials(credentials=list(attached.values()))
+    assert selection.material_ids == material
+
+
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        (ResolvedCredentials(), False),
+        (ResolvedCredentials(oauth_credentials=[uuid.uuid4()]), False),
+        (ResolvedCredentials(env_vars={"TOKEN": "secret"}), True),
+        (ResolvedCredentials(ssh_keys=["private-key"]), True),
+    ],
+)
+def test_resolved_material_reflects_what_the_runner_writes(resolved, expected):
+    """Server-side OAuth grants alone leave nothing to write into a workspace."""
+    assert resolved.has_material is expected

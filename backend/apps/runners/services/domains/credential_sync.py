@@ -95,11 +95,14 @@ class CredentialSyncService:
         return CredentialSvc().resolve_workspace_credentials
 
     @staticmethod
-    def has_credential_material(resolved: ResolvedCredentials | None) -> bool:
-        """Return whether resolved credentials write anything into a workspace."""
-        return resolved is not None and bool(
-            resolved.env_vars or resolved.files or resolved.ssh_keys
-        )
+    async def material_selection_changed(
+        workspace_id: uuid.UUID, resolved: ResolvedCredentials
+    ) -> bool:
+        """Return whether *resolved* delivers other credentials than attached now."""
+        attached = await sync_to_async(
+            CredentialSvc().workspace_material_credential_ids
+        )(workspace_id)
+        return attached != resolved.material_ids
 
     @staticmethod
     def resolved_credentials_payload(resolved) -> dict:

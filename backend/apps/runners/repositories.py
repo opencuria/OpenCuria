@@ -401,18 +401,6 @@ class WorkspaceRepository:
         return list(workspace.credentials.all().select_related("service"))
 
     @staticmethod
-    def list_ordinary_credential_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:
-        """Return attached non-OAuth credential IDs for runner sync comparison."""
-        from django.apps import apps
-
-        credential_model = apps.get_model("credentials", "Credential")
-        return set(
-            credential_model.objects.filter(workspaces__id=workspace_id)
-            .exclude(service__credential_type__in=("mcp_oauth", "provider_secret"))
-            .values_list("id", flat=True)
-        )
-
-    @staticmethod
     def set_credentials(workspace: Workspace, credentials: list) -> Workspace:
         """Replace the attachment relation without claiming on-disk state."""
         workspace.credentials.set(credentials)

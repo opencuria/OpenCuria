@@ -1169,6 +1169,70 @@ def test_service_only_contexts_are_reached_through_their_services(dependencies):
     assert not violations, "\n".join(sorted(violations))
 
 
+def _registry_lookups(tree: ast.AST) -> list[int]:
+    """Return lines of ``get_model`` calls, which bypass import analysis."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (
+            node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else getattr(node.func, "id", "")
+        )
+        == "get_model"
+    ]
+
+
+def test_registry_guard_detects_attribute_and_local_lookups() -> None:
+    """Aliases and function-local lookups cannot hide a model reference."""
+    source = (
+        "from django.apps import apps as registry\n"
+        "def f():\n"
+        "    from django.apps import apps\n"
+        "    apps.get_model('credentials', 'Credential')\n"
+        "    registry.get_model('harness.HarnessSession')\n"
+        "    get_model('runners', 'Workspace')\n"
+        "    payload.get('model')\n"
+    )
+    assert _registry_lookups(ast.parse(source)) == [4, 5, 6]
+
+
+def test_application_code_never_looks_up_models_in_the_app_registry(trees) -> None:
+    """``get_model`` hides ORM access to another context from the import guards."""
+    violations = sorted(
+        f"{_module_name(path)}:{line}"
+        for path, tree in trees.items()
+        for line in _registry_lookups(tree)
+    )
+    assert not violations, (
+        "Import the owning model or call the owning context's service:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_runners_leave_credential_classification_to_credentials(trees) -> None:
+    """Runners ask apps.credentials what a selection writes into a workspace."""
+    package = APPS_ROOT / "runners"
+    server_side = {"mcp_oauth", "provider_secret"}
+    violations = sorted(
+        f"{_module_name(path)}:{node.lineno}"
+        for path, tree in trees.items()
+        if path.is_relative_to(package)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "credential_type"
+        or isinstance(node, ast.keyword)
+        and "credential_type" in (node.arg or "")
+        or isinstance(node, ast.Constant)
+        and node.value in server_side
+    )
+    assert not violations, (
+        "Use ResolvedCredentials.material_ids/has_material or "
+        "CredentialSvc.workspace_material_credential_ids:\n" + "\n".join(violations)
+    )
+
+
 def test_context_repositories_are_private_to_their_context(trees, dependencies) -> None:
     """Consumers use the owning context's service, never its repositories."""
     repository_modules = _repository_modules(trees)
