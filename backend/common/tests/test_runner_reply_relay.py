@@ -269,7 +269,7 @@ async def test_remote_git_reply_resolves_real_registry_after_domain_checks(
     )
 
     async def dispatch(event, data, runner_id):
-        return await sync_to_async(service.handle_git_reply)(
+        return await sync_to_async(service.git_operations.handle_git_reply)(
             event,
             data,
             runner_id=runner_id,
@@ -346,7 +346,7 @@ async def test_remote_harness_reply_resolves_real_accessor(relay_redis, monkeypa
     command = asyncio.create_task(accessor.exec_wait("echo hello"))
 
     async def dispatch(event, data, runner_id):
-        return await sync_to_async(service.handle_harness_reply)(
+        return await sync_to_async(service.runner_transport.handle_harness_reply)(
             event,
             data,
             runner_id=runner_id,

@@ -919,7 +919,7 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
     gaps = collect_deletion_blockers(credential, org_id=org.id)
     assert gaps
     asyncio.run(
-        RunnerService().update_workspace(
+        RunnerService().workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[],
             plugin_ids=[],
@@ -977,7 +977,7 @@ def test_clone_from_image_can_attach_selected_oauth_plugin(context):
     runner_service = RunnerService(sio_server=AsyncMock())
 
     cloned, task = asyncio.run(
-        runner_service.create_workspace_from_image_artifact(
+        runner_service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="OAuth plugin clone",
             credential_ids=[credential.id],

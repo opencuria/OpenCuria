@@ -55,7 +55,7 @@ class CommitMessageService:
             )
         runner, small_model = small
         git = self._git or get_runner_service()
-        diff = await git.run_git_operation(
+        diff = await git.git_operations.run_git_operation(
             workspace_id, "working_diff", repo_path=repo_path, args={}
         )
         if not diff.get("ok"):
@@ -63,7 +63,7 @@ class CommitMessageService:
                 str(diff.get("message") or "Could not read the changes"),
                 code=str(diff.get("code") or "git_failed"),
             )
-        history = await git.run_git_operation(
+        history = await git.git_operations.run_git_operation(
             workspace_id,
             "repo_history",
             repo_path=repo_path,

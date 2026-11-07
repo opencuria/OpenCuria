@@ -207,8 +207,11 @@ class AppBackendService:
         app = self.apps.get_owned(app_id, organization_id, owner_id)
         if app is None:
             raise NotFoundError("App", str(app_id))
-        if app.workspace_id is None or not self._runners().is_active_workspace_owner(
-            owner_id, app.workspace_id, organization_id=organization_id
+        if (
+            app.workspace_id is None
+            or not self._runners().workspace_access.is_active_workspace_owner(
+                owner_id, app.workspace_id, organization_id=organization_id
+            )
         ):
             raise ConflictError(
                 "The workspace this app was published from no longer exists."
@@ -364,7 +367,7 @@ class AppBackendService:
         if app is None:
             raise gone
         if app.workspace_id is None or not await sync_to_async(
-            self._runners().is_active_workspace_owner
+            self._runners().workspace_access.is_active_workspace_owner
         )(claims.owner_id, app.workspace_id, organization_id=claims.organization_id):
             raise BackendError(
                 "The workspace this app was published from no longer exists.",
@@ -379,10 +382,10 @@ class AppBackendService:
         deadline = self._clock() + WORKSPACE_WAIT_SECONDS
         resumed = False
         while True:
-            state = await sync_to_async(runners.get_workspace_launch_state)(
-                workspace_id
-            )
-            available = await sync_to_async(runners.is_workspace_available)(
+            state = await sync_to_async(
+                runners.workspace_lifecycle.get_workspace_launch_state
+            )(workspace_id)
+            available = await sync_to_async(runners.ownership.is_workspace_available)(
                 workspace_id
             )
             if state.status in (Status.RUNNING, Status.STOPPED) and (
@@ -418,13 +421,13 @@ class AppBackendService:
 
     async def _resume(self, workspace_id: uuid.UUID) -> None:
         async with self._lock("resume", str(workspace_id)):
-            state = await sync_to_async(self._runners().get_workspace_launch_state)(
-                workspace_id
-            )
+            state = await sync_to_async(
+                self._runners().workspace_lifecycle.get_workspace_launch_state
+            )(workspace_id)
             if state.status != Status.STOPPED or state.active_operation:
                 return  # Another request resumed it meanwhile.
             try:
-                await self._runners().resume_workspace(workspace_id)
+                await self._runners().workspace_lifecycle.resume_workspace(workspace_id)
             except ServiceError as exc:
                 log.info(
                     "app_backend_resume_refused",
@@ -435,7 +438,7 @@ class AppBackendService:
             log.info("app_backend_workspace_resumed", workspace_id=str(workspace_id))
 
     async def _find_process(self, workspace_id: uuid.UUID, label: str) -> Any:
-        processes = await self._runners().list_processes(
+        processes = await self._runners().process_manager.list_processes(
             workspace_id, kinds=(ProcessKind.PERSISTENT,), live=False
         )
         matches = [p for p in processes if (p.name or "").lower() == label]
@@ -462,7 +465,9 @@ class AppBackendService:
         if process.status == ProcessStatus.RUNNING and process.pid is not None:
             return process
         async with self._lock("process", str(process.id)):
-            current = await self._runners().get_process(workspace_id, process.id)
+            current = await self._runners().process_manager.get_process(
+                workspace_id, process.id
+            )
             # RUNNING without a pid is a start in flight (e.g. an agent's
             # restart); restarting would kill that run. Only a start that
             # never confirms is restarted.
@@ -474,11 +479,13 @@ class AppBackendService:
                 and loop.time() < deadline
             ):
                 await asyncio.sleep(0.5)
-                current = await self._runners().get_process(workspace_id, process.id)
+                current = await self._runners().process_manager.get_process(
+                    workspace_id, process.id
+                )
             if current.status == ProcessStatus.RUNNING and current.pid is not None:
                 return current
             try:
-                started = await self._runners().restart_process(
+                started = await self._runners().process_manager.restart_process(
                     workspace_id, process.id
                 )
             except ServiceError as exc:
@@ -522,7 +529,9 @@ class AppBackendService:
                 self._ports[key] = (port, self._clock() + PORT_CACHE_SECONDS)
                 return port
             if snapshot.alive is False:
-                current = await self._runners().get_process(workspace_id, process.id)
+                current = await self._runners().process_manager.get_process(
+                    workspace_id, process.id
+                )
                 if current.status != ProcessStatus.RUNNING:
                     raise _ProcessExitedError(current)
             if self._clock() >= deadline:
@@ -545,7 +554,9 @@ class AppBackendService:
             return
         self._touched[workspace_id] = now
         try:
-            await self._runners().touch_workspace_activity(workspace_id)
+            await self._runners().workspace_lifecycle.touch_workspace_activity(
+                workspace_id
+            )
         except Exception:  # noqa: BLE001 - activity is best effort
             log.warning("app_backend_touch_failed", workspace_id=str(workspace_id))
 

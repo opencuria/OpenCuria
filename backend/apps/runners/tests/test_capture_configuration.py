@@ -129,12 +129,14 @@ def credential_service(monkeypatch):
 def test_heartbeat_defers_credentials_until_capture_parent_settles(credential_service):
     service, workspace = credential_service
     report = [{"workspace_id": str(workspace.id), "status": "running"}]
-    assert service.handle_heartbeat(workspace.runner, report) == []
+    assert service.heartbeat_reconciler.handle_heartbeat(workspace.runner, report) == []
     workspace.active_operation = None
     workspace.current_task_id = uuid.uuid4()
-    assert service.handle_heartbeat(workspace.runner, report) == []
+    assert service.heartbeat_reconciler.handle_heartbeat(workspace.runner, report) == []
     workspace.current_task_id = None
-    assert service.handle_heartbeat(workspace.runner, report) == [workspace.id]
+    assert service.heartbeat_reconciler.handle_heartbeat(workspace.runner, report) == [
+        workspace.id
+    ]
     service.tasks.create.assert_not_called()
     service.runner_transport.emit_to_runner.assert_not_awaited()
 
@@ -151,7 +153,7 @@ async def test_queued_reconciliation_rechecks_fresh_state(credential_service, ho
     # The queue flush itself sees the old idle snapshot. The final fresh read
     # inside ordinary injection must still prevent task creation and emission.
     service.workspaces.get_by_id.side_effect = [idle, workspace]
-    await service.dispatch_credential_reconcile([workspace.id])
+    await service.credential_sync.dispatch_credential_reconcile([workspace.id])
     service.tasks.create.assert_not_called()
     service.runner_transport.emit_to_runner.assert_not_awaited()
     assert service.credential_sync.pending_inject == set()
@@ -170,7 +172,7 @@ async def test_ordinary_reconciliation_resumes_including_removal(
     service.credential_sync._credential_resolver = Mock()
     resolver = service.credential_sync._credential_resolver
     resolver.resolve_workspace_credentials.return_value = resolved
-    await service.dispatch_credential_reconcile([workspace.id])
+    await service.credential_sync.dispatch_credential_reconcile([workspace.id])
     service.runner_transport.emit_to_runner.assert_awaited_once()
     assert (
         service.runner_transport.emit_to_runner.await_args.args[2]["env_vars"]

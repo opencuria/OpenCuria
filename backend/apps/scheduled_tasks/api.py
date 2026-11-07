@@ -166,9 +166,9 @@ def _run_out(run: ScheduledTaskRun) -> ScheduledTaskRunOut:
 async def _owned_workspace(
     request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID
 ):
-    return await sync_to_async(get_runner_service().get_workspace_for_user)(
-        workspace_id, user=request.user, organization_id=org_id
-    )
+    return await sync_to_async(
+        get_runner_service().workspace_access.get_workspace_for_user
+    )(workspace_id, user=request.user, organization_id=org_id)
 
 
 @scheduled_task_router.get(

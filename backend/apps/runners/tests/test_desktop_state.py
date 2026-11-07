@@ -80,7 +80,7 @@ async def test_active_events_publish_complete_state(
     )
     for _ in range(2):
         await send(event, task_id=str(task.id))
-        assert service.get_desktop_info(str(workspace.id)) == state
+        assert service.session_store.get_desktop_info(str(workspace.id)) == state
         summary = emit.await_args.args[1]
         assert summary["proxy_url"] == f"/ws/desktop/{workspace.id}/"
         assert summary["computer_use_active"] is True
@@ -108,7 +108,9 @@ async def test_viewer_release_keeps_remaining_holders(
         status=TaskStatus.IN_PROGRESS,
     )
     await send("viewer_released", task_id=str(task.id), holder_count=2)
-    assert service.get_desktop_info(str(workspace.id))["holder_count"] == 2
+    assert (
+        service.session_store.get_desktop_info(str(workspace.id))["holder_count"] == 2
+    )
     assert emit.await_args.args[1]["viewer_held"] is True
     await send(
         "viewer_released",
@@ -118,7 +120,7 @@ async def test_viewer_release_keeps_remaining_holders(
         mcp=True,
         holder_count=1,
     )
-    assert service.get_desktop_info(str(workspace.id))["viewer"] is False
+    assert service.session_store.get_desktop_info(str(workspace.id))["viewer"] is False
     assert emit.await_args.args[1]["computer_use_active"] is False
     assert emit.await_args.args[1]["mcp_active"] is True
     task.refresh_from_db()
@@ -142,7 +144,7 @@ async def test_stop_clears_route_and_fences_late_active_events(
         else None
     )
     await send("stopped", task_id=str(task.id) if task else None)
-    assert service.get_desktop_info(str(workspace.id)) is None
+    assert service.session_store.get_desktop_info(str(workspace.id)) is None
     assert service.session_store.state.desktop_versions[str(workspace.id)] == (
         str(runner.id),
         state["epoch"],
@@ -155,10 +157,10 @@ async def test_stop_clears_route_and_fences_late_active_events(
         assert task.status == TaskStatus.COMPLETED
     emit.reset_mock()
     await send("process")
-    assert service.get_desktop_info(str(workspace.id)) is None
+    assert service.session_store.get_desktop_info(str(workspace.id)) is None
     emit.assert_not_awaited()
     await send("process", generation=6)
-    assert service.get_desktop_info(str(workspace.id))["generation"] == 6
+    assert service.session_store.get_desktop_info(str(workspace.id))["generation"] == 6
 
 
 @pytest.mark.asyncio
@@ -173,7 +175,7 @@ async def test_stale_or_unversioned_events_cannot_change_state(
     await send("process")
     emit.reset_mock()
     await send(event, guest_ip="wrong-ip", **metadata)
-    assert service.get_desktop_info(str(workspace.id)) == state
+    assert service.session_store.get_desktop_info(str(workspace.id)) == state
     emit.assert_not_awaited()
 
 
@@ -186,7 +188,10 @@ async def test_registered_epoch_replaces_previous_runner_process(
     service.session_store.set_runner_desktop_epoch(runner_id, "new-epoch")
     await send("process", epoch="new-epoch", generation=1)
     await send("stopped")
-    assert service.get_desktop_info(str(workspace.id))["epoch"] == "new-epoch"
+    assert (
+        service.session_store.get_desktop_info(str(workspace.id))["epoch"]
+        == "new-epoch"
+    )
 
 
 @pytest.mark.asyncio
@@ -211,7 +216,7 @@ async def test_delayed_task_completion_cannot_overwrite_a_newer_desktop(
     monkeypatch.setattr(service.tasks, "complete", complete)
     emit.reset_mock()
     await send(event, task_id=str(task.id), viewer=False)
-    assert service.get_desktop_info(str(workspace.id)) == newer
+    assert service.session_store.get_desktop_info(str(workspace.id)) == newer
     emit.assert_not_awaited()
 
 
@@ -234,7 +239,9 @@ async def test_events_require_real_workspace_ownership(
         sender=foreign_runner,
         workspace_id=str(uuid.uuid4()) if missing_workspace else str(workspace.id),
     )
-    assert service.get_desktop_info(str(workspace.id)) == (state if cached else None)
+    assert service.session_store.get_desktop_info(str(workspace.id)) == (
+        state if cached else None
+    )
     emit.assert_not_awaited()
 
 
@@ -265,12 +272,12 @@ def test_heartbeat_recovery_and_liveness_fencing(
 ):
     ws_id = str(workspace.id)
     if desktop and generation == 5:
-        assert service.get_desktop_info(ws_id) is None
+        assert service.session_store.get_desktop_info(ws_id) is None
     else:
         service.session_store.record_active_desktop(
             ws_id, state, runner_id=str(runner.id)
         )
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner,
         [
             {
@@ -285,9 +292,9 @@ def test_heartbeat_recovery_and_liveness_fencing(
             }
         ],
     )
-    assert service.is_desktop_active(ws_id) is active
+    assert service.session_store.is_desktop_active(ws_id) is active
     if active:
-        assert service.get_desktop_info(ws_id) == (
+        assert service.session_store.get_desktop_info(ws_id) == (
             {**state, "guest_ip": "changed-ip"}
             if desktop and generation == 5
             else state
@@ -308,10 +315,10 @@ def test_workspace_shutdown_cleans_desktop_state(
         else TaskType.REMOVE_WORKSPACE,
         status=TaskStatus.IN_PROGRESS,
     )
-    getattr(service, f"handle_workspace_{operation}")(
+    getattr(service.workspace_lifecycle, f"handle_workspace_{operation}")(
         str(task.id), ws_id, runner_id=str(runner.id)
     )
-    assert service.get_desktop_info(ws_id) is None
+    assert service.session_store.get_desktop_info(ws_id) is None
     assert ws_id not in service.session_store.state.desktop_runners
     workspace.refresh_from_db()
     assert workspace.status == (

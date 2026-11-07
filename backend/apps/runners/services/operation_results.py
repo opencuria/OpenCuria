@@ -12,33 +12,63 @@ from .runner_diagnostics import failure_message
 
 RESULT_METHODS = {
     "workspace:created": (
+        "workspace_lifecycle",
         "handle_workspace_created",
         {"create_workspace", "create_workspace_from_image_artifact"},
     ),
-    "workspace:stopped": ("handle_workspace_stopped", {"stop_workspace"}),
-    "workspace:resumed": ("handle_workspace_resumed", {"resume_workspace"}),
-    "workspace:updated": ("handle_workspace_updated", {"update_workspace"}),
-    "workspace:removed": ("handle_workspace_removed", {"remove_workspace"}),
+    "workspace:stopped": (
+        "workspace_lifecycle",
+        "handle_workspace_stopped",
+        {"stop_workspace"},
+    ),
+    "workspace:resumed": (
+        "workspace_lifecycle",
+        "handle_workspace_resumed",
+        {"resume_workspace"},
+    ),
+    "workspace:updated": (
+        "workspace_lifecycle",
+        "handle_workspace_updated",
+        {"update_workspace"},
+    ),
+    "workspace:removed": (
+        "workspace_lifecycle",
+        "handle_workspace_removed",
+        {"remove_workspace"},
+    ),
     "workspace:credentials_injected": (
+        "credential_sync",
         "handle_credentials_injected",
         {"inject_credentials"},
     ),
     "workspace:error": (
+        "workspace_lifecycle",
         "handle_workspace_error",
         LIFECYCLE_TYPES - {"build_image", "delete_image", "create_image_artifact"},
     ),
-    "image:built": ("handle_image_built", {"build_image"}),
-    "image:build_failed": ("handle_image_build_failed", {"build_image"}),
+    "image:built": ("image_lifecycle", "handle_image_built", {"build_image"}),
+    "image:build_failed": (
+        "image_lifecycle",
+        "handle_image_build_failed",
+        {"build_image"},
+    ),
     "image_artifact:created": (
+        "image_lifecycle",
         "handle_image_artifact_created",
         {"create_image_artifact"},
     ),
     "image_artifact:failed": (
+        "image_lifecycle",
         "handle_image_artifact_failed",
         {"create_image_artifact"},
     ),
-    "image_artifact:deleted": ("handle_image_artifact_deleted", {"delete_image"}),
+    "image_artifact:deleted": (
+        "image_lifecycle",
+        "handle_image_artifact_deleted",
+        {"delete_image"},
+    ),
     "image_artifact:delete_failed": (
+        "image_lifecycle",
         "handle_image_artifact_delete_failed",
         {"delete_image"},
     ),
@@ -68,7 +98,7 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
         if result is None:
             return False
         state = result.state()
-        method_name, types = RESULT_METHODS[event]
+        domain, method_name, types = RESULT_METHODS[event]
         if (
             str(state.runner_id) != runner_id
             or state.task_type not in types
@@ -139,7 +169,7 @@ def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
             "runner_ref": data.get("image_artifact_id", ""),
         }
         result.mark_received()
-        method = getattr(service, method_name)
+        method = getattr(getattr(service, domain), method_name)
         kwargs = {
             k: v
             for k, v in {**data, "runner_id": runner_id}.items()

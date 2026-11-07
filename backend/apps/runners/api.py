@@ -130,7 +130,7 @@ def _get_owned_workspace(
     """Return a workspace only when it belongs to the active org and owner."""
     service = _get_service()
     try:
-        return service.get_workspace_for_user(
+        return service.workspace_access.get_workspace_for_user(
             workspace_id,
             user=request.user,
             organization_id=org_id,
@@ -167,7 +167,7 @@ def list_runners(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    return 200, service.list_runners(organization_id=org_id)
+    return 200, service.runner_lifecycle.list_runners(organization_id=org_id)
 
 
 @runner_router.post(
@@ -189,7 +189,9 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     except AuthenticationError as e:
         return 403, ErrorOut(detail=e.message, code=e.code)
 
-    runner, token = _get_service().create_runner(name=payload.name, organization=org)
+    runner, token = _get_service().runner_lifecycle.create_runner(
+        name=payload.name, organization=org
+    )
 
     return 201, RunnerCreateOut(
         id=runner.id,
@@ -220,11 +222,13 @@ def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpd
 
     service = _get_service()
     try:
-        runner = service.get_runner(runner_id)
+        runner = service.runner_lifecycle.get_runner(runner_id)
         if runner.organization_id != org_id:
             raise NotFoundError("Runner", str(runner_id))
         updated_fields = payload.model_dump(exclude_unset=True)
-        updated = service.update_runner_qemu_settings(runner_id, **updated_fields)
+        updated = service.runner_lifecycle.update_runner_qemu_settings(
+            runner_id, **updated_fields
+        )
         return 200, updated
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -248,11 +252,11 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    runner = service.get_runner_or_none(runner_id)
+    runner = service.runner_lifecycle.get_runner_or_none(runner_id)
     if runner is None or runner.organization_id != org_id:
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
-    metrics = service.get_latest_runner_metrics(runner_id)
+    metrics = service.runner_lifecycle.get_latest_runner_metrics(runner_id)
     if metrics is None:
         return 404, ErrorOut(detail="No metrics available yet", code="not_found")
 
@@ -282,11 +286,11 @@ def get_runner_metrics_history(
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    runner = service.get_runner_or_none(runner_id)
+    runner = service.runner_lifecycle.get_runner_or_none(runner_id)
     if runner is None or runner.organization_id != org_id:
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
-    metrics = service.list_runner_metrics(runner_id, hours=hours)
+    metrics = service.runner_lifecycle.list_runner_metrics(runner_id, hours=hours)
 
     return 200, [
         RunnerSystemMetricsOut(
@@ -324,7 +328,7 @@ def list_workspaces(request: HttpRequest, runner_id: uuid.UUID | None = None):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    workspaces = service.list_workspaces(
+    workspaces = service.runner_lifecycle.list_workspaces(
         runner_id=runner_id,
         organization_id=org_id,
         user=request.user,
@@ -360,7 +364,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
                 detail="An image artifact must be selected to create a workspace",
                 code="image_artifact_required",
             )
-        workspace, task = await service.create_workspace(
+        workspace, task = await service.workspace_lifecycle.create_workspace(
             name=payload.name,
             repos=payload.repos,
             qemu_vcpus=payload.qemu_vcpus,
@@ -436,7 +440,7 @@ async def start_terminal(
 
         cols = payload.cols if payload else 80
         rows = payload.rows if payload else 24
-        task = await service.start_terminal(
+        task = await service.interactive_sessions.start_terminal(
             workspace_id,
             cols=cols,
             rows=rows,
@@ -466,7 +470,7 @@ async def start_desktop(
     org_id = get_organization_id(request)
     service = _get_service()
     try:
-        task = await service.start_desktop(
+        task = await service.interactive_sessions.start_desktop(
             workspace_id, user=request.user, organization_id=org_id,
             viewer_client_id=payload.viewer_client_id,
             intent_revision=payload.intent_revision)
@@ -493,7 +497,7 @@ async def stop_desktop(
     org_id = get_organization_id(request)
     service = _get_service()
     try:
-        task = await service.stop_desktop(
+        task = await service.interactive_sessions.stop_desktop(
             workspace_id, user=request.user, organization_id=org_id,
             viewer_client_id=payload.viewer_client_id,
             intent_revision=payload.intent_revision)
@@ -515,7 +519,7 @@ async def renew_desktop(request: HttpRequest, workspace_id: uuid.UUID,
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     try:
-        result = await _get_service().renew_desktop(
+        result = await _get_service().interactive_sessions.renew_desktop(
             workspace_id,
             user=request.user,
             organization_id=get_organization_id(request),
@@ -547,7 +551,7 @@ async def take_desktop_control(
 
     service = _get_service()
     try:
-        aborted_ids = await service.take_desktop_control(
+        aborted_ids = await service.interactive_sessions.take_desktop_control(
             workspace_id, user=request.user, organization_id=org_id
         )
         return 200, DesktopTakeControlOut(aborted_session_ids=aborted_ids)
@@ -573,7 +577,7 @@ async def desktop_status(
     org_id = get_organization_id(request)
     service = _get_service()
     try:
-        result = await service.viewer_desktop_status(
+        result = await service.interactive_sessions.viewer_desktop_status(
             workspace_id, user=request.user, organization_id=org_id,
             viewer_client_id=viewer_client_id)
         return 200, DesktopStatusOut(**result)
@@ -607,10 +611,10 @@ async def desktop_clipboard_write(
 
     service = _get_service()
     try:
-        await service.write_desktop_clipboard(
+        await service.interactive_sessions.write_desktop_clipboard(
             workspace_id, payload.text, user=request.user, organization_id=org_id
         )
-        text = await service.read_desktop_clipboard(
+        text = await service.interactive_sessions.read_desktop_clipboard(
             workspace_id, user=request.user, organization_id=org_id
         )
         return 200, DesktopClipboardReadOut(text=text)
@@ -647,7 +651,7 @@ async def desktop_clipboard_read(
     options = payload or DesktopClipboardReadIn()
     try:
         if options.copy_selection:
-            text = await service.read_desktop_clipboard(
+            text = await service.interactive_sessions.read_desktop_clipboard(
                 workspace_id,
                 user=request.user,
                 organization_id=org_id,
@@ -655,7 +659,7 @@ async def desktop_clipboard_read(
                 shift=options.shift,
             )
         else:
-            text = await service.read_desktop_clipboard(
+            text = await service.interactive_sessions.read_desktop_clipboard(
                 workspace_id, user=request.user, organization_id=org_id
             )
         return 200, DesktopClipboardReadOut(text=text)
@@ -704,7 +708,7 @@ async def update_workspace(
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        workspace = await service.update_workspace(
+        workspace = await service.workspace_lifecycle.update_workspace(
             workspace_id,
             name=payload.name,
             credential_ids=payload.credential_ids,
@@ -769,7 +773,7 @@ async def stop_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        task = await service.stop_workspace(workspace_id)
+        task = await service.workspace_lifecycle.stop_workspace(workspace_id)
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -793,7 +797,7 @@ async def resume_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        task = await service.resume_workspace(workspace_id)
+        task = await service.workspace_lifecycle.resume_workspace(workspace_id)
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -817,7 +821,7 @@ async def remove_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        task = await service.remove_workspace(workspace_id)
+        task = await service.workspace_lifecycle.remove_workspace(workspace_id)
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -846,7 +850,7 @@ async def recreate_workspace(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        workspace, task = await service.recreate_workspace(
+        workspace, task = await service.workspace_lifecycle.recreate_workspace(
             workspace_id,
             payload.image_id,
             user=request.user,
@@ -1111,7 +1115,7 @@ async def editor_file_content(
     await _require_org_membership_async(request, org_id)
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await _get_service().editor_file_operation(
+        result = await _get_service().file_transfer.editor_file_operation(
             workspace_id, "read", {"path": path}
         )
         return _git_result_to_response(result)
@@ -1133,7 +1137,7 @@ async def save_editor_file_content(
     await _require_org_membership_async(request, org_id)
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await _get_service().editor_file_operation(
+        result = await _get_service().file_transfer.editor_file_operation(
             workspace_id, "write", payload.model_dump()
         )
         return _git_result_to_response(result)
@@ -1157,7 +1161,7 @@ async def git_file_content(
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
         query = GitRepoQuery(repo_path=repo_path)
-        result = await _get_service().run_git_operation(
+        result = await _get_service().git_operations.run_git_operation(
             workspace_id, "file_content", repo_path=query.repo_path,
             args={"path": path, "revision": revision},
         )
@@ -1184,7 +1188,7 @@ async def git_repos(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await service.run_git_operation(
+        result = await service.git_operations.run_git_operation(
             workspace_id,
             "list_repos",
             args={},
@@ -1217,7 +1221,7 @@ async def git_repo(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await service.run_git_operation(
+        result = await service.git_operations.run_git_operation(
             workspace_id,
             "repo_snapshot",
             repo_path=query.repo_path,
@@ -1269,7 +1273,7 @@ async def git_history(
         }
         if query.branch is not None:
             args["branch"] = query.branch
-        result = await service.run_git_operation(
+        result = await service.git_operations.run_git_operation(
             workspace_id,
             "repo_history",
             repo_path=query.repo_path,
@@ -1308,7 +1312,7 @@ async def git_commit_details(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await service.run_git_operation(
+        result = await service.git_operations.run_git_operation(
             workspace_id,
             "commit_details",
             repo_path=query.repo_path,
@@ -1342,7 +1346,7 @@ async def git_operation(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await service.run_git_operation(
+        result = await service.git_operations.run_git_operation(
             workspace_id,
             str(payload.operation),
             repo_path=payload.repo_path,
@@ -1516,7 +1520,8 @@ async def create_workspace_from_captured_image(
         latest = await sync_to_async(ImageVersionService().latest_captured_version)(
             request.user, org_id, captured_image_id
         )
-        workspace, task = await service.create_workspace_from_image_artifact(
+        lifecycle = service.workspace_lifecycle
+        workspace, task = await lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=latest.id,
             name=payload.name,
             credential_ids=payload.credential_ids,
@@ -1554,7 +1559,7 @@ async def create_workspace_image_artifact(
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        workspace, task = await service.create_image_artifact(
+        workspace, task = await service.image_lifecycle.create_image_artifact(
             workspace_id=workspace_id,
             name=payload.name,
             organization_id=org_id,

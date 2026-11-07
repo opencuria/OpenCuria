@@ -122,7 +122,7 @@ async def test_update_workspace_service_persists_geometry(desktop_api) -> None:
 
     workspace = desktop_api["workspace"]
     service = RunnerService(sio_server=AsyncMock())
-    updated = await service.update_workspace(
+    updated = await service.workspace_lifecycle.update_workspace(
         workspace.id,
         desktop_width=1600,
         desktop_height=900,
@@ -149,7 +149,7 @@ async def test_start_desktop_payload_includes_geometry(desktop_api) -> None:
     service.interactive_sessions._viewer_rpc = AsyncMock(
         return_value={"epoch": "runner-epoch"}
     )
-    await service.start_desktop(
+    await service.interactive_sessions.start_desktop(
         workspace.id,
         user=desktop_api["user"],
         organization_id=desktop_api["org"].id,

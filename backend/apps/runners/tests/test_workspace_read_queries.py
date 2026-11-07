@@ -38,7 +38,7 @@ def test_workspace_read_query_count_is_independent_of_list_size(
     workspaces = workspace_read_cases(runner, user, count, with_metadata=with_metadata)
     reads = WorkspaceReadService()
     with django_assert_num_queries(12 if with_metadata else 5):
-        loaded = RunnerService().list_workspaces(
+        loaded = RunnerService().runner_lifecycle.list_workspaces(
             organization_id=runner.organization_id, user=user
         )
         result = [
@@ -77,7 +77,7 @@ def test_empty_workspace_metadata_requires_no_reads(
 ) -> None:
     """Empty lists do not load relations, image versions or attachment catalogs."""
     with django_assert_num_queries(1):
-        workspaces = RunnerService().list_workspaces(
+        workspaces = RunnerService().runner_lifecycle.list_workspaces(
             organization_id=runner.organization_id, user=user
         )
         assert WorkspaceReadService().describe_many(workspaces) == []

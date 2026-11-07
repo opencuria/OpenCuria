@@ -77,7 +77,9 @@ def test_any_busy_session_refuses_capture_without_mutations(
         lambda: CaptureService.allocate(
             workspace.id, "capture", has_busy_agent=has_busy_agent
         ),
-        lambda: async_to_sync(service.create_image_artifact)(workspace.id, "capture"),
+        lambda: async_to_sync(service.image_lifecycle.create_image_artifact)(
+            workspace.id, "capture"
+        ),
     ]:
         with pytest.raises(ConflictError, match="agent is active or waiting"):
             allocate()
@@ -190,9 +192,9 @@ def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
         assert CaptureRequest.objects.get(workspace=workspace).phase == "stop"
         assert Task.objects.filter(workspace=workspace).count() == 1
         with pytest.raises(ConflictError):
-            async_to_sync(service.stop_workspace)(workspace.id)
+            async_to_sync(service.workspace_lifecycle.stop_workspace)(workspace.id)
         with pytest.raises(ConflictError):
-            async_to_sync(service.remove_workspace)(workspace.id)
+            async_to_sync(service.workspace_lifecycle.remove_workspace)(workspace.id)
         assert not CaptureRequest.objects.get(workspace=workspace).resume_suppressed
 
 

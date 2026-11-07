@@ -124,7 +124,7 @@ def test_fail_streams_for_runner_matches_owned_workspaces():
     svc.workspaces.get_runner_id.side_effect = lambda ws: (
         runner_id if ws == owned else uuid.uuid4()
     )
-    svc.fail_streams_for_runner(str(runner_id))
+    svc.stream_transport.fail_streams_for_runner(str(runner_id))
     [(kind, matches, error)] = gateway.calls
     assert kind == "fail_streams"
     assert error == f"runner {runner_id} disconnected"
@@ -135,7 +135,9 @@ def test_fail_streams_for_runner_matches_owned_workspaces():
 
 def test_fail_streams_for_runner_rejects_invalid_runner_id():
     gateway = _FakeHarnessGateway()
-    RunnerService(harness_gateway=gateway).fail_streams_for_runner("bogus")
+    RunnerService(harness_gateway=gateway).stream_transport.fail_streams_for_runner(
+        "bogus"
+    )
     assert gateway.calls == []
 
 
@@ -174,9 +176,9 @@ def test_take_desktop_control_checks_availability_before_gateway():
         return_value=workspace
     )
     context = {"user": types.SimpleNamespace(id=1), "organization_id": uuid.uuid4()}
-    assert asyncio.run(svc.take_desktop_control(workspace.id, **context)) == [
-        uuid.UUID(int=1)
-    ]
+    assert asyncio.run(
+        svc.interactive_sessions.take_desktop_control(workspace.id, **context)
+    ) == [uuid.UUID(int=1)]
     svc.workspace_access.get_workspace_for_desktop_user.assert_called_once_with(
         workspace.id, **context
     )
@@ -185,7 +187,9 @@ def test_take_desktop_control_checks_availability_before_gateway():
     gateway.calls.clear()
     workspace.active_operation = "stopping"
     with pytest.raises(ConflictError):
-        asyncio.run(svc.take_desktop_control(workspace.id, **context))
+        asyncio.run(
+            svc.interactive_sessions.take_desktop_control(workspace.id, **context)
+        )
     assert gateway.calls == []
 
 
@@ -211,11 +215,15 @@ def test_lifecycle_admissions_ask_gateway_for_busy_agents(runner, user):
     svc = RunnerService(harness_gateway=gateway)
 
     with pytest.raises(ConflictError, match="agent is active"):
-        async_to_sync(svc.create_image_artifact)(workspace.id, "capture")
+        async_to_sync(svc.image_lifecycle.create_image_artifact)(
+            workspace.id, "capture"
+        )
     with pytest.raises(ConflictError, match="agent is active"):
-        async_to_sync(svc.recreate_workspace)(workspace.id, v1.id)
+        async_to_sync(svc.workspace_lifecycle.recreate_workspace)(workspace.id, v1.id)
     with pytest.raises(ConflictError, match="no longer eligible"):
-        async_to_sync(svc.stop_workspace)(workspace.id, auto_stop=True)
+        async_to_sync(svc.workspace_lifecycle.stop_workspace)(
+            workspace.id, auto_stop=True
+        )
 
     assert gateway.calls == [("busy_session", workspace.id)] * 3
     workspace.refresh_from_db()
@@ -230,7 +238,7 @@ def test_deactivate_runner_image_rejects_frozen_definition():
     frozen = types.SimpleNamespace(status=ImageDefinition.Status.DELETED)
     svc = RunnerService()
     with pytest.raises(ConflictError):
-        svc.deactivate_runner_image(
+        svc.image_lifecycle.deactivate_runner_image(
             types.SimpleNamespace(image_definition=frozen, runner=object())
         )
 
@@ -245,7 +253,7 @@ def test_workspace_list_reads_activity_in_one_gateway_batch(busy):
     workspaces = [types.SimpleNamespace(id=uuid.uuid4()) for _ in range(3)]
     svc.workspaces.list_for_scope.return_value = workspaces
 
-    assert svc.list_workspaces() == workspaces
+    assert svc.runner_lifecycle.list_workspaces() == workspaces
     assert gateway.calls == [("busy_workspaces", [ws.id for ws in workspaces])]
     assert all(ws.has_active_harness_session is busy for ws in workspaces)
 
@@ -259,8 +267,8 @@ def test_missing_workspace_and_empty_list_do_not_query_harness():
     svc.workspaces.get_by_id.return_value = None
     svc.workspaces.list_for_scope.return_value = []
 
-    assert svc.list_workspaces() == []
-    assert svc.get_workspace_or_none(uuid.uuid4()) is None
+    assert svc.runner_lifecycle.list_workspaces() == []
+    assert svc.runner_lifecycle.get_workspace_or_none(uuid.uuid4()) is None
     assert gateway.calls == []
 
 
@@ -274,4 +282,4 @@ def test_workspace_read_propagates_activity_lookup_failure():
     svc.workspaces.get_by_id.return_value = types.SimpleNamespace(id=uuid.uuid4())
 
     with pytest.raises(RuntimeError, match="unavailable"):
-        svc.get_workspace_or_none(uuid.uuid4())
+        svc.runner_lifecycle.get_workspace_or_none(uuid.uuid4())

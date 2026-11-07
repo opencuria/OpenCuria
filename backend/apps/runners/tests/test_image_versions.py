@@ -333,7 +333,7 @@ def test_heartbeat_does_not_override_status_during_recreate(service, runner, use
     _, (v1,) = make_line(runner, user)
     ws = qemu_workspace(runner, user, v1)
     RecreateService.allocate(ws.id, v1.id, has_busy_agent=has_busy_agent)
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner, [{"workspace_id": str(ws.id), "status": "removed"}]
     )
     ws.refresh_from_db()

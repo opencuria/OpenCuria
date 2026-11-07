@@ -51,7 +51,9 @@ def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool
 
     Same rule as the REST API: members may only access their own workspaces.
     """
-    return get_runner_service().can_user_access_workspace(user_id, workspace_id)
+    return get_runner_service().workspace_access.can_user_access_workspace(
+        user_id, workspace_id
+    )
 
 
 async def _ensure_frontend_workspace_access(
@@ -119,9 +121,9 @@ async def _require_runner_id(
     if not runner_id:
         logger.warning("%s from unauthenticated session (sid=%s)", event, sid)
     if runner_id:
-        current = await sync_to_async(get_runner_service().is_current_runner_session)(
-            runner_id, sid, require_online=event != "runner:heartbeat"
-        )
+        current = await sync_to_async(
+            get_runner_service().runner_lifecycle.is_current_runner_session
+        )(runner_id, sid, require_online=event != "runner:heartbeat")
         if not current:
             return None
     return runner_id
@@ -141,9 +143,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "operation:heartbeat")
         if not runner_id:
             return
-        await sync_to_async(get_runner_service().record_operation_heartbeat)(
-            runner_id, data
-        )
+        await sync_to_async(
+            get_runner_service().runner_transport.record_operation_heartbeat
+        )(runner_id, data)
 
     @sio.on("operation:inspection")
     async def operation_inspection(sid: str, evidence: dict):
@@ -198,12 +200,14 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             )
 
         try:
-            runner = await sync_to_async(service.authenticate_runner)(token)
+            runner = await sync_to_async(service.runner_lifecycle.authenticate_runner)(
+                token
+            )
         except Exception:
             logger.warning("Connection rejected: invalid token (sid=%s)", sid)
             raise socketio.exceptions.ConnectionRefusedError("Invalid API token")
 
-        await sync_to_async(service.register_runner)(runner, sid=sid)
+        await sync_to_async(service.runner_lifecycle.register_runner)(runner, sid=sid)
         # Store runner_id in the session for later lookups
         await sio.save_session(sid, {"runner_id": str(runner.id)})
         logger.info("Runner connected: %s (sid=%s)", runner.id, sid)
@@ -213,7 +217,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         """Handle runner disconnection."""
         await close_runner_ws_tunnels(sid)
         service = get_runner_service()
-        runner_id = await sync_to_async(service.unregister_runner)(sid)
+        runner_id = await sync_to_async(service.runner_lifecycle.unregister_runner)(sid)
         if runner_id:
             await notify_runner_disconnected(runner_id)
         logger.info("Runner disconnected (sid=%s)", sid)
@@ -233,7 +237,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("runner:register from unknown session (sid=%s)", sid)
             return
 
-        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
+        runner = await sync_to_async(service.runner_lifecycle.get_runner_or_none)(
+            uuid.UUID(runner_id)
+        )
         if runner is None:
             logger.warning(
                 "runner:register for deleted runner %s (sid=%s)",
@@ -242,7 +248,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             )
             return
 
-        await sync_to_async(service.register_runner)(
+        await sync_to_async(service.runner_lifecycle.register_runner)(
             runner,
             sid=sid,
             desktop_epoch=(data.get("desktop_leases") or {}).get("epoch"),
@@ -258,7 +264,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await sync_to_async(service.handle_workspace_rpc_error)(
+        await sync_to_async(service.workspace_lifecycle.handle_workspace_rpc_error)(
             task_id=data["task_id"],
             error=data["error"],
             runner_id=runner_id,
@@ -276,8 +282,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             )
             return {"ok": bool(accepted)} if ack else None
 
-    for event, method in RUNNER_REPLY_METHODS.items():
-        register_reply(event, ack=method == "handle_stream_reply")
+    for event, (domain, _method) in RUNNER_REPLY_METHODS.items():
+        register_reply(event, ack=domain == "stream_transport")
 
     # --- Terminal events from runner ---
 
@@ -288,7 +294,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_terminal_started(
+        await service.interactive_sessions.handle_terminal_started(
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
@@ -302,7 +308,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_terminal_output(
+        await service.interactive_sessions.handle_terminal_output(
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             data=data["data"],
@@ -317,7 +323,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
         service = get_runner_service()
         reason = data.get("reason")
-        await service.handle_terminal_closed(
+        await service.interactive_sessions.handle_terminal_closed(
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             runner_id=runner_id,
@@ -333,7 +339,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_desktop_started(
+        await service.interactive_sessions.handle_desktop_started(
             task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             port=data["port"],
@@ -354,7 +360,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_desktop_process(
+        await service.interactive_sessions.handle_desktop_process(
             workspace_id=data["workspace_id"],
             port=data["port"],
             guest_ip=data["guest_ip"],
@@ -374,7 +380,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_desktop_stopped(
+        await service.interactive_sessions.handle_desktop_stopped(
             task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
@@ -389,7 +395,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_desktop_viewer_released(
+        await service.interactive_sessions.handle_desktop_viewer_released(
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
@@ -438,7 +444,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:list_result", data, runner_id=runner_id
         )
 
@@ -449,7 +455,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:find_result", data, runner_id=runner_id
         )
 
@@ -460,7 +466,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_result", data, runner_id=runner_id
         )
 
@@ -471,7 +477,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk", data, runner_id=runner_id
         )
 
@@ -482,7 +488,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:upload_result", data, runner_id=runner_id
         )
 
@@ -493,7 +499,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:download_result", data, runner_id=runner_id
         )
 
@@ -504,7 +510,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:download_chunk", data, runner_id=runner_id
         )
 
@@ -517,7 +523,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
         service = get_runner_service()
-        await sync_to_async(service.handle_image_build_progress)(
+        await sync_to_async(service.image_lifecycle.handle_image_build_progress)(
             build_job_id=data.get("build_job_id", ""),
             line=data.get("line", ""),
             task_id=data.get("task_id", ""),
@@ -537,7 +543,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("runner:system_metrics from unknown session (sid=%s)", sid)
             return
 
-        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
+        runner = await sync_to_async(service.runner_lifecycle.get_runner_or_none)(
+            uuid.UUID(runner_id)
+        )
         if runner is None:
             logger.warning(
                 "runner:system_metrics for deleted runner %s (sid=%s)",
@@ -547,7 +555,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         try:
-            await sync_to_async(service.record_runner_system_metrics)(runner, data)
+            await sync_to_async(service.runner_lifecycle.record_runner_system_metrics)(
+                runner, data
+            )
             logger.debug(
                 "System metrics stored for runner %s: cpu=%.1f%%",
                 runner_id,
@@ -573,7 +583,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("runner:heartbeat from unknown session (sid=%s)", sid)
             return
 
-        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
+        runner = await sync_to_async(service.runner_lifecycle.get_runner_or_none)(
+            uuid.UUID(runner_id)
+        )
         if runner is None:
             logger.warning(
                 "runner:heartbeat for deleted runner %s (sid=%s)",
@@ -583,16 +595,18 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         # Refresh transport liveness before potentially slow reconciliation.
-        await sync_to_async(service.record_runner_heartbeat)(runner)
+        await sync_to_async(service.runner_lifecycle.record_runner_heartbeat)(runner)
         # Leases lapse on the runner unless an attached client is confirmed.
         try:
-            await service.renew_terminal_leases(runner)
+            await service.interactive_sessions.renew_terminal_leases(runner)
         except Exception:
             logger.exception("Terminal lease renewal failed for runner %s", runner_id)
         if data.get("workspace_states_observed") is False:
             return
 
-        credential_sync_ids = await sync_to_async(service.handle_heartbeat)(
+        credential_sync_ids = await sync_to_async(
+            service.heartbeat_reconciler.handle_heartbeat
+        )(
             runner=runner,
             workspaces=data.get("workspaces", []),
         )
@@ -602,14 +616,16 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         # reattach as RUNNING, confirmed-gone rows become EXITED,
         # unverifiable rows stay RUNNING.
         try:
-            await service.reconcile_vanished_processes(runner)
+            await service.heartbeat_reconciler.reconcile_vanished_processes(runner)
         except Exception:
             logger.exception(
                 "reconcile_vanished_processes failed for runner %s",
                 runner_id,
             )
         if credential_sync_ids:
-            await service.dispatch_credential_reconcile(credential_sync_ids)
+            await service.credential_sync.dispatch_credential_reconcile(
+                credential_sync_ids
+            )
 
 
 def _extract_bearer_token(environ: dict) -> str | None:
@@ -710,7 +726,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         """Clean up subscriptions and terminals when a frontend disconnects."""
         drop_frontend(sid)
         try:
-            await get_runner_service().release_frontend_terminals(sid)
+            await get_runner_service().interactive_sessions.release_frontend_terminals(
+                sid
+            )
         except Exception:
             logger.exception("Releasing terminals of frontend %s failed", sid)
         logger.info("Frontend client disconnected (sid=%s)", sid)
@@ -740,7 +758,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
 
         await sio.leave_room(sid, f"workspace:{workspace_id}", namespace="/frontend")
         unsubscribe_frontend(sid, workspace_id)
-        await get_runner_service().release_frontend_terminals(sid, workspace_id)
+        await get_runner_service().interactive_sessions.release_frontend_terminals(
+            sid, workspace_id
+        )
         logger.debug("Frontend %s unsubscribed from workspace %s", sid, workspace_id)
 
     # --- Terminal events from frontend ---
@@ -755,7 +775,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_terminal_input(
+        await service.interactive_sessions.forward_terminal_input(
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             data=data["data"],
@@ -771,7 +791,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_terminal_resize(
+        await service.interactive_sessions.forward_terminal_resize(
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             cols=data.get("cols", 80),
@@ -788,7 +808,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_terminal_close(
+        await service.interactive_sessions.forward_terminal_close(
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
         )
@@ -807,7 +827,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:list",
             data=data,
@@ -825,7 +845,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:find",
             data=data,
@@ -849,7 +869,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:read",
             data=data,
@@ -867,7 +887,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:upload_start",
             data=data,
@@ -885,7 +905,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:upload_chunk",
             data=data,
@@ -903,7 +923,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:upload_finish",
             data=data,
@@ -928,7 +948,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         service = get_runner_service()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=data["workspace_id"],
             event="files:download",
             data=data,

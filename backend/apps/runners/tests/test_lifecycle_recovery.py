@@ -275,7 +275,7 @@ async def test_worker_recovers_offline_intent_after_registration(
             organization=runner.organization,
             name="Offline recipe",
         )
-        build = await service.trigger_build_job(
+        build = await service.image_lifecycle.trigger_build_job(
             image_definition=definition, runner=runner, created_by=user
         )
         image, task = build.pending_generation, build.build_task
@@ -284,7 +284,7 @@ async def test_worker_recovers_offline_intent_after_registration(
         definition.packages = ["curl"]
         definition.save(update_fields=["packages"])
     else:
-        task = await service.remove_workspace(workspace.id)
+        task = await service.workspace_lifecycle.remove_workspace(workspace.id)
     command = LifecycleCommand.objects.get(task=task)
     assert command.event == f"task:{kind}"
     sio_mock.emit.assert_not_awaited()
@@ -292,7 +292,7 @@ async def test_worker_recovers_offline_intent_after_registration(
     transport = AsyncMock()
     await RecoveryService().tick(transport)
     transport.emit.assert_not_awaited()
-    service.register_runner(
+    service.runner_lifecycle.register_runner(
         runner,
         sid="reconnected",
     )

@@ -57,13 +57,13 @@ def service(sio_mock: AsyncMock) -> RunnerService:
 class TestRegisterRunner:
     def test_register_sets_online(self, service, runner):
         """Registering a runner should set it online."""
-        result = service.register_runner(runner, sid="new-sid")
+        result = service.runner_lifecycle.register_runner(runner, sid="new-sid")
         assert result.status == RunnerStatus.ONLINE
         assert result.sid == "new-sid"
 
     def test_unregister_sets_offline(self, service, runner):
         """Disconnecting a runner should set it offline."""
-        service.unregister_runner(runner.sid)
+        service.runner_lifecycle.unregister_runner(runner.sid)
         runner.refresh_from_db()
         assert runner.status == RunnerStatus.OFFLINE
 
@@ -98,7 +98,7 @@ class TestCreateWorkspace:
         )
         build.current_generation = artifact
         build.save()
-        workspace, task = await service.create_workspace(
+        workspace, task = await service.workspace_lifecycle.create_workspace(
             name="Test Workspace",
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
@@ -158,7 +158,7 @@ class TestCreateWorkspace:
         build.current_generation = artifact
         build.save()
 
-        await service.create_workspace(
+        await service.workspace_lifecycle.create_workspace(
             name="Test Workspace",
             repos=[],
             image_artifact_id=artifact.id,
@@ -178,7 +178,7 @@ class TestCreateWorkspace:
     async def test_requires_image_selection(self, service, runner, user):
         """Creating a workspace without an image should be rejected."""
         with pytest.raises(ConflictError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="No Image Workspace",
                 repos=[],
                 user=user,
@@ -189,7 +189,7 @@ class TestCreateWorkspace:
     async def test_unknown_image_raises_not_found(self, service):
         """Selecting an unknown image should be rejected."""
         with pytest.raises(NotFoundError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="No Runner Workspace",
                 repos=[],
                 image_artifact_id=uuid.uuid4(),
@@ -252,7 +252,7 @@ class TestCreateWorkspace:
         build.save()
 
         with pytest.raises(NotFoundError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="cross-org",
                 repos=[],
                 image_artifact_id=artifact.id,
@@ -301,7 +301,7 @@ class TestCreateWorkspace:
             ConflictError,
             match="Selected runner does not have the selected image artifact",
         ):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="mismatch-runner",
                 repos=[],
                 image_artifact_id=artifact.id,
@@ -358,7 +358,7 @@ class TestCreateWorkspace:
         )
 
         with pytest.raises(NotFoundError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="cross-org-image",
                 repos=[],
                 image_artifact_id=image.id,
@@ -380,7 +380,7 @@ class TestCreateWorkspace:
             status=ImageInstance.Status.READY,
         )
 
-        workspace, task = await service.create_workspace(
+        workspace, task = await service.workspace_lifecycle.create_workspace(
             name="From Orphan Capture",
             repos=[],
             image_artifact_id=artifact.id,
@@ -407,7 +407,7 @@ class TestRemoveWorkspace:
         runner.sid = ""
         runner.save(update_fields=["sid"])
 
-        await service.remove_workspace(workspace.id)
+        await service.workspace_lifecycle.remove_workspace(workspace.id)
         task = Task.objects.latest("created_at")
         assert task.status == TaskStatus.IN_PROGRESS
         workspace.refresh_from_db()
@@ -425,7 +425,7 @@ class TestRemoveWorkspace:
         runner.status = RunnerStatus.OFFLINE
         runner.save(update_fields=["status"])
 
-        await service.remove_workspace(workspace.id)
+        await service.workspace_lifecycle.remove_workspace(workspace.id)
 
         workspace.refresh_from_db()
         task = Task.objects.latest("created_at")
@@ -465,7 +465,7 @@ class TestCreateImageArtifactSecurity:
         )
 
         with pytest.raises(WorkspaceNotFoundError):
-            await service.create_image_artifact(
+            await service.image_lifecycle.create_image_artifact(
                 workspace_id=foreign_workspace.id,
                 name="forbidden-image-artifact",
                 organization_id=local_org.id,
@@ -508,12 +508,14 @@ class TestWorkspaceOwnerScoping:
             created_by=admin,
         )
 
-        visible = service.list_workspaces(organization_id=org.id, user=admin)
+        visible = service.runner_lifecycle.list_workspaces(
+            organization_id=org.id, user=admin
+        )
 
         assert len(visible) == 1
         assert visible[0].created_by_id == admin.id
         with pytest.raises(WorkspaceNotFoundError):
-            service.get_workspace_for_user(
+            service.workspace_access.get_workspace_for_user(
                 owner_workspace.id,
                 user=admin,
                 organization_id=org.id,
@@ -541,7 +543,7 @@ class TestImageDeletionLifecycle:
             deleting_task_id=str(task.id),
         )
 
-        service.handle_image_artifact_deleted(
+        service.image_lifecycle.handle_image_artifact_deleted(
             task_id=str(task.id),
             image_instance_id=str(image.id),
             runner_id=str(runner.id),
@@ -588,7 +590,7 @@ class TestImageDeletionLifecycle:
         build.current_generation = image
         build.save()
 
-        service.handle_image_artifact_delete_failed(
+        service.image_lifecycle.handle_image_artifact_delete_failed(
             task_id=str(task.id),
             error="runner refused delete",
             runner_id=str(runner.id),
@@ -645,7 +647,10 @@ class TestCreateWorkspaceFromImageArtifact:
             user=user,
         )
 
-        workspace, task = await service.create_workspace_from_image_artifact(
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone Workspace",
             credential_ids=[credential.id],
@@ -716,7 +721,7 @@ class TestCreateWorkspaceFromImageArtifact:
         tasks_before = RunnerTask.objects.count()
 
         with pytest.raises(PluginSelectionError):
-            await service.create_workspace_from_image_artifact(
+            await service.workspace_lifecycle.create_workspace_from_image_artifact(
                 image_artifact_id=artifact.id,
                 name="Atomic clone",
                 credential_ids=[],
@@ -750,7 +755,10 @@ class TestCreateWorkspaceFromImageArtifact:
             status=ImageInstance.Status.READY,
         )
 
-        workspace, task = await service.create_workspace_from_image_artifact(
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone Without Credentials",
             user=user,
@@ -796,7 +804,10 @@ class TestCreateWorkspaceFromImageArtifact:
             status=ImageInstance.Status.READY,
         )
 
-        workspace, task = await service.create_workspace_from_image_artifact(
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone After Delete",
             user=user,
@@ -823,7 +834,10 @@ class TestCreateWorkspaceFromImageArtifact:
             status=ImageInstance.Status.READY,
         )
 
-        workspace, task = await service.create_workspace_from_image_artifact(
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone Orphan Capture",
             user=user,
@@ -850,7 +864,7 @@ class TestHandleWorkspaceCreated:
         workspace.status = WorkspaceStatus.CREATING
         workspace.save()
 
-        service.handle_workspace_created(
+        service.workspace_lifecycle.handle_workspace_created(
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
@@ -877,7 +891,7 @@ class TestHandleWorkspaceError:
         workspace.status = WorkspaceStatus.CREATING
         workspace.save()
 
-        service.handle_workspace_error(
+        service.workspace_lifecycle.handle_workspace_error(
             task_id=str(task.id),
             error="clone failed",
         )
@@ -910,7 +924,7 @@ class TestHandleWorkspaceError:
             ]
         )
 
-        service.handle_workspace_error(
+        service.workspace_lifecycle.handle_workspace_error(
             task_id=str(task.id),
             error="runner delete failed",
         )
@@ -939,7 +953,7 @@ class TestWorkspaceOperationState:
             ]
         )
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             qemu_vcpus=4,
             qemu_memory_mb=8192,
@@ -979,7 +993,7 @@ class TestWorkspaceOperationState:
 
         monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
         try:
-            updated = await service.update_workspace(
+            updated = await service.workspace_lifecycle.update_workspace(
                 workspace.id,
                 qemu_vcpus=4,
                 qemu_memory_mb=8192,
@@ -1014,7 +1028,7 @@ class TestWorkspaceOperationState:
             ]
         )
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             qemu_vcpus=runner.qemu_default_vcpus,
             qemu_memory_mb=runner.qemu_default_memory_mb,
@@ -1041,7 +1055,7 @@ class TestWorkspaceOperationState:
         workspace.save(update_fields=["active_operation", "updated_at"])
 
         with pytest.raises(ConflictError, match="currently restarting"):
-            await service.stop_workspace(workspace.id)
+            await service.workspace_lifecycle.stop_workspace(workspace.id)
 
 
 @pytest.mark.django_db
@@ -1078,7 +1092,7 @@ class TestHeartbeatReconciliation:
         """Heartbeat should promote STOPPED to RUNNING when runtime is active."""
         runner = self._create_runner()
         stopped_workspace = self._create_workspace(runner, WorkspaceStatus.STOPPED)
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1096,7 +1110,7 @@ class TestHeartbeatReconciliation:
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.CREATING)
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1114,7 +1128,7 @@ class TestHeartbeatReconciliation:
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.RUNNING)
 
-        service.handle_heartbeat(runner=runner, workspaces=[])
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=[])
 
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.RUNNING
@@ -1123,7 +1137,7 @@ class TestHeartbeatReconciliation:
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.DELETING)
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1147,8 +1161,8 @@ class TestHeartbeatReconciliation:
             }
         ]
 
-        service.handle_heartbeat(runner=runner, workspaces=payload)
-        service.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
 
         sio_mock.emit.assert_not_awaited()
 
@@ -1163,7 +1177,7 @@ class TestHeartbeatReconciliation:
         runner = self._create_runner()
         workspace = self._create_workspace(runner, terminal_state)
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1189,7 +1203,7 @@ class TestAutoStopInactiveWorkspaces:
         workspace.last_activity_at = timezone.now() - timedelta(minutes=10)
         workspace.save(update_fields=["last_activity_at", "updated_at"])
 
-        tasks = await service.auto_stop_inactive_workspaces(
+        tasks = await service.heartbeat_reconciler.auto_stop_inactive_workspaces(
             runner_id=workspace.runner_id
         )
 
@@ -1206,7 +1220,7 @@ class TestAutoStopInactiveWorkspaces:
         self, service, workspace
     ):
         before = workspace.last_activity_at
-        await service.forward_terminal_input(
+        await service.interactive_sessions.forward_terminal_input(
             workspace_id=str(workspace.id),
             terminal_id="term-1",
             data="ls\n",
@@ -1215,7 +1229,7 @@ class TestAutoStopInactiveWorkspaces:
         after_terminal = workspace.last_activity_at
         assert after_terminal >= before
 
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:list",
             data={
@@ -1234,7 +1248,7 @@ class TestForwardFilesFind:
     async def test_forwards_files_find_to_online_runner(
         self, service, sio_mock, workspace
     ):
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:find",
             data={
@@ -1263,7 +1277,7 @@ class TestForwardFilesFind:
         monkeypatch.setattr(
             "common.realtime.emit_to_frontend", emit
         )
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:find",
             data={
@@ -1311,8 +1325,8 @@ class TestForwardFilesFind:
             }
         ]
 
-        service.handle_heartbeat(runner=runner, workspaces=payload)
-        service.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
 
         sio_mock.emit.assert_not_awaited()
 
@@ -1372,7 +1386,7 @@ class TestStartTerminal:
         )
         workspace.credentials.add(credential)
 
-        task = await service.start_terminal(workspace.id)
+        task = await service.interactive_sessions.start_terminal(workspace.id)
 
         assert task.type == TaskType.START_TERMINAL
         event, payload = sio_mock.emit.await_args.args[:2]
@@ -1397,7 +1411,7 @@ class TestHarnessReplyRouting:
             "content": "agents",
         }
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             payload,
             runner_id=str(runner.id),
@@ -1421,7 +1435,7 @@ class TestHarnessReplyRouting:
             "image_b64": "aGVsbG8=",
         }
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:desktop_action_result",
             payload,
             runner_id=str(runner.id),
@@ -1443,7 +1457,7 @@ class TestHarnessReplyRouting:
             "workspace_id": workspace.id.hex,
         }
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             payload,
             runner_id=runner.id.hex,
@@ -1461,7 +1475,7 @@ class TestHarnessReplyRouting:
             lambda data: routed.append(data) or True,
         )
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             {
                 "request_id": "req-foreign",
@@ -1480,7 +1494,7 @@ class TestHarnessReplyRouting:
             lambda data: routed.append(data) or True,
         )
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             {
                 "request_id": "req-missing",
@@ -1499,7 +1513,7 @@ class TestHarnessReplyRouting:
             lambda data: routed.append(data) or True,
         )
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             {
                 "request_id": "req-bad-runner",
@@ -1623,7 +1637,9 @@ class TestImageDefinitionLifecycle:
         build.current_generation = legacy_image
         build.save()
 
-        updated = await service.activate_build_job(build, created_by=user)
+        updated = await service.image_lifecycle.activate_build_job(
+            build, created_by=user
+        )
 
         build.refresh_from_db()
         instance = ImageInstance.objects.get(build_job=build)
@@ -1648,7 +1664,9 @@ class TestImageDefinitionLifecycle:
             status=ImageBuildJob.Status.DEACTIVATED,
         )
 
-        updated = await service.activate_build_job(build, created_by=user)
+        updated = await service.image_lifecycle.activate_build_job(
+            build, created_by=user
+        )
 
         build.refresh_from_db()
         assert updated.id == build.id
@@ -1666,7 +1684,7 @@ class TestImageDefinitionLifecycle:
             base_distro="ubuntu:24.04",
         )
 
-        build = await service.trigger_build_job(
+        build = await service.image_lifecycle.trigger_build_job(
             image_definition=definition,
             runner=offline_runner,
             activate=True,
@@ -1691,7 +1709,7 @@ class TestImageDefinitionLifecycle:
         )
 
         with pytest.raises(ConflictError, match="deleting"):
-            await service.trigger_build_job(
+            await service.image_lifecycle.trigger_build_job(
                 image_definition=definition,
                 runner=runner,
                 activate=True,
@@ -1708,7 +1726,7 @@ class TestImageDefinitionLifecycle:
             delete_last_error="still used by 1 workspace(s)",
         )
 
-        await service.activate_image_definition(definition.id)
+        await service.image_lifecycle.activate_image_definition(definition.id)
 
         definition.refresh_from_db()
         assert definition.status == ImageDefinition.Status.ACTIVE
@@ -1731,7 +1749,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save()
 
-        service.handle_workspace_created(
+        service.workspace_lifecycle.handle_workspace_created(
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
@@ -1753,7 +1771,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = False
         workspace.save()
 
-        service.handle_workspace_created(
+        service.workspace_lifecycle.handle_workspace_created(
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
@@ -1775,7 +1793,7 @@ class TestPersistentWorkspaceCredentials:
             status=TaskStatus.IN_PROGRESS,
         )
 
-        service.handle_workspace_stopped(
+        service.workspace_lifecycle.handle_workspace_stopped(
             str(task.id), str(workspace.id), credentials_present=False
         )
 
@@ -1789,7 +1807,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present"])
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1816,7 +1834,7 @@ class TestPersistentWorkspaceCredentials:
         )
 
         with pytest.raises(ConflictError, match="credentials on disk"):
-            await service.create_image_artifact(
+            await service.image_lifecycle.create_image_artifact(
                 workspace_id=workspace.id,
                 name="blocked-capture",
             )
@@ -1833,7 +1851,7 @@ class TestPersistentWorkspaceCredentials:
             credentials_present=False,
         )
 
-        captured, task = await service.create_image_artifact(
+        captured, task = await service.image_lifecycle.create_image_artifact(
             workspace_id=workspace.id,
             name="clean-capture",
         )
@@ -1879,7 +1897,7 @@ class TestPersistentWorkspaceCredentials:
         )
         workspace.credentials.add(credential)
 
-        await service.resume_workspace(workspace.id)
+        await service.workspace_lifecycle.resume_workspace(workspace.id)
 
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:resume_workspace"
@@ -1952,7 +1970,7 @@ class TestPersistentWorkspaceCredentials:
             value=None,
             user=user,
         )
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[env_cred.id, file_cred.id, ssh_cred.id],
         )
@@ -1989,7 +2007,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.save(update_fields=["credentials_present"])
         sio_mock.call = AsyncMock(return_value={"ok": True})
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[credential.id],
             user=user,
@@ -2025,7 +2043,7 @@ class TestPersistentWorkspaceCredentials:
             return_value={"ok": True, "credentials_present": False}
         )
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[replacement.id],
             user=user,
@@ -2117,7 +2135,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = False
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[oauth_credential.id],
         )
@@ -2146,7 +2164,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[env_credential.id, oauth_credential.id],
         )
@@ -2178,7 +2196,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[],
         )
@@ -2217,7 +2235,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(old_cred)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        await service.update_workspace(
+        await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[new_cred.id],
         )
@@ -2238,7 +2256,7 @@ class TestPersistentWorkspaceCredentials:
             env_var="GITHUB_TOKEN",
             value="stopped-token",
         )
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             stopped_workspace.id,
             credential_ids=[credential.id],
         )
@@ -2262,7 +2280,9 @@ class TestPersistentWorkspaceCredentials:
         )
 
         with pytest.raises(RunnerOfflineError):
-            await service.update_workspace(workspace.id, qemu_vcpus=2)
+            await service.workspace_lifecycle.update_workspace(
+                workspace.id, qemu_vcpus=2
+            )
 
         workspace.refresh_from_db()
         assert workspace.qemu_vcpus == 1
@@ -2284,7 +2304,7 @@ class TestPersistentWorkspaceCredentials:
             env_var="GITHUB_TOKEN",
             value="offline-token",
         )
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[credential.id],
             user=workspace.created_by,
@@ -2317,7 +2337,7 @@ class TestPersistentWorkspaceCredentials:
         )
         workspace.credentials.add(credential)
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[],
             user=user,
@@ -2344,7 +2364,7 @@ class TestPersistentWorkspaceCredentials:
         )
         sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[credential.id],
             user=user,
@@ -2378,7 +2398,7 @@ class TestPersistentWorkspaceCredentials:
             }
         )
         updated = asyncio.run(
-            service.update_workspace(
+            service.workspace_lifecycle.update_workspace(
                 workspace.id,
                 credential_ids=[],
                 user=user,
@@ -2390,7 +2410,7 @@ class TestPersistentWorkspaceCredentials:
         assert workspace.credentials.count() == 0
         assert workspace.credentials_present is True
 
-        sync_ids = service.handle_heartbeat(
+        sync_ids = service.heartbeat_reconciler.handle_heartbeat(
             runner=workspace.runner,
             workspaces=[
                 {
@@ -2401,7 +2421,7 @@ class TestPersistentWorkspaceCredentials:
         )
         assert workspace.id in sync_ids
         sio_mock.emit = AsyncMock()
-        asyncio.run(service.dispatch_credential_reconcile(sync_ids))
+        asyncio.run(service.credential_sync.dispatch_credential_reconcile(sync_ids))
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {}
         assert payload["files"] == []
@@ -2413,7 +2433,7 @@ class TestPersistentWorkspaceCredentials:
             .order_by("-created_at")
             .first()
         )
-        service.handle_credentials_injected(
+        service.credential_sync.handle_credentials_injected(
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             credentials_present=False,
@@ -2437,7 +2457,7 @@ class TestPersistentWorkspaceCredentials:
         )
         sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[credential.id],
             user=user,
@@ -2467,7 +2487,7 @@ class TestPersistentWorkspaceCredentials:
         sio_mock.call = AsyncMock(
             return_value={"ok": True, "credentials_present": True}
         )
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             credential_ids=[credential.id],
             user=user,
@@ -2492,7 +2512,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(credential)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        await service.update_workspace(
+        await service.workspace_lifecycle.update_workspace(
             workspace.id,
             name="Renamed Workspace",
             credential_ids=[credential.id],
@@ -2520,7 +2540,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = False
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        sync_ids = service.handle_heartbeat(
+        sync_ids = service.heartbeat_reconciler.handle_heartbeat(
             runner=workspace.runner,
             workspaces=[
                 {
@@ -2543,7 +2563,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        sync_ids = service.handle_heartbeat(
+        sync_ids = service.heartbeat_reconciler.handle_heartbeat(
             runner=workspace.runner,
             workspaces=[
                 {
@@ -2571,7 +2591,7 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = False
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        await service.dispatch_credential_reconcile([workspace.id])
+        await service.credential_sync.dispatch_credential_reconcile([workspace.id])
 
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:inject_credentials"
@@ -2603,7 +2623,7 @@ class TestChunkedFileTransferOwnership:
             "total_chunks": 2,
             "content": "aGVsbG8=",
         }
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk", payload, runner_id=str(workspace.runner_id)
         )
         emit.assert_awaited_once_with("files:content_chunk", payload, str(workspace.id))
@@ -2624,7 +2644,7 @@ class TestChunkedFileTransferOwnership:
             "total_chunks": 2,
             "content": "d29ybGQ=",
         }
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:download_chunk", payload, runner_id=str(workspace.runner_id)
         )
         emit.assert_awaited_once_with(
@@ -2639,7 +2659,7 @@ class TestChunkedFileTransferOwnership:
         monkeypatch.setattr(
             "common.realtime.emit_to_frontend", emit
         )
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk",
             {
                 "workspace_id": str(workspace.id),
@@ -2662,7 +2682,7 @@ class TestChunkedFileTransferOwnership:
             "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_chunk",
             data={
@@ -2689,7 +2709,7 @@ class TestChunkedFileTransferOwnership:
             "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_chunk",
             data={
@@ -2718,7 +2738,7 @@ class TestChunkedFileTransferOwnership:
             "path": "/workspace/a.bin",
             "total_chunks": total,
         }
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_start",
             data=data,
@@ -2749,7 +2769,7 @@ class TestChunkedFileTransferOwnership:
             "path": "/workspace/a.bin",
             "total_chunks": 2,
         }
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id), event="files:upload_start", data=start
         )
         emit.assert_awaited_once()
@@ -2758,7 +2778,7 @@ class TestChunkedFileTransferOwnership:
         assert payload["error"] == "Runner is offline"
 
         emit.reset_mock()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_chunk",
             data={
@@ -2770,7 +2790,7 @@ class TestChunkedFileTransferOwnership:
                 "content": "aGVsbG8=",
             },
         )
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_finish",
             data={
@@ -2791,7 +2811,7 @@ class TestChunkedFileTransferOwnership:
             "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_chunk",
             data={
@@ -2817,7 +2837,7 @@ class TestChunkedFileTransferOwnership:
             "common.realtime.emit_to_frontend", emit
         )
         sio_mock.emit.reset_mock()
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_chunk",
             data={
@@ -2848,7 +2868,7 @@ class TestChunkedFileTransferOwnership:
             # Exactly 256 KiB clean; surrounding whitespace is normalized.
             "content": "  " + "A" * (256 * 1024) + "\n",
         }
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:upload_chunk",
             data=data,
@@ -2867,7 +2887,7 @@ class TestChunkedFileTransferOwnership:
             "common.realtime.emit_to_frontend", emit
         )
         for total in (0, 561, "bad"):
-            await service.handle_files_result(
+            await service.file_transfer.handle_files_result(
                 "files:content_chunk",
                 {
                     "workspace_id": str(workspace.id),
@@ -2889,7 +2909,7 @@ class TestChunkedFileTransferOwnership:
         monkeypatch.setattr(
             "common.realtime.emit_to_frontend", emit
         )
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk",
             {
                 "workspace_id": str(workspace.id),
@@ -2919,14 +2939,14 @@ class TestChunkedFileTransferOwnership:
             "total_chunks": 1,
             "content": "A" * (256 * 1024),
         }
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk", exact, runner_id=str(workspace.runner_id)
         )
         emit.assert_awaited_once_with("files:content_chunk", exact, str(workspace.id))
 
         emit.reset_mock()
         over = dict(exact, request_id="over-cap", content="A" * (256 * 1024 + 1))
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk", over, runner_id=str(workspace.runner_id)
         )
         emit.assert_not_called()
@@ -2940,7 +2960,7 @@ class TestChunkedFileTransferOwnership:
             "common.realtime.emit_to_frontend", emit
         )
         for content in ("", "   \n ", "A" * (256 * 1024 + 1)):
-            await service.handle_files_result(
+            await service.file_transfer.handle_files_result(
                 "files:content_chunk",
                 {
                     "workspace_id": str(workspace.id),
@@ -2970,7 +2990,7 @@ class TestChunkedFileTransferOwnership:
             "total_chunks": 1,
             "content": "aGVs\nbG8=  ",
         }
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk", payload, runner_id=str(workspace.runner_id)
         )
         emit.assert_awaited_once_with("files:content_chunk", payload, str(workspace.id))
@@ -2983,7 +3003,7 @@ class TestChunkedFileTransferOwnership:
         monkeypatch.setattr(
             "common.realtime.emit_to_frontend", emit
         )
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk",
             {
                 "request_id": "no-ws",
@@ -3004,7 +3024,7 @@ class TestChunkedFileTransferOwnership:
         monkeypatch.setattr(
             "common.realtime.emit_to_frontend", emit
         )
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:content_chunk",
             {
                 "workspace_id": "not-a-uuid",
@@ -3026,7 +3046,7 @@ class TestChunkedFileTransferOwnership:
         monkeypatch.setattr(
             "common.realtime.emit_to_frontend", emit
         )
-        await service.handle_files_result(
+        await service.file_transfer.handle_files_result(
             "files:download_chunk",
             {
                 "workspace_id": str(workspace.id),
@@ -3050,7 +3070,7 @@ class TestChunkedFileTransferOwnership:
         assert accessor is None
         # Invalid chunk (empty content) must not reach the accessor routing:
         # it drops inside _route_harness_reply before any accessor lookup.
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_chunk",
             {
                 "workspace_id": str(workspace.id),
@@ -3071,7 +3091,7 @@ class TestChunkedFileTransferOwnership:
         from apps.harness.access.runner_accessor import _ACCESSORS_BY_REQUEST
 
         request_id = f"hr-nowss-{uuid.uuid4().hex[:8]}"
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_chunk",
             {
                 "request_id": request_id,

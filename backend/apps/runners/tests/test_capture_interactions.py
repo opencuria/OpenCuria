@@ -83,7 +83,9 @@ async def test_capture_blocks_interactive_dispatch(
         if method in {"start_desktop", "stop_desktop"}:
             kwargs.update(viewer_client_id=uuid.uuid4(), intent_revision=1)
     with pytest.raises(ConflictError):
-        await getattr(service, method)(workspace_id, *args, **kwargs)
+        await getattr(service.interactive_sessions, method)(
+            workspace_id, *args, **kwargs
+        )
     if kwargs:
         service.interactive_sessions._viewer_rpc.assert_not_awaited()
     service.runner_transport.emit_to_runner.assert_not_awaited()
@@ -107,7 +109,7 @@ async def test_capture_blocks_interactive_dispatch(
 async def test_capture_blocks_every_file_dispatch(interaction_service, event):
     service, workspace = interaction_service
     with pytest.raises(ConflictError):
-        await service.forward_files_event(str(workspace.id), event, {})
+        await service.file_transfer.forward_files_event(str(workspace.id), event, {})
     service.runner_transport.emit_to_runner.assert_not_awaited()
 
 
@@ -141,7 +143,7 @@ async def test_capture_blocks_live_processes(interaction_service, method):
     )
     kwargs = {"name": "test"} if method == "start_process" else {}
     with pytest.raises(ConflictError):
-        await getattr(service, method)(*args, **kwargs)
+        await getattr(service.process_manager, method)(*args, **kwargs)
     service.process_manager._await_process_result.assert_not_awaited()
     service.runner_transport.emit_to_runner.assert_not_awaited()
 
@@ -152,7 +154,7 @@ async def test_saved_process_history_is_allowed(interaction_service):
     service.processes = Mock()
     service.process_manager.processes = service.processes
     service.processes.list_by_workspace.return_value = []
-    assert await service.list_processes(workspace.id, live=False) == []
+    assert await service.process_manager.list_processes(workspace.id, live=False) == []
 
 
 def test_process_guard_preserves_state_and_offline_errors(interaction_service):
@@ -176,7 +178,9 @@ async def test_normal_terminal_input_dispatches(interaction_service):
     service, workspace = interaction_service
     workspace.active_operation = ""
     workspace.current_task_id = None
-    await service.forward_terminal_input(str(workspace.id), "term", "ok")
+    await service.interactive_sessions.forward_terminal_input(
+        str(workspace.id), "term", "ok"
+    )
     service.runner_transport.emit_to_runner.assert_awaited_once()
 
 
@@ -270,7 +274,9 @@ async def test_internal_session_cleanup_can_settle_during_capture(interaction_se
     service.process_manager.processes = service.processes
     service.processes.list_running_session_processes.return_value = [row]
     service.process_manager._stop_running_process = AsyncMock(return_value=row)
-    assert await service.stop_session_processes(workspace.id, uuid.uuid4()) == [row]
+    assert await service.process_manager.stop_session_processes(
+        workspace.id, uuid.uuid4()
+    ) == [row]
     service.process_manager._stop_running_process.assert_awaited_once_with(
         workspace, row
     )
@@ -316,7 +322,7 @@ async def test_file_runner_results_not_blocked_during_capture(
     emit = AsyncMock()
     monkeypatch.setattr("common.realtime.emit_to_frontend", emit)
     payload = {"workspace_id": str(workspace.id), "entries": []}
-    await service.handle_files_result("files:list_result", payload)
+    await service.file_transfer.handle_files_result("files:list_result", payload)
     emit.assert_awaited_once_with("files:list_result", payload, str(workspace.id))
 
 
@@ -331,7 +337,7 @@ async def test_file_normal_dispatch_and_offline_error(
     workspace.runner.is_online = online
     emit = AsyncMock()
     monkeypatch.setattr("common.realtime.emit_to_frontend", emit)
-    await service.forward_files_event(
+    await service.file_transfer.forward_files_event(
         str(workspace.id), "files:download", {"request_id": "read", "path": "/x"}
     )
     if online:

@@ -11,20 +11,25 @@ from pydantic import ValidationError
 from apps.runners.desktop_proxy import _viewer_query, build_vnc_redirect_url
 from apps.runners.schemas import DesktopViewerIntentIn
 from apps.runners.services import RunnerService
+from apps.runners.services.domains.interactive_sessions import (
+    InteractiveSessionsService,
+)
 from common.exceptions import ConflictError
 
 
 def test_identity_scopes_client_to_user_and_workspace():
     workspace, other_workspace, client = [uuid.uuid4() for _ in range(3)]
-    identity = RunnerService.viewer_identity(workspace, 1, client)
-    assert identity == RunnerService.viewer_identity(workspace, 1, client)
+    identity = InteractiveSessionsService.viewer_identity(workspace, 1, client)
+    assert identity == InteractiveSessionsService.viewer_identity(workspace, 1, client)
     assert (
         identity["lease_id"]
-        != RunnerService.viewer_identity(workspace, 2, client)["lease_id"]
+        != InteractiveSessionsService.viewer_identity(workspace, 2, client)["lease_id"]
     )
     assert (
         identity["lease_id"]
-        != RunnerService.viewer_identity(other_workspace, 1, client)["lease_id"]
+        != InteractiveSessionsService.viewer_identity(other_workspace, 1, client)[
+            "lease_id"
+        ]
     )
     assert identity["owner_id"] == "1"
     assert uuid.UUID(identity["lease_id"]).version == 5
@@ -60,7 +65,7 @@ async def test_renew_does_not_recreate_ended_intent(state):
         return_value={"lease_state": state, "revision": 3, "epoch": "epoch"}
     )
     with pytest.raises(ConflictError):
-        await service.renew_desktop(
+        await service.interactive_sessions.renew_desktop(
             uuid.uuid4(),
             user=SimpleNamespace(id=1),
             organization_id=uuid.uuid4(),
@@ -88,7 +93,9 @@ async def test_renew_only_existing_matching_revision_and_status_is_private():
     kwargs = dict(
         user=SimpleNamespace(id=1), organization_id=org, viewer_client_id=client
     )
-    result = await service.renew_desktop(workspace, **kwargs, intent_revision=4)
+    result = await service.interactive_sessions.renew_desktop(
+        workspace, **kwargs, intent_revision=4
+    )
     assert result == {"viewer_lease_state": "held", "revision": 4, "epoch": "e"}
     assert (
         service.interactive_sessions._viewer_rpc.await_args_list[1].args[1] == "renew"
@@ -97,7 +104,9 @@ async def test_renew_only_existing_matching_revision_and_status_is_private():
         service.interactive_sessions._viewer_rpc.await_args_list[1].args[2]["epoch"]
         == "e"
     )
-    result = await service.viewer_desktop_status(workspace, **kwargs)
+    result = await service.interactive_sessions.viewer_desktop_status(
+        workspace, **kwargs
+    )
     assert result["viewer_lease_state"] == "held"
     assert "owner_id" not in result and "lease_id" not in result
     service.interactive_sessions._viewer_workspace.assert_awaited()

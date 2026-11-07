@@ -1,11 +1,11 @@
 # Runner application services
 
-`RunnerService` is the composition root and application facade used by REST,
-Socket.IO, MCP and the harness. Its operation methods delegate to named service
-instances. Domain behavior does not inherit from the facade, reach into it, or
-depend on sibling methods appearing on a shared `self`.
-Internal callers use the owning service directly; internal helpers, constants
-and mutable state are not mirrored on the facade.
+`RunnerService` is the composition root: it wires the domain and infrastructure
+services once per process and exposes them as attributes. REST, Socket.IO, MCP
+and the harness call the owning service directly, e.g.
+`get_runner_service().workspace_lifecycle.stop_workspace(...)`. Domain behavior
+does not inherit from `RunnerService`, reach into it, or depend on sibling
+methods appearing on a shared `self`.
 
 Each domain and infrastructure service has a keyword-only constructor listing its
 repositories and collaborators. No constructor accepts a `RunnerService` or an
@@ -16,15 +16,15 @@ The dependency graph follows these layers:
 
 ```mermaid
 flowchart TD
-    Facade[RunnerService: composition and adapter API]
+    Root[RunnerService: composition root]
     Domains[Workspace, runner, image, interactive, git and file services]
     Processes[ProcessManagerService]
     Credentials[CredentialSyncService]
     Infra[Transport, ownership, frontend bus and task dispatch]
     Repositories[Repository adapters]
-    Facade --> Domains
-    Facade --> Processes
-    Facade --> Credentials
+    Root --> Domains
+    Root --> Processes
+    Root --> Credentials
     Domains --> Processes
     Domains --> Credentials
     Domains --> Infra
@@ -36,11 +36,11 @@ flowchart TD
 Workspace admission is supplied by `OwnershipService`; dispatch goes through
 `RunnerTransportService`; frontend projection goes through `FrontendBusService`.
 Heartbeat reconciliation coordinates the workspace lifecycle, process management,
-and session observations through their explicit service references. The facade
+and session observations through their explicit service references. The root
 coordinates durable operation-result callbacks and adapts harness desktop calls.
-Credential acknowledgement uses a named result callback instead of depending on
-all facade methods. Pure operation labels and file-chunk validation are supplied
-as typed functions, so those infrastructure services need no domain instance.
+Credential acknowledgement uses a named result callback. Pure operation labels
+and file-chunk validation are supplied as typed functions, so those
+infrastructure services need no domain instance.
 
 Mutable process-local state has a single owner:
 
@@ -52,17 +52,14 @@ Mutable process-local state has a single owner:
 | Process verification work from heartbeats | `HeartbeatReconcilerService` |
 | Terminal routes, desktop observations, epochs and generation tombstones | `InteractiveSessionState` |
 
-The interactive state object is created once per facade and explicitly supplied
-to session storage, interactive sessions and ownership checks. No mutable state
-lives on a service class. A second facade gets separate maps and locks. The
-application singleton remains a composition convenience, not a prerequisite for
-correct instance isolation. Tests inspect state directly on its owning service.
+The interactive state object is created once per `RunnerService` and explicitly
+supplied to session storage, interactive sessions and ownership checks. No
+mutable state lives on a service class. A second `RunnerService` gets separate
+maps and locks. The application singleton remains a composition convenience, not
+a prerequisite for correct instance isolation. Tests inspect state directly on
+its owning service.
 
 Services can be tested directly. For example, a process-RPC test constructs
 `ProcessManagerService` with a fake runner transport and a real
-`RpcRegistryService`; it needs no partially initialized facade or sibling mixins.
-Tests that replace behavior patch the owning service or inject a repository at
-construction. `test_service_composition.py` covers standalone RPC success,
-timeout, cancellation, transport failure, ownership rejection, repository
-injection and state isolation. Existing runner tests exercise adapter-facing
-behavior through the composed facade.
+`RpcRegistryService`. Tests that replace behavior patch the owning service or
+inject a repository at construction.

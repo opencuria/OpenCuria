@@ -64,9 +64,9 @@ async def git_commit_message(
     await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
 
     try:
-        await sync_to_async(get_runner_service().get_workspace_for_user)(
-            workspace_id, user=request.user, organization_id=org_id
-        )
+        await sync_to_async(
+            get_runner_service().workspace_access.get_workspace_for_user
+        )(workspace_id, user=request.user, organization_id=org_id)
         message = await CommitMessageService().generate(
             workspace_id=workspace_id,
             repo_path=payload.repo_path,

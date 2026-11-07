@@ -103,7 +103,7 @@ def list_workspaces(ctx: ToolContext) -> list[Any]:
     """Return the caller's existing workspaces in the organization, newest first."""
     return [
         workspace
-        for workspace in get_runner_service().list_workspaces(
+        for workspace in get_runner_service().runner_lifecycle.list_workspaces(
             organization_id=ctx.organization_id, user=ctx.user
         )
         if str(workspace.status) not in GONE_WORKSPACE_STATUSES

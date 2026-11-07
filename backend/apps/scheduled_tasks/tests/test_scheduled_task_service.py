@@ -74,6 +74,9 @@ class FakeRunner:
 
     def __init__(self, status="running"):
         self.status = status
+        # The scheduler reaches several runner domain services; one fake serves all.
+        self.workspace_lifecycle = self.workspace_access = self
+        self.heartbeat_reconciler = self
 
     def get_workspace_launch_state(self, workspace_id):
         return self.status, None, "online", True, None

@@ -488,7 +488,7 @@ async def plugin_set_active(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
         return workspace, plugin, selected
 
     workspace, plugin, selected = await sync_to_async(plan)()
-    await get_runner_service().update_workspace(
+    await get_runner_service().workspace_lifecycle.update_workspace(
         workspace.id,
         plugin_ids=selected,
         user=ctx.user,

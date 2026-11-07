@@ -1034,7 +1034,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         safe_workdir = sanitize_exec_workdir(workdir or "/workspace")
         service = self._runner_service()
         try:
-            process = await service.start_process(
+            process = await service.process_manager.start_process(
                 self._workspace_uuid(),
                 command.strip(),
                 workdir=safe_workdir,
@@ -1062,7 +1062,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         """
         service = self._runner_service()
         try:
-            processes = await service.list_processes(
+            processes = await service.process_manager.list_processes(
                 self._workspace_uuid(), session_id=session_id
             )
         except (
@@ -1086,7 +1086,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.get_process(
+            process = await service.process_manager.get_process(
                 self._workspace_uuid(), key, session_id=session_id
             )
         except (
@@ -1110,7 +1110,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.stop_process(
+            process = await service.process_manager.stop_process(
                 self._workspace_uuid(), key, session_id=session_id
             )
         except (
@@ -1134,7 +1134,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.restart_process(
+            process = await service.process_manager.restart_process(
                 self._workspace_uuid(), key, session_id=session_id
             )
         except (
@@ -1155,7 +1155,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            deleted_id = await service.delete_process(
+            deleted_id = await service.process_manager.delete_process(
                 self._workspace_uuid(), key
             )
         except (
@@ -1847,18 +1847,7 @@ async def create_harness_accessor(
 
     admission = WorkspaceAdmissionService()
 
-    def _service_workspace_lookup(workspace_uuid):
-        """Look up a workspace via the public service API (Phase 4).
-
-        Prefers ``service.get_workspace_or_none`` (public delegation, no
-        repository leak); falls back to ``service.workspaces.get_by_id``
-        for foreign service doubles that only expose the repository
-        (e.g. harness test doubles).
-        """
-        public_lookup = getattr(service, "get_workspace_or_none", None)
-        if callable(public_lookup):
-            return public_lookup(workspace_uuid)
-        return service.workspaces.get_by_id(workspace_uuid)
+    _service_workspace_lookup = service.runner_lifecycle.get_workspace_or_none
 
     workspace = await sync_to_async(_service_workspace_lookup)(
         _uuid.UUID(workspace_id)
@@ -1893,7 +1882,9 @@ async def create_harness_accessor(
                 f"{event} failed: runner {live_runner.id} is offline"
             )
         try:
-            await service.emit_harness_event(live_runner, event, payload)
+            await service.runner_transport.emit_harness_event(
+                live_runner, event, payload
+            )
         except RunnerOfflineError as exc:
             raise RunnerAccessorError(f"{event} failed: {exc}") from exc
 
@@ -1930,7 +1921,7 @@ async def create_harness_accessor(
                 f"{event} failed: runner {live_runner.id} is offline"
             )
         try:
-            return await service.call_stream_event(
+            return await service.stream_transport.call_stream_event(
                 live_runner,
                 event,
                 payload,

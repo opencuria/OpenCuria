@@ -27,9 +27,13 @@ def install(monkeypatch, result=None):
     real = RunnerService(sio_server=None)
     result = result or {"ok": True, "content": "text", "revision": "a" * 64}
     fake = SimpleNamespace(
-        get_workspace_for_user=real.get_workspace_for_user,
-        editor_file_operation=AsyncMock(return_value=result),
-        run_git_operation=AsyncMock(return_value=result),
+        workspace_access=real.workspace_access,
+        file_transfer=SimpleNamespace(
+            editor_file_operation=AsyncMock(return_value=result)
+        ),
+        git_operations=SimpleNamespace(
+            run_git_operation=AsyncMock(return_value=result)
+        ),
     )
     monkeypatch.setattr(api, "_get_service", lambda: fake)
     return fake
@@ -45,7 +49,7 @@ def test_editor_file_read_save_permissions_and_stale_response(monkeypatch):
     url = f"/api/v1/workspaces/{workspace.id}/files/content/"
     response = client.get(url, {"path": "/workspace/a"}, **_auth_headers(read, org.id))
     assert response.status_code == 200
-    assert fake.editor_file_operation.call_args.args[1:] == (
+    assert fake.file_transfer.editor_file_operation.call_args.args[1:] == (
         "read",
         {"path": "/workspace/a"},
     )
@@ -61,7 +65,7 @@ def test_editor_file_read_save_permissions_and_stale_response(monkeypatch):
         **_auth_headers(read, org.id),
     )
     assert response.status_code == 403
-    fake.editor_file_operation.return_value = {
+    fake.file_transfer.editor_file_operation.return_value = {
         "ok": False,
         "code": "stale_document",
         "message": "Reload the file",
@@ -74,7 +78,10 @@ def test_editor_file_read_save_permissions_and_stale_response(monkeypatch):
     )
     assert response.status_code == 409
     assert response.json()["code"] == "stale_document"
-    assert fake.editor_file_operation.call_args.args[1:] == ("write", payload)
+    assert fake.file_transfer.editor_file_operation.call_args.args[1:] == (
+        "write",
+        payload,
+    )
 
 
 @pytest.mark.django_db
@@ -91,7 +98,7 @@ def test_editor_other_organization_and_owner_are_denied(monkeypatch):
         **_auth_headers(token, other_org.id),
     )
     assert response.status_code == 404
-    fake.editor_file_operation.assert_not_called()
+    fake.file_transfer.editor_file_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -109,7 +116,7 @@ def test_git_file_content_and_partial_mutation_permission_boundaries(monkeypatch
     query = {"repo_path": "/workspace/repo", "path": "a", "revision": "index"}
     response = client.get(read_url, query, **_auth_headers(read, org.id))
     assert response.status_code == 200
-    assert fake.run_git_operation.call_args.args[1] == "file_content"
+    assert fake.git_operations.run_git_operation.call_args.args[1] == "file_content"
     assert (
         client.get(read_url, query, **_auth_headers(write, org.id)).status_code == 403
     )
@@ -136,7 +143,7 @@ def test_git_file_content_and_partial_mutation_permission_boundaries(monkeypatch
         **_auth_headers(write, org.id),
     )
     assert response.status_code == 200
-    assert fake.run_git_operation.call_args.args[1] == "stage_patch"
+    assert fake.git_operations.run_git_operation.call_args.args[1] == "stage_patch"
 
 
 @pytest.mark.parametrize(

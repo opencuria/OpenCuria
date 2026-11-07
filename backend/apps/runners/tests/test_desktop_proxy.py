@@ -360,7 +360,7 @@ async def test_runner_disconnect_closes_only_its_desktop_transport(monkeypatch):
 
         assert old_queue.get_nowait() == {"type": "close", "code": 1011}
         assert new_queue.empty()
-        service.unregister_runner.assert_called_once_with("old-sid")
+        service.runner_lifecycle.unregister_runner.assert_called_once_with("old-sid")
     finally:
         unregister_ws_tunnel(old_id)
         unregister_ws_tunnel(new_id)

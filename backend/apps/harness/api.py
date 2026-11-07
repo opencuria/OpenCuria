@@ -96,7 +96,7 @@ def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid
     """Return a workspace only for org members + owners (404 otherwise)."""
     service = _get_service()
     try:
-        return service.get_workspace_for_user(
+        return service.workspace_access.get_workspace_for_user(
             workspace_id,
             user=request.user,
             organization_id=org_id,
@@ -548,7 +548,7 @@ def list_harness_conversations(request: HttpRequest):
     org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     runner_service = _get_service()
-    workspaces = runner_service.list_workspaces(
+    workspaces = runner_service.runner_lifecycle.list_workspaces(
         organization_id=org_id,
         user=request.user,
     )

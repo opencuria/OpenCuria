@@ -28,7 +28,7 @@ class TerminalRoute:
 
 @dataclass
 class InteractiveSessionState:
-    """One facade's terminal routes and generation-fenced desktop observations."""
+    """Per-RunnerService terminal routes and generation-fenced desktop state."""
 
     terminals: dict[str, TerminalRoute] = field(default_factory=dict)
     terminal_starts: dict[str, TerminalStart] = field(default_factory=dict)

@@ -524,10 +524,12 @@ class ScheduledTaskService:
             runner_status,
             owner_is_active,
             current_task_id,
-        ) = await sync_to_async(self._runner().get_workspace_launch_state)(
-            task.workspace_id
-        )
-        owned = await sync_to_async(self._runner().is_active_workspace_owner)(
+        ) = await sync_to_async(
+            self._runner().workspace_lifecycle.get_workspace_launch_state
+        )(task.workspace_id)
+        owned = await sync_to_async(
+            self._runner().workspace_access.is_active_workspace_owner
+        )(
             task.owner_id,
             task.workspace_id,
             organization_id=task.organization_id,
@@ -565,7 +567,9 @@ class ScheduledTaskService:
                 )
             else:
                 try:
-                    await self._runner().resume_workspace(task.workspace_id)
+                    await self._runner().workspace_lifecycle.resume_workspace(
+                        task.workspace_id
+                    )
                     if not await self._wait_for_workspace_running(task.workspace_id):
                         return await self._skip(
                             run,
@@ -602,10 +606,12 @@ class ScheduledTaskService:
             runner_status,
             owner_is_active,
             current_task_id,
-        ) = await sync_to_async(self._runner().get_workspace_launch_state)(
-            task.workspace_id
-        )
-        owned = await sync_to_async(self._runner().is_active_workspace_owner)(
+        ) = await sync_to_async(
+            self._runner().workspace_lifecycle.get_workspace_launch_state
+        )(task.workspace_id)
+        owned = await sync_to_async(
+            self._runner().workspace_access.is_active_workspace_owner
+        )(
             task.owner_id,
             task.workspace_id,
             organization_id=task.organization_id,
@@ -730,7 +736,9 @@ class ScheduledTaskService:
                 "scheduled_task_completion_failed", run_id=str(run.id)
             )
         try:
-            await self._runner().touch_workspace_activity(task.workspace_id)
+            await self._runner().workspace_lifecycle.touch_workspace_activity(
+                task.workspace_id
+            )
         except Exception:
             log.exception(
                 "scheduled_task_workspace_activity_touch_failed",
@@ -751,7 +759,7 @@ class ScheduledTaskService:
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
             status, active_operation, *_ = await sync_to_async(
-                self._runner().get_workspace_launch_state
+                self._runner().workspace_lifecycle.get_workspace_launch_state
             )(workspace_id)
             if (
                 status == WorkspaceStatus.RUNNING
@@ -779,9 +787,9 @@ class ScheduledTaskService:
             runner_status,
             owner_active,
             current_task_id,
-        ) = await sync_to_async(self._runner().get_workspace_launch_state)(
-            task.workspace_id
-        )
+        ) = await sync_to_async(
+            self._runner().workspace_lifecycle.get_workspace_launch_state
+        )(task.workspace_id)
         if status is None or not owner_active:
             reason = "workspace_unavailable"
         elif current_task_id and not operation:
@@ -809,7 +817,9 @@ class ScheduledTaskService:
         """Apply the runner's inactivity auto-stop policy after a scheduled run."""
         # The runner never stops a workspace with a busy chat or operation.
         try:
-            await self._runner().auto_stop_if_inactive(workspace_id)
+            await self._runner().heartbeat_reconciler.auto_stop_if_inactive(
+                workspace_id
+            )
         except ConflictError as exc:
             # A chat or lifecycle operation may have won admission since
             # the policy read. Treat this as a normal no-op.

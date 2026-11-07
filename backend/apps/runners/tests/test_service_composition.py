@@ -162,7 +162,7 @@ def test_repository_injection_reaches_only_explicit_consumers() -> None:
     service = RunnerService(
         repositories=replace(RunnerRepositories(), workspaces=workspaces)
     )
-    assert service.get_workspace_or_none(uuid.uuid4()) is None
+    assert service.runner_lifecycle.get_workspace_or_none(uuid.uuid4()) is None
     assert service.ownership.workspaces is workspaces
     assert service.process_manager.workspaces is workspaces
     assert service.rpc_registry.__dict__ == {"process_pending": {}, "git_pending": {}}

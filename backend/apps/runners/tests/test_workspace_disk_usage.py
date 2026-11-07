@@ -65,7 +65,7 @@ def test_metrics_persist_disk_usage_and_notify_open_workspace(
     service = RunnerService()
 
     with django_capture_on_commit_callbacks(execute=True):
-        service.record_runner_system_metrics(
+        service.runner_lifecycle.record_runner_system_metrics(
             runner, _metrics({str(workspace.id): _guest(9 * GIB, GIB, 10 * GIB)})
         )
 
@@ -98,7 +98,7 @@ def test_metrics_ignore_workspaces_of_other_runners(
     foreign = Workspace.objects.create(runner=other_runner, created_by=user)
 
     with django_capture_on_commit_callbacks(execute=True):
-        RunnerService().record_runner_system_metrics(
+        RunnerService().runner_lifecycle.record_runner_system_metrics(
             runner, _metrics({str(foreign.id): _guest(1, 2, 3)})
         )
 
@@ -112,12 +112,12 @@ def test_metrics_keep_last_observation_when_guest_does_not_answer(
     runner, workspace, frontend, django_capture_on_commit_callbacks
 ):
     service = RunnerService()
-    service.record_runner_system_metrics(
+    service.runner_lifecycle.record_runner_system_metrics(
         runner, _metrics({str(workspace.id): _guest(1, 2, 3)})
     )
 
     with django_capture_on_commit_callbacks(execute=True):
-        RunnerService().record_runner_system_metrics(
+        RunnerService().runner_lifecycle.record_runner_system_metrics(
             runner, _metrics({str(workspace.id): {"disk_used_bytes": 5}})
         )
 

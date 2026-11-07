@@ -80,9 +80,9 @@ def _install_fake(monkeypatch, *, run_return=None, run_side_effect=None):
     else:
         run_mock = AsyncMock(return_value=run_return)
     fake = SimpleNamespace(
-        get_workspace_for_user=real.get_workspace_for_user,
-        get_workspace=real.get_workspace,
-        run_git_operation=run_mock,
+        workspace_access=real.workspace_access,
+        runner_lifecycle=real.runner_lifecycle,
+        git_operations=SimpleNamespace(run_git_operation=run_mock),
     )
     monkeypatch.setattr(runners_api, "_get_service", lambda: fake)
     return fake
@@ -146,7 +146,7 @@ def test_git_reads_use_get_endpoints(
 
     assert response.status_code == 200
     assert response.json() == runner_result
-    fake.run_git_operation.assert_awaited_once_with(
+    fake.git_operations.run_git_operation.assert_awaited_once_with(
         workspace.id, operation, **query, args=args
     )
 
@@ -173,7 +173,7 @@ def test_git_history_paging_and_branch_forwarded(client: Client, monkeypatch):
     )
 
     assert response.status_code == 200
-    call = fake.run_git_operation.call_args
+    call = fake.git_operations.run_git_operation.call_args
     assert call.args[1] == "repo_history"
     assert call.kwargs["args"] == {
         "history_limit": 25,
@@ -202,7 +202,7 @@ def test_git_read_only_key_blocks_mutation(client: Client, monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["code"] == "permission_denied"
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -254,7 +254,7 @@ def test_git_post_rejects_read_operations(client: Client, monkeypatch, operation
 
     assert response.status_code == 422
     assert any(issue["loc"][-1] == "operation" for issue in response.json()["detail"])
-    fake.run_git_operation.assert_not_awaited()
+    fake.git_operations.run_git_operation.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -287,7 +287,7 @@ def test_git_post_checkout_remote_branch_write_perm_routing(
         **_auth_headers(write_token, str(org.id)),
     )
     assert ok.status_code == 200
-    call = fake.run_git_operation.call_args
+    call = fake.git_operations.run_git_operation.call_args
     assert call.args[1] == "checkout_remote_branch"
     assert call.kwargs["repo_path"] == "/workspace/repo"
     assert call.kwargs["args"] == {"remote_ref": "origin/feature"}
@@ -317,7 +317,7 @@ def test_git_checkout_remote_branch_forwards_local_name(
     )
 
     assert response.status_code == 200
-    call = fake.run_git_operation.call_args
+    call = fake.git_operations.run_git_operation.call_args
     assert call.kwargs["args"] == {
         "remote_ref": "origin/feature",
         "local_name": "feature",
@@ -363,7 +363,7 @@ def test_git_mutations_forward_validated_args(
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    fake.run_git_operation.assert_awaited_once_with(
+    fake.git_operations.run_git_operation.assert_awaited_once_with(
         workspace.id,
         operation,
         repo_path="/workspace/repo",
@@ -391,7 +391,7 @@ def test_git_commit_happy_uses_authenticated_user(client: Client, monkeypatch):
     )
 
     assert response.status_code == 200
-    call = fake.run_git_operation.call_args
+    call = fake.git_operations.run_git_operation.call_args
     assert call.args[1] == "commit"
     assert call.kwargs["args"] == {"message": "hello"}
     assert "author_name" not in call.kwargs["args"]
@@ -441,7 +441,7 @@ def test_git_commit_rejects_forbidden_fields_422(
     )
 
     assert response.status_code == 422
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -500,7 +500,7 @@ def test_git_post_rejects_invalid_fields(client: Client, monkeypatch, payload: d
     )
 
     assert response.status_code == 422
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -522,7 +522,7 @@ def test_git_pull_branch_without_remote_rejected_422(client: Client, monkeypatch
     )
 
     assert response.status_code == 422
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -554,7 +554,7 @@ def test_git_get_rejects_invalid_repo_and_hash(client: Client, monkeypatch):
         **_auth_headers(token, str(org.id)),
     )
     assert bad_history.status_code == 400
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -590,7 +590,7 @@ def test_git_owner_isolation_returns_404_without_service_call(
         **_auth_headers(other_token, str(org.id)),
     )
     assert mutation.status_code == 404
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -607,7 +607,7 @@ def test_git_unknown_workspace_returns_404(client: Client, monkeypatch):
         **_auth_headers(token, str(org.id)),
     )
     assert response.status_code == 404
-    fake.run_git_operation.assert_not_called()
+    fake.git_operations.run_git_operation.assert_not_called()
 
 
 @pytest.mark.django_db
@@ -642,7 +642,7 @@ def test_git_conflict_result_preserves_snapshot_and_stderr(
     assert body["message"] == "merge conflict"
     assert body["snapshot"] == {"repos": [{"path": "/workspace/repo"}]}
     assert body["stderr"] == "CONFLICT (content)"
-    fake.run_git_operation.assert_awaited_once()
+    fake.git_operations.run_git_operation.assert_awaited_once()
 
 
 @pytest.mark.django_db

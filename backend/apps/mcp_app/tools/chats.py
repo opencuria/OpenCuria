@@ -78,7 +78,7 @@ def _owned_chat(ctx: ToolContext, chat_id: str) -> tuple[Any, Any]:
     not_found = ToolError(f"Chat {session_id} not found. Find chats with chat_list.")
     try:
         session = ConversationService().get_session(session_id)
-        workspace = get_runner_service().get_workspace_for_user(
+        workspace = get_runner_service().workspace_access.get_workspace_for_user(
             session.workspace_id, user=ctx.user, organization_id=ctx.organization_id
         )
     except NotFoundError:

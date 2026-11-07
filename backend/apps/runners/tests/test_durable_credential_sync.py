@@ -136,7 +136,7 @@ def test_credential_callback_cannot_mutate_unowned_or_terminal_work(
         Task.objects.filter(pk=task.id).update(type="resume_workspace")
     else:
         present = None
-    RunnerService().handle_credentials_injected(
+    RunnerService().credential_sync.handle_credentials_injected(
         str(task.id), workspace_id, present, runner_id=runner_id
     )
     workspace.refresh_from_db()

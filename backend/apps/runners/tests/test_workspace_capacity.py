@@ -623,7 +623,7 @@ def test_legacy_null_resources_keep_confirmed_sizes_on_resume(
     )
     Workspace.objects.filter(pk=workspace.id).update(status="stopped")
     task = async_to_sync(
-        RunnerService(sio_server=AsyncMock()).resume_workspace
+        RunnerService(sio_server=AsyncMock()).workspace_lifecycle.resume_workspace
     )(workspace.id)
     workspace.refresh_from_db()
     assert getattr(workspace, f"qemu_{dimension}") == confirmed

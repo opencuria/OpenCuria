@@ -174,7 +174,7 @@ async def test_artifact_reply_from_foreign_runner_is_dropped(
     await asyncio.sleep(0)
     request_id = transport_events[0][1]["request_id"]
     routed_before = accessor._pending[request_id]
-    backend["service"].handle_harness_reply(
+    backend["service"].runner_transport.handle_harness_reply(
         "workspace:artifact_ensure_result",
         {
             "request_id": request_id,
@@ -188,7 +188,7 @@ async def test_artifact_reply_from_foreign_runner_is_dropped(
     assert not routed_before.done()
 
     # A subsequent correctly-owned result settles the same waiter.
-    backend["service"].handle_harness_reply(
+    backend["service"].runner_transport.handle_harness_reply(
         "workspace:artifact_ensure_result",
         {
             "request_id": request_id,

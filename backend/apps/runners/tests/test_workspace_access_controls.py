@@ -299,14 +299,18 @@ def test_realtime_access_rules_share_one_membership_lookup(workspace_access_setu
     )
 
     assert [
-        service.can_user_access_workspace(user.id, workspace_id)
+        service.workspace_access.can_user_access_workspace(user.id, workspace_id)
         for user in (owner, admin, member, outsider)
     ] == [True, False, False, False]
     assert [
-        service.can_user_view_workspace_desktop(str(user.id), workspace_id)
+        service.workspace_access.can_user_view_workspace_desktop(
+            str(user.id), workspace_id
+        )
         for user in (owner, admin, member, outsider)
     ] == [True, True, False, False]
-    assert service.resolve_desktop_viewer(str(admin.id), workspace_id) == (
+    assert service.workspace_access.resolve_desktop_viewer(
+        str(admin.id), workspace_id
+    ) == (
         admin,
         workspace_access_setup["org"].id,
     )
@@ -316,7 +320,7 @@ def test_realtime_access_rules_share_one_membership_lookup(workspace_access_setu
         ("not-a-user", workspace_id),
     ):
         with pytest.raises(WorkspaceNotFoundError):
-            service.resolve_desktop_viewer(user_id, target)
+            service.workspace_access.resolve_desktop_viewer(user_id, target)
 
 
 @pytest.mark.django_db
@@ -335,7 +339,7 @@ def test_active_workspace_owner_requires_creator_org_and_active_membership(
     )
 
     def owns(user, *, organization=org, workspace=workspace_id):
-        return service.is_active_workspace_owner(
+        return service.workspace_access.is_active_workspace_owner(
             user.id, workspace, organization_id=organization.id
         )
 

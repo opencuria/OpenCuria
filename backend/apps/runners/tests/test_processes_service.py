@@ -75,7 +75,7 @@ def _feed_reply(
         "workspace_id": str(workspace_id),
         **extra,
     }
-    service.handle_process_reply(event, data, runner_id=str(runner.id))
+    service.process_manager.handle_process_reply(event, data, runner_id=str(runner.id))
 
 
 @pytest.mark.django_db(transaction=True)
@@ -106,7 +106,7 @@ class TestStartProcess:
 
         service.runner_transport.emit_to_runner.side_effect = _emit
 
-        process = await service.start_process(
+        process = await service.process_manager.start_process(
             workspace.id,
             "sleep 60",
             workdir="/workspace",
@@ -132,7 +132,7 @@ class TestStartProcess:
         service.process_manager._await_process_result = transport  # type: ignore[method-assign]
         service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
 
-        started = await service.start_process(
+        started = await service.process_manager.start_process(
             workspace.id,
             "python -m updated_app",
             workdir="/srv/app",
@@ -175,7 +175,7 @@ class TestStartProcess:
                 service.processes, "create", side_effect=IntegrityError
             ) as create,
         ):
-            started = await service.start_process(
+            started = await service.process_manager.start_process(
                 workspace.id,
                 "python -m winner",
                 workdir="/srv/winner",
@@ -219,7 +219,7 @@ class TestStartProcess:
         service.runner_transport.emit_to_runner.side_effect = _emit
 
         with pytest.raises(ConflictError):
-            await service.start_process(
+            await service.process_manager.start_process(
                 workspace.id, "sleep 60", name="sleeper", user=user
             )
 
@@ -260,7 +260,7 @@ class TestStartProcess:
         service.process_manager._PROCESS_RPC_TIMEOUT_SECONDS = 1
 
         with pytest.raises(ConflictError):
-            await service.start_process(
+            await service.process_manager.start_process(
                 workspace.id, "sleep 60", name="sleeper", user=user
             )
 
@@ -276,7 +276,9 @@ class TestStartProcess:
             created_by=user,
         )
         with pytest.raises(RunnerOfflineError):
-            await service.start_process(workspace.id, "sleep 60", name="sleeper", user=user)
+            await service.process_manager.start_process(
+                workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
     @pytest.mark.asyncio
     async def test_start_requires_running_workspace(
@@ -284,13 +286,17 @@ class TestStartProcess:
     ):
         """Non-running workspaces cannot start processes."""
         with pytest.raises(WorkspaceStateError):
-            await service.start_process(stopped_workspace.id, "sleep 60", name="sleeper", user=user)
+            await service.process_manager.start_process(
+                stopped_workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
     @pytest.mark.asyncio
     async def test_start_unknown_workspace(self, service, user):
         """Unknown workspace IDs raise WorkspaceNotFoundError."""
         with pytest.raises(NotFoundError):
-            await service.start_process(uuid.uuid4(), "sleep 60", name="sleeper", user=user)
+            await service.process_manager.start_process(
+                uuid.uuid4(), "sleep 60", name="sleeper", user=user
+            )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -310,7 +316,7 @@ class TestRestartProcess:
         service.process_manager._await_process_result = transport  # type: ignore[method-assign]
         service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
 
-        restarted = await service.restart_process(
+        restarted = await service.process_manager.restart_process(
             workspace.id, definition.id, user=user
         )
 
@@ -360,8 +366,12 @@ class TestRestartProcess:
         service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
 
         outcomes = await asyncio.gather(
-            service.restart_process(workspace.id, definition.id, user=user),
-            service.restart_process(workspace.id, definition.id, user=user),
+            service.process_manager.restart_process(
+                workspace.id, definition.id, user=user
+            ),
+            service.process_manager.restart_process(
+                workspace.id, definition.id, user=user
+            ),
             return_exceptions=True,
         )
 
@@ -421,7 +431,7 @@ class TestStopProcess:
 
         service.runner_transport.emit_to_runner.side_effect = _emit
 
-        stopped = await service.stop_process(workspace.id, process.id)
+        stopped = await service.process_manager.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.KILLED
         assert pushes
         assert pushes[0][0] == "process:status_changed"
@@ -435,7 +445,7 @@ class TestStopProcess:
         emit = AsyncMock()
         service.runner_transport.emit_to_runner = emit  # type: ignore[method-assign]
 
-        result = await service.stop_process(workspace.id, process.id)
+        result = await service.process_manager.stop_process(workspace.id, process.id)
         assert result.status == ProcessStatus.EXITED
         emit.assert_not_called()
 
@@ -503,7 +513,7 @@ class TestStopProcess:
 
         service.runner_transport.emit_to_runner.side_effect = _emit
 
-        stopped = await service.stop_process(workspace.id, process.id)
+        stopped = await service.process_manager.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.KILLED
         events = [
             call.args[1]
@@ -557,7 +567,7 @@ class TestStopProcess:
 
         service.runner_transport.emit_to_runner.side_effect = _emit
 
-        stopped = await service.stop_process(workspace.id, process.id)
+        stopped = await service.process_manager.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.EXITED
         assert stopped.exit_code == 3
 
@@ -592,7 +602,9 @@ class TestStopProcess:
         with patch.object(
             service.process_manager, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05
         ):
-            result = await service.stop_process(workspace.id, process.id)
+            result = await service.process_manager.stop_process(
+                workspace.id, process.id
+            )
         assert result.status == ProcessStatus.RUNNING
         result.refresh_from_db()
         assert result.status == ProcessStatus.RUNNING
@@ -601,7 +613,7 @@ class TestStopProcess:
     async def test_stop_unknown_process(self, service, workspace):
         """Unknown process IDs raise NotFoundError."""
         with pytest.raises(NotFoundError):
-            await service.stop_process(workspace.id, uuid.uuid4())
+            await service.process_manager.stop_process(workspace.id, uuid.uuid4())
 
     @pytest.mark.asyncio
     async def test_stop_foreign_workspace_process(self, service, workspace, runner, user):
@@ -616,7 +628,7 @@ class TestStopProcess:
         )
         process = _make_process(service, other_ws)
         with pytest.raises(NotFoundError):
-            await service.stop_process(workspace.id, process.id)
+            await service.process_manager.stop_process(workspace.id, process.id)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -633,7 +645,7 @@ class TestListProcesses:
         emit = AsyncMock()
         service.runner_transport.emit_to_runner = emit  # type: ignore[method-assign]
 
-        rows = await service.list_processes(workspace.id, live=False)
+        rows = await service.process_manager.list_processes(workspace.id, live=False)
 
         assert [row.id for row in rows] == [process.id]
         assert rows[0].status == ProcessStatus.RUNNING
@@ -650,7 +662,7 @@ class TestListProcesses:
         )
         process.refresh_from_db()
 
-        rows = await service.list_processes(workspace.id, live=False)
+        rows = await service.process_manager.list_processes(workspace.id, live=False)
 
         assert rows[0].status == ProcessStatus.RUNNING
         assert rows[0].pid == 4242
@@ -664,7 +676,7 @@ class TestListProcesses:
         transport = AsyncMock(return_value={"processes": []})
         service.process_manager._await_process_result = transport  # type: ignore[method-assign]
 
-        rows = await service.list_processes(workspace.id, live=True)
+        rows = await service.process_manager.list_processes(workspace.id, live=True)
 
         assert [row.id for row in rows] == [definition.id]
         assert rows[0].status == ProcessStatus.EXITED
@@ -672,10 +684,14 @@ class TestListProcesses:
         transport.assert_awaited_once()
         assert transport.await_args.kwargs["event"] == "harness:process_list"
 
-        changed, vanished = service.reconcile_workspace_processes(str(workspace.id), [])
+        changed, vanished = service.process_manager.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
         assert changed == []
         assert vanished == []
-        assert service.sweep_unconfirmed_processes(str(workspace.id)) == []
+        assert (
+            service.process_manager.sweep_unconfirmed_processes(str(workspace.id)) == []
+        )
         definition.refresh_from_db()
         assert definition.status == ProcessStatus.EXITED
         assert definition.run_count == 0
@@ -706,7 +722,7 @@ class TestListProcesses:
             side_effect=_emit
         )
 
-        rows = await service.list_processes(workspace.id)
+        rows = await service.process_manager.list_processes(workspace.id)
 
         assert [row.id for row in rows] == [process.id]
         service.runner_transport.emit_to_runner.assert_awaited_once()
@@ -721,7 +737,7 @@ class TestReconcile:
         process.refresh_from_db()
 
         with patch.object(service.frontend_bus, 'forward_to_frontend') as forward:
-            changed, vanished = service.reconcile_workspace_processes(
+            changed, vanished = service.process_manager.reconcile_workspace_processes(
                 str(workspace.id),
                 [
                     {
@@ -748,7 +764,7 @@ class TestReconcile:
         service.processes.update_status(process.id, status="running", pid=4242)
         process.refresh_from_db()
 
-        changed, vanished = service.reconcile_workspace_processes(
+        changed, vanished = service.process_manager.reconcile_workspace_processes(
             str(workspace.id), []
         )
 
@@ -765,7 +781,7 @@ class TestReconcile:
         process.refresh_from_db()
 
         with patch.object(service.frontend_bus, 'forward_to_frontend') as forward:
-            changed, vanished = service.reconcile_workspace_processes(
+            changed, vanished = service.process_manager.reconcile_workspace_processes(
                 str(workspace.id),
                 [
                     {
@@ -785,7 +801,7 @@ class TestReconcile:
         """Records without a confirmed pid are skipped until the runner ACKs."""
         process = _make_process(service, workspace)
         # pid stays None: start RPC not yet acknowledged.
-        changed, vanished = service.reconcile_workspace_processes(
+        changed, vanished = service.process_manager.reconcile_workspace_processes(
             str(workspace.id), []
         )
         assert changed == []
@@ -814,7 +830,7 @@ class TestReconcile:
                 wraps=service.workspaces.list_by_runner,
             ) as list_by_runner,
         ):
-            service.handle_heartbeat(
+            service.heartbeat_reconciler.handle_heartbeat(
                 runner=runner,
                 workspaces=[
                     {
@@ -880,8 +896,10 @@ class TestReverifyVanished:
                 }
             ],
         )
-        with patch.object(service.frontend_bus, 'forward_to_frontend'):
-            changed = await service.reverify_vanished_processes(workspace.id, [process])
+        with patch.object(service.frontend_bus, "forward_to_frontend"):
+            changed = await service.process_manager.reverify_vanished_processes(
+                workspace.id, [process]
+            )
         assert changed == [process.id]
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
@@ -905,7 +923,7 @@ class TestReverifyVanished:
                 }
             ],
         )
-        changed = await service.reverify_vanished_processes(
+        changed = await service.process_manager.reverify_vanished_processes(
             workspace.id, [process]
         )
         assert changed == [process.id]
@@ -925,7 +943,9 @@ class TestReverifyVanished:
         with patch.object(
             service.process_manager, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05
         ):
-            changed = await service.reverify_vanished_processes(workspace.id, [process])
+            changed = await service.process_manager.reverify_vanished_processes(
+                workspace.id, [process]
+            )
         assert changed == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
@@ -940,7 +960,9 @@ class TestReverifyVanished:
         # Runner lost its sid -> offline path, rows stay RUNNING.
         runner.sid = ""
         runner.save(update_fields=["sid"])
-        changed = await service.reconcile_vanished_processes(runner)
+        changed = await service.heartbeat_reconciler.reconcile_vanished_processes(
+            runner
+        )
         assert changed == []
         assert service.heartbeat_reconciler.pending_process_verify == {}
         process.refresh_from_db()
@@ -957,8 +979,10 @@ class TestSweepUnconfirmed:
         assert process.pid is None
         old = tz.now() - timedelta(seconds=3600)
         type(process).objects.filter(id=process.id).update(started_at=old)
-        with patch.object(service.frontend_bus, 'forward_to_frontend'):
-            changed = service.sweep_unconfirmed_processes(str(workspace.id))
+        with patch.object(service.frontend_bus, "forward_to_frontend"):
+            changed = service.process_manager.sweep_unconfirmed_processes(
+                str(workspace.id)
+            )
         assert changed == [process.id]
         process.refresh_from_db()
         assert process.status == ProcessStatus.FAILED
@@ -966,7 +990,7 @@ class TestSweepUnconfirmed:
     def test_fresh_pid_none_row_is_kept(self, service, workspace):
         """A fresh pid=None row (start in flight) is kept RUNNING."""
         process = _make_process(service, workspace)
-        changed = service.sweep_unconfirmed_processes(str(workspace.id))
+        changed = service.process_manager.sweep_unconfirmed_processes(str(workspace.id))
         assert changed == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
@@ -983,7 +1007,7 @@ class TestWorkspaceLifecycleKillsProcesses:
     def test_mark_processes_killed(self, service, workspace):
         """mark_processes_killed transitions running records to killed."""
         process = self._running_process(service, workspace)
-        count = service.mark_processes_killed(
+        count = service.process_manager.mark_processes_killed(
             str(workspace.id), reason="workspace_stopped"
         )
         assert count == 1
@@ -1002,7 +1026,7 @@ class TestWorkspaceLifecycleKillsProcesses:
             workspace=workspace,
             type=TaskType.STOP_WORKSPACE,
         )
-        service.handle_workspace_stopped(
+        service.workspace_lifecycle.handle_workspace_stopped(
             str(task.id), str(workspace.id), runner_id=str(runner.id)
         )
         process.refresh_from_db()
@@ -1019,7 +1043,7 @@ class TestWorkspaceLifecycleKillsProcesses:
             workspace=workspace,
             type=TaskType.REMOVE_WORKSPACE,
         )
-        service.handle_workspace_removed(
+        service.workspace_lifecycle.handle_workspace_removed(
             str(task.id), str(workspace.id), runner_id=str(runner.id)
         )
         process.refresh_from_db()

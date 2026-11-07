@@ -2163,7 +2163,7 @@ def create_default_harness_service() -> HarnessService:
     async def process_cleanup(
         workspace_id: uuid.UUID, session_id: uuid.UUID, *, reason: str = ""
     ) -> Any:
-        return await runner_service.stop_session_processes(
+        return await runner_service.process_manager.stop_session_processes(
             workspace_id, session_id, reason=reason or "run_finished"
         )
 

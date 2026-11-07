@@ -50,7 +50,7 @@ def test_credential_resolution_failure_does_not_skip_process_or_desktop_reconcil
         "epoch": "epoch",
     }
 
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner,
         [
             {
@@ -96,7 +96,7 @@ async def test_auto_stop_refreshes_busy_harness_state(runner, workspace):
     # Snapshot this row before the scheduled run starts, reproducing the
     # heartbeat's pre-admission activity. The fresh service read inside
     # auto-stop must see the busy session and skip the stop.
-    stale_workspace = service.get_workspace(workspace.id)
+    stale_workspace = service.runner_lifecycle.get_workspace(workspace.id)
     assert stale_workspace.has_active_harness_session is False
     session = HarnessSessionRepository.create(
         workspace_id=workspace.id,
@@ -138,7 +138,7 @@ async def test_auto_stop_if_inactive_applies_the_policy_to_one_workspace(
     stopped = object()
     service.workspace_lifecycle.stop_workspace = AsyncMock(return_value=stopped)  # type: ignore[method-assign]
 
-    result = await service.auto_stop_if_inactive(workspace.id)
+    result = await service.heartbeat_reconciler.auto_stop_if_inactive(workspace.id)
 
     if stops:
         assert result is stopped
@@ -148,7 +148,9 @@ async def test_auto_stop_if_inactive_applies_the_policy_to_one_workspace(
     else:
         assert result is None
         service.workspace_lifecycle.stop_workspace.assert_not_awaited()
-    assert await service.auto_stop_if_inactive(uuid.uuid4()) is None
+    assert (
+        await service.heartbeat_reconciler.auto_stop_if_inactive(uuid.uuid4()) is None
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -283,7 +285,7 @@ def test_heartbeat_cannot_change_lifecycle_owned_workspace(
     service.heartbeat_reconciler.auto_stop_inactive_workspaces = AsyncMock(
         return_value=[]
     )
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner, [{"workspace_id": str(workspace.id), "status": "stopped"}]
     )
     workspace.refresh_from_db()
@@ -307,7 +309,7 @@ def test_stale_heartbeat_snapshot_cannot_overwrite_newer_lifecycle_state(
         status=new_status, updated_at=stale.updated_at + timedelta(seconds=1)
     )
     monkeypatch.setattr(service.workspaces, "list_by_runner", lambda _runner: [stale])
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner, [{"workspace_id": str(workspace.id), "status": "stopped"}]
     )
     workspace.refresh_from_db()
@@ -332,7 +334,7 @@ def test_heartbeat_snapshot_cannot_overwrite_newly_admitted_operation(
         task_type="remove_workspace",
     )
     monkeypatch.setattr(service.workspaces, "list_by_runner", lambda _runner: [stale])
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner, [{"workspace_id": str(workspace.id), "status": "stopped"}]
     )
     workspace.refresh_from_db()
@@ -349,7 +351,7 @@ def test_replaced_runner_session_cannot_change_workspace_status(runner, workspac
         return_value=[]
     )
     Runner.objects.filter(pk=runner.id).update(sid="replacement-session")
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner, [{"workspace_id": str(workspace.id), "status": "stopped"}]
     )
     workspace.refresh_from_db()
@@ -376,7 +378,7 @@ def test_unusable_runtime_observation_is_failed_and_keeps_resources(
     )
     service.session_store.cleanup_desktop_state = Mock()
     assert (
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner,
             [{"workspace_id": str(workspace.id), "status": observed}],
         )
@@ -401,7 +403,7 @@ def test_blocked_runtime_observation_remains_running(runner, workspace):
         return_value=[]
     )
     service.session_store.cleanup_desktop_state = Mock()
-    service.handle_heartbeat(
+    service.heartbeat_reconciler.handle_heartbeat(
         runner, [{"workspace_id": str(workspace.id), "status": "blocked"}]
     )
     workspace.refresh_from_db()
@@ -432,6 +434,6 @@ def test_missing_or_owned_runtime_observation_does_not_override_state(
         if mode == "owned"
         else []
     )
-    service.handle_heartbeat(runner, payload)
+    service.heartbeat_reconciler.handle_heartbeat(runner, payload)
     workspace.refresh_from_db()
     assert workspace.status == "running"

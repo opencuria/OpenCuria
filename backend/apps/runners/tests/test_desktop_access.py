@@ -94,9 +94,9 @@ def test_desktop_action_access_contract(
 
     if interface == "service":
         methods = {
-            "clipboard/read": service.read_desktop_clipboard,
-            "clipboard/write": service.write_desktop_clipboard,
-            "take-control": service.take_desktop_control,
+            "clipboard/read": service.interactive_sessions.read_desktop_clipboard,
+            "clipboard/write": service.interactive_sessions.write_desktop_clipboard,
+            "take-control": service.interactive_sessions.take_desktop_control,
         }
         args = ("new clipboard",) if action == "clipboard/write" else ()
         context = {"user": user, "organization_id": org.id}

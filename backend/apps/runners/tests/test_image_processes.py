@@ -71,8 +71,10 @@ async def _create_from_image(service, method, image, runner, user, name):
         "credential_ids": [],
     }
     if method == "create_workspace":
-        return await service.create_workspace(repos=[], **options)
-    return await service.create_workspace_from_image_artifact(**options)
+        return await service.workspace_lifecycle.create_workspace(repos=[], **options)
+    return await service.workspace_lifecycle.create_workspace_from_image_artifact(
+        **options
+    )
 
 
 @pytest.mark.django_db
@@ -493,7 +495,7 @@ async def test_start_after_stale_preflight_does_not_insert_or_dispatch(
     )
 
     with pytest.raises(ConflictError):
-        await service.start_process(
+        await service.process_manager.start_process(
             workspace.id,
             "python server.py",
             name="api",
@@ -536,7 +538,7 @@ async def test_reconfiguration_after_stale_preflight_preserves_row_and_snapshot(
     )
 
     with pytest.raises(ConflictError):
-        await service.start_process(
+        await service.process_manager.start_process(
             workspace.id,
             "python server.py --new-config",
             workdir="/srv/api-v2",
@@ -587,7 +589,7 @@ async def test_delete_after_capture_cannot_remove_snapshotted_definition(
     )
 
     with pytest.raises(ConflictError):
-        await service.delete_process(workspace.id, process.id)
+        await service.process_manager.delete_process(workspace.id, process.id)
 
     image = ImageInstance.objects.get(origin_workspace=workspace)
     assert image.process_definitions == [

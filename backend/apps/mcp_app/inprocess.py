@@ -29,7 +29,9 @@ def agent_context(workspace_id: uuid.UUID, organization_id: uuid.UUID) -> ToolCo
         ContextError: When the workspace is gone or belongs to another
             organization, or its owner is no longer a member.
     """
-    workspace = get_runner_service().get_workspace_or_none(workspace_id)
+    workspace = get_runner_service().runner_lifecycle.get_workspace_or_none(
+        workspace_id
+    )
     runner = getattr(workspace, "runner", None)
     org_id = getattr(runner, "organization_id", None)
     if workspace is None or str(org_id) != str(organization_id):

@@ -208,11 +208,14 @@ def test_runner_settings_validate_before_persistence(
     service = RunnerService(repositories=replace(RunnerRepositories(), runners=runners))
     changed = {"qemu_default_vcpus": 4 if valid else 9}
     if valid:
-        assert service.update_runner_qemu_settings(limits.id, **changed) is limits
+        assert (
+            service.runner_lifecycle.update_runner_qemu_settings(limits.id, **changed)
+            is limits
+        )
         runners.update_qemu_settings.assert_called_once_with(limits, **changed)
     else:
         with pytest.raises(ConflictError) as caught:
-            service.update_runner_qemu_settings(limits.id, **changed)
+            service.runner_lifecycle.update_runner_qemu_settings(limits.id, **changed)
         assert (
             caught.value.message == "Runner default vCPU must be within min/max range"
         )
@@ -227,5 +230,5 @@ def test_runner_settings_noop_does_not_validate_or_write(
     runners = Mock()
     runners.get_by_id.return_value = limits
     service = RunnerService(repositories=replace(RunnerRepositories(), runners=runners))
-    assert service.update_runner_qemu_settings(limits.id) is limits
+    assert service.runner_lifecycle.update_runner_qemu_settings(limits.id) is limits
     runners.update_qemu_settings.assert_not_called()

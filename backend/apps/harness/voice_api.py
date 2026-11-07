@@ -55,9 +55,9 @@ async def _authorized(
             request.user, org_id
         )
         if workspace_id is not None:
-            await sync_to_async(get_runner_service().get_workspace_for_user)(
-                workspace_id, user=request.user, organization_id=org_id
-            )
+            await sync_to_async(
+                get_runner_service().workspace_access.get_workspace_for_user
+            )(workspace_id, user=request.user, organization_id=org_id)
         return 200, await operation(org_id)
     except VoiceProviderError as exc:
         return exc.status, ErrorOut(detail=str(exc), code="voice_provider_error")

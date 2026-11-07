@@ -122,7 +122,9 @@ class ImageDefinitionService:
         definition = await sync_to_async(self._owned_definition_for_admin)(
             user, organization_id, definition_id
         )
-        await self._runner_service.activate_image_definition(definition.id)
+        await self._runner_service.image_lifecycle.activate_image_definition(
+            definition.id
+        )
         return await sync_to_async(ImageDefinitionRepository.get_by_id)(definition.id)
 
     # -- Runner builds ---------------------------------------------------
@@ -165,7 +167,7 @@ class ImageDefinitionService:
         definition, runner = await sync_to_async(self._build_target)(
             user, organization_id, definition_id, runner_id
         )
-        return await self._runner_service.trigger_build_job(
+        return await self._runner_service.image_lifecycle.trigger_build_job(
             image_definition=definition,
             runner=runner,
             activate=activate,
@@ -189,15 +191,15 @@ class ImageDefinitionService:
         )
         action = action.strip().lower()
         if action == "deactivate":
-            return await sync_to_async(self._runner_service.deactivate_runner_image)(
-                build
-            )
+            return await sync_to_async(
+                self._runner_service.image_lifecycle.deactivate_runner_image
+            )(build)
         if action == "activate":
-            return await self._runner_service.activate_build_job(
+            return await self._runner_service.image_lifecycle.activate_build_job(
                 build, created_by=user, message=message
             )
         if action == "rebuild":
-            return await self._runner_service.trigger_build_job(
+            return await self._runner_service.image_lifecycle.trigger_build_job(
                 image_definition=build.image_definition,
                 runner=build.runner,
                 activate=True,

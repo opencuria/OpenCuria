@@ -57,6 +57,9 @@ class FakeRunners:
         self.resumed: list[uuid.UUID] = []
         self.restarted: list[uuid.UUID] = []
         self.touched: list[uuid.UUID] = []
+        # The backend reaches several runner domain services; one fake serves all.
+        self.workspace_access = self.workspace_lifecycle = self
+        self.ownership = self.process_manager = self
 
     def is_active_workspace_owner(self, user_id, workspace_id, *, organization_id):
         return self.owner

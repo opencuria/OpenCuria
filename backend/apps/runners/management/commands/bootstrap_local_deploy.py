@@ -294,7 +294,7 @@ class Command(BaseCommand):
         ):
             return build
 
-        return async_to_sync(RunnerService().trigger_build_job)(
+        return async_to_sync(RunnerService().image_lifecycle.trigger_build_job)(
             image_definition=definition,
             runner=runner,
             created_by=user,

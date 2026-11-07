@@ -51,7 +51,7 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
         org_id=runner.organization_id,
     )
 
-    workspace, _ = await service.create_workspace(
+    workspace, _ = await service.workspace_lifecycle.create_workspace(
         name="Service-resolved credentials",
         repos=[],
         image_artifact_id=artifact.id,
@@ -70,7 +70,7 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
     }
 
     # Only the runner's successful create acknowledgement updates disk state.
-    service.handle_workspace_created(
+    service.workspace_lifecycle.handle_workspace_created(
         task_id=str(workspace.tasks.get().id),
         workspace_id=str(workspace.id),
         status="created",
@@ -105,7 +105,7 @@ async def test_update_workspace_resolves_requested_credential_ids(workspace, use
     workspace.credentials.set([])
     service.runner_transport.call_runner = AsyncMock(return_value={"ok": True})
 
-    await service.update_workspace(
+    await service.workspace_lifecycle.update_workspace(
         workspace.id,
         credential_ids=[credential.id],
         user=user,
@@ -154,7 +154,7 @@ async def test_create_workspace_credentials_require_user_and_organization(runner
     )
 
     with pytest.raises(ConflictError, match="User and organization"):
-        await service.create_workspace(
+        await service.workspace_lifecycle.create_workspace(
             name="Missing context",
             repos=[],
             image_artifact_id=artifact.id,
@@ -197,7 +197,7 @@ async def test_create_workspace_validates_credential_ownership(runner, user):
     )
 
     with pytest.raises(NotFoundError, match="Credential"):
-        await service.create_workspace(
+        await service.workspace_lifecycle.create_workspace(
             name="Foreign credential",
             repos=[],
             image_artifact_id=artifact.id,

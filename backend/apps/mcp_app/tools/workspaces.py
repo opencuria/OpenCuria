@@ -398,7 +398,7 @@ def _options(ctx: ToolContext) -> dict[str, Any]:
                 ],
             },
         }
-        for runner in get_runner_service().list_runners(
+        for runner in get_runner_service().runner_lifecycle.list_runners(
             organization_id=ctx.organization_id
         )
     ]
@@ -537,7 +537,7 @@ async def workspace_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
         }
 
     prepared = await sync_to_async(plan)()
-    workspace, _task = await get_runner_service().create_workspace(
+    workspace, _task = await get_runner_service().workspace_lifecycle.create_workspace(
         name=args["name"].strip(),
         repos=args.get("repos") or [],
         qemu_vcpus=args.get("vcpus"),
@@ -614,7 +614,7 @@ async def workspace_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
         }
 
     prepared = await sync_to_async(plan)()
-    updated = await get_runner_service().update_workspace(
+    updated = await get_runner_service().workspace_lifecycle.update_workspace(
         prepared["workspace"].id,
         name=args.get("name"),
         credential_ids=prepared["credential_ids"],
@@ -661,7 +661,7 @@ async def workspace_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
     workspace = await sync_to_async(resolve.workspace)(ctx, args["workspace"])
     status = str(workspace.status)
     if status == WorkspaceStatus.STOPPED and not workspace.active_operation:
-        await get_runner_service().resume_workspace(workspace.id)
+        await get_runner_service().workspace_lifecycle.resume_workspace(workspace.id)
     elif status not in _STARTABLE_OR_STARTING:
         raise ToolError(
             f"Workspace '{workspace.name}' is {workspace.status} and cannot be "
@@ -690,7 +690,7 @@ async def workspace_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
 async def workspace_stop(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     workspace = await sync_to_async(resolve.workspace)(ctx, args["workspace"])
     if str(workspace.status) != WorkspaceStatus.STOPPED:
-        await get_runner_service().stop_workspace(workspace.id)
+        await get_runner_service().workspace_lifecycle.stop_workspace(workspace.id)
     workspace = await sync_to_async(resolve.workspace)(ctx, str(workspace.id))
     return await sync_to_async(_summary)(workspace)
 
@@ -708,7 +708,7 @@ async def workspace_stop(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 )
 async def workspace_delete(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     workspace = await sync_to_async(resolve.workspace)(ctx, args["workspace"])
-    await get_runner_service().remove_workspace(workspace.id)
+    await get_runner_service().workspace_lifecycle.remove_workspace(workspace.id)
     return {
         "workspace_id": workspace.id,
         "name": workspace.name,

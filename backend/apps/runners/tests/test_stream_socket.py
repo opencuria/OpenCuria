@@ -21,7 +21,7 @@ async def test_stream_service_validation(runner, workspace, monkeypatch):
         "stream": "stdout",
         "data": "aGk=",
     }
-    assert not service.handle_stream_reply(
+    assert not service.stream_transport.handle_stream_reply(
         "workspace:stream_output", good, runner_id=str(runner.id)
     )  # No live accessor owns this connection.
 
@@ -33,7 +33,9 @@ async def test_stream_service_validation(runner, workspace, monkeypatch):
         runner_accessor, "route_stream_closed", lambda data: routed.append(data) or True
     )
     for event in ("workspace:stream_output", "workspace:stream_closed"):
-        assert service.handle_stream_reply(event, good, runner_id=str(runner.id))
+        assert service.stream_transport.handle_stream_reply(
+            event, good, runner_id=str(runner.id)
+        )
     assert routed == [good, good]
     routed.clear()
 
@@ -43,10 +45,10 @@ async def test_stream_service_validation(runner, workspace, monkeypatch):
         (good, str(uuid.uuid4())),
         ({**good, "workspace_id": str(uuid.uuid4())}, str(runner.id)),
     ):
-        assert not service.handle_stream_reply(
+        assert not service.stream_transport.handle_stream_reply(
             "workspace:stream_output", data, runner_id=owner
         )
-    assert not service.handle_stream_reply(
+    assert not service.stream_transport.handle_stream_reply(
         "workspace:stream_bogus", good, runner_id=str(runner.id)
     )
     assert routed == []

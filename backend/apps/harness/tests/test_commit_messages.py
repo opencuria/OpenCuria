@@ -81,7 +81,11 @@ def _fake_git(monkeypatch, *, diff: dict, history: dict | None = None):
             return diff
         return history or {"ok": True, "commits": []}
 
-    fake = SimpleNamespace(run_git_operation=AsyncMock(side_effect=run_git_operation))
+    fake = SimpleNamespace(
+        git_operations=SimpleNamespace(
+            run_git_operation=AsyncMock(side_effect=run_git_operation)
+        )
+    )
     monkeypatch.setattr(
         "apps.harness.commit_message_service.get_runner_service", lambda: fake
     )

@@ -203,7 +203,7 @@ async def test_runner_heartbeat_refreshes_liveness_before_reconciliation(
 ):
     service = sio_server.get_runner_service()
     reconcile = Mock(return_value=[])
-    monkeypatch.setattr(service, "handle_heartbeat", reconcile)
+    monkeypatch.setattr(service.heartbeat_reconciler, "handle_heartbeat", reconcile)
     monkeypatch.setattr(
         service.heartbeat_reconciler, "reconcile_vanished_processes", AsyncMock()
     )

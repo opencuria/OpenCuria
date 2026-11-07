@@ -30,7 +30,9 @@ async def test_stream_control_preserves_ack(event: str, response: dict) -> None:
     sio = SimpleNamespace(call=AsyncMock(return_value=response))
     service = RunnerService(sio_server=sio)
     payload = {"workspace_id": "workspace", "connection_id": "conn"}
-    result = await service.call_stream_event(SimpleNamespace(sid="sid"), event, payload)
+    result = await service.stream_transport.call_stream_event(
+        SimpleNamespace(sid="sid"), event, payload
+    )
     assert result is response
     sio.call.assert_awaited_once_with(event, payload, to="sid", timeout=15)
 
@@ -40,7 +42,7 @@ async def test_stream_control_ack_timeout() -> None:
     sio = SimpleNamespace(call=AsyncMock(side_effect=SocketIOTimeoutError))
     service = RunnerService(sio_server=sio)
     with pytest.raises(RuntimeError, match="timed out.*workspace:stream_close"):
-        await service.call_stream_event(
+        await service.stream_transport.call_stream_event(
             SimpleNamespace(sid="sid"), "workspace:stream_close", {}, timeout=2
         )
     sio.call.assert_awaited_once_with("workspace:stream_close", {}, to="sid", timeout=2)

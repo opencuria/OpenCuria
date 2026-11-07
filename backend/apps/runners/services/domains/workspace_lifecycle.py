@@ -517,10 +517,6 @@ class WorkspaceLifecycleService:
                     )
         return workspace
 
-    async def rename_workspace(self, workspace_id: uuid.UUID, name: str) -> Workspace:
-        """Rename an existing workspace."""
-        return await self.update_workspace(workspace_id, name=name)
-
     async def stop_workspace(
         self,
         workspace_id: uuid.UUID,

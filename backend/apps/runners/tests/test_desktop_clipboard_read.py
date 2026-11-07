@@ -30,8 +30,8 @@ def clipboard_api(capture_workspace, monkeypatch):
     service.runner_transport.call_runner = AsyncMock(
         return_value={"ok": True, "text": "clipboard text"}
     )
-    service.read_desktop_clipboard = AsyncMock(
-        wraps=service.read_desktop_clipboard
+    service.interactive_sessions.read_desktop_clipboard = AsyncMock(
+        wraps=service.interactive_sessions.read_desktop_clipboard
     )
     monkeypatch.setitem(
         service.session_store.state.desktops, str(workspace.id), {"computer_use": False}
@@ -93,7 +93,7 @@ def test_read_clipboard_preserves_bodyless_path_for_authorized_admin_and_member(
 
     assert response.status_code == 200, response.content
     assert response.json() == {"text": "clipboard text"}
-    service.read_desktop_clipboard.assert_awaited_once_with(
+    service.interactive_sessions.read_desktop_clipboard.assert_awaited_once_with(
         workspace.id, user=user, organization_id=org.id
     )
 
@@ -110,7 +110,7 @@ def test_org_admin_can_read_another_members_workspace(clipboard_api):
     response = _post(client, workspace.id, headers())
 
     assert response.status_code == 200, response.content
-    service.read_desktop_clipboard.assert_awaited_once()
+    service.interactive_sessions.read_desktop_clipboard.assert_awaited_once()
 
 
 @pytest.mark.django_db
@@ -156,7 +156,7 @@ def test_terminal_permission_is_required(clipboard_api):
     )
 
     assert response.status_code == 403, response.content
-    service.read_desktop_clipboard.assert_not_awaited()
+    service.interactive_sessions.read_desktop_clipboard.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -193,7 +193,7 @@ def test_invalid_clipboard_options_are_rejected(clipboard_api, payload):
     response = _post(client, workspace.id, headers(), payload)
 
     assert response.status_code == 422, response.content
-    service.read_desktop_clipboard.assert_not_awaited()
+    service.interactive_sessions.read_desktop_clipboard.assert_not_awaited()
 
 
 def test_clipboard_read_options_schema_is_strict():
@@ -226,7 +226,7 @@ def test_selection_options_forward_to_service(clipboard_api, payload, expected):
     response = _post(client, workspace.id, headers(), payload)
 
     assert response.status_code == 200, response.content
-    service.read_desktop_clipboard.assert_awaited_once_with(
+    service.interactive_sessions.read_desktop_clipboard.assert_awaited_once_with(
         workspace.id, user=user, organization_id=org.id, **expected
     )
 
@@ -284,7 +284,7 @@ async def test_selection_rpc_uses_finite_timeout_and_omits_false_options(
 ):
     service, workspace, context = selection_service
 
-    result = await service.read_desktop_clipboard(
+    result = await service.interactive_sessions.read_desktop_clipboard(
         workspace.id, copy_selection=True, **context
     )
 
@@ -316,7 +316,7 @@ async def test_selection_rejects_malformed_rpc_responses_without_details(
     service.runner_transport.call_runner.return_value = response
 
     with pytest.raises(ConflictError) as error:
-        await service.read_desktop_clipboard(
+        await service.interactive_sessions.read_desktop_clipboard(
             workspace.id, copy_selection=True, **context
         )
 
@@ -332,7 +332,7 @@ async def test_selection_rpc_failures_are_sanitized(selection_service, failure):
     service.runner_transport.call_runner.side_effect = failure
 
     with pytest.raises(ConflictError) as error:
-        await service.read_desktop_clipboard(
+        await service.interactive_sessions.read_desktop_clipboard(
             workspace.id, copy_selection=True, **context
         )
 
@@ -364,7 +364,7 @@ async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse
         )
 
     with pytest.raises(ConflictError):
-        await service.read_desktop_clipboard(
+        await service.interactive_sessions.read_desktop_clipboard(
             workspace.id, copy_selection=True, **context
         )
 
@@ -374,7 +374,7 @@ async def test_selection_copy_rejected_without_rpc_during_capture_or_computeruse
 @pytest.mark.django_db
 def test_selection_rpc_error_does_not_expose_runner_detail(clipboard_api):
     client, headers, service, _, _, workspace = clipboard_api
-    service.read_desktop_clipboard.side_effect = RuntimeError(
+    service.interactive_sessions.read_desktop_clipboard.side_effect = RuntimeError(
         "copied private clipboard payload"
     )
 
@@ -399,7 +399,7 @@ async def test_selection_timeout_bounds_full_operation(selection_service):
     service.runner_transport.call_runner.side_effect = wait_forever
     start = time.monotonic()
     with pytest.raises(ConflictError) as error:
-        await service.read_desktop_clipboard(
+        await service.interactive_sessions.read_desktop_clipboard(
             workspace.id, copy_selection=True, **context
         )
 

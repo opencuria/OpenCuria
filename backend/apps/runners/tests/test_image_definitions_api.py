@@ -341,7 +341,7 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
     monkeypatch.setattr(
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
-            trigger_build_job=_trigger_build_job,
+            image_lifecycle=SimpleNamespace(trigger_build_job=_trigger_build_job),
         ),
     )
 
@@ -434,7 +434,7 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
     monkeypatch.setattr(
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
-            trigger_build_job=_trigger_build_job,
+            image_lifecycle=SimpleNamespace(trigger_build_job=_trigger_build_job),
         ),
     )
 
@@ -605,8 +605,10 @@ def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch)
     monkeypatch.setattr(
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
-            trigger_build_job=_trigger_build_job,
-            activate_build_job=_activate_build_job,
+            image_lifecycle=SimpleNamespace(
+                trigger_build_job=_trigger_build_job,
+                activate_build_job=_activate_build_job,
+            ),
         ),
     )
 
@@ -668,8 +670,10 @@ def test_rebuild_runner_build_uses_rebuild_action(client: Client, monkeypatch):
     monkeypatch.setattr(
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
-            trigger_build_job=_trigger_build_job,
-            activate_build_job=_activate_build_job,
+            image_lifecycle=SimpleNamespace(
+                trigger_build_job=_trigger_build_job,
+                activate_build_job=_activate_build_job,
+            ),
         ),
     )
 
@@ -812,7 +816,7 @@ def test_handle_image_build_progress_appends_atomically_and_caps_log():
     )
     ImageBuildJob.objects.filter(id=build.id).update(build_log="old\n")
     service = RunnerService(sio_server=None)
-    service.handle_image_build_progress(
+    service.image_lifecycle.handle_image_build_progress(
         str(build.id), "new line", runner_id=str(runner.id), task_id=str(task.id)
     )
 
@@ -823,19 +827,21 @@ def test_handle_image_build_progress_appends_atomically_and_caps_log():
     # Over-long stored logs are trimmed to the tail cap atomically.
     big = "y" * (service.image_lifecycle.BUILD_LOG_MAX_CHARS + 100)
     ImageBuildJob.objects.filter(id=build.id).update(build_log=big)
-    service.handle_image_build_progress(str(build.id), "tail", runner_id=None, task_id=str(task.id))
+    service.image_lifecycle.handle_image_build_progress(
+        str(build.id), "tail", runner_id=None, task_id=str(task.id)
+    )
     build.refresh_from_db()
     assert len(build.build_log) == service.image_lifecycle.BUILD_LOG_MAX_CHARS
     assert build.build_log.endswith("tail\n")
 
     # Runner mismatch and unknown jobs are ignored without writes.
     before = build.build_log
-    service.handle_image_build_progress(
+    service.image_lifecycle.handle_image_build_progress(
         str(build.id), "evil", runner_id="00000000-0000-0000-0000-000000000000"
     )
     build.refresh_from_db()
     assert build.build_log == before
-    service.handle_image_build_progress(
+    service.image_lifecycle.handle_image_build_progress(
         "00000000-0000-0000-0000-000000000000", "noop", runner_id=None
     )
 

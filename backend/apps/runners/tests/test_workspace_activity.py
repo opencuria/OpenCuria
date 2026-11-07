@@ -49,7 +49,7 @@ def test_workspace_lists_report_any_busy_session(
         "organization": {"organization_id": runner.organization_id},
         "user": {"organization_id": runner.organization_id, "user": user},
     }
-    workspaces = RunnerService().list_workspaces(**filters[scope])
+    workspaces = RunnerService().runner_lifecycle.list_workspaces(**filters[scope])
     assert {
         workspace.id: workspace.has_active_harness_session for workspace in workspaces
     } == activity_workspaces
@@ -59,7 +59,7 @@ def test_workspace_lists_report_any_busy_session(
 @pytest.mark.parametrize("read", ["get_workspace", "get_workspace_or_none"])
 def test_workspace_details_refresh_activity(activity_workspaces, read) -> None:
     """Details include current activity rather than a cached session state."""
-    lookup = getattr(RunnerService(), read)
+    lookup = getattr(RunnerService().runner_lifecycle, read)
     for workspace_id, expected in activity_workspaces.items():
         assert lookup(workspace_id).has_active_harness_session is expected
     HarnessSession.objects.update(status="idle")
@@ -72,9 +72,9 @@ def test_missing_workspace_read_contract() -> None:
     """The optional lookup returns None; the required lookup still raises."""
     service = RunnerService()
     missing = uuid.uuid4()
-    assert service.get_workspace_or_none(missing) is None
+    assert service.runner_lifecycle.get_workspace_or_none(missing) is None
     with pytest.raises(WorkspaceNotFoundError):
-        service.get_workspace(missing)
+        service.runner_lifecycle.get_workspace(missing)
 
 
 @pytest.mark.django_db
@@ -86,14 +86,14 @@ def test_launch_state_reports_committed_lifecycle_facts(workspace, runner) -> No
     Workspace.objects.filter(pk=workspace.pk).update(current_task_id=lifecycle_task.id)
     service = RunnerService()
 
-    assert service.get_workspace_launch_state(workspace.id) == (
+    assert service.workspace_lifecycle.get_workspace_launch_state(workspace.id) == (
         WorkspaceStatus.RUNNING,
         None,
         RunnerStatus.ONLINE,
         True,
         lifecycle_task.id,
     )
-    assert service.get_workspace_launch_state(uuid.uuid4()) == (
+    assert service.workspace_lifecycle.get_workspace_launch_state(uuid.uuid4()) == (
         None,
         None,
         None,

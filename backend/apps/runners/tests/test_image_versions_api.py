@@ -107,7 +107,9 @@ def test_new_workspace_from_captured_image_uses_latest(
         return workspace, SimpleNamespace(id=workspace.id)
 
     monkeypatch.setattr(
-        get_runner_service(), "create_workspace_from_image_artifact", create
+        get_runner_service().workspace_lifecycle,
+        "create_workspace_from_image_artifact",
+        create,
     )
     response = Client().post(
         f"/api/v1/captured-images/{line.id}/workspaces/",

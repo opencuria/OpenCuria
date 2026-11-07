@@ -37,11 +37,12 @@ def _record(**overrides):
 
 
 class _FakeService:
-    """Minimal RunnerService double recording calls."""
+    """Minimal RunnerService double recording process-manager calls."""
 
     def __init__(self, **methods):
         self.calls: list[tuple] = []
         self._methods = methods
+        self.process_manager = self
 
     async def start_process(self, workspace_id, command, **kwargs):
         self.calls.append(("start_process", workspace_id, command, kwargs))

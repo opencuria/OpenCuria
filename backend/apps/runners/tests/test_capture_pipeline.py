@@ -241,9 +241,11 @@ def test_full_success_holds_parent_until_recovery(
     workspace.credentials_present = True
     workspace.save()
     frontend = Mock()
-    monkeypatch.setattr(FrontendBusService, 'forward_to_frontend', frontend)
+    monkeypatch.setattr(FrontendBusService, "forward_to_frontend", frontend)
     with django_capture_on_commit_callbacks(execute=True):
-        _, stop = async_to_sync(service.create_image_artifact)(workspace.id, "capture")
+        _, stop = async_to_sync(service.image_lifecycle.create_image_artifact)(
+            workspace.id, "capture"
+        )
     request = CaptureRequest.objects.get(workspace=workspace)
     assert request.prior_running and request.phase == "stop"
     assert request.child_id == stop.id
@@ -295,13 +297,12 @@ def test_full_success_holds_parent_until_recovery(
             LifecycleCommand.objects.count(),
         )
         for method, kwargs in [
-            (service.stop_workspace, {}),
-            (service.remove_workspace, {}),
-            (service.resume_workspace, {}),
-            (service.rename_workspace, {"name": "denied"}),
-            (service.update_workspace, {"qemu_vcpus": 2}),
-            (service.update_workspace, {"credential_ids": []}),
-            (service.create_image_artifact, {"name": "overlap"}),
+            (service.workspace_lifecycle.stop_workspace, {}),
+            (service.workspace_lifecycle.remove_workspace, {}),
+            (service.workspace_lifecycle.resume_workspace, {}),
+            (service.workspace_lifecycle.update_workspace, {"qemu_vcpus": 2}),
+            (service.workspace_lifecycle.update_workspace, {"credential_ids": []}),
+            (service.image_lifecycle.create_image_artifact, {"name": "overlap"}),
         ]:
             with pytest.raises(ConflictError):
                 async_to_sync(method)(workspace.id, **kwargs)

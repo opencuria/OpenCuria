@@ -86,7 +86,8 @@ def test_nonterminal_callback_filters_and_normalizes_payload(
     ) -> None:
         received.append((task_id, runner_id, artifact_id, runner_ref))
 
-    service = Mock(handle_workspace_stopped=callback)
+    service = Mock()
+    service.workspace_lifecycle.handle_workspace_stopped = callback
     data = {**data, "image_artifact_id": "/image.qcow2", "unused_field": True}
     assert not apply_result(service, str(runner.id), "workspace:stopped", data)
     assert received == [(str(task.id), str(runner.id), "/image.qcow2", "/image.qcow2")]
@@ -112,7 +113,8 @@ def test_failure_message_does_not_create_a_hidden_intervention_fence(
             "Failure text mentioning intervention must not create a second state",
         )
 
-    service = Mock(handle_workspace_stopped=callback)
+    service = Mock()
+    service.workspace_lifecycle.handle_workspace_stopped = callback
     assert apply_result(service, str(runner.id), "workspace:stopped", data)
     workspace.refresh_from_db()
     task.refresh_from_db()

@@ -41,7 +41,7 @@ class ProcessControlService:
     ) -> None:
         """Require the active organization's workspace owner before any lookup."""
         try:
-            await sync_to_async(self.runners.get_workspace_for_user)(
+            await sync_to_async(self.runners.workspace_access.get_workspace_for_user)(
                 workspace_id, user=user, organization_id=organization_id
             )
         except NotFoundError:
@@ -59,7 +59,9 @@ class ProcessControlService:
         await self._require_workspace(
             workspace_id, user=user, organization_id=organization_id
         )
-        processes = await self.runners.list_processes(workspace_id, live=live)
+        processes = await self.runners.process_manager.list_processes(
+            workspace_id, live=live
+        )
         return [
             process
             for process in processes
@@ -79,7 +81,7 @@ class ProcessControlService:
         await self._require_workspace(
             workspace_id, user=user, organization_id=organization_id
         )
-        return await self.runners.stop_process(workspace_id, id_or_name)
+        return await self.runners.process_manager.stop_process(workspace_id, id_or_name)
 
     async def restart_process(
         self,
@@ -93,13 +95,17 @@ class ProcessControlService:
         await self._require_workspace(
             workspace_id, user=user, organization_id=organization_id
         )
-        existing = await self.runners.get_process(workspace_id, id_or_name)
+        existing = await self.runners.process_manager.get_process(
+            workspace_id, id_or_name
+        )
         if str(getattr(existing, "kind", "") or "") == "temp":
             raise TemporaryProcessControlError(
                 "Temporary processes cannot be restarted by users; "
                 "they live only for their agent session."
             )
-        return await self.runners.restart_process(workspace_id, id_or_name, user=user)
+        return await self.runners.process_manager.restart_process(
+            workspace_id, id_or_name, user=user
+        )
 
     async def delete_process(
         self,
@@ -113,9 +119,13 @@ class ProcessControlService:
         await self._require_workspace(
             workspace_id, user=user, organization_id=organization_id
         )
-        existing = await self.runners.get_process(workspace_id, id_or_name)
+        existing = await self.runners.process_manager.get_process(
+            workspace_id, id_or_name
+        )
         if str(getattr(existing, "kind", "") or "") == "temp":
             raise TemporaryProcessControlError(
                 "Temporary processes cannot be deleted by users; stop them instead."
             )
-        return await self.runners.delete_process(workspace_id, id_or_name)
+        return await self.runners.process_manager.delete_process(
+            workspace_id, id_or_name
+        )

@@ -277,7 +277,12 @@ class _RecordingRunnerService:
         from apps.runners.repositories import WorkspaceRepository
 
         self.workspaces = WorkspaceRepository
+        self.runner_lifecycle = self
+        self.runner_transport = self
         self.emitted: list[tuple[str, str, dict]] = []
+
+    def get_workspace_or_none(self, workspace_id):  # type: ignore[no-untyped-def]
+        return self.workspaces.get_by_id(workspace_id)
 
     async def emit_harness_event(self, runner, event, payload) -> None:  # type: ignore[no-untyped-def]
         self.emitted.append((str(runner.sid), event, payload))

@@ -210,13 +210,17 @@ def _verify_cookie(value: str) -> tuple[str, str] | None:
 @sync_to_async
 def _user_can_access_workspace(user_id: str, workspace_id: str) -> bool:
     """Return whether the authenticated user may access the workspace desktop."""
-    return get_runner_service().can_user_view_workspace_desktop(user_id, workspace_id)
+    return get_runner_service().workspace_access.can_user_view_workspace_desktop(
+        user_id, workspace_id
+    )
 
 
 @sync_to_async
 def _desktop_workspace_available(workspace_id: str) -> bool:
     """Check the shared lifecycle gate without changing desktop authorization."""
-    return get_runner_service().is_workspace_available(uuid.UUID(workspace_id))
+    return get_runner_service().ownership.is_workspace_available(
+        uuid.UUID(workspace_id)
+    )
 
 
 async def _reject_unavailable_desktop(scope, send) -> None:
@@ -661,11 +665,11 @@ async def _ws_proxy_loop(
             return
         service = get_runner_service()
         try:
-            user, organization_id = await sync_to_async(service.resolve_desktop_viewer)(
-                user_id, workspace_id
-            )
+            user, organization_id = await sync_to_async(
+                service.workspace_access.resolve_desktop_viewer
+            )(user_id, workspace_id)
             while True:
-                await service.renew_desktop(
+                await service.interactive_sessions.renew_desktop(
                     uuid.UUID(workspace_id),
                     user=user,
                     organization_id=organization_id,
@@ -743,6 +747,8 @@ async def _validate_token(token: str):
 def _get_desktop_proxy_target(workspace_id: str) -> dict | None:
     """Resolve the active desktop state and online runner socket for a workspace."""
     try:
-        return get_runner_service().get_desktop_proxy_target(workspace_id)
+        return get_runner_service().interactive_sessions.get_desktop_proxy_target(
+            workspace_id
+        )
     except Exception:
         return None

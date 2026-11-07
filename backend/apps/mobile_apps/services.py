@@ -151,7 +151,9 @@ class AppService:
         """Explain backends the app calls that its workspace cannot serve."""
         if not labels:
             return []
-        processes = await self._runners().list_processes(workspace_id, live=False)
+        processes = await self._runners().process_manager.list_processes(
+            workspace_id, live=False
+        )
         kinds: dict[str, set[str]] = {}
         for process in processes:
             kinds.setdefault((process.name or "").lower(), set()).add(process.kind)

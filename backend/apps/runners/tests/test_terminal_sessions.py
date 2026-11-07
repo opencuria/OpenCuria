@@ -60,10 +60,10 @@ def _connect(sid: str, user_id: str, workspace_id: str | None = None) -> None:
 
 
 async def _open(service, workspace, *, client_id=None, user_id=USER, terminal="t1"):
-    task = await service.start_terminal(
+    task = await service.interactive_sessions.start_terminal(
         workspace.id, user_id=user_id, client_id=client_id
     )
-    await service.handle_terminal_started(
+    await service.interactive_sessions.handle_terminal_started(
         str(task.id), str(workspace.id), terminal, str(workspace.runner.id)
     )
     return terminal
@@ -85,10 +85,10 @@ async def test_disconnect_of_the_requesting_client_closes_its_terminal(terminals
     _connect("tab-b", USER, workspace_id)
     await _open(service, workspace, client_id="tab-a")
 
-    await service.release_frontend_terminals("tab-b")
+    await service.interactive_sessions.release_frontend_terminals("tab-b")
     assert _runner_events(service) == []
 
-    await service.release_frontend_terminals("tab-a")
+    await service.interactive_sessions.release_frontend_terminals("tab-a")
     assert _runner_events(service) == [
         ("terminal:close", {"workspace_id": workspace_id, "terminal_id": "t1"})
     ]
@@ -102,10 +102,12 @@ async def test_leaving_a_workspace_releases_only_its_terminals(terminals):
     _connect("tab", USER, workspace_id)
     await _open(service, workspace, client_id="tab")
 
-    await service.release_frontend_terminals("tab", str(uuid.uuid4()))
+    await service.interactive_sessions.release_frontend_terminals(
+        "tab", str(uuid.uuid4())
+    )
     assert _runner_events(service) == []
 
-    await service.release_frontend_terminals("tab", workspace_id)
+    await service.interactive_sessions.release_frontend_terminals("tab", workspace_id)
     assert [event for event, _ in _runner_events(service)] == ["terminal:close"]
 
 
@@ -160,11 +162,13 @@ async def test_heartbeat_renews_only_attached_terminals_of_that_runner(terminals
     await _open(service, workspace, client_id="tab", terminal="kept")
     _connect("closing", USER, workspace_id)
     await _open(service, workspace, client_id="closing", terminal="released")
-    await service.release_frontend_terminals("closing")
+    await service.interactive_sessions.release_frontend_terminals("closing")
     service.runner_transport.emit_to_runner.reset_mock()
 
-    await service.renew_terminal_leases(workspace.runner)
-    await service.renew_terminal_leases(SimpleNamespace(id=uuid.uuid4()))
+    await service.interactive_sessions.renew_terminal_leases(workspace.runner)
+    await service.interactive_sessions.renew_terminal_leases(
+        SimpleNamespace(id=uuid.uuid4())
+    )
 
     service.runner_transport.emit_to_runner.assert_awaited_once_with(
         workspace.runner,
@@ -180,12 +184,12 @@ async def test_runner_close_drops_route_and_forwards_reason(terminals):
     _connect("tab", USER, workspace_id)
     await _open(service, workspace, client_id="tab")
 
-    await service.handle_terminal_closed(
+    await service.interactive_sessions.handle_terminal_closed(
         workspace_id, "t1", str(uuid.uuid4()), reason="idle"
     )
     assert "t1" in service.session_store.state.terminals
 
-    await service.handle_terminal_closed(
+    await service.interactive_sessions.handle_terminal_closed(
         workspace_id, "t1", str(workspace.runner.id), reason="idle"
     )
     assert service.session_store.state.terminals == {}
@@ -204,9 +208,9 @@ async def test_client_close_stops_renewal_immediately(terminals):
     _connect("tab", USER, workspace_id)
     await _open(service, workspace, client_id="tab")
 
-    await service.forward_terminal_close(workspace_id, "t1")
+    await service.interactive_sessions.forward_terminal_close(workspace_id, "t1")
     service.runner_transport.emit_to_runner.reset_mock()
-    await service.renew_terminal_leases(workspace.runner)
+    await service.interactive_sessions.renew_terminal_leases(workspace.runner)
 
     service.runner_transport.emit_to_runner.assert_not_awaited()
 
@@ -219,7 +223,7 @@ async def test_offline_runner_does_not_break_release(terminals):
     await _open(service, workspace, client_id="tab")
     service.runner_transport.emit_to_runner.side_effect = RuntimeError("offline")
 
-    await service.release_frontend_terminals("tab")
+    await service.interactive_sessions.release_frontend_terminals("tab")
 
     assert service.session_store.state.terminals == {}
 
@@ -238,7 +242,9 @@ async def test_socket_disconnect_and_unsubscribe_release_terminals(
     monkeypatch.setattr(
         sio_server, "_frontend_user_can_access_workspace", AsyncMock(return_value=True)
     )
-    service = SimpleNamespace(release_frontend_terminals=AsyncMock())
+    service = SimpleNamespace(
+        interactive_sessions=SimpleNamespace(release_frontend_terminals=AsyncMock())
+    )
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
     _connect("tab", "123", "workspace")
     handlers = server.handlers["/frontend"]
@@ -248,6 +254,6 @@ async def test_socket_disconnect_and_unsubscribe_release_terminals(
     )
     await handlers["disconnect"]("tab")
 
-    releases = service.release_frontend_terminals.await_args_list
+    releases = service.interactive_sessions.release_frontend_terminals.await_args_list
     assert [call.args for call in releases] == [("tab", "workspace"), ("tab",)]
     assert realtime.frontend_user("tab") is None

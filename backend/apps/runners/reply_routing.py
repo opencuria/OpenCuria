@@ -22,9 +22,9 @@ RUNNER_REPLY_METHODS = {
             "harness:desktop_action_result",
             "workspace:artifact_ensure_result",
         ),
-        "handle_harness_reply",
+        ("runner_transport", "handle_harness_reply"),
     ),
-    "git:operation_result": "handle_git_reply",
+    "git:operation_result": ("git_operations", "handle_git_reply"),
     **dict.fromkeys(
         (
             "harness:process_start_result",
@@ -33,21 +33,29 @@ RUNNER_REPLY_METHODS = {
             "harness:process_stop_result",
             "harness:process_verify_result",
         ),
-        "handle_process_reply",
+        ("process_manager", "handle_process_reply"),
     ),
-    "workspace:stream_output": "handle_stream_reply",
-    "workspace:stream_closed": "handle_stream_reply",
+    **dict.fromkeys(
+        ("workspace:stream_output", "workspace:stream_closed"),
+        ("stream_transport", "handle_stream_reply"),
+    ),
 }
+
+
+def _reply_handler(service: RunnerService, event: str):
+    """Return the owning domain service's reply handler for *event*."""
+    domain, method = RUNNER_REPLY_METHODS[event]
+    return getattr(getattr(service, domain), method)
 
 
 def _owns_local_reply(event: str, data: dict) -> bool:
     """Select a live waiter without querying unrelated peers' persistence."""
-    method = RUNNER_REPLY_METHODS.get(event)
-    if method == "handle_git_reply":
+    domain, _method = RUNNER_REPLY_METHODS.get(event, (None, None))
+    if domain == "git_operations":
         return get_runner_service().rpc_registry.owns_request(
             "git", str(data.get("request_id", ""))
         )
-    if method == "handle_process_reply":
+    if domain == "process_manager":
         return get_runner_service().rpc_registry.owns_request(
             "process", str(data.get("request_id", ""))
         )
@@ -56,11 +64,10 @@ def _owns_local_reply(event: str, data: dict) -> bool:
 
 async def _dispatch_local(event: str, data: dict, runner_id: str) -> bool:
     """Keep domain checks identical in API and execution worker processes."""
-    method = RUNNER_REPLY_METHODS.get(event)
-    if method is None:
+    if event not in RUNNER_REPLY_METHODS:
         return False
     return bool(
-        await sync_to_async(getattr(get_runner_service(), method))(
+        await sync_to_async(_reply_handler(get_runner_service(), event))(
             event, data, runner_id=runner_id
         )
     )
@@ -68,7 +75,9 @@ async def _dispatch_local(event: str, data: dict, runner_id: str) -> bool:
 
 async def _fail_runner_streams(runner_id: str) -> None:
     """Wake up remote harness streams when their transport disconnects."""
-    await sync_to_async(get_runner_service().fail_streams_for_runner)(runner_id)
+    await sync_to_async(get_runner_service().stream_transport.fail_streams_for_runner)(
+        runner_id
+    )
 
 
 _relay: RunnerReplyRelay | None = None
@@ -110,16 +119,15 @@ async def route_runner_reply(
     service: RunnerService,
 ) -> bool:
     """Run the local consumer, then forward to the remote correlation owner."""
-    method = RUNNER_REPLY_METHODS.get(event)
-    if method is None or not isinstance(data, dict) or not runner_id:
+    if event not in RUNNER_REPLY_METHODS or not isinstance(data, dict) or not runner_id:
         return False
-    accepted = await sync_to_async(getattr(service, method))(
+    accepted = await sync_to_async(_reply_handler(service, event))(
         event, data, runner_id=runner_id
     )
     if accepted:
-        if method == "handle_stream_reply":
+        if event in {"workspace:stream_output", "workspace:stream_closed"}:
             # The ACK goes out when this returns: pace output to its consumer.
-            await service.pace_stream_reply(event, data)
+            await service.stream_transport.pace_stream_reply(event, data)
         return True
     if _relay is None:
         return False

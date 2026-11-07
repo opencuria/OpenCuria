@@ -49,7 +49,7 @@ def test_disconnect_only_affects_the_current_online_session(
         service.frontend_bus, 'forward_runner_status_to_frontend', notify
     )
 
-    service.unregister_runner(sid)
+    service.runner_lifecycle.unregister_runner(sid)
 
     runner.refresh_from_db()
     if connection == "current":
@@ -101,7 +101,7 @@ def test_workspace_listing_preserves_scope_owner_and_order(
         and (scope not in {"runner", "runner_priority"} or row.runner_id == runner.id)
     ]
 
-    result = RunnerService().list_workspaces(**filters)
+    result = RunnerService().runner_lifecycle.list_workspaces(**filters)
 
     assert [row.id for row in result] == expected
     assert all(hasattr(row, "has_active_harness_session") for row in result)
@@ -165,9 +165,11 @@ async def test_restore_failed_definition_waits_only_for_its_live_deletions(
 
     if blocked:
         with pytest.raises(ConflictError, match="removal is still in progress"):
-            await RunnerService().activate_image_definition(definition.id)
+            await RunnerService().image_lifecycle.activate_image_definition(
+                definition.id
+            )
     else:
-        await RunnerService().activate_image_definition(definition.id)
+        await RunnerService().image_lifecycle.activate_image_definition(definition.id)
 
     definition.refresh_from_db()
     assert definition.status == (
