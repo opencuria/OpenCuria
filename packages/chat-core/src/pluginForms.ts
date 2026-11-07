@@ -3,8 +3,9 @@
  * and native clients.
  *
  * Keeps the editors thin: conversion between `Plugin` API objects and
- * editable form rows, payload normalization for create/update, and
- * client-side validation.
+ * editable form rows, the edits that keep dependent fields consistent,
+ * payload normalization for create/update, and client-side validation.
+ * Edits never mutate their input; they return the next form.
  *
  * Slugs are never user-editable: payloads send empty slugs and the
  * backend derives them from the names (also on rename).
@@ -221,6 +222,159 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
   };
 }
 
+type PluginFormEntries = {
+  skills: PluginSkillForm;
+  mcps: PluginMcpForm;
+  requirements: PluginRequirementForm;
+};
+
+/** Replaces one skill, MCP server or requirement, found by its uid. */
+export function updateEntry<K extends keyof PluginFormEntries>(
+  form: PluginFormModel,
+  list: K,
+  uid: string,
+  update: (entry: PluginFormEntries[K]) => PluginFormEntries[K],
+): PluginFormModel {
+  const entries = form[list] as PluginFormEntries[K][];
+  return {
+    ...form,
+    [list]: entries.map((entry) => (entry.uid === uid ? update(entry) : entry)),
+  };
+}
+
+/** Removes one skill, MCP server or requirement. */
+export function removeEntry(
+  form: PluginFormModel,
+  list: keyof PluginFormEntries,
+  uid: string,
+): PluginFormModel {
+  const entries = form[list] as Array<{ uid: string }>;
+  return { ...form, [list]: entries.filter((entry) => entry.uid !== uid) };
+}
+
+/**
+ * Switches an MCP server's transport and clears what the new transport
+ * forbids, so no stale value hides in the payload: stdio has no URL,
+ * headers or OAuth; HTTP and SSE have no command, arguments, environment
+ * or managed desktop.
+ */
+export function setMcpTransport(
+  form: PluginFormModel,
+  uid: string,
+  transport: PluginMcpTransportOption,
+): PluginFormModel {
+  return updateEntry(form, "mcps", uid, (mcp) => {
+    if (mcp.transport === transport) return mcp;
+    return transport === "stdio"
+      ? {
+          ...mcp,
+          transport,
+          url: "",
+          headers: [],
+          authType: "none",
+          oauthRequirementKey: "",
+        }
+      : {
+          ...mcp,
+          transport,
+          desktop: "none",
+          command: "",
+          argsText: "",
+          env: [],
+        };
+  });
+}
+
+/** Turns MCP OAuth on or off; off forgets the requirement. */
+export function setMcpAuthentication(
+  form: PluginFormModel,
+  uid: string,
+  authType: PluginMcpAuthType,
+): PluginFormModel {
+  return updateEntry(form, "mcps", uid, (mcp) => ({
+    ...mcp,
+    authType,
+    oauthRequirementKey: authType === "none" ? "" : mcp.oauthRequirementKey,
+  }));
+}
+
+/**
+ * Links an OAuth MCP server to a requirement; the server then uses the
+ * endpoint of the requirement's OAuth service, which must match exactly.
+ */
+export function setMcpOAuthRequirement(
+  form: PluginFormModel,
+  uid: string,
+  requirementKey: string,
+  services: CredentialService[],
+): PluginFormModel {
+  const requirement = form.requirements.find(
+    (entry) => entry.reqKey === requirementKey,
+  );
+  const service = services.find((entry) => entry.id === requirement?.serviceId);
+  return updateEntry(form, "mcps", uid, (mcp) => ({
+    ...mcp,
+    oauthRequirementKey: requirementKey,
+    url:
+      service?.credential_type === "mcp_oauth"
+        ? service.oauth_server_url
+        : mcp.url,
+  }));
+}
+
+/** `api_key` from "API Key": the default requirement key for a service. */
+export function requirementKeyFor(serviceName: string): string {
+  return slugify(serviceName).replace(/-/g, "_");
+}
+
+/**
+ * Points a requirement at a credential service: takes over its type, fills
+ * an empty key from the service name and, for MCP OAuth, links the OAuth
+ * server (the only one, if none is linked yet) to the service's endpoint.
+ */
+export function setRequirementService(
+  form: PluginFormModel,
+  uid: string,
+  service: CredentialService,
+): PluginFormModel {
+  const current = form.requirements.find((entry) => entry.uid === uid);
+  if (!current) return form;
+  const reqKey = current.reqKey.trim()
+    ? current.reqKey
+    : requirementKeyFor(service.name);
+  const next = updateEntry(form, "requirements", uid, (entry) => ({
+    ...entry,
+    serviceId: service.id,
+    credentialType: toServiceType(service.credential_type),
+    reqKey,
+  }));
+  if (service.credential_type !== "mcp_oauth") return next;
+  let linked = next.mcps.filter((mcp) => mcp.oauthRequirementKey === reqKey);
+  const oauthRequirements = next.requirements.filter(
+    (entry) => entry.credentialType === "mcp_oauth",
+  );
+  const oauthServers = next.mcps.filter((mcp) => mcp.authType === "oauth");
+  if (
+    !linked.length &&
+    oauthRequirements.length === 1 &&
+    oauthServers.length === 1
+  )
+    linked = oauthServers;
+  const uids = new Set(linked.map((mcp) => mcp.uid));
+  return {
+    ...next,
+    mcps: next.mcps.map((mcp) =>
+      uids.has(mcp.uid)
+        ? {
+            ...mcp,
+            oauthRequirementKey: reqKey,
+            url: service.oauth_server_url,
+          }
+        : mcp,
+    ),
+  };
+}
+
 /** One argument per line → string list (trimmed, empties dropped). */
 export function parseArgsText(text: string): string[] {
   return text
@@ -364,6 +518,44 @@ const SUPPORTED_PLACEHOLDER_RE =
   /\{\{\s*credential\.([A-Za-z0-9_.-]{1,128})\s*\}\}/g;
 const GENERIC_PLACEHOLDER_RE = /\{\{|\}\}/;
 
+/** How `validatePluginForm` names a skill, e.g. "Skill #2". */
+export function skillLabel(index: number): string {
+  return `Skill #${index + 1}`;
+}
+
+/** How `validatePluginForm` names an MCP server. */
+export function mcpLabel(mcp: PluginMcpForm, index: number): string {
+  const name = mcp.name.trim();
+  return name ? `MCP server "${name}"` : `MCP server #${index + 1}`;
+}
+
+/** How `validatePluginForm` names a requirement. */
+export function requirementLabel(
+  requirement: PluginRequirementForm,
+  index: number,
+): string {
+  const key = requirement.reqKey.trim();
+  return key ? `Requirement "${key}"` : `Requirement #${index + 1}`;
+}
+
+/** The validation errors of one entry, without its label prefix. */
+export function entryErrors(errors: string[], label: string): string[] {
+  const prefix = `${label}: `;
+  return errors
+    .filter((error) => error.startsWith(prefix))
+    .map((error) => {
+      const text = error.slice(prefix.length);
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    });
+}
+
+/** Errors that belong to no skill, MCP server or requirement. */
+export function generalErrors(errors: string[]): string[] {
+  return errors.filter(
+    (error) => !/^(Skill #\d+|MCP server [#"]|Requirement [#"])/.test(error),
+  );
+}
+
 /** Client-side validation; mirrors the backend rules (see backend/apps/plugins/services.py). */
 export function validatePluginForm(form: PluginFormModel): string[] {
   const errors: string[] = [];
@@ -381,7 +573,7 @@ export function validatePluginForm(form: PluginFormModel): string[] {
   }
 
   form.skills.forEach((skill, i) => {
-    const label = `Skill #${i + 1}`;
+    const label = skillLabel(i);
     if (!skill.name.trim()) errors.push(`${label}: name is required.`);
     else if (skill.name.trim().length > 255)
       errors.push(`${label}: name is too long.`);
@@ -404,9 +596,7 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     .map((req) => req.reqKey.trim());
 
   form.mcps.forEach((mcp, i) => {
-    const label = mcp.name.trim()
-      ? `MCP server "${mcp.name.trim()}"`
-      : `MCP server #${i + 1}`;
+    const label = mcpLabel(mcp, i);
     if (!mcp.name.trim()) errors.push(`${label}: name is required.`);
     else if (mcp.name.trim().length > 255)
       errors.push(`${label}: name is too long.`);
@@ -532,7 +722,7 @@ export function validatePluginForm(form: PluginFormModel): string[] {
   const seenServices = new Set<string>();
   form.requirements.forEach((req, i) => {
     const key = req.reqKey.trim();
-    const label = key ? `Requirement "${key}"` : `Requirement #${i + 1}`;
+    const label = requirementLabel(req, i);
     if (!key) {
       errors.push(`${label}: key is required.`);
     } else if (key.length > 255 || !KEY_RE.test(key)) {

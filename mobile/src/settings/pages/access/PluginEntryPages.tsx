@@ -2,6 +2,16 @@ import React from "react";
 import {
   PLACEHOLDER_EXAMPLE,
   emptyKeyValueRow,
+  entryErrors,
+  mcpLabel,
+  removeEntry,
+  requirementLabel,
+  setMcpAuthentication,
+  setMcpOAuthRequirement,
+  setMcpTransport,
+  setRequirementService,
+  skillLabel,
+  updateEntry,
   validatePluginForm,
   type KeyValueRow,
   type PluginFormModel,
@@ -16,18 +26,6 @@ import type {
 import { useResource } from "../../resources";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
-import {
-  entryErrors,
-  mcpLabel,
-  removeEntry,
-  requirementLabel,
-  setMcpAuthentication,
-  setMcpOAuthRequirement,
-  setMcpTransport,
-  setRequirementService,
-  skillLabel,
-  updateEntry,
-} from "./pluginDraft";
 import { serviceTypeLabel } from "./credentialServices";
 import { ACTIVE_SERVICES, loadServices } from "./resources";
 import { usePluginDraft } from "./usePluginDraft";

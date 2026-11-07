@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import PluginEditorDialog from './PluginEditorDialog.vue'
+import { Select } from '@/components/ui/select'
 import type { Plugin } from '@/types'
 
 vi.mock('vue-sonner', () => ({
@@ -305,29 +306,141 @@ describe('PluginEditorDialog', () => {
   })
 
   it('exposes transport switching that clears stale fields (unit-level)', async () => {
-    const { emptyMcpForm, formToCreateIn } = await import('@/lib/pluginForms')
+    const { emptyMcpForm, formToCreateIn, setMcpTransport } = await import('@/lib/pluginForms')
     const mcp = emptyMcpForm()
     mcp.name = 'Runner'
     mcp.transport = 'stdio'
     mcp.command = 'npx'
     mcp.argsText = '-y'
-    mcp.url = 'https://stale.example/mcp'
-    // Simulate the dialog's setMcpTransport clearing on stdio→http.
-    mcp.transport = 'streamable_http'
-    mcp.command = ''
-    mcp.argsText = ''
-    mcp.env = []
-    mcp.url = 'https://mcp.example.com/mcp'
-    const payload = formToCreateIn({
-      name: 'Demo',
-      description: '',
-      enabled: true,
-      published: true,
-      skills: [],
-      mcps: [mcp],
-      requirements: [],
-    })
+    mcp.env = [{ uid: 'e', key: 'TOKEN', value: 'x' }]
+    const form = setMcpTransport(
+      {
+        name: 'Demo',
+        description: '',
+        enabled: true,
+        published: true,
+        skills: [],
+        mcps: [mcp],
+        requirements: [],
+      },
+      mcp.uid,
+      'streamable_http',
+    )
+    form.mcps[0]!.url = 'https://mcp.example.com/mcp'
+    const payload = formToCreateIn(form)
     expect(payload.mcp_servers?.[0]).toMatchObject({ command: '', args: [], env: {} })
+  })
+})
+
+describe('PluginEditorDialog form rules', () => {
+  type EditorForm = ReturnType<(typeof import('@/lib/pluginForms'))['emptyPluginForm']>
+
+  function editorForm(wrapper: ReturnType<typeof mountEditor>): EditorForm {
+    return (wrapper.vm as unknown as { form: EditorForm }).form
+  }
+
+  async function choose(wrapper: ReturnType<typeof mountEditor>, testId: string, value: string) {
+    const select = wrapper
+      .findAllComponents(Select)
+      .find((candidate) => candidate.find(`[data-testid="${testId}"]`).exists())
+    expect(select, testId).toBeDefined()
+    select!.vm.$emit('update:modelValue', value)
+    await flushPromises()
+  }
+
+  beforeEach(() => {
+    localStorage.setItem('kern_active_org_id', 'org-1')
+  })
+
+  afterEach(() => {
+    localStorage.removeItem('kern_active_org_id')
+  })
+
+  it('clears what a new transport forbids and forgets OAuth when it is turned off', async () => {
+    const wrapper = mountEditor(null)
+    await flushPromises()
+    await wrapper.find('[data-testid="plugin-add-mcp"]').trigger('click')
+    const form = editorForm(wrapper)
+    Object.assign(form.mcps[0]!, {
+      command: 'npx',
+      argsText: '-y',
+      desktop: 'first_tool',
+      env: [{ uid: 'e', key: 'TOKEN', value: 'x' }],
+    })
+
+    await choose(wrapper, 'plugin-mcp-transport-0', 'streamable_http')
+    expect(form.mcps[0]).toMatchObject({
+      transport: 'streamable_http',
+      command: '',
+      argsText: '',
+      desktop: 'none',
+      env: [],
+    })
+
+    await choose(wrapper, 'plugin-mcp-auth-0', 'oauth')
+    form.mcps[0]!.oauthRequirementKey = 'notion'
+    form.mcps[0]!.url = 'https://mcp.example.com/mcp'
+    form.mcps[0]!.headers = [{ uid: 'h', key: 'X-Team', value: 'a' }]
+    await choose(wrapper, 'plugin-mcp-auth-0', 'none')
+    expect(form.mcps[0]).toMatchObject({ authType: 'none', oauthRequirementKey: '' })
+
+    await choose(wrapper, 'plugin-mcp-auth-0', 'oauth')
+    form.mcps[0]!.oauthRequirementKey = 'notion'
+    await choose(wrapper, 'plugin-mcp-transport-0', 'stdio')
+    expect(form.mcps[0]).toMatchObject({
+      transport: 'stdio',
+      url: '',
+      headers: [],
+      authType: 'none',
+      oauthRequirementKey: '',
+    })
+  })
+
+  it('links an OAuth requirement service to the only OAuth server and its endpoint', async () => {
+    const wrapper = mountEditor(null)
+    await flushPromises()
+    await wrapper.find('[data-testid="plugin-add-mcp"]').trigger('click')
+    await wrapper.find('[data-testid="plugin-add-requirement"]').trigger('click')
+    const form = editorForm(wrapper)
+    await choose(wrapper, 'plugin-mcp-transport-0', 'streamable_http')
+    await choose(wrapper, 'plugin-mcp-auth-0', 'oauth')
+
+    await choose(wrapper, 'plugin-requirement-service-0', 'oauth-service')
+    expect(form.requirements[0]).toMatchObject({
+      serviceId: 'oauth-service',
+      credentialType: 'mcp_oauth',
+      reqKey: 'notion_oauth',
+    })
+    expect(form.mcps[0]).toMatchObject({
+      oauthRequirementKey: 'notion_oauth',
+      url: 'https://mcp.notion.com/mcp',
+    })
+
+    form.mcps[0]!.url = 'https://stale.example/mcp'
+    await choose(wrapper, 'plugin-mcp-oauth-requirement-0', 'notion_oauth')
+    expect(form.mcps[0]!.url).toBe('https://mcp.notion.com/mcp')
+  })
+
+  it('keeps a typed requirement key and only records an unknown service id', async () => {
+    const wrapper = mountEditor(null)
+    await flushPromises()
+    await wrapper.find('[data-testid="plugin-add-requirement"]').trigger('click')
+    const form = editorForm(wrapper)
+    form.requirements[0]!.reqKey = 'token'
+
+    await choose(wrapper, 'plugin-requirement-service-0', 'svc-1')
+    expect(form.requirements[0]).toMatchObject({
+      serviceId: 'svc-1',
+      credentialType: 'env',
+      reqKey: 'token',
+    })
+
+    await choose(wrapper, 'plugin-requirement-service-0', 'missing')
+    expect(form.requirements[0]).toMatchObject({
+      serviceId: 'missing',
+      credentialType: 'env',
+      reqKey: 'token',
+    })
   })
 })
 

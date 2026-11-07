@@ -3,8 +3,13 @@ import {
   emptyMcpForm,
   emptyRequirementForm,
   emptySkillForm,
+  entryErrors,
   formToCreateIn,
   formToUpdateIn,
+  generalErrors,
+  mcpLabel,
+  requirementLabel,
+  skillLabel,
   validatePluginForm,
 } from "@opencuria/chat-core/pluginForms";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
@@ -13,22 +18,9 @@ import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
-import {
-  entryErrors,
-  mcpLabel,
-  requirementLabel,
-  skillLabel,
-} from "./pluginDraft";
 import { transportLabel } from "./plugins";
 import { ACTIVE_SERVICES, PLUGINS, loadServices } from "./resources";
 import { usePluginDraft } from "./usePluginDraft";
-
-/** Errors that belong to no skill, MCP server or requirement. */
-function generalErrors(errors: string[]): string[] {
-  return errors.filter(
-    (error) => !/^(Skill #\d+|MCP server [#"]|Requirement [#"])/.test(error),
-  );
-}
 
 /**
  * Creates or edits an organization plugin: its name and availability, then

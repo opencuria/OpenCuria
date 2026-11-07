@@ -43,11 +43,14 @@ import {
   formToUpdateIn,
   PLACEHOLDER_EXAMPLE,
   pluginToForm,
-  slugify,
+  setMcpAuthentication,
+  setMcpOAuthRequirement,
+  setMcpTransport,
+  setRequirementService,
+  updateEntry,
   validatePluginForm,
   type PluginFormModel,
   type PluginMcpTransportOption,
-  type PluginServiceTypeOption,
 } from '@/lib/pluginForms'
 
 const props = defineProps<{
@@ -125,48 +128,28 @@ async function loadCredentialServices(): Promise<void> {
   if (credentialStore.servicesError) servicesError.value = credentialStore.servicesError
 }
 
+/** Applies a shared plugin form edit (see lib/pluginForms) to the reactive form. */
+function applyEdit(next: PluginFormModel): void {
+  Object.assign(form, next)
+}
+
 function syncMcpOAuthRequirement(mcpUid: string, requirementKey: string): void {
-  const mcp = form.mcps.find((entry) => entry.uid === mcpUid)
-  if (!mcp) return
-  mcp.oauthRequirementKey = requirementKey
-  const requirement = form.requirements.find((entry) => entry.reqKey === requirementKey)
-  const service = credentialStore.services.find((entry) => entry.id === requirement?.serviceId)
-  if (service?.credential_type === 'mcp_oauth') mcp.url = service.oauth_server_url
+  applyEdit(setMcpOAuthRequirement(form, mcpUid, requirementKey, credentialStore.services))
 }
 
 function syncRequirementService(reqUid: string, serviceId: string): void {
-  const req = form.requirements.find((r) => r.uid === reqUid)
-  if (!req) return
-  req.serviceId = serviceId
-  const svc = credentialStore.services.find(
+  const service = credentialStore.services.find(
     (s) =>
       s.id === serviceId &&
       (s.organization_id === null || s.organization_id === authStore.activeOrganizationId),
   )
-  if (svc) {
-    req.credentialType = svc.credential_type as PluginServiceTypeOption
-    if (!req.reqKey.trim()) req.reqKey = slugify(svc.name).replace(/-/g, '_')
-    if (svc.credential_type === 'mcp_oauth') {
-      let matchingServers = form.mcps.filter((item) => item.oauthRequirementKey === req.reqKey)
-      const oauthRequirements = form.requirements.filter(
-        (item) => item.credentialType === 'mcp_oauth',
-      )
-      const oauthServers = form.mcps.filter((item) => item.authType === 'oauth')
-      if (!matchingServers.length && oauthRequirements.length === 1 && oauthServers.length === 1) {
-        matchingServers = oauthServers
-        matchingServers[0]!.oauthRequirementKey = req.reqKey
-      }
-      for (const server of matchingServers) server.url = svc.oauth_server_url
-    }
-  }
+  applyEdit(
+    service
+      ? setRequirementService(form, reqUid, service)
+      : updateEntry(form, 'requirements', reqUid, (req) => ({ ...req, serviceId })),
+  )
 }
 
-/**
- * Narrow transport switch: changing transports clears the now-unused
- * fields immediately so `mcpToIn` never ships stale values (stdio
- * forbids URL; http/sse forbid command/args, env/headers follow the
- * active transport).
- */
 function addSkill(): void {
   form.skills.push(emptySkillForm())
   expandedSkill.value = form.skills[form.skills.length - 1]!.uid
@@ -183,31 +166,11 @@ function addRequirement(): void {
 }
 
 function syncMcpTransport(mcpUid: string, value: unknown): void {
-  setMcpTransport(mcpUid, String(value) as PluginMcpTransportOption)
+  applyEdit(setMcpTransport(form, mcpUid, String(value) as PluginMcpTransportOption))
 }
 
-function setMcpAuthentication(mcpUid: string, value: unknown): void {
-  const mcp = form.mcps.find((entry) => entry.uid === mcpUid)
-  if (!mcp) return
-  mcp.authType = String(value) === 'oauth' ? 'oauth' : 'none'
-  if (mcp.authType === 'none') mcp.oauthRequirementKey = ''
-}
-
-function setMcpTransport(mcpUid: string, transport: PluginMcpTransportOption): void {
-  const mcp = form.mcps.find((entry) => entry.uid === mcpUid)
-  if (!mcp || mcp.transport === transport) return
-  mcp.transport = transport
-  if (transport === 'stdio') {
-    mcp.url = ''
-    mcp.headers = []
-    mcp.authType = 'none'
-    mcp.oauthRequirementKey = ''
-  } else {
-    mcp.desktop = 'none'
-    mcp.command = ''
-    mcp.argsText = ''
-    mcp.env = []
-  }
+function syncMcpAuthentication(mcpUid: string, value: unknown): void {
+  applyEdit(setMcpAuthentication(form, mcpUid, String(value) === 'oauth' ? 'oauth' : 'none'))
 }
 
 function setOpen(value: boolean): void {
@@ -490,7 +453,7 @@ async function handleSubmit(): Promise<void> {
                   <Label>Authentication</Label>
                   <Select
                     :model-value="mcp.authType"
-                    @update:model-value="setMcpAuthentication(mcp.uid, $event)"
+                    @update:model-value="syncMcpAuthentication(mcp.uid, $event)"
                   >
                     <SelectTrigger :data-testid="`plugin-mcp-auth-${index}`">
                       <SelectValue placeholder="Select authentication" />
