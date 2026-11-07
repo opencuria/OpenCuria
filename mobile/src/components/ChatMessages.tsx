@@ -65,7 +65,10 @@ import {
   toolDisplayLabel,
 } from "@opencuria/chat-core/toolDisplay";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
-import type { PublishedAppReference } from "@opencuria/chat-core/publishedApps";
+import {
+  messagePublishedApps,
+  type PublishedAppReference,
+} from "@opencuria/chat-core/publishedApps";
 import { useChromeTopInset } from "../ui/chromeInset";
 import { useChatLayout } from "./ChatLayout";
 import {
@@ -623,6 +626,11 @@ const MessageRow = memo(function MessageRow({
       ),
     [message.parts, showTodos, todoPartId, streaming],
   );
+  // Apps the agent sent show below the message, not where it sent them.
+  const apps = useMemo(
+    () => (isUser ? [] : messagePublishedApps(message.parts)),
+    [isUser, message.parts],
+  );
   const duration = elapsedMs(message.created_at, message.completed_at);
   const elapsedLabel = duration === null ? "" : formatElapsed(duration);
   const copyText = getMessageCopyText(message, streaming);
@@ -824,6 +832,9 @@ const MessageRow = memo(function MessageRow({
               </Text>
             </View>
           ) : null}
+          {apps.map((app) => (
+            <PublishedAppBlock key={app.appId} app={app} />
+          ))}
         </View>
       )}
       {!isUser && !streaming ? (
@@ -1120,8 +1131,6 @@ function BlockView({
       </View>
     );
   if (block.kind === "question") return <QuestionCard part={block.part} />;
-  if (block.kind === "app")
-    return <PublishedAppBlock part={block.part} app={block.app} />;
   if (block.kind === "todos")
     return todos?.length ? <TodoCard todos={todos} /> : null;
   return (
@@ -1556,16 +1565,14 @@ function ToolAttachmentCard({
 
 /** An app the agent sent to the phone; the host renders its install card. */
 function PublishedAppBlock({
-  part,
   app,
 }: {
-  part: HarnessPart;
   app: PublishedAppReference;
 }): React.JSX.Element {
   const { theme } = useTheme();
   const render = React.useContext(PublishedAppContext);
   return (
-    <View testID={`chat-app-${part.id}`} style={styles.appBlock}>
+    <View testID={`chat-app-${app.appId}`} style={styles.appBlock}>
       {render ? (
         render(app)
       ) : (

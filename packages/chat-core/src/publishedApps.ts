@@ -39,3 +39,23 @@ export function publishedAppReference(
     versionName: text(row.version_name),
   };
 }
+
+/**
+ * The apps a message sent to the phone, shown below the message rather than
+ * where the agent called the tool: each app once, with the newest version it
+ * sent, in the order the apps were first sent.
+ */
+export function messagePublishedApps(
+  parts: readonly HarnessPart[],
+): PublishedAppReference[] {
+  const apps = new Map<string, PublishedAppReference>();
+  const ordered = [...parts].sort(
+    (left, right) => (left.position ?? 0) - (right.position ?? 0),
+  );
+  for (const part of ordered) {
+    const app = publishedAppReference(part);
+    // Replacing a key keeps its place, so a later version updates the card.
+    if (app) apps.set(app.appId, app);
+  }
+  return [...apps.values()];
+}

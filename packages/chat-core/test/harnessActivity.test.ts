@@ -7,7 +7,10 @@ import {
   summarizeActivity,
 } from "@opencuria/chat-core/harnessActivity";
 import type { HarnessMessage, HarnessPart } from "@opencuria/chat-core/harness";
-import { publishedAppReference } from "@opencuria/chat-core/publishedApps";
+import {
+  messagePublishedApps,
+  publishedAppReference,
+} from "@opencuria/chat-core/publishedApps";
 
 const part = (
   id: string,
@@ -308,9 +311,15 @@ describe("findTodoAnchor", () => {
 });
 
 describe("published apps", () => {
-  const published = (state: HarnessPart["state"] = "completed") =>
-    tool("publish", "mcp_opencuria_mcp_app_publish", {
+  const published = (
+    id = "publish",
+    state: HarnessPart["state"] = "completed",
+    app: Record<string, unknown> = {},
+    position?: number,
+  ) =>
+    tool(id, "mcp_opencuria_mcp_app_publish", {
       state,
+      ...(position === undefined ? {} : { position }),
       display: {
         tool: "mcp_opencuria_mcp_app_publish",
         app: {
@@ -319,37 +328,67 @@ describe("published apps", () => {
           name: "Todo",
           version: 2,
           version_name: "1.1.0",
+          ...app,
         },
       },
     });
 
-  it("shows an app sent to the phone as reader content outside the fold", () => {
+  it("keeps the publish call in the activity instead of placing the app there", () => {
     const blocks = buildActivityMessageBlocks(
       [text("intro"), tool("bash", "bash"), published(), text("done")],
       { finished: true },
     );
-    expect(blocks.map((block) => block.kind)).toEqual([
-      "workedFor",
-      "app",
-      "text",
-    ]);
-    expect(blocks[1]).toMatchObject({
-      kind: "app",
-      app: {
-        appId: "app-1",
-        versionId: "v-2",
-        name: "Todo",
-        version: 2,
-        versionName: "1.1.0",
-      },
-    });
+    expect(blocks.map((block) => block.kind)).toEqual(["workedFor", "text"]);
+    expect(
+      buildActivityBlocks([tool("bash", "bash"), published()]).map(
+        (block) => block.kind,
+      ),
+    ).toEqual(["activity"]);
   });
 
-  it("keeps running or failed publishes in the activity", () => {
-    expect(publishedAppReference(published("running"))).toBeNull();
-    expect(publishedAppReference(published("error"))).toBeNull();
+  it("lists every app of a message once, newest version, in first-sent order", () => {
+    const apps = messagePublishedApps([
+      published("todo-2", "completed", { version_id: "v-3", version: 3 }, 5),
+      text("between"),
+      published("todo-1", "completed", {}, 1),
+      published(
+        "notes",
+        "completed",
+        {
+          app_id: "app-2",
+          version_id: "n-1",
+          name: "Notes",
+          version: 1,
+          version_name: "",
+        },
+        3,
+      ),
+      published("failed", "error", { app_id: "app-3" }, 4),
+    ]);
+    expect(apps).toEqual([
+      {
+        appId: "app-1",
+        versionId: "v-3",
+        name: "Todo",
+        version: 3,
+        versionName: "1.1.0",
+      },
+      {
+        appId: "app-2",
+        versionId: "n-1",
+        name: "Notes",
+        version: 1,
+        versionName: "",
+      },
+    ]);
+    expect(messagePublishedApps([text("no apps")])).toEqual([]);
+  });
+
+  it("ignores running or failed publishes", () => {
+    expect(publishedAppReference(published("p", "running"))).toBeNull();
+    expect(publishedAppReference(published("p", "error"))).toBeNull();
     expect(
-      buildActivityBlocks([published("error")]).map((block) => block.kind),
+      buildActivityBlocks([published("p", "error")]).map((block) => block.kind),
     ).toEqual(["activity"]);
   });
 });

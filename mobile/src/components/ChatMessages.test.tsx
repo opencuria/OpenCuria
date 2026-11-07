@@ -602,25 +602,36 @@ describe("ChatMessages", () => {
     },
   );
 
-  it("hands an app the agent sent to the phone to the host's install card", () => {
-    const publish: HarnessPart = {
-      ...part("publish", "tool", "", 1),
+  it("shows the apps a message sent below it, once each, not where the tool ran", () => {
+    const publish = (
+      id: string,
+      position: number,
+      app: Record<string, unknown>,
+    ): HarnessPart => ({
+      ...part(id, "tool", "", position),
       tool: "mcp_opencuria_mcp_app_publish",
-      display: {
-        tool: "mcp_opencuria_mcp_app_publish",
-        app: {
-          app_id: "app-1",
-          version_id: "v-1",
-          name: "Todo",
-          version: 1,
-          version_name: "1.0.0",
-        },
-      },
+      display: { tool: "mcp_opencuria_mcp_app_publish", app },
+    });
+    const todo = {
+      app_id: "app-1",
+      version_id: "v-1",
+      name: "Todo",
+      version: 1,
+      version_name: "1.0.0",
     };
     const transcript = message([
       part("bash", "tool", "", 0),
-      publish,
-      part("answer", "text", "It is on your phone.", 2),
+      publish("publish-1", 1, todo),
+      part("middle", "text", "Now a notes app.", 2),
+      publish("publish-2", 3, {
+        app_id: "app-2",
+        version_id: "n-1",
+        name: "Notes",
+        version: 1,
+        version_name: "",
+      }),
+      publish("publish-3", 4, { ...todo, version_id: "v-2", version: 2 }),
+      part("answer", "text", "Both are on your phone.", 5),
     ]);
     transcript.completed_at = "2026-10-18T12:00:00Z";
     const renderPublishedApp = jest.fn((app: { name: string }) => (
@@ -636,10 +647,23 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
 
-    expect(screen.getByTestId("chat-app-publish")).toBeTruthy();
-    expect(screen.getByText("Install Todo")).toBeTruthy();
+    // Below the last text of the message, in the order the apps were sent.
+    const texts = screen
+      .getAllByText(/Both are on your phone\.|Install Todo|Install Notes/)
+      .map((node) => node.props.children);
+    expect(texts).toEqual([
+      "Both are on your phone.",
+      "Install Todo",
+      "Install Notes",
+    ]);
+    expect(screen.getByTestId("chat-app-app-1")).toBeTruthy();
+    expect(screen.getByTestId("chat-app-app-2")).toBeTruthy();
+    // The newest version of an app sent twice.
     expect(renderPublishedApp).toHaveBeenCalledWith(
-      expect.objectContaining({ appId: "app-1", versionId: "v-1" }),
+      expect.objectContaining({ appId: "app-1", versionId: "v-2" }),
+    );
+    expect(renderPublishedApp).not.toHaveBeenCalledWith(
+      expect.objectContaining({ versionId: "v-1" }),
     );
 
     rerender(
@@ -648,6 +672,34 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
     expect(screen.getByText("Sent Todo to your phone")).toBeTruthy();
+    expect(screen.getByText("Sent Notes to your phone")).toBeTruthy();
+  });
+
+  it("keeps a sent app below a reply that is still streaming", () => {
+    const transcript = message([
+      {
+        ...part("publish", "tool", "", 0),
+        tool: "mcp_opencuria_mcp_app_publish",
+        display: {
+          tool: "mcp_opencuria_mcp_app_publish",
+          app: { app_id: "app-1", version_id: "v-1", name: "Todo" },
+        },
+      },
+      part("answer", "text", "Checking the build next.", 1),
+    ]);
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[transcript]}
+          busy
+          renderPublishedApp={(app) => <Text>{`Open ${app.name}`}</Text>}
+        />
+      </ThemeProvider>,
+    );
+    const texts = screen
+      .getAllByText(/Checking the build next\.|Open Todo/)
+      .map((node) => node.props.children);
+    expect(texts).toEqual(["Checking the build next.", "Open Todo"]);
   });
 
   it("renders delivered steer blocks in the native user bubble pattern", () => {
