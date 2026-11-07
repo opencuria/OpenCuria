@@ -474,6 +474,12 @@ function formRow(row) {
           },
           row.leadingText ? h(Text, null, row.leadingText) : null,
           row.leadingCaption ? h(Text, null, row.leadingCaption) : null,
+          row.image
+            ? h(View, {
+                testID: `${row.testID ?? row.id}-image`,
+                accessibilityHint: row.image,
+              })
+            : null,
           h(Text, null, row.title),
           row.subtitle ? h(Text, null, row.subtitle) : null,
           row.badge ? h(Text, null, row.badge) : null,

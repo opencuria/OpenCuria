@@ -55,13 +55,14 @@ function apps(installed: InstalledApp[]): AppsState {
     error: "Could not load apps.",
     progress: {},
     supported: true,
+    offline: false,
     platform: "android",
     refresh: jest.fn(async () => undefined),
     install: jest.fn(async () => false),
     open: jest.fn(async () => undefined),
     uninstall: jest.fn(async () => undefined),
     remove: jest.fn(async () => undefined),
-    iconUri: () => null,
+    icons: {},
   };
 }
 

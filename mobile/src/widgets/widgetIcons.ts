@@ -1,5 +1,5 @@
 import { Directory, File } from "expo-file-system";
-import * as ImageManipulator from "expo-image-manipulator";
+import { shrinkIcon } from "../apps/appIcons";
 import type { AppInstaller, InstalledApp } from "../apps/appInstaller";
 
 /**
@@ -29,26 +29,10 @@ export async function prepareWidgetIcons(
     const name = `${app.appId}-${app.versionId}.png`;
     const target = new File(directory, name);
     keep.add(name);
-    if (target.exists || (await shrink(source, target)))
+    if (target.exists || (await shrinkIcon(source, target, WIDGET_ICON_PIXELS)))
       icons[app.appId] = target.uri;
   }
   for (const entry of directory.list())
     if (entry instanceof File && !keep.has(entry.name)) entry.delete();
   return icons;
-}
-
-async function shrink(source: string, target: File): Promise<boolean> {
-  try {
-    const context = ImageManipulator.ImageManipulator.manipulate(source);
-    context.resize({ width: WIDGET_ICON_PIXELS });
-    const image = await context.renderAsync();
-    const result = await image.saveAsync({
-      format: ImageManipulator.SaveFormat.PNG,
-    });
-    new File(result.uri).moveSync(target, { overwrite: true });
-    return true;
-  } catch {
-    // The tile shows the generic app symbol instead.
-    return false;
-  }
 }

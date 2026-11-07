@@ -14,6 +14,7 @@ import {
   Host,
   Icon,
   IconButton,
+  Image,
   LazyColumn,
   LinearProgressIndicator,
   ListItem,
@@ -193,6 +194,15 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
               </Text>
             ) : null}
           </Row>
+        </ListItem.LeadingContent>
+      ) : row.image ? (
+        <ListItem.LeadingContent>
+          <Image
+            source={{ uri: row.image }}
+            contentScale="crop"
+            contentDescription={null}
+            modifiers={[size(40, 40), clip(Shapes.RoundedCorner(12))]}
+          />
         </ListItem.LeadingContent>
       ) : row.symbol ? (
         <ListItem.LeadingContent>

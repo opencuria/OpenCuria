@@ -29,10 +29,12 @@ import {
 import {
   accessibilityAddTraits,
   accessibilityLabel,
+  aspectRatio,
   autocorrectionDisabled,
   background,
   buttonBorderShape,
   buttonStyle,
+  clipShape,
   controlSize,
   disabled,
   font,
@@ -52,6 +54,7 @@ import {
   padding,
   pickerStyle,
   refreshable,
+  resizable,
   scrollDismissesKeyboard,
   shapes,
   submitLabel,
@@ -172,6 +175,16 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
             </Text>
           ) : null}
         </HStack>
+      ) : row.image ? (
+        <Image
+          uiImage={row.image}
+          modifiers={[
+            resizable(),
+            aspectRatio({ contentMode: "fill" }),
+            frame({ width: 30, height: 30 }),
+            clipShape("roundedRectangle", 8),
+          ]}
+        />
       ) : row.symbol ? (
         <Image
           systemName={row.symbol}

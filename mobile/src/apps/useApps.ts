@@ -4,6 +4,7 @@ import Constants from "expo-constants";
 import type { OpenCuriaClient, PublishedApp } from "@opencuria/client";
 import { showToast } from "../ui/toast";
 import { errorText } from "../workspaces/workspaceOperations";
+import { AppIconCache, appIconSource } from "./appIcons";
 import { AppInstaller, type InstalledApp } from "./appInstaller";
 import {
   appRows,
@@ -20,11 +21,17 @@ import {
 import { createExpoAppFileSystem } from "./appStorage";
 
 let sharedInstaller: AppInstaller | null = null;
+let sharedIcons: AppIconCache | null = null;
 
 /** One installer per process: it serializes installs and owns the registry. */
 export function appInstaller(): AppInstaller {
   sharedInstaller ??= new AppInstaller(createExpoAppFileSystem());
   return sharedInstaller;
+}
+
+function appIconCache(): AppIconCache {
+  sharedIcons ??= new AppIconCache();
+  return sharedIcons;
 }
 
 export interface AppsState {
@@ -37,6 +44,8 @@ export interface AppsState {
   progress: Readonly<Record<string, number>>;
   /** Whether this build can run apps at all. */
   supported: boolean;
+  /** The server is unreachable: only installed apps show, and they open offline. */
+  offline: boolean;
   platform: AppPlatform;
   refresh: () => Promise<void>;
   /** Install the newest version, or update to it; resolves to success. */
@@ -45,7 +54,8 @@ export interface AppsState {
   uninstall: (appId: string) => Promise<void>;
   /** Delete the app from the server; an installed copy stays. */
   remove: (appId: string) => Promise<void>;
-  iconUri: (appId: string) => string | null;
+  /** Small copies of the apps' icons (`file://`) by app id, once they exist. */
+  icons: Readonly<Record<string, string>>;
 }
 
 /** Run events arrive in bursts; refresh once they settle. */
@@ -126,12 +136,20 @@ export async function openApp(
 /**
  * The apps agents published to the signed-in user, joined with the ones
  * installed on this device. Installed apps open offline; the server list
- * refreshes on demand and whenever a run finishes.
+ * refreshes on demand and whenever a run finishes. While `offline`, the
+ * server is not asked and only installed apps show.
  */
 export function useApps(
   client: OpenCuriaClient | null,
   scope: string,
   installer: AppInstaller = appInstaller(),
+  {
+    offline = false,
+    icons: iconCache = appIconCache(),
+  }: {
+    offline?: boolean;
+    icons?: AppIconCache;
+  } = {},
 ): AppsState {
   const [published, setPublished] = useState<PublishedApp[]>([]);
   const [installed, setInstalled] = useState<InstalledApp[]>([]);
@@ -139,7 +157,9 @@ export function useApps(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Record<string, number>>({});
+  const [icons, setIcons] = useState<Record<string, string>>({});
   const generation = useRef(0);
+  const server = offline ? null : client;
 
   const reloadInstalled = useCallback(async () => {
     setInstalled(await installer.installed());
@@ -147,6 +167,7 @@ export function useApps(
 
   const refresh = useCallback(async () => {
     void reloadInstalled();
+    const client = server;
     if (!client) return;
     const request = ++generation.current;
     setLoading(true);
@@ -162,7 +183,7 @@ export function useApps(
     } finally {
       if (request === generation.current) setLoading(false);
     }
-  }, [client, reloadInstalled]);
+  }, [server, reloadInstalled]);
 
   useEffect(() => {
     generation.current += 1;
@@ -170,6 +191,7 @@ export function useApps(
     setLoaded(false);
     setError(null);
     void refresh();
+    const client = server;
     if (!client) return;
     // Agents publish during runs; a finished run is when a new app appears.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -186,7 +208,7 @@ export function useApps(
       if (timer) clearTimeout(timer);
       detach.forEach((off) => off());
     };
-  }, [client, scope, refresh]);
+  }, [server, scope, refresh]);
 
   const rows = useMemo(
     () =>
@@ -199,6 +221,30 @@ export function useApps(
   );
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+
+  useEffect(() => {
+    let current = true;
+    // Icons of apps that are not installed come from the server (online only).
+    const fileRequest = server
+      ? (appId: string, versionId: string, sha256: string) =>
+          server.apps.fileRequest(appId, versionId, sha256)
+      : undefined;
+    const sources = rows.flatMap((row) => {
+      const source = appIconSource(row, installer, fileRequest);
+      return source ? [source] : [];
+    });
+    void iconCache
+      .icons(sources)
+      .then((next) => {
+        if (current)
+          setIcons((previous) => (sameIcons(previous, next) ? previous : next));
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [rows, server, installer, iconCache]);
+
   // Apps with an install or open running; `progress` only shows after the
   // next render, too late for a quick second tap.
   const pending = useRef(new Set<string>());
@@ -266,9 +312,10 @@ export function useApps(
   const open = useCallback(
     (appId: string): Promise<void> =>
       once(appId, undefined, async () => {
-        await openApp(client, scope, appId, installer);
+        // Offline, the app opens at once instead of waiting for a route.
+        await openApp(server, scope, appId, installer);
       }),
-    [client, installer, once, scope],
+    [server, installer, once, scope],
   );
 
   const uninstall = useCallback(
@@ -309,16 +356,6 @@ export function useApps(
     [client],
   );
 
-  const iconUri = useCallback(
-    (appId: string) => {
-      const copy = rowsRef.current.find(
-        (row) => row.appId === appId,
-      )?.installed;
-      return copy ? installer.iconUri(copy) : null;
-    },
-    [installer],
-  );
-
   return {
     rows,
     loaded,
@@ -326,12 +363,24 @@ export function useApps(
     error,
     progress,
     supported: isAppRuntimeAvailable(),
+    offline,
     platform: PLATFORM,
     refresh,
     install,
     open,
     uninstall,
     remove,
-    iconUri,
+    icons,
   };
+}
+
+function sameIcons(
+  left: Readonly<Record<string, string>>,
+  right: Readonly<Record<string, string>>,
+): boolean {
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => left[key] === right[key])
+  );
 }

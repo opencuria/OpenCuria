@@ -29,7 +29,7 @@ export function PublishedAppCard({
   const { theme } = useTheme();
   const row = apps.rows.find((item) => item.appId === reference.appId);
   const progress = apps.progress[reference.appId];
-  const icon = row?.installed ? apps.iconUri(reference.appId) : null;
+  const icon = apps.icons[reference.appId];
   const action =
     row && apps.supported && row.state in ACTIONS
       ? ACTIONS[row.state as keyof typeof ACTIONS]

@@ -49,6 +49,12 @@ export interface NativeFormItemRow extends RowBase {
   /** Color of the leading tile. */
   tint?: string;
   /**
+   * A small local image (`file://`) that fills the leading tile in place of
+   * the symbol, e.g. an app icon. Native lists read it while they draw, so
+   * keep it to a few KB.
+   */
+  image?: string;
+  /**
    * Short leading text in place of the tile, e.g. the time of an agenda
    * entry, in tabular figures so that a column of them aligns.
    */

@@ -136,6 +136,7 @@ export function AppsSheet({
         : appSubtitle(row, apps.platform),
       subtitleTone: row.state === "update" ? "accent" : undefined,
       symbol: "square.grid.2x2.fill",
+      image: apps.icons[row.appId],
       tint: tileColor(TILES[row.state], theme),
       busy,
       badge:
@@ -166,7 +167,20 @@ export function AppsSheet({
         },
       ],
     });
-  if (apps.error)
+  if (apps.offline)
+    notes.push({
+      id: "offline",
+      rows: [
+        {
+          kind: "note",
+          id: "apps-offline",
+          text: installed.length
+            ? "You’re offline. Installed apps still open; new apps and updates show up once you are back online."
+            : "You’re offline. New apps show up here once you are back online.",
+        },
+      ],
+    });
+  else if (apps.error)
     notes.push({
       id: "error",
       rows: [
@@ -201,7 +215,8 @@ export function AppsSheet({
       ? [{ id: "available", title: "Ready to install", rows: available.map(item) }]
       : []),
   ];
-  const waiting = !apps.loaded && !apps.error && !installed.length;
+  const waiting =
+    !apps.offline && !apps.loaded && !apps.error && !installed.length;
 
   return (
     <NativeModal

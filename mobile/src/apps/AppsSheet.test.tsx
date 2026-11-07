@@ -91,13 +91,14 @@ function state(
     error: null,
     progress: {},
     supported: true,
+    offline: false,
     platform: "android",
     refresh: jest.fn(async () => undefined),
     install: jest.fn(async () => true),
     open: jest.fn(async () => undefined),
     uninstall: jest.fn(async () => undefined),
     remove: jest.fn(async () => undefined),
-    iconUri: () => null,
+    icons: {},
     ...overrides,
   };
 }
@@ -172,6 +173,40 @@ describe("AppsSheet", () => {
     renderSheet(apps);
     expect(screen.getByText(/Installed apps still open/)).toBeTruthy();
     expect(screen.getByText("Installed")).toBeTruthy();
+  });
+
+  it("shows each app's icon, installed or not, and the symbol without one", () => {
+    renderSheet(
+      state({
+        icons: {
+          todo: "file:///cache/icons/todo.todo-v1.png",
+          game: "file:///cache/icons/game.0123456789abcdef.png",
+        },
+      }),
+    );
+    expect(screen.getByTestId("app-todo-image").props.accessibilityHint).toBe(
+      "file:///cache/icons/todo.todo-v1.png",
+    );
+    expect(screen.getByTestId("app-game-image").props.accessibilityHint).toBe(
+      "file:///cache/icons/game.0123456789abcdef.png",
+    );
+    expect(screen.queryByTestId("app-tip-image")).toBeNull();
+  });
+
+  it("lists installed apps without waiting for the server while offline", () => {
+    const apps = state(
+      { offline: true, loaded: false },
+      appRows([], [installed("todo", "Todo")], {
+        scope: SCOPE,
+        platform: "android",
+        hostSdk: 57,
+      }),
+    );
+    renderSheet(apps);
+    expect(screen.getByText(/You’re offline\. Installed apps still open/)).toBeTruthy();
+    expect(screen.queryByText("Loading apps…")).toBeNull();
+    expect(screen.queryByText("Retry")).toBeNull();
+    expect(screen.getByText("Todo")).toBeTruthy();
   });
 
   it("shows progress and explains the empty list", () => {
@@ -395,6 +430,69 @@ describe("useApps", () => {
     await act(async () => result.current.open("game"));
 
     expect(mockOpenInstalledApp).toHaveBeenLastCalledWith({ appId: "game" });
+  });
+
+  it("hands out small icons for installed apps and apps to install", async () => {
+    const withIcon = published("game", "Game");
+    withIcon.latest_version!.icon_sha256 = "f".repeat(64);
+    const api = client([withIcon, published("todo", "Todo")]);
+    const local = installer([{ ...installed("todo", "Todo"), hasIcon: true }]);
+    local.iconUri = ((copy: InstalledApp) =>
+      copy.hasIcon ? `file:///docs/${copy.appId}/icon.png` : null) as never;
+    const icons = {
+      icons: jest.fn(async (sources: Array<{ appId: string }>) =>
+        Object.fromEntries(
+          sources.map((source) => [source.appId, `file:///small/${source.appId}`]),
+        ),
+      ),
+    };
+    const { result } = renderHook(() =>
+      useApps(
+        api as unknown as OpenCuriaClient,
+        SCOPE,
+        local as unknown as AppInstaller,
+        { icons: icons as never },
+      ),
+    );
+    await waitFor(() =>
+      expect(result.current.icons).toEqual({
+        game: "file:///small/game",
+        todo: "file:///small/todo",
+      }),
+    );
+    const sources = icons.icons.mock.lastCall![0] as Array<
+      { appId: string; file?: string; request?: () => unknown }
+    >;
+    expect(sources.find((source) => source.appId === "todo")?.file).toBe(
+      "file:///docs/todo/icon.png",
+    );
+    sources.find((source) => source.appId === "game")?.request?.();
+    expect(api.apps.fileRequest).toHaveBeenCalledWith(
+      "game",
+      "game-v1",
+      "f".repeat(64),
+    );
+  });
+
+  it("does not ask the server while offline and opens apps at once", async () => {
+    const api = client([published("game", "Game")]);
+    const local = installer([installed("todo", "Todo")]);
+    const { result } = renderHook(() =>
+      useApps(
+        api as unknown as OpenCuriaClient,
+        SCOPE,
+        local as unknown as AppInstaller,
+        { offline: true },
+      ),
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+    expect(result.current.offline).toBe(true);
+    expect(result.current.loaded).toBe(false);
+    expect(api.apps.list).not.toHaveBeenCalled();
+
+    await act(async () => result.current.open("todo"));
+    expect(api.apps.gatewaySession).not.toHaveBeenCalled();
+    expect(mockOpenInstalledApp).toHaveBeenLastCalledWith({ appId: "todo" });
   });
 
   it("reports a failed install and keeps the app available", async () => {
