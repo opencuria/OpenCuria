@@ -13,8 +13,10 @@ Matching rules:
   command-scoped tools (``bash``) it is the command line.
 - LAST-MATCH-WINS within one rule dict (insertion order).
 - Merge order across layers: global -> agent -> mode. ``deny``
-  in any layer beats a merged allow; ``ask`` beats ``allow``
-  (see ``_combine_decisions`` in ``tools.invocation``).
+  in any layer beats a merged allow.
+- An agent's own rules are evaluated apart from the base policy and the
+  stricter decision wins, so ``ask`` beats ``allow`` (see
+  :class:`AgentPolicy` and :func:`combine_decisions`).
 - Default when nothing matches: ``allow``, except the reserved key
   ``doom_loop`` which defaults to ``ask``. ``external_directory``
   falls through to normal tool rules unless an explicit reserved-key
@@ -135,6 +137,15 @@ def compile_rules(rules: dict[str, Any] | None) -> list[PermissionRule]:
     return compiled
 
 
+def combine_decisions(*decisions: str) -> Decision:
+    """Return the strictest decision: ``deny`` > ``ask`` > ``allow``."""
+    if DENY in decisions:
+        return DENY
+    if ASK in decisions:
+        return ASK
+    return ALLOW
+
+
 class PermissionEvaluator:
     """Evaluate tool permissions across global/agent/mode layers.
 
@@ -180,6 +191,12 @@ class PermissionEvaluator:
             doom_loop=doom_loop,
         )
         return self.evaluate_context(ctx).decision
+
+    def for_agent(self, agent_rules: dict[str, Any] | None) -> AgentPolicy:
+        """Return this policy merged with an agent's own permission rules."""
+        return AgentPolicy(
+            base=self, agent=PermissionEvaluator(agent_rules=agent_rules)
+        )
 
     def evaluate_context(self, ctx: PermissionContext) -> Evaluation:
         """Evaluate a full PermissionContext with reserved-key handling."""
@@ -279,3 +296,39 @@ class PermissionEvaluator:
             if any(_matches(pattern, candidate) for candidate in candidates):
                 matched = (decision, pattern)
         return matched
+
+
+@dataclass(frozen=True)
+class AgentPolicy:
+    """A base policy and one agent's rules; the stricter decision wins.
+
+    The agent's rules form their own evaluator instead of a layer of the base
+    policy, so an agent ``allow`` never relaxes an ``ask`` or ``deny`` of the
+    base policy. Build it with :meth:`PermissionEvaluator.for_agent`.
+    """
+
+    base: PermissionEvaluator
+    agent: PermissionEvaluator
+
+    def evaluate(
+        self,
+        tool: str,
+        action: str = "",
+        *,
+        mode: str = "",
+        external_directory: bool = False,
+        doom_loop: bool = False,
+    ) -> Decision:
+        """Evaluate (*tool*, *action*) in both policies and combine them."""
+        return combine_decisions(
+            *(
+                evaluator.evaluate(
+                    tool,
+                    action,
+                    mode=mode,
+                    external_directory=external_directory,
+                    doom_loop=doom_loop,
+                )
+                for evaluator in (self.base, self.agent)
+            )
+        )

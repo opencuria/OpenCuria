@@ -8,7 +8,12 @@ from typing import Any
 
 from ...access.base import HARNESS_WORKSPACE_ROOT
 from ...agents.definitions import AgentDefinition, canonical_subagent_type
-from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
+from ...permissions.evaluator import (
+    ASK,
+    DENY,
+    PermissionEvaluator,
+    combine_decisions,
+)
 from ...tools.base import ToolRegistry
 
 # Claude Code native tools mapped to OpenCuria registry/policy keys.
@@ -38,15 +43,6 @@ NATIVE_TOOL_KEYS: dict[str, str] = {
     "TodoWrite": "todowrite",
     "ExitPlanMode": "exit_plan_mode",
 }
-
-
-def combine_decisions(*decisions: str) -> str:
-    """Merge policy decisions with deny > ask > allow precedence."""
-    if DENY in decisions:
-        return DENY
-    if ASK in decisions:
-        return ASK
-    return "allow"
 
 
 def _canonical_path(path: Any, cwd: str | None = None) -> str:
@@ -321,25 +317,17 @@ def decide_tool(
         ):
             return DENY, event_tool, action, event_tool
 
-    agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+    policy = evaluator.for_agent(agent.permissions)
     if raw in {"WebFetch", "WebSearch"}:
         title = f"{raw}: {action}"[:240]
-        decision = combine_decisions(
-            evaluator.evaluate(key, action, mode=mode),
-            agent_eval.evaluate(key, action, mode=mode),
-        )
-        return decision, event_tool, action, title
+        return policy.evaluate(key, action, mode=mode), event_tool, action, title
 
     if raw == "Skill":
         skill_name = str(arguments.get("skill", "") or "")
         if skill_name not in set(selected_skills or ()):
             return DENY, event_tool, action, "Skill is not selected in OpenCuria"
         title = f"Skill: {skill_name}"[:240]
-        decision = combine_decisions(
-            evaluator.evaluate(key, action, mode=mode),
-            agent_eval.evaluate(key, action, mode=mode),
-        )
-        return decision, event_tool, action, title
+        return policy.evaluate(key, action, mode=mode), event_tool, action, title
 
     if raw == "Workflow":
         # Shares the task registry entry for permissions, not its argument shape.
@@ -367,10 +355,7 @@ def decide_tool(
     else:
         title = raw
 
-    decision = combine_decisions(
-        evaluator.evaluate(key, action, mode=mode),
-        agent_eval.evaluate(key, action, mode=mode),
-    )
+    decision = policy.evaluate(key, action, mode=mode)
     if (
         mode == "plan"
         and registered is not None
@@ -383,8 +368,7 @@ def decide_tool(
         if detect_external_directory(action):
             decision = combine_decisions(
                 decision,
-                evaluator.evaluate(key, action, mode=mode, external_directory=True),
-                agent_eval.evaluate(key, action, mode=mode, external_directory=True),
+                policy.evaluate(key, action, mode=mode, external_directory=True),
             )
     return decision, event_tool, action, title
 
@@ -400,7 +384,7 @@ def tool_schemas_for_claude(
 ) -> list[dict[str, Any]]:
     """Return registered tool schemas visible to Claude Code."""
     schemas: list[dict[str, Any]] = []
-    agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+    policy = evaluator.for_agent(agent.permissions)
     for registered in tools.list():
         name = (registered.name or "").strip().lower()
         if name == "task" and depth >= max_depth:
@@ -412,13 +396,7 @@ def tool_schemas_for_claude(
             name.startswith("mcp_") or key.startswith("mcp_")
         ):
             continue
-        if (
-            combine_decisions(
-                evaluator.evaluate(key, "", mode=mode),
-                agent_eval.evaluate(key, "", mode=mode),
-            )
-            == DENY
-        ):
+        if policy.evaluate(key, "", mode=mode) == DENY:
             continue
         schemas.append(
             {
@@ -447,7 +425,7 @@ def native_tools_for_claude(
     run) and, as it spawns subagents, under the same limits as Task.
     """
     names: list[str] = []
-    agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+    policy = evaluator.for_agent(agent.permissions)
     for cli_name, registry_name in (
         ("Bash", "bash"),
         ("Read", "read"),
@@ -483,11 +461,7 @@ def native_tools_for_claude(
             except KeyError:
                 continue
             permission_key = registered.permission_key or registry_name
-        decision = combine_decisions(
-            evaluator.evaluate(permission_key, "", mode=mode),
-            agent_eval.evaluate(permission_key, "", mode=mode),
-        )
-        if decision != DENY:
+        if policy.evaluate(permission_key, "", mode=mode) != DENY:
             names.append(cli_name)
     return names
 
@@ -496,7 +470,6 @@ __all__ = [
     "ASK",
     "DENY",
     "NATIVE_TOOL_KEYS",
-    "combine_decisions",
     "decide_tool",
     "native_tools_for_claude",
     "workflow_label",

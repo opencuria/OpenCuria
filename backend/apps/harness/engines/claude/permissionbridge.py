@@ -17,7 +17,6 @@ from ..shared.shellpolicy import shell_command_is_explore_safe
 from .events import WORKFLOW_AGENT_TYPE, ClaudeEventNormalizer, StepState
 from .policy import (
     NATIVE_TOOL_KEYS,
-    combine_decisions,
     decide_tool,
     registry_tool_identity,
     tool_identity,
@@ -223,13 +222,8 @@ class PermissionBridge:
                     "webfetch" if source_name == "WebFetch" else "websearch"
                 )
                 result = (
-                    combine_decisions(
-                        self.evaluator.evaluate(
-                            permission_key, result[2], mode=self.mode
-                        ),
-                        PermissionEvaluator(
-                            agent_rules=dict(effective_agent.permissions or {})
-                        ).evaluate(permission_key, result[2], mode=self.mode),
+                    self.evaluator.for_agent(effective_agent.permissions).evaluate(
+                        permission_key, result[2], mode=self.mode
                     ),
                     result[1],
                     result[2],

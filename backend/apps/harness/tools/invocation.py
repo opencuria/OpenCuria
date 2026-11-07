@@ -13,7 +13,13 @@ from asgiref.sync import sync_to_async
 from ..access.base import WorkspaceAccessor
 from ..agents.definitions import AgentDefinition
 from ..media.attachments import build_tool_message_content
-from ..permissions.evaluator import ASK, DEFAULT_GLOBAL_RULES, DENY, PermissionEvaluator
+from ..permissions.evaluator import (
+    ASK,
+    DEFAULT_GLOBAL_RULES,
+    DENY,
+    PermissionEvaluator,
+    combine_decisions,
+)
 from ..providers.base import LLMMessage, ToolSchema
 from ..todos.service import TodoService
 from .base import ToolContext, ToolError, ToolRegistry, ToolResult
@@ -93,15 +99,6 @@ def _detect_external_directory(tool_name: str, args: dict[str, Any]) -> bool:
     return detect_external_directory(str(args.get("command", "") or ""))
 
 
-def _combine_decisions(*decisions: str) -> str:
-    """Combine decisions with deny > ask > allow precedence."""
-    if DENY in decisions:
-        return DENY
-    if ASK in decisions:
-        return ASK
-    return "allow"
-
-
 def _with_args(message: str, call: _PendingToolCall) -> str:
     """Append the raw tool arguments (truncated) to an error message."""
     raw = (call.raw_arguments or "").strip()
@@ -178,7 +175,7 @@ class AuthorizedToolDispatcher:
         get no todowrite. Filtering happens before permission checks
         so nested tools never reach the provider.
         """
-        agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+        policy = self.evaluator.for_agent(agent.permissions)
         schemas: list[ToolSchema] = []
         for tool in self.tools.list():
             key = tool.permission_key or tool.name
@@ -187,11 +184,7 @@ class AuthorizedToolDispatcher:
                 continue
             if tool_key == "todowrite" and depth > 0:
                 continue
-            decision = _combine_decisions(
-                self.evaluator.evaluate(key, "", mode=mode),
-                agent_eval.evaluate(key, "", mode=mode),
-            )
-            if decision == DENY:
+            if policy.evaluate(key, "", mode=mode) == DENY:
                 continue
             schemas.append(
                 ToolSchema(
@@ -224,29 +217,18 @@ class AuthorizedToolDispatcher:
         apply (paths outside /workspace are allowed by default).
         """
         key = self._permission_key(tool_name)
-        agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+        policy = self.evaluator.for_agent(agent.permissions)
         if doom_loop:
-            return _combine_decisions(
-                self.evaluator.evaluate(key, action, mode=mode, doom_loop=True),
-                agent_eval.evaluate(key, action, mode=mode, doom_loop=True),
-            )
+            return policy.evaluate(key, action, mode=mode, doom_loop=True)
         if external_directory:
-            return _combine_decisions(
-                self.evaluator.evaluate(
-                    key, action, mode=mode, external_directory=True
-                ),
-                agent_eval.evaluate(key, action, mode=mode, external_directory=True),
-            )
-        decision = _combine_decisions(
-            self.evaluator.evaluate(key, action, mode=mode),
-            agent_eval.evaluate(key, action, mode=mode),
-        )
+            return policy.evaluate(key, action, mode=mode, external_directory=True)
+        decision = policy.evaluate(key, action, mode=mode)
         try:
             execution_tool = getattr(self.tools.get(tool_name), "execution_tool", False)
         except KeyError:
             execution_tool = False
         if mode == "plan" and execution_tool:
-            decision = _combine_decisions(decision, ASK)
+            decision = combine_decisions(decision, ASK)
         return decision
 
     def _permission_key(self, tool_name: str) -> str:

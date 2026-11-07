@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.permissions.evaluator import PermissionEvaluator, combine_decisions
 
 
 def test_default_is_allow() -> None:
@@ -123,8 +123,7 @@ def test_external_directory_does_not_bypass_tool_deny() -> None:
         agent_rules={"bash": {"*": "allow", "rm *": "deny"}}
     )
     assert (
-        evaluator.evaluate("bash", "rm /etc/passwd", external_directory=True)
-        == "deny"
+        evaluator.evaluate("bash", "rm /etc/passwd", external_directory=True) == "deny"
     )
     assert (
         evaluator.evaluate("bash", "cat /etc/passwd", external_directory=True)
@@ -150,3 +149,43 @@ def test_default_global_rules_do_not_gate_env() -> None:
     custom = PermissionEvaluator(global_rules={"read": {"*.env": "ask"}})
     assert custom.evaluate("read", "/workspace/.env") == "ask"
     assert custom.evaluate("read", ".env") == "ask"
+
+
+@pytest.mark.parametrize(
+    ("decisions", "expected"),
+    [
+        ((), "allow"),
+        (("allow", "allow"), "allow"),
+        (("allow", "ask"), "ask"),
+        (("ask", "deny", "allow"), "deny"),
+    ],
+)
+def test_combine_decisions_keeps_the_strictest(
+    decisions: tuple[str, ...], expected: str
+) -> None:
+    """Combined decisions follow deny > ask > allow precedence."""
+    assert combine_decisions(*decisions) == expected
+
+
+def test_agent_policy_never_relaxes_the_base_policy() -> None:
+    """An agent allow cannot lift a base ask, unlike an in-evaluator layer."""
+    base = PermissionEvaluator(global_rules={"*": "ask", "read": "allow"})
+    policy = base.for_agent({"bash": "allow", "edit": "deny"})
+    assert policy.evaluate("bash", "ls") == "ask"
+    assert policy.evaluate("edit", "f") == "deny"
+    assert policy.evaluate("read", "f") == "allow"
+    layered = PermissionEvaluator(
+        global_rules={"*": "ask"}, agent_rules={"bash": "allow"}
+    )
+    assert layered.evaluate("bash", "ls") == "allow"
+
+
+def test_agent_policy_forwards_mode_and_reserved_keys() -> None:
+    """Mode slices and reserved keys apply in both combined policies."""
+    base = PermissionEvaluator(mode_rules={"plan": {"bash": "ask"}})
+    policy = base.for_agent({"external_directory": "deny"})
+    assert policy.evaluate("bash", "ls") == "allow"
+    assert policy.evaluate("bash", "ls", mode="plan") == "ask"
+    assert policy.evaluate("bash", "cat /etc/x", external_directory=True) == "deny"
+    assert policy.evaluate("bash", "ls", doom_loop=True) == "ask"
+    assert base.for_agent(None).evaluate("bash", "ls") == "allow"

@@ -21,7 +21,7 @@ from common.exceptions import NotFoundError
 
 from .agents.definitions import get_agent
 from .models import HarnessMessage, HarnessSession, QuestionRequest
-from .permissions.evaluator import ASK, DENY, PermissionEvaluator
+from .permissions.evaluator import ASK, DENY
 from .permissions.models import PermissionRequest
 from .permissions.scopes import (
     is_permission_scope,
@@ -270,20 +270,17 @@ class InteractionService:
         """Authorize a Claude user-media read through existing permission gates."""
         action = str(path)
         agent = get_agent(session.agent_name or session.mode or "build")
-        agent_decision = PermissionEvaluator(
-            agent_rules=dict(agent.permissions or {})
-        ).evaluate("read", action, mode=session.mode or "")
-        decision = self.permissions.evaluator.evaluate(
+        decision = self.permissions.evaluator.for_agent(agent.permissions).evaluate(
             "read", action, mode=session.mode or ""
         )
         # Explicit policy denials remain authoritative, including agent hard bans.
-        if DENY in (agent_decision, decision):
+        if decision == DENY:
             return False
         if await sync_to_async(self.permissions.is_allowlisted)(
             session.organization_id, "read", action, session.workspace_id
         ):
             return True
-        if ASK in (agent_decision, decision):
+        if decision == ASK:
             approved = await self.request_permission(
                 session,
                 assistant,
