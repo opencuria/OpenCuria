@@ -15,6 +15,7 @@ import {
   clearAppRuntimeData,
   isAppRuntimeAvailable,
   openInstalledApp,
+  type AppGatewayLaunch,
 } from "./appRuntime";
 import { createExpoAppFileSystem } from "./appStorage";
 
@@ -62,6 +63,23 @@ export async function runPrimaryAction(apps: AppsState, row: AppRow) {
 
 const HOST_SDK = sdkMajor(Constants.expoConfig?.sdkVersion);
 const PLATFORM: AppPlatform = Platform.OS === "ios" ? "ios" : "android";
+
+/**
+ * The route from the app to processes of its workspace, or `null` when the
+ * server cannot be reached (installed apps still open offline).
+ */
+async function appGateway(
+  client: OpenCuriaClient | null,
+  appId: string,
+): Promise<AppGatewayLaunch | null> {
+  if (!client) return null;
+  try {
+    const { url, token, domain } = await client.apps.gatewaySession(appId);
+    return { url, token, domain };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The apps agents published to the signed-in user, joined with the ones
@@ -188,7 +206,11 @@ export function useApps(
       const copy = rowsRef.current.find((row) => row.appId === appId)?.installed;
       if (!copy) return;
       try {
-        await openInstalledApp(await installer.launchRequest(copy));
+        const [request, gateway] = await Promise.all([
+          installer.launchRequest(copy),
+          appGateway(client, appId),
+        ]);
+        await openInstalledApp(gateway ? { ...request, gateway } : request);
       } catch (cause) {
         showToast({
           title: `Could not open ${copy.name}`,
@@ -197,7 +219,7 @@ export function useApps(
         });
       }
     },
-    [installer],
+    [client, installer],
   );
 
   const uninstall = useCallback(

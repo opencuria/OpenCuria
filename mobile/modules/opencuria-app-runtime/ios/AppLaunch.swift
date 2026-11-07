@@ -32,6 +32,8 @@ struct AppLaunch {
   let orientation: String
   let backgroundColor: UIColor?
   let iconPath: String?
+  /// Route to the app's workspace backends; nil when opened offline.
+  let gateway: AppGatewaySession?
 
   /// The app's Expo config (`Constants.expoConfig`).
   var expoConfig: [String: Any] {
@@ -85,7 +87,8 @@ struct AppLaunch {
       localAssets: root["localAssets"] as? [String: String] ?? [:],
       orientation: root["orientation"] as? String ?? "default",
       backgroundColor: (root["backgroundColor"] as? String).flatMap(UIColor.init(hex:)),
-      iconPath: iconPath
+      iconPath: iconPath,
+      gateway: AppGateway.session(fromJSON: root["gateway"] as? [String: Any])
     )
   }
 }

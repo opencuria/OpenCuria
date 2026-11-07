@@ -396,7 +396,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         ),
     },
     harness,
-    apps: createAppsApi(() => api),
+    apps: createAppsApi(() => api, options.wsBaseUrl),
     git: createGitApi(() => api),
     desktop: {
       ...createDesktopApi(() => api),

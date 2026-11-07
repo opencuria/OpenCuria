@@ -40,6 +40,10 @@ class RunnerHarnessGateway:
         """Deliver a ``workspace:stream_closed`` notice to its byte stream."""
         return runner_accessor.route_stream_closed(data)
 
+    async def wait_stream_capacity(self, data: dict) -> None:
+        """Pace runner output to a byte stream's consumer."""
+        await runner_accessor.wait_stream_capacity(data)
+
     def fail_streams(
         self, matches_workspace: Callable[[str], bool], error: str
     ) -> None:

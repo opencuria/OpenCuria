@@ -921,3 +921,18 @@ export interface AppFileRequest {
   url: string;
   headers: Record<string, string>;
 }
+
+/**
+ * Lets a running app reach processes of its workspace. Requests it sends to
+ * `http://<process>.<domain>[:port]/<path>` go to
+ * `<url>/<process>/<port or 80>/<path>` with `token` in the
+ * `X-OpenCuria-App-Session` header.
+ */
+export interface AppGatewaySession {
+  /** Absolute gateway URL of the app on the server. */
+  url: string;
+  token: string;
+  expires_at: string;
+  /** Domain whose subdomains name processes: `opencuria.local`. */
+  domain: string;
+}

@@ -100,6 +100,10 @@ class HarnessGateway(Protocol):
         """Route a ``workspace:stream_closed`` notice to its byte stream."""
         ...
 
+    async def wait_stream_capacity(self, data: dict) -> None:
+        """Hold an accepted output ACK while the stream's consumer lags."""
+        ...
+
     def fail_streams(
         self, matches_workspace: Callable[[str], bool], error: str
     ) -> None:

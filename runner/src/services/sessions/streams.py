@@ -27,8 +27,10 @@ from .stream_intents import StreamIntentStore
 
 logger = structlog.get_logger(__name__)
 
-#: Max generic stream sessions per workspace (process + TCP relay).
-STREAM_MAX_PER_WORKSPACE = 8
+#: Max generic stream sessions per workspace (process + TCP relay). Agents'
+#: MCP servers and engines share it with the app gateway's connections
+#: (the backend keeps those to at most 10 per workspace).
+STREAM_MAX_PER_WORKSPACE = 16
 
 #: Max raw bytes per stream chunk in either direction.
 STREAM_CHUNK_SIZE = 64 * 1024

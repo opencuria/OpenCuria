@@ -18,8 +18,13 @@ import pytest
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 APPS_ROOT = BACKEND_ROOT / "apps"
 
-#: ASGI adapters for runner/frontend Socket.IO traffic and desktop streams.
-REALTIME_ADAPTERS = ("apps.runners.sio_server", "apps.runners.desktop_proxy")
+#: ASGI adapters for runner/frontend Socket.IO traffic, desktop streams and
+#: the gateway from published apps to their workspace processes.
+REALTIME_ADAPTERS = (
+    "apps.runners.sio_server",
+    "apps.runners.desktop_proxy",
+    "apps.mobile_apps.gateway",
+)
 
 #: Foundational bounded contexts and the only other apps each may import.
 FOUNDATION_DEPENDENCIES = {

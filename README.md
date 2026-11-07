@@ -325,6 +325,15 @@ The implementation lives in `backend/apps/mcp_app/`; published apps are stored b
 `backend/apps/mobile_apps/` under `MEDIA_ROOT`, which the API and execution
 processes must share (Compose uses the backend data volume).
 
+Published apps reach servers in their workspace as `http://<process>.opencuria.local`:
+the mobile app rewrites only those requests to the API gateway path
+`/ws/app-backends/<app_id>/<process>/<port>/…` with a short-lived app session token
+(never visible to the app's code). The gateway checks that the user still owns the
+app and workspace, resumes a stopped workspace, starts the persistent process of that
+name when it is not running and forwards HTTP (streamed) and WebSockets to the port
+it listens on, through the runner's workspace TCP streams. A reverse proxy in front
+of the API must pass `/ws/app-backends/` with WebSocket upgrades, unbuffered.
+
 ## MCP OAuth integrations
 
 OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect named personal or organization accounts from **Settings → Credentials**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production.

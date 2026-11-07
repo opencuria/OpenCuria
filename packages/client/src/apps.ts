@@ -1,10 +1,14 @@
 import type { ApiClient } from "./api";
 import type {
   AppFileRequest,
+  AppGatewaySession,
   AppManifest,
   PublishedApp,
   PublishedAppDetail,
 } from "./types";
+
+/** Opening an app waits at most this long for its gateway session. */
+const GATEWAY_SESSION_TIMEOUT_MS = 5000;
 
 function appPath(appId: string, suffix = ""): string {
   return `/apps/${encodeURIComponent(appId)}/${suffix}`;
@@ -14,12 +18,22 @@ function versionPath(appId: string, versionId: string, suffix: string): string {
   return appPath(appId, `versions/${encodeURIComponent(versionId)}/${suffix}`);
 }
 
+interface GatewaySessionResponse {
+  path: string;
+  token: string;
+  expires_at: string;
+  domain: string;
+}
+
 /**
  * Expo apps agents published to the signed-in user. Agents publish through
  * the `app_publish` MCP tool; clients list apps, read a version's install
  * manifest and download its content-addressed files.
+ *
+ * `wsBaseUrl` is the server origin the gateway paths (`/ws/...`) live on.
  */
-export function createAppsApi(api: () => ApiClient) {
+export function createAppsApi(api: () => ApiClient, wsBaseUrl: string) {
+  const origin = wsBaseUrl.replace(/\/+$/, "").replace(/^ws(s?):/, "http$1:");
   return {
     list: (signal?: AbortSignal) => api().get<PublishedApp[]>("/apps/", signal),
     get: (appId: string, signal?: AbortSignal) =>
@@ -41,6 +55,28 @@ export function createAppsApi(api: () => ApiClient) {
         ),
         signal,
       ),
+    /**
+     * Session that routes the app's `http://<process>.opencuria.local`
+     * requests to its workspace. Requesting a backend can start its process
+     * and resume the workspace.
+     */
+    gatewaySession: async (
+      appId: string,
+      signal?: AbortSignal,
+    ): Promise<AppGatewaySession> => {
+      const session = await api().post<GatewaySessionResponse>(
+        appPath(appId, "gateway-session/"),
+        undefined,
+        signal,
+        GATEWAY_SESSION_TIMEOUT_MS,
+      );
+      return {
+        url: `${origin}${session.path}`,
+        token: session.token,
+        expires_at: session.expires_at,
+        domain: session.domain,
+      };
+    },
     /**
      * Authenticated request for a version file (bundle, asset or icon) with
      * the current session, for native downloaders. Fetch the manifest first so

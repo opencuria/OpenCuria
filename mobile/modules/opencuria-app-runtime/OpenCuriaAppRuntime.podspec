@@ -19,6 +19,10 @@ Pod::Spec.new do |s|
   s.dependency 'Expo'
   s.dependency 'React-RCTAppDelegate'
   s.dependency 'ReactAppDependencyProvider'
+  # Networking hooks that route app backends (RCTHTTPRequestHandler.h,
+  # RCTWebSocketModule.h).
+  s.dependency 'React-RCTNetwork'
+  s.dependency 'React-CoreModules'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',

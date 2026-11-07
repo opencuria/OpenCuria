@@ -169,6 +169,16 @@ class StreamTransportService:
             return harness.route_stream_output(data)
         return harness.route_stream_closed(data)
 
+    async def pace_stream_reply(self, event: str, data: dict) -> None:
+        """Delay the ACK of accepted output until its consumer catches up.
+
+        The runner sends one chunk per ACK, so holding the ACK applies
+        backpressure up to the workspace process instead of overflowing
+        the byte stream's bounded queue.
+        """
+        if event == "workspace:stream_output" and isinstance(data, dict):
+            await self.harness().wait_stream_capacity(data)
+
     async def call_stream_event(
         self,
         runner: Runner,

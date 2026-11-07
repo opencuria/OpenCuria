@@ -39,9 +39,11 @@ def rpc_socket(monkeypatch, runner):
     consumers = {method: Mock() for _, method in REPLIES}
     service = SimpleNamespace(
         is_current_runner_session=RunnerService().is_current_runner_session,
+        pace_stream_reply=AsyncMock(),
         **consumers,
     )
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
+    server.service = service
     return server, consumers
 
 
@@ -64,6 +66,11 @@ async def test_rpc_reply_routing(
             consumer.assert_not_called()
     assert result == ({"ok": accepted} if method == "handle_stream_reply" else None)
     server.emit.assert_not_awaited()
+    # Only accepted stream replies wait for their consumer before the ACK.
+    if accepted and method == "handle_stream_reply":
+        server.service.pace_stream_reply.assert_awaited_once_with(event, data)
+    else:
+        server.service.pace_stream_reply.assert_not_awaited()
 
 
 @pytest.mark.django_db(transaction=True)

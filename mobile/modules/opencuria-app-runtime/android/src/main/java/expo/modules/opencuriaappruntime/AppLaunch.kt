@@ -29,7 +29,9 @@ class AppLaunch(
   val orientation: String,
   val backgroundColor: Int?,
   /** App icon shown while the app starts, if it has one. */
-  val iconPath: String?
+  val iconPath: String?,
+  /** Route to the app's workspace backends; null when opened offline. */
+  val gateway: AppGateway.Session?
 ) {
   /** The Expo config of the app (`Constants.expoConfig`). */
   val expoConfig: JSONObject
@@ -75,7 +77,8 @@ class AppLaunch(
         localAssets = localAssets,
         orientation = root.optString("orientation", "default"),
         backgroundColor = color,
-        iconPath = root.optString("iconPath").takeIf { it.isNotBlank() && File(it).isFile }
+        iconPath = root.optString("iconPath").takeIf { it.isNotBlank() && File(it).isFile },
+        gateway = AppGateway.parse(root.optJSONObject("gateway"))
       )
     }
   }

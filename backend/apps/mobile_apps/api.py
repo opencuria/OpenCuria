@@ -1,7 +1,8 @@
 """REST API for the apps agents published to the signed-in user.
 
 Publishing happens through the ``app_publish`` MCP tool; clients list apps,
-fetch a version's install manifest and download its content-addressed files.
+fetch a version's install manifest and download its content-addressed files,
+and open gateway sessions that route a running app to its workspace backends.
 """
 
 from __future__ import annotations
@@ -14,15 +15,18 @@ from ninja import Router
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
-from common.exceptions import NotFoundError
+from common.exceptions import ConflictError, NotFoundError
 from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
+from .backends import get_app_backend_service
+from .gateway_protocol import BACKEND_DOMAIN
 from .models import AppVersion
 from .schemas import (
     AppAssetOut,
     AppDetailOut,
     AppFileOut,
+    AppGatewaySessionOut,
     AppManifestOut,
     AppOut,
     AppVersionOut,
@@ -147,6 +151,37 @@ def delete_app(request: HttpRequest, app_id: uuid.UUID):
     except NotFoundError as exc:
         return 404, ErrorOut(detail=exc.message, code=exc.code)
     return 204, None
+
+
+@app_router.post(
+    "/{app_id}/gateway-session/",
+    response={200: AppGatewaySessionOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def create_gateway_session(request: HttpRequest, app_id: uuid.UUID):
+    """Token that lets the running app reach processes of its workspace.
+
+    The app calls ``http://<process>.opencuria.local``; the OpenCuria app
+    forwards those requests through the gateway with this token. Opening a
+    backend can start its process and resume a stopped workspace.
+    """
+    permission = APIKeyPermission.WORKSPACES_PROCESSES_RUN
+    if not check_api_key_permission(request, permission):
+        return _denied(permission)
+    try:
+        org_id = _scope(request)
+        session = get_app_backend_service().issue_session(
+            app_id, organization_id=org_id, owner_id=request.user.id
+        )
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except ConflictError as exc:
+        return 409, ErrorOut(detail=exc.message, code=exc.code)
+    return 200, AppGatewaySessionOut(
+        path=session.path,
+        token=session.token,
+        expires_at=session.expires_at,
+        domain=BACKEND_DOMAIN,
+    )
 
 
 @app_router.get(

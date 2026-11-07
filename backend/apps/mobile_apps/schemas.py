@@ -57,6 +57,20 @@ class AppAssetOut(AppFileOut):
     extension: str
 
 
+class AppGatewaySessionOut(Schema):
+    """Lets the user's device route the app's backend requests.
+
+    Requests the app sends to ``http://<process>.opencuria.local[:port]/<path>``
+    go to ``<server><path>/<process>/<port or 80>/<path>`` with ``token`` in
+    the ``X-OpenCuria-App-Session`` header.
+    """
+
+    path: str
+    token: str
+    expires_at: datetime
+    domain: str
+
+
 class AppManifestOut(Schema):
     """What a device downloads to install one version on one platform."""
 

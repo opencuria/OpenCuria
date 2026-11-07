@@ -11,10 +11,12 @@ import pytest
 
 from apps.harness.access.base import StreamClosedError, WorkspaceByteStream
 from apps.harness.access.runner_accessor import (
+    STREAM_PAUSE_DEPTH,
     RunnerAccessorError,
     RunnerWorkspaceAccessor,
     route_stream_closed,
     route_stream_output,
+    wait_stream_capacity,
 )
 
 
@@ -432,6 +434,54 @@ async def test_queue_overflow_marks_error_and_requests_remote_close() -> None:
         if any(e == "workspace:stream_close" for e, _ in emitted)
         else ("missing",)
     )
+    await stream.aclose()
+
+
+async def _fill_to_pause_depth(conn: str) -> None:
+    for _ in range(STREAM_PAUSE_DEPTH):
+        route_stream_output(
+            {
+                "connection_id": conn,
+                "workspace_id": "ws-1",
+                "stream": "stdout",
+                "data": _b64(b"x" * 100),
+            }
+        )
+    await asyncio.sleep(0.05)
+
+
+async def test_output_ack_waits_until_consumer_drains() -> None:
+    """A lagging consumer holds the ACK (runner backpressure), no overflow."""
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["yes"])
+    conn = stream.connection_id
+    # A consumer that keeps up never delays the ACK.
+    await asyncio.wait_for(wait_stream_capacity({"connection_id": conn}), 1)
+
+    await _fill_to_pause_depth(conn)
+    pacing = asyncio.create_task(wait_stream_capacity({"connection_id": conn}))
+    await asyncio.sleep(0.05)
+    assert not pacing.done()
+
+    assert await stream.receive() == b"x" * 100
+    await asyncio.wait_for(pacing, 1)
+    # Unknown connections (owned elsewhere) never wait.
+    await asyncio.wait_for(wait_stream_capacity({"connection_id": "other"}), 1)
+    await stream.aclose()
+
+
+async def test_closing_stream_releases_waiting_ack() -> None:
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["yes"])
+    conn = stream.connection_id
+    await _fill_to_pause_depth(conn)
+    pacing = asyncio.create_task(wait_stream_capacity({"connection_id": conn}))
+    await asyncio.sleep(0.05)
+    assert not pacing.done()
+    route_stream_closed({"connection_id": conn, "workspace_id": "ws-1", "exit_code": 0})
+    await asyncio.wait_for(pacing, 1)
     await stream.aclose()
 
 

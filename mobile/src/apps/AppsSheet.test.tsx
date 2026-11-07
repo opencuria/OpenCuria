@@ -233,6 +233,12 @@ describe("useApps", () => {
           headers: {},
         })),
         delete: jest.fn(async () => undefined),
+        gatewaySession: jest.fn(async (app: string) => ({
+          url: `https://curia.test/ws/app-backends/${app}`,
+          token: "app-session",
+          expires_at: "2026-11-07T12:00:00Z",
+          domain: "opencuria.local",
+        })),
       },
       realtime: {
         on: jest.fn(() => () => undefined),
@@ -299,12 +305,38 @@ describe("useApps", () => {
     expect(result.current.progress).toEqual({});
 
     await act(async () => result.current.open("game"));
-    expect(mockOpenInstalledApp).toHaveBeenCalledWith({ appId: "game" });
+    expect(api.apps.gatewaySession).toHaveBeenCalledWith("game");
+    expect(mockOpenInstalledApp).toHaveBeenCalledWith({
+      appId: "game",
+      gateway: {
+        url: "https://curia.test/ws/app-backends/game",
+        token: "app-session",
+        domain: "opencuria.local",
+      },
+    });
 
     await act(async () => result.current.uninstall("game"));
     expect(local.uninstall).toHaveBeenCalledWith("game");
     expect(mockClearData).toHaveBeenCalledWith("game");
     expect(result.current.rows[0]?.state).toBe("available");
+  });
+
+  it("opens installed apps without a backend route when offline", async () => {
+    const api = client([]);
+    api.apps.gatewaySession.mockRejectedValueOnce(new Error("offline"));
+    const local = installer([installed("game", "Game")]);
+    const { result } = renderHook(() =>
+      useApps(
+        api as unknown as OpenCuriaClient,
+        SCOPE,
+        local as unknown as AppInstaller,
+      ),
+    );
+    await waitFor(() => expect(result.current.rows).toHaveLength(1));
+
+    await act(async () => result.current.open("game"));
+
+    expect(mockOpenInstalledApp).toHaveBeenLastCalledWith({ appId: "game" });
   });
 
   it("reports a failed install and keeps the app available", async () => {

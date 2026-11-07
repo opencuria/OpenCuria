@@ -170,6 +170,16 @@ def route_stream_output(data: dict[str, Any]) -> bool:
     return accessor._deliver_stream_output(data)
 
 
+async def wait_stream_capacity(data: dict[str, Any]) -> None:
+    """Hold an accepted ``workspace:stream_output`` ACK while its consumer lags.
+
+    Streams owned by another process, or already closed, return at once.
+    """
+    accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
+    if accessor is not None:
+        await accessor._wait_stream_capacity(str(data.get("connection_id", "")))
+
+
 def route_stream_closed(data: dict[str, Any]) -> bool:
     """Deliver a ``workspace:stream_closed`` notice to its byte stream."""
     accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
@@ -230,6 +240,16 @@ def _serialize_process(process: Any) -> dict[str, Any]:
 #: Bounded per-stream queue depth (chunks of at most 64KiB each).
 STREAM_QUEUE_DEPTH = 64
 
+#: Queued chunks from which output ACKs wait for the consumer. The runner
+#: sends the next chunk only after an ACK, so a slow consumer (e.g. a phone
+#: downloading through the app gateway) slows the stream down instead of
+#: overflowing its queue.
+STREAM_PAUSE_DEPTH = STREAM_QUEUE_DEPTH // 2
+
+#: Longest an output ACK waits for the consumer; below the runner's ACK
+#: timeout so a stalled consumer still ends in the queue-overflow path.
+STREAM_PACE_TIMEOUT = 10.0
+
 #: ACK timeout for stream control events (start/input/close).
 STREAM_CALL_TIMEOUT = 15.0
 
@@ -282,6 +302,7 @@ class _StreamState:
         "opened_at",
         "stdout_bytes",
         "managed",
+        "drained",
     )
 
     def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
@@ -291,6 +312,10 @@ class _StreamState:
         self.close_error: str | None = None
         self.close_event = asyncio.Event()
         self.exit_code: int | None = None
+        # Set while the consumer keeps up (fewer than STREAM_PAUSE_DEPTH
+        # queued chunks) or the stream is closed; output ACKs wait for it.
+        self.drained = asyncio.Event()
+        self.drained.set()
         # Bounded stderr capture (newest bytes win) for failure
         # diagnosis. Only the sanitized excerpt ever reaches logs —
         # see ``get_stream_stderr_excerpt``.
@@ -314,6 +339,13 @@ class _StreamState:
     def stderr_excerpt(self) -> str:
         """Return the sanitized stderr excerpt (secret-free, bounded)."""
         return stream_diagnostics.sanitize_stderr_excerpt(bytes(self.stderr_buf))
+
+    def update_drained(self) -> None:
+        """Track whether the consumer keeps up (call on the owning loop)."""
+        if self.closed or self.queue.qsize() < STREAM_PAUSE_DEPTH:
+            self.drained.set()
+        else:
+            self.drained.clear()
 
 
 class RunnerByteStream(WorkspaceByteStream):
@@ -1296,6 +1328,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 state.queue.put_nowait(
                     {"type": "chunk", "stream": stream, "data": raw}
                 )
+                state.update_drained()
             except asyncio.QueueFull:
                 # Overflow: mark the failure AND best-effort remote close
                 # so no process keeps running without a consumer — but
@@ -1304,6 +1337,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 state.closed = True
                 state.close_error = "stream queue overflow"
                 state.close_event.set()
+                state.drained.set()
                 # Drain one slot for the terminal marker so a
                 # blocked receiver wakes up instead of hanging.
                 with contextlib.suppress(Exception):
@@ -1320,6 +1354,26 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
         self._schedule(_put)
         return True
+
+    async def _wait_stream_capacity(self, connection_id: str) -> None:
+        """Wait (bounded) until the stream's consumer has drained its queue.
+
+        Called before an output chunk is ACKed: the runner holds the next
+        chunk until then, so backpressure reaches the workspace process.
+        """
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            return
+
+        async def wait() -> None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(state.drained.wait(), STREAM_PACE_TIMEOUT)
+
+        loop = self._loop
+        if loop is None or not loop.is_running() or loop is asyncio.get_running_loop():
+            await wait()
+            return
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(wait(), loop))
 
     def _request_remote_close(self, connection_id: str) -> None:
         """Best-effort remote close without touching consumer state.
@@ -1384,6 +1438,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 except (TypeError, ValueError):
                     state.exit_code = None
             state.close_event.set()
+            state.drained.set()
             try:
                 state.queue.put_nowait({"type": "closed"})
             except asyncio.QueueFull:
@@ -1423,6 +1478,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 state.closed = True
                 state.close_error = error
                 state.close_event.set()
+                state.drained.set()
                 with contextlib.suppress(asyncio.QueueFull):
                     state.queue.put_nowait({"type": "closed"})
 
@@ -1449,6 +1505,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise StreamClosedError(f"stream {connection_id!r} is not open")
         while True:
             item = await state.queue.get()
+            state.update_drained()
             kind = item.get("type")
             if kind == "closed":
                 if state.close_error:

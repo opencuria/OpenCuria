@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from asgiref.sync import sync_to_async
 
+from apps.runners.enums import ProcessKind
+from apps.runners.services import RunnerService, get_runner_service
 from common.exceptions import NotFoundError
 
 from .export import (
@@ -92,9 +95,11 @@ class AppService:
         self,
         repository: type[AppRepository] = AppRepository,
         reader: WorkspaceExportReader | None = None,
+        runners: Callable[[], RunnerService] = get_runner_service,
     ) -> None:
         self.apps = repository
         self.reader = reader or WorkspaceExportReader()
+        self._runners = runners
 
     # -- Publishing -------------------------------------------------------
 
@@ -129,7 +134,35 @@ class AppService:
             project_path=project_path,
             notes=notes.strip()[:MAX_NOTES_CHARS],
         )
-        return PublishResult(version=version, warnings=export.warnings)
+        backend_warnings = await self._backend_warnings(workspace_id, export.backends)
+        return PublishResult(
+            version=version, warnings=(*export.warnings, *backend_warnings)
+        )
+
+    async def _backend_warnings(
+        self, workspace_id: uuid.UUID, labels: tuple[str, ...]
+    ) -> list[str]:
+        """Explain backends the app calls that its workspace cannot serve."""
+        if not labels:
+            return []
+        processes = await self._runners().list_processes(workspace_id, live=False)
+        kinds: dict[str, set[str]] = {}
+        for process in processes:
+            kinds.setdefault((process.name or "").lower(), set()).add(process.kind)
+        warnings = []
+        for label in labels:
+            found = kinds.get(label, set())
+            if ProcessKind.PERSISTENT in found:
+                continue
+            fix = f"process_start(name='{label}', for_user=true)"
+            warnings.append(
+                f"The app calls {label}.opencuria.local, but process '{label}' "
+                f"stops when your run ends; restart it with {fix}."
+                if found
+                else f"The app calls {label}.opencuria.local, but this workspace "
+                f"has no process named '{label}'; start the server with {fix}."
+            )
+        return warnings
 
     def _blob(self, content: bytes) -> AppBlob:
         return self.apps.ensure_blob(

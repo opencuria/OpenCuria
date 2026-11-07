@@ -1014,6 +1014,10 @@ class RunnerService:
         """Delegate to :class:`StreamTransportService`."""
         return self.stream_transport.handle_stream_reply(event, data, runner_id)
 
+    async def pace_stream_reply(self, event: str, data: dict) -> None:
+        """Delegate to :class:`StreamTransportService`."""
+        await self.stream_transport.pace_stream_reply(event, data)
+
     async def call_stream_event(
         self, runner: Runner, event: str, payload: dict, timeout: float | None = None
     ) -> dict:

@@ -61,6 +61,12 @@ def _platforms(sizes: dict[str, int]) -> list[str]:
         and add dependencies with `npx expo install`. Only the native modules
         Expo Go provides are available; custom native code and config plugins
         do not run.
+        Backends: the app reaches a server in this workspace as
+        `http://<process>.opencuria.local` (fetch, WebSocket, images), where
+        <process> is the lowercase name of a process_start(for_user=true)
+        process. OpenCuria starts the process and workspace on demand and
+        uses the port it listens on (`:<port>` picks one); such requests
+        need the phone online.
         Build first, in project_path:
         `npx expo export --platform android --platform ios`
     """,

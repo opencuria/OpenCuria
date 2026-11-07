@@ -2,7 +2,8 @@
 ASGI config for opencuria backend.
 
 Combines Django HTTP, Socket.IO for runners and frontend clients,
-and desktop WebSocket streams.
+desktop WebSocket streams and the gateway from published apps to the
+processes of their workspace.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ django.setup()
 
 from django.core.asgi import get_asgi_application  # noqa: E402
 
+from apps.mobile_apps.gateway import app_backend_gateway  # noqa: E402
+from apps.mobile_apps.gateway_protocol import GATEWAY_PREFIX  # noqa: E402
 from apps.runners.desktop_proxy import desktop_proxy_app  # noqa: E402
 from apps.runners.sio_server import create_sio_app  # noqa: E402
 
@@ -50,6 +53,8 @@ async def application(scope, receive, send):
 
     if path.startswith("/ws/desktop/"):
         await desktop_proxy_app(scope, receive, send)
+    elif path.startswith(f"{GATEWAY_PREFIX}/"):
+        await app_backend_gateway(scope, receive, send)
     elif (
         path.startswith("/ws/runner")
         or path.startswith("/ws/frontend")

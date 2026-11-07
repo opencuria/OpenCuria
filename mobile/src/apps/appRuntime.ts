@@ -1,5 +1,19 @@
 import { requireOptionalNativeModule } from "expo-modules-core";
 
+/**
+ * Routes the app's `http://<process>.<domain>[:port]` requests to processes
+ * of its workspace. Native code rewrites only those requests; the token
+ * never reaches the app's JavaScript.
+ */
+export interface AppGatewayLaunch {
+  /** Gateway URL of the app; requests go to `<url>/<process>/<port>/<path>`. */
+  url: string;
+  /** App session token, sent as `X-OpenCuria-App-Session`. */
+  token: string;
+  /** `opencuria.local`. */
+  domain: string;
+}
+
 /** What the native runtime needs to open one installed app version. */
 export interface AppLaunchRequest {
   appId: string;
@@ -19,6 +33,8 @@ export interface AppLaunchRequest {
   backgroundColor?: string;
   /** Absolute path of the app icon, shown while the app starts. */
   iconPath?: string;
+  /** Missing offline: backend requests then fail like without network. */
+  gateway?: AppGatewayLaunch;
 }
 
 interface AppRuntimeModule {

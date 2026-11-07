@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .gateway_protocol import BACKEND_DOMAIN
 from .runtime import AppRuntime, dependency_warnings
 
 PLATFORMS = ("android", "ios")
@@ -24,6 +26,12 @@ MAX_CONFIG_BYTES = 256 * 1024
 MAX_NOTES_CHARS = 2000
 
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+#: ``<label>.opencuria.local`` in a bundle (Hermes keeps literals readable).
+_BACKEND_HOST = re.compile(
+    rb"(?<![A-Za-z0-9.-])([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)\."
+    + re.escape(BACKEND_DOMAIN.encode())
+    + rb"(?![A-Za-z0-9-])"
+)
 _ASSET_KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _EXTENSION = re.compile(r"^[A-Za-z0-9]{0,16}$")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -79,6 +87,8 @@ class AppExport:
     platforms: dict[str, PlatformExport]
     icon: bytes | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    #: Process labels the app calls as ``http://<label>.opencuria.local``.
+    backends: tuple[str, ...] = ()
 
 
 def relative_path(path: str) -> str:
@@ -222,6 +232,20 @@ def parse_export(
         platforms=platforms,
         icon=_icon(files, config),
         warnings=tuple(warnings),
+        backends=backend_labels(build.bundle for build in platforms.values()),
+    )
+
+
+def backend_labels(bundles: Iterable[bytes]) -> tuple[str, ...]:
+    """Process labels the bundles call as ``<label>.opencuria.local``."""
+    return tuple(
+        sorted(
+            {
+                match.group(1).decode("ascii").lower()
+                for bundle in bundles
+                for match in _BACKEND_HOST.finditer(bundle)
+            }
+        )
     )
 
 

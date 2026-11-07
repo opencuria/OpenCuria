@@ -1908,4 +1908,32 @@ describe("apps", () => {
       },
     });
   });
+
+  it("opens a gateway session on the server origin", async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({
+        path: "/ws/app-backends/app-1",
+        token: "app-token",
+        expires_at: "2026-11-07T12:00:00Z",
+        domain: "opencuria.local",
+      }),
+    );
+    const client = clientOptions({ wsBaseUrl: "wss://api.example/" }).create(
+      fetch as unknown as typeof globalThis.fetch,
+    );
+
+    const session = await client.apps.gatewaySession("app 1");
+
+    const [url, init] = fetch.mock.calls[0]! as unknown as [string, RequestInit];
+    expect(String(url)).toBe(
+      "https://api.example/api/v1/apps/app%201/gateway-session/",
+    );
+    expect(init.method).toBe("POST");
+    expect(session).toEqual({
+      url: "https://api.example/ws/app-backends/app-1",
+      token: "app-token",
+      expires_at: "2026-11-07T12:00:00Z",
+      domain: "opencuria.local",
+    });
+  });
 });

@@ -53,9 +53,14 @@ final class AppRuntimeViewController: UIViewController {
     launch.supportedOrientations
   }
 
+  deinit {
+    AppGateway.close(launch.gateway)
+  }
+
   override func viewDidLoad() {
     super.viewDidLoad()
     AppRuntimeViewController.current = self
+    AppGateway.open(launch.gateway)
     view.backgroundColor = launch.backgroundColor ?? .systemBackground
     let menuGesture = UILongPressGestureRecognizer(target: self, action: #selector(openMenu(_:)))
     menuGesture.numberOfTouchesRequired = 3
@@ -129,6 +134,7 @@ final class AppRuntimeViewController: UIViewController {
 
   func close() {
     stop()
+    AppGateway.close(launch.gateway)
     if AppRuntimeViewController.current === self {
       AppRuntimeViewController.current = nil
     }

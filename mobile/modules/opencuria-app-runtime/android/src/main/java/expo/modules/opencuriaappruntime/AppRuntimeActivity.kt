@@ -74,6 +74,7 @@ class AppRuntimeActivity :
       return
     }
     current = WeakReference(this)
+    AppGateway.open(launch.gateway)
     requestedOrientation = launch.requestedOrientation
     // Apps lay out edge to edge with safe-area insets, as in Expo Go; the
     // theme keeps the system bars transparent.
@@ -263,7 +264,10 @@ class AppRuntimeActivity :
   override fun onDestroy() {
     handler.removeCallbacks(openMenu)
     dialog?.dismiss()
-    if (::launch.isInitialized) stop()
+    if (::launch.isInitialized) {
+      stop()
+      AppGateway.close(launch.gateway)
+    }
     if (current?.get() === this) current = null
     super.onDestroy()
   }

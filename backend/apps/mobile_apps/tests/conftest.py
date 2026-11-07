@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -11,11 +12,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from aiohttp import WSMsgType, web
 from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.harness.access.base import ExecResult
+from apps.harness.access.base import ExecResult, WorkspaceByteStream
 from apps.harness.access.file_types import FileContent
 from apps.harness.access.runner_accessor import RunnerAccessorError
 from apps.mobile_apps.export import ExportFiles
@@ -183,3 +185,108 @@ def media_root(settings, tmp_path):
 @pytest.fixture
 def app_world(db) -> AppWorld:
     return build_world()
+
+
+class SocketStream(WorkspaceByteStream):
+    """A workspace byte stream over a real local TCP connection."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        super().__init__("ws-1", uuid.uuid4().hex)
+        self.reader, self.writer = reader, writer
+
+    async def receive(self) -> bytes:
+        return await self.reader.read(65536)
+
+    async def send(self, data: bytes) -> None:
+        self.writer.write(data)
+        await self.writer.drain()
+
+    async def send_eof(self) -> None:
+        self.writer.write_eof()
+
+    async def aclose(self) -> None:
+        self.writer.close()
+
+    async def wait_closed(self) -> int | None:
+        return None
+
+
+class Process:
+    """What the workspace process saw."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+        self.stream_closed = asyncio.Event()
+
+
+@pytest.fixture
+async def workspace_process():
+    seen = Process()
+
+    async def echo(request: web.Request) -> web.Response:
+        body = await request.read()
+        seen.requests.append(
+            {
+                "method": request.method,
+                "path_qs": request.path_qs,
+                "headers": dict(request.headers),
+                "body": body,
+            }
+        )
+        return web.json_response({"ok": True}, headers={"X-Upstream": "yes"})
+
+    async def events(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        try:
+            for index in range(1000):
+                await response.write(f"data: {index}\n\n".encode())
+                await asyncio.sleep(0.02)
+        except (ConnectionResetError, RuntimeError):
+            seen.stream_closed.set()
+        finally:
+            seen.stream_closed.set()
+        return response
+
+    async def chunks(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse()
+        await response.prepare(request)
+        for part in (b"one,", b"two,", b"three"):
+            await response.write(part)
+        await response.write_eof()
+        return response
+
+    async def login(request: web.Request) -> web.Response:
+        raise web.HTTPFound(
+            "/home",
+            headers={"Set-Cookie": "sid=42; Path=/; Domain=localhost; HttpOnly"},
+        )
+
+    async def socket(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse(protocols=("chat",))
+        await ws.prepare(request)
+        async for message in ws:
+            if message.type == WSMsgType.TEXT:
+                await ws.send_str(f"echo:{message.data}")
+            elif message.type == WSMsgType.BINARY:
+                await ws.send_bytes(message.data[::-1])
+        return ws
+
+    app = web.Application()
+    app.add_routes(
+        [
+            web.route("*", "/echo", echo),
+            web.get("/events", events),
+            web.get("/chunks", chunks),
+            web.get("/login", login),
+            web.get("/socket", socket),
+        ]
+    )
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    seen.port = port
+    yield seen
+    await runner.cleanup()

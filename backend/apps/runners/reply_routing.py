@@ -117,6 +117,9 @@ async def route_runner_reply(
         event, data, runner_id=runner_id
     )
     if accepted:
+        if method == "handle_stream_reply":
+            # The ACK goes out when this returns: pace output to its consumer.
+            await service.pace_stream_reply(event, data)
         return True
     if _relay is None:
         return False
