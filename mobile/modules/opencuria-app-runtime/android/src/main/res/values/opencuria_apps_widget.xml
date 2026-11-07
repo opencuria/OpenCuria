@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="opencuria_apps_widget_label">Apps</string>
+  <string name="opencuria_apps_widget_description">Open your apps from the home screen.</string>
+  <string name="opencuria_apps_widget_more">More</string>
+  <string name="opencuria_apps_widget_more_description">More apps</string>
+  <string name="opencuria_apps_widget_empty">No apps yet</string>
+  <string name="opencuria_apps_widget_empty_detail">Apps you install in OpenCuria appear here.</string>
+  <string name="opencuria_apps_widget_sign_in">Sign in to see your apps</string>
+
+  <!-- Like a launcher folder; Android 12+ uses the wallpaper colors (values-v31). -->
+  <color name="opencuria_apps_widget_background">#F2F0F4</color>
+  <color name="opencuria_apps_widget_label">#1B1B1F</color>
+  <color name="opencuria_apps_widget_secondary">#5E5E66</color>
+
+  <dimen name="opencuria_apps_widget_padding">8dp</dimen>
+  <dimen name="opencuria_apps_widget_radius">16dp</dimen>
+  <dimen name="opencuria_apps_widget_label_size">12sp</dimen>
+</resources>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Apps widget: rows of app tiles, added by AppsWidgetViews. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@android:id/background"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="@drawable/opencuria_apps_widget_background"
+  android:clipToOutline="true"
+  android:orientation="vertical"
+  android:padding="@dimen/opencuria_apps_widget_padding" />

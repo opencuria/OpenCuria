@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One app, as on the home screen: its icon (drawn in the launcher's icon shape) and name. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@+id/opencuria_apps_widget_tile"
+  android:layout_width="0dp"
+  android:layout_height="match_parent"
+  android:layout_weight="1"
+  android:background="?android:attr/selectableItemBackground"
+  android:gravity="center"
+  android:orientation="vertical"
+  android:paddingStart="2dp"
+  android:paddingEnd="2dp">
+
+  <FrameLayout
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <!-- The More tile's folder background: the icon shape, filled with a faint tint. -->
+    <ImageView
+      android:id="@+id/opencuria_apps_widget_folder"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:importantForAccessibility="no"
+      android:tint="@color/opencuria_apps_widget_folder"
+      android:tintMode="src_in"
+      android:visibility="gone" />
+
+    <ImageView
+      android:id="@+id/opencuria_apps_widget_icon"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:importantForAccessibility="no" />
+  </FrameLayout>
+
+  <TextView
+    android:id="@+id/opencuria_apps_widget_label"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="4dp"
+    android:ellipsize="end"
+    android:gravity="center_horizontal"
+    android:importantForAccessibility="no"
+    android:maxLines="1"
+    android:textAppearance="@android:style/TextAppearance.DeviceDefault"
+    android:textColor="@color/opencuria_apps_widget_label"
+    android:textSize="@dimen/opencuria_apps_widget_label_size" />
+</LinearLayout>

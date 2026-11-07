@@ -142,13 +142,18 @@ final class AppRuntimeViewController: UIViewController {
     start()
   }
 
-  func close() {
+  /// Whether this controller runs the version a launch asks for.
+  func shows(_ other: AppLaunch) -> Bool {
+    launch.appId == other.appId && launch.versionId == other.versionId
+  }
+
+  func close(animated: Bool = true) {
     stop()
     AppGateway.close(launch.gateway)
     if AppRuntimeViewController.current === self {
       AppRuntimeViewController.current = nil
     }
-    presentingViewController?.dismiss(animated: true)
+    presentingViewController?.dismiss(animated: animated)
   }
 
   /// The app's icon and a spinner until its first view appears, as in Expo Go.

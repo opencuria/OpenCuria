@@ -40,6 +40,10 @@ export interface AppLaunchRequest {
 interface AppRuntimeModule {
   open(request: string): Promise<void>;
   clearData(appId: string): Promise<void>;
+  /** Missing in development clients built before it existed. */
+  close?(): Promise<void>;
+  /** Android only: iOS draws its widget with expo-widgets. */
+  updateAppsWidget?(snapshot: string): Promise<void>;
 }
 
 const native = requireOptionalNativeModule<AppRuntimeModule>(
@@ -59,7 +63,22 @@ export async function openInstalledApp(
   await native.open(JSON.stringify(request));
 }
 
+/** Close the app that is open, if any; OpenCuria shows again. */
+export async function closeOpenApp(): Promise<void> {
+  await native?.close?.();
+}
+
 /** Remove what the native runtime keeps for an app (cache, SecureStore). */
 export async function clearAppRuntimeData(appId: string): Promise<void> {
   await native?.clearData(appId);
+}
+
+/** Whether this build draws the Android home screen widget. */
+export function isAppsWidgetAvailable(): boolean {
+  return typeof native?.updateAppsWidget === "function";
+}
+
+/** Hand the Android home screen widget its content (JSON `AppsWidgetSnapshot`). */
+export async function updateAppsWidget(snapshot: string): Promise<void> {
+  await native?.updateAppsWidget?.(snapshot);
 }

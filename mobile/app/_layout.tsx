@@ -12,6 +12,7 @@ import { ThemeProvider, useTheme } from "../src/ui/theme";
 import { SessionProvider } from "../src/screens/SessionContext";
 import { NotificationProvider } from "../src/notifications/NotificationContext";
 import { ToastHost } from "../src/ui/ToastHost";
+import { AppsWidgetProvider } from "../src/widgets/AppsWidgetProvider";
 
 export default function RootLayout(): React.JSX.Element {
   return (
@@ -22,12 +23,14 @@ export default function RootLayout(): React.JSX.Element {
             <NativeStatusBar />
             <SessionProvider>
               <NotificationProvider>
-                <Stack
-                  screenOptions={{ headerShown: false, animation: "fade" }}
-                >
-                  <Stack.Screen name="index" />
-                </Stack>
-                <ToastHost />
+                <AppsWidgetProvider>
+                  <Stack
+                    screenOptions={{ headerShown: false, animation: "fade" }}
+                  >
+                    <Stack.Screen name="index" />
+                  </Stack>
+                  <ToastHost />
+                </AppsWidgetProvider>
               </NotificationProvider>
             </SessionProvider>
           </ThemeProvider>

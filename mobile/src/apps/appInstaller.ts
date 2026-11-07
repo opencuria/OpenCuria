@@ -24,6 +24,10 @@ export interface InstalledApp {
   /** When the installed version was published. */
   publishedAt: string;
   installedAt: string;
+  /** When the installed version was installed (the first install or an update). */
+  updatedAt?: string;
+  /** When the app was last opened on this device; missing until then. */
+  openedAt?: string;
   hasIcon: boolean;
 }
 
@@ -41,7 +45,7 @@ export interface InstallOptions {
 }
 
 interface Registry {
-  version: 1;
+  version: 2;
   apps: InstalledApp[];
 }
 
@@ -72,10 +76,21 @@ export function appLayout(root: string, appId: string) {
 
 function parseRegistry(text: string): Registry | null {
   try {
-    const parsed = JSON.parse(text) as Partial<Registry> | null;
-    return parsed && Array.isArray(parsed.apps)
-      ? { version: 1, apps: parsed.apps }
-      : null;
+    const parsed = JSON.parse(text) as {
+      version?: number;
+      apps?: InstalledApp[];
+    } | null;
+    if (!parsed || !Array.isArray(parsed.apps)) return null;
+    if (parsed.version === 2) return { version: 2, apps: parsed.apps };
+    // Version 1 did not track use; its apps count as opened, not as new.
+    return {
+      version: 2,
+      apps: parsed.apps.map((app) => ({
+        ...app,
+        updatedAt: app.updatedAt ?? app.installedAt,
+        openedAt: app.openedAt ?? app.installedAt,
+      })),
+    };
   } catch {
     return null;
   }
@@ -139,6 +154,7 @@ export function updatesManifest(
 export class AppInstaller {
   private registryCache: Promise<Registry> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<() => void>();
 
   constructor(
     private readonly fs: AppFileSystem,
@@ -151,6 +167,29 @@ export class AppInstaller {
     return [...registry.apps].sort((a, b) =>
       b.installedAt.localeCompare(a.installedAt),
     );
+  }
+
+  /** Called after every change to the installed apps; returns the unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** Remember that an app was opened; unknown apps are ignored. */
+  markOpened(appId: string): Promise<void> {
+    return this.serialized(async () => {
+      const registry = await this.registry();
+      if (!registry.apps.some((app) => app.appId === appId)) return;
+      const openedAt = this.now().toISOString();
+      await this.saveRegistry({
+        ...registry,
+        apps: registry.apps.map((app) =>
+          app.appId === appId ? { ...app, openedAt } : app,
+        ),
+      });
+    });
   }
 
   /** Install a version, or update an installed app to it. */
@@ -242,13 +281,20 @@ export class AppInstaller {
       const registry = parseRegistry(await this.fs.readText(candidate));
       if (registry) return registry;
     }
-    return { version: 1, apps: [] };
+    return { version: 2, apps: [] };
   }
 
   private async saveRegistry(registry: Registry): Promise<void> {
     this.fs.makeDirectory(this.fs.root);
     this.fs.writeText(joinUri(this.fs.root, REGISTRY), JSON.stringify(registry));
     this.registryCache = Promise.resolve(registry);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        /* A failing listener must not fail the install. */
+      }
+    }
   }
 
   private async installNow(
@@ -280,6 +326,7 @@ export class AppInstaller {
 
     const registry = await this.registry();
     const previous = registry.apps.find((app) => app.appId === manifest.app_id);
+    const now = this.now().toISOString();
     const installed: InstalledApp = {
       appId: manifest.app_id,
       scope: options.scope,
@@ -290,7 +337,9 @@ export class AppInstaller {
       versionName: manifest.version_name,
       sdkVersion: manifest.sdk_version,
       publishedAt: manifest.created_at,
-      installedAt: previous?.installedAt ?? this.now().toISOString(),
+      installedAt: previous?.installedAt ?? now,
+      updatedAt: now,
+      ...(previous?.openedAt ? { openedAt: previous.openedAt } : {}),
       hasIcon: Boolean(manifest.icon) && this.fs.exists(layout.icon),
     };
     await this.saveRegistry({

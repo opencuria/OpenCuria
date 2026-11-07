@@ -85,7 +85,32 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           color: "#534AB7",
         },
       ],
-      ["expo-widgets", { enablePushNotifications: true }],
+      [
+        "expo-widgets",
+        {
+          enablePushNotifications: true,
+          widgets: [
+            {
+              // Layout: src/widgets/AppsWidget.tsx.
+              name: "OpenCuriaApps",
+              displayName: "Apps",
+              description: "Open your apps from the Home Screen.",
+              ios: {
+                supportedFamilies: [
+                  "systemSmall",
+                  "systemMedium",
+                  "systemLarge",
+                  "systemExtraLarge",
+                ],
+                // The icon grid sets its own margins, like the home screen.
+                contentMarginsDisabled: true,
+              },
+              // Android draws its own (modules/opencuria-app-runtime).
+              android: null,
+            },
+          ],
+        },
+      ],
       [
         "expo-image-picker",
         {

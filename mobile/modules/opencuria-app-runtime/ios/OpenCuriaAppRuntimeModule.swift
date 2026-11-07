@@ -17,12 +17,26 @@ public final class OpenCuriaAppRuntimeModule: Module {
 
     AsyncFunction("open") { (request: String) in
       let launch = try AppLaunch.parse(request)
-      guard let presenter = self.appContext?.utilities?.currentViewController() else {
+      var host = self.appContext?.utilities?.currentViewController()
+      // One app at a time. The app that is open (e.g. tapped again on the
+      // home screen widget) stays as it is; another one replaces it.
+      if let current = AppRuntimeViewController.current {
+        if current.shows(launch) {
+          return
+        }
+        host = current.presentingViewController ?? host
+        current.close(animated: false)
+      }
+      guard let presenter = host else {
         throw MissingCurrentViewControllerException()
       }
-      // One app at a time: an open app closes before the next one starts.
-      AppRuntimeViewController.current?.close()
       presenter.present(AppRuntimeViewController(launch: launch), animated: true)
+    }.runOnQueue(.main)
+
+    AsyncFunction("close") {
+      if let current = AppRuntimeViewController.current {
+        current.close()
+      }
     }.runOnQueue(.main)
 
     AsyncFunction("clearData") { (appId: String) in

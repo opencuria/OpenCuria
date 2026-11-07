@@ -344,6 +344,17 @@ class AppRuntimeActivity :
 
     private var current: WeakReference<AppRuntimeActivity>? = null
 
+    /** Whether this app is open, so showing OpenCuria's task shows it as it is. */
+    fun isOpen(appId: String): Boolean {
+      val activity = current?.get() ?: return false
+      return !activity.isFinishing && !activity.isDestroyed && activity.launch.appId == appId
+    }
+
+    /** Close the open app, if any. */
+    fun close() {
+      current?.get()?.finish()
+    }
+
     /**
      * Open an app; an app that is already open closes first. The request
      * goes by file: with many assets it exceeds what an Intent may carry,

@@ -291,4 +291,79 @@ describe("AppInstaller", () => {
     expect(fs.exists(appLayout(ROOT, "app-1").app)).toBe(false);
     expect(await new AppInstaller(fs).installed()).toEqual([]);
   });
+
+  it("remembers opening an app until its next update", async () => {
+    let now = new Date("2026-11-07T12:00:00Z");
+    installer = new AppInstaller(fs, () => now);
+    const installed = await installer.install(
+      manifest(fs, { id: "v1", number: 1, bundle: "b", assets: [] }),
+      options(fs),
+    );
+    expect(installed.updatedAt).toBe("2026-11-07T12:00:00.000Z");
+    expect(installed.openedAt).toBeUndefined();
+
+    now = new Date("2026-11-07T13:00:00Z");
+    await installer.markOpened("app-1");
+    await installer.markOpened("unknown");
+    const [opened] = await new AppInstaller(fs).installed();
+    expect(opened?.openedAt).toBe("2026-11-07T13:00:00.000Z");
+
+    now = new Date("2026-11-07T14:00:00Z");
+    const updated = await installer.install(
+      manifest(fs, { id: "v2", number: 2, bundle: "b2", assets: [] }),
+      options(fs),
+    );
+    expect(updated).toMatchObject({
+      installedAt: "2026-11-07T12:00:00.000Z",
+      updatedAt: "2026-11-07T14:00:00.000Z",
+      openedAt: "2026-11-07T13:00:00.000Z",
+    });
+  });
+
+  it("counts apps installed before use was tracked as opened", async () => {
+    const app = {
+      appId: "app-1",
+      scope: "s",
+      name: "Todo",
+      slug: "todo",
+      versionId: "v1",
+      versionNumber: 1,
+      versionName: "1.0.0",
+      sdkVersion: "57.0.0",
+      publishedAt: "2026-11-01T10:00:00Z",
+      installedAt: "2026-11-02T10:00:00Z",
+      hasIcon: false,
+    };
+    fs.files.set(
+      `${ROOT}/registry.json`,
+      JSON.stringify({ version: 1, apps: [app] }),
+    );
+
+    const [migrated] = await installer.installed();
+
+    expect(migrated).toMatchObject({
+      updatedAt: "2026-11-02T10:00:00Z",
+      openedAt: "2026-11-02T10:00:00Z",
+    });
+  });
+
+  it("tells subscribers about installs, opens and removals", async () => {
+    const listener = vi.fn();
+    const unsubscribe = installer.subscribe(listener);
+
+    await installer.install(
+      manifest(fs, { id: "v1", number: 1, bundle: "b", assets: [] }),
+      options(fs),
+    );
+    await installer.markOpened("app-1");
+    await installer.uninstall("app-1");
+    expect(listener).toHaveBeenCalledTimes(3);
+
+    unsubscribe();
+    await installer.install(
+      manifest(fs, { id: "v1", number: 1, bundle: "b", assets: [] }),
+      options(fs),
+    );
+    expect(listener).toHaveBeenCalledTimes(3);
+  });
 });

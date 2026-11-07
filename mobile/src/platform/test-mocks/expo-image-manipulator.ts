@@ -1,4 +1,4 @@
-export const SaveFormat = { JPEG: "jpeg" };
+export const SaveFormat = { JPEG: "jpeg", PNG: "png" };
 let nextSize = 3;
 export const __setNextSize = (size: number): void => {
   nextSize = size;

@@ -6,5 +6,24 @@
       android:exported="false"
       android:theme="@style/Theme.OpenCuria.AppRuntime"
       android:windowSoftInputMode="adjustResize" />
+
+    <!-- Opens what an Apps widget tile links to; has no window. -->
+    <activity
+      android:name="expo.modules.opencuriaappruntime.AppLaunchActivity"
+      android:exported="false"
+      android:noHistory="true"
+      android:theme="@android:style/Theme.NoDisplay" />
+
+    <receiver
+      android:name="expo.modules.opencuriaappruntime.AppsWidgetProvider"
+      android:exported="true"
+      android:label="@string/opencuria_apps_widget_label">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+      </intent-filter>
+      <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/opencuria_apps_widget_info" />
+    </receiver>
   </application>
 </manifest>

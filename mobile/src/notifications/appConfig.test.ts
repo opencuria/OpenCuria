@@ -19,8 +19,32 @@ describe("native push signing configuration", () => {
       expect(config.ios?.entitlements?.["aps-environment"]).toBe(environment);
       expect(config.plugins).toContainEqual([
         "expo-widgets",
-        { enablePushNotifications: true },
+        expect.objectContaining({ enablePushNotifications: true }),
       ]);
     },
   );
+});
+
+describe("home screen widget configuration", () => {
+  it("offers the Apps widget in every iPhone and iPad home screen size", () => {
+    const config = appConfig({ config: {} } as ConfigContext);
+    const widgets = config.plugins?.find(
+      (plugin) => Array.isArray(plugin) && plugin[0] === "expo-widgets",
+    )?.[1] as { widgets: Array<Record<string, unknown>> };
+    expect(widgets.widgets).toEqual([
+      expect.objectContaining({
+        name: "OpenCuriaApps",
+        ios: {
+          supportedFamilies: [
+            "systemSmall",
+            "systemMedium",
+            "systemLarge",
+            "systemExtraLarge",
+          ],
+          contentMarginsDisabled: true,
+        },
+        android: null,
+      }),
+    ]);
+  });
 });

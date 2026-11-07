@@ -91,6 +91,7 @@ import { AppsSheet } from "../apps/AppsSheet";
 import { PublishedAppCard } from "../apps/PublishedAppCard";
 import { appScope, pendingAppCount } from "../apps/appPresentation";
 import { useApps } from "../apps/useApps";
+import { useAppsWidgetRequests } from "../widgets/AppsWidgetProvider";
 import { showToast } from "../ui/toast";
 import { profileInitials, profileName } from "../settings/profile";
 import { SettingsScreen } from "../settings/SettingsScreen";
@@ -165,6 +166,7 @@ export function MainScreen(): React.JSX.Element {
     client,
     appScope(client?.api.baseUrl ?? "", session?.organizationId, user?.id),
   );
+  const widgetRequests = useAppsWidgetRequests();
   const renderPublishedApp = useCallback(
     (reference: Parameters<typeof PublishedAppCard>[0]["reference"]) => (
       <PublishedAppCard reference={reference} apps={apps} />
@@ -840,6 +842,15 @@ export function MainScreen(): React.JSX.Element {
     setViewedNotificationSession(chat.activeSessionId);
     return () => setViewedNotificationSession(null);
   }, [chat.activeSessionId]);
+
+  // The home screen widget's More tile shows every app.
+  const { appsRequested, consumeAppsRequest } = widgetRequests;
+  useEffect(() => {
+    if (!appsRequested) return;
+    consumeAppsRequest();
+    void KeyboardController.dismiss().catch(() => undefined);
+    setSheet("apps");
+  }, [appsRequested, consumeAppsRequest]);
 
   useEffect(() => {
     const target = notifications.state.target;

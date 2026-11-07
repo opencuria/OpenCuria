@@ -17,13 +17,23 @@ export class Directory {
   get exists(): boolean {
     return directories.has(this.uri);
   }
-  create(): void {
+  create(_options?: { intermediates?: boolean; idempotent?: boolean }): void {
     directories.add(this.uri);
   }
   delete(): void {
     directories.delete(this.uri);
     for (const key of files.keys())
       if (key.startsWith(`${this.uri}/`)) files.delete(key);
+  }
+  /** Files and directories directly inside this one. */
+  list(): Array<File | Directory> {
+    const inside = (key: string) =>
+      key.startsWith(`${this.uri}/`) &&
+      !key.slice(this.uri.length + 1).includes("/");
+    return [
+      ...[...directories].filter(inside).map((key) => new Directory(key)),
+      ...[...files.keys()].filter(inside).map((key) => new File(key)),
+    ];
   }
 }
 
@@ -65,6 +75,14 @@ export class File {
     return item.encoding === "base64" ? atob(item.data) : item.data;
   }
   delete(): void {
+    files.delete(this.uri);
+  }
+  moveSync(target: File, options?: { overwrite?: boolean }): void {
+    const item = files.get(this.uri);
+    if (!item) throw new Error("missing file");
+    if (files.has(target.uri) && !options?.overwrite)
+      throw new Error("target exists");
+    files.set(target.uri, item);
     files.delete(this.uri);
   }
 }

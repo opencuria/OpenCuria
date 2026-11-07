@@ -81,6 +81,48 @@ async function appGateway(
   }
 }
 
+/** Apps that are starting; another request for one of them is dropped. */
+const opening = new Set<string>();
+
+/**
+ * Open the copy of an app installed for `scope`, from the Apps list, a chat
+ * or the home screen widget. Resolves to false when this device has no such
+ * copy; a copy that fails to start shows an error.
+ */
+export async function openApp(
+  client: OpenCuriaClient | null,
+  scope: string,
+  appId: string,
+  installer: AppInstaller = appInstaller(),
+): Promise<boolean> {
+  // From the registry, not the last render: right after an update the
+  // rows still show the previous version, whose files are already gone.
+  const copy = (await installer.installed()).find(
+    (app) => app.appId === appId && app.scope === scope,
+  );
+  if (!copy) return false;
+  if (opening.has(appId)) return true;
+  opening.add(appId);
+  try {
+    const [request, gateway] = await Promise.all([
+      installer.launchRequest(copy),
+      appGateway(client, appId),
+    ]);
+    await openInstalledApp(gateway ? { ...request, gateway } : request);
+    // Recently used apps lead the home screen widget.
+    void installer.markOpened(appId).catch(() => undefined);
+  } catch (cause) {
+    showToast({
+      title: `Could not open ${copy.name}`,
+      message: errorText(cause, "Install it again."),
+      tone: "error",
+    });
+  } finally {
+    opening.delete(appId);
+  }
+  return true;
+}
+
 /**
  * The apps agents published to the signed-in user, joined with the ones
  * installed on this device. Installed apps open offline; the server list
@@ -224,25 +266,7 @@ export function useApps(
   const open = useCallback(
     (appId: string): Promise<void> =>
       once(appId, undefined, async () => {
-        // From the registry, not the last render: right after an update the
-        // rows still show the previous version, whose files are already gone.
-        const copy = (await installer.installed()).find(
-          (app) => app.appId === appId && app.scope === scope,
-        );
-        if (!copy) return;
-        try {
-          const [request, gateway] = await Promise.all([
-            installer.launchRequest(copy),
-            appGateway(client, appId),
-          ]);
-          await openInstalledApp(gateway ? { ...request, gateway } : request);
-        } catch (cause) {
-          showToast({
-            title: `Could not open ${copy.name}`,
-            message: errorText(cause, "Install it again."),
-            tone: "error",
-          });
-        }
+        await openApp(client, scope, appId, installer);
       }),
     [client, installer, once, scope],
   );
