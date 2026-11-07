@@ -1,24 +1,24 @@
 import type {
-  StorageGeneration,
-  StorageResource,
-  StorageRuntime,
-  StorageWorkspace,
-} from '@/types/runnerStorage'
+  RunnerStorageGeneration,
+  RunnerStorageResource,
+  RunnerStorageRuntime,
+  RunnerStorageWorkspace,
+} from '@opencuria/client/types'
 
 export interface RunnerTopologyNode {
   key: string
   label: string
   column: number
   storage?: {
-    resources: StorageResource[]
+    resources: RunnerStorageResource[]
     allocatedBytes: number | null
     logicalBytes: number | null
     virtualBytes: number | null
     unknownCount: number
   }
-  resource?: StorageResource
-  generation?: StorageGeneration
-  workspace?: StorageWorkspace
+  resource?: RunnerStorageResource
+  generation?: RunnerStorageGeneration
+  workspace?: RunnerStorageWorkspace
   unresolved?: boolean
   unassigned?: boolean
 }
@@ -67,8 +67,8 @@ export function topologyPath(keys: Iterable<string>, edges: RunnerTopologyEdge[]
 
 /** Build an evidence graph; domain usage never masquerades as physical inventory. */
 export function buildRunnerTopology(
-  runtimes: StorageRuntime[],
-  generations: StorageGeneration[],
+  runtimes: RunnerStorageRuntime[],
+  generations: RunnerStorageGeneration[],
 ): RunnerTopology {
   const nodes: RunnerTopologyNode[] = []
   const edges: RunnerTopologyEdge[] = []
@@ -335,7 +335,7 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
   }
   for (const workspace of workspaces.values()) {
     const storage = workspace.storage!
-    const members = new Map<string, StorageResource[]>()
+    const members = new Map<string, RunnerStorageResource[]>()
     for (const resource of storage.resources) {
       const id = identity({
         key: keyFor('physical', resource.physical_id),
@@ -344,7 +344,7 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
       members.set(id, [...(members.get(id) ?? []), resource])
     }
     function measured(
-      resources: StorageResource[],
+      resources: RunnerStorageResource[],
       metric: 'allocated_bytes' | 'logical_bytes' | 'virtual_bytes',
       requireComplete: boolean,
     ): number | null {

@@ -1,7 +1,6 @@
-/**
- * Authentication REST API service.
- */
+/** Authentication and API-key REST API service. */
 
+import { createApiKeysApi } from '@opencuria/client/settings'
 import type {
   LoginRequest,
   TokenPair,
@@ -9,13 +8,8 @@ import type {
   SsoCallbackRequest,
   AuthProviders,
   UserWithOrgs,
-  APIKey,
-  APIKeyCreateIn,
-  APIKeyCreatedOut,
-  APIKeyUpdateIn,
-  APIKeyPermissionInfo,
 } from '@/types'
-import { get, post, del, patch } from './api'
+import { get, getApiClient, post } from './api'
 
 export function login(data: LoginRequest): Promise<TokenPair> {
   return post<TokenPair>('/auth/login/', data)
@@ -37,22 +31,10 @@ export function getMe(): Promise<UserWithOrgs> {
   return get<UserWithOrgs>('/auth/me/')
 }
 
-export function listApiKeys(): Promise<APIKey[]> {
-  return get<APIKey[]>('/auth/api-keys/')
-}
-
-export function createApiKey(data: APIKeyCreateIn): Promise<APIKeyCreatedOut> {
-  return post<APIKeyCreatedOut>('/auth/api-keys/', data)
-}
-
-export function updateApiKey(id: string, data: APIKeyUpdateIn): Promise<APIKey> {
-  return patch<APIKey>(`/auth/api-keys/${id}/`, data)
-}
-
-export function deleteApiKey(id: string): Promise<void> {
-  return del<void>(`/auth/api-keys/${id}/`)
-}
-
-export function listApiKeyPermissions(): Promise<APIKeyPermissionInfo[]> {
-  return get<APIKeyPermissionInfo[]>('/auth/api-key-permissions/')
-}
+export const {
+  list: listApiKeys,
+  create: createApiKey,
+  updatePermissions: updateApiKey,
+  revoke: deleteApiKey,
+  permissions: listApiKeyPermissions,
+} = createApiKeysApi(getApiClient)

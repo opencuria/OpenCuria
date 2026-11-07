@@ -1,4 +1,4 @@
-import type { RunnerActivity } from '@/types/runnerStorage'
+import type { RunnerActivity } from '@opencuria/client/types'
 
 /** Counts and lists share the server's workflow grouping and resolution state. */
 export function runnerActivityGroups(activities: RunnerActivity[] = []) {

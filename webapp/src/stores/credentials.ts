@@ -3,7 +3,7 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 
-import type { Credential, CredentialCreateIn, CredentialService, CredentialUpdateIn } from '@/types'
+import type { Credential, CredentialCreateInput, CredentialService, CredentialUpdateInput } from '@/types'
 import * as credentialsApi from '@/services/credentials.api'
 import { useAuthStore } from './auth'
 import { useNotificationStore } from './notifications'
@@ -70,7 +70,7 @@ export const useCredentialStore = defineStore('credentials', () => {
     }
   }
 
-  async function createCredential(data: CredentialCreateIn): Promise<boolean> {
+  async function createCredential(data: CredentialCreateInput): Promise<boolean> {
     try {
       await credentialsApi.createCredential(data)
       useNotificationStore().success('Credential created', 'The credential has been saved.')
@@ -158,7 +158,7 @@ export const useCredentialStore = defineStore('credentials', () => {
     }
   }
 
-  async function updateCredential(id: string, data: CredentialUpdateIn, options: { silent?: boolean } = {}): Promise<boolean> {
+  async function updateCredential(id: string, data: CredentialUpdateInput, options: { silent?: boolean } = {}): Promise<boolean> {
     try {
       await credentialsApi.updateCredential(id, data)
       if (!options.silent) useNotificationStore().success('Credential updated', 'The credential has been updated.')

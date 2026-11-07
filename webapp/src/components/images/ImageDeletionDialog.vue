@@ -19,7 +19,7 @@ import {
 } from '@/components/ui/dialog'
 import { useAuthStore } from '@/stores/auth'
 import * as api from '@/services/runnerStorage.api'
-import type { DeletionTarget, DeletionGraph, DeletionRequest } from '@/types/runnerStorage'
+import type { DeletionTarget, DeletionGraph, DeletionRequest } from '@opencuria/client/types'
 const props = defineProps<{ target: DeletionTarget | null; name?: string }>()
 const emit = defineEmits<{ close: []; requested: [request: DeletionRequest] }>()
 const isAdmin = () => useAuthStore().isAdmin

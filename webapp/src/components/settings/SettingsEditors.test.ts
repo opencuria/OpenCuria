@@ -6,7 +6,7 @@ import ImageDefinitionModal from '@/components/images/ImageDefinitionModal.vue'
 import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
 import SkillsPanel from './SkillsPanel.vue'
 import { updateImageDefinition } from '@/services/workspaces.api'
-import type { APIKey, ImageDefinition, Skill } from '@/types'
+import type { ApiKey, ImageDefinition, Skill } from '@/types'
 
 const stores = vi.hoisted(() => ({
   skills: {
@@ -68,7 +68,7 @@ const skill: Skill = {
   created_at: '',
   updated_at: '',
 }
-const apiKey: APIKey = {
+const apiKey: ApiKey = {
   id: 'key-1',
   name: 'Integration',
   key_prefix: 'kai_test',

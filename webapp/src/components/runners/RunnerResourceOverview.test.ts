@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import type { Runner, RunnerSystemMetrics } from '@/types'
 import { RunnerStatus } from '@/types'
-import type { StorageRuntime } from '@/types/runnerStorage'
+import type { RunnerStorageRuntime } from '@opencuria/client/types'
 import { getRunnerMetricsHistory, getRunnerMetricsLatest } from '@/services/runners.api'
 import RunnerResourceOverview from './RunnerResourceOverview.vue'
 
@@ -36,7 +36,7 @@ const sample: RunnerSystemMetrics = {
   disk_used_bytes: 200,
   disk_total_bytes: 1000,
 }
-const runtime = (name: string): StorageRuntime => ({
+const runtime = (name: string): RunnerStorageRuntime => ({
   fresh: true,
   snapshot_id: 1,
   collected_at: timestamp,
@@ -48,7 +48,7 @@ const runtime = (name: string): StorageRuntime => ({
 const latest = vi.mocked(getRunnerMetricsLatest)
 const history = vi.mocked(getRunnerMetricsHistory)
 const mounted: ReturnType<typeof mount>[] = []
-function overview(r = runner, runtimes: StorageRuntime[] = []) {
+function overview(r = runner, runtimes: RunnerStorageRuntime[] = []) {
   const wrapper = mount(RunnerResourceOverview, { props: { runner: r, runtimes } })
   mounted.push(wrapper)
   return wrapper

@@ -11,16 +11,12 @@ import type {
   WorkspaceUpdateOut,
   WorkspaceProcess,
   Task,
-  ImageArtifactCreateIn,
-  ImageArtifactCreateOut,
-  ImageArtifactCloneIn,
-  ImageArtifactCloneOut,
-  ImageDefinition,
-  RunnerImageBuild,
-  CapturedImage,
+  ImageCaptureInput,
+  ImageCaptureResult,
   WorkspaceRecreateOut,
 } from '@/types'
 import { createDesktopApi } from '@opencuria/client/desktop'
+import { createImagesApi } from '@opencuria/client/settings'
 import type { DesktopStatus, DesktopViewerIntent } from '@opencuria/client/desktop'
 import { get, post, del, patch, getApiClient, postDuringClipboardGesture } from './api'
 
@@ -178,81 +174,24 @@ export function deleteProcess(
 
 export function createWorkspaceImageArtifact(
   workspaceId: string,
-  data: ImageArtifactCreateIn,
-): Promise<ImageArtifactCreateOut> {
-  return post<ImageArtifactCreateOut>(`/workspaces/${workspaceId}/image-artifacts/`, data)
+  data: ImageCaptureInput,
+): Promise<ImageCaptureResult> {
+  return post<ImageCaptureResult>(`/workspaces/${workspaceId}/image-artifacts/`, data)
 }
 
-// --- Captured image (versioned) API ---
+// --- Captured images, image definitions and runner builds ---
 
-export function listCapturedImages(): Promise<CapturedImage[]> {
-  return get<CapturedImage[]>('/captured-images/')
-}
-
-export function renameCapturedImage(id: string, name: string): Promise<CapturedImage> {
-  return patch<CapturedImage>(`/captured-images/${id}/`, { name })
-}
-
-/** New workspaces always use the latest version of a captured image. */
-export function createWorkspaceFromCapturedImage(
-  id: string,
-  data: ImageArtifactCloneIn,
-): Promise<ImageArtifactCloneOut> {
-  return post<ImageArtifactCloneOut>(`/captured-images/${id}/workspaces/`, data)
-}
-
-// --- Image definition APIs ---
-
-export function listImageDefinitions(): Promise<ImageDefinition[]> {
-  return get<ImageDefinition[]>('/image-definitions/')
-}
-
-export function createImageDefinition(data: Partial<ImageDefinition>): Promise<ImageDefinition> {
-  return post<ImageDefinition>('/image-definitions/', data)
-}
-
-export function duplicateImageDefinition(
-  id: string,
-  data?: { name?: string },
-): Promise<ImageDefinition> {
-  return post<ImageDefinition>(`/image-definitions/${id}/duplicate/`, data || {})
-}
-
-export function updateImageDefinition(id: string, data: Partial<ImageDefinition>): Promise<ImageDefinition> {
-  return patch<ImageDefinition>(`/image-definitions/${id}/`, data)
-}
-
-export function activateImageDefinition(id: string): Promise<ImageDefinition> {
-  return post<ImageDefinition>(`/image-definitions/${id}/activate/`)
-}
-
-export function listRunnerImageBuilds(definitionId: string): Promise<RunnerImageBuild[]> {
-  return get<RunnerImageBuild[]>(`/image-definitions/${definitionId}/runner-builds/`)
-}
-
-export function createRunnerImageBuild(
-  definitionId: string,
-  data: { runner_id: string; activate?: boolean; message?: string },
-): Promise<RunnerImageBuild> {
-  return post<RunnerImageBuild>(`/image-definitions/${definitionId}/runner-builds/`, data)
-}
-
-export function updateRunnerImageBuild(
-  definitionId: string,
-  runnerId: string,
-  data: { action: 'activate' | 'deactivate' | 'rebuild'; message?: string },
-): Promise<RunnerImageBuild> {
-  return patch<RunnerImageBuild>(
-    `/image-definitions/${definitionId}/runner-builds/${runnerId}/`,
-    data,
-  )
-}
-
-export function getRunnerImageBuildLog(
-  definitionId: string,
-  runnerId: string,
-): Promise<{ build_log: string }> {
-  return get<{ build_log: string }>(
-    `/image-definitions/${definitionId}/runner-builds/${runnerId}/log/`,
-  )
-}
+export const {
+  listCaptured: listCapturedImages,
+  renameCaptured: renameCapturedImage,
+  createWorkspace: createWorkspaceFromCapturedImage,
+  listDefinitions: listImageDefinitions,
+  createDefinition: createImageDefinition,
+  duplicateDefinition: duplicateImageDefinition,
+  updateDefinition: updateImageDefinition,
+  activateDefinition: activateImageDefinition,
+  listRunnerBuilds: listRunnerImageBuilds,
+  createRunnerBuild: createRunnerImageBuild,
+  updateRunnerBuild: updateRunnerImageBuild,
+  runnerBuildLog: getRunnerImageBuildLog,
+} = createImagesApi(getApiClient)

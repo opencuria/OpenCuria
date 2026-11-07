@@ -97,7 +97,8 @@ async function loadLiveMetrics(): Promise<void> {
   }
   try {
     const metrics = await getRunnerMetricsLatest(props.workspace.runner_id)
-    const fresh = Date.now() - new Date(metrics.timestamp).getTime() <= LIVE_METRICS_MAX_AGE_MS
+    const fresh =
+      !!metrics && Date.now() - new Date(metrics.timestamp).getTime() <= LIVE_METRICS_MAX_AGE_MS
     vmMetrics.value = fresh ? (metrics.vm_metrics?.[props.workspace.id] ?? null) : null
   } catch {
     vmMetrics.value = null

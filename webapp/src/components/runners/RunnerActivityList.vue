@@ -7,7 +7,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { runnerActivityGroups, runnerActivityLabel } from '@/lib/runnerActivity'
 import { formatRelativeTime } from '@/lib/utils'
 import RunnerOperationsPanel from './RunnerOperationsPanel.vue'
-import type { RunnerStorage, DeletionRequest, DeletionTarget } from '@/types/runnerStorage'
+import type { RunnerStorage, DeletionRequest, DeletionTarget } from '@opencuria/client/types'
 
 const props = defineProps<{ data: RunnerStorage; deletions: DeletionRequest[]; busy?: boolean }>()
 const emit = defineEmits<{

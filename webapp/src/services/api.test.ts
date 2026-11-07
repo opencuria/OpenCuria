@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiRequestError, get, post, postDuringClipboardGesture } from './api'
-import { connectOAuthService, disconnectOAuthCredential, reconnectOAuthCredential } from './credentials.api'
+import { connectOAuthService, reconnectOAuthCredential } from './credentials.api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -8,19 +8,17 @@ afterEach(() => {
   sessionStorage.clear()
 })
 
-it('includes OAuth cookies without changing the policy of subsequent requests', async () => {
+it('includes cookies when starting OAuth without changing the policy of other requests', async () => {
   const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response('{}'))
   vi.stubGlobal('fetch', fetchMock)
 
   await connectOAuthService('service/id', { name: 'Notion', organization_credential: false })
   await reconnectOAuthCredential('credential/id', 'Notion')
-  await disconnectOAuthCredential('credential/id')
   await get('/ordinary/')
 
   expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method, init?.credentials])).toEqual([
     ['/api/v1/credential-services/service%2Fid/oauth/connect/', 'POST', 'include'],
     ['/api/v1/credentials/credential%2Fid/oauth/reconnect/', 'POST', 'include'],
-    ['/api/v1/credentials/credential%2Fid/oauth/disconnect/', 'DELETE', 'include'],
     ['/api/v1/ordinary/', 'GET', 'same-origin'],
   ])
   expect(fetchMock.mock.calls.slice(0, 2).map(([, init]) => JSON.parse(init!.body as string))).toEqual([

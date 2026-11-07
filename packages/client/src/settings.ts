@@ -5,6 +5,7 @@ import type {
   ApiKeyCreated,
   ApiKeyPermission,
   CapturedImage,
+  CapturedImageWorkspaceInput,
   ChatGptOAuthStart,
   ChatGptOAuthStartInput,
   ChatGptOAuthStatus,
@@ -36,10 +37,24 @@ import type {
   RunnerStorage,
   RunnerSystemMetrics,
   RunnerUpdateInput,
+  ScheduledTask,
+  ScheduledTaskInput,
+  ScheduledTaskPatch,
+  ScheduledTaskRun,
+  Skill,
+  SkillCreateInput,
+  SkillUpdateInput,
   SubagentConfig,
   VoiceSettings,
+  WorkspaceCreateResult,
   WorkspacePolicyInput,
 } from "./types";
+
+/**
+ * Run now may wait for a stopped workspace to start; the server allows two
+ * minutes, and a dropped request would cancel the run.
+ */
+const RUN_NOW_TIMEOUT_MS = 150_000;
 
 function segment(value: string): string {
   return encodeURIComponent(value);
@@ -284,12 +299,27 @@ export function createImagesApi(getApi: () => ApiClient) {
   const builds = (definitionId: string, runnerId?: string) =>
     `/image-definitions/${segment(definitionId)}/runner-builds/${runnerId ? `${segment(runnerId)}/` : ""}`;
   return {
+    listCaptured: (signal?: AbortSignal) =>
+      getApi().get<CapturedImage[]>("/captured-images/", signal),
     renameCaptured: (imageId: string, name: string, signal?: AbortSignal) =>
       getApi().patch<CapturedImage>(
         `/captured-images/${segment(imageId)}/`,
         { name },
         signal,
       ),
+    /** New workspaces always start from the latest captured version. */
+    createWorkspace: (
+      capturedImageId: string,
+      input: CapturedImageWorkspaceInput,
+      signal?: AbortSignal,
+    ) =>
+      getApi().post<WorkspaceCreateResult>(
+        `/captured-images/${segment(capturedImageId)}/workspaces/`,
+        input,
+        signal,
+      ),
+    listDefinitions: (signal?: AbortSignal) =>
+      getApi().get<ImageDefinition[]>("/image-definitions/", signal),
     createDefinition: (input: ImageDefinitionInput, signal?: AbortSignal) =>
       getApi().post<ImageDefinition>("/image-definitions/", input, signal),
     updateDefinition: (
@@ -320,6 +350,8 @@ export function createImagesApi(getApi: () => ApiClient) {
         undefined,
         signal,
       ),
+    listRunnerBuilds: (definitionId: string, signal?: AbortSignal) =>
+      getApi().get<RunnerImageBuild[]>(builds(definitionId), signal),
     /** Build (or retry) the definition on a runner. */
     createRunnerBuild: (
       definitionId: string,
@@ -380,6 +412,11 @@ export function createRunnersApi(getApi: () => ApiClient) {
         throw error;
       }
     },
+    metricsHistory: (runnerId: string, hours = 24, signal?: AbortSignal) =>
+      getApi().get<RunnerSystemMetrics[]>(
+        `${runner(runnerId)}metrics/history/?hours=${hours}`,
+        signal,
+      ),
     storage: (runnerId: string, signal?: AbortSignal) =>
       getApi().get<RunnerStorage>(`${runner(runnerId)}storage/`, signal),
     refreshStorage: (runnerId: string, signal?: AbortSignal) =>
@@ -432,5 +469,47 @@ export function createDeletionsApi(getApi: () => ApiClient) {
         undefined,
         signal,
       ),
+  };
+}
+
+/** Personal and organization skills (organization skills need an admin). */
+export function createSkillsApi(getApi: () => ApiClient) {
+  return {
+    list: (signal?: AbortSignal) => getApi().get<Skill[]>("/skills/", signal),
+    create: (input: SkillCreateInput, signal?: AbortSignal) =>
+      getApi().post<Skill>("/skills/", input, signal),
+    update: (skillId: string, input: SkillUpdateInput, signal?: AbortSignal) =>
+      getApi().patch<Skill>(`/skills/${segment(skillId)}/`, input, signal),
+    delete: (skillId: string, signal?: AbortSignal) =>
+      getApi().delete<void>(`/skills/${segment(skillId)}/`, signal),
+  };
+}
+
+/** The signed-in user's scheduled tasks in the active organization. */
+export function createScheduledTasksApi(getApi: () => ApiClient) {
+  const task = (id: string) => `/scheduled-tasks/${segment(id)}/`;
+  return {
+    list: (signal?: AbortSignal) =>
+      getApi().get<ScheduledTask[]>("/scheduled-tasks/", signal),
+    create: (input: ScheduledTaskInput, signal?: AbortSignal) =>
+      getApi().post<ScheduledTask>("/scheduled-tasks/", input, signal),
+    update: (taskId: string, input: ScheduledTaskPatch, signal?: AbortSignal) =>
+      getApi().patch<ScheduledTask>(task(taskId), input, signal),
+    delete: (taskId: string, signal?: AbortSignal) =>
+      getApi().delete<void>(task(taskId), signal),
+    /**
+     * Start a run outside the schedule; each run opens a new chat. Resolves
+     * once the run starts, after a stopped workspace has resumed.
+     */
+    run: (taskId: string, signal?: AbortSignal) =>
+      getApi().post<ScheduledTaskRun>(
+        `${task(taskId)}run/`,
+        undefined,
+        signal,
+        RUN_NOW_TIMEOUT_MS,
+      ),
+    /** Recent runs, newest first. */
+    runs: (taskId: string, signal?: AbortSignal) =>
+      getApi().get<ScheduledTaskRun[]>(`${task(taskId)}runs/`, signal),
   };
 }

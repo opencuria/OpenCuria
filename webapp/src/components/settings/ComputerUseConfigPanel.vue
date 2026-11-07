@@ -7,7 +7,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import SettingsSection from './SettingsSection.vue'
 import AutosaveStatus from './AutosaveStatus.vue'
 import { useAutosave } from '@/composables/useAutosave'
-import { getComputerUseConfig, saveComputerUseConfig, type ComputerUseConfig, type ComputerUseConfigIn } from '@/services/harness.api'
+import { getComputerUseConfig, saveComputerUseConfig, type ComputerUseConfig } from '@/services/harness.api'
 
 const loading = ref(true)
 const error = ref('')
@@ -17,7 +17,7 @@ const screenshotSize = ref('2400')
 const recording = ref(false)
 const validation = computed(() => {
   const errors: Record<string, string> = {}
-  const payload: ComputerUseConfigIn = {}
+  const payload: Partial<ComputerUseConfig> = {}
   const base = loaded.value
   if (!base) return { errors, payload }
   for (const [key, raw, min, max] of [

@@ -1,12 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { get, patch, post } from './api'
+import { get, post } from './api'
 import {
   copyDesktopSelectionDuringGesture,
-  createWorkspaceFromCapturedImage,
   getDesktopStatus,
-  listCapturedImages,
   recreateWorkspace,
-  renameCapturedImage,
   renewDesktop,
   startDesktop,
   stopDesktop,
@@ -107,17 +104,9 @@ describe('clipboard selection transport', () => {
   )
 })
 
-describe('versioned images transport', () => {
+describe('workspace recreation transport', () => {
   it('recreates a workspace on an explicit version', () => {
     recreateWorkspace('ws', 'v3')
     expect(post).toHaveBeenCalledWith('/workspaces/ws/recreate/', { image_id: 'v3' })
-  })
-  it('lists, renames and creates workspaces from captured images', () => {
-    listCapturedImages()
-    renameCapturedImage('line', 'Renamed')
-    createWorkspaceFromCapturedImage('line', { name: 'feature-x' })
-    expect(get).toHaveBeenCalledWith('/captured-images/')
-    expect(patch).toHaveBeenCalledWith('/captured-images/line/', { name: 'Renamed' })
-    expect(post).toHaveBeenCalledWith('/captured-images/line/workspaces/', { name: 'feature-x' })
   })
 })

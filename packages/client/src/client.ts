@@ -11,6 +11,8 @@ import {
   createPluginsApi,
   createProviderAccountsApi,
   createRunnersApi,
+  createScheduledTasksApi,
+  createSkillsApi,
 } from "./settings";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
 import { createAppsApi } from "./apps";
@@ -28,20 +30,9 @@ import type {
   MobileDeviceRegistration,
   PushCapabilities,
   AuthUser,
-  CapturedImage,
-  CapturedImageWorkspaceInput,
   HarnessConversation,
   ImageCaptureInput,
   ImageCaptureResult,
-  ImageDefinition,
-  RunnerImageBuild,
-  ScheduledTask,
-  ScheduledTaskInput,
-  ScheduledTaskPatch,
-  ScheduledTaskRun,
-  Skill,
-  SkillCreateInput,
-  SkillUpdateInput,
   TokenPair,
   Workspace,
   WorkspaceCreateInput,
@@ -140,44 +131,13 @@ export interface OpenCuriaClient {
   apiKeys: ReturnType<typeof createApiKeysApi>;
   /** Deferred or forced removal of images, builds and definitions. */
   deletions: ReturnType<typeof createDeletionsApi>;
-  images: ReturnType<typeof createImagesApi> & {
-    listCaptured(signal?: AbortSignal): Promise<CapturedImage[]>;
-    listDefinitions(signal?: AbortSignal): Promise<ImageDefinition[]>;
-    listRunnerBuilds(
-      definitionId: string,
-      signal?: AbortSignal,
-    ): Promise<RunnerImageBuild[]>;
-    /** New workspaces always start from the latest captured version. */
-    createWorkspace(
-      capturedImageId: string,
-      data: CapturedImageWorkspaceInput,
-      signal?: AbortSignal,
-    ): Promise<WorkspaceCreateResult>;
-  };
+  /** Captured images, image definitions and their builds on runners. */
+  images: ReturnType<typeof createImagesApi>;
   conversations: {
     list(signal?: AbortSignal): Promise<HarnessConversation[]>;
   };
   /** The signed-in user's scheduled tasks in the active organization. */
-  scheduledTasks: {
-    list(signal?: AbortSignal): Promise<ScheduledTask[]>;
-    create(
-      data: ScheduledTaskInput,
-      signal?: AbortSignal,
-    ): Promise<ScheduledTask>;
-    update(
-      taskId: string,
-      data: ScheduledTaskPatch,
-      signal?: AbortSignal,
-    ): Promise<ScheduledTask>;
-    delete(taskId: string, signal?: AbortSignal): Promise<void>;
-    /**
-     * Start a run outside the schedule; each run opens a new chat. Resolves
-     * once the run starts, after a stopped workspace has resumed.
-     */
-    run(taskId: string, signal?: AbortSignal): Promise<ScheduledTaskRun>;
-    /** Recent runs, newest first. */
-    runs(taskId: string, signal?: AbortSignal): Promise<ScheduledTaskRun[]>;
-  };
+  scheduledTasks: ReturnType<typeof createScheduledTasksApi>;
   harness: ReturnType<typeof createHarnessApi>;
   /** Expo apps agents published to the signed-in user. */
   apps: ReturnType<typeof createAppsApi>;
@@ -190,28 +150,14 @@ export interface OpenCuriaClient {
   };
   /** Workspace PTY: REST start plus Socket.IO input/resize/close. */
   terminal: ReturnType<typeof createTerminalApi>;
-  skills: {
-    list(signal?: AbortSignal): Promise<Skill[]>;
-    create(data: SkillCreateInput, signal?: AbortSignal): Promise<Skill>;
-    update(
-      skillId: string,
-      data: SkillUpdateInput,
-      signal?: AbortSignal,
-    ): Promise<Skill>;
-    delete(skillId: string, signal?: AbortSignal): Promise<void>;
-  };
+  /** Personal and organization skills. */
+  skills: ReturnType<typeof createSkillsApi>;
   realtime: RealtimeClient;
   files: Pick<
     RealtimeClient,
     "findFiles" | "listFiles" | "readFile" | "downloadFile" | "uploadFile"
   >;
 }
-
-/**
- * Run now may wait for a stopped workspace to start; the server allows two
- * minutes, and a dropped request would cancel the run.
- */
-const RUN_NOW_TIMEOUT_MS = 150_000;
 
 function segment(value: string): string {
   return encodeURIComponent(value);
@@ -349,52 +295,11 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     agentSettings: createAgentSettingsApi(() => api),
     apiKeys: createApiKeysApi(() => api),
     deletions: createDeletionsApi(() => api),
-    images: {
-      ...createImagesApi(() => api),
-      listCaptured: (signal) =>
-        api.get<CapturedImage[]>("/captured-images/", signal),
-      listDefinitions: (signal) =>
-        api.get<ImageDefinition[]>("/image-definitions/", signal),
-      listRunnerBuilds: (definitionId, signal) =>
-        api.get<RunnerImageBuild[]>(
-          `/image-definitions/${segment(definitionId)}/runner-builds/`,
-          signal,
-        ),
-      createWorkspace: (capturedImageId, data, signal) =>
-        api.post<WorkspaceCreateResult>(
-          `/captured-images/${segment(capturedImageId)}/workspaces/`,
-          data,
-          signal,
-        ),
-    },
+    images: createImagesApi(() => api),
     conversations: {
       list: harness.listConversations,
     },
-    scheduledTasks: {
-      list: (signal) => api.get<ScheduledTask[]>("/scheduled-tasks/", signal),
-      create: (data, signal) =>
-        api.post<ScheduledTask>("/scheduled-tasks/", data, signal),
-      update: (taskId, data, signal) =>
-        api.patch<ScheduledTask>(
-          `/scheduled-tasks/${segment(taskId)}/`,
-          data,
-          signal,
-        ),
-      delete: (taskId, signal) =>
-        api.delete<void>(`/scheduled-tasks/${segment(taskId)}/`, signal),
-      run: (taskId, signal) =>
-        api.post<ScheduledTaskRun>(
-          `/scheduled-tasks/${segment(taskId)}/run/`,
-          undefined,
-          signal,
-          RUN_NOW_TIMEOUT_MS,
-        ),
-      runs: (taskId, signal) =>
-        api.get<ScheduledTaskRun[]>(
-          `/scheduled-tasks/${segment(taskId)}/runs/`,
-          signal,
-        ),
-    },
+    scheduledTasks: createScheduledTasksApi(() => api),
     harness,
     apps: createAppsApi(() => api, options.wsBaseUrl),
     git: createGitApi(() => api),
@@ -409,14 +314,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         ),
     },
     terminal: createTerminalApi(() => api, realtime),
-    skills: {
-      list: (signal) => api.get<Skill[]>("/skills/", signal),
-      create: (data, signal) => api.post<Skill>("/skills/", data, signal),
-      update: (skillId, data, signal) =>
-        api.patch<Skill>(`/skills/${segment(skillId)}/`, data, signal),
-      delete: (skillId, signal) =>
-        api.delete<void>(`/skills/${segment(skillId)}/`, signal),
-    },
+    skills: createSkillsApi(() => api),
     realtime,
     files: realtime,
   };

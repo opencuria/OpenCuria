@@ -13,11 +13,11 @@ import {
 } from '@/lib/runnerTopology'
 import { generationLabel, runnerStateClass, runnerStateLabel } from '@/lib/runnerPresentation'
 import type { VmSystemMetrics } from '@/types'
-import type { StorageGeneration, StorageRuntime } from '@/types/runnerStorage'
+import type { RunnerStorageGeneration, RunnerStorageRuntime } from '@opencuria/client/types'
 
 const props = defineProps<{
-  runtimes: StorageRuntime[]
-  generations: StorageGeneration[]
+  runtimes: RunnerStorageRuntime[]
+  generations: RunnerStorageGeneration[]
   topology?: RunnerTopology
   selectedKey?: string | null
   vmMetrics?: Record<string, VmSystemMetrics>

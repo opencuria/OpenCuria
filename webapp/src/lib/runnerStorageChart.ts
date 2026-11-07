@@ -1,5 +1,5 @@
 import type { RunnerTopology, RunnerTopologyNode } from './runnerTopology'
-import type { StorageResource, StorageRuntime } from '@/types/runnerStorage'
+import type { RunnerStorageResource, RunnerStorageRuntime } from '@opencuria/client/types'
 
 export interface StorageSlice {
   key: string
@@ -26,7 +26,7 @@ const validBytes = (value: number | null | undefined): value is number =>
 
 /** Partition QEMU file allocations, never guest capacity or overlapping image sizes. */
 export function buildRunnerStorageChart(
-  runtimes: StorageRuntime[],
+  runtimes: RunnerStorageRuntime[],
   graph: RunnerTopology,
 ): RunnerStorageChart {
   const result: RunnerStorageChart = {
@@ -45,7 +45,7 @@ export function buildRunnerStorageChart(
     return { ...result, groups: [], unavailable: message }
   }
   if (!scans.length) return unavailable('No QEMU storage inventory available.')
-  const filesystems = new Map<string, StorageRuntime['filesystems'][number]>()
+  const filesystems = new Map<string, RunnerStorageRuntime['filesystems'][number]>()
   for (const scan of scans) {
     if (!scan.filesystems.length)
       return unavailable('Filesystem measurements unavailable. Refresh inventory.')
@@ -126,9 +126,13 @@ export function buildRunnerStorageChart(
     const pin = node.workspace?.base_image_instance_id
     return images.find((image) => image.generation?.id === pin)?.key
   }
-  const owners = new Map<StorageResource, { node: RunnerTopologyNode; groupKey: string }>()
+  const owners = new Map<RunnerStorageResource, { node: RunnerTopologyNode; groupKey: string }>()
   const slices = new Map<string, StorageSlice>()
-  function addSlice(node: RunnerTopologyNode, groupKey: string, resources: StorageResource[]) {
+  function addSlice(
+    node: RunnerTopologyNode,
+    groupKey: string,
+    resources: RunnerStorageResource[],
+  ) {
     const slice: StorageSlice = {
       key: node.key,
       label: node.label,
@@ -147,7 +151,7 @@ export function buildRunnerStorageChart(
     if (groupKey) addSlice(node, groupKey, node.storage?.resources ?? [])
   }
   // Reconcile all hardlink aliases, including unknown measurements, before attributing bytes.
-  const files = new Map<string, StorageResource[]>()
+  const files = new Map<string, RunnerStorageResource[]>()
   for (const scan of scans)
     for (const resource of scan.resources) {
       if (!['disk', 'image', 'file'].includes(resource.kind)) continue

@@ -14,7 +14,7 @@ import type {
   WorkspaceDiskUsage,
   WorkspaceCreateIn,
   WorkspaceUpdateIn,
-  ImageArtifactCreateIn,
+  ImageCaptureInput,
 } from '@/types'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
@@ -666,7 +666,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   async function createImageArtifact(
     workspaceId: string,
-    data: ImageArtifactCreateIn,
+    data: ImageCaptureInput,
   ): Promise<boolean> {
     const notifications = useNotificationStore()
     const imageStore = useImageStore()

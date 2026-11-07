@@ -2,7 +2,7 @@ import { ref, watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { usePolling } from './usePolling'
 import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import * as api from '@/services/runnerStorage.api'
-import type { RunnerStorage, DeletionRequest } from '@/types/runnerStorage'
+import type { RunnerStorage, DeletionRequest } from '@opencuria/client/types'
 export function useRunnerStorage(runnerId: Ref<string>) {
   const data = ref<RunnerStorage | null>(null)
   const deletions = ref<DeletionRequest[]>([])

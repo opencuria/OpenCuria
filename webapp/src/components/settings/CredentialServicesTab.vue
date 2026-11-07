@@ -29,7 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { CredentialService, CredentialServiceCreateIn } from '@/types'
+import type { CredentialService, CredentialServiceCreateInput } from '@/types'
 
 const authStore = useAuthStore()
 const credentialStore = useCredentialStore()
@@ -42,7 +42,7 @@ const showCreate = ref(false)
 const creating = ref(false)
 const serviceName = ref('')
 const description = ref('')
-const type = ref<CredentialServiceCreateIn['credential_type']>('env')
+const type = ref<CredentialServiceCreateInput['credential_type']>('env')
 const envVarName = ref('')
 const targetPath = ref('')
 const oauthServerUrl = ref('')
@@ -145,7 +145,7 @@ async function create(): Promise<void> {
   if (!valid.value || creating.value) return
   creating.value = true
   error.value = null
-  const data: CredentialServiceCreateIn = {
+  const data: CredentialServiceCreateInput = {
     name: serviceName.value.trim(),
     slug: '',
     description: description.value.trim(),

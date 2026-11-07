@@ -21,7 +21,7 @@ import {
   nextImageVersion,
 } from '@/lib/imageVersions'
 import { useImageStore } from '@/stores/images'
-import type { ImageArtifactCreateIn, Workspace } from '@/types'
+import type { ImageCaptureInput, Workspace } from '@/types'
 
 const props = defineProps<{
   workspace: Workspace | null
@@ -57,7 +57,7 @@ const isValid = computed(() =>
     : candidates.value.some((image) => image.id === target.value),
 )
 
-function payload(): ImageArtifactCreateIn {
+function payload(): ImageCaptureInput {
   return target.value === NEW_IMAGE
     ? { name: name.value.trim(), message: message.value.trim() }
     : { captured_image_id: target.value, message: message.value.trim() }

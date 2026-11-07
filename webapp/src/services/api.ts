@@ -104,12 +104,3 @@ export function patch<T>(path: string, body?: unknown): Promise<T> {
 export function put<T>(path: string, body?: unknown): Promise<T> {
   return getApiClient().put<T>(path, body)
 }
-
-/** Fetch JSON and return HTTP status without throwing for non-2xx responses. */
-export function requestWithStatus<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<{ ok: boolean; status: number; data: T }> {
-  return getApiClient().requestWithStatus<T>(method, path, body)
-}

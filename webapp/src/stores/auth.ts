@@ -220,7 +220,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function createOrganization(name: string): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
-      const org = await orgApi.createOrganization({ name })
+      const org = await orgApi.createOrganization(name)
       const nextOrganizations = [
         ...organizations.value,
         {

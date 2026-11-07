@@ -7,16 +7,16 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import type { APIKey, APIKeyCreateIn, APIKeyCreatedOut, APIKeyPermissionInfo } from '@/types'
+import type { ApiKey, ApiKeyCreateInput, ApiKeyCreated, ApiKeyPermission } from '@/types'
 import * as authApi from '@/services/auth.api'
 import { useNotificationStore } from './notifications'
 
 export const useApiKeyStore = defineStore('apiKeys', () => {
   // --- State ---
-  const keys = ref<APIKey[]>([])
+  const keys = ref<ApiKey[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
-  const availablePermissions = ref<APIKeyPermissionInfo[]>([])
+  const availablePermissions = ref<ApiKeyPermission[]>([])
 
   // --- Actions ---
 
@@ -40,7 +40,7 @@ export const useApiKeyStore = defineStore('apiKeys', () => {
     }
   }
 
-  async function createKey(data: APIKeyCreateIn): Promise<APIKeyCreatedOut | null> {
+  async function createKey(data: ApiKeyCreateInput): Promise<ApiKeyCreated | null> {
     const notifications = useNotificationStore()
     try {
       const result = await authApi.createApiKey(data)
@@ -56,7 +56,7 @@ export const useApiKeyStore = defineStore('apiKeys', () => {
   async function updateKeyPermissions(id: string, permissions: string[], options: { silent?: boolean } = {}): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
-      const updated = await authApi.updateApiKey(id, { permissions })
+      const updated = await authApi.updateApiKey(id, permissions)
       const idx = keys.value.findIndex((k) => k.id === id)
       if (idx !== -1) keys.value[idx] = updated
       if (!options.silent) notifications.success('Permissions updated', 'API key permissions saved.')

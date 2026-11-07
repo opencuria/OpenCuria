@@ -36,7 +36,7 @@ import {
   startChatGptOAuth,
   updateProviderAccount,
   type ProviderAccount,
-  type ProviderAccountPayload,
+  type ProviderAccountInput,
 } from '@/services/harness.api'
 
 const props = withDefaults(
@@ -126,7 +126,7 @@ function openEditForm(account: ProviderAccount): void {
   resetForm(account)
 }
 
-function payloadForAccount(): ProviderAccountPayload | null {
+function payloadForAccount(): ProviderAccountInput | null {
   if (!props.provider) return null
   const openRouter = props.provider === 'openrouter'
   const result = providerAccountPayload(

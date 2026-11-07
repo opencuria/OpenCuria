@@ -13,7 +13,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import SettingsSection from './SettingsSection.vue'
 import { useAutosave } from '@/composables/useAutosave'
 import AutosaveStatus from './AutosaveStatus.vue'
-import type { Organization } from '@/types'
+import type { Organization } from '@opencuria/client'
 import { formatMinutesAsDuration } from '@/lib/utils'
 
 const authStore = useAuthStore()

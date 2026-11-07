@@ -96,7 +96,7 @@ export interface PluginCredentialRequirement {
   service_id: string;
   service_name: string;
   service_slug: string;
-  credential_type: PluginCredentialServiceType | string;
+  credential_type: PluginCredentialServiceType;
 }
 
 export interface Plugin {
@@ -111,11 +111,11 @@ export interface Plugin {
   is_global: boolean;
   /** Activated for the organization, so workspaces can enable it. */
   org_enabled: boolean;
-  skills?: PluginSkill[];
-  mcp_servers?: PluginMcpServer[];
+  skills: PluginSkill[];
+  mcp_servers: PluginMcpServer[];
   credential_requirements: PluginCredentialRequirement[];
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface PluginCreateIn {

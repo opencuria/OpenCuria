@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useApiKeyStore } from '@/stores/apiKeys'
-import type { APIKeyCreatedOut } from '@/types'
+import type { ApiKeyCreated } from '@/types'
 import { AlertTriangle, KeyRound, Shield } from '@lucide/vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import { Button } from '@/components/ui/button'
@@ -28,7 +28,7 @@ const expiresAt = ref('')
 const selectedPermissions = ref<string[]>([])
 const fullAccess = ref(true)
 const submitting = ref(false)
-const createdKey = ref<APIKeyCreatedOut | null>(null)
+const createdKey = ref<ApiKeyCreated | null>(null)
 
 onMounted(() => {
   apiKeyStore.fetchAvailablePermissions()

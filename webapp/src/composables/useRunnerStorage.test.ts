@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent, ref } from 'vue'
 import { useRunnerStorage, storageBytes } from './useRunnerStorage'
-import type { RunnerStorage } from '@/types/runnerStorage'
+import type { RunnerStorage } from '@opencuria/client/types'
 const api = vi.hoisted(() => ({
   getRunnerStorage: vi.fn(),
   listDeletions: vi.fn(),

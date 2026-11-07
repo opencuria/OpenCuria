@@ -220,8 +220,7 @@ export interface ImageCaptureResult {
 export interface Runner {
   id: string;
   name: string;
-  /** "online" or "offline". */
-  status: string;
+  status: "online" | "offline";
   qemu_min_vcpus: number;
   qemu_max_vcpus: number;
   qemu_default_vcpus: number;
@@ -232,15 +231,14 @@ export interface Runner {
   qemu_max_disk_size_gb: number;
   qemu_default_disk_size_gb: number;
   /** Totals across active workspaces; `null` is unlimited. */
-  qemu_max_active_vcpus?: number | null;
-  qemu_max_active_memory_mb?: number | null;
-  qemu_max_active_disk_size_gb?: number | null;
-  organization_id?: string;
-  connected_at?: string | null;
-  disconnected_at?: string | null;
-  created_at?: string;
-  updated_at?: string;
-  [key: string]: unknown;
+  qemu_max_active_vcpus: number | null;
+  qemu_max_active_memory_mb: number | null;
+  qemu_max_active_disk_size_gb: number | null;
+  organization_id: string;
+  connected_at: string | null;
+  disconnected_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface RunnerCreateInput {
@@ -277,6 +275,16 @@ export interface RunnerSystemMetrics {
   ram_total_bytes: number;
   disk_used_bytes: number;
   disk_total_bytes: number;
+  /** Per-workspace VM usage, keyed by workspace id. */
+  vm_metrics?: Record<string, VmSystemMetrics>;
+}
+
+export interface VmSystemMetrics {
+  cpu_usage_percent: number;
+  ram_used_bytes: number;
+  ram_total_bytes: number;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
 }
 
 export type {
@@ -307,20 +315,18 @@ export interface Credential {
   service_id: string;
   service_name: string;
   service_slug: string;
-  /** "env", "file", "ssh_key" or "mcp_oauth". */
-  credential_type: string;
+  credential_type: "env" | "file" | "ssh_key" | "mcp_oauth";
+  env_var_name: string;
+  target_path: string;
+  has_public_key: boolean;
   created_by_id: number | null;
+  created_at: string;
+  updated_at: string;
   oauth_connected: boolean;
-  env_var_name?: string;
-  target_path?: string;
-  has_public_key?: boolean;
-  created_at?: string;
-  updated_at?: string;
   /** "connected", "reconnect_required", "disconnected" or "" (not OAuth). */
-  oauth_status?: string;
-  oauth_reconnect_required?: boolean;
-  oauth_expires_at?: string | null;
-  [key: string]: unknown;
+  oauth_status: string;
+  oauth_reconnect_required: boolean;
+  oauth_expires_at: string | null;
 }
 
 export interface CredentialCreateInput {
@@ -387,43 +393,61 @@ export type ImageVersionRetention = "latest" | "kept" | "expires_when_unused";
 
 export interface ImageArtifact {
   id: string;
+  source_workspace_id: string | null;
+  runner_artifact_id: string;
   name: string;
-  status: string;
+  size_bytes: number | null;
+  status:
+    | "creating"
+    | "capturing"
+    | "building"
+    | "ready"
+    | "failed"
+    | "retired"
+    | "pending_deletion"
+    | "deleting"
+    | "deleted"
+    | "delete_failed";
   artifact_kind: "built" | "captured";
+  build_job_id?: string | null;
+  source_definition_name?: string | null;
   source_runner_id?: string | null;
+  is_deactivated?: boolean;
+  source_runner_online?: boolean;
+  delete_requested_at?: string | null;
+  delete_confirmed_at?: string | null;
+  delete_last_error?: string;
+  created_at: string;
+  created_by_id: number | null;
   captured_image_id?: string | null;
   version?: number | null;
   message?: string;
-  created_at: string;
-  size_bytes?: number | null;
   is_latest?: boolean;
   retention?: ImageVersionRetention | null;
   workspace_count?: number;
-  workspaces?: Array<{
-    id: string;
-    name: string;
-    created_by_id: number | null;
-  }>;
-  delete_last_error?: string;
-  [key: string]: unknown;
+  workspaces?: ImageVersionWorkspace[];
+}
+
+export interface ImageVersionWorkspace {
+  id: string;
+  name: string;
+  created_by_id: number | null;
 }
 
 /** A versioned captured image with all of its versions (newest first). */
 export interface CapturedImage {
   id: string;
   name: string;
-  /** "active", "pending_deletion" or "deleted". */
-  status: string;
+  status: "active" | "pending_deletion" | "deleted";
   runner_id: string;
   runner_online: boolean;
+  created_by_id: number | null;
+  created_at: string;
   latest_id: string | null;
   latest_version: number | null;
+  total_size_bytes: number;
   workspace_count: number;
-  total_size_bytes?: number;
-  created_by_id?: number | null;
-  created_at?: string;
   versions: ImageArtifact[];
-  [key: string]: unknown;
 }
 
 export interface ImageDefinitionBuildSummary {
@@ -436,23 +460,32 @@ export interface ImageDefinitionBuildSummary {
 
 export interface ImageDefinition {
   id: string;
+  organization_id: string | null;
+  created_by_id?: number | null;
   name: string;
   description: string;
-  is_active: boolean;
-  /** "active", "deactivated", "pending_deletion", "deleting", "deleted" or "delete_failed". */
-  status: string;
-  organization_id?: string | null;
   /** A global recipe; only custom definitions can be edited. */
-  is_standard?: boolean;
-  base_distro?: string;
-  packages?: string[];
-  env_vars?: Record<string, string>;
-  custom_init_script?: string;
+  is_standard: boolean;
+  base_distro: string;
+  packages: string[];
+  env_vars: Record<string, string>;
+  custom_init_script: string;
+  is_active: boolean;
+  status:
+    | "active"
+    | "deactivated"
+    | "pending_deletion"
+    | "deleting"
+    | "deleted"
+    | "delete_failed";
   runner_build_summary?: ImageDefinitionBuildSummary;
+  delete_requested_at?: string | null;
+  delete_started_at?: string | null;
+  delete_confirmed_at?: string | null;
   delete_last_error?: string;
-  created_at?: string;
-  updated_at?: string;
-  [key: string]: unknown;
+  delete_attempt_count?: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ImageDefinitionInput {
@@ -469,17 +502,30 @@ export interface RunnerImageBuild {
   image_definition_id: string;
   runner_id: string;
   image_artifact_id?: string | null;
-  /** "pending", "building", "active", "failed", "deactivated", "pending_deletion", "deleting", "deleted" or "delete_failed". */
-  status: string;
   current_generation_id?: string | null;
   pending_generation_id?: string | null;
+  status:
+    | "pending"
+    | "building"
+    | "active"
+    | "failed"
+    | "deactivated"
+    | "pending_deletion"
+    | "deleting"
+    | "deleted"
+    | "delete_failed";
+  /** Only on create/update responses; list responses carry `build_log_size`. */
+  build_log?: string;
   build_log_size?: number;
+  build_task_id?: string | null;
   built_at?: string | null;
+  deactivated_at?: string | null;
+  delete_requested_at?: string | null;
+  delete_confirmed_at?: string | null;
   delete_last_error?: string;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
   versions?: ImageArtifact[];
-  [key: string]: unknown;
 }
 
 export type DeletionTargetType =
@@ -541,6 +587,8 @@ export interface RunnerStorageWorkspace {
 }
 
 export interface RunnerStorageResource {
+  filesystem_id?: string | null;
+  file_identity?: string | null;
   physical_id: string;
   kind: string;
   managed: boolean;
@@ -563,6 +611,7 @@ export interface RunnerStorageRuntime {
   collected_at: string | null;
   received_at: string | null;
   filesystems: Array<{
+    filesystem_id?: string | null;
     path: string;
     capacity_bytes: number | null;
     used_bytes: number | null;
@@ -593,8 +642,11 @@ export interface RunnerStorageGeneration {
   retention?: ImageVersionRetention | null;
   status: string;
   assignment_status: string | null;
+  runner_ref: string;
   size_bytes: number | null;
   size_source: string;
+  origin_type: string;
+  revision_id: string | null;
   is_legacy: boolean;
   is_current: boolean;
   is_pending: boolean;
@@ -623,6 +675,23 @@ export interface RunnerStorage {
   runtimes: RunnerStorageRuntime[];
   generations: RunnerStorageGeneration[];
   activities?: RunnerActivity[];
+  operations: Array<{
+    task_id: string;
+    task__status: string;
+    task__error: string;
+    task__workspace__name?: string | null;
+    phase: string;
+    target: string;
+    deliveries: number;
+  }>;
+  capture_requests: Array<{
+    id: string;
+    workspace_id: string;
+    image_id: string;
+    phase: string;
+    diagnostic: string;
+    resume_suppressed: boolean;
+  }>;
 }
 
 export type OperationDisposition =

@@ -1,5 +1,6 @@
 /** Workspace-scoped voice input; credentials and model calls stay server-side. */
-import { get, post } from './api'
+import { createAgentSettingsApi } from '@opencuria/client/settings'
+import { get, getApiClient, post } from './api'
 import type { PointingResult } from '@/lib/voicePointing'
 
 export interface VoiceConfig {
@@ -28,9 +29,7 @@ export interface VoiceTranscript {
   cleanup_model?: string
 }
 /** Organization voice capabilities for provider settings, without a workspace. */
-export function getVoiceSettings(signal?: AbortSignal): Promise<VoiceConfig> {
-  return get('/voice/config/', signal)
-}
+export const { getVoiceSettings } = createAgentSettingsApi(getApiClient)
 
 export function getVoiceConfig(workspaceId: string, signal?: AbortSignal): Promise<VoiceConfig> {
   return get(`/workspaces/${workspaceId}/voice/config/`, signal)

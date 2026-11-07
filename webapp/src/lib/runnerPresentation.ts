@@ -1,6 +1,6 @@
-import type { StorageGeneration } from '@/types/runnerStorage'
+import type { RunnerStorageGeneration } from '@opencuria/client/types'
 
-export function currentRunnerDefault(image: StorageGeneration): boolean {
+export function currentRunnerDefault(image: RunnerStorageGeneration): boolean {
   return (
     image.is_current &&
     image.status !== 'deleted' &&
@@ -8,7 +8,7 @@ export function currentRunnerDefault(image: StorageGeneration): boolean {
   )
 }
 
-export function generationLabel(image: StorageGeneration): string {
+export function generationLabel(image: RunnerStorageGeneration): string {
   if (image.status === 'deleted') return 'Deleted'
   if (currentRunnerDefault(image)) return 'Current default'
   if (image.is_pending) return 'Pending attempt'
@@ -19,7 +19,7 @@ export function generationLabel(image: StorageGeneration): string {
 }
 
 /** "line · v3" for any image version shown in storage views. */
-export function storageVersionTitle(image: StorageGeneration): string {
+export function storageVersionTitle(image: RunnerStorageGeneration): string {
   const name = image.line_name || image.name
   return image.generation == null ? name : `${name} · v${image.generation}`
 }

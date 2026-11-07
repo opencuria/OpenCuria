@@ -39,11 +39,17 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import { usePolling } from '@/composables/usePolling'
-import { get } from '@/services/api'
+import { listRunners } from '@/services/runners.api'
 import * as workspacesApi from '@/services/workspaces.api'
 import { useAuthStore } from '@/stores/auth'
-import type { ImageArtifact, ImageDefinition, Runner, RunnerImageBuild } from '@/types'
-import type { DeletionTarget } from '@/types/runnerStorage'
+import type {
+  ImageArtifact,
+  ImageDefinition,
+  ImageDefinitionInput,
+  Runner,
+  RunnerImageBuild,
+} from '@/types'
+import type { DeletionTarget } from '@opencuria/client/types'
 import ImageDefinitionModal from './ImageDefinitionModal.vue'
 import ImageDeletionDialog from './ImageDeletionDialog.vue'
 import ImageRunnerBuildRow from './ImageRunnerBuildRow.vue'
@@ -133,7 +139,7 @@ async function loadDefinitions(): Promise<void> {
   try {
     const [list, runnerList] = await Promise.all([
       workspacesApi.listImageDefinitions(),
-      get<Runner[]>('/runners/'),
+      listRunners(),
     ])
     definitions.value = visibleImageDefinitions(list)
     runners.value = runnerList
@@ -193,7 +199,7 @@ function openEdit(definition: ImageDefinition): void {
   editorOpen.value = true
 }
 
-async function onEditorSaved(payload: Partial<ImageDefinition>): Promise<void> {
+async function onEditorSaved(payload: ImageDefinitionInput): Promise<void> {
   if (editorSaving.value) return
   editorSaving.value = true
   editorError.value = null

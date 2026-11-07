@@ -10,10 +10,10 @@ import {
   type StorageSlice,
 } from '@/lib/runnerStorageChart'
 import type { RunnerTopology, RunnerTopologyNode } from '@/lib/runnerTopology'
-import type { StorageRuntime } from '@/types/runnerStorage'
+import type { RunnerStorageRuntime } from '@opencuria/client/types'
 
 const props = defineProps<{
-  runtimes: StorageRuntime[]
+  runtimes: RunnerStorageRuntime[]
   topology: RunnerTopology
   selectedKey?: string | null
 }>()

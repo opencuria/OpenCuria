@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { buildRunnerTopology, projectRunnerTopology, topologyPath } from './runnerTopology'
 import type {
-  StorageGeneration,
-  StorageResource,
-  StorageRuntime,
-  StorageWorkspace,
-} from '@/types/runnerStorage'
-const ws = (id: string): StorageWorkspace => ({
+  RunnerStorageGeneration,
+  RunnerStorageResource,
+  RunnerStorageRuntime,
+  RunnerStorageWorkspace,
+} from '@opencuria/client/types'
+const ws = (id: string): RunnerStorageWorkspace => ({
   id,
   name: `Workspace ${id}`,
   owner_id: null,
@@ -17,8 +17,8 @@ const ws = (id: string): StorageWorkspace => ({
 })
 const resource = (
   physical_id: string,
-  overrides: Partial<StorageResource> = {},
-): StorageResource => ({
+  overrides: Partial<RunnerStorageResource> = {},
+): RunnerStorageResource => ({
   physical_id,
   kind: 'disk',
   managed: true,
@@ -35,7 +35,7 @@ const resource = (
   provenance: '',
   ...overrides,
 })
-const runtime = (resources: StorageResource[]): StorageRuntime => ({
+const runtime = (resources: RunnerStorageResource[]): RunnerStorageRuntime => ({
   resources,
   fresh: true,
   snapshot_id: 1,
@@ -44,7 +44,7 @@ const runtime = (resources: StorageResource[]): StorageRuntime => ({
   filesystems: [],
   diagnostics: null,
 })
-const generation = (overrides: Partial<StorageGeneration> = {}): StorageGeneration => ({
+const generation = (overrides: Partial<RunnerStorageGeneration> = {}): RunnerStorageGeneration => ({
   id: 'image',
   name: 'Base image',
   owner_label: 'Owner',

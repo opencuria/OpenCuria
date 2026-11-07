@@ -33,7 +33,7 @@ import {
 import { cn } from '@/lib/utils'
 import { storageBytes } from '@/composables/useRunnerStorage'
 import type { CapturedImage, ImageArtifact } from '@/types'
-import type { DeletionTarget } from '@/types/runnerStorage'
+import type { DeletionTarget } from '@opencuria/client/types'
 
 const imageStore = useImageStore()
 

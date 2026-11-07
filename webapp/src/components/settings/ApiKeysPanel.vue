@@ -10,17 +10,17 @@ import RevokeApiKeyDialog from '@/components/api-keys/RevokeApiKeyDialog.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from './SettingsSection.vue'
-import type { APIKey } from '@/types'
+import type { ApiKey } from '@/types'
 import { KeyRound } from '@lucide/vue'
 
 const apiKeyStore = useApiKeyStore()
-const revokingKey = ref<APIKey | null>(null)
+const revokingKey = ref<ApiKey | null>(null)
 
 onMounted(() => {
   apiKeyStore.fetchKeys()
 })
 
-function onRevoke(key: APIKey): void {
+function onRevoke(key: ApiKey): void {
   revokingKey.value = key
 }
 

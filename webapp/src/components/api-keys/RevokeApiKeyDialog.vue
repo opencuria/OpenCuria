@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { useApiKeyStore } from '@/stores/apiKeys'
-import type { APIKey } from '@/types'
+import type { ApiKey } from '@/types'
 import { TriangleAlert } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dialog'
 
 const props = defineProps<{
-  apiKey: APIKey | null
+  apiKey: ApiKey | null
 }>()
 
 const emit = defineEmits<{

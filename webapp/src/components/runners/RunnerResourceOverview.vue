@@ -3,14 +3,14 @@ import { computed, toRef, watch } from 'vue'
 import { Cpu, MemoryStick, HardDrive, ChevronDown, TriangleAlert } from '@lucide/vue'
 import type { Runner, RunnerSystemMetrics } from '@/types'
 import { RunnerStatus } from '@/types'
-import type { StorageRuntime } from '@/types/runnerStorage'
+import type { RunnerStorageRuntime } from '@opencuria/client/types'
 import { useRunnerMetrics, resourcePercent, sampleOutdated } from '@/composables/useRunnerMetrics'
 import { storageBytes } from '@/composables/useRunnerStorage'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import Sparkline from '@/components/charts/Sparkline.vue'
 
-const props = defineProps<{ runner: Runner; runtimes: StorageRuntime[] }>()
+const props = defineProps<{ runner: Runner; runtimes: RunnerStorageRuntime[] }>()
 const emit = defineEmits<{ sample: [sample: RunnerSystemMetrics | null] }>()
 const runnerId = computed(() => props.runner.id)
 const { metrics, history, loading, error, latestError, now, load } = useRunnerMetrics(

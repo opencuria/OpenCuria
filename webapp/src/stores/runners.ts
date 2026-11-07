@@ -8,7 +8,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 
-import type { Runner, RunnerCreateOut, RunnerUpdateIn } from '@/types'
+import type { Runner, RunnerCreateResult, RunnerUpdateInput } from '@/types'
 import { RunnerStatus } from '@/types'
 import * as runnersApi from '@/services/runners.api'
 import { useNotificationStore } from './notifications'
@@ -46,7 +46,7 @@ export const useRunnerStore = defineStore('runners', () => {
     }
   }
 
-  async function createRunner(name: string): Promise<RunnerCreateOut | null> {
+  async function createRunner(name: string): Promise<RunnerCreateResult | null> {
     const notifications = useNotificationStore()
     try {
       const result = await runnersApi.createRunner({ name })
@@ -61,7 +61,7 @@ export const useRunnerStore = defineStore('runners', () => {
     }
   }
 
-  async function updateRunner(id: string, data: RunnerUpdateIn, options: { silent?: boolean } = {}): Promise<boolean> {
+  async function updateRunner(id: string, data: RunnerUpdateInput, options: { silent?: boolean } = {}): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
       const updated = await runnersApi.updateRunner(id, data)

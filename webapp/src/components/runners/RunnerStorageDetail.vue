@@ -15,7 +15,7 @@ import {
 } from '@lucide/vue'
 import type { Runner, RunnerSystemMetrics } from '@/types'
 import { RunnerStatus } from '@/types'
-import type { DeletionTarget, StorageGeneration } from '@/types/runnerStorage'
+import type { DeletionTarget, RunnerStorageGeneration } from '@opencuria/client/types'
 import { useAuthStore } from '@/stores/auth'
 import { useRunnerStorage, storageBytes } from '@/composables/useRunnerStorage'
 import { cancelDeletion } from '@/services/runnerStorage.api'
@@ -151,8 +151,8 @@ const activityProblems = computed(() => activityGroups.value.attention.length)
 const activityUnavailable = computed(() => !!data.value && !data.value.activities)
 const activeActivities = computed(() => activityProblems.value + activityGroups.value.active.length)
 /** Versions of one image stay together, newest first. */
-function byVersionLine(images: StorageGeneration[]): StorageGeneration[] {
-  const line = (i: StorageGeneration) => i.captured_image_id || i.build_job_id || i.id
+function byVersionLine(images: RunnerStorageGeneration[]): RunnerStorageGeneration[] {
+  const line = (i: RunnerStorageGeneration) => i.captured_image_id || i.build_job_id || i.id
   return [...images].sort(
     (a, b) =>
       (a.line_name || a.name).localeCompare(b.line_name || b.name) ||
@@ -162,7 +162,7 @@ function byVersionLine(images: StorageGeneration[]): StorageGeneration[] {
 }
 const inventoryGroups = computed(() => {
   const term = inventoryQuery.value.trim().toLowerCase()
-  const matches = (image: StorageGeneration) =>
+  const matches = (image: RunnerStorageGeneration) =>
     [image.name, image.definition_name, image.id, image.runner_ref].some((t) =>
       t?.toLowerCase().includes(term),
     )
@@ -207,7 +207,7 @@ watch(selectedKey, async (key) => {
 function selectNode(node: RunnerTopologyNode) {
   selectedKey.value = node.key
 }
-function selectImage(image: StorageGeneration) {
+function selectImage(image: RunnerStorageGeneration) {
   selectedKey.value =
     presentation.value.nodes.find((n) => n.generation?.id === image.id)?.key ?? null
 }

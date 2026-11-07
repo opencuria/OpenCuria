@@ -5,13 +5,13 @@ import RunnerStorageDonut from './RunnerStorageDonut.vue'
 import { buildRunnerTopology, projectRunnerTopology } from '@/lib/runnerTopology'
 import { storageRingPath } from '@/lib/runnerStorageChart'
 import type {
-  StorageGeneration,
-  StorageResource,
-  StorageRuntime,
-  StorageWorkspace,
-} from '@/types/runnerStorage'
+  RunnerStorageGeneration,
+  RunnerStorageResource,
+  RunnerStorageRuntime,
+  RunnerStorageWorkspace,
+} from '@opencuria/client/types'
 
-const ws: StorageWorkspace = {
+const ws: RunnerStorageWorkspace = {
   id: 'ws',
   name: 'My workspace',
   owner_id: null,
@@ -22,8 +22,8 @@ const ws: StorageWorkspace = {
 const file = (
   physical_id: string,
   bytes: number,
-  overrides: Partial<StorageResource> = {},
-): StorageResource => ({
+  overrides: Partial<RunnerStorageResource> = {},
+): RunnerStorageResource => ({
   physical_id,
   allocated_bytes: bytes,
   kind: 'disk',
@@ -42,7 +42,7 @@ const file = (
   provenance: '',
   ...overrides,
 })
-function fixture(): StorageRuntime[] {
+function fixture(): RunnerStorageRuntime[] {
   return [
     {
       fresh: true,
@@ -72,7 +72,11 @@ const wrappers: VueWrapper[] = []
 afterEach(() => {
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
 })
-function render(runtimes = fixture(), selected = false, generations: StorageGeneration[] = []) {
+function render(
+  runtimes = fixture(),
+  selected = false,
+  generations: RunnerStorageGeneration[] = [],
+) {
   const topology = projectRunnerTopology(buildRunnerTopology(runtimes, generations))
   const workspaceNode = topology.nodes.find((node) => node.workspace?.id === ws.id)!
   const imageNode = topology.nodes.find(
@@ -198,7 +202,7 @@ describe('RunnerStorageDonut', () => {
   it('retains a physically missing image as an Unknown selectable legend entry, never a guessed ring', async () => {
     const runtimes = fixture()
     runtimes[0]!.resources = []
-    const generation: StorageGeneration = {
+    const generation: RunnerStorageGeneration = {
       id: 'missing',
       name: 'Missing image',
       owner_label: 'Owner',

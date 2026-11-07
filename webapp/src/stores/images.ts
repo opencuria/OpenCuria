@@ -6,7 +6,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type {
   CapturedImage,
-  ImageArtifactCloneIn,
+  CapturedImageWorkspaceInput,
   ImageDefinition,
   RunnerImageBuild,
 } from '@/types'
@@ -51,7 +51,7 @@ export const useImageStore = defineStore('images', () => {
   /** New workspaces always start from the latest version of an image. */
   async function createWorkspaceFromCapturedImage(
     capturedImageId: string,
-    data: ImageArtifactCloneIn,
+    data: CapturedImageWorkspaceInput,
   ): Promise<string | null> {
     try {
       const result = await workspacesApi.createWorkspaceFromCapturedImage(capturedImageId, data)

@@ -1,7 +1,11 @@
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import type { StorageGeneration, StorageResource, StorageWorkspace } from '@/types/runnerStorage'
+import type {
+  RunnerStorageGeneration,
+  RunnerStorageResource,
+  RunnerStorageWorkspace,
+} from '@opencuria/client/types'
 import type { RunnerTopologyNode } from '@/lib/runnerTopology'
 import RunnerNodeInspector from './RunnerNodeInspector.vue'
 
@@ -16,7 +20,7 @@ vi.mock('@/components/ui/dropdown-menu', () => ({
     template: '<button role="menuitem" @click="$emit(\'select\')"><slot /></button>',
   }),
 }))
-const workspace: StorageWorkspace = {
+const workspace: RunnerStorageWorkspace = {
   id: 'workspace-secret',
   name: 'Pinned workspace',
   owner_id: 'alice',
@@ -25,7 +29,7 @@ const workspace: StorageWorkspace = {
   observed_state: 'unknown',
   last_activity_at: '2026-10-01',
 }
-function image(patch: Partial<StorageGeneration> = {}): StorageGeneration {
+function image(patch: Partial<RunnerStorageGeneration> = {}): RunnerStorageGeneration {
   return {
     id: 'image-secret',
     name: 'Base v2',
@@ -50,7 +54,7 @@ function image(patch: Partial<StorageGeneration> = {}): StorageGeneration {
     ...patch,
   }
 }
-const resource: StorageResource = {
+const resource: RunnerStorageResource = {
   physical_id: '/images/private.qcow2',
   kind: 'image',
   managed: true,
@@ -67,7 +71,7 @@ const resource: StorageResource = {
   provenance: 'confirmed',
 }
 let w: VueWrapper
-let generation: StorageGeneration
+let generation: RunnerStorageGeneration
 beforeEach(() => {
   vi.restoreAllMocks()
   generation = image()

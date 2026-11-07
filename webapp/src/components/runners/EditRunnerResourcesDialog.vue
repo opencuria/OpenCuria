@@ -70,8 +70,8 @@ async function loadHostMetrics(): Promise<void> {
   loadingMetrics.value = true
   try {
     const metrics = await getRunnerMetricsLatest(props.runner.id)
-    hostMemoryMb.value = toMiB(metrics.ram_total_bytes)
-    hostDiskSizeGb.value = toGiB(metrics.disk_total_bytes)
+    hostMemoryMb.value = toMiB(metrics?.ram_total_bytes)
+    hostDiskSizeGb.value = toGiB(metrics?.disk_total_bytes)
     // CPU core count is not reported by current metrics; we keep a practical marker.
     hostVcpus.value = props.runner.qemu_max_vcpus
   } catch {

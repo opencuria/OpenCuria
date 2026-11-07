@@ -12,7 +12,11 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import * as api from '@/services/runnerStorage.api'
-import type { RunnerStorage, OperationInspection, DispositionAction } from '@/types/runnerStorage'
+import type {
+  RunnerStorage,
+  OperationInspection,
+  OperationDisposition,
+} from '@opencuria/client/types'
 defineProps<{ operations: RunnerStorage['operations']; diagnostic?: string }>()
 const emit = defineEmits<{ changed: [] }>()
 const inspection = ref<OperationInspection | null>(null),
@@ -20,7 +24,7 @@ const inspection = ref<OperationInspection | null>(null),
   error = ref(''),
   acknowledge = ref(false)
 let version = 0
-const actionLabels: Record<DispositionAction, string> = {
+const actionLabels: Record<OperationDisposition, string> = {
   reconcile: 'Apply confirmed result',
   retry: 'Try again',
   acknowledge_interrupted: 'Close interrupted operation',
@@ -49,7 +53,7 @@ async function inspect(id: string) {
     if (requestVersion === version) busy.value = false
   }
 }
-async function act(action: DispositionAction) {
+async function act(action: OperationDisposition) {
   if (busy.value || !inspection.value?.permitted_actions.includes(action)) return
   busy.value = true
   error.value = ''

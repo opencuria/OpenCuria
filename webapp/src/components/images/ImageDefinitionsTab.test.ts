@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ImageDefinitionsTab from './ImageDefinitionsTab.vue'
 import { RunnerStatus, type ImageDefinition, type Runner, type RunnerImageBuild } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
-import * as api from '@/services/api'
+import * as runnersApi from '@/services/runners.api'
 
 const auth = vi.hoisted(() => ({ isAdmin: true }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => auth }))
@@ -22,13 +22,7 @@ vi.mock('@/services/workspaces.api', () => ({
   getRunnerImageBuildLog: vi.fn(),
 }))
 
-vi.mock('@/services/api', async () => {
-  const actual = await vi.importActual<typeof import('@/services/api')>('@/services/api')
-  return {
-    ...actual,
-    get: vi.fn(),
-  }
-})
+vi.mock('@/services/runners.api', () => ({ listRunners: vi.fn() }))
 
 // Inline menus keep secondary actions testable without portals.
 vi.mock('@/components/ui/dropdown-menu', () => ({
@@ -61,7 +55,7 @@ const listImageDefinitions = vi.mocked(workspacesApi.listImageDefinitions)
 const listRunnerImageBuilds = vi.mocked(workspacesApi.listRunnerImageBuilds)
 const createRunnerImageBuild = vi.mocked(workspacesApi.createRunnerImageBuild)
 const updateRunnerImageBuild = vi.mocked(workspacesApi.updateRunnerImageBuild)
-const getMock = vi.mocked(api.get)
+const listRunners = vi.mocked(runnersApi.listRunners)
 
 function makeDefinition(overrides: Partial<ImageDefinition> = {}): ImageDefinition {
   return {
@@ -152,7 +146,7 @@ describe('ImageDefinitionsTab', () => {
       makeDefinition({ id: 'gone', name: 'Deleted Recipe', status: 'deleted' }),
     ])
     listRunnerImageBuilds.mockResolvedValue([])
-    getMock.mockResolvedValue([makeRunner()] as never)
+    listRunners.mockResolvedValue([makeRunner()])
   })
 
   it('shows one status per definition without loading runner builds', async () => {

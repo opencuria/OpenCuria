@@ -1,7 +1,7 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { expect, it } from 'vitest'
 import RunnerActivityList from './RunnerActivityList.vue'
-import type { DeletionRequest, RunnerActivity, RunnerStorage } from '@/types/runnerStorage'
+import type { DeletionRequest, RunnerActivity, RunnerStorage } from '@opencuria/client/types'
 
 const activity = (patch: Partial<RunnerActivity> = {}): RunnerActivity => ({
   id: 'blender-stop',

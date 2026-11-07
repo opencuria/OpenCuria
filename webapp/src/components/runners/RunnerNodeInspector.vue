@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ArrowUpRight, ChevronDown, MoreHorizontal, RotateCw, Trash2, X } from '@lucide/vue'
-import type { DeletionTarget, StorageGeneration } from '@/types/runnerStorage'
+import type { DeletionTarget, RunnerStorageGeneration } from '@opencuria/client/types'
 import type { RunnerTopologyNode } from '@/lib/runnerTopology'
 import {
   currentRunnerDefault,
@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 const props = defineProps<{
   node: RunnerTopologyNode
-  generations: StorageGeneration[]
+  generations: RunnerStorageGeneration[]
   busy?: boolean
 }>()
 const emit = defineEmits<{

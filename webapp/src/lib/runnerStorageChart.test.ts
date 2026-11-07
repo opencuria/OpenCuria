@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { buildRunnerStorageChart, storageRingPath } from './runnerStorageChart'
 import { buildRunnerTopology, projectRunnerTopology } from './runnerTopology'
 import type {
-  StorageGeneration,
-  StorageResource,
-  StorageRuntime,
-  StorageWorkspace,
-} from '@/types/runnerStorage'
+  RunnerStorageGeneration,
+  RunnerStorageResource,
+  RunnerStorageRuntime,
+  RunnerStorageWorkspace,
+} from '@opencuria/client/types'
 
-const workspace = (id = 'ws', pin?: string): StorageWorkspace => ({
+const workspace = (id = 'ws', pin?: string): RunnerStorageWorkspace => ({
   id,
   name: id,
   owner_id: null,
@@ -20,8 +20,8 @@ const workspace = (id = 'ws', pin?: string): StorageWorkspace => ({
 const file = (
   physical_id: string,
   allocated_bytes = 100,
-  overrides: Partial<StorageResource> = {},
-): StorageResource => ({
+  overrides: Partial<RunnerStorageResource> = {},
+): RunnerStorageResource => ({
   physical_id,
   kind: 'disk',
   managed: true,
@@ -42,8 +42,8 @@ const file = (
 })
 const generation = (
   id = 'base',
-  overrides: Partial<StorageGeneration> = {},
-): StorageGeneration => ({
+  overrides: Partial<RunnerStorageGeneration> = {},
+): RunnerStorageGeneration => ({
   id,
   name: id,
   owner_label: 'Owner',
@@ -79,9 +79,9 @@ const filesystem = (
   available_bytes,
 })
 const runtime = (
-  resources: StorageResource[],
-  overrides: Partial<StorageRuntime> = {},
-): StorageRuntime => ({
+  resources: RunnerStorageResource[],
+  overrides: Partial<RunnerStorageRuntime> = {},
+): RunnerStorageRuntime => ({
   fresh: true,
   snapshot_id: 1,
   collected_at: null,
@@ -100,7 +100,7 @@ function fixture() {
     file('seed', 50, { kind: 'file', workspace: ws }),
   ])
 }
-function chart(runtimes: StorageRuntime[], generations = [generation()]) {
+function chart(runtimes: RunnerStorageRuntime[], generations = [generation()]) {
   // Use the actual presentation pipeline, retaining the authoritative resource references.
   const topology = projectRunnerTopology(buildRunnerTopology(runtimes, generations))
   return { topology, result: buildRunnerStorageChart(runtimes, topology) }

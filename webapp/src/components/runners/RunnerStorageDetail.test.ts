@@ -5,11 +5,11 @@ import type { Runner } from '@/types'
 import { RunnerStatus } from '@/types'
 import type {
   RunnerStorage,
-  StorageGeneration,
-  StorageResource,
+  RunnerStorageGeneration,
+  RunnerStorageResource,
   DeletionRequest,
   RunnerActivity,
-} from '@/types/runnerStorage'
+} from '@opencuria/client/types'
 import RunnerStorageDetail from './RunnerStorageDetail.vue'
 import RunnerDependencyMap from './RunnerDependencyMap.vue'
 import RunnerStorageDonut from './RunnerStorageDonut.vue'
@@ -67,7 +67,7 @@ vi.mock('@/components/images/ImageDeletionDialog.vue', () => ({
   }),
 }))
 
-function generation(patch: Partial<StorageGeneration> = {}): StorageGeneration {
+function generation(patch: Partial<RunnerStorageGeneration> = {}): RunnerStorageGeneration {
   return {
     id: 'current',
     name: 'Base v2',
@@ -92,7 +92,7 @@ function generation(patch: Partial<StorageGeneration> = {}): StorageGeneration {
     ...patch,
   }
 }
-function resource(patch: Partial<StorageResource> = {}): StorageResource {
+function resource(patch: Partial<RunnerStorageResource> = {}): RunnerStorageResource {
   return {
     physical_id: '/images/base.qcow2',
     kind: 'image',

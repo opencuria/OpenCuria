@@ -51,6 +51,42 @@ export enum TaskType {
   BUILD_IMAGE = 'build_image',
 }
 
+// --- Shared REST DTOs (one definition for web and mobile) ---
+
+export type {
+  ApiKey,
+  ApiKeyCreated,
+  ApiKeyCreateInput,
+  ApiKeyPermission,
+  CapturedImage,
+  CapturedImageWorkspaceInput,
+  Credential,
+  CredentialCreateInput,
+  CredentialServiceCreateInput,
+  CredentialUpdateInput,
+  ImageArtifact,
+  ImageCaptureInput,
+  ImageCaptureResult,
+  ImageDefinition,
+  ImageDefinitionInput,
+  Runner,
+  RunnerCreateResult,
+  RunnerImageBuild,
+  RunnerSystemMetrics,
+  RunnerUpdateInput,
+  Skill,
+  SkillCreateInput,
+  SkillUpdateInput,
+  VmSystemMetrics,
+} from '@opencuria/client/types'
+export type {
+  CredentialService,
+  Plugin,
+  PluginCreateIn,
+  PluginUpdateIn,
+} from '@opencuria/chat-core/plugins'
+import type { ImageArtifact } from '@opencuria/client/types'
+
 // --- Auth ---
 
 export interface LoginRequest {
@@ -117,78 +153,7 @@ export interface Organization {
   created_at: string
 }
 
-export interface OrganizationCreateIn {
-  name: string
-}
-
 // --- Runner ---
-
-export interface Runner {
-  id: string
-  name: string
-  status: RunnerStatus
-  qemu_min_vcpus: number
-  qemu_max_vcpus: number
-  qemu_default_vcpus: number
-  qemu_min_memory_mb: number
-  qemu_max_memory_mb: number
-  qemu_default_memory_mb: number
-  qemu_min_disk_size_gb: number
-  qemu_max_disk_size_gb: number
-  qemu_default_disk_size_gb: number
-  qemu_max_active_vcpus: number | null
-  qemu_max_active_memory_mb: number | null
-  qemu_max_active_disk_size_gb: number | null
-  organization_id: string
-  connected_at: string | null
-  disconnected_at: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface RunnerCreateIn {
-  name: string
-}
-
-export interface RunnerCreateOut {
-  id: string
-  name: string
-  api_token: string
-}
-
-export interface RunnerUpdateIn {
-  qemu_min_vcpus?: number
-  qemu_max_vcpus?: number
-  qemu_default_vcpus?: number
-  qemu_min_memory_mb?: number
-  qemu_max_memory_mb?: number
-  qemu_default_memory_mb?: number
-  qemu_min_disk_size_gb?: number
-  qemu_max_disk_size_gb?: number
-  qemu_default_disk_size_gb?: number
-  qemu_max_active_vcpus?: number | null
-  qemu_max_active_memory_mb?: number | null
-  qemu_max_active_disk_size_gb?: number | null
-}
-
-export interface RunnerSystemMetrics {
-  runner_id: string
-  timestamp: string
-  cpu_usage_percent: number
-  ram_used_bytes: number
-  ram_total_bytes: number
-  disk_used_bytes: number
-  disk_total_bytes: number
-  vm_metrics?: Record<string, VmSystemMetrics>
-}
-
-export interface VmSystemMetrics {
-  cpu_usage_percent: number
-  ram_used_bytes: number
-  ram_total_bytes: number
-  disk_used_bytes: number
-  disk_total_bytes: number
-}
 
 // --- Workspace ---
 
@@ -320,79 +285,11 @@ export interface Task {
   completed_at: string | null
 }
 
-// --- Error ---
-
-export interface ApiError {
-  detail: string
-  code: string
-}
-
 // --- Credentials ---
-
-export interface CredentialService {
-  id: string
-  name: string
-  slug: string
-  description: string
-  credential_type: string
-  organization_id?: string | null
-  env_var_name: string
-  target_path: string
-  label: string
-  oauth_server_url: string
-  is_active: boolean
-}
-
-export interface Credential {
-  id: string
-  name: string
-  scope: 'personal' | 'organization'
-  service_id: string
-  service_name: string
-  service_slug: string
-  credential_type: 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
-  env_var_name: string
-  target_path: string
-  has_public_key: boolean
-  created_by_id: number
-  created_at: string
-  updated_at: string
-  oauth_connected: boolean
-  oauth_status: string
-  oauth_reconnect_required: boolean
-  oauth_expires_at: string | null
-}
 
 export interface OAuthConnectOut {
   authorization_url: string
   status: 'pending'
-}
-
-export interface CredentialServiceCreateIn {
-  name: string
-  slug?: string
-  description?: string
-  credential_type: Credential['credential_type']
-  env_var_name?: string
-  target_path?: string
-  label?: string
-  oauth_server_url?: string
-}
-
-export interface CredentialCreateIn {
-  service_id: string
-  name?: string
-  value?: string
-  organization_credential?: boolean
-}
-
-export interface CredentialUpdateIn {
-  name?: string
-  value?: string
-}
-
-export interface PublicKeyOut {
-  public_key: string
 }
 
 // --- File Explorer ---
@@ -414,359 +311,6 @@ export interface FilesUploadResultEvent {
   path: string
   status: 'success' | 'error'
   error?: string
-}
-
-// --- Skills ---
-
-export interface Skill {
-  id: string
-  name: string
-  body: string
-  scope: 'personal' | 'organization'
-  created_by_email: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface SkillCreateIn {
-  name: string
-  body: string
-  organization_skill?: boolean
-}
-
-export interface SkillUpdateIn {
-  name?: string
-  body?: string
-}
-
-// --- Plugins ---
-
-export type DesktopActivation = 'server_start' | 'first_tool'
-export interface PluginResources {
-  desktop?: { activation?: DesktopActivation }
-}
-
-/** Transports a plugin author can choose. */
-export type PluginMcpTransport = 'stdio' | 'streamable_http' | 'sse'
-/** `builtin` is OpenCuria's own MCP server, served to the agent by the backend. */
-export type PluginMcpServerTransport = PluginMcpTransport | 'builtin'
-
-export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
-
-export type PluginMcpAuthType = 'none' | 'oauth'
-
-export interface PluginSkill {
-  id: string
-  name: string
-  slug: string
-  body: string
-  position: number
-}
-
-export interface PluginSkillIn {
-  name: string
-  slug?: string
-  body: string
-  position?: number
-}
-
-export interface PluginMcpToolPolicy {
-  exposed_tools?: string[] | null
-  internal_tools?: string[]
-  desktop_tools?: string[] | null
-  execution_tools?: string[]
-  on_run_end?: string
-  desktop_kind?: 'mcp' | 'computeruse'
-  exclusive_input?: boolean
-}
-
-export interface PluginMcpServer {
-  id: string
-  name: string
-  slug: string
-  transport: PluginMcpServerTransport
-  command: string
-  args: string[]
-  cwd: string
-  resources?: PluginResources
-  tool_policy?: PluginMcpToolPolicy
-  runtime_artifact?: { id: string; version: string } | null
-  env: Record<string, string>
-  url: string
-  headers: Record<string, string>
-  startup_timeout_seconds: number
-  request_timeout_seconds: number
-  auth_type: PluginMcpAuthType
-  oauth_requirement_key: string
-}
-
-export interface PluginMcpServerIn {
-  name: string
-  slug?: string
-  transport?: PluginMcpTransport
-  command?: string
-  args?: string[]
-  cwd?: string
-  resources?: PluginResources
-  tool_policy?: PluginMcpToolPolicy
-  runtime_artifact?: { id: string; version: string } | null
-  env?: Record<string, string>
-  url?: string
-  headers?: Record<string, string>
-  startup_timeout_seconds?: number
-  request_timeout_seconds?: number
-  auth_type?: PluginMcpAuthType
-  oauth_requirement_key?: string
-}
-
-export interface PluginCredentialRequirementIn {
-  key: string
-  description?: string
-  required?: boolean
-  service_id: string
-}
-
-export interface PluginCredentialRequirement {
-  id: string
-  key: string
-  description: string
-  required: boolean
-  service_id: string
-  service_name: string
-  service_slug: string
-  credential_type: PluginCredentialServiceType
-}
-
-export interface Plugin {
-  id: string
-  name: string
-  slug: string
-  description: string
-  enabled: boolean
-  published: boolean
-  organization_id: string | null
-  is_global: boolean
-  org_enabled: boolean
-  skills: PluginSkill[]
-  mcp_servers: PluginMcpServer[]
-  credential_requirements: PluginCredentialRequirement[]
-  created_at: string
-  updated_at: string
-}
-
-export interface PluginCreateIn {
-  name: string
-  slug?: string
-  description?: string
-  enabled?: boolean
-  published?: boolean
-  skills?: PluginSkillIn[]
-  mcp_servers?: PluginMcpServerIn[]
-  credential_requirements?: PluginCredentialRequirementIn[]
-}
-
-export interface PluginUpdateIn {
-  name?: string
-  slug?: string
-  description?: string
-  enabled?: boolean
-  published?: boolean
-  skills?: PluginSkillIn[] | null
-  mcp_servers?: PluginMcpServerIn[] | null
-  credential_requirements?: PluginCredentialRequirementIn[] | null
-}
-
-export interface PluginActivationIn {
-  active: boolean
-}
-
-// --- API Keys ---
-
-export interface APIKeyPermissionInfo {
-  value: string
-  label: string
-  description: string
-  group: string
-}
-
-export interface APIKey {
-  id: string
-  name: string
-  key_prefix: string
-  is_active: boolean
-  created_at: string
-  last_used_at: string | null
-  expires_at: string | null
-  permissions: string[]
-}
-
-export interface APIKeyCreatedOut extends APIKey {
-  key: string
-}
-
-export interface APIKeyCreateIn {
-  name: string
-  expires_at: string | null
-  permissions: string[]
-}
-
-export interface APIKeyUpdateIn {
-  permissions: string[]
-}
-
-// --- Images ---
-
-export interface ImageArtifact {
-  id: string
-  source_workspace_id: string | null
-  runner_artifact_id: string
-  name: string
-  size_bytes: number | null
-  status:
-    | 'creating'
-    | 'capturing'
-    | 'building'
-    | 'ready'
-    | 'failed'
-    | 'retired'
-    | 'pending_deletion'
-    | 'deleting'
-    | 'deleted'
-    | 'delete_failed'
-  artifact_kind: 'built' | 'captured'
-  build_job_id?: string | null
-  source_definition_name?: string | null
-  source_runner_id?: string | null
-  is_deactivated?: boolean
-  source_runner_online?: boolean
-  delete_requested_at?: string | null
-  delete_confirmed_at?: string | null
-  delete_last_error?: string
-  created_at: string
-  created_by_id: number | null
-  captured_image_id?: string | null
-  version?: number | null
-  message?: string
-  is_latest?: boolean
-  retention?: ImageVersionRetention | null
-  workspace_count?: number
-  workspaces?: ImageVersionWorkspace[]
-}
-
-/** latest: used for new workspaces; kept: retained by policy; expires_when_unused:
- * deleted automatically once no workspace is based on it. */
-export type ImageVersionRetention = 'latest' | 'kept' | 'expires_when_unused'
-
-export interface ImageVersionWorkspace {
-  id: string
-  name: string
-  created_by_id: number | null
-}
-
-/** A versioned captured image with all of its versions (newest first). */
-export interface CapturedImage {
-  id: string
-  name: string
-  status: 'active' | 'pending_deletion' | 'deleted'
-  runner_id: string
-  runner_online: boolean
-  created_by_id: number | null
-  created_at: string
-  latest_id: string | null
-  latest_version: number | null
-  total_size_bytes: number
-  workspace_count: number
-  versions: ImageArtifact[]
-}
-
-export interface ImageArtifactCreateIn {
-  name?: string
-  captured_image_id?: string | null
-  message?: string
-}
-
-export interface ImageArtifactCreateOut {
-  task_id: string
-  workspace_id: string
-}
-
-export interface ImageArtifactCloneIn {
-  name?: string
-  credential_ids?: string[]
-  plugin_ids?: string[]
-}
-
-export interface ImageArtifactCloneOut {
-  workspace_id: string
-  task_id: string
-  status: string
-  plugin_ids: string[]
-}
-
-export interface RunnerImageBuild {
-  current_generation_id?: string | null
-  pending_generation_id?: string | null
-  id: string
-  image_definition_id: string
-  runner_id: string
-  image_artifact_id?: string | null
-  status:
-    | 'pending'
-    | 'building'
-    | 'active'
-    | 'failed'
-    | 'deactivated'
-    | 'pending_deletion'
-    | 'deleting'
-    | 'deleted'
-    | 'delete_failed'
-  /**
-   * Full log text — only present on create/update responses and the
-   * dedicated /log/ endpoint. List (polling) responses carry
-   * `build_log_size` instead; see `ImageBuildJobListOut`.
-   */
-  build_log?: string
-  build_log_size?: number
-  build_task_id?: string | null
-  built_at?: string | null
-  deactivated_at?: string | null
-  delete_requested_at?: string | null
-  delete_confirmed_at?: string | null
-  delete_last_error?: string
-  created_at: string
-  updated_at: string
-  versions?: ImageArtifact[]
-}
-
-export interface ImageDefinitionBuildSummary {
-  active: number
-  building: number
-  failed: number
-  inactive: number
-  removing: number
-}
-
-export interface ImageDefinition {
-  id: string
-  organization_id: string | null
-  created_by_id?: number | null
-  name: string
-  description: string
-  is_standard: boolean
-  base_distro: string
-  packages: string[]
-  env_vars: Record<string, string>
-  custom_init_script: string
-  is_active: boolean
-  status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
-  runner_build_summary?: ImageDefinitionBuildSummary
-  delete_requested_at?: string | null
-  delete_started_at?: string | null
-  delete_confirmed_at?: string | null
-  delete_last_error?: string
-  delete_attempt_count?: number
-  created_at: string
-  updated_at: string
 }
 
 // --- Background processes ---

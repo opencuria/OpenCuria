@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import type { APIKey } from '@/types'
+import type { ApiKey } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -22,11 +22,11 @@ import { useAutosave } from '@/composables/useAutosave'
 import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = defineProps<{
-  apiKey: APIKey
+  apiKey: ApiKey
 }>()
 
 const emit = defineEmits<{
-  revoke: [apiKey: APIKey]
+  revoke: [apiKey: ApiKey]
 }>()
 
 const apiKeyStore = useApiKeyStore()

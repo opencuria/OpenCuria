@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { expect, it } from 'vitest'
 import RunnerDependencyMap from './RunnerDependencyMap.vue'
-import type { StorageGeneration, StorageRuntime } from '@/types/runnerStorage'
+import type { RunnerStorageGeneration, RunnerStorageRuntime } from '@opencuria/client/types'
 
 const generations = [
   {
@@ -13,7 +13,7 @@ const generations = [
       { id: 'ws', name: 'My workspace', status: 'stopped', observed_state: 'unknown' },
     ],
   },
-] as StorageGeneration[]
+] as RunnerStorageGeneration[]
 it('offers keyboard-accessible selection and distinguishes lifecycle, observation and domain usage', async () => {
   const wrapper = mount(RunnerDependencyMap, { props: { runtimes: [], generations } })
   await flushPromises()
@@ -53,7 +53,7 @@ it('discloses other resource count without showing raw IDs, while retaining link
         { physical_id: '/private/disks/loose', kind: 'disk', dependencies: [], aliases: [] },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, { props: { runtimes, generations: [] } })
   await flushPromises()
   expect(wrapper.text()).toContain('Other resources (2)')
@@ -91,7 +91,7 @@ it('shows valid normalized VM telemetry only on physical QEMU workspace nodes', 
         },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const sample = {
     cpu_usage_percent: 25,
     ram_used_bytes: 1024,
@@ -136,7 +136,7 @@ it('retains distinct allocated and generation accounting in compact image cards'
         },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, {
     props: {
       runtimes,
@@ -189,7 +189,7 @@ it('searches collapsed boot seed members without a separate toggle', async () =>
         },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, {
     props: {
       runtimes,
@@ -224,7 +224,7 @@ it('does not color cached observed states as current or show telemetry on an exi
         },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, { props: { runtimes, generations: [] } })
   expect(wrapper.get('button[aria-label="Inspect Cached VM"]').find('.bg-success').exists()).toBe(
     false,
@@ -278,7 +278,7 @@ it('accepts a parent projection, translates physical selection and searches memb
         },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const topology = projectRunnerTopology(buildRunnerTopology(runtimes, []))
   const wrapper = mount(RunnerDependencyMap, {
     props: {
@@ -338,7 +338,7 @@ it('hides shared and foreign exceptions behind Other resources unless selected o
         },
       ],
     },
-  ] as unknown as StorageRuntime[]
+  ] as unknown as RunnerStorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, { props: { runtimes, generations: [] } })
   expect(wrapper.text()).toContain('Other resources (2)')
   expect(wrapper.find('section[aria-label="Other resources"]').exists()).toBe(false)

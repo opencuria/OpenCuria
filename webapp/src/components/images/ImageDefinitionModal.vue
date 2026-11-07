@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
-import type { ImageDefinition } from '@/types'
+import type { ImageDefinition, ImageDefinitionInput } from '@/types'
 import {
   BASE_DISTRO_PRESETS,
   envVarsTextValid,
@@ -54,7 +54,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
-  saved: [payload: Partial<ImageDefinition>]
+  saved: [payload: ImageDefinitionInput]
 }>()
 
 const form = ref<ImageDefinitionForm>(imageDefinitionForm())
