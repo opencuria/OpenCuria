@@ -7,8 +7,8 @@ are thin adapters over the same services as the REST API.
 from __future__ import annotations
 
 from ..registry import ToolSpec
-from . import chats, context, plugins, scheduled_tasks, skills, workspaces
+from . import apps, chats, context, plugins, scheduled_tasks, skills, workspaces
 
-DOMAINS = (context, workspaces, chats, skills, plugins, scheduled_tasks)
+DOMAINS = (context, workspaces, chats, skills, plugins, scheduled_tasks, apps)
 
 TOOLS: list[ToolSpec] = [tool for domain in DOMAINS for tool in domain.TOOLS]

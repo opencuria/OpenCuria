@@ -7,6 +7,7 @@ import {
   summarizeActivity,
 } from "@opencuria/chat-core/harnessActivity";
 import type { HarnessMessage, HarnessPart } from "@opencuria/chat-core/harness";
+import { publishedAppReference } from "@opencuria/chat-core/publishedApps";
 
 const part = (
   id: string,
@@ -303,5 +304,52 @@ describe("findTodoAnchor", () => {
       ]),
     ).toEqual({ messageId: "a2", partId: null });
     expect(findTodoAnchor([message("u1", "user")])).toBeNull();
+  });
+});
+
+describe("published apps", () => {
+  const published = (state: HarnessPart["state"] = "completed") =>
+    tool("publish", "mcp_opencuria_mcp_app_publish", {
+      state,
+      display: {
+        tool: "mcp_opencuria_mcp_app_publish",
+        app: {
+          app_id: "app-1",
+          version_id: "v-2",
+          name: "Todo",
+          version: 2,
+          version_name: "1.1.0",
+        },
+      },
+    });
+
+  it("shows an app sent to the phone as reader content outside the fold", () => {
+    const blocks = buildActivityMessageBlocks(
+      [text("intro"), tool("bash", "bash"), published(), text("done")],
+      { finished: true },
+    );
+    expect(blocks.map((block) => block.kind)).toEqual([
+      "workedFor",
+      "app",
+      "text",
+    ]);
+    expect(blocks[1]).toMatchObject({
+      kind: "app",
+      app: {
+        appId: "app-1",
+        versionId: "v-2",
+        name: "Todo",
+        version: 2,
+        versionName: "1.1.0",
+      },
+    });
+  });
+
+  it("keeps running or failed publishes in the activity", () => {
+    expect(publishedAppReference(published("running"))).toBeNull();
+    expect(publishedAppReference(published("error"))).toBeNull();
+    expect(
+      buildActivityBlocks([published("error")]).map((block) => block.kind),
+    ).toEqual(["activity"]);
   });
 });

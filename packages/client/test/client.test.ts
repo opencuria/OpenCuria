@@ -1879,3 +1879,33 @@ describe("settings API", () => {
     ]);
   });
 });
+
+describe("apps", () => {
+  it("lists apps, reads manifests and signs file downloads with the session", async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/manifest/")
+        ? jsonResponse({ app_id: "app 1", platform: "ios" })
+        : jsonResponse([]),
+    );
+    const options = clientOptions();
+    const client = options.create(fetch as unknown as typeof globalThis.fetch);
+
+    await client.apps.list();
+    await client.apps.manifest("app 1", "v/1", "ios");
+    const request = client.apps.fileRequest("app 1", "v/1", "abc");
+
+    expect(String(fetch.mock.calls[0]![0])).toBe(
+      "https://api.example/api/v1/apps/",
+    );
+    expect(String(fetch.mock.calls[1]![0])).toBe(
+      "https://api.example/api/v1/apps/app%201/versions/v%2F1/manifest/?platform=ios",
+    );
+    expect(request).toEqual({
+      url: "https://api.example/api/v1/apps/app%201/versions/v%2F1/files/abc/",
+      headers: {
+        Authorization: "Bearer old-access",
+        "X-Organization-Id": "org-a",
+      },
+    });
+  });
+});

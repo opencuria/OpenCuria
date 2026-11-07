@@ -9,7 +9,7 @@ import jsonschema
 from apps.mcp_app.tools import TOOLS
 
 PREFIXES = ("opencuria_", "model_", "workspace_", "chat_", "skill_", "plugin_")
-PREFIXES += ("scheduled_task_",)
+PREFIXES += ("scheduled_task_", "app_")
 READ_ONLY_VERBS = ("_list", "_get", "_read", "_options", "_context")
 
 

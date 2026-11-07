@@ -13,6 +13,7 @@ import {
   createRunnersApi,
 } from "./settings";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
+import { createAppsApi } from "./apps";
 import { createDesktopApi } from "./desktop";
 import { buildDesktopViewerUrl } from "@opencuria/chat-core/desktopSurface";
 import type { DesktopViewerIntent } from "@opencuria/chat-core/desktopViewer";
@@ -178,6 +179,8 @@ export interface OpenCuriaClient {
     runs(taskId: string, signal?: AbortSignal): Promise<ScheduledTaskRun[]>;
   };
   harness: ReturnType<typeof createHarnessApi>;
+  /** Expo apps agents published to the signed-in user. */
+  apps: ReturnType<typeof createAppsApi>;
   /** Workspace git integration (repos, history, typed mutations, file sides). */
   git: ReturnType<typeof createGitApi>;
   /** KasmVNC desktop: viewer lease, Computer Use takeover and clipboard. */
@@ -393,6 +396,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         ),
     },
     harness,
+    apps: createAppsApi(() => api),
     git: createGitApi(() => api),
     desktop: {
       ...createDesktopApi(() => api),

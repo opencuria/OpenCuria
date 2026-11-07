@@ -16,6 +16,7 @@ services:
       FCM_SERVICE_ACCOUNT_FILE: ${FCM_SERVICE_ACCOUNT_FILE:-}
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
       SQLITE_PATH: /data/db.sqlite3
+      MEDIA_ROOT: /data/media
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
         is required}
       MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}

@@ -55,6 +55,7 @@ REPOSITORY_ONLY_APPS = {
     "apps.credentials",
     "apps.harness",
     "apps.mcp_app",
+    "apps.mobile_apps",
     "apps.notifications",
     "apps.organizations",
     "apps.plugins",

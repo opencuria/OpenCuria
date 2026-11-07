@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["OpenCuriaAppRuntimeModule"],
+    "podspecPath": "OpenCuriaAppRuntime.podspec"
+  },
+  "android": {
+    "modules": ["expo.modules.opencuriaappruntime.OpenCuriaAppRuntimeModule"]
+  }
+}

@@ -87,6 +87,10 @@ import { ScheduledTasksSheet } from "../scheduledTasks/ScheduledTasksSheet";
 import type { AgentCatalog } from "../scheduledTasks/scheduledTaskForm";
 import { activeTaskCount } from "../scheduledTasks/scheduledTaskPresentation";
 import { useScheduledTasks } from "../scheduledTasks/useScheduledTasks";
+import { AppsSheet } from "../apps/AppsSheet";
+import { PublishedAppCard } from "../apps/PublishedAppCard";
+import { appScope, pendingAppCount } from "../apps/appPresentation";
+import { useApps } from "../apps/useApps";
 import { showToast } from "../ui/toast";
 import { profileInitials, profileName } from "../settings/profile";
 import { SettingsScreen } from "../settings/SettingsScreen";
@@ -118,6 +122,7 @@ type SheetName =
   | "workspaces"
   | "schedules"
   | "schedule-prompt"
+  | "apps"
   | "profile"
   | "settings"
   | "rename"
@@ -155,6 +160,16 @@ export function MainScreen(): React.JSX.Element {
   const schedules = useScheduledTasks(
     client,
     `${client?.api.baseUrl ?? ""}:${session?.organizationId ?? ""}`,
+  );
+  const apps = useApps(
+    client,
+    appScope(client?.api.baseUrl ?? "", session?.organizationId, user?.id),
+  );
+  const renderPublishedApp = useCallback(
+    (reference: Parameters<typeof PublishedAppCard>[0]["reference"]) => (
+      <PublishedAppCard reference={reference} apps={apps} />
+    ),
+    [apps],
   );
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -1218,6 +1233,8 @@ export function MainScreen(): React.JSX.Element {
               running: schedules.tasks.some((task) => task.is_running),
             }}
             onScheduledTasks={() => setSheet("schedules")}
+            pendingApps={pendingAppCount(apps.rows)}
+            onApps={() => setSheet("apps")}
             onConversationAction={(row, action) => {
               if (action === "rename") rename(row);
               else if (action === "read") void markConversation(row);
@@ -1375,6 +1392,7 @@ export function MainScreen(): React.JSX.Element {
               toolsAvailable ? () => openSheet("tools") : undefined
             }
             pullUpLabel="Git, Desktop, Terminal & Files"
+            renderPublishedApp={renderPublishedApp}
             testID="chat-transcript"
           />
         </ChatLayout>
@@ -1438,6 +1456,14 @@ export function MainScreen(): React.JSX.Element {
         catalog={agentCatalog}
         defaultWorkspaceId={workspaceId}
         onOpenChat={openRunChat}
+      />
+
+      <AppsSheet
+        visible={sheet === "apps"}
+        onClose={() =>
+          setSheet((current) => (current === "apps" ? null : current))
+        }
+        apps={apps}
       />
 
       <ScheduledTaskSheet

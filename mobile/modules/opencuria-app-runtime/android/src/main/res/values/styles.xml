@@ -1,0 +1,7 @@
+<resources>
+  <!-- Installed apps draw behind transparent system bars (edge to edge). -->
+  <style name="Theme.OpenCuria.AppRuntime" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <item name="android:statusBarColor">@android:color/transparent</item>
+    <item name="android:navigationBarColor">@android:color/transparent</item>
+  </style>
+</resources>

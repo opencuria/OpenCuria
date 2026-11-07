@@ -65,6 +65,7 @@ import {
   toolDisplayLabel,
 } from "@opencuria/chat-core/toolDisplay";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
+import type { PublishedAppReference } from "@opencuria/chat-core/publishedApps";
 import { useChromeTopInset } from "../ui/chromeInset";
 import { useChatLayout } from "./ChatLayout";
 import {
@@ -134,8 +135,18 @@ export interface ChatMessagesProps {
   onPullUpAtEnd?: () => void;
   /** Hint shown while pulling, such as "Git, Desktop, Terminal & Files". */
   pullUpLabel?: string;
+  /** Renders an app the agent sent to the phone, e.g. with an install button. */
+  renderPublishedApp?: (app: PublishedAppReference) => React.ReactNode;
   testID?: string;
 }
+
+/**
+ * Renderer for apps in the transcript. A context, so that install progress
+ * updates the card without re-rendering transcript rows.
+ */
+const PublishedAppContext = React.createContext<
+  ChatMessagesProps["renderPublishedApp"] | null
+>(null);
 
 const VIEWABILITY = { itemVisiblePercentThreshold: 1 };
 /** Message actions keep native touch targets; their glyphs align with the text. */
@@ -172,6 +183,7 @@ export function ChatMessages({
   contentInsetTop = 0,
   onPullUpAtEnd,
   pullUpLabel = "Workspace tools",
+  renderPublishedApp,
   testID = "chat-messages",
 }: ChatMessagesProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -376,6 +388,7 @@ export function ChatMessages({
 
   return (
     <MediaGalleryContext.Provider value={openGallery}>
+      <PublishedAppContext.Provider value={renderPublishedApp ?? null}>
       <View style={styles.listRoot}>
         <EndPullArea gesture={pull.gesture}>
           <View style={styles.listRoot} collapsable={false}>
@@ -422,6 +435,7 @@ export function ChatMessages({
         <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
         {pullHint}
       </View>
+      </PublishedAppContext.Provider>
       {viewer}
     </MediaGalleryContext.Provider>
   );
@@ -1106,6 +1120,8 @@ function BlockView({
       </View>
     );
   if (block.kind === "question") return <QuestionCard part={block.part} />;
+  if (block.kind === "app")
+    return <PublishedAppBlock part={block.part} app={block.app} />;
   if (block.kind === "todos")
     return todos?.length ? <TodoCard todos={todos} /> : null;
   return (
@@ -1538,6 +1554,29 @@ function ToolAttachmentCard({
   );
 }
 
+/** An app the agent sent to the phone; the host renders its install card. */
+function PublishedAppBlock({
+  part,
+  app,
+}: {
+  part: HarnessPart;
+  app: PublishedAppReference;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const render = React.useContext(PublishedAppContext);
+  return (
+    <View testID={`chat-app-${part.id}`} style={styles.appBlock}>
+      {render ? (
+        render(app)
+      ) : (
+        <Text style={{ color: theme.mutedText, fontSize: 14 }}>
+          {`Sent ${app.name} to your phone`}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function QuestionCard({ part }: { part: HarnessPart }): React.JSX.Element {
   const { theme } = useTheme();
   const rows = Array.isArray(part.display?.question_rows)
@@ -1788,6 +1827,7 @@ function blockKey(block: ActivityMessageBlock, index: number): string {
 
 const styles = StyleSheet.create({
   listRoot: { flex: 1, minHeight: 0 },
+  appBlock: { marginVertical: 6 },
   empty: {
     flexGrow: 1,
     alignItems: "center",

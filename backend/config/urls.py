@@ -24,6 +24,7 @@ from apps.harness.commit_message_api import commit_message_router
 from apps.harness.engines.api import engines_router
 from apps.harness.provider_accounts_api import provider_accounts_router
 from apps.harness.voice_api import voice_router, voice_settings_router
+from apps.mobile_apps.api import app_router
 from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
 from apps.organizations.member_profile_api import member_profile_router
@@ -93,6 +94,7 @@ api.add_router("/", scheduled_task_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
 api.add_router("/image-definitions/", image_definition_router)
 api.add_router("/plugins/", plugin_router)
+api.add_router("/apps/", app_router)
 
 urlpatterns = [
     path("api/v1/mcp-oauth/callback/", mcp_oauth_callback, name="mcp_oauth_callback"),

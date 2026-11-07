@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application>
+    <activity
+      android:name="expo.modules.opencuriaappruntime.AppRuntimeActivity"
+      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|smallestScreenSize"
+      android:exported="false"
+      android:theme="@style/Theme.OpenCuria.AppRuntime"
+      android:windowSoftInputMode="adjustResize" />
+  </application>
+</manifest>

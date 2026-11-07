@@ -25,10 +25,27 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       supportsTablet: true,
       entitlements: { "aps-environment": apnsEnvironment },
       infoPlist: {
-        NSCameraUsageDescription:
-          "Attach a photo to your OpenCuria conversation.",
-        NSPhotoLibraryUsageDescription:
-          "Choose photos to share with your OpenCuria agent.",
+        // Camera, photo library and microphone strings come from the
+        // expo-image-picker plugin below. Apps agents publish run inside
+        // OpenCuria (like Expo Go) and may ask for these when opened.
+        NSPhotoLibraryAddUsageDescription:
+          "Save photos and videos from apps you open in OpenCuria.",
+        NSLocationWhenInUseUsageDescription:
+          "Share your location with apps you open in OpenCuria.",
+        NSContactsUsageDescription:
+          "Let apps you open in OpenCuria use your contacts.",
+        NSCalendarsUsageDescription:
+          "Let apps you open in OpenCuria use your calendars.",
+        NSCalendarsFullAccessUsageDescription:
+          "Let apps you open in OpenCuria use your calendars.",
+        NSRemindersUsageDescription:
+          "Let apps you open in OpenCuria use your reminders.",
+        NSRemindersFullAccessUsageDescription:
+          "Let apps you open in OpenCuria use your reminders.",
+        NSFaceIDUsageDescription:
+          "Let apps you open in OpenCuria confirm it is you.",
+        NSMotionUsageDescription:
+          "Let apps you open in OpenCuria use motion and fitness data.",
         // HTTP is limited to local-network hosts (unqualified, .local, IPs).
         NSAppTransportSecurity: { NSAllowsLocalNetworking: true },
       },
@@ -44,8 +61,18 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         foregroundImage: "./assets/adaptive-icon.png",
         backgroundColor: "#F4F4F6",
       },
-      permissions: ["CAMERA"],
-      blockedPermissions: ["android.permission.RECORD_AUDIO"],
+      // Camera for chat photos; the rest for apps agents publish, which run
+      // inside OpenCuria and request them at runtime like in Expo Go.
+      // Microphone and location come from expo-image-picker and expo-location.
+      permissions: [
+        "CAMERA",
+        "READ_CONTACTS",
+        "WRITE_CONTACTS",
+        "READ_CALENDAR",
+        "WRITE_CALENDAR",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+      ],
     },
     plugins: [
       "expo-router",
@@ -62,9 +89,11 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       [
         "expo-image-picker",
         {
-          photosPermission: "Choose photos to share with your OpenCuria agent.",
-          cameraPermission: "Attach a photo to your OpenCuria conversation.",
-          microphonePermission: false,
+          photosPermission:
+            "Choose photos to share with your OpenCuria agent or an app you open in OpenCuria.",
+          cameraPermission:
+            "Take photos for your OpenCuria conversation or an app you open in OpenCuria.",
+          microphonePermission: "Record audio in apps you open in OpenCuria.",
         },
       ],
       [
@@ -74,6 +103,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         { android: { usesCleartextTraffic: true } },
       ],
       "react-native-enriched-markdown",
+      [
+        "react-native-maps",
+        // Maps in published apps: Android needs a Google Maps key at build
+        // time, otherwise maps stay blank (the SDK aborts without any key).
+        {
+          androidGoogleMapsApiKey:
+            process.env.GOOGLE_MAPS_ANDROID_API_KEY || "unconfigured",
+        },
+      ],
     ],
     experiments: { typedRoutes: true },
   };

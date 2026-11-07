@@ -13,7 +13,7 @@ import {
   getByGestureTestId,
 } from "react-native-gesture-handler/jest-utils";
 import { ChatMessages, UserMessageContent } from "./ChatMessages";
-import { Animated } from "react-native";
+import { Animated, Text } from "react-native";
 import { ThemeProvider } from "../ui/theme";
 import type {
   HarnessMessage,
@@ -601,6 +601,54 @@ describe("ChatMessages", () => {
       }
     },
   );
+
+  it("hands an app the agent sent to the phone to the host's install card", () => {
+    const publish: HarnessPart = {
+      ...part("publish", "tool", "", 1),
+      tool: "mcp_opencuria_mcp_app_publish",
+      display: {
+        tool: "mcp_opencuria_mcp_app_publish",
+        app: {
+          app_id: "app-1",
+          version_id: "v-1",
+          name: "Todo",
+          version: 1,
+          version_name: "1.0.0",
+        },
+      },
+    };
+    const transcript = message([
+      part("bash", "tool", "", 0),
+      publish,
+      part("answer", "text", "It is on your phone.", 2),
+    ]);
+    transcript.completed_at = "2026-10-18T12:00:00Z";
+    const renderPublishedApp = jest.fn((app: { name: string }) => (
+      <Text>{`Install ${app.name}`}</Text>
+    ));
+
+    const { rerender } = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[transcript]}
+          renderPublishedApp={renderPublishedApp}
+        />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId("chat-app-publish")).toBeTruthy();
+    expect(screen.getByText("Install Todo")).toBeTruthy();
+    expect(renderPublishedApp).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: "app-1", versionId: "v-1" }),
+    );
+
+    rerender(
+      <ThemeProvider>
+        <ChatMessages messages={[transcript]} />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText("Sent Todo to your phone")).toBeTruthy();
+  });
 
   it("renders delivered steer blocks in the native user bubble pattern", () => {
     const transcript = message([

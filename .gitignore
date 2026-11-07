@@ -16,6 +16,7 @@ redisdata/
 
 # Python
 __pycache__/
+/backend/media/
 .venv/
 *.egg-info/
 

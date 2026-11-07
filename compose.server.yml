@@ -47,6 +47,7 @@ services:
     environment: &backend_environment
       DJANGO_ENV: production
       EXECUTION_PROCESS_LOCK_PATH: /var/lib/opencuria/backend/process.lock
+      MEDIA_ROOT: /var/lib/opencuria/backend/media
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}

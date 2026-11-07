@@ -1,0 +1,7 @@
+<resources>
+  <string name="opencuria_app_failed">%1$s stopped</string>
+  <string name="opencuria_app_reload">Reload</string>
+  <string name="opencuria_app_close">Close app</string>
+  <string name="opencuria_app_loading">Opening %1$s</string>
+  <string name="opencuria_app_menu_hint">Long-press with three fingers for the app menu</string>
+</resources>

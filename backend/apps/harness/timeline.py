@@ -4,7 +4,8 @@ Timeline patch preview contract: ``display.preview`` is at most four objects
 ``{type, oldNo, newNo, content}``, matching the frontend collapsed diff window;
 the browser should render these lines directly and never parse full diffs here.
 Question calls expose bounded ``display.question_rows`` so the timeline
-need not send potentially large tool input/output fields.
+need not send potentially large tool input/output fields. Published apps
+expose ``display.app`` so clients can offer the install in the transcript.
 """
 
 from __future__ import annotations
@@ -13,12 +14,16 @@ import json
 import re
 from typing import Any
 
+from .mcp_client.naming import mcp_tool_name
+
 #: Part types whose full text travels with the lightweight timeline.
 TIMELINE_TEXT_PART_TYPES = ("text", "steer")
 DISPLAY_TEXT_LIMIT = 240
 QUESTION_TEXT_LIMIT = 500
 PATCH_PREVIEW_LINES = 4
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+#: The built-in OpenCuria MCP tool that sends an app to the user's phone.
+APP_PUBLISH_TOOL = mcp_tool_name("opencuria", "mcp", "app_publish")
 
 
 def _short(value: object, limit: int = DISPLAY_TEXT_LIMIT) -> str:
@@ -37,6 +42,21 @@ def _json_object(value: object) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _published_app(output: object) -> dict[str, Any] | None:
+    """Bounded app reference from a successful ``app_publish`` result."""
+    result = _json_object(output)
+    if not result.get("app_id") or not result.get("version_id"):
+        return None
+    version = result.get("version")
+    return {
+        "app_id": _short(result["app_id"], 64),
+        "version_id": _short(result["version_id"], 64),
+        "name": _short(result.get("name")),
+        "version": version if isinstance(version, int) else None,
+        "version_name": _short(result.get("version_name"), 64),
+    }
 
 
 def project_question_definitions(source: object) -> list[dict[str, Any]]:
@@ -209,6 +229,10 @@ def build_part_display(
         if tool_name == "question":
             rows = _question_rows(args, meta, output or "")
             display["question_rows"] = rows
+        elif tool_name == APP_PUBLISH_TOOL:
+            app = _published_app(output)
+            if app:
+                display["app"] = app
     elif part_type == "reasoning":
         normalized = (output or "").replace("\r\n", "\n").replace("\r", "\n")
         final_line = normalized.strip().splitlines()[-1] if normalized.strip() else ""

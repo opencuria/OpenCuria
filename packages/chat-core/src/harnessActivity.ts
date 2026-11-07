@@ -5,7 +5,7 @@
  * calls (failed ones included), patches, reasoning and subtasks — becomes one
  * activity block summarized as e.g. "Explored 9 files, 2 searches". Only
  * content meant for the reader splits a run: assistant text, delivered
- * steers, answered questions and the to-do card. Finished turns use the same
+ * steers, answered questions, apps sent to the phone and the to-do card. Finished turns use the same
  * chronological "Worked for" folding as the web client.
  */
 
@@ -17,12 +17,17 @@ import {
   type WorkedForBlock,
 } from "./harnessBlocks";
 import { isTaskToolPart } from "./harnessSubtaskActivity";
+import {
+  publishedAppReference,
+  type PublishedAppReference,
+} from "./publishedApps";
 import { resolveToolName } from "./toolDisplay";
 
 export type ActivityTimelineBlock =
   | { kind: "text"; part: HarnessPart }
   | { kind: "steer"; part: HarnessPart }
   | { kind: "question"; part: HarnessPart }
+  | { kind: "app"; part: HarnessPart; app: PublishedAppReference }
   | { kind: "todos"; part: HarnessPart }
   | { kind: "activity"; parts: HarnessPart[] };
 
@@ -57,9 +62,14 @@ export function buildActivityBlocks(
     run = [];
   }
   for (const part of visibleTimelineParts(parts)) {
+    const app = publishedAppReference(part);
     if (part.type === "text") {
       flushRun();
       blocks.push({ kind: "text", part });
+    } else if (app) {
+      // An app the user can install: reader content, never folded away.
+      flushRun();
+      blocks.push({ kind: "app", part, app });
     } else if (part.type === "steer") {
       flushRun();
       if (part.output) blocks.push({ kind: "steer", part });

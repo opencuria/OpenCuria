@@ -31,6 +31,9 @@ const ICONS: Record<string, ImageSourcePropType> = {
   "checkmark.circle.fill": require("../../assets/native-icons/check-circle.xml"),
   "xmark.circle.fill": require("../../assets/native-icons/cancel.xml"),
   "minus.circle.fill": require("../../assets/native-icons/remove-circle.xml"),
+  // Apps agents publish.
+  "square.grid.2x2.fill": require("../../assets/native-icons/apps.xml"),
+  "arrow.down.circle": require("../../assets/native-icons/download.xml"),
   // Settings (Material Symbols, rounded).
   cpu: require("../../assets/native-icons/memory.xml"),
   sparkles: require("../../assets/native-icons/auto-awesome.xml"),

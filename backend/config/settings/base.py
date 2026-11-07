@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "apps.plugins",
     "apps.skills",
     "apps.mcp_app",
+    "apps.mobile_apps",
 ]
 
 MIDDLEWARE = [
@@ -153,6 +154,10 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Uploaded and published files (e.g. agent-built apps). Backend and execution
+# processes must share this directory, so deployments point it at their volume.
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 
 STORAGES = {
     "default": {

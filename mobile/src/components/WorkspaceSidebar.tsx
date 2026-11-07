@@ -17,6 +17,7 @@ import {
   ChevronRight,
   CircleAlert,
   Layers,
+  LayoutGrid,
   MessageCircle,
   MessageCircleQuestion,
   ShieldAlert,
@@ -74,6 +75,9 @@ export interface WorkspaceSidebarProps {
   /** Scheduled tasks that have not ended, and whether one is running. */
   scheduledTasks?: { count: number; running: boolean };
   onScheduledTasks?: () => void;
+  /** Apps agents sent that wait to be installed or updated. */
+  pendingApps?: number;
+  onApps?: () => void;
   onMarkAllRead?: () => void;
   /** The signed-in user's name or email, spoken with the Settings control. */
   profileTitle: string;
@@ -103,6 +107,8 @@ export function WorkspaceSidebar({
   onAllWorkspaces,
   scheduledTasks,
   onScheduledTasks,
+  pendingApps,
+  onApps,
   onMarkAllRead,
   profileTitle,
   profileInitials,
@@ -269,6 +275,18 @@ export function WorkspaceSidebar({
               .join(", ")}
             onPress={onScheduledTasks}
             testID="scheduled-tasks"
+          />
+        ) : null}
+        {onApps ? (
+          <SidebarRow
+            title="Apps"
+            icon={<LayoutGrid size={20} color={theme.text} />}
+            meta={pendingApps ? String(pendingApps) : undefined}
+            accessibilityLabel={
+              pendingApps ? `Apps, ${pendingApps} to install or update` : "Apps"
+            }
+            onPress={onApps}
+            testID="apps"
           />
         ) : null}
 

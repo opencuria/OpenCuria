@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -316,3 +317,37 @@ def test_patch_updates_and_forks_rebuild_the_same_projection(
     payload = timeline.timeline_part_payload(copied)
     assert payload["display"] == expected
     assert payload["output"] == "" and payload["detail_loaded"] is False
+
+
+def test_published_app_projection_offers_the_install():
+    from apps.harness.timeline import APP_PUBLISH_TOOL, build_part_display
+
+    output = json.dumps(
+        {
+            "app_id": "a" * 36,
+            "version_id": "b" * 36,
+            "name": "Todo\nList",
+            "version": 3,
+            "version_name": "1.2.0",
+            "warnings": ["x" * 5000],
+        }
+    )
+    display = build_part_display(
+        part_type="tool",
+        input_data={"tool": APP_PUBLISH_TOOL, "arguments": {}},
+        output=output,
+    )
+    assert APP_PUBLISH_TOOL == "mcp_opencuria_mcp_app_publish"
+    assert display["app"] == {
+        "app_id": "a" * 36,
+        "version_id": "b" * 36,
+        "name": "Todo List",
+        "version": 3,
+        "version_name": "1.2.0",
+    }
+    failed = build_part_display(
+        part_type="tool",
+        input_data={"tool": APP_PUBLISH_TOOL},
+        output="Error: No dist/metadata.json found.",
+    )
+    assert "app" not in failed

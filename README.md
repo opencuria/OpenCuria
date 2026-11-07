@@ -318,8 +318,12 @@ membership. Run backend migrations before using this setting.
 Agents manage OpenCuria through the built-in **OpenCuria** plugin, enabled per
 organization and workspace. Its MCP server runs in-process as the workspace owner,
 within that owner's organization role, without API keys or credentials. About 30
-task-oriented tools cover workspaces, chats, skills, plugins and scheduled tasks.
-The implementation lives in `backend/apps/mcp_app/`.
+task-oriented tools cover workspaces, chats, skills, plugins, scheduled tasks and
+apps: `app_publish` sends an Expo app the agent built and exported in its workspace
+to the owner's mobile app, which installs it and runs it offline inside OpenCuria.
+The implementation lives in `backend/apps/mcp_app/`; published apps are stored by
+`backend/apps/mobile_apps/` under `MEDIA_ROOT`, which the API and execution
+processes must share (Compose uses the backend data volume).
 
 ## MCP OAuth integrations
 

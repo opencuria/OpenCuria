@@ -1,0 +1,39 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.opencuriaappruntime'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.opencuriaappruntime"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+/**
+ * Another Expo module, as a source project or, when Expo links it prebuilt,
+ * as its local Maven artifact. The app itself ships the module at runtime.
+ */
+def expoModule = { String name, String artifactId ->
+  def source = rootProject.findProject(":${name}")
+  if (source != null) {
+    return source
+  }
+  def version = providers.exec {
+    workingDir(projectDir)
+    commandLine("node", "--print", "require('${name}/package.json').version")
+  }.standardOutput.asText.get().trim()
+  return "host.exp.exponent:${artifactId}:${version}"
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  implementation 'androidx.appcompat:appcompat:1.7.0'
+  // Installed apps get their own constants and SecureStore scope.
+  compileOnly expoModule('expo-constants', 'expo.modules.constants')
+  compileOnly expoModule('expo-secure-store', 'expo.modules.securestore')
+}

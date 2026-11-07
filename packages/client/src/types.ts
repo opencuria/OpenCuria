@@ -851,3 +851,73 @@ export interface FileChunkEvent {
   total_chunks: number;
   content: string;
 }
+
+/** One published version of an app an agent sent to the user. */
+export interface PublishedAppVersion {
+  id: string;
+  /** Sequential per app, starting at 1. */
+  number: number;
+  /** Expo config `version`, e.g. "1.2.0". */
+  version_name: string;
+  /** Expo SDK the build targets, e.g. "57.0.0". */
+  sdk_version: string;
+  notes: string;
+  created_at: string;
+  /** Content hash of the icon PNG, downloadable as a version file. */
+  icon_sha256: string | null;
+  /** Download size in bytes per supported platform. */
+  platforms: Partial<Record<"android" | "ios", number>>;
+}
+
+/** An Expo app published to the signed-in user, with its newest version. */
+export interface PublishedApp {
+  id: string;
+  name: string;
+  slug: string;
+  workspace_id: string | null;
+  workspace_name: string;
+  created_at: string;
+  updated_at: string;
+  latest_version: PublishedAppVersion | null;
+}
+
+export interface PublishedAppDetail extends PublishedApp {
+  versions: PublishedAppVersion[];
+}
+
+/** A content-addressed file of an app version. */
+export interface AppManifestFile {
+  sha256: string;
+  md5: string;
+  size: number;
+}
+
+/** An asset the bundle references by its Metro hash `key`. */
+export interface AppManifestAsset extends AppManifestFile {
+  key: string;
+  extension: string;
+}
+
+/** Everything a device downloads to install one version on one platform. */
+export interface AppManifest {
+  app_id: string;
+  version_id: string;
+  number: number;
+  name: string;
+  slug: string;
+  version_name: string;
+  sdk_version: string;
+  platform: "android" | "ios";
+  /** Public Expo config, exposed to the app as `Constants.expoConfig`. */
+  expo_config: Record<string, unknown>;
+  bundle: AppManifestFile;
+  assets: AppManifestAsset[];
+  icon: AppManifestFile | null;
+  created_at: string;
+}
+
+/** URL and headers for downloading an app file with a native downloader. */
+export interface AppFileRequest {
+  url: string;
+  headers: Record<string, string>;
+}
