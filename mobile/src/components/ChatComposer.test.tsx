@@ -175,6 +175,16 @@ describe("ChatComposer", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("keeps writing possible but sending and attaching closed when it cannot send", () => {
+    const { onSend } = renderComposer({ canSend: false });
+    const input = screen.getByTestId("chat-composer-input");
+    expect(input.props.editable).toBe(true);
+    fireEvent.changeText(input, "Draft for later");
+    expect(screen.getByTestId("chat-composer-send")).toBeDisabled();
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("sends an attachment without requiring a text draft", async () => {
     const attachment = {
       id: "document",

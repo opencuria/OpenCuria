@@ -58,6 +58,8 @@ export interface SettingsEnvironment {
   isAdmin: boolean;
   /** The server's web address, e.g. for handing a flow over to the webapp. */
   serverUrl: string;
+  /** The server is unreachable: only what works on the device is offered. */
+  offline: boolean;
   resources: ResourceStore;
   workspaces: Workspace[];
   refreshWorkspaces: () => Promise<void>;

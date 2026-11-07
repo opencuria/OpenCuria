@@ -21,7 +21,8 @@ await media.dispose() // permanent logout/workspace teardown
 
 Use the same adapter instance only for its constructor's workspace and
 server/auth/organization scope. Dispose it when that scope ends; do not persist
-its URIs or use local media as offline chat history. Paths are validated with
+its URIs. Pictures for offline chat history are copied into the offline store
+(`src/offline/offlineStore.ts`), not kept here. Paths are validated with
 `resolveWorkspaceLinkPath`; workspace previews/text reads are limited to 20
 MiB, and document downloads are explicit-only (runner limit: 100 MiB). Preview
 cache is app-private, LRU-capped at 32 MiB with two concurrent transfers. Use

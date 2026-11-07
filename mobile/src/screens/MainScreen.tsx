@@ -18,6 +18,7 @@ import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
+import type { ResolvedChatMedia } from "../components/useWorkspaceMedia";
 import {
   filterMentionCandidates,
   mentionFileSearchQuery,
@@ -94,6 +95,14 @@ import { useApps } from "../apps/useApps";
 import { useAppsWidgetRequests } from "../widgets/AppsWidgetProvider";
 import { showToast } from "../ui/toast";
 import { profileInitials, profileName } from "../settings/profile";
+import { offlineStore } from "../offline/offlineStore";
+import {
+  SavedChatView,
+  SavedChatWriter,
+  conversationFromSession,
+  savedConversations,
+} from "../offline/savedChats";
+import { useSavedChatCleanup } from "../offline/useSavedChatCleanup";
 import { SettingsScreen } from "../settings/SettingsScreen";
 import { releaseGitControllers } from "../tools/git";
 import { releaseTerminalSessions } from "../tools/terminal";
@@ -129,6 +138,17 @@ type SheetName =
   | "rename"
   | "file"
   | null;
+/** Sheets that need the server; they close when OpenCuria goes offline. */
+const ONLINE_SHEETS = new Set<SheetName>([
+  "tools",
+  "workspaces",
+  "schedules",
+  "schedule-prompt",
+  "profile",
+  "settings",
+  "rename",
+  "file",
+]);
 type NavigationRequest = {
   revision: number;
   workspaceId: string;
@@ -145,27 +165,51 @@ export function MainScreen(): React.JSX.Element {
     session,
     user,
     organizations,
+    offline,
+    reconnecting,
+    retry,
     signOut,
     selectOrganization,
     createOrganization,
     registerResource,
     registerForegroundRefresh,
   } = useSession();
+  const offlineRef = useRef(offline);
+  offlineRef.current = offline;
   const controller = useMemo(
     () => (client ? new ChatController(client) : null),
     [client],
   );
   const subscribe = controller?.subscribe ?? noopSubscribe;
   const getSnapshot = controller?.getSnapshot ?? emptySnapshot;
-  const chat = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const liveChat = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  // The account's chats, lists and pictures saved for offline use.
+  const accountScope = appScope(
+    client?.api.baseUrl ?? "",
+    session?.organizationId,
+    user?.id,
+  );
+  const hasUser = Boolean(user);
+  const saved = useMemo(
+    () => (hasUser ? offlineStore().account(accountScope) : null),
+    [hasUser, accountScope],
+  );
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
+  useSavedChatCleanup(hasUser ? accountScope : null);
+  const savedView = useMemo(() => new SavedChatView(saved), [saved]);
+  const savedChat = useSyncExternalStore(
+    savedView.subscribe,
+    savedView.getSnapshot,
+    savedView.getSnapshot,
+  );
+  // Offline, the chat on screen is the copy saved on this device.
+  const chat = offline ? savedChat : liveChat;
   const schedules = useScheduledTasks(
-    client,
+    offline ? null : client,
     `${client?.api.baseUrl ?? ""}:${session?.organizationId ?? ""}`,
   );
-  const apps = useApps(
-    client,
-    appScope(client?.api.baseUrl ?? "", session?.organizationId, user?.id),
-  );
+  const apps = useApps(client, accountScope, undefined, { offline });
   const widgetRequests = useAppsWidgetRequests();
   const renderPublishedApp = useCallback(
     (reference: Parameters<typeof PublishedAppCard>[0]["reference"]) => (
@@ -212,6 +256,7 @@ export function MainScreen(): React.JSX.Element {
   const [renaming, setRenaming] = useState(false);
   const [resolving, setResolving] = useState<Set<string>>(new Set());
   const [file, setFile] = useState<FileViewerTarget | null>(null);
+  const [offlineNoticeHidden, setOfflineNoticeHidden] = useState(false);
   const insets = useSafeAreaInsets();
   const [noticeInset, setNoticeInset] = useState(0);
   const generation = useRef(0);
@@ -235,9 +280,9 @@ export function MainScreen(): React.JSX.Element {
   const isTransitioning = Boolean(
     workspace?.active_operation || workspace?.intervention_required,
   );
-  const ready = Boolean(
-    workspace && isWorkspaceReadyForChat(workspace, isTransitioning),
-  );
+  const ready =
+    !offline &&
+    Boolean(workspace && isWorkspaceReadyForChat(workspace, isTransitioning));
   const catalogForEngine = (id: HarnessId) =>
     id === "native" ? models : (engineModels[id] ?? []);
   const modelsForEngine = harnessSessionModels(
@@ -318,11 +363,42 @@ export function MainScreen(): React.JSX.Element {
     };
   }, [media, registerResource]);
 
+  const activeSessionRef = useRef<string | null>(null);
+  activeSessionRef.current = chat.activeSessionId;
+  /**
+   * Pictures come from the workspace and are saved with the chat; offline,
+   * or while the workspace is stopped, the saved copy shows.
+   */
   const resolveMedia = useCallback(
-    (path: string) =>
-      media
-        ? media.resolvePinned(path)
-        : Promise.reject(new Error("No workspace selected")),
+    async (path: string): Promise<ResolvedChatMedia> => {
+      const sessionId = activeSessionRef.current;
+      const account = savedRef.current;
+      const savedCopy = () =>
+        sessionId && account
+          ? account.media(sessionId, path).catch(() => null)
+          : Promise.resolve(null);
+      if (offlineRef.current) {
+        const uri = await savedCopy();
+        if (uri) return uri;
+        throw Object.assign(
+          new Error("This picture is not saved on this device."),
+          { retryable: false },
+        );
+      }
+      if (!media) throw new Error("No workspace selected");
+      try {
+        const pinned = await media.resolvePinned(path);
+        if (sessionId && account)
+          void account
+            .saveMedia(sessionId, path, pinned.uri)
+            .catch(() => undefined);
+        return pinned;
+      } catch (cause) {
+        const uri = await savedCopy();
+        if (uri) return uri;
+        throw cause;
+      }
+    },
     [media],
   );
 
@@ -333,6 +409,10 @@ export function MainScreen(): React.JSX.Element {
       const requestGeneration = ++overviewGeneration.current;
       if (!background) setLoading(true);
       try {
+        if (offlineRef.current) {
+          await loadSavedOverview(requestGeneration);
+          return;
+        }
         const [ws, rows, loadedSkills] = await Promise.all([
           client.workspaces.list(),
           client.conversations.list(),
@@ -347,6 +427,7 @@ export function MainScreen(): React.JSX.Element {
         setWorkspaces(ws);
         setConversations(rows);
         setSkills(loadedSkills);
+        void savedRef.current?.saveOverview(ws, rows).catch(() => undefined);
         const chosen = selectedWorkspaceRef.current;
         const fallback =
           ws.find(
@@ -404,8 +485,54 @@ export function MainScreen(): React.JSX.Element {
   );
   loadOverviewRef.current = loadOverview;
 
+  /** Offline: the saved lists, and the chat opened last when none is open. */
+  async function loadSavedOverview(requestGeneration: number): Promise<void> {
+    const account = savedRef.current;
+    const [overview, chats] = await Promise.all([
+      account?.loadOverview().catch(() => null) ?? null,
+      account?.chats().catch(() => []) ?? [],
+    ]);
+    if (
+      !mountedRef.current ||
+      requestGeneration !== overviewGeneration.current ||
+      !offlineRef.current
+    )
+      return;
+    const fresher = new Map(
+      (overview?.conversations ?? []).map((row) => [row.session_id, row]),
+    );
+    setWorkspaces(overview?.workspaces ?? []);
+    setConversations(
+      savedConversations(
+        chats.map((chat) => ({
+          ...chat,
+          conversation: chat.conversation
+            ? (fresher.get(chat.sessionId) ?? chat.conversation)
+            : null,
+        })),
+      ),
+    );
+    const latest = chats.find((chat) => chat.conversation);
+    if (!selectedWorkspaceRef.current && latest) {
+      selectedWorkspaceRef.current = latest.workspaceId;
+      setWorkspaceId(latest.workspaceId);
+      setNavigation({
+        revision: ++navigationRevision.current,
+        workspaceId: latest.workspaceId,
+        sessionId: latest.sessionId,
+      });
+    }
+    setError(null);
+  }
+
   const loadCatalogs = useCallback(async () => {
-    if (!client || !mountedRef.current || clientRef.current !== client) return;
+    if (
+      !client ||
+      !mountedRef.current ||
+      clientRef.current !== client ||
+      offlineRef.current
+    )
+      return;
     const requestGeneration = ++catalogGeneration.current;
     const engineRequest = client.harness.listEngines();
     const results = await Promise.allSettled([
@@ -524,7 +651,8 @@ export function MainScreen(): React.JSX.Element {
   useEffect(
     () =>
       registerForegroundRefresh(async () => {
-        if (!client || !controller) return;
+        // Offline, the session reconnects first; going online reloads.
+        if (!client || !controller || offlineRef.current) return;
         await Promise.allSettled([
           loadOverview(true),
           controller.refresh(),
@@ -590,12 +718,17 @@ export function MainScreen(): React.JSX.Element {
   }, [client, workspaceScopeKey, loadCatalogs]);
 
   useEffect(() => {
-    if (!controller || !navigation) return;
+    if (!navigation || (!offline && !controller)) return;
     let alive = true;
     const request = navigation;
-    const run = request.newChat
-      ? controller.newChat(request.workspaceId)
-      : controller.openWorkspace(request.workspaceId, request.sessionId);
+    const run = offline
+      ? savedView.open(
+          request.workspaceId,
+          request.newChat ? undefined : request.sessionId,
+        )
+      : request.newChat
+        ? controller!.newChat(request.workspaceId)
+        : controller!.openWorkspace(request.workspaceId, request.sessionId);
     void run
       .then(() => {
         if (alive && request.revision === navigationRevision.current) {
@@ -612,7 +745,44 @@ export function MainScreen(): React.JSX.Element {
     return () => {
       alive = false;
     };
-  }, [controller, navigation]);
+  }, [controller, navigation, offline, savedView]);
+
+  // Going offline or back online moves the open chat to the other source
+  // (the copy saved on this device or the server) and reloads the lists.
+  const previousOffline = useRef(offline);
+  useEffect(() => {
+    if (previousOffline.current === offline) return;
+    previousOffline.current = offline;
+    setOfflineNoticeHidden(false);
+    setError(null);
+    if (offline) {
+      setFile(null);
+      setSheet((current) => (ONLINE_SHEETS.has(current) ? null : current));
+    }
+    void loadOverviewRef.current(true);
+    if (!offline) void loadCatalogsRef.current();
+  }, [offline]);
+
+  // The chat being read is saved, so it opens offline later.
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
+  useEffect(() => {
+    if (!controller || !saved || offline) return;
+    const writer = new SavedChatWriter(
+      controller,
+      saved,
+      (session) =>
+        conversationsRef.current.find((row) => row.session_id === session.id) ??
+        conversationFromSession(
+          session,
+          workspacesRef.current.find((item) => item.id === session.workspace_id)
+            ?.name ?? "",
+        ),
+    );
+    return writer.start();
+  }, [controller, saved, offline]);
 
   useEffect(() => {
     const keep = keepSelection.current;
@@ -661,9 +831,13 @@ export function MainScreen(): React.JSX.Element {
 
   const refresh = useCallback(async () => {
     if (!client) return;
+    if (offlineRef.current) {
+      await retry();
+      return;
+    }
     await Promise.allSettled([loadOverview(true), controller?.refresh()]);
     retryPendingNavigation();
-  }, [client, controller, loadOverview, retryPendingNavigation]);
+  }, [client, controller, loadOverview, retry, retryPendingNavigation]);
 
   const selectMode = (next: HarnessSessionMode) => {
     setMode(next);
@@ -858,6 +1032,7 @@ export function MainScreen(): React.JSX.Element {
       !target ||
       !client ||
       loading ||
+      offline ||
       target.organizationId !== session?.organizationId
     )
       return;
@@ -913,13 +1088,15 @@ export function MainScreen(): React.JSX.Element {
     notifications.controller,
     client,
     loading,
+    offline,
     notificationRetry,
     session?.organizationId,
   ]);
 
   const openConversation = (row: HarnessConversation) => {
     const owner = workspaces.find((item) => item.id === row.workspace_id);
-    if (!owner) {
+    // Offline, a saved chat opens even when its workspace was not saved.
+    if (!owner && !offline) {
       setDrawerError("This conversation’s workspace is no longer available.");
       return;
     }
@@ -927,7 +1104,7 @@ export function MainScreen(): React.JSX.Element {
     setAttachments([]);
     setSheet(null);
     setDrawerError(null);
-    requestNavigation(owner.id, { sessionId: row.session_id });
+    requestNavigation(row.workspace_id, { sessionId: row.session_id });
   };
 
   /** A scheduled run's chat; its workspace may have been removed since. */
@@ -1123,7 +1300,7 @@ export function MainScreen(): React.JSX.Element {
     null;
   /** Until its first message, a new chat can still change workspace. */
   const newChatWorkspace =
-    workspace && !chat.activeSessionId && !navigation?.sessionId
+    workspace && !offline && !chat.activeSessionId && !navigation?.sessionId
       ? {
           name: workspace.name,
           actions: workspacePickerActions(workspaces, workspace.id),
@@ -1132,48 +1309,53 @@ export function MainScreen(): React.JSX.Element {
       : undefined;
   /** Git, Desktop, Terminal and Files need the workspace's VM and runner. */
   const toolsAvailable = Boolean(
+    !offline &&
     workspace &&
     workspace.status === "running" &&
     workspace.runner_online &&
     !isTransitioning,
   );
-  const chatMenuActions: NativeMenuAction[] = [
-    {
-      id: "workspace",
-      title: "Switch workspace",
-      symbol: "square.stack.3d.up",
-    },
-    ...(chat.activeSession && !activeIsSubtask
-      ? [
-          {
-            id: "rename",
-            title: "Rename chat",
-            symbol: "pencil",
-            disabled: isTransitioning,
-          },
-        ]
-      : []),
-    ...(workspace && !activeIsSubtask
-      ? [
-          {
-            id: "schedule",
-            title: draft.trim() ? "Schedule this prompt" : "New scheduled task",
-            symbol: "calendar.badge.clock",
-          },
-        ]
-      : []),
-    ...(activeConversation
-      ? [
-          {
-            id: "delete",
-            title: "Delete chat",
-            symbol: "trash",
-            destructive: true,
-            disabled: isTransitioning || actionBusy,
-          },
-        ]
-      : []),
-  ];
+  const chatMenuActions: NativeMenuAction[] = offline
+    ? []
+    : [
+        {
+          id: "workspace",
+          title: "Switch workspace",
+          symbol: "square.stack.3d.up",
+        },
+        ...(chat.activeSession && !activeIsSubtask
+          ? [
+              {
+                id: "rename",
+                title: "Rename chat",
+                symbol: "pencil",
+                disabled: isTransitioning,
+              },
+            ]
+          : []),
+        ...(workspace && !activeIsSubtask
+          ? [
+              {
+                id: "schedule",
+                title: draft.trim()
+                  ? "Schedule this prompt"
+                  : "New scheduled task",
+                symbol: "calendar.badge.clock",
+              },
+            ]
+          : []),
+        ...(activeConversation
+          ? [
+              {
+                id: "delete",
+                title: "Delete chat",
+                symbol: "trash",
+                destructive: true,
+                disabled: isTransitioning || actionBusy,
+              },
+            ]
+          : []),
+      ];
   /** Sheets cover the chat, so the keyboard closes before one opens. */
   const openSheet = (name: Exclude<SheetName, null>) => {
     void KeyboardController.dismiss().catch(() => undefined);
@@ -1232,18 +1414,23 @@ export function MainScreen(): React.JSX.Element {
             activeSessionId={chat.activeSessionId}
             scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
             canCreate={ready}
+            offline={offline}
             onCreate={newChat}
             onWorkspace={chooseWorkspace}
             onConversation={openConversation}
-            onMarkAllRead={() => {
-              void markAllRead();
-            }}
-            onAllWorkspaces={() => setSheet("workspaces")}
+            onMarkAllRead={
+              offline
+                ? undefined
+                : () => {
+                    void markAllRead();
+                  }
+            }
+            onAllWorkspaces={offline ? undefined : () => setSheet("workspaces")}
             scheduledTasks={{
               count: activeTaskCount(schedules.tasks),
               running: schedules.tasks.some((task) => task.is_running),
             }}
-            onScheduledTasks={() => setSheet("schedules")}
+            onScheduledTasks={offline ? undefined : () => setSheet("schedules")}
             pendingApps={pendingAppCount(apps.rows)}
             onApps={() => setSheet("apps")}
             onConversationAction={(row, action) => {
@@ -1269,16 +1456,22 @@ export function MainScreen(): React.JSX.Element {
                 await controller?.abort();
               }}
               busy={navigationReady && chat.busy}
-              disabled={chatUnavailable}
+              // Offline a prompt can be written, not sent.
+              disabled={offline ? false : chatUnavailable}
+              canSend={!offline}
               placeholder="Ask OpenCuria"
               workspace={newChatWorkspace}
-              settings={{
-                harness: harnessEngineLabel(harness, engines),
-                mode,
-                model: selectedModel?.name ?? model,
-                effort: effort ? formatEffort(effort) : "",
-              }}
-              onSettings={() => openSheet("settings")}
+              settings={
+                offline
+                  ? undefined
+                  : {
+                      harness: harnessEngineLabel(harness, engines),
+                      mode,
+                      model: selectedModel?.name ?? model,
+                      effort: effort ? formatEffort(effort) : "",
+                    }
+              }
+              onSettings={offline ? undefined : () => openSheet("settings")}
               skills={skills.map((item) => ({
                 id: item.id,
                 name: item.name,
@@ -1287,7 +1480,7 @@ export function MainScreen(): React.JSX.Element {
               onSelectedSkillIdsChange={setSkillIds}
               attachments={attachments}
               onAttachmentsChange={setAttachments}
-              onSearchMentions={searchMentions}
+              onSearchMentions={offline ? undefined : searchMentions}
               onTakePhoto={async () => pickPhoto("camera")}
               onChoosePhotos={async () => pickPhoto("library")}
               onChooseFiles={async () => pickDocuments()}
@@ -1298,6 +1491,20 @@ export function MainScreen(): React.JSX.Element {
           overlay={
             <>
               <ChromeOverlay onHeightChange={setNoticeInset}>
+                {offline && !offlineNoticeHidden ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone="neutral"
+                      message="You’re offline. Saved chats and installed apps still open."
+                      actionLabel={reconnecting ? undefined : "Retry"}
+                      onAction={() => {
+                        void retry();
+                      }}
+                      onDismiss={() => setOfflineNoticeHidden(true)}
+                      testID="offline-notice"
+                    />
+                  </View>
+                ) : null}
                 {error || chat.error ? (
                   <View style={styles.notice}>
                     <Banner
@@ -1360,27 +1567,44 @@ export function MainScreen(): React.JSX.Element {
                 !error &&
                 !chat.error)
             }
-            onDismissNotice={(id) => controller!.dismissNotice(id)}
+            onDismissNotice={
+              offline ? undefined : (id) => controller!.dismissNotice(id)
+            }
             messages={navigationReady ? chat.messages : EMPTY.messages}
             sessions={chat.sessions}
             todos={chat.todos}
             busy={navigationReady && chat.busy}
             disabled={!ready}
             resolveMedia={resolveMedia}
-            mediaScopeKey={`${contextKey}:${chat.connected}`}
+            mediaScopeKey={`${contextKey}:${chat.connected}:${offline}`}
             contentInsetTop={noticeInset}
-            onEdit={async (messageId, text) => {
-              await controller!.edit(
-                messageId,
-                text,
-                runOptions(),
-                chat.activeSessionId,
-              );
-            }}
-            onFork={async (messageId) => {
-              await controller?.fork(messageId);
-              setError(null);
-            }}
+            emptyText={
+              offline
+                ? conversations.length
+                  ? "Open a saved chat from the sidebar."
+                  : "No chats are saved on this device yet."
+                : undefined
+            }
+            onEdit={
+              offline
+                ? undefined
+                : async (messageId, text) => {
+                    await controller!.edit(
+                      messageId,
+                      text,
+                      runOptions(),
+                      chat.activeSessionId,
+                    );
+                  }
+            }
+            onFork={
+              offline
+                ? undefined
+                : async (messageId) => {
+                    await controller?.fork(messageId);
+                    setError(null);
+                  }
+            }
             onOpenSubtask={(id) => {
               setDraft("");
               setAttachments([]);
@@ -1389,12 +1613,18 @@ export function MainScreen(): React.JSX.Element {
                 requestNavigation(workspaceId, { sessionId: id });
             }}
             onRequestPartDetail={(sessionId, partId) =>
-              controller!.requestPartDetail(sessionId, partId)
+              offline
+                ? Promise.reject(new Error("Details need a connection."))
+                : controller!.requestPartDetail(sessionId, partId)
             }
-            onOpenFile={(path) => {
-              setFile(path);
-              openSheet("file");
-            }}
+            onOpenFile={
+              offline
+                ? undefined
+                : (path) => {
+                    setFile(path);
+                    openSheet("file");
+                  }
+            }
             onOpenAttachment={(attachment) => {
               setFile(attachment);
               openSheet("file");
@@ -1513,6 +1743,7 @@ export function MainScreen(): React.JSX.Element {
         organizations={organizations}
         organizationId={session?.organizationId ?? null}
         serverUrl={session?.serverUrl ?? client.api.baseUrl}
+        offline={offline}
         workspaces={workspaces}
         refreshWorkspaces={refreshWorkspaces}
         onCatalogChanged={reloadCatalogs}

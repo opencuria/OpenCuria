@@ -56,7 +56,7 @@ function accountScope(
 export function AppsWidgetProvider({
   children,
 }: React.PropsWithChildren): React.JSX.Element {
-  const { booting, session, client } = useSession();
+  const { booting, session, client, offline } = useSession();
   const scope = accountScope(booting, session, client);
   const [link, setLink] = useState<AppLink | null>(null);
 
@@ -86,7 +86,8 @@ export function AppsWidgetProvider({
     setLink(null);
     // Signed out, OpenCuria opens on the sign-in screen.
     if (scope === null) return;
-    void openApp(client, scope, link.appId)
+    // Offline, the app opens at once instead of waiting for a route.
+    void openApp(offline ? null : client, scope, link.appId)
       .then((found) => {
         if (!found)
           showToast({
@@ -96,7 +97,7 @@ export function AppsWidgetProvider({
           });
       })
       .catch(() => undefined);
-  }, [link, scope, client]);
+  }, [link, scope, client, offline]);
 
   useEffect(() => {
     // An open app would cover the Apps list.

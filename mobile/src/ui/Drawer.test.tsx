@@ -131,3 +131,18 @@ it("preserves native disabled and destructive command behavior", () => {
     destructive: true,
   });
 });
+
+it("leaves the overflow menu out when it has no commands", () => {
+  const { props, rerender } = setup();
+  rerender({ ...props, menuActions: [], canCreate: false, canOpenTools: false });
+  const { options } = mockScreen.mock.calls.at(-1)![0];
+  const items = options.unstable_headerRightItems() as NativeStackHeaderItem[];
+  expect(items.some((item) => item.type === "menu")).toBe(false);
+  expect(items).toEqual([
+    expect.objectContaining({ label: "New chat", disabled: true }),
+    expect.objectContaining({
+      label: "Git, Desktop, Terminal & Files",
+      disabled: true,
+    }),
+  ]);
+});

@@ -16,7 +16,7 @@ export interface DrawerProps {
   onTools: () => void;
   /** The workspace can run its tools (running VM, online runner). */
   canOpenTools: boolean;
-  /** Actions of the chat header's overflow ("…") menu. */
+  /** Actions of the chat header's overflow ("…") menu; none hides it. */
   menuActions: NativeMenuAction[];
   onMenuAction: (id: string) => void;
 }

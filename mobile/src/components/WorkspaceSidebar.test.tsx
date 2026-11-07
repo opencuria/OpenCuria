@@ -239,3 +239,39 @@ it("offers the account and New chat from the floating footer", () => {
   update({ canCreate: false });
   expect(screen.getByRole("button", { name: "New chat" })).toBeDisabled();
 });
+
+it("lists the chats saved on this device by workspace while offline", () => {
+  const onConversation = jest.fn();
+  const saved = [
+    ...chats("Alpha", 2),
+    { ...chats("Beta", 1)[0]!, unread: true },
+  ];
+  setup({
+    offline: true,
+    // Offline the workspaces' last known state does not matter.
+    workspaces: [workspace("Alpha", "stopped")],
+    conversations: saved,
+    canCreate: false,
+    onAllWorkspaces: undefined,
+    onConversation,
+  });
+  expect(screen.getByTestId("section-Alpha")).toBeTruthy();
+  expect(screen.getByTestId("section-Beta")).toBeTruthy();
+  expect(screen.queryByTestId("section-inbox")).toBeNull();
+  expect(screen.queryByTestId("all-workspaces")).toBeNull();
+  expect(screen.queryByText("Offline")).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "New chat in Alpha" }),
+  ).toBeNull();
+  expect(screen.getByTestId("drawer-new-chat")).toBeDisabled();
+
+  fireEvent.press(screen.getByTestId("Alpha-1"));
+  expect(onConversation).toHaveBeenCalledWith(saved[0]);
+  // Renaming, marking and deleting need the server.
+  expect(screen.getByTestId("Alpha-1").props.accessibilityActions).toBeUndefined();
+});
+
+it("says when no chat is saved on this device", () => {
+  setup({ offline: true, workspaces: [], conversations: [] });
+  expect(screen.getByText("No saved chats")).toBeTruthy();
+});

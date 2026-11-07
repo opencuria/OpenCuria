@@ -140,6 +140,8 @@ export interface ChatMessagesProps {
   pullUpLabel?: string;
   /** Renders an app the agent sent to the phone, e.g. with an install button. */
   renderPublishedApp?: (app: PublishedAppReference) => React.ReactNode;
+  /** Shown in place of an empty chat; defaults to an invitation to ask. */
+  emptyText?: string;
   testID?: string;
 }
 
@@ -187,6 +189,7 @@ export function ChatMessages({
   onPullUpAtEnd,
   pullUpLabel = "Workspace tools",
   renderPublishedApp,
+  emptyText = "What can I help with?",
   testID = "chat-messages",
 }: ChatMessagesProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -378,6 +381,7 @@ export function ChatMessages({
           <View style={styles.listRoot} collapsable={false}>
             <EmptyTranscript
               loading={loading}
+              text={emptyText}
               topInset={topInset}
               testID={testID}
               scrollHandlers={pullScroll}
@@ -506,11 +510,13 @@ function JumpToLatest({
  */
 function EmptyTranscript({
   loading,
+  text,
   topInset,
   testID,
   scrollHandlers,
 }: {
   loading: boolean;
+  text: string;
   topInset: number;
   testID: string;
   scrollHandlers: EndPullScrollHandlers;
@@ -551,7 +557,7 @@ function EmptyTranscript({
           />
         ) : (
           <Text style={[styles.emptyTitle, { color: theme.text }]}>
-            What can I help with?
+            {text}
           </Text>
         )}
       </Animated.View>

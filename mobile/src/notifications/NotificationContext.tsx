@@ -31,11 +31,18 @@ const Context = createContext<{
 export function NotificationProvider({
   children,
 }: React.PropsWithChildren): React.JSX.Element {
-  const { client, session, user, registerResource, registerSignOutCleanup } =
-    useSession();
+  const {
+    client,
+    session,
+    user,
+    offline,
+    registerResource,
+    registerSignOutCleanup,
+  } = useSession();
   const scope = `${session?.serverUrl ?? ""}:${user?.id ?? ""}:${session?.organizationId ?? ""}`;
   const controller = useMemo(() => {
-    if (!client || !user || !session?.organizationId) return null;
+    // Offline there is no server to register this device with.
+    if (!client || !user || !session?.organizationId || offline) return null;
     return new NotificationController(
       client,
       session.organizationId,
@@ -43,7 +50,7 @@ export function NotificationProvider({
       nativeNotifications,
       liveActivities,
     );
-  }, [client, user?.id, session?.organizationId, scope]);
+  }, [client, user?.id, session?.organizationId, scope, offline]);
   const state = useSyncExternalStore(
     controller?.subscribe ?? (() => () => undefined),
     controller?.getSnapshot ?? (() => empty),

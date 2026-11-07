@@ -31,7 +31,7 @@ jest.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
 }));
 
-function renderScreen(role = "admin") {
+function renderScreen(role = "admin", offline = false) {
   const organizations = [
     { ...testOrganization, role },
     { ...testOrganization, id: "org-2", name: "Beta", role: "member" },
@@ -44,6 +44,7 @@ function renderScreen(role = "admin") {
     organizations,
     organizationId: "org-1",
     serverUrl: "https://curia.example",
+    offline,
     workspaces: [],
     refreshWorkspaces: jest.fn(async () => undefined),
     onCatalogChanged: jest.fn(),
@@ -100,6 +101,25 @@ it("switches organizations from the card and confirms signing out", () => {
   fireEvent.press(screen.getByRole("button", { name: "Switch" }));
   fireEvent.press(screen.getByRole("button", { name: "Beta" }));
   expect(props.selectOrganization).toHaveBeenCalledWith("org-2");
+
+  const alert = jest.spyOn(Alert, "alert");
+  fireEvent.press(screen.getByTestId("sign-out"));
+  const buttons = alert.mock.calls[0]![2] as AlertButton[];
+  act(() => buttons.find((button) => button.text === "Sign out")!.onPress!());
+  expect(props.signOut).toHaveBeenCalled();
+  alert.mockRestore();
+});
+
+it("offers only appearance and the account while offline", () => {
+  const props = renderScreen("admin", true);
+  expect(screen.getByText("Ada Lovelace")).toBeTruthy();
+  expect(screen.getByText(/You’re offline/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Switch" })).toBeNull();
+  for (const title of ["Provider & Models", "Runners", "Notifications"])
+    expect(
+      screen.queryByRole("link", { name: new RegExp(`^${title}`) }),
+    ).toBeNull();
+  expect(screen.getByText("Email: ada@example.com")).toBeTruthy();
 
   const alert = jest.spyOn(Alert, "alert");
   fireEvent.press(screen.getByTestId("sign-out"));

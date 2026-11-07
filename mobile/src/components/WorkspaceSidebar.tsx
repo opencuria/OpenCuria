@@ -35,6 +35,7 @@ import {
   type WorkspaceConversationGroup,
 } from "@opencuria/chat-core/conversationGroups";
 import { isWorkspaceReadyForChat } from "@opencuria/chat-core/workspaceReadiness";
+import { groupSavedConversations } from "../offline/savedChats";
 import { NativeContextMenu } from "../ui/ContextMenu";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { OpenCuriaMark } from "../ui/OpenCuriaMark";
@@ -63,6 +64,11 @@ export interface WorkspaceSidebarProps {
   /** Server and organization; changing it resets search, paging and collapse. */
   scopeKey: string;
   canCreate: boolean;
+  /**
+   * The server is unreachable: `conversations` are the chats saved on this
+   * device, grouped by workspace whatever its state, without chat actions.
+   */
+  offline?: boolean;
   onCreate: () => void;
   /** Starts a chat in the workspace (or opens it while it is unavailable). */
   onWorkspace: (workspace: Workspace) => void;
@@ -71,7 +77,8 @@ export interface WorkspaceSidebarProps {
     conversation: HarnessConversation,
     action: string,
   ) => void;
-  onAllWorkspaces: () => void;
+  /** Opens all workspaces; the row is hidden without it. */
+  onAllWorkspaces?: () => void;
   /** Scheduled tasks that have not ended, and whether one is running. */
   scheduledTasks?: { count: number; running: boolean };
   onScheduledTasks?: () => void;
@@ -100,6 +107,7 @@ export function WorkspaceSidebar({
   activeSessionId,
   scopeKey,
   canCreate,
+  offline = false,
   onCreate,
   onWorkspace,
   onConversation,
@@ -125,8 +133,11 @@ export function WorkspaceSidebar({
   );
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const groups = useMemo(
-    () => groupConversationsByWorkspace(workspaces, conversations),
-    [workspaces, conversations],
+    () =>
+      offline
+        ? groupSavedConversations(workspaces, conversations)
+        : groupConversationsByWorkspace(workspaces, conversations),
+    [offline, workspaces, conversations],
   );
   useEffect(() => {
     setSearching(false);
@@ -164,9 +175,10 @@ export function WorkspaceSidebar({
       .filter((item) => item.status === "running")
       .map((item) => item.id),
   );
-  const inbox = extractInboxConversations(conversations, running).filter(
-    matches,
-  );
+  // Offline there is nothing new to read.
+  const inbox = offline
+    ? []
+    : extractInboxConversations(conversations, running).filter(matches);
   const canMarkAllRead = Boolean(
     onMarkAllRead &&
     conversations.some((row) => row.unread && running.has(row.workspace_id)),
@@ -190,6 +202,7 @@ export function WorkspaceSidebar({
       inbox={inboxRow}
       selected={row.session_id === activeSessionId}
       actionsDisabled={mutationsDisabled(row.workspace_id)}
+      offline={offline}
       onPress={() => {
         closeSearch();
         onConversation(row);
@@ -245,14 +258,16 @@ export function WorkspaceSidebar({
             <Banner tone="error" message={error} onDismiss={onDismissError} />
           </View>
         ) : null}
-        <SidebarRow
-          title="Workspaces"
-          icon={<Layers size={20} color={theme.text} />}
-          meta={String(countableWorkspaces(workspaces).length)}
-          accessibilityLabel={`All workspaces, ${countableWorkspaces(workspaces).length}`}
-          onPress={onAllWorkspaces}
-          testID="all-workspaces"
-        />
+        {onAllWorkspaces ? (
+          <SidebarRow
+            title="Workspaces"
+            icon={<Layers size={20} color={theme.text} />}
+            meta={String(countableWorkspaces(workspaces).length)}
+            accessibilityLabel={`All workspaces, ${countableWorkspaces(workspaces).length}`}
+            onPress={onAllWorkspaces}
+            testID="all-workspaces"
+          />
+        ) : null}
         {onScheduledTasks ? (
           <SidebarRow
             title="Scheduled tasks"
@@ -313,7 +328,7 @@ export function WorkspaceSidebar({
 
         {!groups.length ? (
           <Text style={[styles.placeholder, { color: theme.subtleText }]}>
-            No running workspaces
+            {offline ? "No saved chats" : "No running workspaces"}
           </Text>
         ) : null}
         {query && !inbox.length && !visibleGroups.length ? (
@@ -338,6 +353,7 @@ export function WorkspaceSidebar({
               <WorkspaceHeader
                 group={group}
                 expanded={expanded}
+                offline={offline}
                 active={activeWorkspaceId === group.workspaceId}
                 onToggle={() =>
                   setCollapsed((current) => ({
@@ -419,6 +435,7 @@ function ConversationRow({
   inbox,
   selected,
   actionsDisabled,
+  offline,
   onPress,
   onAction,
 }: {
@@ -426,6 +443,8 @@ function ConversationRow({
   inbox: boolean;
   selected: boolean;
   actionsDisabled: boolean;
+  /** Renaming, marking and deleting need the server. */
+  offline: boolean;
   onPress: () => void;
   onAction: (action: string) => void;
 }): React.JSX.Element {
@@ -453,25 +472,30 @@ function ConversationRow({
     ...action,
     disabled: action.id !== "read" && actionsDisabled,
   }));
+  const row = (showMenu?: () => void) => (
+    <SidebarRow
+      title={title}
+      strong={conversation.unread || conversation.needs_attention}
+      icon={
+        <ConversationIcon conversation={conversation} selected={selected} />
+      }
+      meta={meta}
+      selected={selected}
+      onPress={onPress}
+      onLongPress={showMenu}
+      accessibilityLabel={[title, status, meta].filter(Boolean).join(", ")}
+      accessibilityActions={
+        offline ? undefined : actions.filter((action) => !action.disabled)
+      }
+      onAccessibilityAction={offline ? undefined : onAction}
+      testID={`${inbox ? "inbox-" : ""}${conversation.session_id}`}
+    />
+  );
+  // Renaming, marking and deleting need the server.
+  if (offline) return row();
   return (
     <NativeContextMenu label={title} actions={actions} onSelect={onAction}>
-      {(showMenu) => (
-        <SidebarRow
-          title={title}
-          strong={conversation.unread || conversation.needs_attention}
-          icon={
-            <ConversationIcon conversation={conversation} selected={selected} />
-          }
-          meta={meta}
-          selected={selected}
-          onPress={onPress}
-          onLongPress={showMenu}
-          accessibilityLabel={[title, status, meta].filter(Boolean).join(", ")}
-          accessibilityActions={actions.filter((action) => !action.disabled)}
-          onAccessibilityAction={onAction}
-          testID={`${inbox ? "inbox-" : ""}${conversation.session_id}`}
-        />
-      )}
+      {(showMenu) => row(showMenu)}
     </NativeContextMenu>
   );
 }
@@ -589,12 +613,15 @@ function SidebarRow({
 function WorkspaceHeader({
   group,
   expanded,
+  offline,
   active,
   onToggle,
   onCreate,
 }: {
   group: WorkspaceConversationGroup<Workspace>;
   expanded: boolean;
+  /** Saved chats only: no states to report and no new chats to start. */
+  offline: boolean;
   active: boolean;
   onToggle: () => void;
   onCreate: () => void;
@@ -602,16 +629,20 @@ function WorkspaceHeader({
   const { theme } = useTheme();
   const workspace = group.workspace;
   const operating = Boolean(workspace && isOperatingWorkspace(workspace));
-  const busy = Boolean(
-    workspace?.has_active_session ||
-    operating ||
-    group.conversations.some((row) => row.status === "busy"),
-  );
-  const status = workspace?.active_operation
-    ? workspace.active_operation.replaceAll("_", " ")
-    : group.online
-      ? ""
-      : "Offline";
+  const busy =
+    !offline &&
+    Boolean(
+      workspace?.has_active_session ||
+      operating ||
+      group.conversations.some((row) => row.status === "busy"),
+    );
+  const status = offline
+    ? ""
+    : workspace?.active_operation
+      ? workspace.active_operation.replaceAll("_", " ")
+      : group.online
+        ? ""
+        : "Offline";
   const startable = Boolean(
     workspace && isWorkspaceReadyForChat(workspace, operating),
   );
@@ -653,14 +684,16 @@ function WorkspaceHeader({
           />
         ) : null}
       </Pressable>
-      <HeaderAction
-        label={`New chat in ${group.name}`}
-        onPress={onCreate}
-        disabled={!startable}
-        theme={theme}
-      >
-        <SquarePen size={17} color={theme.mutedText} />
-      </HeaderAction>
+      {offline ? null : (
+        <HeaderAction
+          label={`New chat in ${group.name}`}
+          onPress={onCreate}
+          disabled={!startable}
+          theme={theme}
+        >
+          <SquarePen size={17} color={theme.mutedText} />
+        </HeaderAction>
+      )}
     </View>
   );
 }

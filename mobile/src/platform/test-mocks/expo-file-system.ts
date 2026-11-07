@@ -9,6 +9,14 @@ function uriOf(...parts: Array<string | Directory>): string {
     .join("/");
 }
 
+/** Directories from the scheme down to `uri`, as `intermediates` creates them. */
+function addWithAncestors(uri: string): void {
+  const scheme = /^[a-z]+:\/\/\/?/.exec(uri)?.[0] ?? "";
+  const segments = uri.slice(scheme.length).split("/").filter(Boolean);
+  for (let index = 1; index <= segments.length; index += 1)
+    directories.add(`${scheme}${segments.slice(0, index).join("/")}`);
+}
+
 export class Directory {
   readonly uri: string;
   constructor(...parts: Array<string | Directory>) {
@@ -17,11 +25,17 @@ export class Directory {
   get exists(): boolean {
     return directories.has(this.uri);
   }
-  create(_options?: { intermediates?: boolean; idempotent?: boolean }): void {
-    directories.add(this.uri);
+  get name(): string {
+    return this.uri.split("/").pop() ?? "";
+  }
+  create(options?: { intermediates?: boolean; idempotent?: boolean }): void {
+    if (options?.intermediates) addWithAncestors(this.uri);
+    else directories.add(this.uri);
   }
   delete(): void {
     directories.delete(this.uri);
+    for (const key of [...directories])
+      if (key.startsWith(`${this.uri}/`)) directories.delete(key);
     for (const key of files.keys())
       if (key.startsWith(`${this.uri}/`)) files.delete(key);
   }
@@ -58,7 +72,7 @@ export class File {
   }
   create(options?: { intermediates?: boolean }): void {
     if (options?.intermediates)
-      directories.add(this.uri.slice(0, this.uri.lastIndexOf("/")));
+      addWithAncestors(this.uri.slice(0, this.uri.lastIndexOf("/")));
     files.set(this.uri, { data: "", encoding: "utf8" });
   }
   write(data: string, options?: { encoding?: string }): void {
@@ -85,8 +99,18 @@ export class File {
     files.set(target.uri, item);
     files.delete(this.uri);
   }
+  copySync(target: File, options?: { overwrite?: boolean }): void {
+    const item = files.get(this.uri);
+    if (!item) throw new Error("missing file");
+    if (files.has(target.uri) && !options?.overwrite)
+      throw new Error("target exists");
+    files.set(target.uri, { ...item });
+  }
 }
 
-export const Paths = { cache: new Directory("file:///cache") };
+export const Paths = {
+  cache: new Directory("file:///cache"),
+  document: new Directory("file:///document"),
+};
 export const __files = files;
 export const __directories = directories;

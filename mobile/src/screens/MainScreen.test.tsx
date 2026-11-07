@@ -51,6 +51,30 @@ jest.mock("../notifications/NotificationContext", () => ({
 jest.mock("../notifications/native", () => ({
   setViewedNotificationSession: jest.fn(),
 }));
+const mockSavedAccount = {
+  loadOverview: jest.fn(),
+  saveOverview: jest.fn(),
+  chats: jest.fn(),
+  loadChat: jest.fn(),
+  markOpened: jest.fn(),
+  saveChat: jest.fn(),
+  saveMedia: jest.fn(),
+  media: jest.fn(),
+};
+jest.mock("../offline/offlineStore", () => ({
+  offlineStore: () => ({ account: () => mockSavedAccount }),
+}));
+jest.mock("../offline/useSavedChatCleanup", () => ({
+  useSavedChatCleanup: jest.fn(),
+}));
+/** The props the transcript got last, to call its handlers directly. */
+const mockTranscript: {
+  props?: {
+    resolveMedia?: (path: string) => Promise<unknown>;
+    onFork?: unknown;
+    onEdit?: unknown;
+  };
+} = {};
 
 const listeners = new Set<() => void>();
 let snapshot = {
@@ -133,6 +157,7 @@ jest.mock("../components", () => {
       };
       placeholder?: string;
       disabled?: boolean;
+      canSend?: boolean;
       onSettings: () => void;
       onDraftChange: (value: string) => void;
       onSend: (value: {
@@ -204,6 +229,11 @@ jest.mock("../components", () => {
           `${props.placeholder ?? ""}|${props.disabled ? "disabled" : "ready"}`,
         ),
         ReactRuntime.createElement(
+          Text,
+          { testID: "composer-send" },
+          props.canSend === false ? "no-send" : "send",
+        ),
+        ReactRuntime.createElement(
           Pressable,
           {
             accessibilityRole: "button",
@@ -239,6 +269,8 @@ jest.mock("../components", () => {
       ),
     ChatMessages: (props: {
       loading?: boolean;
+      emptyText?: string;
+      resolveMedia?: (path: string) => Promise<unknown>;
       messages: Array<{ content: string }>;
       onPullUpAtEnd?: () => void;
       onOpenFile: (path: string) => void;
@@ -247,8 +279,9 @@ jest.mock("../components", () => {
         filename: string;
         mime: string;
       }) => void;
-    }) =>
-      ReactRuntime.createElement(
+    }) => {
+      mockTranscript.props = props;
+      return ReactRuntime.createElement(
         View,
         null,
         ReactRuntime.createElement(
@@ -257,7 +290,7 @@ jest.mock("../components", () => {
           props.loading
             ? "Loading chat"
             : props.messages.map((item) => item.content).join("\n") ||
-                "Empty chat",
+                (props.emptyText ?? "Empty chat"),
         ),
         props.onPullUpAtEnd
           ? ReactRuntime.createElement(Pressable, {
@@ -278,7 +311,8 @@ jest.mock("../components", () => {
               filename: "report.pdf",
             }),
         }),
-      ),
+      );
+    },
   };
 });
 jest.mock("../tools/WorkspaceToolsSheet", () => {
@@ -412,6 +446,15 @@ beforeEach(() => {
   mockNotificationState.target = null;
   jest.clearAllMocks();
   listeners.clear();
+  mockTranscript.props = undefined;
+  mockSavedAccount.loadOverview.mockResolvedValue(null);
+  mockSavedAccount.saveOverview.mockResolvedValue(undefined);
+  mockSavedAccount.chats.mockResolvedValue([]);
+  mockSavedAccount.loadChat.mockResolvedValue(null);
+  mockSavedAccount.markOpened.mockResolvedValue(undefined);
+  mockSavedAccount.saveChat.mockResolvedValue(undefined);
+  mockSavedAccount.saveMedia.mockResolvedValue(undefined);
+  mockSavedAccount.media.mockResolvedValue(null);
   snapshot = {
     sessions: [],
     messages: [],
@@ -460,6 +503,8 @@ function sessionValue(client: ReturnType<typeof mockClient>) {
     organizations: [],
     error: null,
     sessionExpired: false,
+    offline: false,
+    reconnecting: false,
     login: jest.fn(),
     retry: jest.fn(),
     signOut: jest.fn(),
@@ -1586,4 +1631,257 @@ it("closes the file viewer when navigating to a different chat", async () => {
     listeners.forEach((listener) => listener());
   });
   expect(screen.queryByTestId("file-viewer")).toBeNull();
+});
+
+describe("offline", () => {
+  const savedRow = {
+    session_id: "saved-chat",
+    workspace_id: runningWorkspace.id,
+    workspace_name: runningWorkspace.name,
+    title: "Saved chat",
+    status: "busy",
+    mode: "build",
+    agent_name: "build",
+    model: "m",
+    unread: true,
+    updated_at: "2026-11-01T00:00:00Z",
+    last_message_at: "2026-11-01T00:00:00Z",
+  } as HarnessConversation;
+  const savedSession = {
+    id: "saved-chat",
+    workspace_id: runningWorkspace.id,
+    parent_id: null,
+    title: "Saved chat",
+    mode: "build",
+    agent_name: "build",
+    model: "m",
+    status: "idle",
+    cost: 0,
+    tokens: {},
+  } as HarnessSession;
+
+  function saveChat() {
+    mockSavedAccount.loadOverview.mockResolvedValue({
+      workspaces: [runningWorkspace],
+      conversations: [savedRow],
+      savedAt: "2026-11-06T00:00:00Z",
+    });
+    mockSavedAccount.chats.mockResolvedValue([
+      {
+        sessionId: "saved-chat",
+        workspaceId: runningWorkspace.id,
+        conversation: savedRow,
+        openedAt: "2026-11-06T00:00:00Z",
+        savedAt: "2026-11-06T00:00:00Z",
+      },
+    ]);
+    mockSavedAccount.loadChat.mockResolvedValue({
+      session: savedSession,
+      sessions: [savedSession],
+      messages: [
+        {
+          id: "saved-message",
+          session_id: "saved-chat",
+          role: "assistant",
+          content: "Saved answer",
+          parts: [],
+        },
+      ],
+      todos: [],
+    });
+  }
+
+  it("opens the chat saved last and offers only what works without the server", async () => {
+    const client = mockClient();
+    saveChat();
+    const retry = jest.fn().mockResolvedValue(undefined);
+    mockUseSession.mockReturnValue({
+      ...sessionValue(client),
+      offline: true,
+      retry,
+    } as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+        "Saved answer",
+      ),
+    );
+    expect(mockSavedAccount.loadChat).toHaveBeenCalledWith("saved-chat");
+    expect(mockSavedAccount.markOpened).toHaveBeenCalledWith("saved-chat");
+    // Nothing asks the server.
+    expect(client.workspaces.list).not.toHaveBeenCalled();
+    expect(client.conversations.list).not.toHaveBeenCalled();
+    expect(client.harness.listEngines).not.toHaveBeenCalled();
+    expect(client.scheduledTasks.list).not.toHaveBeenCalled();
+    expect(mockController.openWorkspace).not.toHaveBeenCalled();
+    expect(mockController.newChat).not.toHaveBeenCalled();
+    // A prompt can be written, not sent; forking and editing need the server.
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    );
+    expect(screen.getByTestId("composer-send")).toHaveTextContent("no-send");
+    expect(mockTranscript.props?.onFork).toBeUndefined();
+    expect(mockTranscript.props?.onEdit).toBeUndefined();
+    expect(screen.getByTestId("new-chat")).toBeDisabled();
+    expect(screen.getByTestId("workspace-tools")).toBeDisabled();
+
+    // The sidebar lists the saved chat, without live states, and the apps.
+    fireEvent.press(screen.getByTestId("main-menu"));
+    const drawer = within(screen.getByTestId("conversation-drawer"));
+    expect(drawer.getByTestId("saved-chat")).toBeTruthy();
+    expect(drawer.queryByTestId("inbox-saved-chat")).toBeNull();
+    expect(drawer.queryByTestId("all-workspaces")).toBeNull();
+    expect(drawer.queryByTestId("scheduled-tasks")).toBeNull();
+    expect(drawer.getByTestId("apps")).toBeTruthy();
+
+    // Pictures come from the copies saved with the chat.
+    mockSavedAccount.media.mockResolvedValueOnce("file:///saved/shot.png");
+    await expect(
+      mockTranscript.props!.resolveMedia!("/workspace/shot.png"),
+    ).resolves.toBe("file:///saved/shot.png");
+    expect(mockSavedAccount.media).toHaveBeenCalledWith(
+      "saved-chat",
+      "/workspace/shot.png",
+    );
+    await expect(
+      mockTranscript.props!.resolveMedia!("/workspace/missing.png"),
+    ).rejects.toMatchObject({ retryable: false });
+
+    fireEvent.press(
+      within(screen.getByTestId("offline-notice")).getByRole("button", {
+        name: "Retry",
+      }),
+    );
+    expect(retry).toHaveBeenCalled();
+    tree.unmount();
+  });
+
+  it("says when nothing is saved on this device", async () => {
+    const client = mockClient();
+    mockUseSession.mockReturnValue({
+      ...sessionValue(client),
+      offline: true,
+    } as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+        "No chats are saved on this device yet.",
+      ),
+    );
+    tree.unmount();
+  });
+
+  it("saves the lists and the open chat online, and switches sources with the connection", async () => {
+    const client = mockClient();
+    client.conversations.list.mockResolvedValue([savedRow]);
+    saveChat();
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(mockSavedAccount.saveOverview).toHaveBeenCalledWith(
+        [runningWorkspace],
+        [savedRow],
+      ),
+    );
+
+    // Open the chat online: its transcript is saved shortly after.
+    fireEvent.press(screen.getByTestId("main-menu"));
+    fireEvent.press(
+      within(screen.getByTestId("conversation-drawer")).getByTestId(
+        "saved-chat",
+      ),
+    );
+    await waitFor(() =>
+      expect(mockController.openWorkspace).toHaveBeenCalledWith(
+        runningWorkspace.id,
+        "saved-chat",
+      ),
+    );
+    act(() => {
+      snapshot = {
+        ...snapshot,
+        workspaceId: runningWorkspace.id,
+        activeSessionId: "saved-chat",
+        activeSession: savedSession as never,
+        sessions: [savedSession] as never[],
+        messages: [
+          {
+            id: "live-message",
+            session_id: "saved-chat",
+            role: "assistant",
+            content: "Live answer",
+            parts: [],
+          },
+        ] as never[],
+      };
+      listeners.forEach((listener) => listener());
+    });
+    await waitFor(
+      () =>
+        expect(mockSavedAccount.saveChat).toHaveBeenCalledWith(
+          expect.objectContaining({
+            session: savedSession,
+            messages: [expect.objectContaining({ content: "Live answer" })],
+          }),
+          savedRow,
+        ),
+      { timeout: 3000 },
+    );
+    expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+      "Live answer",
+    );
+
+    // The connection goes: the same chat shows from what was saved.
+    mockUseSession.mockReturnValue({
+      ...sessionValue(client),
+      offline: true,
+    } as never);
+    tree.rerender(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+        "Saved answer",
+      ),
+    );
+    expect(screen.getByTestId("offline-notice")).toBeTruthy();
+    expect(mockSavedAccount.loadChat).toHaveBeenCalledWith("saved-chat");
+
+    // It comes back: the server's chat takes over again.
+    mockController.openWorkspace.mockClear();
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    tree.rerender(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(mockController.openWorkspace).toHaveBeenCalledWith(
+        runningWorkspace.id,
+        "saved-chat",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("transcript-state")).toHaveTextContent(
+        "Live answer",
+      ),
+    );
+    expect(screen.queryByTestId("offline-notice")).toBeNull();
+    tree.unmount();
+  });
 });

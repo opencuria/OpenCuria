@@ -78,6 +78,7 @@ export function renderSettingsPage(
     organization,
     isAdmin: admin,
     serverUrl: "https://curia.example",
+    offline: false,
     resources: new ResourceStore(),
     workspaces: [],
     refreshWorkspaces: jest.fn(async () => undefined),

@@ -74,28 +74,36 @@ function ChatStack(props: DrawerProps): React.JSX.Element {
       disabled: !props.canOpenTools,
       onPress: () => latest.current.onTools(),
     },
-    {
-      type: "menu",
-      label: "More",
-      icon: { type: "sfSymbol", name: "ellipsis" },
-      changesSelectionAsPrimaryAction: false,
-      menu: {
-        title: props.title,
-        // Native-stack otherwise makes this a single-selection menu, so UIKit
-        // checks the last command the user ran.
-        multiselectable: true,
-        items: props.menuActions.map((action) => ({
-          type: "action" as const,
-          label: action.title,
-          icon: action.symbol
-            ? { type: "sfSymbol" as const, name: action.symbol as NativeSymbol }
-            : undefined,
-          destructive: action.destructive,
-          disabled: action.disabled,
-          onPress: () => latest.current.onMenuAction(action.id),
-        })),
-      },
-    },
+    // An empty menu (offline) is left out.
+    ...(props.menuActions.length
+      ? [
+          {
+            type: "menu" as const,
+            label: "More",
+            icon: { type: "sfSymbol" as const, name: "ellipsis" as const },
+            changesSelectionAsPrimaryAction: false,
+            menu: {
+              title: props.title,
+              // Native-stack otherwise makes this a single-selection menu, so
+              // UIKit checks the last command the user ran.
+              multiselectable: true,
+              items: props.menuActions.map((action) => ({
+                type: "action" as const,
+                label: action.title,
+                icon: action.symbol
+                  ? {
+                      type: "sfSymbol" as const,
+                      name: action.symbol as NativeSymbol,
+                    }
+                  : undefined,
+                destructive: action.destructive,
+                disabled: action.disabled,
+                onPress: () => latest.current.onMenuAction(action.id),
+              })),
+            },
+          },
+        ]
+      : []),
   ];
 
   return (
@@ -214,24 +222,26 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
                   ]}
                 />
               </ToolbarItem>
-              <ToolbarItem placement="topBarTrailing">
-                <Menu
-                  label="More"
-                  systemImage="ellipsis"
-                  modifiers={[labelStyle("iconOnly")]}
-                >
-                  {props.menuActions.map((action) => (
-                    <SwiftButton
-                      key={action.id}
-                      label={action.title}
-                      systemImage={action.symbol as NativeSymbol | undefined}
-                      role={action.destructive ? "destructive" : undefined}
-                      modifiers={[disabled(Boolean(action.disabled))]}
-                      onPress={() => props.onMenuAction(action.id)}
-                    />
-                  ))}
-                </Menu>
-              </ToolbarItem>
+              {props.menuActions.length ? (
+                <ToolbarItem placement="topBarTrailing">
+                  <Menu
+                    label="More"
+                    systemImage="ellipsis"
+                    modifiers={[labelStyle("iconOnly")]}
+                  >
+                    {props.menuActions.map((action) => (
+                      <SwiftButton
+                        key={action.id}
+                        label={action.title}
+                        systemImage={action.symbol as NativeSymbol | undefined}
+                        role={action.destructive ? "destructive" : undefined}
+                        modifiers={[disabled(Boolean(action.disabled))]}
+                        onPress={() => props.onMenuAction(action.id)}
+                      />
+                    ))}
+                  </Menu>
+                </ToolbarItem>
+              ) : null}
             </Toolbar.Content>
           </Toolbar>
         </NavigationSplitView.Detail>

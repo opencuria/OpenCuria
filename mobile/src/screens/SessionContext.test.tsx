@@ -4,13 +4,36 @@ import { AppState } from "react-native";
 import { createClient } from "@opencuria/client";
 import type { CreateClientOptions } from "@opencuria/client";
 import * as SecureStore from "expo-secure-store";
-import { SessionProvider, useSession } from "./SessionContext";
+import {
+  OFFLINE_AFTER_MS,
+  SessionProvider,
+  useSession,
+} from "./SessionContext";
 
 jest.mock("@opencuria/client", () => ({ createClient: jest.fn() }));
 jest.mock("expo-secure-store", () => ({
   getItemAsync: jest.fn().mockResolvedValue(null),
   setItemAsync: jest.fn().mockResolvedValue(undefined),
   deleteItemAsync: jest.fn().mockResolvedValue(undefined),
+}));
+const mockSaved = {
+  loadProfile: jest.fn(),
+  saveProfile: jest.fn(),
+};
+const mockStore = {
+  account: jest.fn(() => mockSaved),
+  clear: jest.fn(),
+};
+jest.mock("../offline/offlineStore", () => ({
+  offlineStore: () => mockStore,
+}));
+const mockNetwork = new Set<(connected: boolean) => void>();
+jest.mock("../offline/connectivity", () => ({
+  ...jest.requireActual("../offline/connectivity"),
+  watchNetwork: (listener: (connected: boolean) => void) => {
+    mockNetwork.add(listener);
+    return () => mockNetwork.delete(listener);
+  },
 }));
 
 const mockCreateClient = createClient as jest.MockedFunction<
@@ -52,6 +75,8 @@ function makeClient(overrides: Record<string, unknown> = {}) {
       connect: jest.fn(),
       setActive: jest.fn(),
       dispose: jest.fn(),
+      on: jest.fn(() => jest.fn()),
+      isConnected: false,
       ...(overrides.realtime as object | undefined),
     },
   };
@@ -83,6 +108,10 @@ describe("SessionProvider", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockNetwork.clear();
+    mockSaved.loadProfile.mockResolvedValue(null);
+    mockSaved.saveProfile.mockResolvedValue(undefined);
+    mockStore.clear.mockResolvedValue(undefined);
     jest.mocked(SecureStore.getItemAsync).mockResolvedValue(null);
     jest.mocked(SecureStore.setItemAsync).mockResolvedValue(undefined);
     jest.mocked(SecureStore.deleteItemAsync).mockResolvedValue(undefined);
@@ -290,6 +319,9 @@ describe("SessionProvider", () => {
     expect(SecureStore.deleteItemAsync).toHaveBeenCalledWith(
       "opencuria.auth-session.v1",
     );
+    // Saved chats need a valid sign-in.
+    expect(mockStore.clear).toHaveBeenCalled();
+    expect(current.mock.lastCall?.[0].offline).toBe(false);
   });
 
   it("waits for device revocation before clearing auth and keeps failure retryable", async () => {
@@ -332,6 +364,191 @@ describe("SessionProvider", () => {
     });
     expect(current.mock.lastCall?.[0].session).toBeNull();
     expect(revoke).toHaveBeenCalledTimes(2);
+  });
+
+  const savedSession = JSON.stringify({
+    serverUrl: "https://curia.example",
+    accessToken: "a",
+    refreshToken: "r",
+    organizationId: "org-a",
+    userId: 7,
+  });
+  const savedProfile = {
+    user: { ...profile, first_name: "Saved" },
+    organizations: [orgA],
+    savedAt: "2026-11-06T00:00:00Z",
+  };
+
+  it("opens what this device saved when the server is unreachable, then reconnects", async () => {
+    jest.mocked(SecureStore.getItemAsync).mockResolvedValue(savedSession);
+    mockSaved.loadProfile.mockResolvedValue(savedProfile);
+    const client = makeClient({
+      auth: {
+        me: jest
+          .fn()
+          .mockRejectedValueOnce(new TypeError("Network request failed"))
+          .mockResolvedValue(profile),
+      },
+    });
+    clients.push(client);
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].booting).toBe(false));
+    expect(mockStore.account).toHaveBeenCalledWith(
+      "https://curia.example/api/v1|org-a|7",
+    );
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      offline: true,
+      error: null,
+      user: { first_name: "Saved" },
+    });
+    expect(client.realtime.connect).not.toHaveBeenCalled();
+
+    // The network returns: the server answers again and takes over.
+    await act(async () => {
+      mockNetwork.forEach((listener) => listener(true));
+    });
+    await waitFor(() => expect(current.mock.lastCall?.[0].offline).toBe(false));
+    expect(current.mock.lastCall?.[0].user.first_name).toBe("User");
+    expect(client.realtime.connect).toHaveBeenCalled();
+  });
+
+  it("stays offline without an error while the server still cannot be reached", async () => {
+    jest.mocked(SecureStore.getItemAsync).mockResolvedValue(savedSession);
+    mockSaved.loadProfile.mockResolvedValue(savedProfile);
+    const client = makeClient({
+      auth: {
+        me: jest.fn().mockRejectedValue(new TypeError("Network request failed")),
+      },
+    });
+    clients.push(client);
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].offline).toBe(true));
+    await act(async () => {
+      await current.mock.lastCall![0].retry();
+    });
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      offline: true,
+      reconnecting: false,
+      error: null,
+    });
+    expect(client.auth.me).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows saved chats while a slow server answers, then goes online", async () => {
+    jest.useFakeTimers({ doNotFake: ["queueMicrotask", "nextTick"] });
+    try {
+      jest.mocked(SecureStore.getItemAsync).mockResolvedValue(savedSession);
+      mockSaved.loadProfile.mockResolvedValue(savedProfile);
+      const me = deferred<typeof profile>();
+      const client = makeClient({ auth: { me: jest.fn(() => me.promise) } });
+      clients.push(client);
+      const current = jest.fn();
+      render(
+        <SessionProvider>
+          <Harness onValue={current} />
+        </SessionProvider>,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(current.mock.lastCall?.[0].booting).toBe(true);
+      await act(async () => {
+        jest.advanceTimersByTime(OFFLINE_AFTER_MS);
+      });
+      await waitFor(() =>
+        expect(current.mock.lastCall?.[0]).toMatchObject({
+          booting: false,
+          offline: true,
+        }),
+      );
+      await act(async () => {
+        me.resolve(profile);
+        await me.promise;
+      });
+      await waitFor(() =>
+        expect(current.mock.lastCall?.[0].offline).toBe(false),
+      );
+      expect(client.realtime.connect).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("keeps reporting answers of the server instead of working offline", async () => {
+    jest.mocked(SecureStore.getItemAsync).mockResolvedValue(savedSession);
+    mockSaved.loadProfile.mockResolvedValue(savedProfile);
+    const client = makeClient({
+      auth: {
+        me: jest
+          .fn()
+          .mockRejectedValue(
+            Object.assign(new Error("Server error"), { status: 500 }),
+          ),
+      },
+    });
+    clients.push(client);
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].booting).toBe(false));
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      offline: false,
+      error: "Server error",
+    });
+  });
+
+  it("saves the profile for offline use and goes offline when the network is lost", async () => {
+    const client = makeClient();
+    clients.push(client);
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].booting).toBe(false));
+    await act(async () => {
+      await current.mock.lastCall![0].login(
+        "https://curia.example",
+        "user@example.test",
+        "secret",
+      );
+    });
+    expect(mockStore.account).toHaveBeenCalledWith(
+      "https://curia.example/api/v1|org-a|7",
+    );
+    expect(mockSaved.saveProfile).toHaveBeenCalledWith(profile, [orgA, orgB]);
+
+    await act(async () => {
+      mockNetwork.forEach((listener) => listener(false));
+    });
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      offline: true,
+      user: { email: "user@example.test" },
+    });
+
+    // Signing out deletes what was saved for offline use.
+    await act(async () => {
+      await current.mock.lastCall![0].signOut();
+    });
+    expect(mockStore.clear).toHaveBeenCalled();
+    expect(current.mock.lastCall?.[0]).toMatchObject({
+      offline: false,
+      session: null,
+    });
   });
 
   it("reactivates realtime and refreshes registered foreground work on resume", async () => {

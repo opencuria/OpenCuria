@@ -89,6 +89,11 @@ export interface ChatComposerProps {
   onStop?: () => void | Promise<void>;
   busy?: boolean;
   disabled?: boolean;
+  /**
+   * False keeps the draft editable but neither sends it nor adds attachments,
+   * e.g. offline.
+   */
+  canSend?: boolean;
   placeholder?: string;
   /** Workspace picker above the editor; hosts pass it only for new chats. */
   workspace?: ComposerWorkspace;
@@ -138,6 +143,7 @@ export function ChatComposer({
   onStop,
   busy = false,
   disabled = false,
+  canSend = true,
   placeholder = "Ask OpenCuria",
   workspace,
   settings,
@@ -398,7 +404,7 @@ export function ChatComposer({
         | ChatComposerProps["onChoosePhotos"]
         | ChatComposerProps["onChooseFiles"],
     ) => {
-      if (!picker || disabled || pickerInFlight.current) return;
+      if (!picker || disabled || !canSend || pickerInFlight.current) return;
       const generation = operationGeneration.current;
       pickerInFlight.current = true;
       const context = contextKeyRef.current;
@@ -429,7 +435,7 @@ export function ChatComposer({
         pickerInFlight.current = false;
       }
     },
-    [disabled, onAttachmentsChange],
+    [canSend, disabled, onAttachmentsChange],
   );
 
   const send = useCallback(async () => {
@@ -459,6 +465,7 @@ export function ChatComposer({
     const currentAttachments = [...attachmentsRef.current];
     if (
       disabled ||
+      !canSend ||
       pickerInFlight.current ||
       (!text && currentAttachments.length === 0)
     )
@@ -512,6 +519,7 @@ export function ChatComposer({
     }
   }, [
     busy,
+    canSend,
     cancelSearch,
     disabled,
     dismissKeyboard,
@@ -523,7 +531,8 @@ export function ChatComposer({
 
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
   const canSubmit =
-    !disabled && (draft.trim().length > 0 || attachments.length > 0);
+    !disabled && canSend && (draft.trim().length > 0 || attachments.length > 0);
+  const attachDisabled = disabled || !canSend;
   const attachmentButton = hasPicker ? (
     <NativeMenu
       label="Add attachment"
@@ -535,7 +544,7 @@ export function ChatComposer({
                 id: "camera",
                 title: "Take a photo",
                 symbol: "camera",
-                disabled,
+                disabled: attachDisabled,
               },
             ]
           : []),
@@ -545,12 +554,19 @@ export function ChatComposer({
                 id: "photos",
                 title: "Choose photos",
                 symbol: "photo.on.rectangle",
-                disabled,
+                disabled: attachDisabled,
               },
             ]
           : []),
         ...(onChooseFiles
-          ? [{ id: "files", title: "Choose files", symbol: "doc", disabled }]
+          ? [
+              {
+                id: "files",
+                title: "Choose files",
+                symbol: "doc",
+                disabled: attachDisabled,
+              },
+            ]
           : []),
       ]}
       onSelect={(id) => {
@@ -564,7 +580,7 @@ export function ChatComposer({
       }}
     >
       <View pointerEvents="none">
-        <ComposerActionContent icon={Plus} disabled={disabled} />
+        <ComposerActionContent icon={Plus} disabled={attachDisabled} />
       </View>
     </NativeMenu>
   ) : null;

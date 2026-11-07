@@ -53,17 +53,20 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
               disabled={!props.canOpenTools}
               testID="workspace-tools"
             />
-            <NativeMenu
-              label="More"
-              actions={props.menuActions}
-              onSelect={props.onMenuAction}
-              style={styles.menu}
-              testID="chat-menu"
-            >
-              <View style={styles.menuIcon}>
-                <Ellipsis color={theme.text} size={22} />
-              </View>
-            </NativeMenu>
+            {/* An empty menu (offline) is left out. */}
+            {props.menuActions.length ? (
+              <NativeMenu
+                label="More"
+                actions={props.menuActions}
+                onSelect={props.onMenuAction}
+                style={styles.menu}
+                testID="chat-menu"
+              >
+                <View style={styles.menuIcon}>
+                  <Ellipsis color={theme.text} size={22} />
+                </View>
+              </NativeMenu>
+            ) : null}
           </View>
         }
       >

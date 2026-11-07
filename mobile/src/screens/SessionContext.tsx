@@ -10,6 +10,9 @@ import React, {
 import { AppState, type AppStateStatus } from "react-native";
 import { createClient, type OpenCuriaClient } from "@opencuria/client";
 import type { AuthUser, Organization, TokenPair } from "@opencuria/client";
+import { appScope } from "../apps/appPresentation";
+import { isUnreachable, watchNetwork } from "../offline/connectivity";
+import { offlineStore } from "../offline/offlineStore";
 import {
   NativeSessionStorage,
   type NativeAuthSession,
@@ -17,6 +20,27 @@ import {
 import { normalizeServerUrl } from "./serverConfig";
 
 const storage = new NativeSessionStorage();
+
+/** A slow server does not keep saved chats away for longer than this. */
+export const OFFLINE_AFTER_MS = 5_000;
+/** Offline, reconnecting is tried after these delays (the last one repeats). */
+export const RECONNECT_DELAYS_MS = [5_000, 10_000, 20_000, 30_000, 60_000];
+/** A dropped live connection gets this long to come back before a check. */
+export const DISCONNECT_GRACE_MS = 5_000;
+
+/** The account whose data is saved for offline use; null until it is known. */
+function savedScope(session: NativeAuthSession): string | null {
+  if (session.userId === undefined) return null;
+  try {
+    return appScope(
+      normalizeServerUrl(session.serverUrl).apiBaseUrl,
+      session.organizationId,
+      session.userId,
+    );
+  } catch {
+    return null;
+  }
+}
 
 type RegisterResource = (dispose: () => void) => () => void;
 interface SessionContextValue {
@@ -27,6 +51,13 @@ interface SessionContextValue {
   organizations: Organization[];
   error: string | null;
   sessionExpired: boolean;
+  /**
+   * The server cannot be reached: the profile, chats and lists saved on this
+   * device show instead, and OpenCuria reconnects by itself.
+   */
+  offline: boolean;
+  /** A reconnect attempt is running while offline. */
+  reconnecting: boolean;
   login: (serverUrl: string, email: string, password: string) => Promise<void>;
   retry: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -53,6 +84,15 @@ export function SessionProvider({
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sessionExpired, setSessionExpired] = useState(false);
+  const [offline, setOfflineState] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const offlineRef = useRef(false);
+  const userRef = useRef<AuthUser | null>(null);
+  userRef.current = user;
+  /** Counts profiles that came from the server rather than from this device. */
+  const freshProfilesRef = useRef(0);
+  const probeRef = useRef<Promise<void> | null>(null);
+  const reconnectRef = useRef<() => Promise<void>>(async () => undefined);
   const sessionRef = useRef<NativeAuthSession | null>(null);
   const clientRef = useRef<OpenCuriaClient | null>(null);
   const generationRef = useRef(0);
@@ -119,22 +159,32 @@ export function SessionProvider({
     setSession(next);
   }, []);
 
+  const setOffline = useCallback((value: boolean) => {
+    offlineRef.current = value;
+    setOfflineState(value);
+  }, []);
+
   const expireAuthentication = useCallback(async () => {
     const generation = ++generationRef.current;
     disposeScope();
     setCurrentSession(null);
     setUser(null);
     setOrganizations([]);
+    setOffline(false);
     setError("Your session expired. Sign in again.");
     setSessionExpired(true);
     setBooting(false);
+    // Saved chats need a valid sign-in, like the server's.
+    void offlineStore()
+      .clear()
+      .catch(() => undefined);
     try {
       await storage.clear();
     } catch (cause) {
       if (generation === generationRef.current)
         setError(messageOf(cause, "Could not clear the saved session."));
     }
-  }, [disposeScope, setCurrentSession]);
+  }, [disposeScope, setCurrentSession, setOffline]);
 
   useEffect(() => {
     lifecycleRef.current += 1;
@@ -229,8 +279,12 @@ export function SessionProvider({
           profile = await instance.auth.me();
         } catch (retryError) {
           if (isUnauthorized(retryError)) {
-            throw new Error(
-              "Could not verify your saved session. Check the connection and retry.",
+            // The server answered: this is no reason to work offline.
+            throw Object.assign(
+              new Error(
+                "Could not verify your saved session. Check the connection and retry.",
+              ),
+              { status: 401 },
             );
           }
           throw retryError;
@@ -250,8 +304,16 @@ export function SessionProvider({
             : (orgs[0]?.id ?? null);
       const next = { ...current, organizationId: selected, userId: profile.id };
       setCurrentSession(next);
+      freshProfilesRef.current += 1;
       setUser(profile);
       setOrganizations(orgs);
+      setOffline(false);
+      const scope = savedScope(next);
+      if (scope)
+        void offlineStore()
+          .account(scope)
+          .saveProfile(profile, orgs)
+          .catch(() => undefined);
       if (next !== current) {
         const write = saveQueueRef.current.then(async () => {
           if (
@@ -264,13 +326,48 @@ export function SessionProvider({
         await write;
       }
     },
-    [setCurrentSession],
+    [setCurrentSession, setOffline],
+  );
+
+  /**
+   * Show what this device saved for the session's account while the server
+   * cannot be reached. False when nothing is saved (or the server answered
+   * meanwhile); the caller then reports the failure.
+   */
+  const openOffline = useCallback(
+    async (authSession: NativeAuthSession, generation: number) => {
+      const scope = savedScope(sessionRef.current ?? authSession);
+      if (!scope) return false;
+      const fresh = freshProfilesRef.current;
+      const saved = await offlineStore()
+        .account(scope)
+        .loadProfile()
+        .catch(() => null);
+      if (
+        !saved ||
+        generation !== generationRef.current ||
+        freshProfilesRef.current !== fresh
+      )
+        return false;
+      setUser(saved.user);
+      setOrganizations(saved.organizations);
+      setError(null);
+      setOffline(true);
+      return true;
+    },
+    [setOffline],
   );
 
   const authenticateExisting = useCallback(
     async (authSession: NativeAuthSession, generation: number) => {
       setCurrentSession(authSession);
       const instance = makeClient(authSession, generation);
+      // Saved chats show while a slow server answers; it takes over then.
+      const fallback = setTimeout(() => {
+        void openOffline(authSession, generation).then((opened) => {
+          if (opened && generation === generationRef.current) setBooting(false);
+        });
+      }, OFFLINE_AFTER_MS);
       try {
         await readProfile(instance, generation);
         if (generation === generationRef.current) {
@@ -278,17 +375,49 @@ export function SessionProvider({
           setError(null);
         }
       } catch (cause) {
-        if (generation === generationRef.current) {
+        if (generation === generationRef.current && !offlineRef.current) {
           // Only the shared client's confirmed rejected-refresh callback expires
           // local auth. Any profile/refresh transport error remains retryable.
-          setError(messageOf(cause, "Could not reach this OpenCuria server."));
+          if (
+            !isUnreachable(cause) ||
+            !(await openOffline(authSession, generation))
+          )
+            setError(
+              messageOf(cause, "Could not reach this OpenCuria server."),
+            );
         }
       } finally {
+        clearTimeout(fallback);
         if (generation === generationRef.current) setBooting(false);
       }
     },
-    [expireAuthentication, makeClient, readProfile, setCurrentSession],
+    [makeClient, openOffline, readProfile, setCurrentSession],
   );
+
+  /** Offline: check whether the server answers again and go back online. */
+  const reconnect = useCallback(async () => {
+    const instance = clientRef.current;
+    if (!offlineRef.current || !instance) return;
+    if (probeRef.current) return probeRef.current;
+    const generation = generationRef.current;
+    setReconnecting(true);
+    const probe = (async () => {
+      try {
+        await readProfile(instance, generation);
+        if (generation === generationRef.current) instance.realtime.connect();
+      } catch {
+        /* Still offline; the next attempt follows. */
+      }
+    })();
+    probeRef.current = probe;
+    try {
+      await probe;
+    } finally {
+      if (probeRef.current === probe) probeRef.current = null;
+      setReconnecting(false);
+    }
+  }, [readProfile]);
+  reconnectRef.current = reconnect;
 
   useEffect(() => {
     let alive = true;
@@ -333,6 +462,10 @@ export function SessionProvider({
       if (!activeClient) return;
       if (next === "active") {
         activeClient.realtime.setActive(true);
+        if (offlineRef.current) {
+          void reconnectRef.current();
+          return;
+        }
         for (const refresh of [...foregroundRefreshersRef.current]) {
           try {
             void Promise.resolve(refresh()).catch(() => undefined);
@@ -348,6 +481,88 @@ export function SessionProvider({
     return () => subscription.remove();
   }, []);
 
+  // Offline: reconnect after a while, as soon as the network returns or the
+  // live connection gets through.
+  useEffect(() => {
+    if (!offline || !client) return;
+    let active = true;
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      const delay =
+        RECONNECT_DELAYS_MS[Math.min(attempt, RECONNECT_DELAYS_MS.length - 1)];
+      timer = setTimeout(() => {
+        attempt += 1;
+        void reconnectRef.current().finally(() => {
+          if (active && offlineRef.current) schedule();
+        });
+      }, delay);
+    };
+    schedule();
+    const now = () => {
+      attempt = 0;
+      void reconnectRef.current();
+      schedule();
+    };
+    const stopNetwork = watchNetwork((connected) => {
+      if (connected) now();
+    });
+    const stopConnect = client.realtime.on("connect", now);
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      stopNetwork();
+      stopConnect();
+    };
+  }, [offline, client]);
+
+  // Online: losing the network, or a live connection that stays down while
+  // the server no longer answers, switches to what this device saved.
+  useEffect(() => {
+    if (offline || !client) return;
+    const generation = generationRef.current;
+    const goOffline = () => {
+      if (
+        generation === generationRef.current &&
+        userRef.current &&
+        !offlineRef.current
+      )
+        setOffline(true);
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = async () => {
+      if (
+        AppState.currentState !== "active" ||
+        client.realtime.isConnected ||
+        !userRef.current
+      )
+        return;
+      try {
+        await client.auth.me();
+      } catch (cause) {
+        if (isUnreachable(cause) && !client.realtime.isConnected) goOffline();
+      }
+    };
+    const stopNetwork = watchNetwork((connected) => {
+      if (!connected) goOffline();
+    });
+    const detach = [
+      client.realtime.on("disconnect", () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => void check(), DISCONNECT_GRACE_MS);
+      }),
+      client.realtime.on("connect", () => {
+        if (timer) clearTimeout(timer);
+      }),
+    ];
+    return () => {
+      if (timer) clearTimeout(timer);
+      stopNetwork();
+      detach.forEach((off) => off());
+    };
+  }, [offline, client, setOffline]);
+
   const login = useCallback(
     async (serverUrl: string, email: string, password: string) => {
       let config: ReturnType<typeof normalizeServerUrl>;
@@ -362,6 +577,7 @@ export function SessionProvider({
       setSessionExpired(false);
       setUser(null);
       setOrganizations([]);
+      setOffline(false);
       setError(null);
       setSessionExpired(false);
       setBooting(true);
@@ -403,7 +619,7 @@ export function SessionProvider({
         if (generation === generationRef.current) setBooting(false);
       }
     },
-    [disposeScope, makeClient, readProfile, setCurrentSession],
+    [disposeScope, makeClient, readProfile, setCurrentSession, setOffline],
   );
 
   const retry = useCallback(async () => {
@@ -411,6 +627,10 @@ export function SessionProvider({
     const activeClient = clientRef.current;
     if (!current) {
       setError(null);
+      return;
+    }
+    if (offlineRef.current) {
+      await reconnect();
       return;
     }
     const generation = generationRef.current;
@@ -435,12 +655,21 @@ export function SessionProvider({
         setError(null);
       }
     } catch (cause) {
-      if (generation === generationRef.current)
+      if (
+        generation === generationRef.current &&
+        !(isUnreachable(cause) && (await openOffline(current, generation)))
+      )
         setError(messageOf(cause, "Could not reach this OpenCuria server."));
     } finally {
       if (generation === generationRef.current) setBooting(false);
     }
-  }, [authenticateExisting, expireAuthentication, readProfile]);
+  }, [
+    authenticateExisting,
+    expireAuthentication,
+    openOffline,
+    readProfile,
+    reconnect,
+  ]);
 
   const signOut = useCallback(async () => {
     if (!(await revokeDevices())) return;
@@ -450,14 +679,19 @@ export function SessionProvider({
     setCurrentSession(null);
     setUser(null);
     setOrganizations([]);
+    setOffline(false);
     setError(null);
     setBooting(false);
+    // Chats saved for offline use leave the device with the sign-in.
+    void offlineStore()
+      .clear()
+      .catch(() => undefined);
     try {
       await storage.clear();
     } catch (cause) {
       setError(messageOf(cause, "Could not clear the saved session."));
     }
-  }, [disposeScope, revokeDevices, setCurrentSession]);
+  }, [disposeScope, revokeDevices, setCurrentSession, setOffline]);
 
   /** Switches the session to `id`; the fresh profile must list it. */
   const switchOrganization = useCallback(
@@ -469,6 +703,7 @@ export function SessionProvider({
       disposeScope();
       const next = { ...current, organizationId: id };
       setCurrentSession(next);
+      setOffline(false);
       setError(null);
       setBooting(true);
       try {
@@ -486,13 +721,24 @@ export function SessionProvider({
         await readProfile(instance, generation);
         if (generation === generationRef.current) instance.realtime.connect();
       } catch (cause) {
-        if (generation === generationRef.current)
+        if (
+          generation === generationRef.current &&
+          !(isUnreachable(cause) && (await openOffline(next, generation)))
+        )
           setError(messageOf(cause, "Could not change organization."));
       } finally {
         if (generation === generationRef.current) setBooting(false);
       }
     },
-    [disposeScope, makeClient, readProfile, revokeDevices, setCurrentSession],
+    [
+      disposeScope,
+      makeClient,
+      openOffline,
+      readProfile,
+      revokeDevices,
+      setCurrentSession,
+      setOffline,
+    ],
   );
 
   const selectOrganization = useCallback(
@@ -523,6 +769,8 @@ export function SessionProvider({
       organizations,
       error,
       sessionExpired,
+      offline,
+      reconnecting,
       login,
       retry,
       signOut,
@@ -541,6 +789,8 @@ export function SessionProvider({
       organizations,
       error,
       sessionExpired,
+      offline,
+      reconnecting,
       login,
       retry,
       signOut,

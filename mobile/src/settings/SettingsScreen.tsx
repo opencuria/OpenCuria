@@ -44,6 +44,8 @@ export interface SettingsScreenProps {
   organizations: Organization[];
   organizationId: string | null;
   serverUrl: string;
+  /** Offline, Settings offers only appearance and the account. */
+  offline?: boolean;
   workspaces: Workspace[];
   refreshWorkspaces: () => Promise<void>;
   onCatalogChanged: () => void;
@@ -155,6 +157,7 @@ export function SettingsScreen(
         null,
       isAdmin: isOrganizationAdmin(props.organizations, organizationId),
       serverUrl: props.serverUrl,
+      offline: Boolean(props.offline),
       resources,
       workspaces: props.workspaces,
       refreshWorkspaces: props.refreshWorkspaces,
@@ -171,6 +174,7 @@ export function SettingsScreen(
       props.user,
       props.organizations,
       props.serverUrl,
+      props.offline,
       props.workspaces,
       props.refreshWorkspaces,
       props.onCatalogChanged,
