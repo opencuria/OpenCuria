@@ -130,8 +130,7 @@ final class AppRuntimeViewController: UIViewController {
     loadingView = nil
     rootView?.removeFromSuperview()
     rootView = nil
-    // Dropping the host invalidates the instance (RCTHost dealloc).
-    factory?.rootViewFactory.reactHost = nil
+    factory?.invalidate()
     factory = nil
     delegate = nil
   }

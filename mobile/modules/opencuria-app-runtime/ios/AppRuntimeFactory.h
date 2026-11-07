@@ -22,6 +22,10 @@ NS_SWIFT_NAME(AppRuntimeFactory)
 /// Called with the message of a fatal JavaScript error.
 @property (nonatomic, copy, nullable) void (^onFatalError)(NSString *message);
 
+/// Ends the React instance; dropping its host invalidates it (RCTHost dealloc).
+/// Swift cannot set `rootViewFactory.reactHost`: `RCTHost` is C++-only there.
+- (void)invalidate;
+
 @end
 
 NS_ASSUME_NONNULL_END

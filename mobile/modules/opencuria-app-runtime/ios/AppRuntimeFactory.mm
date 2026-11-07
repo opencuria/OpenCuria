@@ -61,4 +61,9 @@
 }
 #pragma clang diagnostic pop
 
+- (void)invalidate
+{
+  self.rootViewFactory.reactHost = nil;
+}
+
 @end
