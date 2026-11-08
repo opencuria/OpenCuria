@@ -2,7 +2,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAuthStore } from '@/stores/auth'
 import { useScheduledTaskStore } from './scheduledTasks'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 
 const api = vi.hoisted(() => ({
   list: vi.fn(),

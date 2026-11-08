@@ -21,7 +21,7 @@ import {
   classifyWorkspaceFile,
   resolveWorkspaceLinkPath,
   resolveWorkspaceMediaPath,
-} from '@/lib/workspaceFileRefs'
+} from '@opencuria/chat-core/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
@@ -29,9 +29,8 @@ import {
   parseComposerSegments,
   type ComposerFileToken,
   type ComposerToken,
-} from '@/lib/composerTokens'
+} from '@opencuria/chat-core/composerTokens'
 import { workspaceFileIconUrl } from '@/lib/fileIconAssets'
-import type { HarnessPart } from '@/types/harness'
 
 const emit = defineEmits<{ 'mention-images': [tokens: ComposerFileToken[]] }>()
 
@@ -527,7 +526,7 @@ function onHtmlImageActivate(event: MouseEvent | KeyboardEvent): void {
 // ---------------------------------------------------------------------------
 // Mention rendering (sent-user history only, `mentions === true`).
 //
-// Tokens come from the shared `src/lib/composerTokens.ts`
+// Tokens come from the shared `@opencuria/chat-core/composerTokens`
 // (`parseComposerSegments` / `imageMentionTokens`) and badge icons from the
 // shared `src/lib/fileIconAssets.ts` (`workspaceFileIconUrl`), so history
 // badges match composer chips. Badges are applied as a safe DOM text-node
@@ -777,7 +776,6 @@ onUnmounted(() => {
 })
 
 defineExpose({ renderMarkdown })
-export type { HarnessPart }
 </script>
 
 <template>

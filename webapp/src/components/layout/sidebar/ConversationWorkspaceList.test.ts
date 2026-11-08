@@ -6,7 +6,7 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import ConversationWorkspaceList from './ConversationWorkspaceList.vue'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 
 enableAutoUnmount(afterEach)
 beforeEach(() => setActivePinia(createPinia()))

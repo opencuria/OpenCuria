@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { resolveActiveChatTitle } from '@/lib/activeChatTitle'
-import type { HarnessConversation, HarnessSession } from '@/types/harness'
+import type { HarnessConversation, HarnessSession } from '@opencuria/chat-core/harness'
 
 function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
   return {

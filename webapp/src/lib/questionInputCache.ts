@@ -1,4 +1,4 @@
-import type { HarnessQuestionRequest } from '@/types/harness'
+import type { HarnessQuestionRequest } from '@opencuria/chat-core/harness'
 
 const CACHE_PREFIX = 'question-input:'
 

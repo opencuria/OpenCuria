@@ -30,9 +30,9 @@ import {
   type AgentConfigId,
   type AgentState,
   type EffortStrategy,
-} from '@/lib/harnessAgents'
+} from '@opencuria/chat-core/harnessAgents'
 import { invalidateAgentConfigs, loadAgentConfigsCached } from '@/lib/agentConfigs'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import {
   getSubagentConfig,

@@ -18,11 +18,15 @@
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
 import { WorkspaceStatus } from '@/types'
-import { getWorkspaceActionAvailability, isWorkspaceLifecycleBusy } from '@/lib/workspaceLifecycle'
-import type { HarnessSession } from '@/types/harness'
-import { formatSubagentType } from '@/lib/harnessSubtaskActivity'
-import { versionLabel } from '@/lib/imageVersions'
-import { USAGE_LEVEL_CLASSES, describeDiskUsage } from '@/lib/workspaceDisk'
+import {
+  getWorkspaceActionAvailability,
+  isWorkspaceLifecycleBusy,
+} from '@opencuria/chat-core/workspaceLifecycle'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
+import { formatSubagentType } from '@opencuria/chat-core/harnessSubtaskActivity'
+import { versionLabel } from '@opencuria/chat-core/imageVersions'
+import { USAGE_LEVEL_CLASSES } from '@/lib/workspaceDisk'
+import { describeDiskUsage } from '@opencuria/chat-core/workspaceDisk'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'

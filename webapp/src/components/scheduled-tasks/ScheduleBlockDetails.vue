@@ -6,10 +6,14 @@
 import { computed } from 'vue'
 import { CirclePlay, MessageSquare, Pause, Pencil, Play } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { describeSchedule, isScheduleEnded, scheduleRunStatusLabel } from '@/lib/scheduledTasks'
+import {
+  describeSchedule,
+  isScheduleEnded,
+  scheduleRunStatusLabel,
+} from '@opencuria/chat-core/scheduledTasks'
 import { describeSeries, formatMinutes, wallClock } from '@/lib/scheduleCalendar'
 import type { CalendarBlock } from '@/lib/scheduleCalendar'
-import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
+import type { ScheduledTask, ScheduledTaskRun } from '@opencuria/chat-core/scheduledTasks'
 
 const props = defineProps<{
   block: CalendarBlock

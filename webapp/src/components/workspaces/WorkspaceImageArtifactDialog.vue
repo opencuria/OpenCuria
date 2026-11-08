@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import CaptureTargetFields from '@/components/images/CaptureTargetFields.vue'
-import { NEW_IMAGE } from '@/lib/imageVersions'
+import { NEW_IMAGE } from '@opencuria/chat-core/imageVersions'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import type { Workspace } from '@/types'
 

@@ -15,7 +15,7 @@ import { computed, inject, ref } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { workspaceDesktopSize } from '@/lib/desktopGeometry'
+import { workspaceDesktopSize } from '@opencuria/chat-core/desktopSurface'
 
 const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const workspaceId = computed(() => workspaceIdRef.value)

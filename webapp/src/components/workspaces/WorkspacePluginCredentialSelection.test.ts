@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import WorkspacePluginCredentialSelection from './WorkspacePluginCredentialSelection.vue'
-import type { Credential, Plugin } from '@/types'
+import type { Credential } from '@/types'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 
 const catalog = vi.hoisted(() => ({
   plugins: [] as Plugin[],

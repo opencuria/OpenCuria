@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 
 import HarnessQueueSheet from './HarnessQueueSheet.vue'
 import source from './HarnessQueueSheet.vue?raw'
-import type { HarnessSteer } from '@/types/harness'
+import type { HarnessSteer } from '@opencuria/chat-core/harness'
 
 function makeSteer(id: string, content: string): HarnessSteer {
   return { id, content, created_at: '2026-10-16T10:00:00Z' }

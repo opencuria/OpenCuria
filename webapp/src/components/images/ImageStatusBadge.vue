@@ -2,7 +2,7 @@
 /** Status pill of an image definition or runner build; spins while the state changes. */
 import { Loader2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
-import type { ImageStatus, ImageStatusTone } from './imageDefinitionLifecycle'
+import type { ImageStatus, ImageStatusTone } from '@opencuria/chat-core/imageDefinitionLifecycle'
 
 defineProps<{ status: ImageStatus }>()
 

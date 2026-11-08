@@ -1,7 +1,5 @@
-// Disk usage rules are shared with the mobile app; only the colors are web-specific.
+// Web colors for the shared disk usage levels (chat-core).
 import type { UsageLevel } from '@opencuria/chat-core/workspaceDisk'
-
-export * from '@opencuria/chat-core/workspaceDisk'
 
 /** Tailwind classes per level: meter fill and accompanying text. */
 export const USAGE_LEVEL_CLASSES: Record<UsageLevel, { fill: string; text: string }> = {

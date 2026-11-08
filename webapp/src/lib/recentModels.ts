@@ -9,8 +9,8 @@
 
 import { ref } from 'vue'
 
-import type { ProviderModel } from './harnessModels'
-import type { HarnessId, HarnessSessionMode } from '@/types/harness'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
+import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
 import { listRecentModels, saveRecentModel } from '@/services/harness.api'
 import { providerCatalogContext } from './providerCatalog'
 

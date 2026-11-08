@@ -8,7 +8,7 @@ import {
   splitBase64Chunks,
   stripBase64Whitespace,
   type FileChunk,
-} from './fileChunks'
+} from '@opencuria/chat-core/fileChunks'
 
 function makeChunk(requestId: string, index: number, total: number, content: string): FileChunk {
   return {

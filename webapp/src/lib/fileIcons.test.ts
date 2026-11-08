@@ -8,7 +8,7 @@ import {
   resolveFileIconKey,
   resolveFolderIconKey,
   resolveWorkspaceIconKey,
-} from './fileIcons'
+} from '@opencuria/chat-core/fileIcons'
 
 describe('fileIcons resolver', () => {
   it('resolves common source extensions to colored keys', () => {

@@ -8,7 +8,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { useHarnessStore } from '@/stores/harness'
 import { createHarnessSession, saveRecentModel, sendHarnessMessage } from '@/services/harness.api'
-import type { HarnessSession } from '@/types/harness'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =

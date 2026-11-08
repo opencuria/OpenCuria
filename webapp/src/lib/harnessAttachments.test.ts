@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import {
   attachmentByteSize,
   attachmentSizeLabel,
@@ -9,7 +9,7 @@ import {
   isPdfAttachment,
   toolAttachments,
   TOOL_ATTACHMENT_MAX_COUNT,
-} from './harnessAttachments'
+} from '@opencuria/chat-core/harnessAttachments'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {

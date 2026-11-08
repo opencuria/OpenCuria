@@ -2,14 +2,14 @@
 import { computed, onMounted, ref } from 'vue'
 import { ChevronRight } from '@lucide/vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { useHarnessStore } from '@/stores/harness'
 import {
   formatSubagentType,
   subtaskActivityLabel,
   resolveChildSessionId,
-} from '@/lib/harnessSubtaskActivity'
-import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
+} from '@opencuria/chat-core/harnessSubtaskActivity'
+import { formatHarnessModelEffort, type ProviderModel } from '@opencuria/chat-core/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import HarnessDesktopMini from './HarnessDesktopMini.vue'
 

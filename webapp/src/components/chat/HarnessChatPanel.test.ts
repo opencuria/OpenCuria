@@ -12,7 +12,7 @@ import {
 } from '@/services/harness.api'
 import { onEvent } from '@/services/socket'
 import { armComposerTransition, clearComposerTransition } from '@/lib/composerTransition'
-import type { HarnessSession } from '@/types/harness'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
 
 enableAutoUnmount(afterEach)
 

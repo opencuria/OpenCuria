@@ -13,7 +13,7 @@ import {
   makeRepoSnapshot,
   makeRepoSummary,
 } from './git.fixtures'
-import type { RawGitRepoSnapshot } from '@/services/git.api'
+import type { RawGitRepoSnapshot } from '@opencuria/chat-core/gitTypes'
 
 vi.mock('vue-sonner', () => ({
   toast: {

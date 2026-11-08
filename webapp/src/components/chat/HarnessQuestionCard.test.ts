@@ -3,7 +3,7 @@ import { requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 import { mount } from '@vue/test-utils'
 
 import HarnessQuestionCard from './HarnessQuestionCard.vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import { createPointerHoverGate, type MentionCandidate } from '@/lib/harnessMentions'
+import { createPointerHoverGate, type MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 const props = withDefaults(

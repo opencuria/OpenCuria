@@ -33,13 +33,15 @@ import type {
   ScheduledTask,
   ScheduledTaskInput,
   ScheduledTaskRun,
-} from '@/services/scheduledTasks.api'
+  ScheduleDraft,
+  ScheduleMode,
+} from '@opencuria/chat-core/scheduledTasks'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useAuthStore } from '@/stores/auth'
 import { useSkillStore } from '@/stores/skills'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { WorkspaceStatus } from '@/types'
-import type { HarnessId } from '@/types/harness'
+import type { HarnessId } from '@opencuria/chat-core/harness'
 import {
   COMMON_TIME_ZONES,
   CRON_PRESETS,
@@ -65,8 +67,8 @@ import {
   validateSchedule,
   validateScheduleDraft,
   WEEKDAYS,
-} from '@/lib/scheduledTasks'
-import type { ScheduleDraft, ScheduleMode } from '@/lib/scheduledTasks'
+} from '@opencuria/chat-core/scheduledTasks'
+
 import { useNotificationStore } from '@/stores/notifications'
 import { usePolling } from '@/composables/usePolling'
 

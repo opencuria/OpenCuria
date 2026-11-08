@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useAuthStore } from '@/stores/auth'
-import { getWorkspaceActionAvailability } from '@/lib/workspaceLifecycle'
+import { getWorkspaceActionAvailability } from '@opencuria/chat-core/workspaceLifecycle'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
 
 const props = defineProps<{

@@ -1,4 +1,4 @@
-/** Web-specific Lucide icon mapping with shared pure tool display helpers. */
+/** Web-specific Lucide icons for tool and reasoning rows. */
 
 import type { Component } from 'vue'
 import {
@@ -17,19 +17,8 @@ import {
   Terminal,
   Wrench,
 } from '@lucide/vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { isComputerUseTool, resolveToolName } from '@opencuria/chat-core/toolDisplay'
-
-export {
-  computerUseSummary,
-  isComputerUseTool,
-  hydrateHarnessPart,
-  parseToolArguments,
-  resolveToolName,
-  stringArg,
-  toolDisplayLabel,
-  truncatePreview,
-} from '@opencuria/chat-core/toolDisplay'
 
 /** Lucide icon for a tool or reasoning row. */
 export function toolDisplayIcon(part: HarnessPart): Component {

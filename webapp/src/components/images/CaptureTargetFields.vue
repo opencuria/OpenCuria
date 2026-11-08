@@ -19,7 +19,7 @@ import {
   captureTargetCandidates,
   defaultCaptureTarget,
   nextImageVersion,
-} from '@/lib/imageVersions'
+} from '@opencuria/chat-core/imageVersions'
 import { useImageStore } from '@/stores/images'
 import type { ImageCaptureInput, Workspace } from '@/types'
 

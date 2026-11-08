@@ -8,7 +8,7 @@ import {
   listHarnessSessions,
   listHarnessTodos,
 } from '@/services/harness.api'
-import type { HarnessMessage, HarnessSession } from '@/types/harness'
+import type { HarnessMessage, HarnessSession } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =

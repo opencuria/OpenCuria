@@ -3,7 +3,7 @@ import {
   agentDisplayName,
   isSubagent,
   resolvePreviewEffort,
-} from './harnessAgents'
+} from '@opencuria/chat-core/harnessAgents'
 
 describe('harnessAgents', () => {
   it('previews strategy efforts with floor(n/2) for medium', () => {

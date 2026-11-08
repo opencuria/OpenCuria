@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import type { GitRefTag } from '@/types/git'
-import { groupRefTags, parseRemoteRef } from './gitRefGroups'
+import type { GitRefTag } from '@opencuria/chat-core/gitTypes'
+import { groupRefTags, parseRemoteRef } from '@opencuria/chat-core/gitRefGroups'
 
 function tag(name: string, remote = false, current = false): GitRefTag {
   return { name, remote, current }

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { describeDiskUsage, diskUsagePercent, isDiskUsageStale, usageLevel } from './workspaceDisk'
+import {
+  describeDiskUsage,
+  diskUsagePercent,
+  isDiskUsageStale,
+  usageLevel,
+} from '@opencuria/chat-core/workspaceDisk'
 
 const GIB = 1024 ** 3
 

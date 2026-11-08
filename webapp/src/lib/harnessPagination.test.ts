@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { shouldResetHarnessPage } from './harnessPagination'
+import { shouldResetHarnessPage } from '@opencuria/chat-core/harnessPagination'
 
 describe('shouldResetHarnessPage', () => {
   it('keeps the page on append-only stream growth or unchanged structural identities', () => {

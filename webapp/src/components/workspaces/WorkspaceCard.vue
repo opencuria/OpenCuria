@@ -6,15 +6,19 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, Container, Loader2, WifiOff } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
-import { USAGE_LEVEL_CLASSES, describeDiskUsage, isDiskUsageStale } from '@/lib/workspaceDisk'
+import { USAGE_LEVEL_CLASSES } from '@/lib/workspaceDisk'
+import {
+  describeDiskUsage,
+  isDiskUsageStale,
+  formatStorageBytes,
+} from '@opencuria/chat-core/workspaceDisk'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import { workspaceStatusLabel } from '@/lib/workspaceLifecycle'
+import { workspaceStatusLabel } from '@opencuria/chat-core/workspaceLifecycle'
 import WorkspaceActions from './WorkspaceActions.vue'
 import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
 import WorkspaceRecreateDialog from './WorkspaceRecreateDialog.vue'
 import ImageVersionBadge from '@/components/images/ImageVersionBadge.vue'
 import UsageMeter from '@/components/common/UsageMeter.vue'
-import { storageBytes } from '@/composables/useRunnerStorage'
 
 const props = withDefaults(
   defineProps<{
@@ -106,8 +110,8 @@ const disk = computed(() => {
       : ''
   return {
     ...view,
-    free: storageBytes(view.freeBytes),
-    title: `${storageBytes(view.usedBytes)} of ${storageBytes(view.capacityBytes)} used (${view.percent}%)${measured}`,
+    free: formatStorageBytes(view.freeBytes),
+    title: `${formatStorageBytes(view.usedBytes)} of ${formatStorageBytes(view.capacityBytes)} used (${view.percent}%)${measured}`,
   }
 })
 </script>

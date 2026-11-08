@@ -8,9 +8,13 @@ import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsRow from './SettingsRow.vue'
 import SettingsSection from './SettingsSection.vue'
-import { PROVIDER_META, type ProviderMeta, type SettingsProviderId } from './providerMeta'
-import { providerAccountsSummary, providerModelCount } from '@opencuria/chat-core/providerAccounts'
-import type { ProviderModel } from '@/lib/harnessModels'
+import { PROVIDER_META, type ProviderMeta } from './providerMeta'
+import {
+  providerAccountsSummary,
+  providerModelCount,
+  type ProviderAccountProvider,
+} from '@opencuria/chat-core/providerAccounts'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 import {
   invalidateProviderCatalog,
   loadProviderModelsCached,
@@ -60,10 +64,10 @@ const speechCatalog = computed<ProviderModel[]>(() =>
     max_output_tokens: 0,
   })),
 )
-const activeProvider = ref<SettingsProviderId | null>(null)
+const activeProvider = ref<ProviderAccountProvider | null>(null)
 
 const accountsByProvider = computed(() => {
-  const map = new Map<SettingsProviderId, ProviderAccount[]>()
+  const map = new Map<ProviderAccountProvider, ProviderAccount[]>()
   for (const account of accounts.value) {
     const list = map.get(account.provider) ?? []
     list.push(account)
@@ -72,7 +76,7 @@ const accountsByProvider = computed(() => {
   return map
 })
 const activeAccountByProvider = computed(() => {
-  const map = new Map<SettingsProviderId, ProviderAccount>()
+  const map = new Map<ProviderAccountProvider, ProviderAccount>()
   for (const account of accounts.value) {
     if (account.is_active) map.set(account.provider, account)
   }
@@ -176,7 +180,7 @@ async function loadState(): Promise<void> {
   }
 }
 
-function openProviderDialog(provider: SettingsProviderId): void {
+function openProviderDialog(provider: ProviderAccountProvider): void {
   activeProvider.value = provider
 }
 

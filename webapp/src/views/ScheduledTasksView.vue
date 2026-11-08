@@ -27,7 +27,7 @@ import {
   isScheduleRunActive,
   isValidTimeZone,
   scheduleRunWorkspaceId,
-} from '@/lib/scheduledTasks'
+} from '@opencuria/chat-core/scheduledTasks'
 import {
   addDays,
   browserTimeZone,
@@ -49,7 +49,7 @@ import {
 } from '@/lib/scheduleCalendar'
 import type { CalendarBlock, CalendarDay, SchedulePatch } from '@/lib/scheduleCalendar'
 import { listScheduledTaskRuns, runScheduledTaskNow } from '@/services/scheduledTasks.api'
-import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
+import type { ScheduledTask, ScheduledTaskRun } from '@opencuria/chat-core/scheduledTasks'
 import { useNotificationStore } from '@/stores/notifications'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { useWorkspaceStore } from '@/stores/workspaces'

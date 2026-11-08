@@ -13,7 +13,7 @@ import type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
   HarnessSession,
-} from '@/types/harness'
+} from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =

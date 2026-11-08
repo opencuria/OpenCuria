@@ -4,8 +4,8 @@
  *
  * Published prop API for composer reuse:
  * - `tokens`: file tokens (`{ kind:'file', path, raw?, name?, start, end }`,
- *   as returned by `parseComposerSegments` / `imageMentionTokens` in the
- *   planned `src/lib/composerTokens.ts`). Only safe `/workspace/...` image
+ *   as returned by `parseComposerSegments` / `imageMentionTokens` in
+ *   `@opencuria/chat-core/composerTokens`). Only safe `/workspace/...` image
  *   paths render; escapes and non-images are ignored.
  * - `workspaceId`: workspace used for `store.fetchImage`. Empty/absent
  *   disables fetching (fallback tiles only, never a stuck spinner).
@@ -26,8 +26,8 @@ import { X } from '@lucide/vue'
 import { Skeleton } from '@/components/ui/skeleton'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 import ImageLightbox from './ImageLightbox.vue'
-import { classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
-import { workspaceRelativePath } from '@/lib/harnessMentions'
+import { classifyWorkspaceFile } from '@opencuria/chat-core/workspaceFileRefs'
+import { workspaceRelativePath } from '@opencuria/chat-core/harnessMentions'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 
 export interface MentionFileToken {

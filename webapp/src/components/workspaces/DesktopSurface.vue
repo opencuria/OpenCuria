@@ -15,18 +15,17 @@ import { useDesktopSession } from '@/composables/useDesktopSession'
 import { bindDesktopClipboard, createDesktopClipboardReader } from '@/lib/desktopClipboard'
 import * as workspacesApi from '@/services/workspaces.api'
 import { getConfig } from '@/services/config'
-import {
-  desktopIframeSrc as buildDesktopIframeSrc,
-  workspaceDesktopSize,
-} from '@/lib/desktopGeometry'
+
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
-import { DESKTOP_CONNECTION_TIMEOUT_MS } from '@opencuria/chat-core/desktopSurface'
 import {
+  DESKTOP_CONNECTION_TIMEOUT_MS,
+  buildDesktopViewerUrl,
+  workspaceDesktopSize,
   createDesktopReconnectBackoff,
   createPausableTimer,
-  isTrustedDesktopMessage,
   parseDesktopConnectionStatus,
-} from '@/lib/desktopSurfaceRecovery'
+} from '@opencuria/chat-core/desktopSurface'
+import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { registerPointingDesktop } from '@/lib/voicePointing'
@@ -118,7 +117,7 @@ const desktopViewer = computed(() => {
   const config = getConfig()
   return {
     key,
-    src: buildDesktopIframeSrc(
+    src: buildDesktopViewerUrl(
       config.wsBaseUrl || '',
       desktopStore.proxyUrl,
       token,

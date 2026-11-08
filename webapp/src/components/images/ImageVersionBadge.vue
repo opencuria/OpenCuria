@@ -2,7 +2,7 @@
 /** "image · v3" chip for a workspace, with an update hint when a newer version exists. */
 import { computed } from 'vue'
 import { Layers } from '@lucide/vue'
-import { versionLabel } from '@/lib/imageVersions'
+import { versionLabel } from '@opencuria/chat-core/imageVersions'
 import type { Workspace } from '@/types'
 
 const props = defineProps<{ workspace: Workspace }>()

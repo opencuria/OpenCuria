@@ -7,7 +7,7 @@ import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { ApiRequestError } from '@/services/api'
 import { editHarnessMessage, forkHarnessSession, listHarnessParts } from '@/services/harness.api'
 import { useRecentModels } from '@/lib/recentModels'
-import type { HarnessMessage, HarnessSession } from '@/types/harness'
+import type { HarnessMessage, HarnessSession } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =

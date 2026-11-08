@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Button } from '@/components/ui/button'
-import { HARNESS_PAGE_SIZE } from '@/lib/harnessPagination'
+import { HARNESS_PAGE_SIZE } from '@opencuria/chat-core/harnessPagination'
 
 const props = withDefaults(
   defineProps<{

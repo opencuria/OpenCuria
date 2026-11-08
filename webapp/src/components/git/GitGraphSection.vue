@@ -18,18 +18,18 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { CSSProperties } from 'vue'
-import type { GitCommit, GitRefTag } from '@/types/git'
-import type { GitRefGroup } from '@/lib/gitRefGroups'
+import type { GitCommit, GitRefTag } from '@opencuria/chat-core/gitTypes'
+import type { GitRefGroup } from '@opencuria/chat-core/gitRefGroups'
+import { GIT_GRAPH_COLORS } from '@/lib/gitGraph'
 import {
-  GIT_GRAPH_COLORS,
   GIT_GRAPH_GRID_Y,
   GIT_GRAPH_NODE_R,
   branchPath,
   computeGitGraphLayout,
   filterReachableCommits,
   vertexPixel,
-} from '@/lib/gitGraph'
-import { insertStashCommits } from '@/lib/gitStash'
+} from '@opencuria/chat-core/gitGraph'
+import { insertStashCommits } from '@opencuria/chat-core/gitStash'
 import { useGitStore } from '@/stores/git'
 import { copyToClipboard } from '@/lib/clipboard'
 import { formatRelativeTime } from '@/lib/utils'

@@ -12,7 +12,7 @@ import { useAuthStore } from '@/stores/auth'
 import { ApiRequestError } from '@/services/api'
 import { toast } from 'vue-sonner'
 import type { ProviderAccount } from '@/services/harness.api'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 
 enableAutoUnmount(afterEach)
 afterEach(() => vi.useRealTimers())

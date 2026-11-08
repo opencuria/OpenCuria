@@ -3,21 +3,21 @@ import { computed, inject, ref } from 'vue'
 
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
-import type { HarnessPart } from '@/types/harness'
-import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { parseToolArguments, stringArg, truncatePreview } from '@opencuria/chat-core/toolDisplay'
+import { workspaceAttachmentTokens } from '@/lib/harnessAttachments'
 import {
   attachmentSizeLabel,
   isImageAttachment,
   isPdfAttachment,
   toolAttachments,
-  workspaceAttachmentTokens,
   type ToolAttachment,
-} from '@/lib/harnessAttachments'
+} from '@opencuria/chat-core/harnessAttachments'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
+import { resolveWorkspaceMediaPath } from '@opencuria/chat-core/workspaceFileRefs'
 
 const props = defineProps<{
   part: HarnessPart

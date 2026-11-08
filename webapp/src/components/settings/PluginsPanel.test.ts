@@ -4,7 +4,7 @@ import { reactive } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import PluginsPanel from './PluginsPanel.vue'
 import DetailHeader from '@/components/common/DetailHeader.vue'
-import type { Plugin } from '@/types'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 
 const routerPush = vi.fn()
 const routerReplace = vi.fn(async () => undefined)

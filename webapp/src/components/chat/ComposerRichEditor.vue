@@ -4,7 +4,7 @@ import {
   parseComposerSegments,
   removeComposerToken,
   type ComposerToken,
-} from '@/lib/composerTokens'
+} from '@opencuria/chat-core/composerTokens'
 import { workspaceFileIconUrl } from '@/lib/fileIconAssets'
 import { cn } from '@/lib/utils'
 

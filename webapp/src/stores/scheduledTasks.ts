@@ -11,7 +11,7 @@ import type {
   ScheduledTask,
   ScheduledTaskInput,
   ScheduledTaskPatch,
-} from '@/services/scheduledTasks.api'
+} from '@opencuria/chat-core/scheduledTasks'
 
 /** Initial values for a new task, e.g. from a calendar slot. */
 export interface ScheduledTaskPrefill {

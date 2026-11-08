@@ -17,8 +17,8 @@ import {
   scheduleStateLabel,
   validateSchedule,
   validateScheduleDraft,
-} from './scheduledTasks'
-import type { ScheduleDraft } from './scheduledTasks'
+} from '@opencuria/chat-core/scheduledTasks'
+import type { ScheduleDraft } from '@opencuria/chat-core/scheduledTasks'
 
 const base = {
   name: 'Daily review', workspace_id: 'ws-1', prompt: 'Check the project',

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { ref } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import ImageLightbox from '../ImageLightbox.vue'
 import ToolDetailBash from './ToolDetailBash.vue'
 import ToolDetailDefault from './ToolDetailDefault.vue'

@@ -40,6 +40,3 @@ export function formatRelativeTime(date: string | null | undefined): string {
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`
   return `${Math.floor(diffSec / 86400)}d ago`
 }
-
-/** Compact duration label for minutes; shared with the native client. */
-export { formatMinutesAsDuration } from '@opencuria/chat-core/workspaceLifecycle'

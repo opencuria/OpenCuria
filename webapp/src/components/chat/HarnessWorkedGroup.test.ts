@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 vi.mock('@/components/common/LoadingSpinner.vue', () => ({
   default: { template: '<span class="loading-stub" />' },

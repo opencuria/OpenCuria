@@ -1,5 +1,5 @@
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
-import type { HarnessId } from '@/types/harness'
+import type { HarnessId } from '@opencuria/chat-core/harness'
 
 export function useChatInputCache(
   workspaceId: MaybeRefOrGetter<string>,

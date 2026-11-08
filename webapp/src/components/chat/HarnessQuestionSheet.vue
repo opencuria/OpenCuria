@@ -4,8 +4,8 @@ import { ChevronDown, ChevronUp, MessageCircleQuestion, PenLine } from '@lucide/
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { optionLetter } from '@/lib/composerSheets'
-import { gateSourceLabel } from '@/lib/harnessSubtaskActivity'
-import type { HarnessQuestionRequest } from '@/types/harness'
+import { gateSourceLabel } from '@opencuria/chat-core/harnessSubtaskActivity'
+import type { HarnessQuestionRequest } from '@opencuria/chat-core/harness'
 import { useAuthStore } from '@/stores/auth'
 import {
   loadQuestionInputCache,

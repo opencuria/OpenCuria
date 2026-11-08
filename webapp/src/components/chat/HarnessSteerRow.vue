@@ -8,7 +8,7 @@
  * edit or fork actions.
  */
 import { CornerDownRight } from '@lucide/vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import HarnessUserBubble from './HarnessUserBubble.vue'
 
 defineProps<{ part: HarnessPart }>()

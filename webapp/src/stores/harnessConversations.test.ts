@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { listHarnessConversations, markHarnessSessionRead, markHarnessSessionUnread } from '@/services/harness.api'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', () => ({
   listHarnessConversations: vi.fn().mockResolvedValue([]),

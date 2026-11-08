@@ -1,7 +1,7 @@
 /** Split a tool row label into verb, object and path hint for typographic hierarchy. */
 
-import type { HarnessPart } from '@/types/harness'
-import { resolveToolName, toolDisplayLabel } from '@/lib/toolDisplay'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { resolveToolName, toolDisplayLabel } from '@opencuria/chat-core/toolDisplay'
 
 export interface ToolRowLabel {
   /** Action word (`Read`, `Grep`, `$`, `Thought`), rendered muted. */

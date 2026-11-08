@@ -7,7 +7,7 @@
  * and persisted through the store (cdvHeight).
  */
 import { computed, ref } from 'vue'
-import type { GitCommitFile } from '@/types/git'
+import type { GitCommitFile } from '@opencuria/chat-core/gitTypes'
 import { useGitStore } from '@/stores/git'
 import { formatDate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'

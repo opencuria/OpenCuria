@@ -79,12 +79,6 @@ export type {
   SkillUpdateInput,
   VmSystemMetrics,
 } from '@opencuria/client/types'
-export type {
-  CredentialService,
-  Plugin,
-  PluginCreateIn,
-  PluginUpdateIn,
-} from '@opencuria/chat-core/plugins'
 import type { ImageArtifact } from '@opencuria/client/types'
 
 // --- Auth ---

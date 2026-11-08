@@ -4,7 +4,7 @@ import { Plus, Key, X } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
 import { useCredentialStore } from '@/stores/credentials'
 import * as credentialsApi from '@/services/credentials.api'
-import { slugify } from '@/lib/pluginForms'
+import { slugify } from '@opencuria/chat-core/pluginForms'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -29,7 +29,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import type { CredentialService, CredentialServiceCreateInput } from '@/types'
+import type { CredentialServiceCreateInput } from '@/types'
+import type { CredentialService } from '@opencuria/chat-core/plugins'
 
 const authStore = useAuthStore()
 const credentialStore = useCredentialStore()

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Separator } from '@/components/ui/separator'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { useHarnessPartDetail } from '@/lib/harnessPartDetail'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 

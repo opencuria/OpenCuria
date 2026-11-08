@@ -3,7 +3,7 @@
  *
  * Owns the harness block model (`HarnessSession` + `HarnessMessage` with
  * `parts[]` + todos + pending permission requests). All streaming
- * transitions delegate to the pure reducers in `lib/harnessReducer.ts`.
+ * transitions delegate to the pure reducers in `@opencuria/chat-core/harnessReducer`.
  */
 
 import { defineStore } from 'pinia'
@@ -20,7 +20,7 @@ import type {
   HarnessId,
   HarnessSteer,
   HarnessTodo,
-} from '@/types/harness'
+} from '@opencuria/chat-core/harness'
 import {
   abortHarnessSession,
   createHarnessSession,
@@ -54,16 +54,20 @@ import {
   hasDeliveredSteer,
   routeAssistantMessage,
   sortHarnessParts,
-} from '@/lib/harnessReducer'
+} from '@opencuria/chat-core/harnessReducer'
 import {
   collectAncestorSessions,
   collectDescendantSessionIds,
   collectRunningChildSessionIds,
-} from '@/lib/harnessSubtaskActivity'
+} from '@opencuria/chat-core/harnessSubtaskActivity'
 import { loadAgentConfigsCached } from '@/lib/agentConfigs'
 import { recordRecentModelUsage } from '@/lib/recentModels'
-import type { AgentConfig } from '@/lib/harnessAgents'
-import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
+import type { AgentConfig } from '@opencuria/chat-core/harnessAgents'
+import {
+  resolveCatalogModel,
+  snapEffort,
+  type ProviderModel,
+} from '@opencuria/chat-core/harnessModels'
 import { clearQuestionInputCache, pruneQuestionInputCaches } from '@/lib/questionInputCache'
 import { useAuthStore } from './auth'
 import { useWorkspaceStore } from './workspaces'

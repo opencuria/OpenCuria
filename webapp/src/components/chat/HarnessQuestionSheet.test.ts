@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 
 import HarnessQuestionSheet from './HarnessQuestionSheet.vue'
-import type { HarnessQuestionRequest } from '@/types/harness'
+import type { HarnessQuestionRequest } from '@opencuria/chat-core/harness'
 import { useAuthStore } from '@/stores/auth'
 import { loadQuestionInputCache, questionInputCacheKey } from '@/lib/questionInputCache'
 

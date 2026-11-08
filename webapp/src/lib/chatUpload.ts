@@ -1,20 +1,5 @@
 /** Browser File and drag/drop transport helpers for workspace chat uploads. */
 
-export {
-  appendUploadMentions,
-  buildUploadMentionToken,
-  CHAT_UPLOAD_DIR,
-  collectUploadDirFilenames,
-  findWorkspaceTreeNode,
-  hasTreePath,
-  hasUploadMention,
-  nextChatUploadRequestId,
-  resolveUniqueFilename,
-  sanitizeUploadFilename,
-  uploadTargetPath,
-} from './chatUploads'
-export { UPLOAD_MAX_BYTES } from './fileChunks'
-
 /** Encode a browser File as base64 (same arrayBuffer → btoa path as FileUploadZone). */
 export async function fileToBase64(file: File): Promise<string> {
   const buffer = await file.arrayBuffer()

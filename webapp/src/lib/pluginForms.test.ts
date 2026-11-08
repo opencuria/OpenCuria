@@ -9,8 +9,8 @@ import {
   rowsToDict,
   slugify,
   validatePluginForm,
-} from './pluginForms'
-import type { Plugin } from '@/types'
+} from '@opencuria/chat-core/pluginForms'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 
 function makePlugin(): Plugin {
   return {

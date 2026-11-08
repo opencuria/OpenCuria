@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessMessage, HarnessPart, HarnessSession } from '@/types/harness'
+import type { HarnessMessage, HarnessPart, HarnessSession } from '@opencuria/chat-core/harness'
 import {
   collectAncestorSessions,
   collectDescendantSessionIds,
@@ -11,7 +11,7 @@ import {
   isTaskToolPart,
   latestRunningChildTool,
   subtaskActivityLabel,
-} from './harnessSubtaskActivity'
+} from '@opencuria/chat-core/harnessSubtaskActivity'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {

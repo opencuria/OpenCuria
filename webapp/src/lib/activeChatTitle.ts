@@ -1,4 +1,4 @@
-import type { HarnessConversation, HarnessSession } from '@/types/harness'
+import type { HarnessConversation, HarnessSession } from '@opencuria/chat-core/harness'
 
 /**
  * The conversations feed can know a generated title before the workspace's

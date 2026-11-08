@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useWorkspaceFileEvents } from './useWorkspaceFileEvents'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useNotificationStore } from '@/stores/notifications'
-import { CHAT_UPLOAD_DIR } from '@/lib/chatUpload'
+import { CHAT_UPLOAD_DIR } from '@opencuria/chat-core/chatUploads'
 import { listWorkspaceFiles } from '@/services/socket'
 
 const listeners: Partial<Record<string, Array<(data: unknown) => void>>> = {}

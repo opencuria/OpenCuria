@@ -3,7 +3,7 @@
  */
 
 import { listAgentConfigs } from '@/services/harness.api'
-import type { AgentConfig } from './harnessAgents'
+import type { AgentConfig } from '@opencuria/chat-core/harnessAgents'
 import { providerCatalogContext } from './providerCatalog'
 
 let inflight: Promise<AgentConfig[]> | null = null

@@ -12,8 +12,11 @@ import SettingsSection from './SettingsSection.vue'
 import PluginEditorDialog from './PluginEditorDialog.vue'
 import { usePluginStore } from '@/stores/plugins'
 import { useAuthStore } from '@/stores/auth'
-import type { Plugin } from '@/types'
-import { canTogglePlugin, pluginAvailability } from '@opencuria/chat-core/plugins'
+import {
+  canTogglePlugin,
+  pluginAvailability,
+  type Plugin,
+} from '@opencuria/chat-core/plugins'
 import {
   Dialog,
   DialogContent,

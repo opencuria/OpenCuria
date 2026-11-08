@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { isTrustedDesktopMessage } from './desktopSurfaceRecovery'
 import {
   createDesktopReconnectBackoff,
   createPausableTimer,
-  isTrustedDesktopMessage,
   parseDesktopConnectionStatus,
-} from './desktopSurfaceRecovery'
+} from '@opencuria/chat-core/desktopSurface'
 
 describe('desktop surface recovery helpers', () => {
   afterEach(() => vi.useRealTimers())

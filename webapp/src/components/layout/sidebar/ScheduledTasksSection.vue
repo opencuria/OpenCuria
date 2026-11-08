@@ -9,8 +9,8 @@ import {
   describeSchedule,
   isScheduleVisibleInSidebar,
   scheduleStateLabel,
-} from '@/lib/scheduledTasks'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+} from '@opencuria/chat-core/scheduledTasks'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 
 const props = defineProps<{ tasks: ScheduledTask[] }>()
 const emit = defineEmits<{ 'open-all': [] }>()

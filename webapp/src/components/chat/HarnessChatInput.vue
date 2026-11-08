@@ -14,7 +14,7 @@ import VoiceInputControl from '@/components/chat/VoiceInputControl.vue'
 import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
 import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
-import { imageMentionTokens, removeComposerToken } from '@/lib/composerTokens'
+import { imageMentionTokens, removeComposerToken } from '@opencuria/chat-core/composerTokens'
 import {
   BookText,
   Check,
@@ -27,7 +27,7 @@ import {
   Square,
   X,
 } from '@lucide/vue'
-import type { HarnessId, HarnessSessionMode } from '@/types/harness'
+import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
 import type { FileNode, Skill } from '@/types'
 import { sendFilesUpload, subscribeToWorkspace } from '@/services/socket'
 import {
@@ -38,7 +38,7 @@ import {
   harnessSessionModels,
   type HarnessEngine,
   type ProviderModel,
-} from '@/lib/harnessModels'
+} from '@opencuria/chat-core/harnessModels'
 import { loadEngineModelsCached, providerCatalogContext } from '@/lib/providerCatalog'
 import {
   HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
@@ -54,19 +54,17 @@ import {
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
+import { fileToBase64, getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import {
   appendUploadMentions,
   CHAT_UPLOAD_DIR,
-  fileToBase64,
-  getDroppedFiles,
   hasUploadMention,
-  isFileDrag,
   nextChatUploadRequestId,
   resolveUniqueFilename,
   sanitizeUploadFilename,
-  UPLOAD_MAX_BYTES,
   uploadTargetPath,
-} from '@/lib/chatUpload'
+} from '@opencuria/chat-core/chatUploads'
+import { UPLOAD_MAX_BYTES } from '@opencuria/chat-core/fileChunks'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
@@ -86,7 +84,7 @@ import {
   createPointerHoverGate,
   MENTION_FIND_LIMIT,
   type MentionCandidate,
-} from '@/lib/harnessMentions'
+} from '@opencuria/chat-core/harnessMentions'
 
 /** External drag state mirrored from the surrounding drop zone (chat history
  * or home view). Renders a subtle highlight on the composer card only —

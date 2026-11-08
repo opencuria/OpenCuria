@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessPart, HarnessPartType } from '@/types/harness'
+import type { HarnessPart, HarnessPartType } from '@opencuria/chat-core/harness'
 import {
   buildRenderBlocks,
   countWorkItems,
@@ -9,7 +9,7 @@ import {
   isQuestionToolPart,
   isWorkItem,
   wrapFinishedWork,
-} from './harnessBlocks'
+} from '@opencuria/chat-core/harnessBlocks'
 
 function makePart(type: HarnessPartType, overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {

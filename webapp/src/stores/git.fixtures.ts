@@ -15,7 +15,7 @@ import type {
   RawGitRepoSnapshot,
   RawGitRepoSummary,
   RawGitStash,
-} from '@/services/git.api'
+} from '@opencuria/chat-core/gitTypes'
 
 export function makeCommitFile(
   path: string,

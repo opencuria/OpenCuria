@@ -11,7 +11,7 @@ import {
   isDefinitionLocked,
   isDefinitionSelectableForWorkspace,
   visibleImageDefinitions,
-} from './imageDefinitionLifecycle'
+} from '@opencuria/chat-core/imageDefinitionLifecycle'
 import type { ImageDefinition } from '@/types'
 
 function makeDefinition(overrides: Partial<ImageDefinition> = {}): ImageDefinition {

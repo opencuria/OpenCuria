@@ -13,16 +13,16 @@ import { WorkspaceStatus } from '@/types'
 import { Button } from '@/components/ui/button'
 import UsageMeter from '@/components/common/UsageMeter.vue'
 import { usePolling } from '@/composables/usePolling'
-import { storageBytes } from '@/composables/useRunnerStorage'
-import { getRunnerMetricsLatest } from '@/services/runners.api'
-import { useRunnerStore } from '@/stores/runners'
-import { formatRelativeTime } from '@/lib/utils'
 import {
-  USAGE_LEVEL_CLASSES,
+  formatStorageBytes,
   describeDiskUsage,
   isDiskUsageStale,
   usageLevel,
-} from '@/lib/workspaceDisk'
+} from '@opencuria/chat-core/workspaceDisk'
+import { getRunnerMetricsLatest } from '@/services/runners.api'
+import { useRunnerStore } from '@/stores/runners'
+import { formatRelativeTime } from '@/lib/utils'
+import { USAGE_LEVEL_CLASSES } from '@/lib/workspaceDisk'
 
 const props = withDefaults(
   defineProps<{
@@ -51,9 +51,9 @@ const disk = computed(() => {
   const view = describeDiskUsage(props.workspace.disk_usage)
   return {
     ...view,
-    used: storageBytes(view.usedBytes),
-    free: storageBytes(view.freeBytes),
-    capacity: storageBytes(view.capacityBytes),
+    used: formatStorageBytes(view.usedBytes),
+    free: formatStorageBytes(view.freeBytes),
+    capacity: formatStorageBytes(view.capacityBytes),
   }
 })
 const diskAgeLabel = computed(() => {
@@ -69,7 +69,7 @@ const memory = computed(() => {
   return {
     percent,
     level: usageLevel(percent),
-    label: `${storageBytes(metric.ram_used_bytes)} of ${storageBytes(metric.ram_total_bytes)}`,
+    label: `${formatStorageBytes(metric.ram_used_bytes)} of ${formatStorageBytes(metric.ram_total_bytes)}`,
   }
 })
 const cpuPercent = computed(() =>
@@ -83,8 +83,8 @@ const allocation = computed(() => {
   const diskGb = props.workspace.qemu_disk_size_gb ?? runner?.qemu_default_disk_size_gb
   return [
     vcpus ? `${vcpus} vCPU` : null,
-    memoryMb ? `${storageBytes(memoryMb * 1024 ** 2)} RAM` : null,
-    diskGb ? `${storageBytes(diskGb * 1024 ** 3)} disk` : null,
+    memoryMb ? `${formatStorageBytes(memoryMb * 1024 ** 2)} RAM` : null,
+    diskGb ? `${formatStorageBytes(diskGb * 1024 ** 3)} disk` : null,
   ]
     .filter(Boolean)
     .join(' · ')

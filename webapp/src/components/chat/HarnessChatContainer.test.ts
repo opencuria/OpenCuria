@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
 import HarnessChatContainer from './HarnessChatContainer.vue'
-import type { HarnessMessage } from '@/types/harness'
+import type { HarnessMessage } from '@opencuria/chat-core/harness'
 
 function makeMessage(overrides: Partial<HarnessMessage> = {}): HarnessMessage {
   return {

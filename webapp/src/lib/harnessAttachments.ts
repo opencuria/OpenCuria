@@ -1,6 +1,3 @@
-/** Shared framework-neutral chat implementation. */
-export * from '@opencuria/chat-core/harnessAttachments'
-
 import type { ToolAttachment } from '@opencuria/chat-core/harnessAttachments'
 
 /** Thumbnail tokens for attachments whose bytes live in the workspace. */

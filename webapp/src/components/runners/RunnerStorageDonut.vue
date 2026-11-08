@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { ChevronDown, HardDrive, Image, Monitor } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { storageBytes } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import {
   buildRunnerStorageChart,
   storageRingPath,
@@ -94,7 +94,7 @@ function percent(bytes: number) {
 function sliceBytes(slice: StorageSlice) {
   return slice.unknown && !slice.bytes
     ? 'Unknown'
-    : `${storageBytes(slice.bytes)}${slice.unknown ? ' · partial' : ''}`
+    : `${formatStorageBytes(slice.bytes)}${slice.unknown ? ' · partial' : ''}`
 }
 function label(slice: StorageSlice, grouped = false) {
   return `${slice.label}${grouped ? ' · Image + workspaces' : ''}: ${sliceBytes(slice)} · ${percent(slice.bytes)}`
@@ -189,7 +189,7 @@ function select(slice: StorageSlice) {
               text-anchor="middle"
               class="fill-foreground text-base font-semibold"
             >
-              {{ storageBytes(chart.capacity) }}
+              {{ formatStorageBytes(chart.capacity) }}
             </text>
           </svg>
           <div class="min-h-12 text-center text-xs" aria-live="polite" aria-atomic="true">
@@ -244,7 +244,7 @@ function select(slice: StorageSlice) {
               />
               <span class="min-w-0 flex-1 text-xs font-medium">{{ group.label }}</span>
               <span class="shrink-0 text-right text-xs tabular-nums"
-                ><span class="block">{{ storageBytes(group.bytes) }}</span
+                ><span class="block">{{ formatStorageBytes(group.bytes) }}</span
                 ><span class="text-[11px] text-muted-foreground">{{
                   percent(group.bytes)
                 }}</span></span

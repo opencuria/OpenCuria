@@ -3,7 +3,7 @@
  */
 
 import { HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, listEngineModels } from '@/services/harness.api'
-import type { ProviderModel } from './harnessModels'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 
 interface CatalogCacheEntry {
   context: string

@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick, ref } from 'vue'
 
 import HarnessMessageView from './HarnessMessageView.vue'
-import type { HarnessMessage } from '@/types/harness'
+import type { HarnessMessage } from '@opencuria/chat-core/harness'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'

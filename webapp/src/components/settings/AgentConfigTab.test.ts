@@ -7,8 +7,8 @@ import AgentConfigTab from './AgentConfigTab.vue'
 import * as agentConfigs from '@/lib/agentConfigs'
 import * as providerCatalog from '@/lib/providerCatalog'
 import * as harnessApi from '@/services/harness.api'
-import type { AgentConfig } from '@/lib/harnessAgents'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { AgentConfig } from '@opencuria/chat-core/harnessAgents'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 
 enableAutoUnmount(afterEach)
 afterEach(() => vi.useRealTimers())

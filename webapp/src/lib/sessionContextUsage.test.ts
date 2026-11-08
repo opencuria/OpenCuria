@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
 import {
   formatTokenCount,
   resolveMessageContextTokens,

@@ -15,7 +15,7 @@ import type {
   HarnessAttentionKind,
   HarnessConversation,
   HarnessSessionStatus,
-} from '@/types/harness'
+} from '@opencuria/chat-core/harness'
 import {
   listHarnessConversations,
   markHarnessSessionRead,

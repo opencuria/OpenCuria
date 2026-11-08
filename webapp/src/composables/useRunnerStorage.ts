@@ -1,6 +1,5 @@
 import { ref, watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { usePolling } from './usePolling'
-import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import * as api from '@/services/runnerStorage.api'
 import type { RunnerStorage, DeletionRequest } from '@opencuria/client/types'
 export function useRunnerStorage(runnerId: Ref<string>) {
@@ -72,5 +71,3 @@ export function useRunnerStorage(runnerId: Ref<string>) {
   })
   return { data, deletions, error, loading, refreshPending, load, refresh }
 }
-/** Binary-unit size shared with the mobile app ("12.4 GiB"). */
-export const storageBytes = formatStorageBytes

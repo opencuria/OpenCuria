@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { imageMentionTokens, parseComposerSegments, removeComposerToken } from './composerTokens'
+import {
+  imageMentionTokens,
+  parseComposerSegments,
+  removeComposerToken,
+} from '@opencuria/chat-core/composerTokens'
 
 describe('composer mention tokens', () => {
   it('parses inline file and agent tokens with their exact offsets and image thumbnails', () => {

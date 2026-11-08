@@ -9,8 +9,9 @@ import {
   evaluateWorkspacePluginSelection,
   isCredentialConnected,
   toggleWorkspaceCredentialSelection,
-} from '@/lib/workspaceCredentialSelection'
-import type { Credential, Plugin } from '@/types'
+} from '@opencuria/chat-core/workspaceConfiguration'
+import type { Credential } from '@/types'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 
 const props = withDefaults(
   defineProps<{

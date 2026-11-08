@@ -8,8 +8,8 @@ import ScheduledTaskDialog from './ScheduledTaskDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import type { ScheduledTaskPrefill } from '@/stores/scheduledTasks'
-import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
-import { nextDateAt } from '@/lib/scheduledTasks'
+import type { ScheduledTask, ScheduledTaskRun } from '@opencuria/chat-core/scheduledTasks'
+import { nextDateAt } from '@opencuria/chat-core/scheduledTasks'
 
 const providerMocks = vi.hoisted(() => ({ load: vi.fn() }))
 const api = vi.hoisted(() => ({

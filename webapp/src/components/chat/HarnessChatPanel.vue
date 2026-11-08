@@ -7,8 +7,8 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
 import { onEvent, onReconnect, subscribeToWorkspace } from '@/services/socket'
-import type { HarnessId, HarnessSessionMode } from '@/types/harness'
-import type { MentionCandidate } from '@/lib/harnessMentions'
+import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 import {
   buildComposerSheets,
   type ContextSheetState,

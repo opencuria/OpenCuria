@@ -7,9 +7,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import {
   groupConversationsByWorkspace,
   WORKSPACE_CONVERSATION_PAGE_SIZE,
-} from '@/lib/conversationGroups'
+} from '@opencuria/chat-core/conversationGroups'
 import type { Workspace } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import ConversationWorkspaceGroup from './ConversationWorkspaceGroup.vue'
 
 const props = defineProps<{

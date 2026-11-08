@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { elapsedMs, formatElapsed } from './formatElapsed'
+import { elapsedMs, formatElapsed } from '@opencuria/chat-core/formatElapsed'
 
 describe('formatElapsed', () => {
   it('formats seconds only', () => {

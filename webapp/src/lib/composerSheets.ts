@@ -3,8 +3,8 @@ import type {
   HarnessQuestionRequest,
   HarnessSteer,
   HarnessTodo,
-} from '@/types/harness'
-import type { MentionCandidate } from '@/lib/harnessMentions'
+} from '@opencuria/chat-core/harness'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 
 /**
  * One entry of the composer sheet stack.

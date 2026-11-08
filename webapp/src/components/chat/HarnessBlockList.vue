@@ -1,18 +1,22 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { RenderBlock } from '@/lib/harnessBlocks'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { RenderBlock } from '@opencuria/chat-core/harnessBlocks'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessQuestionCard from './HarnessQuestionCard.vue'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessWorkedGroup from './HarnessWorkedGroup.vue'
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import HarnessPatchCard from './HarnessPatchCard.vue'
-import { isQuestionToolPart } from '@/lib/harnessBlocks'
+import { isQuestionToolPart } from '@opencuria/chat-core/harnessBlocks'
 import HarnessCompactionRow from './HarnessCompactionRow.vue'
 import HarnessSteerRow from './HarnessSteerRow.vue'
 import HarnessPageControls from './HarnessPageControls.vue'
-import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/lib/harnessPagination'
+import {
+  HARNESS_PAGE_SIZE,
+  lastHarnessPage,
+  shouldResetHarnessPage,
+} from '@opencuria/chat-core/harnessPagination'
 
 const props = defineProps<{
   blocks: RenderBlock[]

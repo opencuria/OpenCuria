@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import HarnessPatchCard from './HarnessPatchCard.vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 const LARGE_DIFF = `--- a/CommandPalette.vue
 +++ b/CommandPalette.vue

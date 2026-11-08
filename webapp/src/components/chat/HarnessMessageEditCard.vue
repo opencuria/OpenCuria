@@ -13,10 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import ModelPicker from '@/components/common/ModelPicker.vue'
-import {
-  harnessSessionModels,
-  type ProviderModel,
-} from '@/lib/harnessModels'
+import { harnessSessionModels, type ProviderModel } from '@opencuria/chat-core/harnessModels'
 import { loadEngineModelsCached } from '@/lib/providerCatalog'
 import { loadRecentModels, recentCatalogModels, useRecentModels } from '@/lib/recentModels'
 import { useHarnessStore } from '@/stores/harness'

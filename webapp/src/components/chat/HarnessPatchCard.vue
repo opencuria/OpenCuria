@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useHarnessPartDetail } from '@/lib/harnessPartDetail'
 import { ChevronDown } from '@lucide/vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { diffFileName, parseFileDiff, type DiffLineType } from '@/lib/fileDiff'
 
 const props = defineProps<{

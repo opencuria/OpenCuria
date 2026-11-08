@@ -6,8 +6,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Switch } from '@/components/ui/switch'
-import { describeSchedule, isScheduleEnded, scheduleStateLabel } from '@/lib/scheduledTasks'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+import {
+  describeSchedule,
+  isScheduleEnded,
+  scheduleStateLabel,
+} from '@opencuria/chat-core/scheduledTasks'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 
 const props = defineProps<{
   tasks: ScheduledTask[]

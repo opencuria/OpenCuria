@@ -19,7 +19,7 @@ import {
   resolveCatalogModel,
   snapEffort,
   type ProviderModel,
-} from '@/lib/harnessModels'
+} from '@opencuria/chat-core/harnessModels'
 import { MAX_RECENT_MODELS, type RecentModelEntry } from '@/lib/recentModels'
 
 const props = withDefaults(

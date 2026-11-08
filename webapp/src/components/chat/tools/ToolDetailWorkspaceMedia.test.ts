@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { ref } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { readWorkspaceFile } from '@/services/socket'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'

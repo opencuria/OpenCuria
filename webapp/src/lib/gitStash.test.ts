@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { insertStashCommits, isStashCommit, stashCommitNode } from './gitStash'
-import type { GitCommit, GitStashInfo } from '@/types/git'
+import { insertStashCommits, isStashCommit, stashCommitNode } from '@opencuria/chat-core/gitStash'
+import type { GitCommit, GitStashInfo } from '@opencuria/chat-core/gitTypes'
 
 function makeCommit(hash: string, parents: string[] = []): GitCommit {
   return {

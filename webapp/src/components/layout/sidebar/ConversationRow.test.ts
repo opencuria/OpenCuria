@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import ConversationRow from './ConversationRow.vue'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 
 const dropdownStubs = {
   Tooltip: { template: '<div><slot /></div>' },

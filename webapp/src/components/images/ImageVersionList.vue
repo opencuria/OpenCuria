@@ -7,9 +7,9 @@
 import { Trash2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { retentionLabel } from '@/lib/imageVersions'
+import { retentionLabel } from '@opencuria/chat-core/imageVersions'
 import { formatDate } from '@/lib/utils'
-import { storageBytes } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import type { ImageArtifact } from '@/types'
 
 defineProps<{
@@ -41,7 +41,7 @@ function details(version: ImageArtifact): string {
     : ''
   return [
     formatDate(version.created_at),
-    version.size_bytes == null ? '' : storageBytes(version.size_bytes),
+    version.size_bytes == null ? '' : formatStorageBytes(version.size_bytes),
     used,
   ]
     .filter(Boolean)

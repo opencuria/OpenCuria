@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import { useHarnessStore } from '@/stores/harness'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 vi.mock('./HarnessDesktopMini.vue', () => ({
   default: { template: '<div data-testid="harness-desktop-mini" />' },

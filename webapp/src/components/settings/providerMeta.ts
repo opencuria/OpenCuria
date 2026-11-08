@@ -10,13 +10,11 @@ import {
   type ProviderAccountProvider,
 } from '@opencuria/chat-core/providerAccounts'
 
-export type SettingsProviderId = ProviderAccountProvider
-
 export interface ProviderMeta extends ProviderAccountInfo {
   icon: typeof Globe
 }
 
-const ICONS: Record<SettingsProviderId, typeof Globe> = {
+const ICONS: Record<ProviderAccountProvider, typeof Globe> = {
   openrouter: Globe,
   chatgpt: Bot,
   'amazon-bedrock': Cloud,
@@ -30,6 +28,6 @@ export const PROVIDER_META: ProviderMeta[] = PROVIDER_ACCOUNT_PROVIDERS.map((inf
 }))
 
 /** Look up presentation metadata for a provider id. */
-export function providerMeta(id: SettingsProviderId | null): ProviderMeta | undefined {
+export function providerMeta(id: ProviderAccountProvider | null): ProviderMeta | undefined {
   return PROVIDER_META.find((meta) => meta.id === id)
 }

@@ -32,7 +32,7 @@ import {
   getRunnerBuildStatus,
   type RunnerBuildAction,
   type RunnerBuildActionId,
-} from './imageDefinitionLifecycle'
+} from '@opencuria/chat-core/imageDefinitionLifecycle'
 
 const props = defineProps<{
   runner: Runner

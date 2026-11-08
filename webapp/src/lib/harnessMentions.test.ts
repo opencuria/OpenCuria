@@ -14,7 +14,7 @@ import {
   mentionFileSearchQuery,
   mergeMentionFilePaths,
   workspaceRelativePath,
-} from './harnessMentions'
+} from '@opencuria/chat-core/harnessMentions'
 import type { FileNode } from '@/types'
 
 function file(path: string): FileNode {

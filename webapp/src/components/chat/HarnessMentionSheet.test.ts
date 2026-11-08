@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessMentionSheet from './HarnessMentionSheet.vue'
-import type { MentionCandidate } from '@/lib/harnessMentions'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 
 function fileCandidate(index: number): MentionCandidate {
   return {

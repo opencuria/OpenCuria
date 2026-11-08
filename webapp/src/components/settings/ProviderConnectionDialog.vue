@@ -19,13 +19,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
-import { providerMeta, type SettingsProviderId } from './providerMeta'
+import { providerMeta } from './providerMeta'
 import {
   chatGptOAuthOutcome,
   providerAccountForm,
   providerAccountPayload,
   unsharePayload,
   type ProviderAccountForm,
+  type ProviderAccountProvider,
 } from '@opencuria/chat-core/providerAccounts'
 import {
   cancelChatGptOAuth,
@@ -42,7 +43,7 @@ import {
 
 const props = withDefaults(
   defineProps<{
-    provider: SettingsProviderId | null
+    provider: ProviderAccountProvider | null
     accounts?: ProviderAccount[]
     isAdmin?: boolean
   }>(),

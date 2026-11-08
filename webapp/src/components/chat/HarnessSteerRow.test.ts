@@ -6,7 +6,7 @@ import { ref } from 'vue'
 import HarnessSteerRow from './HarnessSteerRow.vue'
 import HarnessMessageView from './HarnessMessageView.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn(() => new Promise(() => {})) }))
 

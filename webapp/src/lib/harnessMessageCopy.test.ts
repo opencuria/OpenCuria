@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
-import { getMessageCopyText } from './harnessMessageCopy'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
+import { getMessageCopyText } from '@opencuria/chat-core/harnessMessageCopy'
 
 function makePart(
   id: string,

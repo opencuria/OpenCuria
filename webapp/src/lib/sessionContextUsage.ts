@@ -2,7 +2,7 @@
  * Session context-window occupancy for the composer usage ring and sheet.
  */
 
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
 
 function asFiniteNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0

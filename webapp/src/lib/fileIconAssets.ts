@@ -1,4 +1,4 @@
-import { resolveFileIconKey } from '@/lib/fileIcons'
+import { resolveFileIconKey } from '@opencuria/chat-core/fileIcons'
 
 const iconUrlModules = import.meta.glob<string>('../assets/file-icons/*.svg', {
   eager: true,

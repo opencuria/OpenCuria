@@ -2,8 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { Skeleton } from '@/components/ui/skeleton'
 import { MessageSquare } from '@lucide/vue'
-import type { HarnessMessage } from '@/types/harness'
-import { sortHarnessMessages } from '@/lib/harnessReducer'
+import type { HarnessMessage } from '@opencuria/chat-core/harness'
+import { sortHarnessMessages } from '@opencuria/chat-core/harnessReducer'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
 import HarnessMessageView from './HarnessMessageView.vue'
 

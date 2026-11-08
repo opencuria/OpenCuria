@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessBlockList from './HarnessBlockList.vue'
-import type { RenderBlock } from '@/lib/harnessBlocks'
-import type { HarnessPart } from '@/types/harness'
+import type { RenderBlock } from '@opencuria/chat-core/harnessBlocks'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 vi.mock('./HarnessMarkdown.vue', () => ({
   default: {

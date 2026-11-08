@@ -26,7 +26,7 @@ import CaptureTargetFields from '@/components/images/CaptureTargetFields.vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { WorkspaceStatus } from '@/types'
-import { NEW_IMAGE } from '@/lib/imageVersions'
+import { NEW_IMAGE } from '@opencuria/chat-core/imageVersions'
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()

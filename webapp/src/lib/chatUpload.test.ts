@@ -1,21 +1,19 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 
+import { fileToBase64, getDroppedFiles, isFileDrag } from './chatUpload'
 import {
   appendUploadMentions,
   buildUploadMentionToken,
   CHAT_UPLOAD_DIR,
   collectUploadDirFilenames,
-  fileToBase64,
-  getDroppedFiles,
   hasTreePath,
   hasUploadMention,
-  isFileDrag,
   nextChatUploadRequestId,
   resolveUniqueFilename,
   sanitizeUploadFilename,
-  UPLOAD_MAX_BYTES,
   uploadTargetPath,
-} from './chatUpload'
+} from '@opencuria/chat-core/chatUploads'
+import { UPLOAD_MAX_BYTES } from '@opencuria/chat-core/fileChunks'
 import type { FileNode } from '@/types'
 
 function makeNode(overrides: Partial<FileNode> & { name: string; path: string }): FileNode {

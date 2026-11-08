@@ -19,7 +19,10 @@ import type {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { isWorkspaceReadyForChat } from '@opencuria/chat-core/workspaceReadiness'
-import { isWorkspaceLifecycleBusy, workspaceOperationLabel } from '@/lib/workspaceLifecycle'
+import {
+  isWorkspaceLifecycleBusy,
+  workspaceOperationLabel,
+} from '@opencuria/chat-core/workspaceLifecycle'
 import { useNotificationStore } from './notifications'
 import { useImageStore } from './images'
 

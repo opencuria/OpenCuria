@@ -5,7 +5,7 @@ import { nextTick } from 'vue'
 
 import HarnessMessageView from './HarnessMessageView.vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
-import type { HarnessMessage, HarnessSession } from '@/types/harness'
+import type { HarnessMessage, HarnessSession } from '@opencuria/chat-core/harness'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'

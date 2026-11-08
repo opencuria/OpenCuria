@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import type { HarnessPart } from '@/types/harness'
-import { countWorkItems, isWorkItem } from '@/lib/harnessBlocks'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { countWorkItems, isWorkItem } from '@opencuria/chat-core/harnessBlocks'
 import { ChevronRight, Layers } from '@lucide/vue'
-import { toolDisplayLabel } from '@/lib/toolDisplay'
+import { toolDisplayLabel } from '@opencuria/chat-core/toolDisplay'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import HarnessPageControls from './HarnessPageControls.vue'
-import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/lib/harnessPagination'
+import {
+  HARNESS_PAGE_SIZE,
+  lastHarnessPage,
+  shouldResetHarnessPage,
+} from '@opencuria/chat-core/harnessPagination'
 
 const props = defineProps<{
   parts: HarnessPart[]

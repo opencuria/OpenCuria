@@ -23,7 +23,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { recreateBase, recreateBlocker, workspaceRecreateOptions } from '@/lib/imageVersions'
+import {
+  recreateBase,
+  recreateBlocker,
+  workspaceRecreateOptions,
+} from '@opencuria/chat-core/imageVersions'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import type { Workspace } from '@/types'
 

@@ -4,12 +4,11 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises } from '@vue/test-utils'
 import { useDesktopSession } from './useDesktopSession'
 import {
-  createViewerClientId,
   desktopViewerClientId,
   desktopViewerSession,
   refreshDesktopViewer,
-  RELEASE_GRACE_MS,
 } from './useDesktopSessionCoordinator'
+import { createViewerClientId, RELEASE_GRACE_MS } from '@opencuria/chat-core/desktopViewer'
 import { useDesktopStore } from '@/stores/desktop'
 import * as api from '@/services/workspaces.api'
 import { copyToClipboard } from '@/lib/clipboard'

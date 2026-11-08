@@ -15,7 +15,7 @@ import {
   useRecentModels,
 } from './recentModels'
 import * as harnessApi from '@/services/harness.api'
-import type { ProviderModel } from './harnessModels'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =

@@ -8,7 +8,7 @@
  */
 import { Clock, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import type { HarnessSteer } from '@/types/harness'
+import type { HarnessSteer } from '@opencuria/chat-core/harness'
 
 defineProps<{
   steers: HarnessSteer[]

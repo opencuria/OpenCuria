@@ -8,13 +8,9 @@ import { reactive } from 'vue'
 import {
   createDesktopViewerCoordinator,
   createViewerClientId,
-  RELEASE_GRACE_MS,
   type ViewerSession,
 } from '@opencuria/chat-core/desktopViewer'
 import * as api from '@/services/workspaces.api'
-
-export { createViewerClientId, RELEASE_GRACE_MS }
-export type { ViewerSession }
 
 // Deliberately not persisted: another browser tab must never inherit this intent.
 export const desktopViewerClientId = createViewerClientId()

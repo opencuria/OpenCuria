@@ -6,7 +6,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { CircleAlert, CircleCheck, CircleMinus, CircleX, Loader2, Plus } from '@lucide/vue'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 import {
   blockVisualEnd,
   canMoveBlock,

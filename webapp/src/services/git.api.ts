@@ -3,8 +3,6 @@
 import { createGitApi } from '@opencuria/client/workspaceTools'
 import { getApiClient } from './api'
 
-export type * from '@opencuria/chat-core/gitTypes'
-
 export const {
   repos: getGitRepos,
   repo: getGitRepo,

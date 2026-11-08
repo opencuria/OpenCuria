@@ -5,7 +5,7 @@ import {
   extractWorkspacePathReferences,
   resolveWorkspaceLinkPath,
   resolveWorkspaceMediaPath,
-} from './workspaceFileRefs'
+} from '@opencuria/chat-core/workspaceFileRefs'
 
 describe('workspaceFileRefs', () => {
   it('classifies files by extension and mime type', () => {

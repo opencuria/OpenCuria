@@ -10,8 +10,8 @@ import {
   isOperatingWorkspace,
   WORKSPACE_CONVERSATION_PAGE_SIZE,
   type WorkspaceConversationGroup,
-} from '@/lib/conversationGroups'
-import type { HarnessConversation } from '@/types/harness'
+} from '@opencuria/chat-core/conversationGroups'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import ConversationRow from './ConversationRow.vue'
 
 const props = defineProps<{

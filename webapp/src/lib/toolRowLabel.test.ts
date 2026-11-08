@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { toolRowLabel } from './toolRowLabel'
 
 function part(overrides: Partial<HarnessPart>): HarnessPart {

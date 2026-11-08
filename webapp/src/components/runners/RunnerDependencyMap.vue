@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import { ArrowRight, HardDrive, Image, Monitor, Search } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { storageBytes } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import {
   buildRunnerTopology,
   projectRunnerTopology,
@@ -352,14 +352,14 @@ function vmSample(node: RunnerTopologyNode) {
                   class="flex flex-wrap justify-between gap-x-2 text-[11px] text-muted-foreground"
                 >
                   <span v-if="!node.storage && node.resource?.allocated_bytes != null"
-                    >{{ storageBytes(node.resource.allocated_bytes) }} allocated</span
+                    >{{ formatStorageBytes(node.resource.allocated_bytes) }} allocated</span
                   >
                   <span
                     v-if="
                       node.generation?.size_bytes != null &&
                       node.generation.size_bytes !== node.resource?.allocated_bytes
                     "
-                    >{{ storageBytes(node.generation.size_bytes) }} image ({{
+                    >{{ formatStorageBytes(node.generation.size_bytes) }} image ({{
                       node.generation.size_source
                     }})</span
                   >
@@ -369,18 +369,18 @@ function vmSample(node: RunnerTopologyNode) {
                   class="block text-[11px] text-muted-foreground"
                   :title="metricsTimestamp ? `VM sample: ${metricsTimestamp}` : 'Latest VM sample'"
                   >VM CPU {{ vmSample(node)!.cpu_usage_percent.toFixed(0) }}% · RAM
-                  {{ storageBytes(vmSample(node)!.ram_used_bytes) }} /
-                  {{ storageBytes(vmSample(node)!.ram_total_bytes) }}</span
+                  {{ formatStorageBytes(vmSample(node)!.ram_used_bytes) }} /
+                  {{ formatStorageBytes(vmSample(node)!.ram_total_bytes) }}</span
                 >
                 <template v-if="node.storage">
                   <span class="block text-[11px] text-muted-foreground">
-                    Used {{ storageBytes(node.storage.allocatedBytes)
+                    Used {{ formatStorageBytes(node.storage.allocatedBytes)
                     }}<template v-if="node.storage.unknownCount">
                       · partial ({{ node.storage.unknownCount }} unknown)</template
                     >
                   </span>
                   <span class="block text-[11px] text-muted-foreground"
-                    >Disk capacity {{ storageBytes(node.storage.virtualBytes) }}</span
+                    >Disk capacity {{ formatStorageBytes(node.storage.virtualBytes) }}</span
                   >
                 </template>
                 <span class="mobile-relations space-y-1 pt-1 text-[11px] text-muted-foreground"

@@ -26,10 +26,10 @@ import {
   extractActiveConversations,
   selectSidebarWorkspaces,
   countableWorkspaces,
-} from '@/lib/conversationGroups'
+} from '@opencuria/chat-core/conversationGroups'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import type { Workspace } from '@/types'
 
 const props = withDefaults(

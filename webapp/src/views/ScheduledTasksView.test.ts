@@ -10,7 +10,7 @@ import type { CalendarBlock } from '@/lib/scheduleCalendar'
 import { useAuthStore } from '@/stores/auth'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 import type { Workspace } from '@/types'
 
 const api = vi.hoisted(() => ({

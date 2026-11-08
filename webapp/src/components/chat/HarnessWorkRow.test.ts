@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessWorkRow from './HarnessWorkRow.vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 
 vi.mock('@/components/common/LoadingSpinner.vue', () => ({

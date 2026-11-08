@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
-import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { parseToolArguments, stringArg, truncatePreview } from '@opencuria/chat-core/toolDisplay'
 
 const props = defineProps<{
   part: HarnessPart

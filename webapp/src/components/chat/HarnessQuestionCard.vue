@@ -2,8 +2,8 @@
 import { computed, ref, watch } from 'vue'
 import { useHarnessPartDetail } from '@/lib/harnessPartDetail'
 import { MessageCircleQuestion } from '@lucide/vue'
-import type { HarnessPart } from '@/types/harness'
-import { parseQuestionRows, questionCardStatus } from '@/lib/harnessQuestion'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { parseQuestionRows, questionCardStatus } from '@opencuria/chat-core/harnessQuestion'
 
 const props = defineProps<{ part: HarnessPart }>()
 const open = ref(false)

@@ -17,7 +17,8 @@ import type { Runner, RunnerSystemMetrics } from '@/types'
 import { RunnerStatus } from '@/types'
 import type { DeletionTarget, RunnerStorageGeneration } from '@opencuria/client/types'
 import { useAuthStore } from '@/stores/auth'
-import { useRunnerStorage, storageBytes } from '@/composables/useRunnerStorage'
+import { useRunnerStorage } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import { cancelDeletion } from '@/services/runnerStorage.api'
 import { updateRunnerImageBuild } from '@/services/workspaces.api'
 import {
@@ -519,7 +520,7 @@ async function rebuild(definition: string) {
                 ></span
               >
               <span class="hidden shrink-0 text-right text-xs text-muted-foreground sm:block"
-                ><span class="block tabular-nums">{{ storageBytes(image.size_bytes) }}</span
+                ><span class="block tabular-nums">{{ formatStorageBytes(image.size_bytes) }}</span
                 ><span>{{ image.dependencies.length }} dependents</span></span
               >
               <span class="flex shrink-0 flex-col items-end gap-1"
@@ -563,7 +564,7 @@ async function rebuild(definition: string) {
                     {{ node.resource?.managed ? 'Managed' : 'Unmanaged / unknown' }}</span
                   ></span
                 ><span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{
-                  storageBytes(node.resource?.allocated_bytes)
+                  formatStorageBytes(node.resource?.allocated_bytes)
                 }}</span
                 ><Badge variant="outline" class="text-[10px]">{{ node.resource?.state }}</Badge>
               </Button>

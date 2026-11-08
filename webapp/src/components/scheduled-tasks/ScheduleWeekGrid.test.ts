@@ -4,7 +4,7 @@ import { nextTick } from 'vue'
 import ScheduleWeekGrid from './ScheduleWeekGrid.vue'
 import { addDays, buildCalendarBlocks } from '@/lib/scheduleCalendar'
 import type { CalendarOccurrence } from '@/lib/scheduleCalendar'
-import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
+import type { ScheduledTask, ScheduledTaskRun } from '@opencuria/chat-core/scheduledTasks'
 
 const HOUR_PX = 48
 const COLUMN_PX = 100

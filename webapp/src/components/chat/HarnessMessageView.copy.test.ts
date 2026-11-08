@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import HarnessMessageView from './HarnessMessageView.vue'
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 vi.mock('@/services/harness.api', async () => {

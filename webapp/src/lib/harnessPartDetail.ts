@@ -1,6 +1,6 @@
 import { inject, onUnmounted, ref, type ComputedRef, type InjectionKey } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 export type RequestHarnessPartDetail = (sessionId: string, partId: string) => Promise<boolean>
 export const requestHarnessPartDetailKey: InjectionKey<RequestHarnessPartDetail> = Symbol(

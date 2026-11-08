@@ -36,12 +36,13 @@ import type {
   GitBranch,
   GitCommitDetails,
   GitCommitFile,
+  GitOperationRequest,
   GitRepo,
   GitRepoSummary,
   GitStashInfo,
-} from '@/types/git'
+} from '@opencuria/chat-core/gitTypes'
 import { ApiRequestError } from '@/services/api'
-import { groupRefTags, type GitRefGroup } from '@/lib/gitRefGroups'
+import { groupRefTags, type GitRefGroup } from '@opencuria/chat-core/gitRefGroups'
 import {
   GIT_DETAILS_POLL_MS,
   GIT_HISTORY_LIMIT,
@@ -72,7 +73,6 @@ import {
   getGitRepo,
   getGitRepos,
   runGitOperation,
-  type GitOperationRequest,
 } from '@/services/git.api'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'

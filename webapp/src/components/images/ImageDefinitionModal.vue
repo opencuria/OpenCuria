@@ -36,7 +36,7 @@ import {
   isBaseDistroSupported,
   isImageDefinitionFormValid,
   type ImageDefinitionForm,
-} from './imageDefinitionLifecycle'
+} from '@opencuria/chat-core/imageDefinitionLifecycle'
 
 const props = withDefaults(
   defineProps<{

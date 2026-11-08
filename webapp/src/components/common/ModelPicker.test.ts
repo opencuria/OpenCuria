@@ -3,7 +3,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 
 import ModelPicker from './ModelPicker.vue'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 
 const models: ProviderModel[] = [
   {

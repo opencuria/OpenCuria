@@ -6,7 +6,7 @@ import type {
   HarnessQuestionRequest,
   HarnessSteer,
   HarnessTodo,
-} from '@/types/harness'
+} from '@opencuria/chat-core/harness'
 
 function makeQuestion(id: string): HarnessQuestionRequest {
   return {

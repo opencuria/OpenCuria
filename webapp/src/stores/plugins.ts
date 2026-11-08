@@ -11,7 +11,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import type { Plugin, PluginCreateIn, PluginUpdateIn } from '@/types'
+import type { Plugin, PluginCreateIn, PluginUpdateIn } from '@opencuria/chat-core/plugins'
 import { useAuthStore } from './auth'
 import { useNotificationStore } from './notifications'
 import * as pluginsApi from '@/services/plugins.api'

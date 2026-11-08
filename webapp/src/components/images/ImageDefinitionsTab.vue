@@ -62,7 +62,7 @@ import {
   isDefinitionLocked,
   visibleImageDefinitions,
   type RunnerBuildAction,
-} from './imageDefinitionLifecycle'
+} from '@opencuria/chat-core/imageDefinitionLifecycle'
 
 const auth = useAuthStore()
 const isAdmin = computed(() => auth.isAdmin)

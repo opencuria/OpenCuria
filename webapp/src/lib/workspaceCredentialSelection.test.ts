@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { toggleWorkspaceCredentialSelection } from './workspaceCredentialSelection'
+import { toggleWorkspaceCredentialSelection } from '@opencuria/chat-core/workspaceConfiguration'
 
 describe('workspaceCredentialSelection', () => {
   it('replaces the existing selection for the same service', () => {

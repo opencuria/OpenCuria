@@ -11,7 +11,7 @@ import {
   resolveCatalogModel,
   snapEffort,
   type ProviderModel,
-} from './harnessModels'
+} from '@opencuria/chat-core/harnessModels'
 
 const withEffort: ProviderModel = {
   id: 'openrouter/think',

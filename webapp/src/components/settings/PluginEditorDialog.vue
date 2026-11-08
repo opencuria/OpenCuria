@@ -2,7 +2,7 @@
   PluginEditorDialog — create/edit an org-owned plugin with nested
   skills, MCP servers, and credential requirements.
 
-  Requirements round-trip via `service_id` on edit (see lib/pluginForms).
+  Requirements round-trip via `service_id` on edit (see `@opencuria/chat-core/pluginForms`).
 -->
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
@@ -32,7 +32,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { useCredentialStore } from '@/stores/credentials'
 import { useAuthStore } from '@/stores/auth'
 import { usePluginStore } from '@/stores/plugins'
-import type { Plugin } from '@/types'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 import {
   emptyKeyValueRow,
   emptyMcpForm,
@@ -51,7 +51,7 @@ import {
   validatePluginForm,
   type PluginFormModel,
   type PluginMcpTransportOption,
-} from '@/lib/pluginForms'
+} from '@opencuria/chat-core/pluginForms'
 
 const props = defineProps<{
   plugin: Plugin | null
@@ -128,7 +128,7 @@ async function loadCredentialServices(): Promise<void> {
   if (credentialStore.servicesError) servicesError.value = credentialStore.servicesError
 }
 
-/** Applies a shared plugin form edit (see lib/pluginForms) to the reactive form. */
+/** Applies a shared plugin form edit (chat-core `pluginForms`) to the reactive form. */
 function applyEdit(next: PluginFormModel): void {
   Object.assign(form, next)
 }

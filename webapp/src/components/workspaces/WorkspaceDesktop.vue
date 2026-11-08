@@ -14,7 +14,8 @@ import type { ComponentPublicInstance } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useDesktopSession } from '@/composables/useDesktopSession'
-import { desktopModalWidthCss, workspaceDesktopSize } from '@/lib/desktopGeometry'
+import { desktopModalWidthCss } from '@/lib/desktopGeometry'
+import { workspaceDesktopSize } from '@opencuria/chat-core/desktopSurface'
 import { modalDesktopHost } from '@/lib/desktopSurfaceHost'
 import {
   Dialog,

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import * as harnessApi from '@/services/harness.api'
-import type { ProviderModel } from './harnessModels'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
 import {
   invalidateProviderCatalog,
   loadProviderModelsCached,

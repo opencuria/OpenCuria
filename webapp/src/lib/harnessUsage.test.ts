@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
-import type { ProviderModel } from './harnessModels'
-import { formatMessageHoverLine, formatMessageUsage, resolveMessageUsage } from './harnessUsage'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
+import {
+  formatMessageHoverLine,
+  formatMessageUsage,
+  resolveMessageUsage,
+} from '@opencuria/chat-core/harnessUsage'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {

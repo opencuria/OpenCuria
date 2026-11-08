@@ -12,7 +12,7 @@
  * row opens the working diff in the main area (staged vs unstaged aware).
  */
 import { computed, ref } from 'vue'
-import type { GitFileStatus } from '@/types/git'
+import type { GitFileStatus } from '@opencuria/chat-core/gitTypes'
 import { GIT_STATUS_LABELS } from '@opencuria/chat-core/gitModel'
 import { useGitStore } from '@/stores/git'
 import { copyToClipboard } from '@/lib/clipboard'

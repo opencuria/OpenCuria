@@ -5,7 +5,7 @@ import {
   nextCronOccurrences,
   parseCron,
   validateCronExpression,
-} from './cron'
+} from '@opencuria/chat-core/scheduleCron'
 
 const iso = (dates: Date[]): string[] => dates.map((date) => date.toISOString())
 

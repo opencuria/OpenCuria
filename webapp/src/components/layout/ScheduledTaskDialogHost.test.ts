@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ScheduledTaskDialogHost from './ScheduledTaskDialogHost.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 
 const api = vi.hoisted(() => ({ list: vi.fn() }))
 const socket = vi.hoisted(() => ({ listeners: new Map<string, () => void>() }))

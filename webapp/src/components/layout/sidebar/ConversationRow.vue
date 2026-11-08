@@ -28,8 +28,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { conversationTitle, formatTimeAgo } from '@/lib/conversationGroups'
-import type { HarnessAttentionKind, HarnessConversation } from '@/types/harness'
+import { conversationTitle, formatTimeAgo } from '@opencuria/chat-core/conversationGroups'
+import type { HarnessAttentionKind, HarnessConversation } from '@opencuria/chat-core/harness'
 
 const props = withDefaults(
   defineProps<{

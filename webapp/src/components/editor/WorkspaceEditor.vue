@@ -16,7 +16,7 @@ import { useEditorStore } from '@/stores/editor'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useGitStore } from '@/stores/git'
 import type { MonacoChangeRange } from '@/lib/monacoChanges'
-import { getWorkspaceFileExtension } from '@/lib/workspaceFileRefs'
+import { getWorkspaceFileExtension } from '@opencuria/chat-core/workspaceFileRefs'
 import { formatAttachmentSize } from '@opencuria/chat-core/harnessAttachments'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 

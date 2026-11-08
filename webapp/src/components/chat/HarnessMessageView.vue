@@ -2,14 +2,21 @@
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
 import { BookText, CornerDownRight } from '@lucide/vue'
-import type { HarnessMessage } from '@/types/harness'
-import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
-import { getMessageCopyText } from '@/lib/harnessMessageCopy'
-import { hasRunningStep, hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
-import { formatMessageHoverLine } from '@/lib/harnessUsage'
+import type { HarnessMessage } from '@opencuria/chat-core/harness'
+import {
+  buildMessageBlocks,
+  type MessageRenderBlock,
+  type RenderBlock,
+} from '@opencuria/chat-core/harnessBlocks'
+import { getMessageCopyText } from '@opencuria/chat-core/harnessMessageCopy'
+import {
+  hasRunningStep,
+  hasRunningToolOrSubtask,
+} from '@opencuria/chat-core/harnessSubtaskActivity'
+import { formatMessageHoverLine } from '@opencuria/chat-core/harnessUsage'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
-import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
-import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
+import { formatHarnessModelEffort, type ProviderModel } from '@opencuria/chat-core/harnessModels'
+import { elapsedMs, formatElapsed } from '@opencuria/chat-core/formatElapsed'
 import { useSkillStore } from '@/stores/skills'
 import HarnessUserBubble from './HarnessUserBubble.vue'
 import HarnessMessageEditCard from './HarnessMessageEditCard.vue'
@@ -18,7 +25,11 @@ import HarnessBlockList from './HarnessBlockList.vue'
 import HarnessWorkedFor from './HarnessWorkedFor.vue'
 import HarnessPageControls from './HarnessPageControls.vue'
 import HarnessMessageFooter from './HarnessMessageFooter.vue'
-import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/lib/harnessPagination'
+import {
+  HARNESS_PAGE_SIZE,
+  lastHarnessPage,
+  shouldResetHarnessPage,
+} from '@opencuria/chat-core/harnessPagination'
 
 const props = defineProps<{
   message: HarnessMessage

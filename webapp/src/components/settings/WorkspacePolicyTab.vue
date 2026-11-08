@@ -14,7 +14,7 @@ import SettingsSection from './SettingsSection.vue'
 import { useAutosave } from '@/composables/useAutosave'
 import AutosaveStatus from './AutosaveStatus.vue'
 import type { Organization } from '@opencuria/client'
-import { formatMinutesAsDuration } from '@/lib/utils'
+import { formatMinutesAsDuration } from '@opencuria/chat-core/workspaceLifecycle'
 
 const authStore = useAuthStore()
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)

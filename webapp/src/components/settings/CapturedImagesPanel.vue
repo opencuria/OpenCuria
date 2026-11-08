@@ -31,7 +31,7 @@ import {
   WifiOff,
 } from '@lucide/vue'
 import { cn } from '@/lib/utils'
-import { storageBytes } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import type { CapturedImage, ImageArtifact } from '@/types'
 import type { DeletionTarget } from '@opencuria/client/types'
 
@@ -198,7 +198,7 @@ async function confirmRename(image: CapturedImage): Promise<void> {
                 <HardDrive :size="12" />
                 {{ image.versions.length }}
                 {{ image.versions.length === 1 ? 'version' : 'versions' }} ·
-                {{ storageBytes(image.total_size_bytes) }}
+                {{ formatStorageBytes(image.total_size_bytes) }}
                 <template v-if="image.workspace_count">
                   · used by {{ image.workspace_count }}
                   {{ image.workspace_count === 1 ? 'workspace' : 'workspaces' }}

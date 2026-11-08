@@ -9,8 +9,8 @@ import { subscribeToWorkspace } from '@/services/socket'
 
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
-import type { ScheduledTask } from '@/services/scheduledTasks.api'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 
 enableAutoUnmount(afterEach)
 

@@ -15,7 +15,7 @@ import {
   workspaceColors,
 } from './scheduleCalendar'
 import type { CalendarBlock, CalendarOccurrence } from './scheduleCalendar'
-import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
+import type { ScheduledTask, ScheduledTaskRun } from '@opencuria/chat-core/scheduledTasks'
 
 // Instants use the local zone; calendar dates always use midnight UTC.
 const LOCAL_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone

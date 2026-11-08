@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
+import { GIT_GRAPH_COLORS } from './gitGraph'
 import {
-  GIT_GRAPH_COLORS,
   GIT_GRAPH_CURVE_D,
   branchPath,
   computeGitGraphLayout,
   enforceChildBeforeParent,
   filterReachableCommits,
   vertexPixel,
-} from './gitGraph'
-import type { GitCommit } from '@/types/git'
+} from '@opencuria/chat-core/gitGraph'
+import type { GitCommit } from '@opencuria/chat-core/gitTypes'
 
 function makeCommit(
   hash: string,

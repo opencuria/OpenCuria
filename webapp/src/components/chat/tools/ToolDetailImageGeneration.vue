@@ -1,17 +1,14 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
-import {
-  isImageAttachment,
-  toolAttachments,
-  workspaceAttachmentTokens,
-} from '@/lib/harnessAttachments'
-import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { workspaceAttachmentTokens } from '@/lib/harnessAttachments'
+import { isImageAttachment, toolAttachments } from '@opencuria/chat-core/harnessAttachments'
+import { parseToolArguments, stringArg, truncatePreview } from '@opencuria/chat-core/toolDisplay'
 import HarnessMentionImages from '../HarnessMentionImages.vue'
 import ImageLightbox from '../ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
+import { resolveWorkspaceMediaPath } from '@opencuria/chat-core/workspaceFileRefs'
 
 const props = defineProps<{
   part: HarnessPart

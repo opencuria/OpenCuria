@@ -21,31 +21,14 @@ import type {
 import type {
   HarnessPartUpdatedEvent,
   HarnessPermissionRequiredEvent,
-  HarnessPermissionResolvedEvent,
   HarnessQuestionRequiredEvent,
-  HarnessQuestionResolvedEvent,
   HarnessSessionStatusEvent,
   HarnessSessionSummaryEvent,
   HarnessSteerQueueEvent,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodoUpdatedEvent,
-} from '@/types/harness'
-
-// Re-exported for socket listeners in harness views (avoids a second import).
-export type {
-  HarnessPartUpdatedEvent,
-  HarnessPermissionRequiredEvent,
-  HarnessPermissionResolvedEvent,
-  HarnessQuestionRequiredEvent,
-  HarnessQuestionResolvedEvent,
-  HarnessSessionStatusEvent,
-  HarnessSessionSummaryEvent,
-  HarnessSteerQueueEvent,
-  HarnessSubtaskFinishedEvent,
-  HarnessSubtaskStartedEvent,
-  HarnessTodoUpdatedEvent,
-}
+} from '@opencuria/chat-core/harness'
 
 export const isConnected = ref(false)
 let client: RealtimeClient | null = null

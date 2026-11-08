@@ -3,7 +3,8 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 
-import type { Credential, CredentialCreateInput, CredentialService, CredentialUpdateInput } from '@/types'
+import type { Credential, CredentialCreateInput, CredentialUpdateInput } from '@/types'
+import type { CredentialService } from '@opencuria/chat-core/plugins'
 import * as credentialsApi from '@/services/credentials.api'
 import { useAuthStore } from './auth'
 import { useNotificationStore } from './notifications'

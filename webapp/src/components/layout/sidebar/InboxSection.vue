@@ -2,7 +2,7 @@
 /**
  * Shared inbox for pending gates and unread, idle plan/build chats.
  */
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import ConversationRow from './ConversationRow.vue'
 

@@ -8,15 +8,16 @@ import type {
   ScheduledTask,
   ScheduledTaskInput,
   ScheduledTaskRun,
-} from '@/services/scheduledTasks.api'
-import { cronOccurrencesBetween, formatClock } from '@/lib/cron'
+  ScheduleDraft,
+  ScheduleFields,
+} from '@opencuria/chat-core/scheduledTasks'
+import { cronOccurrencesBetween, formatClock } from '@opencuria/chat-core/scheduleCron'
 import {
   onceOccurrence,
   scheduleDraftFromTask,
   scheduleDraftToCron,
   schedulePayload,
-} from '@/lib/scheduledTasks'
-import type { ScheduleDraft, ScheduleFields } from '@/lib/scheduledTasks'
+} from '@opencuria/chat-core/scheduledTasks'
 
 export const MINUTES_PER_DAY = 24 * 60
 /** Shortest drawn event; used for overlap layout so chips never cover each other. */

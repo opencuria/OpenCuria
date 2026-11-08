@@ -9,7 +9,7 @@ import {
   runnerStateClass,
   runnerStateLabel,
 } from '@/lib/runnerPresentation'
-import { storageBytes } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -100,14 +100,14 @@ function openWorkspace() {
       <dl class="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
         <div v-if="image">
           <dt class="text-muted-foreground">Image size</dt>
-          <dd class="mt-1 font-medium tabular-nums">{{ storageBytes(image.size_bytes) }}</dd>
+          <dd class="mt-1 font-medium tabular-nums">{{ formatStorageBytes(image.size_bytes) }}</dd>
           <dd class="text-[11px] text-muted-foreground">{{ image.size_source }}</dd>
         </div>
         <template v-if="node.storage">
           <div>
             <dt class="text-muted-foreground">Used storage</dt>
             <dd class="mt-1 font-medium tabular-nums">
-              {{ storageBytes(node.storage.allocatedBytes) }}
+              {{ formatStorageBytes(node.storage.allocatedBytes) }}
             </dd>
             <dd v-if="node.storage.unknownCount" class="text-[11px] text-muted-foreground">
               Partial known total · {{ node.storage.unknownCount }} resource(s) unknown
@@ -116,13 +116,13 @@ function openWorkspace() {
           <div>
             <dt class="text-muted-foreground">Disk capacity</dt>
             <dd class="mt-1 font-medium tabular-nums">
-              {{ storageBytes(node.storage.virtualBytes) }}
+              {{ formatStorageBytes(node.storage.virtualBytes) }}
             </dd>
           </div>
           <div>
             <dt class="text-muted-foreground">File size</dt>
             <dd class="mt-1 font-medium tabular-nums">
-              {{ storageBytes(node.storage.logicalBytes) }}
+              {{ formatStorageBytes(node.storage.logicalBytes) }}
             </dd>
           </div>
         </template>
@@ -138,7 +138,7 @@ function openWorkspace() {
             :key="label"
           >
             <dt class="text-muted-foreground">{{ label }}</dt>
-            <dd class="mt-1 font-medium tabular-nums">{{ storageBytes(value) }}</dd>
+            <dd class="mt-1 font-medium tabular-nums">{{ formatStorageBytes(value) }}</dd>
           </div>
         </template>
         <div v-if="workspace || image">
@@ -185,7 +185,7 @@ function openWorkspace() {
               <p class="text-muted-foreground">
                 {{ ws.owner_label }} · {{ ws.last_activity_at || 'Activity unknown' }}
                 <template v-if="ws.allocated_bytes != null">
-                  · {{ storageBytes(ws.allocated_bytes) }} own disk</template
+                  · {{ formatStorageBytes(ws.allocated_bytes) }} own disk</template
                 >
                 <template v-if="ws.pending_base_image_instance_id === image.id">
                   · switching to this version</template
@@ -244,7 +244,7 @@ function openWorkspace() {
                     :key="label"
                   >
                     <dt>{{ label }}</dt>
-                    <dd>{{ storageBytes(value) }}</dd>
+                    <dd>{{ formatStorageBytes(value) }}</dd>
                   </div>
                 </dl>
                 <p>Aliases: {{ member.aliases.join(', ') || 'None' }}</p>

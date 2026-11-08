@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { defineComponent, ref } from 'vue'
-import { useRunnerStorage, storageBytes } from './useRunnerStorage'
+import { useRunnerStorage } from './useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import type { RunnerStorage } from '@opencuria/client/types'
 const api = vi.hoisted(() => ({
   getRunnerStorage: vi.fn(),
@@ -36,9 +37,9 @@ describe('runner storage evidence', () => {
     api.listDeletions.mockResolvedValue([])
   })
   it('keeps nullable measurements distinct from zero', () => {
-    expect(storageBytes(null)).toBe('Unknown')
-    expect(storageBytes(undefined)).toBe('Unknown')
-    expect(storageBytes(0)).toBe('0 B')
+    expect(formatStorageBytes(null)).toBe('Unknown')
+    expect(formatStorageBytes(undefined)).toBe('Unknown')
+    expect(formatStorageBytes(0)).toBe('0 B')
   })
   it('rejects stale replies when selecting another runner and after unmount', async () => {
     let old!: (value: RunnerStorage) => void

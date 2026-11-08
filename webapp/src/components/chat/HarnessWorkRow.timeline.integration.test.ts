@@ -7,7 +7,7 @@ import { pinHarnessPartDetailKey, requestHarnessPartDetailKey } from '@/lib/harn
 import { useHarnessStore } from '@/stores/harness'
 import type { HarnessTimeline } from '@opencuria/client'
 import { getHarnessPart, listHarnessParts } from '@/services/harness.api'
-import type { HarnessPart, HarnessSession } from '@/types/harness'
+import type { HarnessPart, HarnessSession } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =

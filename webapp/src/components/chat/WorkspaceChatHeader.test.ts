@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import WorkspaceChatHeader from './WorkspaceChatHeader.vue'
 import { WorkspaceStatus } from '@/types'
 import type { WorkspaceDetail } from '@/types'
-import type { HarnessSession } from '@/types/harness'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
 
 const sidebarStubs = {
   SidebarTrigger: { template: '<button data-testid="sidebar-trigger" />' },

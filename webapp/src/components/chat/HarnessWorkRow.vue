@@ -5,7 +5,7 @@ import { ChevronRight } from '@lucide/vue'
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import ToolDetailBash from './tools/ToolDetailBash.vue'
 import ToolDetailComputerUse from './tools/ToolDetailComputerUse.vue'
@@ -16,7 +16,12 @@ import ToolDetailRead from './tools/ToolDetailRead.vue'
 import ToolDetailSearch from './tools/ToolDetailSearch.vue'
 import ToolDetailTodos from './tools/ToolDetailTodos.vue'
 import ToolDetailWebfetch from './tools/ToolDetailWebfetch.vue'
-import { isComputerUseTool, resolveToolName, toolDisplayIcon, toolDisplayLabel } from '@/lib/toolDisplay'
+import { toolDisplayIcon } from '@/lib/toolDisplay'
+import {
+  isComputerUseTool,
+  resolveToolName,
+  toolDisplayLabel,
+} from '@opencuria/chat-core/toolDisplay'
 import { toolRowLabel } from '@/lib/toolRowLabel'
 import { cn } from '@/lib/utils'
 

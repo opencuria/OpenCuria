@@ -38,7 +38,7 @@ import {
   conversationTitle,
   extractInboxConversations,
   isConversationWorkspaceEligible,
-} from '@/lib/conversationGroups'
+} from '@opencuria/chat-core/conversationGroups'
 import { useAuthStore } from '@/stores/auth'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useHarnessStore } from '@/stores/harness'
@@ -52,7 +52,7 @@ import {
   subscribeToWorkspace,
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 
 const route = useRoute()
 const router = useRouter()

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { WorkspaceOperation, WorkspaceStatus, type Workspace } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import { getWorkspaceActionAvailability } from './workspaceLifecycle'
+import { getWorkspaceActionAvailability } from '@opencuria/chat-core/workspaceLifecycle'
 
 const states: [WorkspaceStatus, string[]][] = [
   [WorkspaceStatus.CREATING, []],

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import {
   conversationTitle,
   extractActionRequired,
@@ -12,7 +12,7 @@ import {
   groupConversationsByWorkspace,
   isConversationWorkspaceEligible,
   selectSidebarWorkspaces,
-} from './conversationGroups'
+} from '@opencuria/chat-core/conversationGroups'
 
 const NOW = new Date('2026-03-15T15:00:00').getTime()
 

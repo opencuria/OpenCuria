@@ -2,7 +2,8 @@
 import type { HTMLAttributes } from 'vue'
 import { computed } from 'vue'
 import { cn } from '@/lib/utils'
-import { USAGE_LEVEL_CLASSES, type UsageLevel } from '@/lib/workspaceDisk'
+import { USAGE_LEVEL_CLASSES } from '@/lib/workspaceDisk'
+import type { UsageLevel } from '@opencuria/chat-core/workspaceDisk'
 
 /** Slim horizontal usage bar; the fill colour follows the usage level. */
 const props = withDefaults(

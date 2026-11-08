@@ -3,8 +3,8 @@
  * WorkspaceFileIcon — VS Code-like colored file/folder SVG icon.
  *
  * Icons are a small curated subset of `material-icon-theme` (MIT) copied
- * into `src/assets/file-icons/` (see `src/lib/fileIcons.ts` for the mapping
- * and attribution). Rendered via `<img>` so the multicolor SVG fills are
+ * into `src/assets/file-icons/` (see `@opencuria/chat-core/fileIcons` for the
+ * mapping and attribution). Rendered via `<img>` so the multicolor SVG fills are
  * preserved as-is.
  *
  * Props:
@@ -14,7 +14,7 @@
  * - `size`: pixel width/height (default 16).
  */
 import { computed } from 'vue'
-import { resolveWorkspaceIconKey } from '@/lib/fileIcons'
+import { resolveWorkspaceIconKey } from '@opencuria/chat-core/fileIcons'
 import { workspaceIconUrl } from '@/lib/fileIconAssets'
 
 const props = withDefaults(

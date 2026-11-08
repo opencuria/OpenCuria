@@ -53,6 +53,8 @@ layer, one implementation per behavior, composition over duplication.
 - `mobile`: reuse `@opencuria/chat-core` and `@opencuria/client`; keep native
   screens in `mobile/src/screens/` (not `mobile/src/app/`, which collides with
   Expo Router's `mobile/app/`). Native React chat snapshots must stay immutable.
+- Clients import shared rules from `@opencuria/chat-core/<module>` directly;
+  never re-export chat-core from a client module (`clientBoundaries.test.ts`).
 - UI: less is more. Use fewer controls and less text; remaining copy must
   describe intent clearly and concisely. Combine related choices rather than
   adding separate buttons, selectors, or repeated explanations.

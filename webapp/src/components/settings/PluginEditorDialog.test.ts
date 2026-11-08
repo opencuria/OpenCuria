@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import PluginEditorDialog from './PluginEditorDialog.vue'
 import { Select } from '@/components/ui/select'
-import type { Plugin } from '@/types'
+import type { Plugin } from '@opencuria/chat-core/plugins'
 
 vi.mock('vue-sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
@@ -242,7 +242,7 @@ describe('PluginEditorDialog', () => {
     const mcp = wrapper.find('[data-testid="plugin-mcp-0"]')
     await mcp.find('input').setValue('Notion')
     const { emptyPluginForm, emptyMcpForm, formToCreateIn, validatePluginForm } =
-      await import('@/lib/pluginForms')
+      await import('@opencuria/chat-core/pluginForms')
     const form = emptyPluginForm()
     form.name = 'Notion'
     form.requirements.push({
@@ -269,7 +269,8 @@ describe('PluginEditorDialog', () => {
   })
 
   it('rejects mismatched OAuth endpoint and requires an existing OAuth service', async () => {
-    const { emptyPluginForm, emptyMcpForm, validatePluginForm } = await import('@/lib/pluginForms')
+    const { emptyPluginForm, emptyMcpForm, validatePluginForm } =
+      await import('@opencuria/chat-core/pluginForms')
     const form = emptyPluginForm()
     form.name = 'Notion'
     form.requirements.push({
@@ -306,7 +307,8 @@ describe('PluginEditorDialog', () => {
   })
 
   it('exposes transport switching that clears stale fields (unit-level)', async () => {
-    const { emptyMcpForm, formToCreateIn, setMcpTransport } = await import('@/lib/pluginForms')
+    const { emptyMcpForm, formToCreateIn, setMcpTransport } =
+      await import('@opencuria/chat-core/pluginForms')
     const mcp = emptyMcpForm()
     mcp.name = 'Runner'
     mcp.transport = 'stdio'
@@ -333,7 +335,9 @@ describe('PluginEditorDialog', () => {
 })
 
 describe('PluginEditorDialog form rules', () => {
-  type EditorForm = ReturnType<(typeof import('@/lib/pluginForms'))['emptyPluginForm']>
+  type EditorForm = ReturnType<
+    (typeof import('@opencuria/chat-core/pluginForms'))['emptyPluginForm']
+  >
 
   function editorForm(wrapper: ReturnType<typeof mountEditor>): EditorForm {
     return (wrapper.vm as unknown as { form: EditorForm }).form
@@ -449,10 +453,10 @@ it('offers one managed desktop selector and surfaces explicit env conflicts', as
   await flushPromises()
   const form = (
     wrapper.vm as unknown as {
-      form: ReturnType<(typeof import('@/lib/pluginForms'))['emptyPluginForm']>
+      form: ReturnType<(typeof import('@opencuria/chat-core/pluginForms'))['emptyPluginForm']>
     }
   ).form
-  const { emptyMcpForm } = await import('@/lib/pluginForms')
+  const { emptyMcpForm } = await import('@opencuria/chat-core/pluginForms')
   const mcp = emptyMcpForm()
   mcp.name = 'Browser'
   mcp.command = 'npx'

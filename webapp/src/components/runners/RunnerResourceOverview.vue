@@ -5,7 +5,7 @@ import type { Runner, RunnerSystemMetrics } from '@/types'
 import { RunnerStatus } from '@/types'
 import type { RunnerStorageRuntime } from '@opencuria/client/types'
 import { useRunnerMetrics, resourcePercent, sampleOutdated } from '@/composables/useRunnerMetrics'
-import { storageBytes } from '@/composables/useRunnerStorage'
+import { formatStorageBytes } from '@opencuria/chat-core/workspaceDisk'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import Sparkline from '@/components/charts/Sparkline.vue'
@@ -38,7 +38,7 @@ function age(timestamp: string | null | undefined): string {
       : `${Math.floor(seconds / 3600)}h ago`
 }
 function bytes(value: number | null | undefined): string {
-  return storageBytes(value != null && value >= 0 ? value : null)
+  return formatStorageBytes(value != null && value >= 0 ? value : null)
 }
 function free(used: number | undefined, total: number | undefined): string {
   if (

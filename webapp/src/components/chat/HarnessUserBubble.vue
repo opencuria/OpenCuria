@@ -8,7 +8,7 @@
  * strip); the parent owns alignment and surrounding actions.
  */
 import { inject, ref } from 'vue'
-import type { ComposerFileToken } from '@/lib/composerTokens'
+import type { ComposerFileToken } from '@opencuria/chat-core/composerTokens'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessMentionImages from './HarnessMentionImages.vue'

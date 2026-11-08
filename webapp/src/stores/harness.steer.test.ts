@@ -10,7 +10,7 @@ import {
   steerHarnessSession,
   withdrawHarnessSteer,
 } from '@/services/harness.api'
-import type { HarnessMessage, HarnessSession, HarnessSteer } from '@/types/harness'
+import type { HarnessMessage, HarnessSession, HarnessSteer } from '@opencuria/chat-core/harness'
 
 const notifyError = vi.hoisted(() => vi.fn())
 
