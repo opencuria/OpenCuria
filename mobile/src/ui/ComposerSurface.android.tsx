@@ -41,7 +41,7 @@ export function ComposerSurface({
 
 const SHEET_RADIUS = 22;
 
-/** Material surface of the composer sheet stack; the composer overlaps its lower edge. */
+/** Material surface of the composer sheet stack; its square lower edge runs into the composer. */
 export function ComposerSheetSurface({
   children,
   style,
@@ -67,8 +67,8 @@ export function ComposerSheetSurface({
             cornerRadii: {
               topStart: SHEET_RADIUS,
               topEnd: SHEET_RADIUS,
-              bottomStart: SHEET_RADIUS,
-              bottomEnd: SHEET_RADIUS,
+              bottomStart: 0,
+              bottomEnd: 0,
             },
           })}
           modifiers={[fillMaxSize()]}

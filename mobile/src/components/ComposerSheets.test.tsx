@@ -220,8 +220,8 @@ describe("ComposerSheetStack in the chat layout", () => {
     fireEvent(screen.getByTestId("composer-sheet-stack"), "layout", {
       nativeEvent: { layout: { x: 0, y: 0, width: 360, height: 224 } },
     });
-    // The composer overlaps the sheet's lower 24 points.
-    expect(screen.getByTestId("dock-offset")).toHaveTextContent("316");
+    // The sheet's lower 14 points run under the composer.
+    expect(screen.getByTestId("dock-offset")).toHaveTextContent("326");
 
     rerenderGates(gates());
     expect(screen.getByTestId("dock-offset")).toHaveTextContent("116");

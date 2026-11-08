@@ -70,8 +70,11 @@ export interface ComposerSheetStackProps {
   testID?: string;
 }
 
-/** The composer covers this much of the sheet's lower edge. */
-const OVERLAP = 24;
+/**
+ * The sheet runs into the composer as in the webapp: its square lower edge
+ * reaches under the composer (6pt core padding plus 8pt behind its curve).
+ */
+const OVERLAP = 14;
 /** Visible edge of each sheet waiting beneath the top one. */
 const PEEK = 7;
 const MAX_PEEKS = 2;
@@ -718,9 +721,11 @@ const styles = StyleSheet.create({
   peek: {
     position: "absolute",
     height: PEEK * (MAX_PEEKS + 1) + 22,
-    borderRadius: 20,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
     borderCurve: "continuous",
     borderWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 0,
   },
   top: { minHeight: 0 },
   shrink: { flexShrink: 1, minHeight: 0 },

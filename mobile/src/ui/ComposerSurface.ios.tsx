@@ -40,7 +40,7 @@ export function ComposerSurface({
 
 /**
  * Opaque card of the composer sheet stack. Questions and approvals stay legible
- * above any transcript; the composer's glass overlaps its lower edge.
+ * above any transcript; its square lower edge runs into the composer.
  */
 export function ComposerSheetSurface({
   children,
@@ -66,12 +66,14 @@ const styles = StyleSheet.create({
   surface: { borderRadius: 28, borderCurve: "continuous", padding: 6 },
   opaque: { overflow: "hidden" },
   sheet: {
-    borderRadius: 22,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
     borderCurve: "continuous",
     borderWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: 0,
     shadowColor: "#000000",
-    shadowOpacity: 0.12,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -2 },
   },
 });
