@@ -3,8 +3,9 @@
 `ChatTimelineController` owns the asynchronous transcript lifecycle used by web
 and mobile: request deduplication and freshness, busy/idle snapshot reconciliation,
 part detail loading, detail LRU and inactive transcript retention. Its constructor
-ports provide transport, transcript storage, current session status and protected
-session identities. It imports no framework or API client.
+ports provide transport, transcript storage, the open scope's sessions (status and
+lineage) and the sessions the adapter still shows or waits on. It imports no
+framework or API client.
 
 The Vue store supplies reactive records; the native adapter supplies immutable
 snapshots. Both adapters retain navigation, authenticated session actions and UI
@@ -19,8 +20,10 @@ the request actually starts, including refreshes waiting behind an older flight.
 
 Detail hydration checks ownership before and after transport and refuses unfinished
 parts. Cache eviction writes a new transcript through the storage port; it never
-mutates a previously published native snapshot. Selection, live runs, pending gates,
-lineage, outstanding requests and explicitly pinned details protect transcripts.
+mutates a previously published native snapshot. The controller keeps the lineage
+family of every retained (selection, pending gates, todo fetches), busy, loading or
+detail-pinned session; adapters report those sessions but never compute the
+protected set.
 
 # Desktop viewer
 

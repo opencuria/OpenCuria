@@ -670,6 +670,47 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
+  it("keeps gated lineages and busy chats cached while evicting idle chats", async () => {
+    const root = session("root");
+    const child = session("child", { parent_id: "root" });
+    const idle = ["s1", "s2", "s3", "s4", "s5", "s6"].map((id) => session(id));
+    const { client, rows } = makeClient([
+      root,
+      child,
+      session("busy", { status: "busy" }),
+      ...idle,
+    ]);
+    const permission: HarnessPermissionRequest = {
+      request_id: "gate-1",
+      session_id: "child",
+      workspace_id: "workspace-a",
+      tool: "shell",
+      pattern: "ls",
+      title: "List files",
+      status: "pending",
+    };
+    vi.mocked(client.harness.timeline).mockImplementation(async (id) =>
+      timeline(rows.get(id)!, [], id === "child" ? [permission] : []),
+    );
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a");
+    for (const id of ["root", "busy", ...idle.map((row) => row.id)]) {
+      await controller.openSession(id);
+    }
+    // Opening reports `loading` synchronously only for an evicted transcript.
+    const cached = async (id: string): Promise<boolean> => {
+      const opening = controller.openSession(id);
+      const hit = !controller.getSnapshot().loading;
+      await opening;
+      return hit;
+    };
+
+    expect(await cached("root")).toBe(true);
+    expect(await cached("busy")).toBe(true);
+    expect(await cached("s1")).toBe(false);
+    controller.dispose();
+  });
+
   it("loads child session timelines and exposes child gates with parent breadcrumbs", async () => {
     const root = session("root");
     const child = session("child", {

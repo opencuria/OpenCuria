@@ -241,9 +241,9 @@ export const useHarnessStore = defineStore('harness', () => {
     loadDetail: getHarnessPart,
     read: (sessionId) => messagesBySession.value[sessionId],
     write: publishTranscript,
-    status: (sessionId) => sessions.value.find((session) => session.id === sessionId)?.status,
+    sessions: () => sessions.value,
     discardMessage: isDiscardedMessage,
-    protectedSessions: protectedTranscriptSessions,
+    retainedSessionIds: retainedTranscriptSessionIds,
     forget: forgetTranscript,
     unwrap: toRaw,
     onError: (cause) =>
@@ -257,36 +257,15 @@ export const useHarnessStore = defineStore('harness', () => {
     timeline.touch(sessionId, recalculateBytes)
   }
 
-  /** Protect a lineage family when its contents support the active subtask UI. */
-  function protectedTranscriptSessions(): Set<string> {
-    const protectedIds = new Set<string>()
-    const protectFamily = (sessionId: string): void => {
-      protectedIds.add(sessionId)
-      for (const ancestor of collectAncestorSessions(sessionId, sessions.value)) {
-        protectedIds.add(ancestor.id)
-      }
-      for (const descendantId of collectDescendantSessionIds(sessionId, sessions.value)) {
-        protectedIds.add(descendantId)
-      }
-    }
-
-    for (const sessionId of [activeSessionId.value, viewingSessionId.value]) {
-      if (sessionId) protectFamily(sessionId)
-    }
-    for (const session of sessions.value) {
-      if (session.status === 'busy') protectFamily(session.id)
-    }
-    for (const request of Object.values(pendingPermissions.value)) {
-      protectFamily(request.session_id)
-    }
-    for (const request of Object.values(pendingQuestions.value)) {
-      protectFamily(request.session_id)
-    }
-    // A live fetch or explicitly pinned detail is an explicit temporary cache pin.
-    for (const sessionId of timeline.pinnedSessionIds()) protectFamily(sessionId)
-    const inFlightSessionIds = new Set([...timeline.pendingSessionIds(), ...todoFetches.keys()])
-    for (const sessionId of inFlightSessionIds) protectFamily(sessionId)
-    return protectedIds
+  /** Selected, viewed, gated and todo-loading sessions; the timeline owns the policy. */
+  function retainedTranscriptSessionIds(): Array<string | null> {
+    return [
+      activeSessionId.value,
+      viewingSessionId.value,
+      ...Object.values(pendingPermissions.value).map((request) => request.session_id),
+      ...Object.values(pendingQuestions.value).map((request) => request.session_id),
+      ...todoFetches.keys(),
+    ]
   }
 
   function invalidatePartFetches(sessionId: string): void {

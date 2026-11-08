@@ -64,7 +64,8 @@ function harness(
   const statuses = new Map<string, HarnessSession["status"]>([
     ["session", "busy"],
   ]);
-  const protectedIds = new Set<string>();
+  const parents = new Map<string, string>();
+  const retainedIds = new Set<string>();
   const loads: ReturnType<typeof deferred<ChatTimelineSnapshot>>[] = [];
   const details: ReturnType<typeof deferred<HarnessPart>>[] = [];
   const load = vi.fn(() => {
@@ -84,8 +85,16 @@ function harness(
     write: (id, next) => {
       messages.set(id, immutable ? freeze(next) : next);
     },
-    status: (id) => statuses.get(id),
-    protectedSessions: () => new Set(protectedIds),
+    sessions: () =>
+      [...statuses].map(
+        ([id, status]) =>
+          ({
+            id,
+            status,
+            parent_id: parents.get(id) ?? null,
+          }) as HarnessSession,
+      ),
+    retainedSessionIds: () => retainedIds,
     forget: (id) => {
       messages.delete(id);
     },
@@ -95,7 +104,8 @@ function harness(
     controller,
     messages,
     statuses,
-    protectedIds,
+    parents,
+    retainedIds,
     loads,
     details,
     load,
@@ -323,9 +333,64 @@ describe.each([false, true])(
         h.messages.set(id, [message(id)]);
         h.controller.touch(id, true);
       }
-      h.protectedIds.add("active");
+      h.retainedIds.add("active");
       h.controller.trim();
       expect([...h.messages.keys()]).toEqual(["second", "active"]);
+    });
+
+    it("keeps the lineage family of retained and busy sessions", () => {
+      const h = harness(immutable, { transcriptLimit: 1 });
+      const lineage = [
+        ["root", "idle", ""],
+        ["child", "idle", "root"],
+        ["grandchild", "idle", "child"],
+        ["busy", "busy", ""],
+        ["busy-child", "idle", "busy"],
+        ["first", "idle", ""],
+        ["second", "idle", ""],
+      ] as const;
+      for (const [id, status, parent] of lineage) {
+        h.statuses.set(id, status);
+        if (parent) h.parents.set(id, parent);
+        h.messages.set(id, [message(id)]);
+        h.controller.touch(id, true);
+      }
+      h.retainedIds.add("child");
+      h.controller.trim();
+      expect([...h.messages.keys()]).toEqual([
+        "root",
+        "child",
+        "grandchild",
+        "busy",
+        "busy-child",
+        "second",
+      ]);
+    });
+
+    it("keeps the lineage family of loading and detail-pinned sessions", () => {
+      const h = harness(immutable, { transcriptLimit: 0 });
+      const lineage = [
+        ["root", ""],
+        ["loading", "root"],
+        ["pinned", ""],
+        ["pinned-child", "pinned"],
+        ["idle", ""],
+      ] as const;
+      for (const [id, parent] of lineage) {
+        h.statuses.set(id, "idle");
+        if (parent) h.parents.set(id, parent);
+        h.messages.set(id, [message(id)]);
+        h.controller.touch(id, true);
+      }
+      void h.controller.fetch("loading");
+      h.controller.pinDetail("pinned", "part", true);
+      h.controller.trim();
+      expect([...h.messages.keys()]).toEqual([
+        "root",
+        "loading",
+        "pinned",
+        "pinned-child",
+      ]);
     });
 
     it("enforces the byte budget even when the transcript count is within limit", () => {

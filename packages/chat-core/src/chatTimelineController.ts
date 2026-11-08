@@ -12,6 +12,10 @@ import {
   sortHarnessMessages,
   sortHarnessParts,
 } from "./harnessReducer";
+import {
+  collectAncestorSessions,
+  collectDescendantSessionIds,
+} from "./harnessSubtaskActivity";
 import { hydrateHarnessPart } from "./toolDisplay";
 
 /** The owner changed while transport was in flight; the response is obsolete. */
@@ -42,12 +46,13 @@ export interface ChatTimelinePorts<T extends ChatTimelineSnapshot> {
   loadDetail?: (sessionId: string, partId: string) => Promise<HarnessPart>;
   read: (sessionId: string) => HarnessMessage[] | undefined;
   write: (sessionId: string, messages: HarnessMessage[]) => void;
-  status: (sessionId: string) => HarnessSession["status"] | undefined;
+  /** Known sessions of the open scope: current status and parent lineage. */
+  sessions: () => HarnessSession[];
   discardMessage?: (sessionId: string, messageId: string) => boolean;
   onError?: (error: unknown) => void;
   onSettled?: () => void;
-  /** All adapter-specific pins (selection, busy sessions, gates, todo fetches). */
-  protectedSessions: () => Set<string>;
+  /** Sessions the adapter still shows or waits on: selection, gates, todo fetches. */
+  retainedSessionIds: () => Iterable<string | null | undefined>;
   forget: (sessionId: string) => void;
   /** Vue passes toRaw so identity accounting does not depend on proxies. */
   unwrap?: (value: object) => object;
@@ -127,7 +132,12 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     return this.versions.get(sessionId) ?? 0;
   }
 
-  pendingSessionIds(): string[] {
+  private status(sessionId: string): HarnessSession["status"] | undefined {
+    return this.ports.sessions().find((session) => session.id === sessionId)
+      ?.status;
+  }
+
+  private pendingSessionIds(): string[] {
     return [
       ...new Set(
         [...this.flights.values(), ...this.detailFlights.values()].map(
@@ -137,7 +147,7 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     ];
   }
 
-  pinnedSessionIds(): string[] {
+  private pinnedSessionIds(): string[] {
     return [
       ...new Set(
         [...this.pins].map((key) => key.slice(0, key.lastIndexOf(":"))),
@@ -170,7 +180,7 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     const epoch = this.epoch;
     const generation = this.generation(sessionId) + 1;
     this.versions.set(sessionId, generation);
-    const statusAtRequest = this.ports.status(sessionId);
+    const statusAtRequest = this.status(sessionId);
     const onSnapshot = request.prepare?.() ?? request.onSnapshot;
     const current = () =>
       epoch === this.epoch &&
@@ -260,7 +270,7 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
         }),
     );
     const reconciled =
-      this.ports.status(sessionId) === "busy"
+      this.status(sessionId) === "busy"
         ? mergeBusyFetchedMessages(previous.map(cloneMessage), incoming)
         : statusAtRequest === "busy"
           ? preserveLatestStream(previous, incoming)
@@ -524,10 +534,31 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
     return bytes;
   }
 
+  /**
+   * Keep the lineage family (ancestors and descendants) of every retained, busy,
+   * loading or detail-pinned session, so the subtask UI around it stays whole.
+   */
+  private protectedSessionIds(): Set<string> {
+    const sessions = this.ports.sessions();
+    const roots = new Set<string>();
+    for (const id of this.ports.retainedSessionIds()) if (id) roots.add(id);
+    for (const session of sessions)
+      if (session.status === "busy") roots.add(session.id);
+    for (const id of this.pendingSessionIds()) roots.add(id);
+    for (const id of this.pinnedSessionIds()) roots.add(id);
+    const protectedIds = new Set<string>();
+    for (const id of roots) {
+      protectedIds.add(id);
+      for (const ancestor of collectAncestorSessions(id, sessions))
+        protectedIds.add(ancestor.id);
+      for (const descendant of collectDescendantSessionIds(id, sessions))
+        protectedIds.add(descendant);
+    }
+    return protectedIds;
+  }
+
   trim(): void {
-    const protectedIds = this.ports.protectedSessions();
-    for (const id of this.pendingSessionIds()) protectedIds.add(id);
-    for (const id of this.pinnedSessionIds()) protectedIds.add(id);
+    const protectedIds = this.protectedSessionIds();
     const candidates = [...this.transcripts].filter(
       ([id]) => !protectedIds.has(id),
     );

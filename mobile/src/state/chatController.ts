@@ -247,9 +247,8 @@ export class ChatController {
       read: (sessionId) => this.messagesBySession.get(sessionId),
       write: (sessionId, messages) =>
         this.messagesBySession.set(sessionId, freezeMessages(messages)),
-      status: (sessionId) =>
-        this.sessions.find((session) => session.id === sessionId)?.status,
-      protectedSessions: () => this.protectedTranscriptSessions(),
+      sessions: () => this.sessions,
+      retainedSessionIds: () => this.retainedTranscriptSessionIds(),
       forget: (sessionId) => this.forgetSession(sessionId),
     });
     this.connected = client.realtime.isConnected;
@@ -1906,30 +1905,15 @@ export class ChatController {
     this.timeline.touch(sessionId, recalculate);
   }
 
-  private protectedTranscriptSessions(): Set<string> {
-    const ids = new Set<string>();
-    const protectFamily = (sessionId: string): void => {
-      ids.add(sessionId);
-      for (const ancestor of collectAncestorSessions(sessionId, this.sessions))
-        ids.add(ancestor.id);
-      for (const descendant of collectDescendantSessionIds(
-        sessionId,
-        this.sessions,
-      ))
-        ids.add(descendant);
-    };
-    if (this.activeSessionId) protectFamily(this.activeSessionId);
-    for (const session of this.sessions)
-      if (session.status === "busy") protectFamily(session.id);
-    for (const gate of [
-      ...this.permissionsById.values(),
-      ...this.questionsById.values(),
-    ])
-      protectFamily(gate.session_id);
-    for (const id of this.timeline.pendingSessionIds()) protectFamily(id);
-    for (const id of this.timeline.pinnedSessionIds()) protectFamily(id);
-    for (const id of this.todoFlights.keys()) protectFamily(id);
-    return ids;
+  /** Selected, gated and todo-loading sessions; the timeline owns the policy. */
+  private retainedTranscriptSessionIds(): Array<string | null> {
+    return [
+      this.activeSessionId,
+      ...[...this.permissionsById.values(), ...this.questionsById.values()].map(
+        (gate) => gate.session_id,
+      ),
+      ...this.todoFlights.keys(),
+    ];
   }
 
   private trimInactiveTranscripts(): void {
