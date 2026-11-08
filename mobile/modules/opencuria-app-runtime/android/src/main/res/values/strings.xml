@@ -3,5 +3,15 @@
   <string name="opencuria_app_reload">Reload</string>
   <string name="opencuria_app_close">Close app</string>
   <string name="opencuria_app_loading">Opening %1$s</string>
-  <string name="opencuria_app_menu_hint">Long-press with three fingers for the app menu</string>
+  <string name="opencuria_app_menu_button_label">App menu</string>
+  <string name="opencuria_app_menu_triggers">Open this menu with</string>
+  <string name="opencuria_app_menu_shake">Shake</string>
+  <string name="opencuria_app_menu_three_fingers">Three-finger long press</string>
+  <string name="opencuria_app_menu_button">Menu button</string>
+  <!-- Hint when an app opens: the ways that are on, e.g. "Shake or tap the menu button to close the app". -->
+  <string name="opencuria_app_close_hint">%1$s to close the app</string>
+  <string name="opencuria_app_hint_or">%1$s or %2$s</string>
+  <string name="opencuria_app_hint_shake">shake</string>
+  <string name="opencuria_app_hint_three_fingers">long-press with three fingers</string>
+  <string name="opencuria_app_hint_button">tap the menu button</string>
 </resources>

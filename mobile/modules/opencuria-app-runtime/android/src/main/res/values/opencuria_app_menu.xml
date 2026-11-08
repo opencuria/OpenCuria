@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app menu sheet in OpenCuria's colors (src/ui/theme.tsx, light). -->
+<resources>
+  <color name="opencuria_app_menu_primary">#007AFF</color>
+  <color name="opencuria_app_menu_on_primary">#FFFFFF</color>
+  <color name="opencuria_app_menu_surface">#FFFFFF</color>
+  <color name="opencuria_app_menu_text">#0D0D0D</color>
+  <color name="opencuria_app_menu_muted_text">#606060</color>
+  <color name="opencuria_app_menu_subtle_text">#909090</color>
+  <color name="opencuria_app_menu_control">#F2F2F7</color>
+  <color name="opencuria_app_menu_border">#E4E4E4</color>
+</resources>

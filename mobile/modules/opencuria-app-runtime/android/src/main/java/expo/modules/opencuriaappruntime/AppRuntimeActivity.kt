@@ -1,16 +1,17 @@
 package expo.modules.opencuriaappruntime
 
 import android.app.Activity
-import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -23,8 +24,10 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDialog
 import androidx.core.view.WindowCompat
 import com.facebook.react.bridge.JSBundleLoader
+import com.facebook.react.common.ShakeDetector
 import com.facebook.react.common.annotations.UnstableReactNativeAPI
 import com.facebook.react.defaults.DefaultComponentsRegistry
 import com.facebook.react.defaults.DefaultReactHostDelegate
@@ -45,8 +48,10 @@ private const val TAG = "OpenCuriaAppRuntime"
  * Runs one installed app in its own React instance, like an Expo Go
  * experience: its JavaScript bundle from local storage, every native module
  * from OpenCuria. The instance never touches OpenCuria's own React host and
- * ends with this activity. Back at the app's root closes it; a three-finger
- * long press opens the app menu (reload, close).
+ * ends with this activity. Back at the app's root closes it. Shaking, a
+ * three-finger long press and the floating menu button open the app menu,
+ * each as switched on there ([AppMenuTriggers]); a note at the bottom says
+ * how when the app opens.
  */
 class AppRuntimeActivity :
   AppCompatActivity(),
@@ -55,16 +60,35 @@ class AppRuntimeActivity :
 
   private lateinit var launch: AppLaunch
   private lateinit var sandbox: AppSandbox
+  private lateinit var triggers: AppMenuTriggers
   private lateinit var container: FrameLayout
+  /** The app's surface and its loading screen, beneath the menu button. */
+  private lateinit var content: FrameLayout
+  private lateinit var menuButton: AppMenuButton
   private var host: ReactHostImpl? = null
   private var surface: ReactSurface? = null
   /** Identifies the running instance; callbacks of a stopped one are ignored. */
   private var instance = 0
   private var loading: View? = null
   private var permissionListener: PermissionListener? = null
-  private var dialog: AlertDialog? = null
+  /** The app menu or the error of a failed app. */
+  private var dialog: AppCompatDialog? = null
   private val handler = Handler(Looper.getMainLooper())
-  private val openMenu = Runnable { showMenu() }
+  private val openMenuByPress = Runnable {
+    container.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    showMenu()
+  }
+  private val shakeDetector = ShakeDetector({ showMenu() })
+  private var isShakeDetecting = false
+  private var isThreeFingerPressOn = false
+  private var isInForeground = false
+  private var closeHintShown = false
+  private val showCloseHint = Runnable {
+    if (!closeHintShown && !isFinishing) {
+      closeHintShown = true
+      AppCloseHint.show(container, triggers.closeHint())
+    }
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(null)
@@ -83,7 +107,12 @@ class AppRuntimeActivity :
     // theme keeps the system bars transparent.
     WindowCompat.setDecorFitsSystemWindows(window, false)
     sandbox = AppSandbox(applicationContext, launch)
+    triggers = AppMenuTriggers(this)
     container = FrameLayout(this).apply { setBackgroundColor(backgroundColor()) }
+    content = FrameLayout(this)
+    container.addView(content, matchParent())
+    menuButton = AppMenuButton(this, ::showMenu)
+    container.addView(menuButton)
     setContentView(container)
     onBackPressedDispatcher.addCallback(
       this,
@@ -94,7 +123,31 @@ class AppRuntimeActivity :
       }
     )
     start()
-    showMenuHintOnce()
+    applyTriggers()
+    // The note shows with the app's first screen, or now if that is slow.
+    handler.postDelayed(showCloseHint, CLOSE_HINT_FALLBACK_MS)
+  }
+
+  private fun matchParent() =
+    FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+
+  /** Arm the ways that open the app menu, at start and whenever they change. */
+  private fun applyTriggers() {
+    isThreeFingerPressOn = triggers.isEnabled(AppMenuTrigger.THREE_FINGER_PRESS)
+    menuButton.isOn = triggers.isEnabled(AppMenuTrigger.BUTTON)
+    updateShakeDetector()
+  }
+
+  /** Shaking opens the menu while the app is in the foreground. */
+  private fun updateShakeDetector() {
+    val detect = isInForeground && triggers.isEnabled(AppMenuTrigger.SHAKE)
+    if (detect == isShakeDetecting) return
+    isShakeDetecting = detect
+    if (detect) {
+      shakeDetector.start(getSystemService(SensorManager::class.java))
+    } else {
+      shakeDetector.stop()
+    }
   }
 
   private fun backgroundColor(): Int {
@@ -132,10 +185,7 @@ class AppRuntimeActivity :
     val reactSurface = reactHost.createSurface(this, MAIN_COMPONENT, null)
     surface = reactSurface
     reactSurface.view?.let { view ->
-      container.addView(
-        view,
-        FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-      )
+      content.addView(view, matchParent())
       showLoadingUntilContent(view as ViewGroup)
     }
     reactSurface.start()
@@ -161,19 +211,18 @@ class AppRuntimeActivity :
       }
       addView(ProgressBar(context))
     }
-    loading?.let(container::removeView)
+    loading?.let(content::removeView)
     loading = overlay
-    container.addView(
-      overlay,
-      FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-    )
+    content.addView(overlay, matchParent())
     surfaceView.viewTreeObserver.addOnGlobalLayoutListener(
       object : ViewTreeObserver.OnGlobalLayoutListener {
         override fun onGlobalLayout() {
           if (surfaceView.childCount == 0) return
           surfaceView.viewTreeObserver.removeOnGlobalLayoutListener(this)
-          container.removeView(overlay)
+          content.removeView(overlay)
           if (loading === overlay) loading = null
+          handler.removeCallbacks(showCloseHint)
+          showCloseHint.run()
         }
       }
     )
@@ -188,9 +237,9 @@ class AppRuntimeActivity :
    */
   private fun stop() {
     instance++
-    surface?.view?.let(container::removeView)
+    surface?.view?.let(content::removeView)
     surface = null
-    loading?.let(container::removeView)
+    loading?.let(content::removeView)
     loading = null
     host?.let { reactHost ->
       reactHost.onHostDestroy(this)
@@ -236,30 +285,28 @@ class AppRuntimeActivity :
   }
 
   private fun showMenu() {
-    if (isFinishing || dialog?.isShowing == true) return
-    dialog = AlertDialog.Builder(this)
-      .setTitle(launch.name)
-      .setItems(
-        arrayOf(getString(R.string.opencuria_app_reload), getString(R.string.opencuria_app_close))
-      ) { _, which -> if (which == 0) restart() else finish() }
-      .show()
+    if (isFinishing || isDestroyed || dialog?.isShowing == true) return
+    dialog = AppMenuSheet.show(
+      activity = this,
+      launch = launch,
+      triggers = triggers,
+      onClose = ::finish,
+      onReload = ::restart,
+      onTriggersChanged = ::applyTriggers
+    )
   }
 
-  private fun showMenuHintOnce() {
-    val prefs = getSharedPreferences(HINT_PREFERENCES, Context.MODE_PRIVATE)
-    if (prefs.getBoolean(HINT_KEY, false)) return
-    prefs.edit().putBoolean(HINT_KEY, true).apply()
-    Toast.makeText(this, R.string.opencuria_app_menu_hint, Toast.LENGTH_LONG).show()
-  }
-
-  /** A three-finger long press opens the app menu; touches still reach the app. */
+  /** A three-finger long press opens the app menu if on; touches still reach the app. */
   override fun dispatchTouchEvent(event: MotionEvent): Boolean {
     when (event.actionMasked) {
       MotionEvent.ACTION_POINTER_DOWN ->
-        if (event.pointerCount == MENU_FINGERS) handler.postDelayed(openMenu, MENU_PRESS_MS)
-        else handler.removeCallbacks(openMenu)
+        if (isThreeFingerPressOn && event.pointerCount == MENU_FINGERS) {
+          handler.postDelayed(openMenuByPress, MENU_PRESS_MS)
+        } else {
+          handler.removeCallbacks(openMenuByPress)
+        }
       MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
-        handler.removeCallbacks(openMenu)
+        handler.removeCallbacks(openMenuByPress)
     }
     return super.dispatchTouchEvent(event)
   }
@@ -271,15 +318,21 @@ class AppRuntimeActivity :
   override fun onResume() {
     super.onResume()
     host?.onHostResume(this, this)
+    isInForeground = true
+    if (::triggers.isInitialized) updateShakeDetector()
   }
 
   override fun onPause() {
     host?.onHostPause(this)
+    isInForeground = false
+    if (::triggers.isInitialized) updateShakeDetector()
     super.onPause()
   }
 
   override fun onDestroy() {
-    handler.removeCallbacks(openMenu)
+    handler.removeCallbacks(openMenuByPress)
+    handler.removeCallbacks(showCloseHint)
+    shakeDetector.stop()
     dialog?.dismiss()
     if (::launch.isInitialized) {
       stop()
@@ -339,8 +392,8 @@ class AppRuntimeActivity :
     private const val MAX_ERROR_CHARS = 600
     /** What React Native's ExceptionsManager appends to render errors. */
     private const val COMPONENT_STACK = "\n\nThis error is located at:"
-    private const val HINT_PREFERENCES = "opencuria-app-runtime"
-    private const val HINT_KEY = "menu-hint-shown"
+    /** How long the close note waits for the app's first screen. */
+    private const val CLOSE_HINT_FALLBACK_MS = 2_000L
 
     private var current: WeakReference<AppRuntimeActivity>? = null
 

@@ -1,8 +1,10 @@
 // Copyright OpenCuria contributors. AGPL-3.0-only.
 
+import Combine
 import ExpoModulesCore
 import React
 import ReactAppDependencyProvider
+import SwiftUI
 import UIKit
 
 /// Points the app's React instance at its installed bundle.
@@ -22,11 +24,14 @@ final class AppRuntimeDelegate: RCTDefaultReactNativeFactoryDelegate {
 /**
  Runs one installed app full screen in its own React instance, like an Expo Go
  experience: its JavaScript bundle from local storage, every native module
- from OpenCuria. The instance ends with this controller. A three-finger long
- press opens the app menu (reload, close).
+ from OpenCuria. The instance ends with this controller. Shaking, a
+ three-finger long press and the floating menu button open the app menu, each
+ as switched on there (`AppMenuTriggers`); a note at the bottom says how when
+ the app opens.
  */
-final class AppRuntimeViewController: UIViewController {
-  private static let hintKey = "opencuria.app-runtime.menu-hint-shown"
+final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationControllerDelegate {
+  /// How long the close note waits for the app's first screen.
+  private static let closeHintFallback: TimeInterval = 2
   static weak var current: AppRuntimeViewController?
 
   private let launch: AppLaunch
@@ -36,8 +41,23 @@ final class AppRuntimeViewController: UIViewController {
   private var rootView: UIView?
   private var loadingView: UIView?
   private var contentObserver: NSObjectProtocol?
+  private var keyboardObserver: NSObjectProtocol?
+  private var triggersObserver: AnyCancellable?
+  private var closeHintShown = false
   /// Identifies the running instance; callbacks of a stopped one are ignored.
   private var instance = 0
+
+  private lazy var menuGesture: UILongPressGestureRecognizer = {
+    let gesture = UILongPressGestureRecognizer(target: self, action: #selector(openMenuByPress(_:)))
+    gesture.numberOfTouchesRequired = 3
+    gesture.minimumPressDuration = 0.6
+    gesture.cancelsTouchesInView = false
+    return gesture
+  }()
+
+  private lazy var menuButton = AppMenuButton { [weak self] in
+    self?.showMenu()
+  }
 
   init(launch: AppLaunch) {
     self.launch = launch
@@ -56,6 +76,9 @@ final class AppRuntimeViewController: UIViewController {
   }
 
   deinit {
+    if let keyboardObserver {
+      NotificationCenter.default.removeObserver(keyboardObserver)
+    }
     AppGateway.close(launch.gateway)
   }
 
@@ -64,17 +87,61 @@ final class AppRuntimeViewController: UIViewController {
     AppRuntimeViewController.current = self
     AppGateway.open(launch.gateway)
     view.backgroundColor = launch.backgroundColor ?? .systemBackground
-    let menuGesture = UILongPressGestureRecognizer(target: self, action: #selector(openMenu(_:)))
-    menuGesture.numberOfTouchesRequired = 3
-    menuGesture.minimumPressDuration = 0.6
-    menuGesture.cancelsTouchesInView = false
     view.addGestureRecognizer(menuGesture)
+    view.addSubview(menuButton)
+    triggersObserver = AppMenuTriggers.shared.$enabled.sink { [weak self] enabled in
+      self?.applyTriggers(enabled)
+    }
+    // Shaking reaches this controller only as first responder; take that
+    // role back when the app's text field lets go of the keyboard.
+    keyboardObserver = NotificationCenter.default.addObserver(
+      forName: UIResponder.keyboardDidHideNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.claimShake()
+    }
     start()
   }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    showMenuHintOnce()
+    claimShake()
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.closeHintFallback) { [weak self] in
+      self?.showCloseHint()
+    }
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    menuButton.superviewDidLayout()
+  }
+
+  /// Arm the ways that open the app menu (`enabled` is the new value).
+  private func applyTriggers(_ enabled: Set<AppMenuTrigger>) {
+    menuGesture.isEnabled = enabled.contains(.threeFingerPress)
+    menuButton.isOn = enabled.contains(.button)
+  }
+
+  override var canBecomeFirstResponder: Bool {
+    true
+  }
+
+  override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+    guard motion == .motionShake, AppMenuTriggers.shared.isEnabled(.shake) else {
+      super.motionEnded(motion, with: event)
+      return
+    }
+    showMenu()
+  }
+
+  /// Become first responder for shake events unless something of the app (e.g. a text field) is.
+  private func claimShake() {
+    guard view.window != nil, presentedViewController == nil, !isFirstResponder else { return }
+    let current = UIResponder.opencuriaFirstResponder
+    if current == nil || current is UIWindow || current is UIApplication {
+      becomeFirstResponder()
+    }
   }
 
   /// Release level of OpenCuria's own instance; React Native requires a match.
@@ -113,7 +180,8 @@ final class AppRuntimeViewController: UIViewController {
     root.frame = view.bounds
     root.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     root.backgroundColor = .clear
-    view.addSubview(root)
+    // Beneath the menu button and the close note.
+    view.insertSubview(root, at: 0)
     self.delegate = delegate
     self.factory = factory
     self.rootView = root
@@ -183,7 +251,7 @@ final class AppRuntimeViewController: UIViewController {
       stack.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
       stack.centerYAnchor.constraint(equalTo: overlay.centerYAnchor)
     ])
-    view.addSubview(overlay)
+    view.insertSubview(overlay, aboveSubview: root)
     loadingView = overlay
     contentObserver = NotificationCenter.default.addObserver(
       forName: NSNotification.Name("RCTContentDidAppearNotification"),
@@ -193,6 +261,7 @@ final class AppRuntimeViewController: UIViewController {
       overlay?.removeFromSuperview()
       if let self, self.loadingView === overlay {
         self.loadingView = nil
+        self.showCloseHint()
       }
     }
   }
@@ -223,45 +292,108 @@ final class AppRuntimeViewController: UIViewController {
     }
   }
 
-  @objc private func openMenu(_ gesture: UILongPressGestureRecognizer) {
+  @objc private func openMenuByPress(_ gesture: UILongPressGestureRecognizer) {
     guard gesture.state == .began, presentedViewController == nil else { return }
-    let menu = UIAlertController(title: launch.name, message: nil, preferredStyle: .actionSheet)
-    menu.addAction(UIAlertAction(title: "Reload", style: .default) { [weak self] _ in
-      self?.restart()
-    })
-    menu.addAction(UIAlertAction(title: "Close app", style: .destructive) { [weak self] _ in
-      self?.close()
-    })
-    menu.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-    if let popover = menu.popoverPresentationController {
-      popover.sourceView = view
-      popover.sourceRect = CGRect(origin: gesture.location(in: view), size: .zero)
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    showMenu()
+  }
+
+  /// The app menu as a sheet: half height, pulled up to full height when needed.
+  private func showMenu() {
+    guard isViewLoaded, view.window != nil, presentedViewController == nil else { return }
+    let menu = UIHostingController(rootView: AppMenuView(
+      name: launch.name,
+      icon: launch.iconPath.flatMap(UIImage.init(contentsOfFile:)),
+      triggers: .shared,
+      onDismiss: { [weak self] in
+        self?.dismiss(animated: true) {
+          self?.claimShake()
+        }
+      },
+      onCloseApp: { [weak self] in
+        self?.close()
+      },
+      onReload: { [weak self] in
+        self?.restart()
+      }
+    ))
+    menu.modalPresentationStyle = .pageSheet
+    if let sheet = menu.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.prefersGrabberVisible = true
     }
+    menu.presentationController?.delegate = self
     present(menu, animated: true)
   }
 
-  private func showMenuHintOnce() {
-    let defaults = UserDefaults.standard
-    guard !defaults.bool(forKey: AppRuntimeViewController.hintKey) else { return }
-    defaults.set(true, forKey: AppRuntimeViewController.hintKey)
-    let hint = UILabel()
-    hint.text = "  Long-press with three fingers for the app menu  "
-    hint.font = .preferredFont(forTextStyle: .footnote)
-    hint.textColor = .white
-    hint.backgroundColor = UIColor.black.withAlphaComponent(0.75)
-    hint.layer.cornerRadius = 14
-    hint.clipsToBounds = true
+  /// The menu was swiped away.
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    claimShake()
+  }
+
+  /// A small note at the bottom on how to close the app; it fades after a few seconds.
+  private func showCloseHint() {
+    guard !closeHintShown, isViewLoaded, view.window != nil else { return }
+    closeHintShown = true
+    let text = AppMenuTriggers.shared.closeHint
+    let label = UILabel()
+    label.text = text
+    label.font = .preferredFont(forTextStyle: .footnote)
+    label.adjustsFontForContentSizeCategory = true
+    label.textColor = .white
+    label.textAlignment = .center
+    label.numberOfLines = 0
+    label.translatesAutoresizingMaskIntoConstraints = false
+    let hint = UIView()
+    hint.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+    hint.layer.cornerRadius = 16
+    hint.layer.cornerCurve = .continuous
+    hint.isUserInteractionEnabled = false
+    hint.alpha = 0
     hint.translatesAutoresizingMaskIntoConstraints = false
+    hint.addSubview(label)
     view.addSubview(hint)
     NSLayoutConstraint.activate([
+      label.topAnchor.constraint(equalTo: hint.topAnchor, constant: 7),
+      label.bottomAnchor.constraint(equalTo: hint.bottomAnchor, constant: -7),
+      label.leadingAnchor.constraint(equalTo: hint.leadingAnchor, constant: 14),
+      label.trailingAnchor.constraint(equalTo: hint.trailingAnchor, constant: -14),
       hint.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-      hint.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
-      hint.heightAnchor.constraint(equalToConstant: 32)
+      hint.leadingAnchor.constraint(
+        greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor,
+        constant: 24
+      ),
+      hint.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16)
     ])
-    UIView.animate(withDuration: 0.3, delay: 3.5, options: []) {
-      hint.alpha = 0
+    UIAccessibility.post(notification: .announcement, argument: text)
+    UIView.animate(withDuration: 0.3) {
+      hint.alpha = 1
     } completion: { _ in
-      hint.removeFromSuperview()
+      UIView.animate(withDuration: 0.3, delay: 4, options: []) {
+        hint.alpha = 0
+      } completion: { _ in
+        hint.removeFromSuperview()
+      }
     }
+  }
+}
+
+private extension UIResponder {
+  private static weak var reportedFirstResponder: UIResponder?
+
+  /// The current first responder, found through the responder chain; a window or the application when there is none.
+  static var opencuriaFirstResponder: UIResponder? {
+    reportedFirstResponder = nil
+    UIApplication.shared.sendAction(
+      #selector(opencuriaReportFirstResponder),
+      to: nil,
+      from: nil,
+      for: nil
+    )
+    return reportedFirstResponder
+  }
+
+  @objc func opencuriaReportFirstResponder() {
+    UIResponder.reportedFirstResponder = self
   }
 }
