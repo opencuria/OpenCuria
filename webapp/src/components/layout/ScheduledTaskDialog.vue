@@ -58,7 +58,9 @@ import {
   scheduleDraftToCron,
   scheduleDraftWithMode,
   schedulePayload,
+  isScheduleRunActive,
   scheduleRunStatusLabel,
+  scheduleRunWorkspaceId,
   upcomingScheduleRuns,
   validateSchedule,
   validateScheduleDraft,
@@ -455,7 +457,7 @@ async function runNow(): Promise<void> {
       organizationId !== lastOrganizationId
     )
       return
-    if (run.status === 'running' || run.status === 'claimed')
+    if (isScheduleRunActive(run))
       notifications.info(
         'Run started',
         run.status === 'running' ? 'A new chat was created for this run.' : 'Your task is queued.',
@@ -512,16 +514,11 @@ function formatDate(value: string | null): string {
     : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 const formatRunStatus = scheduleRunStatusLabel
-function chatPath(sessionId: string, workspaceId: string): string {
-  return `/workspaces/${workspaceId}?session=${encodeURIComponent(sessionId)}`
-}
 async function openRunChat(run: ScheduledTaskRun): Promise<void> {
   if (!run.session_id || busy.value) return
   requestClose(async () => {
-    const path = chatPath(
-      run.session_id!,
-      selectedTask.value?.workspace_id ?? form.value.workspace_id,
-    )
+    const workspaceId = scheduleRunWorkspaceId(run, selectedTask.value ?? form.value)
+    const path = `/workspaces/${workspaceId}?session=${encodeURIComponent(run.session_id!)}`
     closeDialog()
     await nextTick()
     await router.push(path)
@@ -568,7 +565,7 @@ const { start: startRunsPolling, stop: stopRunsPolling } = usePolling(async () =
     !props.open ||
     tab.value !== 'runs' ||
     !selectedId.value ||
-    !runs.value.some((run) => run.status === 'running' || run.status === 'claimed')
+    !runs.value.some(isScheduleRunActive)
   )
     return
   await loadRuns(selectedId.value)

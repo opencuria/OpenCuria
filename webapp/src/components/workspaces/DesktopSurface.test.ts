@@ -618,7 +618,7 @@ describe('DesktopSurface', () => {
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
     mountSurface()
     await nextTick()
-    store.setViewerIntent(1, 'held', 'epoch-1')
+    store.setViewerIntent(1, 'held')
     await nextTick()
     const iframe = document.querySelector('iframe')!
     expect(new URL(iframe.src).searchParams.get('token')).toBe('tok')

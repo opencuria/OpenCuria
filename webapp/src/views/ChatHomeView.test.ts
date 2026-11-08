@@ -38,7 +38,6 @@ const harnessStore = {
   loadAgentConfigs: vi.fn().mockResolvedValue(undefined),
   agentDefault: vi.fn().mockReturnValue({ model: '', effort: '' }),
   ensureComposerDefaults: vi.fn(),
-  resetComposerDirty: vi.fn(),
 }
 
 const skillStore = {

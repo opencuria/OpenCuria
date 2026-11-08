@@ -68,10 +68,6 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
         desktopStore.setDisconnected()
       } else if (state.status) {
         desktopStore.setComputerUseActive(Boolean(state.status.computer_use_active))
-        desktopStore.setGlobalHolders(
-          Boolean(state.status.mcp_active),
-          state.status.holder_count ?? 0,
-        )
         if (state.status.active && state.status.proxy_url) {
           if (state.connecting) {
             const observedRevision = state.status.revision ?? state.status.intent_revision
@@ -87,11 +83,7 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
           desktopStore.setDisconnected()
         }
       }
-      desktopStore.setViewerIntent(
-        state.wanted ? state.revision : null,
-        state.leaseState,
-        state.epoch,
-      )
+      desktopStore.setViewerIntent(state.wanted ? state.revision : null, state.leaseState)
       if (state.connecting) desktopStore.setConnecting(id)
     },
     { deep: true, immediate: true, flush: 'sync' },

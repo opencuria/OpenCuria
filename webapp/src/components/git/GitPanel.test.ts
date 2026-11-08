@@ -7,7 +7,6 @@ import GitPanel from './GitPanel.vue'
 import * as gitApi from '@/services/git.api'
 import { useGitStore } from '@/stores/git'
 import { useSidePanelStore } from '@/stores/sidePanel'
-import { useTerminalStore } from '@/stores/terminal'
 import {
   makeRawChange,
   makeRepoSnapshot,
@@ -345,14 +344,10 @@ describe('GitPanel', () => {
       expect(getRepo).toHaveBeenCalledTimes(1)
 
       const repoDetails = store.repoDetails['/workspace/repo-app']
-      const terminal = useTerminalStore()
-      terminal.setConnected('terminal-1', 'workspace-1')
 
       sidePanel.activeTab = 'terminal'
       await nextTick()
       expect(store.polling).toBe(false)
-      expect(terminal.isConnected).toBe(true)
-      expect(terminal.terminalId).toBe('terminal-1')
       vi.clearAllMocks()
       await vi.advanceTimersByTimeAsync(20_000)
       expect(getRepos).not.toHaveBeenCalled()

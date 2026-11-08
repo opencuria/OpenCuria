@@ -78,29 +78,10 @@ import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
 import { useEditorStore } from '@/stores/editor'
 
-export type { GitRefTag } from '@/types/git'
-
 const CDV_HEIGHT_KEY = 'opencuria:git:cdvHeight'
 const CDV_HEIGHT_DEFAULT = 250
 const CDV_HEIGHT_MIN = 120
 const CDV_HEIGHT_MAX = 600
-
-// Rules and normalizers are shared with the mobile Git panel.
-export {
-  GIT_DETAILS_POLL_MS,
-  GIT_HISTORY_LIMIT,
-  GIT_MAX_PATHS_PER_OPERATION,
-  GIT_POLL_INTERVAL_MS,
-  commitDetailsKey,
-  normalizeChange,
-  normalizeCommit,
-  normalizeCommitDetails,
-  normalizeCommitFile,
-  normalizeRepoSnapshot,
-  normalizeRepoSummary,
-  normalizeStash,
-} from '@opencuria/chat-core/gitModel'
-export type { SuggestedRemoteAction } from '@opencuria/chat-core/gitModel'
 
 function loadCdvHeight(): number {
   try {

@@ -23,13 +23,6 @@ const MAX_TERMINAL_UPLOAD_IDS = 500
 /** How long an upload request may stay pending. */
 const REQUEST_TIMEOUT_MS = 30_000
 
-function formatBytes(size: number): string {
-  if (!Number.isFinite(size) || size < 0) return 'unknown size'
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`
-}
-
 export const useFileExplorerStore = defineStore('fileExplorer', () => {
   // -- state ----------------------------------------------------------------
 
@@ -479,7 +472,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     trackAndUpload,
     cancelUpload,
     failUpload,
-    formatBytes,
     // event handlers
     shouldRefreshUploadResult,
     handleUploadResult,

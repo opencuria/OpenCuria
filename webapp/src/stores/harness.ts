@@ -11,7 +11,6 @@ import { computed, ref, toRaw } from 'vue'
 
 import type {
   HarnessMessage,
-  HarnessPart,
   HarnessPartDelta,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
@@ -187,25 +186,6 @@ export const useHarnessStore = defineStore('harness', () => {
     return { ...request, agent_name: session.agent_name }
   }
 
-  const rootSessions = computed(() => sessions.value.filter((session) => !session.parent_id))
-
-  const childSessionsByParent = computed(() => {
-    const map: Record<string, HarnessSession[]> = {}
-    for (const session of sessions.value) {
-      if (!session.parent_id) continue
-      if (!map[session.parent_id]) map[session.parent_id] = []
-      map[session.parent_id]!.push(session)
-    }
-    for (const children of Object.values(map)) {
-      children.sort((a, b) => {
-        const aTime = a.created_at ? new Date(a.created_at).getTime() : 0
-        const bTime = b.created_at ? new Date(b.created_at).getTime() : 0
-        return aTime - bTime
-      })
-    }
-    return map
-  })
-
   /** Root → current session chain for the header breadcrumb. */
   const activeSessionLineage = computed<HarnessSession[]>(() => {
     if (!activeSessionId.value) return []
@@ -300,7 +280,6 @@ export const useHarnessStore = defineStore('harness', () => {
 
   /** Clear transcript caches and invalidate all outstanding session fetches. */
   function clearTranscriptCaches(): void {
-    const sessionIdFromKey = (key: string): string => key.slice(0, key.indexOf(':'))
     const todoSessionIds = new Set([...todoGenerations.keys(), ...todoFetches.keys()])
     for (const sessionId of todoSessionIds) {
       todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
@@ -1285,11 +1264,6 @@ export const useHarnessStore = defineStore('harness', () => {
     composerDirty.value = false
   }
 
-  // Clear the dirty flag.
-  function resetComposerDirty(): void {
-    composerDirty.value = false
-  }
-
   // Force-apply mode defaults (clears dirty first).
   function resetComposer(mode: HarnessSessionMode, catalog: ProviderModel[] = []): void {
     composerDirty.value = false
@@ -1340,8 +1314,6 @@ export const useHarnessStore = defineStore('harness', () => {
     activeQueuedSteers,
     activePermissionRequests,
     activeQuestionRequests,
-    rootSessions,
-    childSessionsByParent,
     activeSessionLineage,
     // Actions
     fetchSessions,
@@ -1372,7 +1344,6 @@ export const useHarnessStore = defineStore('harness', () => {
     setComposerEffort,
     markComposerDirty,
     loadSessionIntoComposer,
-    resetComposerDirty,
     resetComposer,
     dismissNotice,
     resolvePermission,

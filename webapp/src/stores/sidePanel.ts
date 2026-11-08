@@ -17,7 +17,6 @@ import {
   savePanelWidth,
   type SidePanelTab,
 } from '@/lib/sidePanel'
-import { useTerminalStore } from '@/stores/terminal'
 
 export const useSidePanelStore = defineStore('sidePanel', () => {
   const persisted = loadPanelState()
@@ -42,7 +41,6 @@ export const useSidePanelStore = defineStore('sidePanel', () => {
     if (tab) activeTab.value = tab
     isOpen.value = true
     hasOpened.value = true
-    if (activeTab.value === 'terminal') useTerminalStore().open()
     persistState()
   }
 
@@ -53,7 +51,6 @@ export const useSidePanelStore = defineStore('sidePanel', () => {
 
   function setTab(tab: SidePanelTab): void {
     activeTab.value = tab
-    if (tab === 'terminal') useTerminalStore().open()
     persistState()
   }
 

@@ -25,7 +25,6 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useGitStore } from '@/stores/git'
 import { useSidePanelStore } from '@/stores/sidePanel'
-import { useTerminalStore } from '@/stores/terminal'
 import { useEditorStore } from '@/stores/editor'
 import EditorTabs from '@/components/editor/EditorTabs.vue'
 import { sidebarChatTargetKey, useWorkspaceLayoutStore } from '@/stores/workspaceLayout'
@@ -57,7 +56,6 @@ if (props.workspaceId && mediaWorkspaceId !== props.workspaceId) {
   mediaWorkspaceId = props.workspaceId
 }
 const gitStore = useGitStore()
-const terminalStore = useTerminalStore()
 const editorStore = useEditorStore()
 const workspaceEditor = ref<{
   save: () => Promise<void>
@@ -146,7 +144,6 @@ function resetToolStores(options: { resetDesktop?: boolean } = {}): void {
   // Resetting this shared store first would erase the old workspace identity,
   // preventing the surface from issuing that release.
   if (options.resetDesktop !== false) desktopStore.reset()
-  terminalStore.reset()
   fileExplorerStore.reset()
   gitStore.reset()
 }
@@ -156,7 +153,6 @@ watch(
   (ok) => {
     if (!ok) {
       desktopStore.close()
-      terminalStore.close()
       fileExplorerStore.reset()
       gitStore.reset()
     }

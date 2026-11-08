@@ -33,7 +33,6 @@ vi.mock('@/stores/fileExplorer', () => ({
   useFileExplorerStore: () => ({
     reset: mocks.reset,
     downloadFile: mocks.download,
-    formatBytes: String,
   }),
 }))
 vi.mock('@/stores/git', () => ({
@@ -45,9 +44,6 @@ vi.mock('@/stores/git', () => ({
 }))
 vi.mock('@/stores/desktop', () => ({
   useDesktopStore: () => ({ reset: mocks.reset, close: vi.fn() }),
-}))
-vi.mock('@/stores/terminal', () => ({
-  useTerminalStore: () => ({ reset: mocks.reset, close: vi.fn(), open: vi.fn() }),
 }))
 vi.mock('@/stores/workspaceImages', () => ({
   useWorkspaceImageStore: () => ({ reset: mocks.reset }),

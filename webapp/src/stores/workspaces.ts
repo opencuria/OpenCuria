@@ -6,7 +6,7 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 
 import type {
   Workspace,
@@ -112,22 +112,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       // Acceptance succeeded: keep the fence until WS or a later REST refresh confirms completion.
     }
   }
-
-  // --- Getters ---
-  const runningWorkspaces = computed(() =>
-    workspaces.value.filter((w) => w.status === WorkspaceStatus.RUNNING),
-  )
-
-  const workspacesByStatus = computed(() => ({
-    creating: workspaces.value.filter((w) => w.status === WorkspaceStatus.CREATING),
-    running: workspaces.value.filter((w) => w.status === WorkspaceStatus.RUNNING),
-    stopped: workspaces.value.filter((w) => w.status === WorkspaceStatus.STOPPED),
-    failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.FAILED),
-    pending_deletion: workspaces.value.filter((w) => w.status === WorkspaceStatus.PENDING_DELETION),
-    deleting: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETING),
-    deleted: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETED),
-    delete_failed: workspaces.value.filter((w) => w.status === WorkspaceStatus.DELETE_FAILED),
-  }))
 
   // --- Actions ---
 
@@ -806,8 +790,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     pendingWorkspaceOperations,
     pendingCaptures,
     // Getters
-    runningWorkspaces,
-    workspacesByStatus,
     // Actions
     fetchWorkspaces,
     fetchWorkspaceDetail,

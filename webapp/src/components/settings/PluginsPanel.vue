@@ -13,6 +13,7 @@ import PluginEditorDialog from './PluginEditorDialog.vue'
 import { usePluginStore } from '@/stores/plugins'
 import { useAuthStore } from '@/stores/auth'
 import type { Plugin } from '@/types'
+import { canTogglePlugin, pluginAvailability } from '@opencuria/chat-core/plugins'
 import {
   Dialog,
   DialogContent,
@@ -127,11 +128,6 @@ function mcpEndpoint(server: Plugin['mcp_servers'][number]): string {
     : server.url
 }
 
-function availabilityLabel(plugin: Plugin): string {
-  if (!plugin.enabled || !plugin.published) return 'Unpublished'
-  return plugin.org_enabled ? 'Active' : 'Inactive'
-}
-
 function transportLabel(transport: string): string {
   if (transport === 'builtin') return 'Built-in'
   return transport === 'streamable_http'
@@ -161,7 +157,7 @@ function credentialTypeLabel(type: string): string {
             ><span
               class="size-1.5 rounded-full"
               :class="selectedPlugin.org_enabled ? 'bg-success' : 'bg-muted-foreground'"
-            />{{ availabilityLabel(selectedPlugin) }}</span
+            />{{ pluginAvailability(selectedPlugin) }}</span
           >
           <span>{{ selectedPlugin.is_global ? 'Global' : 'Organization' }}</span>
         </template>
@@ -169,9 +165,7 @@ function credentialTypeLabel(type: string): string {
           <Switch
             :model-value="selectedPlugin.org_enabled"
             :disabled="
-              (!selectedPlugin.org_enabled &&
-                (!selectedPlugin.enabled || !selectedPlugin.published)) ||
-              pluginStore.togglingIds.includes(selectedPlugin.id)
+              !canTogglePlugin(selectedPlugin) || pluginStore.togglingIds.includes(selectedPlugin.id)
             "
             :aria-label="
               selectedPlugin.org_enabled
@@ -361,7 +355,7 @@ function credentialTypeLabel(type: string): string {
             {{ plugin.description || 'No description provided.' }}
           </p>
           <div class="mt-auto flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            <Badge :variant="plugin.org_enabled ? 'secondary' : 'outline'">{{ availabilityLabel(plugin) }}</Badge>
+            <Badge :variant="plugin.org_enabled ? 'secondary' : 'outline'">{{ pluginAvailability(plugin) }}</Badge>
             <span>{{ plugin.skills.length }} {{ plugin.skills.length === 1 ? 'skill' : 'skills' }} ·</span>
             <span>{{ plugin.mcp_servers.length }} {{ plugin.mcp_servers.length === 1 ? 'MCP server' : 'MCP servers' }} ·</span>
             <span>{{ plugin.credential_requirements.length }} {{ plugin.credential_requirements.length === 1 ? 'service' : 'services' }}</span>

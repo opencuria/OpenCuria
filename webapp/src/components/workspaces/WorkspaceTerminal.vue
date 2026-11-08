@@ -14,7 +14,6 @@ import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { useTerminalStore } from '@/stores/terminal'
 import * as workspacesApi from '@/services/workspaces.api'
 import {
   isConnected,
@@ -34,12 +33,11 @@ const props = defineProps<{
   workspaceId: string
 }>()
 
-const terminalStore = useTerminalStore()
-
 const terminalRef = ref<HTMLDivElement | null>(null)
 const connecting = ref(false)
 const error = ref<string | null>(null)
 const hadConnection = ref(false)
+const connected = ref(false)
 const endedNotice = ref('Terminal session ended')
 
 let terminal: Terminal | null = null
@@ -285,7 +283,7 @@ async function connectTerminal(): Promise<void> {
 
 function adoptTerminal(id: string): void {
   terminalId = id
-  terminalStore.setConnected(id, props.workspaceId)
+  connected.value = true
   hadConnection.value = true
   connecting.value = false
   error.value = null
@@ -300,7 +298,7 @@ function releaseTerminal(): void {
   request = null
   if (terminalId) sendTerminalClose(props.workspaceId, terminalId)
   terminalId = null
-  terminalStore.setDisconnected()
+  connected.value = false
 }
 
 function setupSocketListeners(): void {
@@ -321,7 +319,7 @@ function setupSocketListeners(): void {
     onEvent('terminal:closed', (data) => {
       if (data.workspace_id === props.workspaceId && data.terminal_id === terminalId) {
         terminalId = null
-        terminalStore.setDisconnected()
+        connected.value = false
         endedNotice.value = CLOSED_NOTICES[data.reason ?? ''] ?? 'Terminal session ended'
         terminal?.writeln(`\r\n\x1b[33m[${endedNotice.value}]\x1b[0m`)
       }
@@ -388,7 +386,7 @@ onBeforeUnmount(() => {
 
     <!-- Session ended overlay -->
     <div
-      v-else-if="hadConnection && !terminalStore.isConnected && !connecting && !error"
+      v-else-if="hadConnection && !connected && !connecting && !error"
       class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-card/80"
     >
       <TerminalSquare :size="28" class="text-muted-foreground" />

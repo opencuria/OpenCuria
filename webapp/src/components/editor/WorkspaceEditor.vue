@@ -17,6 +17,7 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useGitStore } from '@/stores/git'
 import type { MonacoChangeRange } from '@/lib/monacoChanges'
 import { getWorkspaceFileExtension } from '@/lib/workspaceFileRefs'
+import { formatAttachmentSize } from '@opencuria/chat-core/harnessAttachments'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 
 const MonacoEditor = defineAsyncComponent(() => import('./MonacoEditor.vue'))
@@ -171,8 +172,8 @@ onUnmounted(() => document.removeEventListener('keydown', handleKeydown))
         class="shrink-0 border-b border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning"
         data-testid="editor-truncated"
       >
-        Read-only preview · {{ files.formatBytes(tab.previewBytes) }} of
-        {{ files.formatBytes(tab.size) }}
+        Read-only preview · {{ formatAttachmentSize(tab.previewBytes) }} of
+        {{ formatAttachmentSize(tab.size) }}
       </div>
       <MonacoEditor
         v-if="tab.mediaType === 'text' && !showMarkdownPreview"

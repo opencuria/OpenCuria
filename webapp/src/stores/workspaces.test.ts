@@ -163,9 +163,7 @@ describe('workspace transition state', () => {
     store.updateWorkspaceStatus('workspace-remove', WorkspaceStatus.DELETED)
 
     expect(store.pendingWorkspaceOperations['workspace-remove']).toBeUndefined()
-    expect(store.workspacesByStatus.deleted.map((workspace) => workspace.id)).toEqual([
-      'workspace-remove',
-    ])
+    expect(store.workspaces.map((workspace) => workspace.status)).toEqual([WorkspaceStatus.DELETED])
     expect(store.isWorkspaceTransitioning('workspace-remove')).toBe(true)
   })
 })

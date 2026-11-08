@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useSidePanelStore } from './sidePanel'
-import { useTerminalStore } from './terminal'
 import {
   DEFAULT_PANEL_TAB,
   DEFAULT_PANEL_WIDTH,
@@ -67,14 +66,6 @@ describe('sidePanel store', () => {
     expect(JSON.parse(localStorage.getItem(PANEL_STATE_STORAGE_KEY)!)).toMatchObject({
       activeTab: 'files',
     })
-  })
-
-  it('opens the terminal store when the terminal tab is activated', () => {
-    const store = useSidePanelStore()
-    const terminal = useTerminalStore()
-    expect(terminal.isOpen).toBe(false)
-    store.open('terminal')
-    expect(terminal.isOpen).toBe(true)
   })
 
   it('clamps and persists the panel width', () => {

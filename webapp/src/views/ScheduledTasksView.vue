@@ -21,7 +21,13 @@ import ScheduleBlockDetails from '@/components/scheduled-tasks/ScheduleBlockDeta
 import ScheduleTaskRail from '@/components/scheduled-tasks/ScheduleTaskRail.vue'
 import ScheduleWeekGrid from '@/components/scheduled-tasks/ScheduleWeekGrid.vue'
 import { usePolling } from '@/composables/usePolling'
-import { COMMON_TIME_ZONES, describeSchedule, isValidTimeZone } from '@/lib/scheduledTasks'
+import {
+  COMMON_TIME_ZONES,
+  describeSchedule,
+  isScheduleRunActive,
+  isValidTimeZone,
+  scheduleRunWorkspaceId,
+} from '@/lib/scheduledTasks'
 import {
   addDays,
   browserTimeZone,
@@ -271,7 +277,7 @@ async function runNow(task: ScheduledTask): Promise<void> {
   setBusy(task.id, true)
   try {
     const run = await runScheduledTaskNow(task.id)
-    if (run.status === 'running' || run.status === 'claimed')
+    if (isScheduleRunActive(run))
       notifications.info('Run started', `${task.name} is running in a new chat.`)
     else notifications.error('Task could not run', run.error || 'The run was skipped.')
     await loadRuns()
@@ -288,7 +294,10 @@ async function runNow(task: ScheduledTask): Promise<void> {
 function openChat(task: ScheduledTask, run: ScheduledTaskRun): void {
   if (!run.session_id) return
   selection.value = null
-  void router.push({ path: `/workspaces/${task.workspace_id}`, query: { session: run.session_id } })
+  void router.push({
+    path: `/workspaces/${scheduleRunWorkspaceId(run, task)}`,
+    query: { session: run.session_id },
+  })
 }
 
 function selectBlock(block: CalendarBlock, element: HTMLElement): void {

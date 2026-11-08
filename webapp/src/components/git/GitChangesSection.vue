@@ -13,6 +13,7 @@
  */
 import { computed, ref } from 'vue'
 import type { GitFileStatus } from '@/types/git'
+import { GIT_STATUS_LABELS } from '@opencuria/chat-core/gitModel'
 import { useGitStore } from '@/stores/git'
 import { copyToClipboard } from '@/lib/clipboard'
 import { Textarea } from '@/components/ui/textarea'
@@ -283,15 +284,6 @@ const STATUS_COLORS: Record<GitFileStatus, string> = {
   U: 'text-muted-foreground',
 }
 
-const STATUS_LABELS: Record<GitFileStatus, string> = {
-  M: 'Modified',
-  A: 'Added',
-  D: 'Deleted',
-  R: 'Renamed',
-  C: 'Copied',
-  U: 'Unresolved',
-}
-
 const stagedOpen = ref(true)
 const changesOpen = ref(true)
 </script>
@@ -547,7 +539,7 @@ const changesOpen = ref(true)
               <span
                 class="w-3 shrink-0 text-center text-[10px] font-semibold"
                 :class="STATUS_COLORS[change.status]"
-                :title="STATUS_LABELS[change.status]"
+                :title="GIT_STATUS_LABELS[change.status]"
               >
                 {{ change.status }}
               </span>
@@ -646,7 +638,7 @@ const changesOpen = ref(true)
               <span
                 class="w-3 shrink-0 text-center text-[10px] font-semibold"
                 :class="STATUS_COLORS[change.status]"
-                :title="STATUS_LABELS[change.status]"
+                :title="GIT_STATUS_LABELS[change.status]"
               >
                 {{ change.status }}
               </span>

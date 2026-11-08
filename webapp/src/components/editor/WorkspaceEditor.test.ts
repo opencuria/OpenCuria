@@ -72,7 +72,6 @@ vi.mock('@/components/ui/dialog', () => {
 vi.mock('@/stores/fileExplorer', () => ({
   useFileExplorerStore: () => ({
     downloadFile: mocks.downloadFile,
-    formatBytes: (n: number) => `${n} bytes`,
   }),
 }))
 vi.mock('@/stores/git', () => ({ useGitStore: () => ({ refresh: mocks.refreshGit }) }))

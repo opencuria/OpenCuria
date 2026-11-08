@@ -6,7 +6,6 @@ import type { VueWrapper } from '@vue/test-utils'
 import WorkspaceTerminal from './WorkspaceTerminal.vue'
 import * as socket from '@/services/socket'
 import * as workspacesApi from '@/services/workspaces.api'
-import { useTerminalStore } from '@/stores/terminal'
 
 type Handler = (data: Record<string, string>) => void
 const handlers = new Map<string, Set<Handler>>()
@@ -189,25 +188,10 @@ describe('WorkspaceTerminal shell ownership', () => {
     emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'mine', task_id: 'task-1' })
     resolve({ task_id: 'task-1' })
     await flushPromises()
-    expect(useTerminalStore().terminalId).toBe('mine')
 
     wrapper.unmount()
     expect(sendTerminalClose.mock.calls).toEqual([['ws-1', 'mine']])
     expect(rooms.get('ws-1')).toBe(0)
-  })
-
-  it('closes its shell on unmount even after the shared store was reset', async () => {
-    startTerminal.mockResolvedValue({ task_id: 'task-1' })
-    const wrapper = mountTerminal()
-    await flushPromises()
-    emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'term-1', task_id: 'task-1' })
-    await flushPromises()
-
-    // A workspace switch resets the tool stores before the panel unmounts.
-    useTerminalStore().reset()
-    wrapper.unmount()
-
-    expect(sendTerminalClose).toHaveBeenCalledWith('ws-1', 'term-1')
   })
 
   it('closes a shell that only starts after the panel unmounted', async () => {
@@ -228,7 +212,7 @@ describe('WorkspaceTerminal shell ownership', () => {
   it('replaces the shell after a reconnect instead of leaking it', async () => {
     startTerminal.mockResolvedValueOnce({ task_id: 'task-1' })
     startTerminal.mockResolvedValueOnce({ task_id: 'task-2' })
-    mountTerminal()
+    const wrapper = mountTerminal()
     await flushPromises()
     emit('terminal:started', { workspace_id: 'ws-1', terminal_id: 'first', task_id: 'task-1' })
     await flushPromises()
@@ -239,7 +223,11 @@ describe('WorkspaceTerminal shell ownership', () => {
     await flushPromises()
 
     expect(sendTerminalClose.mock.calls).toEqual([['ws-1', 'first']])
-    expect(useTerminalStore().terminalId).toBe('second')
+    wrapper.unmount()
+    expect(sendTerminalClose.mock.calls).toEqual([
+      ['ws-1', 'first'],
+      ['ws-1', 'second'],
+    ])
   })
 
   it('tells the user when the server closed an idle shell', async () => {

@@ -80,7 +80,6 @@ vi.mock('@/stores/plugins', () => ({
     orgEnabledPlugins: [],
     loading: false,
     error: null,
-    togglingId: null,
     reload: vi.fn(),
     fetchPlugins: vi.fn(),
     createPlugin: vi.fn(),

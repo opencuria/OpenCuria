@@ -21,10 +21,11 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
 import { providerMeta, type SettingsProviderId } from './providerMeta'
 import {
-  DEFAULT_BEDROCK_REGION,
-  DEFAULT_OPENROUTER_BASE_URL,
+  chatGptOAuthOutcome,
+  providerAccountForm,
   providerAccountPayload,
   unsharePayload,
+  type ProviderAccountForm,
 } from '@opencuria/chat-core/providerAccounts'
 import {
   cancelChatGptOAuth,
@@ -56,27 +57,11 @@ const creating = ref(false)
 const saving = ref(false)
 const dialogError = ref<string | null>(null)
 const confirmAction = ref<'delete' | 'unshare' | null>(null)
-const label = ref('')
-const shared = ref(false)
-const openRouterApiKey = ref('')
-const openRouterBaseUrl = ref(DEFAULT_OPENROUTER_BASE_URL)
-const compatApiKey = ref('')
-const compatBaseUrl = ref('')
-const compatModelsText = ref('')
-const bedrockAuthMethod = ref<'access_keys' | 'bearer'>('access_keys')
-const bedrockRegion = ref(DEFAULT_BEDROCK_REGION)
-const bedrockAccessKeyId = ref('')
-const bedrockSecretAccessKey = ref('')
-const bedrockSessionToken = ref('')
-const bedrockBearerToken = ref('')
-const claudeAuthType = ref<'api_token' | 'subscription_token'>('api_token')
-const claudeToken = ref('')
-type OAuthPhase = 'idle' | 'pending' | 'connected' | 'expired' | 'denied' | 'error'
-const oauthPhase = ref<OAuthPhase>('idle')
+const form = ref<ProviderAccountForm>(providerAccountForm(props.provider ?? 'openrouter'))
+const oauthPending = ref(false)
 const oauthFlowId = ref<string | null>(null)
 const oauthUserCode = ref('')
 const oauthVerificationUrl = ref('')
-const oauthAccountId = ref('')
 const oauthError = ref<string | null>(null)
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let pollIntervalSec = 5
@@ -94,27 +79,11 @@ function resetForm(account: ProviderAccount | null = null, isCreating = false): 
   creating.value = isCreating
   dialogError.value = null
   confirmAction.value = null
-  label.value = account?.label ?? ''
-  shared.value = account?.scope === 'organization'
-  openRouterApiKey.value = ''
-  openRouterBaseUrl.value = account?.base_url || DEFAULT_OPENROUTER_BASE_URL
-  compatApiKey.value = ''
-  compatBaseUrl.value = account?.base_url || ''
-  compatModelsText.value = (account?.models ?? []).join('\n')
-  bedrockAuthMethod.value = account?.auth_method === 'bearer' ? 'bearer' : 'access_keys'
-  bedrockRegion.value = account?.region || DEFAULT_BEDROCK_REGION
-  bedrockAccessKeyId.value = ''
-  bedrockSecretAccessKey.value = ''
-  bedrockSessionToken.value = ''
-  bedrockBearerToken.value = ''
-  claudeAuthType.value =
-    account?.auth_type === 'subscription_token' ? 'subscription_token' : 'api_token'
-  claudeToken.value = ''
-  oauthPhase.value = 'idle'
+  form.value = providerAccountForm(props.provider ?? 'openrouter', account)
+  oauthPending.value = false
   oauthFlowId.value = null
   oauthUserCode.value = ''
   oauthVerificationUrl.value = ''
-  oauthAccountId.value = ''
   oauthError.value = null
 }
 
@@ -128,26 +97,10 @@ function openEditForm(account: ProviderAccount): void {
 
 function payloadForAccount(): ProviderAccountInput | null {
   if (!props.provider) return null
-  const openRouter = props.provider === 'openrouter'
-  const result = providerAccountPayload(
-    props.provider,
-    {
-      label: label.value,
-      shared: shared.value,
-      apiKey: openRouter ? openRouterApiKey.value : compatApiKey.value,
-      baseUrl: openRouter ? openRouterBaseUrl.value : compatBaseUrl.value,
-      modelsText: compatModelsText.value,
-      bedrockAuthMethod: bedrockAuthMethod.value,
-      region: bedrockRegion.value,
-      accessKeyId: bedrockAccessKeyId.value,
-      secretAccessKey: bedrockSecretAccessKey.value,
-      sessionToken: bedrockSessionToken.value,
-      bearerToken: bedrockBearerToken.value,
-      claudeAuthType: claudeAuthType.value,
-      claudeToken: claudeToken.value,
-    },
-    { isAdmin: props.isAdmin, account: selectedAccount.value },
-  )
+  const result = providerAccountPayload(props.provider, form.value, {
+    isAdmin: props.isAdmin,
+    account: selectedAccount.value,
+  })
   if ('error' in result) {
     dialogError.value = result.error
     return null
@@ -158,7 +111,7 @@ function payloadForAccount(): ProviderAccountInput | null {
 async function saveAccount(): Promise<void> {
   if (!props.provider || !canEdit.value || saving.value) return
   dialogError.value = null
-  if (selectedAccount.value?.scope === 'organization' && props.isAdmin && !shared.value) {
+  if (selectedAccount.value?.scope === 'organization' && props.isAdmin && !form.value.shared) {
     confirmAction.value = 'unshare'
     return
   }
@@ -251,34 +204,25 @@ async function pollOAuth(): Promise<void> {
   if (!flowId) return
   const generation = dialogGeneration
   try {
-    const status = await getChatGptOAuthStatus(flowId)
+    const outcome = chatGptOAuthOutcome((await getChatGptOAuthStatus(flowId)).status)
     if (generation !== dialogGeneration || flowId !== oauthFlowId.value) return
-    if (status.status === 'pending') {
-      stopPolling()
+    stopPolling()
+    if (outcome === 'pending') {
       pollTimer = setTimeout(() => void pollOAuth(), pollIntervalSec * 1000)
       return
     }
-    stopPolling()
-    if (status.status === 'connected') {
-      oauthPhase.value = 'connected'
-      oauthAccountId.value = status.account_id || ''
+    if (outcome === 'connected') {
       notifyProviderAccountsChanged()
       emit('changed')
       resetForm()
       return
     }
-    oauthPhase.value =
-      status.status === 'denied' ? 'denied' : status.status === 'cancelled' ? 'idle' : 'expired'
-    oauthError.value =
-      status.status === 'denied'
-        ? 'Authorization was denied. Try again when ready.'
-        : status.status === 'cancelled'
-          ? null
-          : 'The authorization code expired. Start a new connection.'
+    oauthPending.value = false
+    oauthError.value = outcome === 'cancelled' ? null : outcome.error
   } catch (error: unknown) {
     if (generation !== dialogGeneration || flowId !== oauthFlowId.value) return
     stopPolling()
-    oauthPhase.value = 'error'
+    oauthPending.value = false
     oauthError.value = error instanceof Error ? error.message : 'OAuth polling failed'
   }
 }
@@ -292,8 +236,8 @@ async function startChatGptAuthorization(): Promise<void> {
   saving.value = true
   try {
     const result = await startChatGptOAuth({
-      label: label.value.trim(),
-      shared: props.isAdmin && shared.value,
+      label: form.value.label.trim(),
+      shared: props.isAdmin && form.value.shared,
       ...(selectedAccount.value ? { account_id: selectedAccount.value.id } : {}),
     })
     if (!result.flow_id) throw new Error('OAuth flow could not be scoped to this account.')
@@ -305,11 +249,11 @@ async function startChatGptAuthorization(): Promise<void> {
     oauthUserCode.value = result.user_code
     oauthVerificationUrl.value = result.verification_url
     pollIntervalSec = Math.max(1, result.interval)
-    oauthPhase.value = 'pending'
+    oauthPending.value = true
     stopPolling()
     pollTimer = setTimeout(() => void pollOAuth(), pollIntervalSec * 1000)
   } catch (error: unknown) {
-    oauthPhase.value = 'error'
+    oauthPending.value = false
     oauthError.value = error instanceof Error ? error.message : 'Failed to start OAuth'
   } finally {
     saving.value = false
@@ -432,14 +376,14 @@ onBeforeUnmount(() => {
             <Label for="account-label">Account name</Label>
             <Input
               id="account-label"
-              v-model="label"
+              v-model="form.label"
               autocomplete="off"
               placeholder="e.g. Personal or Production"
             />
           </div>
           <label v-if="isAdmin" class="flex items-center gap-2 text-sm">
             <Checkbox
-              v-model="shared"
+              v-model="form.shared"
               :disabled="Boolean(selectedAccount && !selectedAccount.can_manage)"
               data-testid="account-shared"
             />
@@ -457,7 +401,7 @@ onBeforeUnmount(() => {
               <Label for="openrouter-api-key">API key</Label
               ><Input
                 id="openrouter-api-key"
-                v-model="openRouterApiKey"
+                v-model="form.apiKey"
                 type="password"
                 autocomplete="off"
                 :placeholder="secretHint ? `Saved key (${secretHint})` : 'sk-or-…'"
@@ -468,7 +412,7 @@ onBeforeUnmount(() => {
               <Label for="openrouter-base-url">Base URL</Label
               ><Input
                 id="openrouter-base-url"
-                v-model="openRouterBaseUrl"
+                v-model="form.baseUrl"
                 type="url"
                 placeholder="https://openrouter.ai/api/v1"
               />
@@ -476,7 +420,7 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else-if="provider === 'chatgpt'">
-            <template v-if="oauthPhase === 'pending'">
+            <template v-if="oauthPending">
               <div class="space-y-3 text-center">
                 <p class="text-sm text-muted-foreground">Enter this code at OpenAI:</p>
                 <p
@@ -503,7 +447,7 @@ onBeforeUnmount(() => {
               <p v-if="oauthError" class="text-sm text-destructive">{{ oauthError }}</p>
               <Button
                 class="w-full"
-                :disabled="saving || !label.trim()"
+                :disabled="saving || !form.label.trim()"
                 data-testid="chatgpt-connect"
                 @click="startChatGptAuthorization"
                 ><LoadingSpinner v-if="saving" :size="12" /><span v-else>{{
@@ -518,7 +462,7 @@ onBeforeUnmount(() => {
               <Label for="compat-base-url">Base URL</Label
               ><Input
                 id="compat-base-url"
-                v-model="compatBaseUrl"
+                v-model="form.baseUrl"
                 type="url"
                 autocomplete="off"
                 placeholder="https://my-host:8000/v1"
@@ -528,7 +472,7 @@ onBeforeUnmount(() => {
               <Label for="compat-api-key">API key (optional)</Label
               ><Input
                 id="compat-api-key"
-                v-model="compatApiKey"
+                v-model="form.apiKey"
                 type="password"
                 autocomplete="off"
                 :placeholder="secretHint ? `Saved key (${secretHint})` : 'Optional API key'"
@@ -539,7 +483,7 @@ onBeforeUnmount(() => {
               <Label for="compat-models">Models (one per line)</Label
               ><Textarea
                 id="compat-models"
-                v-model="compatModelsText"
+                v-model="form.modelsText"
                 rows="4"
                 placeholder="ui-tars-1.5-7b&#10;my-grounding-model"
               />
@@ -549,7 +493,7 @@ onBeforeUnmount(() => {
           <template v-else-if="provider === 'claude-agent'">
             <div class="space-y-2">
               <Label for="claude-auth-type">Anthropic authentication</Label
-              ><Tabs v-model="claudeAuthType"
+              ><Tabs v-model="form.claudeAuthType"
                 ><TabsList class="grid w-full grid-cols-2"
                   ><TabsTrigger value="api_token">API token</TabsTrigger
                   ><TabsTrigger value="subscription_token"
@@ -560,17 +504,17 @@ onBeforeUnmount(() => {
             </div>
             <div class="space-y-2">
               <Label for="claude-token">{{
-                claudeAuthType === 'api_token'
+                form.claudeAuthType === 'api_token'
                   ? 'Anthropic API token'
                   : 'Anthropic subscription token'
               }}</Label
               ><Input
                 id="claude-token"
-                v-model="claudeToken"
+                v-model="form.claudeToken"
                 type="password"
                 autocomplete="off"
                 :placeholder="
-                  selectedAccount?.connected && selectedAccount.auth_type === claudeAuthType
+                  selectedAccount?.connected && selectedAccount.auth_type === form.claudeAuthType
                     ? 'Leave blank to keep existing token'
                     : 'Paste your Anthropic token'
                 "
@@ -580,7 +524,7 @@ onBeforeUnmount(() => {
           </template>
 
           <template v-else-if="provider === 'amazon-bedrock'">
-            <Tabs v-model="bedrockAuthMethod"
+            <Tabs v-model="form.bedrockAuthMethod"
               ><TabsList class="grid w-full grid-cols-2"
                 ><TabsTrigger value="access_keys">Access keys</TabsTrigger
                 ><TabsTrigger value="bearer">Bearer token</TabsTrigger></TabsList
@@ -589,7 +533,7 @@ onBeforeUnmount(() => {
                   <Label for="bedrock-access-key-id">Access key ID</Label
                   ><Input
                     id="bedrock-access-key-id"
-                    v-model="bedrockAccessKeyId"
+                    v-model="form.accessKeyId"
                     autocomplete="off"
                     placeholder="AKIA…"
                   />
@@ -598,7 +542,7 @@ onBeforeUnmount(() => {
                   <Label for="bedrock-secret-access-key">Secret access key</Label
                   ><Input
                     id="bedrock-secret-access-key"
-                    v-model="bedrockSecretAccessKey"
+                    v-model="form.secretAccessKey"
                     type="password"
                     autocomplete="off"
                     placeholder="Leave blank to keep existing"
@@ -608,7 +552,7 @@ onBeforeUnmount(() => {
                   <Label for="bedrock-session-token">Session token (optional)</Label
                   ><Input
                     id="bedrock-session-token"
-                    v-model="bedrockSessionToken"
+                    v-model="form.sessionToken"
                     type="password"
                     autocomplete="off"
                     placeholder="Leave blank to keep existing"
@@ -618,7 +562,7 @@ onBeforeUnmount(() => {
                   <Label for="bedrock-bearer-token">Bearer token</Label
                   ><Input
                     id="bedrock-bearer-token"
-                    v-model="bedrockBearerToken"
+                    v-model="form.bearerToken"
                     type="password"
                     autocomplete="off"
                     placeholder="Leave blank to keep existing"
@@ -626,7 +570,7 @@ onBeforeUnmount(() => {
             ></Tabs>
             <div class="space-y-2">
               <Label for="bedrock-region">Region</Label
-              ><Input id="bedrock-region" v-model="bedrockRegion" placeholder="us-east-1" />
+              ><Input id="bedrock-region" v-model="form.region" placeholder="us-east-1" />
             </div>
           </template>
 

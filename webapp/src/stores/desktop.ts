@@ -14,25 +14,13 @@ export const useDesktopStore = defineStore('desktop', () => {
   const viewerClientId = desktopViewerClientId
   const intentRevision = ref<number | null>(null)
   const viewerLeaseState = ref('unknown')
-  const epoch = ref<string | null>(null)
-  const mcpActive = ref(false)
-  const holderCount = ref(0)
   const viewerOwned = computed(
     () => intentRevision.value !== null && viewerLeaseState.value === 'held',
   )
 
-  function setViewerIntent(
-    revision: number | null,
-    state: string,
-    runnerEpoch: string | null,
-  ): void {
+  function setViewerIntent(revision: number | null, state: string): void {
     intentRevision.value = revision
     viewerLeaseState.value = state
-    epoch.value = runnerEpoch
-  }
-  function setGlobalHolders(mcp: boolean, count: number): void {
-    mcpActive.value = mcp
-    holderCount.value = count
   }
 
   const isOpen = ref(false)
@@ -73,23 +61,6 @@ export const useDesktopStore = defineStore('desktop', () => {
     computerUseRuns.value = active ? new Set(['active']) : new Set()
   }
 
-  /**
-   * Drop the viewer lease while keeping the running session mounted.
-   *
-   * Used when the runner releases the viewer lease but computer-use still
-   * holds the desktop process: the iframe stays visible read-only instead
-   * of being unmounted. Callers pass the current proxy URL (or null when
-   * unknown); an existing mounted URL is never cleared by this path.
-   */
-  function setViewerReleased(wsId: string, url: string | null): void {
-    workspaceId.value = wsId
-    if (url) proxyUrl.value = url
-    // Viewer lease dropped but the process still runs: keep the mounted
-    // iframe connected and read-only instead of tearing down the client.
-    isConnected.value = true
-    isConnecting.value = false
-  }
-
   function markComputerUseStarted(runId: string): void {
     const next = new Set(computerUseRuns.value)
     next.add(runId)
@@ -110,8 +81,7 @@ export const useDesktopStore = defineStore('desktop', () => {
   }
 
   function reset(): void {
-    setViewerIntent(null, 'unknown', null)
-    setGlobalHolders(false, 0)
+    setViewerIntent(null, 'unknown')
     isOpen.value = false
     isConnected.value = false
     isConnecting.value = false
@@ -125,12 +95,8 @@ export const useDesktopStore = defineStore('desktop', () => {
     viewerClientId,
     intentRevision,
     viewerLeaseState,
-    epoch,
     viewerOwned,
-    mcpActive,
-    holderCount,
     setViewerIntent,
-    setGlobalHolders,
     isOpen,
     isConnecting,
     isConnected,
@@ -144,7 +110,6 @@ export const useDesktopStore = defineStore('desktop', () => {
     setConnecting,
     setConnected,
     setComputerUseActive,
-    setViewerReleased,
     markComputerUseStarted,
     markComputerUseFinished,
     setDisconnected,

@@ -34,11 +34,6 @@ export const usePluginStore = defineStore('plugins', () => {
 
   // --- Actions ---
 
-  /** Backwards-compatible single-toggle id (null unless exactly one toggle is in flight). */
-  const togglingId = computed<string | null>(() =>
-    togglingIds.value.length === 1 ? togglingIds.value[0]! : null,
-  )
-
   function clear(): void {
     catalogRequestId += 1
     plugins.value = []
@@ -155,7 +150,6 @@ export const usePluginStore = defineStore('plugins', () => {
     loading,
     error,
     togglingIds,
-    togglingId,
     loadedOrgId,
     // Getters
     globalPlugins,

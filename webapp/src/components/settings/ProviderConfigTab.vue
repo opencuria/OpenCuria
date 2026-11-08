@@ -9,6 +9,7 @@ import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsRow from './SettingsRow.vue'
 import SettingsSection from './SettingsSection.vue'
 import { PROVIDER_META, type ProviderMeta, type SettingsProviderId } from './providerMeta'
+import { providerAccountsSummary, providerModelCount } from '@opencuria/chat-core/providerAccounts'
 import type { ProviderModel } from '@/lib/harnessModels'
 import {
   invalidateProviderCatalog,
@@ -85,16 +86,9 @@ function currentContextKey(): string {
   return `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}`
 }
 
-const modelCountByProvider = computed(() => {
-  const counts = new Map<string, number>()
-  const seen = new Set<string>()
-  for (const model of [...catalog.value, ...externalCatalog.value]) {
-    if (!model.provider || seen.has(`${model.provider}:${model.id}`)) continue
-    seen.add(`${model.provider}:${model.id}`)
-    counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1)
-  }
-  return counts
-})
+function modelCount(meta: ProviderMeta): number {
+  return providerModelCount(meta, [catalog.value, externalCatalog.value])
+}
 const defaultsDirty = computed(
   () =>
     smallModel.value.trim() !== (config.value?.small_model ?? '') ||
@@ -187,12 +181,7 @@ function openProviderDialog(provider: SettingsProviderId): void {
 }
 
 function rowDetail(meta: ProviderMeta): string {
-  const providerAccounts = accountsByProvider.value.get(meta.id) ?? []
-  const selected = activeAccountByProvider.value.get(meta.id)
-  if (!providerAccounts.length) return meta.description
-  if (!selected)
-    return `${providerAccounts.length} account${providerAccounts.length === 1 ? '' : 's'} · None selected`
-  return `${selected.label} · ${selected.scope === 'organization' ? 'Shared' : 'Personal'}`
+  return providerAccountsSummary(meta, accountsByProvider.value.get(meta.id) ?? [])
 }
 
 function handleDialogClosed(open: boolean): void {
@@ -280,13 +269,10 @@ watch(organizationId, () => {
                 {{ accountsByProvider.get(meta.id)?.length === 1 ? 'account' : 'accounts' }}</span
               >
               <span
-                v-if="modelCountByProvider.get(meta.id === 'claude-agent' ? 'claude' : meta.id)"
+                v-if="modelCount(meta)"
                 class="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
                 :data-testid="`provider-model-count-${meta.id}`"
-                >{{
-                  modelCountByProvider.get(meta.id === 'claude-agent' ? 'claude' : meta.id)
-                }}
-                models</span
+                >{{ modelCount(meta) }} models</span
               >
             </template>
             <template #actions>

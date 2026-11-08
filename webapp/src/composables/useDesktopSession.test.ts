@@ -270,8 +270,6 @@ describe('per-tab desktop viewer intents', () => {
     await flushPromises()
     const store = useDesktopStore()
     expect(store.isConnected).toBe(true)
-    expect(store.mcpActive).toBe(true)
-    expect(store.holderCount).toBe(2)
     expect(store.viewerOwned).toBe(false)
     expect(store.intentRevision).toBeNull()
     await vi.advanceTimersByTimeAsync(90_000)
@@ -717,7 +715,7 @@ describe('synchronous desktop selection copying', () => {
 
   it('reports a generic failure when the local browser copy is blocked', () => {
     const { session } = connectedSurface()
-    const { exec } = stubExecCommand([], false)
+    stubExecCommand([], false)
     vi.mocked(api.copyDesktopSelectionDuringGesture).mockReturnValueOnce('text')
 
     expect(session.copySelectionDuringGesture(window)).toBe(false)
