@@ -4,6 +4,7 @@
 
 #import <ExpoModulesCore/EXHostWrapper.h>
 #import <ExpoModulesCore/EXReactSchedulerDispatch.h>
+#import <React/RCTComponentViewFactory.h>
 #import <ReactCommon/RCTHost.h>
 #import <react/renderer/runtimescheduler/RuntimeSchedulerBinding.h>
 
@@ -16,6 +17,27 @@
 @implementation OCAppRuntimeFactory {
   // The context lives as long as this factory's single React instance.
   EXAppContext *_appContext;
+}
+
+// [Main thread] Both initializers of RCTReactNativeFactory end up here.
+- (instancetype)initWithDelegate:(id<RCTReactNativeFactoryDelegate>)delegate releaseLevel:(RCTReleaseLevel)releaseLevel
+{
+  // RCTReactNativeFactory makes every new factory the provider of third-party
+  // Fabric components, held weakly by the process-wide RCTComponentViewFactory.
+  // This factory ends with its app; afterwards every third-party component that
+  // OpenCuria renders for the first time would become an <UnimplementedView>,
+  // and the factory caches that until the process ends. OpenCuria's factory
+  // lives as long as the process and resolves the same components (both use the
+  // generated RCTAppDependencyProvider), so it stays the provider for both
+  // instances. A provider of another app instance is not kept: it ends too.
+  RCTComponentViewFactory *componentViewFactory = [RCTComponentViewFactory currentComponentViewFactory];
+  id<RCTComponentViewFactoryComponentProvider> provider = componentViewFactory.thirdPartyFabricComponentsProvider;
+  if (self = [super initWithDelegate:delegate releaseLevel:releaseLevel]) {
+    if (provider != nil && ![provider isKindOfClass:[OCAppRuntimeFactory class]]) {
+      componentViewFactory.thirdPartyFabricComponentsProvider = provider;
+    }
+  }
+  return self;
 }
 
 // [JS thread] Mirrors EXReactNativeFactory, with the sandbox applied first.
