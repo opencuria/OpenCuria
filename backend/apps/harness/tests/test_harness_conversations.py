@@ -1,4 +1,4 @@
-"""Tests for harness conversations feed and unread tracking (Paket 5)."""
+"""Tests for harness conversations feed and unread tracking."""
 
 from __future__ import annotations
 

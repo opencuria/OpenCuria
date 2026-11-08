@@ -1,6 +1,7 @@
 # @opencuria/client
 
-Framework-neutral OpenCuria REST, Socket.IO realtime, and workspace-file client for Expo and web. ESM source exports only; no browser globals, Vue, or storage access.
+Framework-neutral REST, Socket.IO and workspace-file client for web and Expo. ESM
+source only; no browser globals, Vue or storage access.
 
 ```ts
 import { createClient } from '@opencuria/client'
@@ -10,25 +11,22 @@ const client = createClient({
   wsBaseUrl: 'https://curia.example',
   getAccessToken: () => accessToken,
   getRefreshToken: () => refreshToken,
-  setTokens: async (tokens) => saveTokens(tokens),
+  setTokens: (tokens) => saveTokens(tokens),
   getOrganizationId: () => organizationId,
   onAuthenticationExpired: () => clearSession(),
 })
 
-const user = await client.auth.me()
 const workspaces = await client.workspaces.list()
-const sessions = await client.harness.listSessions(workspaces[0].id)
 client.realtime.connect()
 const release = client.realtime.subscribeWorkspace(workspaces[0].id)
-const stop = client.realtime.on('harness.part_updated', (event) => {})
 ```
 
-`client.api` exposes `request<T>(method, path, body?, signal?, credentials?)`, `get`, `post`, `put`, `patch`, and `delete`. All methods use the client's cookie policy (`omit` by default); `request` can override it for OAuth actions. Token refresh uses the client policy. `ApiRequestError` preserves `status`, `code`, and raw `data`. Non-auth 401s share a context-safe refresh and retry once. Auth expiry only follows a refresh 401/403; network and server failures leave the current session intact. Absolute and protocol-relative request paths are rejected before auth headers are attached. Web integration may pass `options.fetch`; callers can preserve `ApiRequestError` identity by re-exporting that class and these request functions from the same client instance. The desktop clipboard-gesture sync exception is deliberately outside this native client.
-
-REST requests have a 30-second deadline covering response bodies and auth retries, configurable with `requestTimeoutMs` on `ApiClient` or `createClient`. A timeout aborts transport and rejects with `ApiRequestError.code === 'timeout'`, even when native fetch does not settle on abort. Caller cancellation is preserved. Shared token refresh has its own deadline and releases stalled refresh flights; transport failures do not expire auth. Requests are not automatically replayed after a timeout.
-
-Web chat bindings use `createHarnessApi(getApiClient)` from `@opencuria/client/harness`, so web and mobile share routes, payloads, and response types. The callback resolves the current browser transport for every request, including API-base changes. It preserves the transport's credential policy (`same-origin` for web, `omit` for native). Session and message defaults come from the backend schemas; sends use the structured message input.
-
-Additional groups: `auth` (login/me), `workspaces`, `conversations`, `harness` (sessions, messages, timeline/details, gates, session actions, engines/models/config/recent usage), `skills`, and `files` (`findFiles`, `listFiles`, `readFile`, `downloadFile`, `uploadFile`). Wire find paths (`{name,path}`) are normalized to `/workspace/...` strings in `findFiles().paths`; out-of-root or pathless entries are discarded rather than reconstructing paths from untrusted names. Realtime maintains logical event/workspace subscriptions through ordinary transport reconnects. An auth/org/API-base change clears old workspace ownership and event bindings; callers should reacquire workspace subscription handles after switching context. Call `setActive(false|true)` from native app lifecycle handling; `dispose()` permanently clears listeners/subscriptions and rejects pending file transfers. `files` never queues writes while disconnected. If external token state is replaced outside login/refresh, call `client.api.notifyTokensChanged()` to bump the auth generation and reset realtime. See the typed exports in `src/index.ts` for exact signatures.
-
-`desktop` (`@opencuria/client/desktop`, also used by the webapp's REST bindings) starts, renews, observes and releases this client's KasmVNC viewer intent, takes control from Computer Use and reads/writes the desktop clipboard; `desktop.viewerUrl(proxyUrl, intent)` builds the authenticated KasmVNC client URL. `desktopViewerTransport(() => client.desktop)` adapts it to the shared lease coordinator in `@opencuria/chat-core/desktopViewer`.
+- Groups: `api`, `auth`, `workspaces`, `conversations`, `harness`, `skills`, `files`,
+  `desktop`; exact signatures in `src/index.ts`. The webapp builds its chat bindings
+  with `createHarnessApi` from `@opencuria/client/harness`.
+- Errors are `ApiRequestError` (`status`, `code`, `data`). A 401 refreshes once and
+  retries; only a failed refresh expires the session.
+- Requests time out after 30 s (`requestTimeoutMs`) and are never replayed.
+  Absolute request paths are rejected before auth headers are attached.
+- After switching auth, organization or API base, reacquire workspace subscriptions.
+  Call `realtime.setActive()` on app lifecycle changes and `dispose()` at teardown.

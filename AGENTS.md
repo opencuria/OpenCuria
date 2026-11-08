@@ -1,116 +1,78 @@
-# AGENTS.md — OpenCuria Project Guide
+# AGENTS.md
 
-> Single source of truth for AI coding agents. Read it in full before changing code.
-> Living document: keep it short, drop what is outdated, add only what matters.
+Guide for AI coding agents. Read it in full before changing code. Keep it short.
 
-## 1. What is OpenCuria?
+## Project
 
-OpenCuria centrally provisions, manages, and monitors AI coding agents.
+OpenCuria provisions, manages and monitors AI coding agents.
 
-- `backend/` (Django + Ninja + Socket.IO on Uvicorn): control plane and agent harness
-  (providers, tools, permissions, prompts, agentic loop). Owns all agent logic.
-- `runner/` (Python, asyncio): dumb exec daemon. Runs QEMU/KVM workspaces,
-  exposes lifecycle, exec, files, terminal, desktop, and git RPC. No agent logic.
-- `webapp/` (Vue 3): dashboard for workspaces, chat, credentials, images.
-- `mobile/` (Expo + React Native): native iOS/Android client for existing chats.
-- `packages/chat-core/` and `packages/client/`: framework-neutral chat rules
-  and shared REST/Socket.IO client for web and mobile.
+- `backend/` (Django, Ninja, Socket.IO on Uvicorn): control plane and agent harness.
+  Owns all agent logic: providers, tools, permissions, prompts, agentic loop.
+- `runner/` (Python, asyncio): exec daemon for QEMU/KVM workspaces (lifecycle, exec,
+  files, terminal, desktop, Git RPC). No agent logic.
+- `webapp/` (Vue 3) and `mobile/` (Expo, React Native): clients.
+- `packages/chat-core/`, `packages/client/`: shared chat rules and REST/Socket.IO client.
 
-Flow: web/mobile → REST + Socket.IO `/frontend` → `backend` → Socket.IO
-`harness:*` RPC → `runner` → workspace. Mobile feature screens live in
-`mobile/src/screens/`; `mobile/app/` is Expo Router routes only. See
-`mobile/README.md` for setup, mobile boundaries and platform limitations.
+Flow: client → REST + Socket.IO `/frontend` → backend → `harness:*` RPC → runner → workspace.
 
-## 2. Goal: modular and extensible
+## Extend, don't duplicate
 
-Extend OpenCuria by reusing and extending existing structures, never by
-duplicating or bypassing them:
+Follow SOLID, separation of concerns and DRY. Extend existing structures:
 
-- Credentials: `backend/apps/credentials/` (catalog + org instances,
-  Fernet-encrypted, resolved server-side at workspace/plugin runtime).
-- Plugins: `backend/apps/plugins/` (skills, MCP servers, credential
-  requirements). New integrations belong here.
-- Harness: `backend/apps/harness/` (`providers/`, `tools/` + registry,
-  `permissions/`, `agents/` definitions, `prompts/` composer, `runner.py` loop).
-- Runners: `runner/src/runtime/` and `interfaces/` abstractions (ABC + implementations).
-- MCP server: `backend/apps/mcp_app/` is a sibling adapter of REST over the same
-  services. Keep it to ~30 task-oriented tools (`<resource>_<verb>`); extend an
-  existing tool before adding one, and give every tool a precise description.
-  Workspace agents reach it in-process through the seeded OpenCuria plugin
-  (MCP transport `builtin`, `mcp_app/inprocess.py`).
+- Secrets: `backend/apps/credentials/` (Fernet-encrypted, resolved server-side).
+  Never return, log or embed plaintext secrets.
+- Integrations: `backend/apps/plugins/` (skills, MCP servers, credential requirements).
+- Agent capabilities: `backend/apps/harness/` (`providers/`, `tools/` registry,
+  `permissions/`, `agents/`, `prompts/`, `runner.py`), not one-off endpoints.
+- Runtimes: ABCs in `runner/src/runtime/` and `runner/src/interfaces/`.
+- MCP server: `backend/apps/mcp_app/`, an adapter over the same services as REST.
+  Keep about 30 task-oriented `<resource>_<verb>` tools with precise descriptions;
+  extend a tool before adding one.
 
-Strictly follow SOLID, separation of concerns, and DRY. One concern per
-layer, one implementation per behavior, composition over duplication.
+## Architecture
 
-## 3. Architecture rules
+- Backend: `api.py` (validation, routing) → `services.py` (business logic) →
+  `repositories.py` (ORM only). No business logic in API/Socket.IO, no ORM in services.
+- Runner and frontends never prompt, decide or own provider/tool/permission logic.
+- Webapp: only shadcn-vue components from `webapp/src/components/ui/`; use the shared
+  `ModelPicker` and start list detail views with `DetailHeader`.
+- Mobile: reuse `@opencuria/chat-core` and `@opencuria/client`; screens in
+  `mobile/src/screens/` (never `mobile/src/app/`). Chat snapshots stay immutable.
+- Import chat-core modules directly; never re-export them (`clientBoundaries.test.ts`).
+- UI: less is more. Few controls, concise copy, one design language; reuse existing
+  components and patterns before creating new ones.
+- Harness prompts: role, scope and hard constraints only; never repeat tool schemas.
 
-- Backend is Clean Architecture: `api.py` (thin validation/routing) →
-  `services.py` (all business logic) → `repositories.py` (only ORM access).
-  No business logic in API/Socket.IO layers, no ORM calls in services.
-- All agentic knowledge lives in `backend/apps/harness/`. The runner never
-  prompts, never decides, never owns provider/tool/permission logic.
-- `webapp`: use only shadcn-vue components from `webapp/src/components/ui/`.
-- `mobile`: reuse `@opencuria/chat-core` and `@opencuria/client`; keep native
-  screens in `mobile/src/screens/` (not `mobile/src/app/`, which collides with
-  Expo Router's `mobile/app/`). Native React chat snapshots must stay immutable.
-- Clients import shared rules from `@opencuria/chat-core/<module>` directly;
-  never re-export chat-core from a client module (`clientBoundaries.test.ts`).
-- UI: less is more. Use fewer controls and less text; remaining copy must
-  describe intent clearly and concisely. Combine related choices rather than
-  adding separate buttons, selectors, or repeated explanations.
-- Keep one design language. Reuse existing components and interaction patterns
-  before creating anything new. Use the shared `ModelPicker` in webapp composers
-  and settings; mobile may present a native picker but must reuse shared model
-  rules instead of duplicating business logic. Webapp detail views opened from a
-  list (e.g. runner, plugin) start with the shared `DetailHeader`.
-- Docs/setup details live in `README.md` and component READMEs; do not
-  duplicate them here.
+## Code
 
-## 4. Coding rules
+- English everywhere. Python 3.10+, type hints on all signatures, docstrings on
+  public APIs, PEP 8 at 88 columns, dataclasses/Pydantic over raw dicts.
+- Async-first: `asyncio.to_thread()` for blocking calls, never `time.sleep()`.
+- `structlog` only, never `print()`; bind `workspace_id`, `task_id` early.
+- No dependency without justification. Never bypass todo or permission gates.
+- Never commit directly to `main`.
 
-- English for code, comments, docstrings, commits, docs. Python 3.10+
-  (`X | Y` unions), type hints on all signatures, docstrings on public APIs.
-- PEP 8, 88 cols; `snake_case` / `PascalCase` / `UPPER_SNAKE_CASE`;
-  dataclasses/Pydantic over raw dicts; stdlib → third-party → local imports.
-- Async-first; wrap blocking calls in `asyncio.to_thread()`; never `time.sleep()`.
-- `structlog` only, never `print()`; bind context (`workspace_id`, `task_id`) early.
+## Docs
 
-## 5. Do's
+READMEs cover only setup, operation, orientation and invariants that code cannot
+show. No feature specs, changelogs, update notes or implementation narratives;
+code and tests document behavior. Keep every Markdown file short and update or
+delete outdated text instead of appending. Do not add plan, notes or report files
+to the repository.
 
-- Do reuse the credential system for any new secret (env var, SSH key, token).
-- Do build new capabilities as harness tools or plugins, not as one-off endpoints.
-- Do extend existing ABCs, registries, and permission checks before adding new ones.
-- Do keep harness system prompts precise and short: state role, scope, and hard
-  constraints only; no background prose, no duplication with tool descriptions.
-- Do add or update tests with every behavior change (happy path + auth/permission
-  + one failure path) and keep the suite green.
-- Do render secrets server-side only; never return, log, or embed plaintext secrets.
+## Verify
 
-## 6. Don'ts
-
-- Don't duplicate business logic across interface, service, or runtime layers.
-- Don't put agent/prompt/permission logic in the runner or the frontend.
-- Don't invent a parallel secret, config, plugin, or permission mechanism.
-- Don't write long, verbose system prompts or repeat tool schemas in prompts.
-- Don't add dependencies without justification; don't bypass `Todo`/permission gates.
-- Don't commit directly to `main`.
-
-## 7. Verify before finishing
-
-Run checks relevant to your change; the full test suite is not required for each
-commit. Available checks include:
+Add or update tests with every behavior change (happy path, auth/permission, one
+failure path). Run the checks relevant to your change:
 
 ```bash
-cd backend && source .venv/bin/activate && pytest -q
-cd runner && source .venv/bin/activate && pytest -q
+cd backend && .venv/bin/pytest -q
+cd runner && .venv/bin/pytest -q
 npm run type-check
 npm run test
 ```
 
-Install npm workspace dependencies with `npm ci` from the repository root; do not
-use a component-local npm lockfile. Mobile-specific Expo/device checks are in
-`mobile/README.md`.
-
-For a fresh clone, run `./scripts/setup-dev.sh`. After implementing, verify for
-real and embed a workspace screenshot as `![label](path)` when it shows the
-working result.
+Install npm dependencies with `npm ci` at the repository root only. Fresh clone:
+`./scripts/setup-dev.sh`. Mobile device checks: `mobile/README.md`. After
+implementing, verify for real and embed a screenshot as `![label](path)` when it
+shows the result.

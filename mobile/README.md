@@ -1,79 +1,56 @@
 # OpenCuria Mobile
 
-Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.3. The interface follows t3code’s use of platform controls: SwiftUI/UIKit on iOS and Material/Android controls on Android, with native navigation, text editing, menus and file pickers; it talks directly to the configured OpenCuria server, not to the webapp.
+Native iOS and Android client (Expo SDK 57, React Native 0.86.3). It talks directly
+to the OpenCuria server and uses platform controls: SwiftUI/UIKit on iOS, Material
+on Android (`@expo/ui`, native menus, native navigation and text editing).
 
-## Scope
+## Features
 
-- Browse existing workspaces and conversations, read history, and start or continue harness chats; follow live output, tasks/subtasks, permission and question gates, Markdown, mentions, model choices and skills.
-- Attach photos, camera images and documents; preview supported workspace files. Chat and workspace data remain on the server.
-- Work in the chat's workspace from the tools sheet: Git, the workspace desktop, a terminal and files. The desktop shows the workspace's KasmVNC session with a trackpad and keyboard, under the same viewer lease rules as the webapp.
-- Install and run Expo apps agents build and send with the `app_publish` tool. Apps open inside OpenCuria like experiences in Expo Go, keep working offline and update when the agent publishes a new version. Shaking, a three-finger long press or the floating menu button opens the app menu (Close app, Reload and which of these three ways are on; at least one stays on), and a short note at the bottom says how whenever an app opens. The apps a reply sent appear below that reply, once each with its newest version, with Install, Update or Open, and under Apps in the sidebar, each with its icon (small copies in the cache: an installed app's own icon, else its newest version's). Apps reach servers in their workspace as `http://<process>.opencuria.local`; OpenCuria starts the process (and the workspace) when needed. They run on the native modules OpenCuria ships (the Expo Go set listed in `backend/apps/mobile_apps/runtime.json`, except Stripe, Apple authentication, tracking transparency, splash screen and background tasks); custom native code does not run. Details: `modules/opencuria-app-runtime/README.md`.
-- Open installed apps from the home screen with the Apps widget: a group of home screen icons, one per app, each opening its app in OpenCuria (offline too). The widget's size decides how many: on iOS 2 × 2 (small), 4 × 2 (medium), 4 × 4 (large) and 8 × 4 (iPad extra large); on Android about one launcher cell per app, resizable from 2 × 1. The most recently used apps show, in a stable alphabetical order; when more are installed, the last tile previews the rest like a folder and opens Apps. Icons take the system's look: continuous corners, tinted and clear home screens on iOS; the launcher's icon shape and wallpaper colors on Android. Tapping an app that is open in the background brings it back as it was. iOS draws the widget with `expo-widgets` (`src/widgets/AppsWidget.tsx`), Android natively in `modules/opencuria-app-runtime`; both read the snapshot `src/widgets/appsWidgetSync.ts` writes whenever the installed apps or the account change.
-- Plan scheduled tasks: an agenda of upcoming runs, creating and editing tasks (once, at set times, intervals or cron), Run now, pause/resume, deletion and each run's chat. A drafted prompt can be scheduled from the chat menu.
-- Receive optional native push notifications for finished/failed runs and pending approvals/questions. On iOS, follow running agents on the Lock Screen and Dynamic Island with Live Activities.
-- Change every setting the webapp offers: provider accounts (including ChatGPT device login), small, voice and agent models, Computer Use limits, skills, plugins, credentials and credential services, API keys, the workspace policy, captured images, image definitions and runners, plus organization, appearance and notifications. Admin-only areas follow the organization role. MCP OAuth credentials finish connecting in the webapp in the browser, because the server binds that flow to a browser session.
-- Sign in to an existing server. Chat refreshes from REST when brought back to the foreground; push delivery does not replay missed chat events.
-- Open OpenCuria offline. Chats the user reads are saved in the app's cache with their pictures (`src/offline/`; never backed up, the system may only clear it when storage runs low): the chat list, the workspaces and the profile as last loaded, and each opened chat's transcript, saved shortly after it opens and every few seconds while a reply streams. When the server cannot be reached at start (no answer within 5 s, or no network), the chat screen opens with what is saved instead of an error: the sidebar lists the saved chats by workspace, the chat opened last shows, prompts can be written but not sent, and installed apps open from Apps and the widget. Workspaces, scheduled tasks, Git, Desktop, Terminal, Files, chat actions and most settings need the server and are hidden; Settings keeps appearance and Sign out. Losing the network while online switches to the saved copies too; OpenCuria reconnects by itself (after a few seconds with growing pauses, when the network returns and when it comes back to the foreground) and the server's chat takes over. A stopped workspace also shows the saved pictures of its chats. Chats not opened on the device for a week are deleted in the background (shortly after start and on returning to the foreground; at most 100 per account, 64 MiB of pictures per chat); signing out or an expired session deletes everything saved. File and directory names are hashes, never identifiers.
-
-## Native interface
-
-Buttons, selection rows, model/engine pickers and lists use platform controls via `@expo/ui`. Menus use `@react-native-menu/menu` (`UIMenu` / Android popup menus); no Expo bottom-sheet component is used. Modal screens use the OS presentation and native navigation bars. Chat pictures open full screen, as in messaging apps: back and share in the native bar, swipe through every picture of the chat, thumbnails below. PDFs open in the platform document view (PDFKit on iOS, `PdfRenderer` on Android; `modules/opencuria-pdf`) with continuous pages and zoom. On iPhone and Android the sidebar slides in beneath the chat as in the Claude app; iPad keeps `NavigationSplitView`. The composer uses a native `UITextView` / `EditText`, with interactive `expo-glass-effect` liquid glass on supported iOS versions and a Material surface on Android. `react-native-keyboard-controller` keeps the composer on top of the keyboard and lets the keyboard follow the finger when the transcript or the composer is dragged down.
-
-The workspace tools sheet switches Git, Desktop, Terminal and Files with a UISegmentedControl on iOS and the app's Compose segmented row on Android. Desktop shows the remote screen on top: KasmVNC runs in a `react-native-webview` that takes no touches itself; a page bridge (`src/tools/desktop/viewerBridge.ts`) reduces it to the framebuffer and replays native input as DOM events on KasmVNC's canvas. In portrait the screen spans the phone's full width whenever the trackpad below keeps its minimum height; a phone turned sideways shows the screen alone, like a full-screen video, without bars, trackpad or keyboard (tablets keep screen and trackpad side by side). The trackpad moves the pointer with acceleration: a quick tap clicks on release, while a touch that has moved the pointer never clicks or grabs; double-tap and slide (or rest the finger) drags with the left button held; a two-finger tap right-clicks and two fingers scroll. Recognition is a pure state machine (`src/tools/desktop/desktopGestures.ts`) run on the UI thread, and a native cursor follows the finger without waiting for the page and shows the remote cursor image. The WebView is laid out once at about one device pixel per framebuffer pixel and only scaled natively, so zoom never re-lays out the page: two fingers zoom around their midpoint and pan, one finger pans a zoomed view with momentum, a tap clicks at the touched pixel and the view follows the pointer. The keyboard button at the bottom right opens the system keyboard with a key row (esc, sticky ctrl/alt/super/shift, tab, arrows, del, home/end, page up/down), as in the terminal. The menu pastes the phone clipboard into the desktop, copies the desktop clipboard, fits the view, reconnects and stops or starts the desktop. While Computer Use drives the desktop the screen stays fully visible and read-only (zoom still works); Take control sits in the status bar. Lease, renewal, recovery and the viewer URL come from `@opencuria/chat-core/desktopViewer` and `desktopSurface`, the REST calls from `client.desktop` — the webapp uses the same modules.
-
-Search, Settings and New chat in the sidebar are SwiftUI buttons with liquid glass on iOS 26 (bordered before) and Material buttons on Android; searching shows a native SwiftUI text field in a glass capsule on iOS and a Material docked search bar on Android.
-
-Settings follow ChatGPT's layout: the account's initials and name, an organization card, then grouped pages with large section titles. On iOS it is a SwiftUI `NavigationStack` with `Form` pages, `NavigationLink` rows, system pickers, toggles, steppers and secure fields, and liquid-glass bar buttons; on Android the same pages are Material 3 lists with a toolbar and back stack. Every page is described once as `NativeForm` sections (`src/settings/`).
-
-The sidebar shares workspace eligibility, inbox and sorting rules with the webapp through `@opencuria/chat-core/conversationGroups`. Each workspace initially shows four recent chats, with independent four-chat pagination. Closing navigation retains pagination and collapsed groups; switching organization resets them. Stopped workspaces remain accessible through All workspaces.
-
-Scheduled tasks open from the sidebar below Workspaces. The agenda groups tasks by the day of their next run and leads each row with its time in the device's zone; running, paused and (on request) ended tasks have their own groups. The editor uses a native segmented control for how a task repeats, round weekday toggles, SwiftUI date and time pickers on iOS and Material date and time dialogs on Android, and the composer's model sheet. Schedule drafts, cron rules and previews come from `@opencuria/chat-core/scheduledTasks`, shared with the webapp.
-
-These native dependencies require rebuilding the development client after updating the branch.
+- Workspaces and chats: live output, subtasks, permission/question gates, Markdown,
+  mentions, skills, model choice, photo/camera/document attachments.
+- Workspace tools: Git, the KasmVNC desktop (trackpad and keyboard), terminal, files.
+- Apps published by agents (`app_publish`): installed and run inside OpenCuria like
+  in Expo Go, also offline, with an app menu (shake, three fingers or menu button)
+  and a home screen widget. See
+  [`modules/opencuria-app-runtime`](modules/opencuria-app-runtime/README.md).
+- Scheduled tasks, push notifications, iOS Live Activities and every webapp setting.
+  MCP OAuth connections finish in the browser.
+- Offline mode: opened chats and their pictures are cached per account
+  (`src/offline/`) and shown read-only when the server is unreachable.
 
 ## Local development
 
-Requirements: Node.js **22.13+**, Android Studio command-line tools and an Android SDK, and **Java 17**. For Android, install SDK Platform **36**, Build-Tools **36.0.0**, and NDK **27.1.12297006**. Set `ANDROID_HOME` (and, if needed, `ANDROID_SDK_ROOT`) to the SDK location. iOS builds require macOS, Xcode and CocoaPods.
-
-Install JavaScript dependencies once from the repository root; the root npm workspace and `package-lock.json` cover web, mobile and shared packages:
-
-```sh
-cd /path/to/OpenCuria
-npm ci
-```
-
-Build and install the Android development client (from `mobile/`):
+Requirements: Node.js 22.13+, Java 17, Android SDK Platform 36, Build-Tools 36.0.0
+and NDK 27.1.12297006 (`ANDROID_HOME` set). iOS builds need macOS, Xcode and CocoaPods.
 
 ```sh
-cd mobile
-APP_VARIANT=development EXPO_PUBLIC_DEFAULT_SERVER_URL=http://10.0.2.2:8000 npx expo run:android
+npm ci                      # repository root, once
+export APP_VARIANT=development EXPO_PUBLIC_DEFAULT_SERVER_URL=http://10.0.2.2:8000
+(cd mobile && npx expo run:android)   # build and install the dev client
+npm run dev:mobile                    # Metro for the dev client, not Expo Go
 ```
 
-Then start Metro with the **development client**, not Expo Go:
+Use `npx expo run:ios` on a Mac. Rebuild the development client after native
+dependency changes.
 
-```sh
-cd /path/to/OpenCuria
-APP_VARIANT=development EXPO_PUBLIC_DEFAULT_SERVER_URL=http://10.0.2.2:8000 npm run dev:mobile
-```
-
-`EXPO_PUBLIC_DEFAULT_SERVER_URL` is only an optional, build-time default for the editable server URL on the sign-in screen. It is public app configuration—never put passwords, API keys or tokens in it. For an Android emulator, `10.0.2.2` reaches the host machine; a physical phone needs a LAN-reachable host name/IP, an accessible firewall port and Metro reachable over the LAN. For a USB-connected Android device, `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081` can forward the API and Metro ports from the host; use `http://127.0.0.1:8000` as the server URL. `localhost` on a phone without forwarding means the phone. Plain `http://` is accepted in every build, but only for local-network servers (private/loopback IPs, `localhost`, `.local` and single-label host names); public hosts need `https://`.
-
-For an iOS simulator on a Mac, from `mobile/` run `APP_VARIANT=development EXPO_PUBLIC_DEFAULT_SERVER_URL=https://curia.example npx expo run:ios`. A physical iPhone additionally needs suitable Apple development signing/provisioning and network access to both the server and Metro. No iOS build is claimed for this workspace.
+`EXPO_PUBLIC_DEFAULT_SERVER_URL` only prefills the sign-in screen and is public; never
+put secrets in it. `10.0.2.2` reaches the host from the Android emulator; for a USB
+device use `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081`
+with `http://127.0.0.1:8000`. Plain `http://` is accepted only for local-network
+hosts; public hosts need `https://`.
 
 ## Repository map
 
-- `app/` — Expo Router entry/layout only. Keep feature screens under `src/` (do not introduce `src/app/`, which would collide with the router convention).
-- `src/screens/` — login, authenticated app and session lifecycle.
-- `src/state/chatController.ts` — REST hydration, live subscriptions, chat state and immutable snapshots for React.
-- `src/components/`, `src/ui/` — native chat presentation and controls.
-- `src/scheduledTasks/` — scheduled-task agenda, editor and run history.
-- `src/apps/` — apps agents publish: install manager (content-addressed downloads verified by MD5, atomic version switch), Apps sheet, chat install card and the JS side of `modules/opencuria-app-runtime`. After adding or upgrading a native dependency run `node mobile/scripts/sync-app-runtime.mjs`; the backend validates published apps against the generated runtime list.
-- `src/settings/` — the settings sheet, its navigation stack and one page per settings area (see its README).
-- `src/offline/` — what OpenCuria keeps for offline use: the per-account store (profile, lists, saved chats and their pictures, expiry), the saved-chat view in the shape of the live chat, the writer that saves the chat being read, connectivity and the background clean-up.
-- `src/platform/` — secure token storage, camera/document pickers, authenticated uploads, files in the app's own storage and the bounded temporary media cache.
-- `src/notifications/` — device consent, native push tokens and notification navigation.
-- `src/widgets/` — the iOS Live Activity, the Apps home screen widget (iOS layout, snapshot, icons and sync) and the handling of its links.
-- `packages/chat-core/`, `packages/client/` — framework-neutral shared chat helpers/protocol and the real REST/Socket.IO client used by the web and native clients.
+- `app/`: Expo Router routes only. Screens live in `src/screens/`; never add `src/app/`.
+- `src/state/chatController.ts`: REST hydration, live subscriptions, immutable chat snapshots.
+- `src/components/`, `src/ui/`: chat presentation and native controls.
+- `src/tools/`: workspace tools sheet (Git, desktop, terminal, files).
+- `src/settings/`: settings sheet and pages.
+- `src/apps/`: installing and opening published apps. After adding or upgrading a
+  native dependency run `node mobile/scripts/sync-app-runtime.mjs`.
+- `src/scheduledTasks/`, `src/notifications/`, `src/widgets/`, `src/offline/`,
+  `src/platform/` (secure storage, pickers, uploads, media cache).
+- `modules/`: local Expo modules (app runtime, terminal, highlighter, PDF, toolbar).
 
 ## Checks
 
@@ -82,7 +59,5 @@ From the repository root:
 ```sh
 npm run type-check
 npm run test
-npm run export -w mobile
+npm run export -w mobile    # JS bundle for both platforms, not a signed build
 ```
-
-`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. An Android debug APK was built. This is not a claim of iOS native build, production-signing or store acceptance.

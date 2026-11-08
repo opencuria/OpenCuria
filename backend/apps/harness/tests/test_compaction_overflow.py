@@ -39,7 +39,7 @@ from apps.harness.providers.base import (
 from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
-from apps.harness.tests.test_paket6_features import ScriptProvider
+from apps.harness.tests.test_questions_patches_compaction import ScriptProvider
 from apps.harness.tools import default_tool_registry
 
 

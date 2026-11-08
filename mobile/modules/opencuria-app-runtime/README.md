@@ -1,14 +1,28 @@
 # App runtime
 
-Local Expo module that runs apps agents publish (`app_publish` MCP tool) inside OpenCuria, like experiences in Expo Go: the app's JavaScript bundle comes from the installed files, every native module from OpenCuria. Installing, updating and the Apps list live in JavaScript (`mobile/src/apps/`); this module opens and closes an installed version, clears its native-side data and draws the Android Apps widget.
+Local Expo module that runs apps published by agents (`app_publish`) inside
+OpenCuria, like Expo Go: the JavaScript bundle comes from the installed files,
+native modules from OpenCuria. Installing, updating and the Apps list live in
+`mobile/src/apps/`; this module opens and closes an installed version, clears its
+data and draws the Android Apps widget.
 
-- **Separate React instance.** Android starts `AppRuntimeActivity` with its own bridgeless `ReactHostImpl` (Hermes, file bundle loader, no Metro or dev support) and the autolinked packages minus development tooling. iOS presents `AppRuntimeViewController` full screen with its own `RCTReactNativeFactory` (`AppRuntimeFactory`, an `EXReactNativeFactory` subclass). The instance ends with the screen; OpenCuria's own React host is never touched. Every new `RCTReactNativeFactory` claims React Native's process-wide (weak) provider of third-party Fabric components; `AppRuntimeFactory` hands it back to OpenCuria's factory, which outlives every app, so components OpenCuria first renders after an app closed still resolve. Expo views need no such step: Expo names them per app context.
-- **Offline assets and config.** Only app instances get a module named `ExpoUpdates`, the mechanism Expo Go uses: `localAssets` maps every Metro asset hash to its downloaded file (read by `expo-asset`), and `manifestString` carries the app's Expo config (`Constants.expoConfig` via `expo-constants`). `checkForUpdateAsync` and friends reject; `reloadAsync` restarts the app.
-- **Sandbox.** Each app has its own data and cache directories (`Paths.document`, `Paths.cache`, SQLite) and SecureStore scope. On Android, file access outside its directories and its own installed files is denied within OpenCuria's private storage. Notifications, AsyncStorage and background tasks are not scoped per app.
-- **Workspace backends.** Requests to `http://<process>.opencuria.local[:port]` go to that process in the workspace the app was published from; every other host goes out unchanged. Opening an app fetches a gateway session (`client.apps.gatewaySession`); `AppGateway` rewrites matching requests to `<gateway>/<process>/<port>/<path>` and adds the session token, which never reaches the app's JavaScript. Android installs one OkHttp interceptor at application start (`OpenCuriaAppRuntimePackage`) into every client React Native and Expo create: fetch, XMLHttpRequest, WebSocket, `expo/fetch` and images (Fresco, expo-image); clients outside `OkHttpClientProvider` (expo-file-system downloads, expo-video, expo-audio) are not routed. iOS uses React Native's request interceptor and WebSocket provider and a URL protocol for `expo/fetch`. Without network or session such requests fail like offline requests.
-- **Errors and navigation.** A fatal JavaScript error shows the app's error with Reload and Close instead of ending OpenCuria. Android's back button at the app's root closes it. While the bundle starts, the app's icon and a spinner show.
-- **App menu.** As in Expo Go, three ways open a sheet with the app's icon and name, Close app, Reload and a switch for each way: shaking the phone, a three-finger long press and a floating menu button (OpenCuria's mark) that can be dragged anywhere, rests at the nearest side edge and fades after 5 s untouched. All three are on at first; the last one that is on cannot be turned off. The choice and the button's spot apply to every app (`AppMenuTriggers`, `AppMenuButton`). Each time an app opens, a small note at the bottom says how to close it with the ways that are on (e.g. "Shake or tap the menu button to close the app") and fades after about 4 s. Android detects shaking with React Native's `ShakeDetector` and draws the sheet as a Material 3 bottom sheet; iOS uses the system shake gesture (the app's controller is first responder while no text field is) and a SwiftUI `Form` in a medium/large sheet.
-- **One app at a time.** Opening another app closes the open one; opening the open version again keeps it as it is. On iOS `open` does this itself; on Android the home screen widget's taps go through `AppLaunchActivity`, which brings back an open app (its task comes to the front) and passes every other link to OpenCuria, since starting OpenCuria's `singleTask` activity would close the app.
-- **Android Apps widget.** `AppsWidgetProvider` draws the snapshot JavaScript hands to `updateAppsWidget` (`src/widgets/appsWidgetSnapshot.ts`, stored in shared preferences) with RemoteViews: one layout per size the launcher reports (Android 12+), about one launcher cell per app, icons cut to the launcher's shape (`AdaptiveIconDrawable` mask), dynamic colors on Android 12+, and a folder-like More tile when apps do not fit. iOS draws its widget with `expo-widgets` (`src/widgets/AppsWidget.tsx`).
+- **Separate React instance:** `AppRuntimeActivity` (Android) and
+  `AppRuntimeViewController` with `AppRuntimeFactory` (iOS). OpenCuria's own React
+  host is never touched; `AppRuntimeFactory` hands the Fabric component provider back
+  to OpenCuria when the app closes.
+- **Offline:** an app-only `ExpoUpdates` module maps asset hashes to downloaded files
+  and provides the app's Expo config.
+- **Sandbox:** each app has its own document, cache, SQLite and SecureStore scope.
+  Notifications, AsyncStorage and background tasks are not scoped.
+- **Workspace backends:** `AppGateway` rewrites `http://<process>.opencuria.local[:port]`
+  to the API gateway and adds the session token, which the app never sees. Android
+  routes clients created through `OkHttpClientProvider` only.
+- **App menu** (`AppMenuTriggers`, `AppMenuButton`): shaking, a three-finger long
+  press or a draggable menu button opens Close app and Reload. Each way can be turned
+  off, but never the last one; the setting applies to every app.
+- **One app at a time.** A fatal JavaScript error shows Reload/Close instead of
+  ending OpenCuria.
 
-JavaScript calls `open(request)` with the JSON `AppLaunchRequest` from `src/apps/appRuntime.ts`, `close()` before showing the Apps list, `clearData(appId)` after an uninstall and, on Android, `updateAppsWidget(snapshot)`. Rebuild the development client after changing native code. The iOS implementation follows the same design but has not been built or run in this repository's CI or workspaces (no macOS).
+JavaScript API (`src/apps/appRuntime.ts`): `open(request)`, `close()`,
+`clearData(appId)` and, on Android, `updateAppsWidget(snapshot)`. Rebuild the
+development client after native changes. The iOS side has not been built in CI.

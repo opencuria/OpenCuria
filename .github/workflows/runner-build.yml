@@ -6,7 +6,6 @@ on:
   push:
     branches:
       - main
-      - "feat/expo-mobile-app"
     tags:
       - "*"
   pull_request:

@@ -1,4 +1,4 @@
-"""Phase 2 robustness: retry events, finish reasons, caps, locks, SSRF."""
+"""Runner robustness: retry events, finish reasons, caps, locks, SSRF."""
 
 from __future__ import annotations
 
@@ -405,7 +405,7 @@ async def test_no_default_step_budget() -> None:
     assert result.steps == 1
 
 
-async def test_tool_descriptions_carry_phase2_keywords() -> None:
+async def test_tool_descriptions_document_limits() -> None:
     """Bash/read descriptions document timeout/paging (happy path)."""
     assert "timeout" in BashTool().description.lower()
     assert "tail" in BashTool().description.lower()

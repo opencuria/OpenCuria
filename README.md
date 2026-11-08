@@ -9,399 +9,110 @@
   <strong>Run and manage AI coding agents from one place.</strong>
 </p>
 
-<p align="center">
-  OpenCuria gives you a central backend, a web dashboard, and runners that launch QEMU/KVM virtual machines.
-</p>
+OpenCuria is a control plane for AI coding agents: a central backend, a web
+dashboard, a mobile app and runners that execute agents in QEMU/KVM virtual machines.
 
-<p align="center">
-  🖥️ Local deployment &nbsp;•&nbsp; 🌍 Distributed deployment &nbsp;•&nbsp; 🤖 Multiple agents &nbsp;•&nbsp; 🧱 QEMU/KVM workspaces
-</p>
+- `backend/`: Django API, agent harness and runner control plane
+- `webapp/`: Vue dashboard
+- `mobile/`: native Expo iOS/Android client ([guide](./mobile/README.md))
+- `runner/`: executes QEMU/KVM workspaces ([guide](./runner/README.md))
+- `packages/`: shared chat rules, API client and the Computer Use runtime
 
----
+Agents run on the built-in harness, the pinned Claude Code CLI or the pinned Codex
+app-server. Workspaces provide a desktop, terminal, Git and files; plugins add
+skills, MCP servers and credentials. A built-in OpenCuria MCP server lets agents
+manage workspaces, chats, scheduled tasks and publish Expo apps to the mobile app.
 
-## ✨ Quick Start
-
-Start the local control plane, then configure a native Linux runner:
+## Quick start (local)
 
 ```bash
 cp .env.example .env
 docker compose up -d
 ```
 
-Then open:
+- Web app: `http://127.0.0.1:8080` (login: `LOCAL_ADMIN_EMAIL` / `LOCAL_ADMIN_PASSWORD`)
+- API docs: `http://127.0.0.1:8000/api/v1/docs`
 
-- 🌐 Web app: `http://127.0.0.1:8080`
-- 🔌 API: `http://127.0.0.1:8000/api/v1`
-- 📚 API docs: `http://127.0.0.1:8000/api/v1/docs`
+Compose bootstraps the admin, organization, runner and default image definition.
+Then set up a native runner as below, using `LOCAL_RUNNER_API_TOKEN` as its token.
+Workspaces can be created once the default image build has finished.
 
-Local login credentials come from your `.env` values:
+## Distributed setup
 
-- Email: `LOCAL_ADMIN_EMAIL`
-- Password: `LOCAL_ADMIN_PASSWORD`
-
-What this starts for you:
-
-- `backend` in local mode
-- `webapp` on localhost
-- automatic bootstrap for admin, org, runner, and default workspace image
-
-No manual runner registration is needed in local mode.
-
-> Run the QEMU/KVM runner natively on Linux using the setup below. Use the
-> bootstrap token from `LOCAL_RUNNER_API_TOKEN` for this local runner.
-> Workspace creation becomes available once its default image build finishes.
-
-## 🧭 What OpenCuria Is
-
-OpenCuria is a control plane for AI coding agents.
-
-- `backend/` is the Django API and runner control plane
-- `webapp/` is the dashboard
-- `runner/` executes QEMU/KVM VMs
-- `mobile/` is a native Expo iOS/Android client for existing OpenCuria
-  workspaces and chats
-
-Use it when you want:
-
-- one local stack for fast onboarding
-- a central server with one or more remote runners
-- isolated agent workspaces in QEMU/KVM VMs
-
-## 🐳 Local Control Plane
-
-The repository root is optimized for the fast path:
-
-```bash
-docker compose up -d
-```
-
-Key files:
-
-- [`compose.yml`](./compose.yml) — local default
-- [`.env.example`](./.env.example) — local environment template
-
-The control plane can run wherever Docker Compose is available. Workspace
-runners require a Linux host with QEMU/KVM and libvirt.
-
-## 🌍 Distributed Setup
-
-If you want a proper split setup, run the central services and the runners separately.
-
-### 1. Central server
+### Central server
 
 ```bash
 cp .env.server.example .env
 docker compose -f compose.server.yml up -d
 ```
 
-Key files:
+This starts PostgreSQL, Redis, the backend (API, execution and lifecycle recovery
+workers) and the webapp. A reverse proxy must route `/api` and `/ws` to the backend
+(with WebSocket upgrades, unbuffered) and everything else to the webapp.
 
-- [`compose.server.yml`](./compose.server.yml)
-- [`.env.server.example`](./.env.server.example)
+### QEMU runner
 
-This starts:
-
-- PostgreSQL
-- Redis
-- backend
-- webapp
-
-### 2. QEMU runner
-
-Run the runner natively on a Linux host with QEMU/KVM and libvirt.
-
-Use:
-
-- [`runner/systemd/opencuria-runner.service`](./runner/systemd/opencuria-runner.service)
-- [`runner/.env.example`](./runner/.env.example)
-
-The default QEMU SSH user is `root`. This matches the shipped QEMU cloud-init
-and desktop setup, which provision and start the desktop session under `/root`.
-
-Why native for QEMU:
-
-- better libvirt/KVM integration
-- simpler disk and snapshot permissions
-- less operational overhead than containerized libvirt
-
-Recommended setup flow:
-
-1. Start the central services first (`compose.server.yml` or a local source setup
-   for backend + webapp).
-2. Create a runner API token in the backend UI/API.
-3. On the Linux runner host, install the native QEMU/libvirt dependencies plus
-   the Python build dependencies required by `libvirt-python`:
-
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y \
-     qemu-kvm \
-     qemu-utils \
-     libvirt-daemon-system \
-     libvirt-clients \
-     genisoimage \
-     build-essential \
-     python3-dev \
-     pkg-config \
-     libvirt-dev
-   ```
-
-4. Clone this repository onto the runner host, create the runner virtualenv,
-   and install dependencies:
-
-   ```bash
-   cd runner
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-
-5. Copy `runner/.env.example` to `runner/.env` and set at least:
-
-   ```dotenv
-   RUNNER_API_TOKEN=...
-   RUNNER_BACKEND_URL=http://<backend-host>:8000
-   ```
-
-6. Create the QEMU storage directories configured in that env file, for example:
-
-   ```bash
-   sudo install -d -m 755 \
-     /var/lib/opencuria/images \
-     /var/lib/opencuria/base-images \
-     /var/lib/opencuria/disks \
-     /var/lib/opencuria/snapshots
-   ```
-
-7. Install the systemd unit from the repo. The helper script renders the unit
-   with the real checkout path and keeps using `runner/.env` directly:
-
-   ```bash
-   sudo ./runner/systemd/install-runner-service.sh
-   sudo systemctl enable --now opencuria-runner
-   ```
-
-8. Follow the logs and confirm the runner shows up online in the backend:
-
-   ```bash
-   sudo journalctl -u opencuria-runner -f
-   ```
-
-QEMU image definitions currently require `ubuntu:<version>` as the base distro.
-When a QEMU image build is triggered, the runner downloads the matching Ubuntu
-cloud image into `RUNNER_QEMU_IMAGE_CACHE_DIR` on first use.
-
-## 📱 Native mobile app
-
-A native Expo/React Native iOS and Android client for existing OpenCuria chats
-is under [`mobile/`](./mobile/). It reuses the shared API/chat packages and the
-root npm workspace. Start with the [mobile developer guide](./mobile/README.md).
-
-Native push providers are hosting settings shared by every organization. Configure
-`APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE` and/or
-`FCM_SERVICE_ACCOUNT_FILE` in the backend environment. Keys are read from files at
-startup; Compose mounts `./secrets/push/` read-only at `/run/secrets/`.
-
-## 📦 Images
-
-Published via GHCR:
-
-- `ghcr.io/opencuria/backend`
-- `ghcr.io/opencuria/webapp`
-
-The GitHub Actions workflow builds multi-arch images for:
-
-- `main`
-- `release`
-- tags
-
-## 🛠️ Develop From Source
-
-If you do not want Docker Compose for day-to-day development:
+The runner needs a Linux host with KVM. Create a runner API token in the backend
+first, then on the runner host:
 
 ```bash
-./scripts/setup-dev.sh
+sudo apt-get install -y qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients \
+  genisoimage build-essential python3-dev pkg-config libvirt-dev
+cd runner
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env   # set RUNNER_API_TOKEN and RUNNER_BACKEND_URL
+sudo install -d -m 755 /var/lib/opencuria/{images,base-images,disks,snapshots}
+cd .. && sudo ./runner/systemd/install-runner-service.sh
+sudo systemctl enable --now opencuria-runner
+sudo journalctl -u opencuria-runner -f
 ```
 
-After that you can run the API, execution worker, `webapp`, and `runner` individually. When
-updating a source checkout, apply backend migrations before starting the ASGI server:
+The runner should then show up online in the backend.
+
+## Develop from source
 
 ```bash
-cd backend
+./scripts/setup-dev.sh      # system packages, Python venvs, npm ci, migrations
+npm run dev:web             # or: npm run dev:mobile
+```
+
+Backend (each in its own terminal, from `backend/`; migrate after every update):
+
+```bash
 .venv/bin/python manage.py migrate --noinput
-.venv/bin/uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --workers 1 --lifespan on --ws websockets-sansio --ws-max-size 209715200
-```
-
-Start execution in a separate terminal with the same backend environment and database:
-
-```bash
-cd backend
+.venv/bin/uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --workers 1 \
+  --lifespan on --ws websockets-sansio --ws-max-size 209715200
 .venv/bin/python manage.py execute_harness
+.venv/bin/python manage.py recover_lifecycle
 ```
 
-The webapp and mobile app are npm workspaces in this repository. Install their
-dependencies once at the repository root with `npm ci` (the root
-`package-lock.json` is authoritative), then use `npm run dev:web` or
-`npm run dev:mobile`. Mobile build and local API/device networking notes are in
-the [mobile developer guide](./mobile/README.md).
+For a local runner, point `RUNNER_BACKEND_URL` at this backend and run
+`python -m src` in `runner/`. SQLite is for development; use PostgreSQL in production.
 
-The Docker backend entrypoint runs migrations and starts the API. Compose runs
-`execute_harness` as the separate `execution` service. API restarts leave native
-runs and background jobs running. The supported deployment keeps one realtime API gateway because terminal and
-desktop sessions still own gateway-local state. Redis routes runner replies and
-authorized workspace events between that gateway and the execution worker.
+## Operations
 
-One execution worker owns the native task registry, scheduler, notifications and
-recovery. Its durable command queue separates admitted work from HTTP requests.
-The worker renews a database heartbeat every 2 s. If an agent request finds no
-live worker within a few seconds, the API withdraws the request and answers 503
-`execution_unavailable` instead of waiting.
-A process-lifetime file lock excludes another live execution owner; SQLite places
-it next to its database. PostgreSQL deployments with multiple hosts must set
-`EXECUTION_PROCESS_LOCK_PATH` on shared execution storage. The scheduler also holds
-a database lease. A worker restart settles interrupted native work and recovers
-external engines through their existing runner ownership fences.
-Scheduled tasks are personal
-prompts in an IANA timezone: `recurrence: "once"` runs a single time on `run_date`
-(`YYYY-MM-DD`) at a local `HH:MM` and then disables itself; daily or selected weekdays
-run at a local `HH:MM`; `recurrence: "cron"` uses five-field cron expressions
-(`cron_expression`, several joined by `;`) for multiple runs per day, intervals and
-monthly/yearly cadences. The UI defaults new tasks to a single run and also offers set
-times, repeating intervals and a raw cron editor; the `/scheduled-tasks`
-page shows past runs and upcoming occurrences per workspace in a week calendar
-(click a free slot to plan a run there, drag a one-time or set-time run to move it).
-Recurring schedules skip DST gaps, while a one-time run in a gap is rejected;
-fall-back repeated times are executed once. Each occurrence
-creates a new root harness session. REST endpoints are under
-`/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for
-create/edit/pause/delete/run-now); the MCP server exposes the same as
-`scheduled_task_*` tools.
+- **Processes:** one API gateway (terminal and desktop sessions hold gateway-local
+  state), one `execute_harness` worker (agent runs, scheduler, notifications,
+  recovery) and one `recover_lifecycle` worker. Redis connects them. API restarts
+  leave runs going; without a live execution worker, agent requests fail with 503.
+- **Systemd:** `sudo ./backend/systemd/install-recovery-service.sh` installs both
+  workers for a source checkout (`--help` for options).
+- **Stuck runner operations:** use **Check status** in the runner's activity list;
+  reconcile, retry and acknowledge are under `/api/v1/runners/operations/{id}/`.
+- **Shared storage:** API and execution worker must share `MEDIA_ROOT`. Multi-host
+  PostgreSQL deployments must set `EXECUTION_PROCESS_LOCK_PATH` on shared storage.
+- **Upgrades:** run migrations first and deploy matching backend and runner versions.
+  Keep the runner's `RUNNER_STATE_DIR` with its disks and snapshots; never share or
+  delete it.
+- **Push notifications:** set `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_PRIVATE_KEY_FILE`
+  and/or `FCM_SERVICE_ACCOUNT_FILE`; Compose mounts `./secrets/push/` at `/run/secrets/`.
+- **MCP OAuth:** set `MCP_OAUTH_CALLBACK_URL` (public HTTPS) and
+  `MCP_OAUTH_FRONTEND_RETURN_URL` on the same hostname as the frontend.
 
-For a local Linux setup with backend/webapp from source and a native QEMU
-runner on the same machine, use the same QEMU runner flow above, but point
-`RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
-with `python -m src` while iterating.
-
-## Image versions
-
-Captured images and image-definition builds share the same version model.
-Each capture or build is a standalone version (`v1`, `v2`, …) with an optional
-message. New workspaces always use **Latest**. Reset rebuilds the same workspace
-id on its current version; Update moves it to Latest. Capture replaces the
-source workspace with the new version. Name, URL, chats, credentials, plugins
-and schedules stay; only the runner disk and runtime are recreated.
-
-**Settings → Workspace policy → Image versions to keep** (default **2**, range
-1–20) retains Latest plus the newest ready versions. Unused older versions are
-deleted automatically; versions still used by a workspace stay until that
-workspace is gone. Raising the setting does not restore already deleted
-versions.
-
-REST: `GET/PATCH /api/v1/captured-images/`, `POST /api/v1/workspaces/{id}/recreate/`,
-`PATCH /api/v1/organizations/{id}/workspace-policy/`.
-
-## Subagent nesting
-
-**Settings → Agents → Subagents → Maximum nesting depth** sets the organization-wide
-limit for new runs (default: **2**, minimum: **1**). The main agent is depth 0;
-depth 2 allows a subagent to delegate to another subagent, but blocks a third
-subagent level. This limits nesting, not the number of parallel tasks. Children
-inherit their root run's limit, and resumed tasks retain their persisted depth.
-Changes do not alter an active run's limit.
-
-REST: `GET/PUT /api/v1/subagent-config/` with `{"max_depth": 2}`.
-Reading requires `harness:read`; saving requires `harness:run` and organization
-membership. Run backend migrations before using this setting.
-
-## OpenCuria MCP server
-
-Agents manage OpenCuria through the built-in **OpenCuria** plugin, enabled per
-organization and workspace. Its MCP server runs in-process as the workspace owner,
-within that owner's organization role, without API keys or credentials. About 30
-task-oriented tools cover workspaces, chats, skills, plugins, scheduled tasks and
-apps: `app_publish` sends an Expo app the agent built and exported in its workspace
-to the owner's mobile app, which installs it and runs it offline inside OpenCuria.
-The implementation lives in `backend/apps/mcp_app/`; published apps are stored by
-`backend/apps/mobile_apps/` under `MEDIA_ROOT`, which the API and execution
-processes must share (Compose uses the backend data volume).
-
-Published apps reach servers in their workspace as `http://<process>.opencuria.local`:
-the mobile app rewrites only those requests to the API gateway path
-`/ws/app-backends/<app_id>/<process>/<port>/…` with a short-lived app session token
-(never visible to the app's code). The gateway checks that the user still owns the
-app and workspace, resumes a stopped workspace, starts the persistent process of that
-name when it is not running and forwards HTTP (streamed) and WebSockets to the port
-it listens on, through the runner's workspace TCP streams. A reverse proxy in front
-of the API must pass `/ws/app-backends/` with WebSocket upgrades, unbuffered.
-
-## MCP OAuth integrations
-
-OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect named personal or organization accounts from **Settings → Credentials**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production.
-
-## Claude Agent
-
-OpenCuria can run the pinned Claude Code CLI as a separate harness inside a workspace, using your own Anthropic API or authorized subscription token.
-
-## Codex
-
-Run the pinned Codex app-server inside a workspace with a **ChatGPT subscription**
-or **OpenRouter** account. Engine and provider stay fixed per chat; OpenCuria
-manages permissions, account refresh, tools, subagents and encrypted checkpoints.
-Direct OpenAI API keys and generic compatible providers are not in the initial
-scope. See the [backend guide](./backend/README.md#codex-harness) for matching
-backend/runner deployment and optional real-runtime tests.
-
-## Managed desktop resources
-
-See the [backend](./backend/README.md) and [runner](./runner/README.md) component guides.
+CI publishes multi-arch images `ghcr.io/opencuria/backend` and
+`ghcr.io/opencuria/webapp` from `main`.
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0.
-See [`LICENSE`](./LICENSE).
-
-### Lifecycle recovery operations
-
-Backend and runner lifecycle protocol versions must match. Keep the runner's
-`RUNNER_STATE_DIR` persistent across restarts/upgrades together with the QEMU disks
-and snapshots. Do not share one journal
-between runners or delete it to resolve a failed task. Run migrations and the
-independent `python manage.py recover_lifecycle` worker alongside ASGI (Compose
-and the backend systemd worker unit provide this process).
-
-For a systemd source checkout, install the worker and its backend dependency:
-
-```bash
-sudo ./backend/systemd/install-recovery-service.sh
-```
-
-The installer uses the backend virtualenv and environment file, applies migrations,
-enables `opencuria-recover-lifecycle.service` and `opencuria-execution.service` at
-boot, and starts the API and both workers after the upgrade. It briefly stops
-these services to apply migrations. Later API restarts leave execution running. Override
-`--env-file` or the service names when the deployment differs. To inspect the
-rendered files first, use `--no-activate --output-dir /tmp/opencuria-systemd`.
-When updating a local runner as well, add `--restart-runner opencuria-runner.service`.
-The worker reports readiness after its first successful tick and Redis connectivity
-check, and renews systemd's 90-second watchdog only after both succeed. Failures
-remain visible in
-`systemctl status opencuria-recover-lifecycle` and
-`journalctl -u opencuria-recover-lifecycle`.
-
-SQLite development deployments use `IMMEDIATE` transactions and a 20-second
-busy timeout so concurrent atomic writes wait before reading, instead of failing
-during a read-to-write lock upgrade. Idle delivery polling does not reserve the
-writer lock. Keep transactions short; PostgreSQL remains the production backend.
-See [Django's SQLite transaction guidance](https://docs.djangoproject.com/en/5.2/ref/databases/#transactions-behavior).
-Backend tests use a separate temporary SQLite file, so concurrency checks exercise
-the same lock waiting as the application rather than shared-cache memory locks.
-
-For an unresolved operation, select **Check status** in the runner's activity
-list (`GET /api/v1/runners/operations/{id}/`). Offline inspection returns unknown;
-it never clears a fence. `POST .../{id}/reconcile/` applies proven journal
-completion; `retry/` is only for known finished failed start/stop/remove, bounded
-and requiring fresh resource evidence. Organization admins can explicitly
-`acknowledge_interrupted/` only after proof of no executing handler/helper and a
-complete current-session runtime scan. Acknowledgment preserves all resources;
-partial creation stays failed, with disks intact. Removal is a separate explicit
-request. No full create/build/capture rerun or external-stop auto-start occurs.
+GNU Affero General Public License v3.0, see [`LICENSE`](./LICENSE). Third-party
+components: [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).

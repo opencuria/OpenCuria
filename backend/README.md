@@ -1,38 +1,20 @@
 # Backend
 
-The Django backend owns the control plane, agent harness, plugin policy, and
-server-side credentials. See the root [source setup](../README.md)
-for installation, migrations, API startup and the independent execution worker.
+Django control plane: REST/Socket.IO API, agent harness (`apps/harness/`), plugins,
+credentials and runner orchestration. Setup and processes: [root README](../README.md).
 
-## Image attachments
+## Media
 
-Native, Claude and Codex runs share image preparation for `@file:` mentions and
-workspace Markdown images, including history and steering messages. Up to 16
-images are automatically decoded and, when needed, reduced to previews bounded
-by 2048 pixels per edge and 1.5 MB each. Originals and their paths are preserved.
-More than 16 images use paths only, without opening the files. Missing, denied,
-corrupt, oversized or otherwise unreadable images also remain as paths with an
-explanation for the agent instead of aborting input preparation. File-reading
-tools use the same preview processing and fallback. Resumed sessions and steering
-count previously referenced images toward the same limit without replaying them.
-
-Tool images and PDFs are stored once in the workspace under
-`/workspace/.opencuria/tool-media/<sha256>.<ext>`. Chat parts keep only that path,
-and the web and mobile chats load it like other workspace media. Agents see
-tool media in the turn that produced it. Later turns, restored Claude transcripts
-and Codex checkpoints contain a short path notice instead of base64, so the agent
-reads the file again when needed.
+Prompt images (`@file:` mentions, workspace Markdown images) are shared by all
+engines: up to 16 per turn, previews bounded by 2048 px and 1.5 MB, unreadable
+images passed as paths. Tool images and PDFs are stored once under
+`/workspace/.opencuria/tool-media/<sha256>.<ext>`; later turns reference the path
+instead of base64.
 
 ## Codex harness
 
-The [engine README](apps/harness/engines/codex/README.md) maps internal contracts.
-Deploy matching backend and runner versions. Install `requirements.txt` (including
-the mandatory `pypdf==6.21.1` isolated PDF parser), then run migrations, including
-`0037_provider_refresh_lease`, before starting ASGI. ChatGPT refresh is centralized
-for native and Codex engines under database leases; no refresh token is sent to
-the workspace. Preserve database/encryption keys for encrypted checkpoints.
-
-Optional pinned runtime setup, from the repository root on Linux:
+Engine internals: [Codex engine README](apps/harness/engines/codex/README.md).
+Optional tests against the pinned runtime, from the repository root on Linux:
 
 ```bash
 python3 scripts/fetch-codex-test-runtime.py
@@ -40,7 +22,5 @@ python3 scripts/fetch-codex-test-runtime.py
 (cd runner && .venv/bin/pytest -q tests/test_codex_artifacts.py)
 ```
 
-Artifacts live in ignored `.opencuria/codex-test-runtime/`. Tests use a local fake
-Responses endpoint, not real provider credentials or paid inference. Real-runtime
-cases skip if artifacts are absent; other contract tests still run. The runner's
-real-package installer test currently targets x86_64.
+Artifacts go to the ignored `.opencuria/codex-test-runtime/`; tests use a local fake
+Responses endpoint, never real credentials. Without artifacts these cases skip.

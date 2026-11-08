@@ -1,104 +1,43 @@
 # Codex engine internals
 
-The pinned **0.166.0** standalone app-server runs inside the workspace over private
-stdio. This package adapts its experimental internal API to OpenCuria's existing
-harness contracts; it is not a stable public SDK integration. See the
-[backend README](../../../../README.md#codex-harness) for setup and runtime tests.
-
-## Architecture map
+Runs the pinned **0.166.0** standalone Codex app-server inside the workspace over
+private stdio and adapts its experimental internal API to OpenCuria's harness
+contracts. Setup and tests: [backend README](../../../../README.md#codex-harness).
 
 | Module | Responsibility |
 | --- | --- |
-| `catalog.py`, `models.json` | Pinned bundled ChatGPT capabilities and namespaced routing; OpenRouter uses the shared provider catalog. |
-| `auth.py` | Resolve the captured provider account through existing organization/user ACLs; private auth values never become public state. |
-| `configuration.py` | Authoritative startup/thread overrides, provider wire mapping, minimal integration overrides. |
-| `protocol.py` | Bounded JSON-RPC stdio, request deadlines, server requests and terminal transport failure. |
-| `engine.py` | Thread/turn loop, managed owner lifecycle, streaming, steering, cancellation and checkpoint finalization. |
-| `tools.py` | Small OpenCuria extension surface and invocation through shared permissions. |
-| `events.py` | Native tool projection, attachments and native child timelines. |
-| `media.py` | Checked image hydration and isolated bounded PDF text extraction through shared media/parser code. |
-| `session_store.py`, `state_io.py` | Encrypted owner-fenced checkpoint replacement and strict guest-side snapshot/restore. |
+| `catalog.py`, `models.json` | Pinned ChatGPT capabilities and model routing; OpenRouter uses the shared provider catalog. |
+| `auth.py` | Resolves the provider account through organization/user ACLs; secrets never become public state. |
+| `configuration.py` | Startup/thread overrides and provider wire mapping. |
+| `protocol.py` | Bounded JSON-RPC stdio, request deadlines, server requests, transport failure. |
+| `engine.py` | Thread/turn loop, owner lifecycle, streaming, steering, cancellation, checkpoints. |
+| `tools.py` | OpenCuria extension tools, dispatched through shared permissions. |
+| `events.py` | Native tool projection, attachments and child timelines. |
+| `media.py` | Image hydration and isolated, bounded PDF text extraction (`pypdf`). |
+| `session_store.py`, `state_io.py` | Encrypted, owner-fenced checkpoints and guest snapshot/restore. |
 
-The common `engines/external_runtime.py` prepares auth, refresh and state ports;
-`engines/execution.py` retains durable run ownership and emits existing session
-and message events. Runner artifact/process code only provisions and transports;
-it does not decide model, prompt, tool or permission policy.
+Shared plumbing lives in `engines/external_runtime.py` (auth, refresh, state) and
+`engines/execution.py` (durable run ownership, events). The runner only provisions
+and transports; it makes no model, prompt, tool or permission decisions.
 
-## Contracts
+## Invariants
 
-- Admission fixes engine/provider; model IDs are `chatgpt/<id>` or
-  `openrouter/<vendor>/<model>`. Legacy/generic default routes remain compatible;
-  they are not a way to change an existing Codex chat's provider.
-- Every answer resolves its immutable account snapshot, registers provider use
-  before contacting upstream, and retains revocation/current-owner fencing.
-  Native and Codex ChatGPT auth share the database-leased credential service in
-  `providers/chatgpt_credentials.py`; the execution-supplied refresh callback has
-  a nine-second bound and must return the same provider/connection identity.
-- ChatGPT uses ephemeral `account/login/start` (`chatgptAuthTokens`) and refresh
-  replies through stdio, without sending refresh tokens. OpenRouter uses
-  `OPENCURIA_CODEX_API_KEY` in the private runner stdin environment preamble.
-  Secrets are repr-hidden/redacted, never persistent engine metadata. Trusted
-  same-user workspace processes are not an OS credential-isolation boundary.
-- `on_binding(external_id, metadata)` merges nonsecret metadata under the current
-  run fence, including CLOSING. An initial empty ID marks `codex_dirty=True`
-  before launch; only a real upstream UUID binds a thread. Clear dirty only after
-  terminal state, confirmed process-tree closure and persisted checkpoint.
-- `on_owner` phases are `reserved`, `closing`, `released`. Runner release confirms
-  tree closure, not answer finalization; durable ownership survives checkpoint
-  and final binding/event writes.
-- Native MCP relays share the Codex agent lease and explicitly select the
-  `helper` process profile. Helpers get an isolated temporary home and controlled
-  path with no explicit or inherited credentials; lease closure fences all their
-  processes. Agent streams retain their provider-specific environment validation.
-- `CodexSessionStore` writes require exact `session_id`, `run_id`, `owner_token`
-  and external thread. One encrypted generation replaces the previous row.
-  Dirty/missing/mismatched state never falls back to an older generation.
-- Codex owns native multi-agent execution. Native child threads project through
-  the shared external-child timeline adapter and share the root owner/account
-  and checkpoint. OpenCuria does not advertise its `task` dispatcher to Codex.
-- Native base instructions remain untouched; `developerInstructions` contains
-  only the shared product context
-  (workspace boundaries, permitted local setup, and chat file/media rendering).
-  Native workspace configuration,
-  AGENTS and skill discovery remain enabled. Selected skills use native files.
-- Native question/update-plan tools are replaced by OpenCuria's persistent
-  question/todo tools. Process and registered MCP tools are the other extensions.
-- Dynamic signatures are immutable on resume; incompatible registry/schema
-  changes require fork/new-chat. Current role, depth and policy are checked at
-  every dispatch, so mode changes do not change the registered ceiling. `thread/resume` gets neither unsupported dynamic
-  tool overrides nor fabricated native history. Fork/edit instead starts a new
-  upstream thread from copied OpenCuria history; workspace effects remain.
-- Steering sends `turn/steer(expectedTurnId=...)` before acknowledging delivery.
-  Explicit rejection leaves followup work pending; uncertain transport fails the
-  run rather than replaying an unknown upstream action.
+- Engine and provider are fixed per chat. Model IDs are `chatgpt/<id>` or
+  `openrouter/<vendor>/<model>`.
+- No refresh token reaches the workspace. ChatGPT tokens are refreshed centrally
+  (`providers/chatgpt_credentials.py`) and passed over stdio; the OpenRouter key goes
+  only into the runner's private stdin environment preamble.
+- Checkpoint writes require the exact session, run, owner token and thread. Dirty,
+  missing or mismatched state never falls back to an older checkpoint.
+- Clear `codex_dirty` only after terminal state, confirmed process-tree closure and
+  a persisted checkpoint.
+- Dynamic tool signatures are immutable on resume; incompatible changes need a fork
+  or new chat. Role, depth and policy are checked on every dispatch.
+- Native question/plan tools are replaced by OpenCuria's question/todo tools; no
+  duplicate file/shell tools are advertised. Codex runs subagents natively.
+- Steering sends `turn/steer` before acknowledging delivery; uncertain transport
+  fails the run instead of replaying an upstream action.
+- Timeline edits come from `fileChange` items only; `turn/diff/updated` is a
+  cumulative snapshot and never creates rows.
 
-## Capabilities and limits
-
-Timeline edits come from native `fileChange` items, one patch per changed file.
-`turn/diff/updated` is a cumulative snapshot, so it never creates timeline rows:
-it repeats earlier edits and can arrive after the final answer. Migration `0040`
-removes these redundant snapshots from completed Codex messages that already
-have file patches, preserving the actual work and answer order.
-
-Build/General use native `dangerFullAccess`/`never`. Root Plan/Explore disable
-native shell under `readOnly`/`never`; explicit permission rules also require
-managed extension actions. Native subagents inherit the native sandbox.
-Registered MCP edits and permitted process actions retain existing Plan policy.
-No duplicate OpenCuria file/shell tools are advertised.
-
-Images use shared authorized no-follow reads. Mandatory `pypdf==6.21.1` extracts
-text only in an isolated parser (256 MiB, 5-second soft CPU, 10-second wall,
-100 pages, 512 KiB text); there is no OCR or PDF image support.
-Checkpoints allow 256 files, 50 MiB raw/68 MiB encoded, including v1/v2 native memory
-markdown/databases and child rollouts, but excluding auth/config/logs/caches.
-The absolute workspace and `CODEX_HOME` must match; 4 MiB restore pieces respect
-10 MiB writes. Confirmed Stop plus cleanup/checkpoint allows continuation;
-uncertain failure requires fork/new-chat. Neither path rolls back files.
-The notification buffer allows 4,096 events up to 32 MiB, without blocking RPC
-replies or server requests. Overflow retains its specific cause and surfaces
-fixed recovery guidance without including protocol payloads.
-Runtime token totals supply usage; unknown billed cost is zero, not an invoice.
-ChatGPT metadata is not an entitlement list; OpenRouter catalog tool support does
-not guarantee real Responses/tool compatibility. See the
-[backend README](../../../../README.md#codex-harness) for deployment and
-[third-party notices](../../../../../THIRD_PARTY_NOTICES.md#openai-codex) for licensing.
+Licensing: [third-party notices](../../../../../THIRD_PARTY_NOTICES.md#openai-codex).

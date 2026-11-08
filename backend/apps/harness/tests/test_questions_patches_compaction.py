@@ -1,4 +1,4 @@
-"""Paket 6: question tool, patch parts, compaction, MCP mark-read."""
+"""Question tool, patch parts, compaction and MCP mark-read."""
 
 from __future__ import annotations
 

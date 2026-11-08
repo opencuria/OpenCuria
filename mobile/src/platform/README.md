@@ -1,66 +1,17 @@
-# Native Expo platform adapters
+# Native platform adapters
 
-These framework-neutral adapters target Expo SDK 57. They depend on the host
-installing the corresponding Expo modules; this UI package intentionally does
-not own application config, permissions copy, auth lifecycle, or dependency
-versions.
+Expo SDK 57 adapters for media, pickers, uploads and secure storage. They do not
+own app config, permission copy or the auth lifecycle.
 
-## Media (`media.ts`)
-
-```ts
-const media = new MediaCache(client, workspaceId, authOrganizationScope)
-const uri = await media.resolve('/workspace/output.png') // compatibility API
-const visible = await media.resolvePinned('/workspace/output.png') // hold while rendered
-// On unmount/when no longer visible:
-visible.release()
-const file = await media.openFile('/workspace/README.md') // { uri, mimeType, name, kind, text? }
-await media.shareAttachment(toolAttachment.url) // bounded image/PDF data URL -> native share sheet
-await media.clear() // clear files and invalidate in-flight ownership; adapter can be reused
-await media.dispose() // permanent logout/workspace teardown
-```
-
-Use the same adapter instance only for its constructor's workspace and
-server/auth/organization scope. Dispose it when that scope ends; do not persist
-its URIs. Pictures for offline chat history are copied into the offline store
-(`src/offline/offlineStore.ts`), not kept here. Paths are validated with
-`resolveWorkspaceLinkPath`; workspace previews/text reads are limited to 20
-MiB, and document downloads are explicit-only (runner limit: 100 MiB). Preview
-cache is app-private, LRU-capped at 32 MiB with two concurrent transfers. Use
-`resolvePinned`/`pin` for visible media and call its idempotent `release()` when
-that view no longer uses the URI; pins are protected from LRU eviction. The
-unique cache directory and filenames contain no workspace/account identifiers.
-`openFile` rejects oversize files with a user-displayable error code/message.
-
-## Pickers and upload (`pickers.ts`)
-
-`pickPhoto('camera' | 'library')` and `pickDocuments()` return
-`ComposerAttachment[]`; cancellation returns an empty array. Picker permission
-errors have friendly messages. DocumentPicker copies selected files to Expo's
-cache, so `content://` inputs are immediately readable. HEIC/HEIF photos are
-converted to JPEGs no wider than 2048 pixels and no larger than 10 MiB;
-oversize raster photos are resized as well. Other documents are never
-recompressed. Call `clearPickedPhotoCache()` when the picker session is abandoned
-or after upload to delete only adapter-created converted image files.
-
-`uploadAttachments(client, workspaceId, attachments)` validates local sizes
-before reading base64, lists the shared chat-upload directory before choosing
-names, and uploads through the client's authenticated chunked file transport.
-It only treats an explicit missing-directory response as an empty listing;
-all other list errors fail without uploading/overwriting.
-
-## Secure auth session (`storage.ts`)
-
-`NativeSessionStorage` serializes a single SecureStore record of access/refresh
-tokens, server URL, and organization ID. It never stores a password. SecureStore
-failures propagate. `clear()` immediately invalidates pending reads/saves and
-queues deletion after any active write, so logout cannot be undone by an older
-save.
-
-## Git selection (`gitSelection.ts`)
-
-`NativeGitSelectionStorage` keeps the last selected repository path in
-SecureStore, keyed by a hash of the server, organization and workspace. Reads
-and writes are serialized across Git controllers. The controller restores the
-selection before loading repository details and falls back to the first
-available repository if the saved path no longer exists. Storage failures
-leave Git usable with an in-memory selection.
+- `media.ts`: `MediaCache` for one workspace and server/auth/organization scope.
+  `resolvePinned(path)` returns a URI plus `release()`; pinned files survive LRU
+  eviction (32 MiB, previews up to 20 MiB). `dispose()` when the scope ends; never
+  persist its URIs. Offline pictures live in `src/offline/`, not here.
+- `pickers.ts`: `pickPhoto('camera' | 'library')` and `pickDocuments()` return
+  `ComposerAttachment[]` (empty on cancel). HEIC and oversized photos become JPEGs
+  up to 2048 px / 10 MiB. `uploadAttachments()` checks sizes first and never
+  overwrites existing uploads.
+- `storage.ts`: `NativeSessionStorage` keeps tokens, server URL and organization in
+  one SecureStore record, never a password. `clear()` cannot be undone by an older save.
+- `gitSelection.ts`: remembers the selected repository per server, organization and
+  workspace.

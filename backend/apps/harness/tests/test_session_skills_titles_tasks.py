@@ -1,4 +1,4 @@
-"""Tests for Paket 3: skills, session CRUD, title agent, child sessions."""
+"""Session skills, session CRUD, title agent and child task sessions."""
 
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ RUN = [APIKeyPermission.HARNESS_RUN.value]
 
 
 @pytest.fixture
-def paket3_setup(db):
-    """Org, users, workspace, and skills for Paket 3 tests."""
+def session_setup(db):
+    """Org, users, workspace, and skills for session tests."""
     user_model = get_user_model()
     org = Organization.objects.create(
         name=f"P3 {uuid.uuid4().hex[:6]}",
@@ -145,17 +145,17 @@ def fake_harness_service(monkeypatch):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_create_session_invalid_skill_is_400(paket3_setup, fake_harness_service):
+def test_create_session_invalid_skill_is_400(session_setup, fake_harness_service):
     """POST with an inaccessible skill_id returns 400."""
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     response = client.post(
-        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
         data=json.dumps(
             {
                 "prompt": "hello",
-                "skill_ids": [str(paket3_setup["foreign_skill"].id)],
+                "skill_ids": [str(session_setup["foreign_skill"].id)],
             }
         ),
         content_type="application/json",
@@ -164,14 +164,14 @@ def test_create_session_invalid_skill_is_400(paket3_setup, fake_harness_service)
 
 
 @pytest.mark.django_db(transaction=True)
-def test_create_session_returns_skill_ids_in_body(paket3_setup, fake_harness_service):
+def test_create_session_returns_skill_ids_in_body(session_setup, fake_harness_service):
     """POST with skill_ids echoes them in the 201 response."""
-    skill_id = str(paket3_setup["org_skill"].id)
+    skill_id = str(session_setup["org_skill"].id)
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     response = client.post(
-        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
         data=json.dumps({"prompt": "hello", "skill_ids": [skill_id]}),
         content_type="application/json",
     )
@@ -182,17 +182,17 @@ def test_create_session_returns_skill_ids_in_body(paket3_setup, fake_harness_ser
 
 
 @pytest.mark.django_db(transaction=True)
-def test_timeline_returns_per_message_skill_ids(paket3_setup, fake_harness_service):
+def test_timeline_returns_per_message_skill_ids(session_setup, fake_harness_service):
     """Timeline echoes the per-turn skill snapshot on each user message."""
     from apps.harness.repositories import HarnessMessageRepository
 
-    org_skill_id = str(paket3_setup["org_skill"].id)
-    personal_skill_id = str(paket3_setup["personal_skill"].id)
-    owner = paket3_setup["owner"]
-    org = paket3_setup["org"]
+    org_skill_id = str(session_setup["org_skill"].id)
+    personal_skill_id = str(session_setup["personal_skill"].id)
+    owner = session_setup["owner"]
+    org = session_setup["org"]
     client = _client(user=owner, org=org, permissions=RUN)
     response = client.post(
-        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
         data=json.dumps({"prompt": "first", "skill_ids": [org_skill_id]}),
         content_type="application/json",
     )
@@ -231,18 +231,18 @@ def test_timeline_returns_per_message_skill_ids(paket3_setup, fake_harness_servi
 
 @pytest.mark.django_db(transaction=True)
 def test_followup_drops_deleted_skill_from_inherited_selection(
-    paket3_setup, fake_harness_service
+    session_setup, fake_harness_service
 ):
     """A skill deleted after selection must not reject every later prompt."""
     from apps.harness.repositories import HarnessMessageRepository
 
-    org_skill_id = str(paket3_setup["org_skill"].id)
-    personal_skill_id = str(paket3_setup["personal_skill"].id)
+    org_skill_id = str(session_setup["org_skill"].id)
+    personal_skill_id = str(session_setup["personal_skill"].id)
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     created = client.post(
-        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
         data=json.dumps(
             {"prompt": "first", "skill_ids": [org_skill_id, personal_skill_id]}
         ),
@@ -250,7 +250,7 @@ def test_followup_drops_deleted_skill_from_inherited_selection(
     )
     assert created.status_code == 201, created.content[:500]
     session_id = created.json()["id"]
-    paket3_setup["personal_skill"].delete()
+    session_setup["personal_skill"].delete()
 
     followup = client.post(
         f"/api/v1/harness/sessions/{session_id}/message",
@@ -269,19 +269,19 @@ def test_followup_drops_deleted_skill_from_inherited_selection(
 
 @pytest.mark.django_db(transaction=True)
 def test_edit_drops_deleted_skill_from_inherited_selection(
-    paket3_setup, fake_harness_service
+    session_setup, fake_harness_service
 ):
     """Editing a message reruns without skills deleted since selection."""
     from apps.harness.repositories import HarnessMessageRepository
 
-    org_skill_id = str(paket3_setup["org_skill"].id)
-    selection = [org_skill_id, str(paket3_setup["personal_skill"].id)]
+    org_skill_id = str(session_setup["org_skill"].id)
+    selection = [org_skill_id, str(session_setup["personal_skill"].id)]
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["owned"].id,
-        organization_id=paket3_setup["org"].id,
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
         prompt="first",
         skill_ids=selection,
-        user_id=paket3_setup["owner"].id,
+        user_id=session_setup["owner"].id,
     )
     first = HarnessMessageRepository.create(
         session_id=session.id, role="user", content="first", skill_ids=selection
@@ -289,9 +289,9 @@ def test_edit_drops_deleted_skill_from_inherited_selection(
     HarnessMessageRepository.create(
         session_id=session.id, role="assistant", content="answer"
     )
-    paket3_setup["personal_skill"].delete()
+    session_setup["personal_skill"].delete()
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
 
     response = client.post(
@@ -314,23 +314,23 @@ def test_edit_drops_deleted_skill_from_inherited_selection(
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("requested", ["deleted", "foreign_skill"])
 def test_followup_still_rejects_explicit_unavailable_skill(
-    paket3_setup, fake_harness_service, requested
+    session_setup, fake_harness_service, requested
 ):
     """Only the inherited selection is pruned; explicit requests stay strict."""
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     created = client.post(
-        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
         data=json.dumps({"prompt": "first"}),
         content_type="application/json",
     )
     assert created.status_code == 201, created.content[:500]
     if requested == "deleted":
-        skill_id = str(paket3_setup["personal_skill"].id)
-        paket3_setup["personal_skill"].delete()
+        skill_id = str(session_setup["personal_skill"].id)
+        session_setup["personal_skill"].delete()
     else:
-        skill_id = str(paket3_setup[requested].id)
+        skill_id = str(session_setup[requested].id)
 
     followup = client.post(
         f"/api/v1/harness/sessions/{created.json()['id']}/message",
@@ -344,15 +344,15 @@ def test_followup_still_rejects_explicit_unavailable_skill(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_service):
+async def test_fork_copies_per_message_skill_ids(session_setup, fake_harness_service):
     """Fork keeps the per-message skill snapshot of the copied prefix."""
     from apps.harness.repositories import HarnessMessageRepository
 
-    skill_id = str(paket3_setup["org_skill"].id)
-    owner = paket3_setup["owner"]
-    org = paket3_setup["org"]
+    skill_id = str(session_setup["org_skill"].id)
+    owner = session_setup["owner"]
+    org = session_setup["org"]
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["owned"].id,
+        workspace_id=session_setup["owned"].id,
         organization_id=org.id,
         prompt="forked",
         skill_ids=[skill_id],
@@ -362,7 +362,7 @@ async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_serv
         session,
         "forked",
         organization_id=org.id,
-        workspace_id=str(paket3_setup["owned"].id),
+        workspace_id=str(session_setup["owned"].id),
         user_id=owner.id,
         skill_ids=[skill_id],
     )
@@ -377,11 +377,11 @@ async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_serv
 
 
 @pytest.mark.django_db(transaction=True)
-def test_patch_session_title_happy(paket3_setup, fake_harness_service, monkeypatch):
+def test_patch_session_title_happy(session_setup, fake_harness_service, monkeypatch):
     """PATCH session title succeeds without resolving the live run orchestrator."""
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["owned"].id,
-        organization_id=paket3_setup["org"].id,
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
         prompt="rename me",
     )
 
@@ -390,7 +390,7 @@ def test_patch_session_title_happy(paket3_setup, fake_harness_service, monkeypat
 
     monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_execution)
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     response = client.patch(
         f"/api/v1/harness/sessions/{session.id}",
@@ -402,15 +402,15 @@ def test_patch_session_title_happy(paket3_setup, fake_harness_service, monkeypat
 
 
 @pytest.mark.django_db(transaction=True)
-def test_patch_session_foreign_workspace_is_404(paket3_setup, fake_harness_service):
+def test_patch_session_foreign_workspace_is_404(session_setup, fake_harness_service):
     """Cannot rename another owner's session."""
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["foreign"].id,
-        organization_id=paket3_setup["org"].id,
+        workspace_id=session_setup["foreign"].id,
+        organization_id=session_setup["org"].id,
         prompt="foreign",
     )
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     response = client.patch(
         f"/api/v1/harness/sessions/{session.id}",
@@ -421,15 +421,15 @@ def test_patch_session_foreign_workspace_is_404(paket3_setup, fake_harness_servi
 
 
 @pytest.mark.django_db(transaction=True)
-def test_patch_session_needs_run_permission(paket3_setup, fake_harness_service):
+def test_patch_session_needs_run_permission(session_setup, fake_harness_service):
     """Read-only API keys cannot rename sessions."""
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["owned"].id,
-        organization_id=paket3_setup["org"].id,
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
         prompt="perm",
     )
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=READ
+        user=session_setup["owner"], org=session_setup["org"], permissions=READ
     )
     response = client.patch(
         f"/api/v1/harness/sessions/{session.id}",
@@ -440,15 +440,15 @@ def test_patch_session_needs_run_permission(paket3_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_delete_session_returns_204(paket3_setup, fake_harness_service):
+def test_delete_session_returns_204(session_setup, fake_harness_service):
     """DELETE removes the session after aborting any active run."""
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["owned"].id,
-        organization_id=paket3_setup["org"].id,
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
         prompt="delete me",
     )
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
     )
     response = client.delete(f"/api/v1/harness/sessions/{session.id}")
     assert response.status_code == 204
@@ -456,15 +456,15 @@ def test_delete_session_returns_204(paket3_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_delete_session_needs_run_not_read(paket3_setup, fake_harness_service):
+def test_delete_session_needs_run_not_read(session_setup, fake_harness_service):
     """harness:read alone cannot delete sessions."""
     session = fake_harness_service.create_session(
-        workspace_id=paket3_setup["owned"].id,
-        organization_id=paket3_setup["org"].id,
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
         prompt="keep",
     )
     client = _client(
-        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=READ
+        user=session_setup["owner"], org=session_setup["org"], permissions=READ
     )
     response = client.delete(f"/api/v1/harness/sessions/{session.id}")
     assert response.status_code == 403
