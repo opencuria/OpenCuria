@@ -30,7 +30,7 @@ from .services.sessions.streams import StreamManager
 from .services.sessions.terminals import TerminalManager
 from .services.workspace_helpers import sanitize_exec_workdir
 from .services.workspace_lifecycle import WorkspaceLifecycle
-from .services.workspace_registry import WorkspaceRegistry
+from .services.workspace_registry import LifecycleMark, WorkspaceRegistry
 
 logger = structlog.get_logger(__name__)
 
@@ -57,7 +57,7 @@ class WorkspaceService:
             runtime,
             get_cached,
             get_runtime,
-            lambda workspace_id: self.registry._cache.pop(workspace_id, None),
+            self.registry.evict,
             WORKSPACE_CREDENTIAL_ENV_FILE,
             lease_timeout=settings.terminal_lease_timeout,
             idle_timeout=settings.terminal_idle_timeout,
@@ -152,8 +152,7 @@ class WorkspaceService:
 
         snapshots = []
         runtime = self._runtime
-        epochs = self.registry._epochs.copy()
-        active = self.registry._active.copy()
+        marks = self.registry.lifecycle_marks()
         try:
             scan = await runtime.inventory()
         except Exception:  # noqa: BLE001 - failed scan is incomplete evidence
@@ -169,8 +168,7 @@ class WorkspaceService:
                     await self._observe_workspace_state(
                         workspace_uuid,
                         resource.state,
-                        epochs.get(workspace_uuid, 0),
-                        workspace_uuid in active,
+                        marks.get(workspace_uuid, LifecycleMark()),
                     )
         snapshots.append(asdict(scan))
         return {
@@ -180,14 +178,10 @@ class WorkspaceService:
         }
 
     async def _observe_workspace_state(
-        self, workspace_id: uuid.UUID, state: str, epoch: int, active: bool
+        self, workspace_id: uuid.UUID, state: str, mark: LifecycleMark
     ) -> None:
         """Do not revoke newer scrub evidence with a stale running observation."""
-        if (
-            active
-            or workspace_id in self.registry._active
-            or epoch != self.registry._epochs.get(workspace_id, 0)
-        ):
+        if not self.registry.observation_current(workspace_id, mark):
             return
         # Queue immediately after the epoch check. Journal's FIFO IO admission
         # orders this before checkpoints from any lifecycle starting afterwards.
@@ -200,15 +194,12 @@ class WorkspaceService:
         matches = []
         runtime = self._runtime
         workspace_uuid = uuid.UUID(workspace_id)
-        epoch = self.registry._epochs.get(workspace_uuid, 0)
-        active = workspace_uuid in self.registry._active
+        mark = self.registry.lifecycle_mark(workspace_uuid)
         inspect_source = getattr(runtime, "workspace_incarnation", None)
         if inspect_source is not None:
             result = await inspect_source(workspace_id)
             if result and self.journal:
-                await self._observe_workspace_state(
-                    workspace_uuid, result[1], epoch, active
-                )
+                await self._observe_workspace_state(workspace_uuid, result[1], mark)
             return result
         scan = asdict(await runtime.inventory())
         if not scan["complete"]:
@@ -231,9 +222,7 @@ class WorkspaceService:
                 )
         result = matches[0] if len(matches) == 1 else None
         if result and self.journal:
-            await self._observe_workspace_state(
-                workspace_uuid, result[1], epoch, active
-            )
+            await self._observe_workspace_state(workspace_uuid, result[1], mark)
         return result
 
     async def publication_evidence(self, identity: dict) -> tuple[str, dict] | None:
@@ -406,10 +395,38 @@ class WorkspaceService:
                     result["credentials_present"] = present
         return result
 
+    async def refresh_credential_presence(self) -> None:
+        """Adopt journal-proven credential presence for unchanged cached guests.
+
+        A proof applies only to the exact incarnation it was checkpointed for,
+        and only while no lifecycle operation replaced or touched the entry.
+        """
+        journal = self.journal
+        if journal is None:
+            return
+        for workspace_id, info in self.registry.cached_workspaces().items():
+            mark = self.registry.lifecycle_mark(workspace_id)
+            observed = await self.workspace_incarnation(str(workspace_id))
+            if not observed or self.registry.find_cached(workspace_id) is not info:
+                continue
+            incarnation, state = observed
+            proof = await journal.call("proof", str(workspace_id), incarnation)
+            if (
+                self.registry.find_cached(workspace_id) is info
+                and self.registry.observation_current(workspace_id, mark)
+                and proof
+                and (
+                    proof.get("state") == state
+                    or proof.get("event") == "scrubbed"
+                    and state in {"exited", "stopped"}
+                )
+            ):
+                info.credentials_present = proof.get("credentials_present")
+
     async def recover_desktop_sessions_from_runtime(self) -> None:
         """Reconcile desktops from live runtime state with bounded workers."""
         await self.run_desktop_workers(
-            list(self.registry._cache), self.desktop.maintain_workspace
+            list(self.registry.cached_workspaces()), self.desktop.maintain_workspace
         )
 
     async def run_desktop_workers(

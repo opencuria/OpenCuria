@@ -141,7 +141,7 @@ class WorkspaceLifecycle:
             workspace_id = next(
                 (
                     key
-                    for key, info in self._registry._cache.items()
+                    for key, info in self._registry.cached_workspaces().items()
                     if info.instance_id == instance_id
                 ),
                 None,
@@ -279,8 +279,9 @@ class WorkspaceLifecycle:
             else:
                 log.info("repo_cloned", repo=repo_url)
 
-        self._registry._cache[workspace_id].status = "running"
-        self._registry._cache[workspace_id].credentials_present = credentials_present
+        info = self._registry.get_cached(workspace_id)
+        info.status = "running"
+        info.credentials_present = credentials_present
 
         if self.checkpoint_hook is not None:
             await self.checkpoint_hook(
@@ -465,7 +466,7 @@ class WorkspaceLifecycle:
     @coordinated
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
         """Remove the exact guest before finalizing durable owners and cache state."""
-        info = self._registry._cache.get(workspace_id)
+        info = self._registry.find_cached(workspace_id)
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Workspace runtime is unavailable")
@@ -493,7 +494,7 @@ class WorkspaceLifecycle:
                 info.instance_id = instance_id
                 info.status = "removed"
             await self._confirm_workspace_ended(info, "remove")
-            self._registry._cache.pop(workspace_id, None)
+            self._registry.evict(workspace_id)
             return
         await self._background._kill_all_background_processes(
             workspace_id, reason="remove"
@@ -503,4 +504,4 @@ class WorkspaceLifecycle:
         # publish successful death on exceptions, or remove cache before confirmation.
         await runtime.remove_workspace(info.instance_id)
         await self._confirm_workspace_ended(info, "remove")
-        self._registry._cache.pop(workspace_id, None)
+        self._registry.evict(workspace_id)

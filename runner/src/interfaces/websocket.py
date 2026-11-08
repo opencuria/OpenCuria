@@ -367,7 +367,7 @@ class WebSocketInterface(Interface):
                             desktop.get_desktop_session(workspace_id),
                             self._desktop_lifecycle_payload(workspace_id),
                         )
-                        for workspace_id in registry._cache
+                        for workspace_id in registry.cached_workspaces()
                     }
                     if desktop is not None
                     else {}
@@ -389,27 +389,7 @@ class WebSocketInterface(Interface):
                                 "epoch": self._desktop_epoch,
                             },
                         )
-                for workspace_id, info in list(registry._cache.items()):
-                    epoch = registry._epochs.get(workspace_id, 0)
-                    observed = await self._service.workspace_incarnation(
-                        str(workspace_id)
-                    )
-                    if observed and registry._cache.get(workspace_id) is info:
-                        proof = await self._operations.journal.call(
-                            "proof", str(workspace_id), observed[0]
-                        )
-                        if (
-                            registry._cache.get(workspace_id) is info
-                            and workspace_id not in registry._active
-                            and epoch == registry._epochs.get(workspace_id, 0)
-                            and proof
-                            and (
-                                proof.get("state") == observed[1]
-                                or proof.get("event") == "scrubbed"
-                                and observed[1] in {"exited", "stopped"}
-                            )
-                        ):
-                            info.credentials_present = proof.get("credentials_present")
+                await self._service.refresh_credential_presence()
                 workspaces = await registry.get_workspace_heartbeat_statuses()
                 self._cached_heartbeat_workspaces = workspaces
                 if self._sio.connected:

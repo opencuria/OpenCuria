@@ -471,3 +471,49 @@ async def test_stale_running_observation_cannot_revoke_new_stop_checkpoint(
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
         interface._operations.journal.close()
+
+
+@pytest.mark.parametrize("change", ["unchanged", "removed", "replaced", "lifecycle"])
+async def test_credential_presence_adopts_proofs_only_for_unchanged_entries(
+    tmp_path, change
+):
+    """Changes during the probe must not abort refresh or update stale entries."""
+    ws_id, runtime, service, interface = setup(tmp_path)
+    runtime.state = "running"
+    previous = service.registry.get_cached(ws_id)
+    previous.status = "running"
+    source = runtime.workspace_incarnation
+    interface._operations.journal.checkpoint(
+        str(ws_id),
+        (await source(str(ws_id)))[0],
+        {"state": "running", "credentials_present": True},
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def incarnation(workspace_id):
+        entered.set()
+        await release.wait()
+        return await source(workspace_id)
+
+    runtime.workspace_incarnation = incarnation
+    refresh = asyncio.create_task(service.refresh_credential_presence())
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if change in {"removed", "replaced"}:
+            service.registry.evict(ws_id)
+        if change == "replaced":
+            service.registry.register_new_workspace(
+                WorkspaceInfo(ws_id, "new-guest", "running")
+            )
+        if change == "lifecycle":
+            async with service.registry.lifecycle(ws_id):
+                pass
+        release.set()
+        await asyncio.wait_for(refresh, 2)
+        assert previous.credentials_present is (True if change == "unchanged" else None)
+        if change == "replaced":
+            assert service.registry.get_cached(ws_id).credentials_present is None
+    finally:
+        release.set()
+        await asyncio.gather(refresh, return_exceptions=True)
+        interface._operations.journal.close()

@@ -1,4 +1,4 @@
-"""Keep runner modules layered: dependencies point one way, without cycles."""
+"""Keep runner modules layered: one-way dependencies, owners keep their state."""
 
 from __future__ import annotations
 
@@ -69,3 +69,50 @@ def test_runner_modules_are_acyclic() -> None:
             "Runner import cycle; move the shared piece into a lower module "
             f"instead of importing lazily: {cycle}"
         )
+
+
+REGISTRY_MODULE = SOURCE_ROOT / "services" / "workspace_registry.py"
+REGISTRY_HOLDERS = {"registry", "_registry"}
+
+
+def _private_registry_access(tree: ast.Module) -> list[str]:
+    """Return private attributes read or written through a registry reference."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or not node.attr.startswith("_"):
+            continue
+        holder = node.value
+        name = getattr(holder, "id", None) or getattr(holder, "attr", "")
+        if name in REGISTRY_HOLDERS and not node.attr.startswith("__"):
+            found.append(f"{node.lineno}: {name}.{node.attr}")
+    return sorted(found)
+
+
+def test_registry_guard_sees_local_and_attribute_holders() -> None:
+    """Private state is reported however the registry reference is held."""
+    tree = ast.parse(
+        "self.registry._cache.pop(workspace_id)\n"
+        "registry._epochs.get(workspace_id)\n"
+        "self._registry._active\n"
+        "self.registry.evict(workspace_id)\n"
+        "self._epochs.get(key)\n"
+    )
+    assert _private_registry_access(tree) == [
+        "1: registry._cache",
+        "2: registry._epochs",
+        "3: _registry._active",
+    ]
+
+
+def test_workspace_registry_state_stays_behind_its_api() -> None:
+    """Only the registry touches its cache and lifecycle fence directly."""
+    violations = [
+        f"{path.relative_to(RUNNER_ROOT)}:{finding}"
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        if path != REGISTRY_MODULE
+        for finding in _private_registry_access(ast.parse(path.read_text()))
+    ]
+    assert not violations, (
+        "Use the WorkspaceRegistry API instead of its private state:\n"
+        + "\n".join(violations)
+    )

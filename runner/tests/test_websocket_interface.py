@@ -23,9 +23,7 @@ from src.services.sessions.desktop import DESKTOP_STOP_COMMAND
 class DummyService:
     def __init__(self) -> None:
         self.registry = SimpleNamespace(
-            _cache={},
-            _epochs={},
-            _active=set(),
+            cached_workspaces=Mock(return_value={}),
             sync_from_runtime=AsyncMock(),
             get_workspace_heartbeat_statuses=AsyncMock(return_value=[]),
         )
@@ -34,6 +32,7 @@ class DummyService:
             inject_credentials=AsyncMock(side_effect=self._inject_credentials),
         )
         self.recover_desktop_sessions_from_runtime = AsyncMock()
+        self.refresh_credential_presence = AsyncMock()
         # WebSocket terminal and image handlers call the managers directly.
         self.terminal_manager = AsyncMock()
         self.images = AsyncMock()
@@ -188,60 +187,31 @@ class WebSocketTransportSettingsTests(unittest.TestCase):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["removed", "replaced"])
-async def test_observation_tolerates_workspace_changes_during_probe(
-    tmp_path: Path, change: str
+async def test_observation_leaves_credential_evidence_to_the_service(
+    tmp_path: Path,
 ) -> None:
-    """Lifecycle changes must not abort heartbeats or update stale cache objects."""
+    """The transport refreshes credential presence via the service, then reports."""
     service = DummyService()
-    workspace_id = uuid.uuid4()
-    other_id = uuid.uuid4()
-    previous = WorkspaceInfo(workspace_id, "old-guest", "running")
-    service.registry._cache = {
-        workspace_id: previous,
-        other_id: WorkspaceInfo(other_id, "other-guest", "running"),
-    }
-    entered = asyncio.Event()
-    release = asyncio.Event()
+    order: list[str] = []
     heartbeat = asyncio.Event()
-    identity = {"domain_uuid": "old-guest"}
-
-    async def incarnation(observed_id: str) -> tuple[dict, str] | None:
-        if observed_id == str(workspace_id):
-            entered.set()
-            await release.wait()
-            return identity, "running"
-        return None
 
     async def statuses() -> list[dict]:
+        order.append("heartbeat")
         heartbeat.set()
         return []
 
-    service.workspace_incarnation = AsyncMock(side_effect=incarnation)
+    service.refresh_credential_presence.side_effect = lambda: order.append(
+        "credentials"
+    )
     service.registry.get_workspace_heartbeat_statuses.side_effect = statuses
     interface = WebSocketInterface(
         service,
         RunnerSettings(state_dir=str(tmp_path), inventory_interval=10**12),
     )
-    interface._operations.journal.checkpoint(
-        str(workspace_id),
-        identity,
-        {"state": "running", "credentials_present": True},
-    )
     observation = asyncio.create_task(interface._observation_loop())
     try:
-        await asyncio.wait_for(entered.wait(), timeout=2)
-        if change == "removed":
-            service.registry._cache.pop(workspace_id)
-        else:
-            service.registry._cache[workspace_id] = WorkspaceInfo(
-                workspace_id, "new-guest", "running"
-            )
-        release.set()
         await asyncio.wait_for(heartbeat.wait(), timeout=2)
-        assert previous.credentials_present is None
-        if change == "replaced":
-            assert service.registry._cache[workspace_id].credentials_present is None
+        assert order[:2] == ["credentials", "heartbeat"]
     finally:
         observation.cancel()
         await asyncio.gather(observation, return_exceptions=True)

@@ -2,6 +2,7 @@
 
 The registry merges runtime inventory while fencing lifecycle-owned cache
 entries. Optional hooks provide desktop and background-process heartbeat data.
+Other modules read the cache and lifecycle fence only through its public API.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -19,6 +21,17 @@ from ..runtime.base import RuntimeBackend
 from ..runtime.diagnostics import WORKSPACE_EXISTS, OperationRejectedError
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class LifecycleMark:
+    """Lifecycle fence position of one workspace when an observation began.
+
+    The default is a workspace that has never run a lifecycle operation.
+    """
+
+    epoch: int = 0
+    active: bool = False
 
 
 class WorkspaceRegistry:
@@ -67,6 +80,49 @@ class WorkspaceRegistry:
         if self._cache.get(info.workspace_id) is info:
             del self._cache[info.workspace_id]
 
+    def evict(self, workspace_id: uuid.UUID) -> None:
+        """Forget a workspace whose resource ended or vanished from the runtime."""
+        self._cache.pop(workspace_id, None)
+
+    def find_cached(self, workspace_id: uuid.UUID) -> WorkspaceInfo | None:
+        """Return the cached workspace, or None when it is unknown."""
+        return self._cache.get(workspace_id)
+
+    def cached_workspaces(self) -> dict[uuid.UUID, WorkspaceInfo]:
+        """Return a point-in-time copy of the cache, safe to iterate across awaits."""
+        return dict(self._cache)
+
+    # -- lifecycle fence -------------------------------------------------
+
+    def lifecycle_mark(self, workspace_id: uuid.UUID) -> LifecycleMark:
+        """Record the lifecycle fence of one workspace before observing it."""
+        return LifecycleMark(
+            self._epochs.get(workspace_id, 0), workspace_id in self._active
+        )
+
+    def lifecycle_marks(self) -> dict[uuid.UUID, LifecycleMark]:
+        """Record every workspace's fence before a scan; absent ids are unmarked."""
+        return {
+            workspace_id: LifecycleMark(epoch, workspace_id in self._active)
+            for workspace_id, epoch in self._epochs.items()
+        }
+
+    def lifecycle_changed(self, workspace_id: uuid.UUID, mark: LifecycleMark) -> bool:
+        """Return True when a lifecycle operation started or ended since *mark*."""
+        return mark.epoch != self._epochs.get(workspace_id, 0)
+
+    def observation_current(self, workspace_id: uuid.UUID, mark: LifecycleMark) -> bool:
+        """Return True when an observation begun at *mark* may still be applied.
+
+        Lifecycle operations own the cache entry and its evidence while they
+        run, so observations made during or across one are stale.
+        """
+        return (
+            not mark.active
+            and workspace_id not in self._active
+            and not self.lifecycle_changed(workspace_id, mark)
+        )
+
     @asynccontextmanager
     async def lifecycle(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:
         """Serialize one resource, not heartbeats or unrelated workspaces.
@@ -91,10 +147,10 @@ class WorkspaceRegistry:
         Share the lifecycle mutex only for admission, not the runtime operation:
         stop must remain able to close processes whose reads are in flight.
         """
-        epoch = self._epochs.get(workspace_id, 0)
+        mark = self.lifecycle_mark(workspace_id)
         lock = self._lifecycle_locks.setdefault(workspace_id, asyncio.Lock())
         async with lock:
-            if epoch != self._epochs.get(workspace_id, 0):
+            if self.lifecycle_changed(workspace_id, mark):
                 # Preserve the established missing-workspace error after remove.
                 self.get_cached(workspace_id)
                 raise RuntimeError("Workspace lifecycle changed while waiting")
@@ -103,8 +159,7 @@ class WorkspaceRegistry:
     async def sync_from_runtime(self) -> None:
         """Merge observations without detaching lifecycle-owned cache objects."""
         async with self._refresh_lock:
-            epochs = self._epochs.copy()
-            active = self._active.copy()
+            marks = self.lifecycle_marks()
             observed: dict[uuid.UUID, WorkspaceInfo] = {}
             # Collect first: a failed/incomplete enumeration must not delete cache.
             runtime = self._runtime
@@ -123,10 +178,8 @@ class WorkspaceRegistry:
                 )
 
             for ws_id in self._cache.keys() | observed.keys():
-                if (
-                    ws_id in active
-                    or ws_id in self._active
-                    or epochs.get(ws_id, 0) != self._epochs.get(ws_id, 0)
+                if not self.observation_current(
+                    ws_id, marks.get(ws_id, LifecycleMark())
                 ):
                     continue
                 existing = self._cache.get(ws_id)

@@ -11,7 +11,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
-    from .workspace_registry import WorkspaceRegistry
+    from .workspace_registry import LifecycleMark, WorkspaceRegistry
 
 Method = TypeVar("Method", bound=Callable[..., Any])
 
@@ -28,7 +28,9 @@ class CaptureFence:
         self._capturing: set[uuid.UUID] = set()
         self._users: dict[tuple[uuid.UUID, asyncio.Task[Any] | None], int] = {}
         self._changed = asyncio.Condition()
-        self._epochs: dict[tuple[uuid.UUID, asyncio.Task[Any] | None], int] = {}
+        self._marks: dict[
+            tuple[uuid.UUID, asyncio.Task[Any] | None], LifecycleMark
+        ] = {}
         self._coordinated: set[tuple[uuid.UUID, asyncio.Task[Any] | None]] = set()
 
     def check_available(self, workspace_id: uuid.UUID) -> None:
@@ -54,8 +56,8 @@ class CaptureFence:
                 self._users[key] = 1
         else:
             self._users[key] = self._users.get(key, 0) + 1
-        if self._registry is not None and key not in self._epochs:
-            self._epochs[key] = self._registry._epochs.get(workspace_id, 0)
+        if self._registry is not None and key not in self._marks:
+            self._marks[key] = self._registry.lifecycle_mark(workspace_id)
         if coordinated:
             self._coordinated.add(key)
         try:
@@ -64,7 +66,7 @@ class CaptureFence:
             self._users[key] -= 1
             if not self._users[key]:
                 del self._users[key]
-                self._epochs.pop(key, None)
+                self._marks.pop(key, None)
                 self._coordinated.discard(key)
             async with self._changed:
                 self._changed.notify_all()
@@ -73,9 +75,9 @@ class CaptureFence:
         """Reject admitted work made stale while waiting for a manager lock."""
         key = (workspace_id, asyncio.current_task())
         if self._registry is not None and key not in self._coordinated:
-            epoch = self._epochs.get(key)
-            if epoch is not None and epoch != self._registry._epochs.get(
-                workspace_id, 0
+            mark = self._marks.get(key)
+            if mark is not None and self._registry.lifecycle_changed(
+                workspace_id, mark
             ):
                 self._registry.get_cached(workspace_id)
                 raise RuntimeError("Workspace lifecycle changed while waiting")
