@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { AlertCircle, Info, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import type { NoticeSheetState } from '@/lib/composerSheets'
+import type { NoticeSheetState } from '@opencuria/chat-core/composerSheets'
 
 defineProps<{
   notice: NoticeSheetState

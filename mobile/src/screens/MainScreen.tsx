@@ -47,7 +47,6 @@ import type {
 } from "@opencuria/client";
 import {
   ChatComposer,
-  ChatGates,
   ChatLayout,
   ChatMessages,
   type ComposerAttachment,
@@ -1485,6 +1484,30 @@ export function MainScreen(): React.JSX.Element {
               onChoosePhotos={async () => pickPhoto("library")}
               onChooseFiles={async () => pickDocuments()}
               contextKey={contextKey}
+              gates={{
+                questions: navigationReady ? chat.questions : EMPTY.questions,
+                permissions: navigationReady
+                  ? chat.permissions
+                  : EMPTY.permissions,
+                submitting: chat.questions.some((item) =>
+                  resolving.has(item.request_id),
+                ),
+                resolving: chat.permissions.some((item) =>
+                  resolving.has(item.request_id),
+                ),
+                onSubmitQuestion: (id, answers) =>
+                  gateAction(id, () =>
+                    controller!.resolveQuestion(id, answers),
+                  ),
+                onSkipQuestion: (id) =>
+                  gateAction(id, () =>
+                    controller!.resolveQuestion(id, [], true),
+                  ),
+                onResolvePermission: (id, response) =>
+                  gateAction(id, () =>
+                    controller!.resolvePermission(id, response),
+                  ),
+              }}
               testID="chat-composer"
             />
           }
@@ -1638,25 +1661,6 @@ export function MainScreen(): React.JSX.Element {
           />
         </ChatLayout>
       </Drawer>
-      <ChatGates
-        permissions={navigationReady ? chat.permissions : EMPTY.permissions}
-        questions={navigationReady ? chat.questions : EMPTY.questions}
-        resolving={chat.permissions.some((item) =>
-          resolving.has(item.request_id),
-        )}
-        submitting={chat.questions.some((item) =>
-          resolving.has(item.request_id),
-        )}
-        onResolvePermission={(id, response) =>
-          gateAction(id, () => controller!.resolvePermission(id, response))
-        }
-        onSubmitQuestion={(id, answers) =>
-          gateAction(id, () => controller!.resolveQuestion(id, answers))
-        }
-        onSkipQuestion={(id) =>
-          gateAction(id, () => controller!.resolveQuestion(id, [], true))
-        }
-      />
 
       {workspace && (toolsAvailable || sheet === "tools") ? (
         <WorkspaceToolsSheet

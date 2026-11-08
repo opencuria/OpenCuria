@@ -3,21 +3,24 @@ import { computed, ref, watch } from 'vue'
 import { ChevronDown, ChevronUp, MessageCircleQuestion, PenLine } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { optionLetter } from '@/lib/composerSheets'
+import { optionLetter } from '@opencuria/chat-core/composerSheets'
 import { gateSourceLabel } from '@opencuria/chat-core/harnessSubtaskActivity'
 import type { HarnessQuestionRequest } from '@opencuria/chat-core/harness'
+import {
+  collectQuestionAnswers,
+  emptyQuestionDraft,
+  isQuestionCustomActive,
+  selectedQuestionOptions,
+  setQuestionCustomAnswer,
+  toggleQuestionOption,
+  type QuestionDraft,
+} from '@opencuria/chat-core/harnessQuestion'
 import { useAuthStore } from '@/stores/auth'
 import {
   loadQuestionInputCache,
   questionInputCacheKey,
   saveQuestionInputCache,
 } from '@/lib/questionInputCache'
-
-/**
- * Separator for multi-select answers. Must match the backend contract and
- * the previous inline form (NUL-joined labels).
- */
-const MULTI_SELECT_SEPARATOR = String.fromCharCode(0)
 
 const props = defineProps<{
   requests: HarnessQuestionRequest[]
@@ -32,16 +35,8 @@ const emit = defineEmits<{
 const auth = useAuthStore()
 const page = ref(0)
 const cacheKeys: Record<string, string> = {}
-/**
- * Raw option selections per request id, one entry per question. Multi-select
- * values are stored separator-joined.
- */
-const answersByRequest = ref<Record<string, string[]>>({})
-/**
- * Custom free-text answers per request id, one entry per question. Always
- * available even when the question also offers selectable options.
- */
-const customByRequest = ref<Record<string, string[]>>({})
+/** Unsent answers per request id (shared chat-core draft rules). */
+const drafts = ref<Record<string, QuestionDraft>>({})
 
 const total = computed(() => props.requests.length)
 const request = computed<HarnessQuestionRequest | null>(
@@ -59,105 +54,57 @@ watch(
     for (const item of requests) {
       const id = item.request_id
       const key = questionInputCacheKey({ userId, organizationId }, item)
-      if (cacheKeys[id] === key && answersByRequest.value[id]) continue
-      const draft = loadQuestionInputCache(key, item.questions.length)
-      answersByRequest.value[id] = draft?.answers ?? item.questions.map(() => '')
-      customByRequest.value[id] = draft?.custom ?? item.questions.map(() => '')
+      if (cacheKeys[id] === key && drafts.value[id]) continue
+      drafts.value[id] =
+        loadQuestionInputCache(key, item.questions.length) ?? emptyQuestionDraft(item)
       cacheKeys[id] = key
     }
     // Leaving a chat is not a resolution: prune only local state, not the cache.
     for (const id of Object.keys(cacheKeys)) {
       if (requests.some((item) => item.request_id === id)) continue
       delete cacheKeys[id]
-      delete answersByRequest.value[id]
-      delete customByRequest.value[id]
+      delete drafts.value[id]
     }
   },
   { immediate: true, flush: 'sync' },
 )
 
-function saveDraft(requestId: string): void {
-  saveQuestionInputCache(cacheKeys[requestId] ?? '', {
-    answers: answersByRequest.value[requestId] ?? [],
-    custom: customByRequest.value[requestId] ?? [],
-  })
+function draftFor(item: HarnessQuestionRequest): QuestionDraft {
+  return drafts.value[item.request_id] ?? emptyQuestionDraft(item)
 }
 
-function selectedOptions(requestId: string, questionIndex: number): string[] {
-  const raw = answersByRequest.value[requestId]?.[questionIndex] ?? ''
-  return raw ? raw.split(MULTI_SELECT_SEPARATOR).filter(Boolean) : []
+function updateDraft(item: HarnessQuestionRequest, draft: QuestionDraft): void {
+  drafts.value[item.request_id] = draft
+  saveQuestionInputCache(cacheKeys[item.request_id] ?? '', draft)
 }
 
-function setAnswer(requestId: string, questionIndex: number, value: string): void {
-  const answers = answersByRequest.value[requestId]
-  if (!answers) return
-  answers[questionIndex] = value
+function setCustom(item: HarnessQuestionRequest, questionIndex: number, value: string): void {
+  updateDraft(item, setQuestionCustomAnswer(draftFor(item), item, questionIndex, value))
 }
 
-function setCustom(requestId: string, questionIndex: number, value: string): void {
-  const customs = customByRequest.value[requestId]
-  if (!customs) return
-  customs[questionIndex] = value
-  const item = props.requests.find((request) => request.request_id === requestId)
-  const question = item?.questions[questionIndex]
-  if (question?.options?.length && !question.multiple) {
-    setAnswer(requestId, questionIndex, '')
-  }
-  saveDraft(requestId)
+function toggleOption(item: HarnessQuestionRequest, questionIndex: number, label: string): void {
+  updateDraft(item, toggleQuestionOption(draftFor(item), item, questionIndex, label))
 }
 
-function toggleOption(
-  requestId: string,
+function isOptionSelected(
+  item: HarnessQuestionRequest,
   questionIndex: number,
   label: string,
-  multiple: boolean,
-): void {
-  if (multiple) {
-    const current = selectedOptions(requestId, questionIndex)
-    const next = current.includes(label)
-      ? current.filter((item) => item !== label)
-      : [...current, label]
-    setAnswer(requestId, questionIndex, next.join(MULTI_SELECT_SEPARATOR))
-    saveDraft(requestId)
-    return
-  }
-  setAnswer(requestId, questionIndex, label)
-  const customs = customByRequest.value[requestId]
-  if (customs) customs[questionIndex] = ''
-  saveDraft(requestId)
+): boolean {
+  return selectedQuestionOptions(draftFor(item), questionIndex).includes(label)
 }
 
-function isOptionSelected(requestId: string, questionIndex: number, label: string): boolean {
-  return selectedOptions(requestId, questionIndex).includes(label)
-}
-
-/** Whether the custom free-text row is the "active" choice (has text and no option selected in single-select). */
-function isCustomActive(requestId: string, questionIndex: number, hasOptions: boolean, multiple?: boolean): boolean {
-  const custom = (customByRequest.value[requestId]?.[questionIndex] ?? '').trim()
-  if (!hasOptions) return false
-  if (multiple) return !!custom
-  const selected = selectedOptions(requestId, questionIndex)
-  return !!custom && selected.length === 0
-}
-
-function collectAnswers(item: HarnessQuestionRequest): string[] {
-  const raw = answersByRequest.value[item.request_id] ?? []
-  const customs = customByRequest.value[item.request_id] ?? []
-  return item.questions.map((question, index) => {
-    const custom = (customs[index] ?? '').trim()
-    if (!question.options?.length) return custom
-    const selected = (raw[index] ?? '').split(MULTI_SELECT_SEPARATOR).filter(Boolean)
-    if (question.multiple) {
-      if (custom) selected.push(custom)
-      return selected.join(MULTI_SELECT_SEPARATOR)
-    }
-    return custom || selected[0] || ''
-  })
+function isCustomActive(item: HarnessQuestionRequest, questionIndex: number): boolean {
+  return isQuestionCustomActive(draftFor(item), item, questionIndex)
 }
 
 function handleSubmit(): void {
   if (!request.value || props.submitting) return
-  emit('submit', request.value.request_id, collectAnswers(request.value))
+  emit(
+    'submit',
+    request.value.request_id,
+    collectQuestionAnswers(request.value, draftFor(request.value)),
+  )
 }
 
 function handleSkip(): void {
@@ -188,7 +135,7 @@ function onKeydown(event: KeyboardEvent): void {
     const option = question.options?.[optionIndex]
     if (!option) return
     event.preventDefault()
-    toggleOption(item.request_id, questionIndex, option.label, question.multiple ?? false)
+    toggleOption(item, questionIndex, option.label)
     return
   }
   if (event.key === 'Enter' && tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'BUTTON') {
@@ -204,11 +151,7 @@ function onKeydown(event: KeyboardEvent): void {
     <div class="flex items-center gap-2 px-4 pt-3">
       <MessageCircleQuestion :size="14" class="shrink-0 text-muted-foreground" />
       <p class="text-sm font-medium text-foreground">Questions</p>
-      <Badge
-        v-if="sourceLabel"
-        variant="outline"
-        data-testid="composer-question-source"
-      >
+      <Badge v-if="sourceLabel" variant="outline" data-testid="composer-question-source">
         {{ sourceLabel }}
       </Badge>
       <div class="ml-auto flex items-center gap-0.5" data-testid="composer-question-pager">
@@ -270,10 +213,7 @@ function onKeydown(event: KeyboardEvent): void {
         <!-- Options list (when the question has selectable options) -->
         <div v-if="question.options?.length" class="flex flex-col gap-1">
           <!-- Selection hint: single vs multi choice -->
-          <p
-            class="text-xs text-muted-foreground"
-            data-testid="composer-question-hint"
-          >
+          <p class="text-xs text-muted-foreground" data-testid="composer-question-hint">
             {{ question.multiple ? 'Select all that apply' : 'Select one' }}
           </p>
           <!-- Selectable option rows -->
@@ -283,27 +223,23 @@ function onKeydown(event: KeyboardEvent): void {
             type="button"
             :disabled="submitting"
             :role="question.multiple ? 'checkbox' : 'radio'"
-            :aria-checked="isOptionSelected(request.request_id, qIndex, option.label)"
+            :aria-checked="isOptionSelected(request, qIndex, option.label)"
             class="flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left text-sm transition-colors"
             :class="
-              isOptionSelected(request.request_id, qIndex, option.label)
+              isOptionSelected(request, qIndex, option.label)
                 ? 'border-primary bg-accent text-foreground'
                 : 'border-border bg-muted/30 text-foreground hover:bg-muted/60'
             "
-            :data-variant="
-              isOptionSelected(request.request_id, qIndex, option.label) ? 'default' : 'outline'
-            "
+            :data-variant="isOptionSelected(request, qIndex, option.label) ? 'default' : 'outline'"
             data-testid="composer-question-option"
-            @click="
-              toggleOption(request.request_id, qIndex, option.label, question.multiple ?? false)
-            "
+            @click="toggleOption(request, qIndex, option.label)"
           >
             <span
               class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold"
               :data-type="question.multiple ? 'checkbox' : 'radio'"
-              :data-picked="isOptionSelected(request.request_id, qIndex, option.label)"
+              :data-picked="isOptionSelected(request, qIndex, option.label)"
               :class="
-                isOptionSelected(request.request_id, qIndex, option.label)
+                isOptionSelected(request, qIndex, option.label)
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted text-muted-foreground'
               "
@@ -312,10 +248,7 @@ function onKeydown(event: KeyboardEvent): void {
             </span>
             <span class="min-w-0 flex-1">
               <span class="font-medium">{{ option.label }}</span>
-              <span
-                v-if="option.description"
-                class="ml-1.5 text-xs text-muted-foreground"
-              >
+              <span v-if="option.description" class="ml-1.5 text-xs text-muted-foreground">
                 {{ option.description }}
               </span>
             </span>
@@ -325,7 +258,7 @@ function onKeydown(event: KeyboardEvent): void {
           <div
             class="flex items-center gap-2.5 rounded-lg border px-3 py-2 transition-colors"
             :class="
-              isCustomActive(request.request_id, qIndex, true, question.multiple)
+              isCustomActive(request, qIndex)
                 ? 'border-primary bg-accent'
                 : 'border-border bg-muted/30'
             "
@@ -334,7 +267,7 @@ function onKeydown(event: KeyboardEvent): void {
             <span
               class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md"
               :class="
-                isCustomActive(request.request_id, qIndex, true, question.multiple)
+                isCustomActive(request, qIndex)
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted text-muted-foreground'
               "
@@ -343,12 +276,14 @@ function onKeydown(event: KeyboardEvent): void {
             </span>
             <input
               :id="`composer-question-${request.request_id}-${qIndex}`"
-              :value="customByRequest[request.request_id]?.[qIndex] ?? ''"
+              :value="draftFor(request).custom[qIndex] ?? ''"
               :disabled="submitting"
               placeholder="Own answer…"
               class="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
               data-testid="composer-question-custom"
-              @input="setCustom(request.request_id, qIndex, String(($event.target as HTMLInputElement).value ?? ''))"
+              @input="
+                setCustom(request, qIndex, String(($event.target as HTMLInputElement).value ?? ''))
+              "
             />
           </div>
         </div>
@@ -357,12 +292,14 @@ function onKeydown(event: KeyboardEvent): void {
         <div v-else>
           <input
             :id="`composer-question-${request.request_id}-${qIndex}`"
-            :value="customByRequest[request.request_id]?.[qIndex] ?? ''"
+            :value="draftFor(request).custom[qIndex] ?? ''"
             :disabled="submitting"
             placeholder="Your answer…"
             class="w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus:border-primary focus:ring-1 focus:ring-primary/30"
             data-testid="composer-question-custom"
-            @input="setCustom(request.request_id, qIndex, String(($event.target as HTMLInputElement).value ?? ''))"
+            @input="
+              setCustom(request, qIndex, String(($event.target as HTMLInputElement).value ?? ''))
+            "
           />
         </div>
       </div>

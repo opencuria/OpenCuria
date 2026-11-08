@@ -12,6 +12,8 @@ export interface NativeTextFieldProps {
   onChangeText: (value: string) => void;
   placeholder?: string;
   secureTextEntry?: boolean;
+  /** Free text such as answers: autocorrection and sentence capitalization. */
+  prose?: boolean;
   keyboardType?: "email-address" | "url" | "default";
   returnKeyType?: "next" | "go" | "done";
   onSubmitEditing?: () => void;

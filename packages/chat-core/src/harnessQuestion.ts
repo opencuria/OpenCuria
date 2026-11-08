@@ -1,5 +1,6 @@
 /**
- * Parsing helpers for answered `question` tool calls.
+ * Answer rules for pending `question` gates and parsing helpers for answered
+ * `question` tool calls.
  *
  * The backend persists the asked questions in `input.arguments.questions`
  * (mirrored into `meta.questions` on live parts) and the user answers as
@@ -9,8 +10,121 @@
  * card and tests share one implementation.
  */
 
-import type { HarnessPart } from "./harness";
+import type { HarnessPart, HarnessQuestionRequest } from "./harness";
 import { parseToolArguments } from "./toolDisplay";
+
+/** Joins multi-select answers; the backend splits submitted answers on NUL. */
+export const QUESTION_MULTI_SELECT_SEPARATOR = String.fromCharCode(0);
+
+/**
+ * Unsent answers of one pending question request, one entry per question.
+ * `answers` holds picked option labels (multi-select joined by
+ * `QUESTION_MULTI_SELECT_SEPARATOR`); `custom` holds the free-text answer,
+ * available even when the question offers options. Helpers return new drafts.
+ */
+export interface QuestionDraft {
+  answers: string[];
+  custom: string[];
+}
+
+export function emptyQuestionDraft(
+  request: HarnessQuestionRequest,
+): QuestionDraft {
+  return {
+    answers: request.questions.map(() => ""),
+    custom: request.questions.map(() => ""),
+  };
+}
+
+function replaceAt(values: string[], index: number, value: string): string[] {
+  const next = [...values];
+  next[index] = value;
+  return next;
+}
+
+export function selectedQuestionOptions(
+  draft: QuestionDraft,
+  questionIndex: number,
+): string[] {
+  const raw = draft.answers[questionIndex] ?? "";
+  return raw ? raw.split(QUESTION_MULTI_SELECT_SEPARATOR).filter(Boolean) : [];
+}
+
+/** Multi-select toggles the label; single-select picks it and clears free text. */
+export function toggleQuestionOption(
+  draft: QuestionDraft,
+  request: HarnessQuestionRequest,
+  questionIndex: number,
+  label: string,
+): QuestionDraft {
+  if (request.questions[questionIndex]?.multiple) {
+    const current = selectedQuestionOptions(draft, questionIndex);
+    const next = current.includes(label)
+      ? current.filter((item) => item !== label)
+      : [...current, label];
+    return {
+      ...draft,
+      answers: replaceAt(
+        draft.answers,
+        questionIndex,
+        next.join(QUESTION_MULTI_SELECT_SEPARATOR),
+      ),
+    };
+  }
+  return {
+    answers: replaceAt(draft.answers, questionIndex, label),
+    custom: replaceAt(draft.custom, questionIndex, ""),
+  };
+}
+
+/** Free text replaces a single-select pick; multi-select keeps its picks. */
+export function setQuestionCustomAnswer(
+  draft: QuestionDraft,
+  request: HarnessQuestionRequest,
+  questionIndex: number,
+  value: string,
+): QuestionDraft {
+  const question = request.questions[questionIndex];
+  return {
+    answers:
+      question?.options?.length && !question.multiple
+        ? replaceAt(draft.answers, questionIndex, "")
+        : draft.answers,
+    custom: replaceAt(draft.custom, questionIndex, value),
+  };
+}
+
+/** Whether the free-text row counts as a chosen option of a question with options. */
+export function isQuestionCustomActive(
+  draft: QuestionDraft,
+  request: HarnessQuestionRequest,
+  questionIndex: number,
+): boolean {
+  const question = request.questions[questionIndex];
+  const custom = (draft.custom[questionIndex] ?? "").trim();
+  if (!question?.options?.length || !custom) return false;
+  return (
+    Boolean(question.multiple) ||
+    selectedQuestionOptions(draft, questionIndex).length === 0
+  );
+}
+
+/** One submitted answer per question, in the backend's NUL-joined format. */
+export function collectQuestionAnswers(
+  request: HarnessQuestionRequest,
+  draft: QuestionDraft,
+): string[] {
+  return request.questions.map((question, index) => {
+    const custom = (draft.custom[index] ?? "").trim();
+    if (!question.options?.length) return custom;
+    const selected = selectedQuestionOptions(draft, index);
+    if (question.multiple)
+      return [...selected, ...(custom ? [custom] : [])].join(
+        QUESTION_MULTI_SELECT_SEPARATOR,
+      );
+    return custom || selected[0] || "";
+  });
+}
 
 export interface HarnessQuestionRow {
   question: string;

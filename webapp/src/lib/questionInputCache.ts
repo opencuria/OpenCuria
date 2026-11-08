@@ -1,4 +1,5 @@
 import type { HarnessQuestionRequest } from '@opencuria/chat-core/harness'
+import type { QuestionDraft } from '@opencuria/chat-core/harnessQuestion'
 
 const CACHE_PREFIX = 'question-input:'
 
@@ -8,11 +9,6 @@ type Identity = {
 }
 type RequestScope = Pick<HarnessQuestionRequest, 'workspace_id' | 'session_id'>
 type RequestId = RequestScope & Pick<HarnessQuestionRequest, 'request_id'>
-
-export interface QuestionInputDraft {
-  answers: string[]
-  custom: string[]
-}
 
 function scopePrefix(identity: Identity, request: RequestScope): string {
   if (!identity.userId || !identity.organizationId || !request.workspace_id || !request.session_id)
@@ -31,10 +27,7 @@ export function questionInputCacheKey(identity: Identity, request: RequestId): s
 }
 
 /** Load a question draft from this tab, ignoring corrupt or unavailable storage. */
-export function loadQuestionInputCache(
-  key: string,
-  questionCount: number,
-): QuestionInputDraft | null {
+export function loadQuestionInputCache(key: string, questionCount: number): QuestionDraft | null {
   if (!key || typeof window === 'undefined') return null
   try {
     const raw = window.sessionStorage.getItem(key)
@@ -56,7 +49,7 @@ export function loadQuestionInputCache(
 }
 
 /** Save on each edit, rather than waiting for unmount or a debounced watcher. */
-export function saveQuestionInputCache(key: string, draft: QuestionInputDraft): void {
+export function saveQuestionInputCache(key: string, draft: QuestionDraft): void {
   if (!key || typeof window === 'undefined') return
   try {
     if ([...draft.answers, ...draft.custom].some((value) => value.length > 0))

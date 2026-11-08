@@ -30,6 +30,7 @@ import {
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { runOnJS } from "react-native-worklets";
+import { useChromeTopInset } from "../ui/chromeInset";
 import { useTheme } from "../ui/theme";
 
 /** Links the composer input to the keyboard's interactive-dismiss area. */
@@ -39,6 +40,12 @@ export const COMPOSER_INPUT_NATIVE_ID = "chat-composer-input";
 const KEYBOARD_GAP = 8;
 /** Empty editor, toolbar and surface padding before the first native layout. */
 const ESTIMATED_COMPOSER_HEIGHT = 104;
+/** Transcript kept visible above the composer sheet stack. */
+const SHEET_TRANSCRIPT_GAP = 72;
+/** Share of the chat the sheet stack may cover while the keyboard is closed. */
+const SHEET_MAX_SHARE = 0.55;
+/** The sheet stack keeps its header and actions even on a short screen. */
+const SHEET_MIN_HEIGHT = 168;
 /** Downward pull on the composer that hands the keyboard its close animation. */
 const COMPOSER_PULL = 12;
 const IS_IOS = Platform.OS === "ios";
@@ -59,7 +66,7 @@ const EXTENDS_DISMISS_AREA = Platform.OS === "ios" && !Platform.isPad;
 export type TranscriptScrollToEnd = () => Promise<void>;
 
 export interface ChatLayoutValue {
-  /** Docked composer plus its bottom inset; the transcript scrolls above it. */
+  /** Docked composer, its sheet stack and bottom inset; the transcript scrolls above. */
   dockHeight: SharedValue<number>;
   /** The same height for layout on the JavaScript side. */
   dockOffset: number;
@@ -73,8 +80,12 @@ export interface ChatLayoutValue {
   /** Bottom inset the open keyboard covers; matches the dock's offset. */
   keyboardOffset: number;
   keyboardDismissMode: "interactive" | "on-drag" | "none";
-  /** The composer reports its core height (without transient panels). */
+  /** The composer reports its core height (without sheets or banners). */
   onComposerLayout: (event: LayoutChangeEvent) => void;
+  /** The composer sheet stack reports the height it adds above the composer. */
+  onSheetsHeight: (height: number) => void;
+  /** Tallest the sheet stack may grow while keeping some transcript visible. */
+  sheetMaxHeight: DerivedValue<number>;
   /** The transcript registers how to reach its end; returns an unregister. */
   registerScrollToEnd: (scrollToEnd: TranscriptScrollToEnd) => () => void;
   /** Closes the keyboard; after a send it also reveals the newest messages. */
@@ -82,6 +93,7 @@ export interface ChatLayoutValue {
 }
 
 const zero = makeMutable(0);
+const unbounded = makeMutable(Number.MAX_SAFE_INTEGER);
 
 /** Static geometry for transcripts rendered outside a chat layout (tests, previews). */
 const DETACHED: ChatLayoutValue = {
@@ -95,6 +107,8 @@ const DETACHED: ChatLayoutValue = {
   keyboardOffset: 0,
   keyboardDismissMode: IS_IOS ? "interactive" : "on-drag",
   onComposerLayout: () => undefined,
+  onSheetsHeight: () => undefined,
+  sheetMaxHeight: unbounded,
   registerScrollToEnd: () => () => undefined,
   dismissKeyboard: () => {
     void KeyboardController.dismiss().catch(() => undefined);
@@ -129,6 +143,7 @@ export function ChatLayout({
 }: ChatLayoutProps): React.JSX.Element {
   const { theme } = useTheme();
   const insets = useSafeAreaInsets();
+  const chromeTop = useChromeTopInset();
   const restingInset = insets.bottom > 0 ? insets.bottom : 12;
   const keyboardOffset = Math.max(0, restingInset - KEYBOARD_GAP);
   const docked = composer != null;
@@ -136,7 +151,11 @@ export function ChatLayout({
   const [composerHeight, setComposerHeight] = useState(
     ESTIMATED_COMPOSER_HEIGHT,
   );
-  const dockOffset = (docked ? composerHeight : 0) + restingInset;
+  const [sheetsHeight, setSheetsHeight] = useState(0);
+  const [layoutHeight, setLayoutHeight] = useState(0);
+  const heights = useRef({ composer: composerHeight, sheets: sheetsHeight });
+  const dockOffset =
+    (docked ? composerHeight + sheetsHeight : 0) + restingInset;
   const dockHeight = useSharedValue(dockOffset);
   useEffect(() => {
     dockHeight.value = dockOffset;
@@ -144,13 +163,26 @@ export function ChatLayout({
   const onComposerLayout = useCallback(
     (event: LayoutChangeEvent) => {
       const height = Math.round(event.nativeEvent.layout.height);
+      heights.current.composer = height;
       // The transcript inset follows on the UI thread before React re-renders.
-      dockHeight.value = height + restingInset;
+      dockHeight.value = height + heights.current.sheets + restingInset;
       setComposerHeight(height);
     },
     [dockHeight, restingInset],
   );
-  const dismissArea = composerHeight + KEYBOARD_GAP;
+  const onSheetsHeight = useCallback(
+    (height: number) => {
+      const rounded = Math.max(0, Math.round(height));
+      heights.current.sheets = rounded;
+      dockHeight.value = heights.current.composer + rounded + restingInset;
+      setSheetsHeight(rounded);
+    },
+    [dockHeight, restingInset],
+  );
+  const onRootLayout = useCallback((event: LayoutChangeEvent) => {
+    setLayoutHeight(Math.round(event.nativeEvent.layout.height));
+  }, []);
+  const dismissArea = composerHeight + sheetsHeight + KEYBOARD_GAP;
 
   // Same proportional offset as the transcript's keyboard padding, so the
   // composer and the newest message move as one.
@@ -175,6 +207,21 @@ export function ChatLayout({
   );
   const { height: keyboardShift } = useReanimatedKeyboardAnimation();
   const keyboardHeight = useDerivedValue(() => -keyboardShift.value);
+  const sheetMaxHeight = useDerivedValue(
+    () =>
+      Math.max(
+        SHEET_MIN_HEIGHT,
+        Math.min(
+          layoutHeight * SHEET_MAX_SHARE,
+          layoutHeight -
+            chromeTop -
+            SHEET_TRANSCRIPT_GAP -
+            composerHeight -
+            Math.max(-keyboardShift.value + KEYBOARD_GAP, restingInset),
+        ),
+      ),
+    [chromeTop, composerHeight, layoutHeight, restingInset],
+  );
 
   const scrollToEndRef = useRef<TranscriptScrollToEnd | null>(null);
   const registerScrollToEnd = useCallback(
@@ -213,6 +260,8 @@ export function ChatLayout({
           ? "none"
           : "on-drag",
       onComposerLayout,
+      onSheetsHeight,
+      sheetMaxHeight,
       registerScrollToEnd,
       dismissKeyboard,
     }),
@@ -224,13 +273,18 @@ export function ChatLayout({
       keyboardHeight,
       keyboardOffset,
       onComposerLayout,
+      onSheetsHeight,
       registerScrollToEnd,
+      sheetMaxHeight,
     ],
   );
 
   return (
     <ChatLayoutContext.Provider value={value}>
-      <View style={[styles.root, { backgroundColor: theme.background }]}>
+      <View
+        onLayout={onRootLayout}
+        style={[styles.root, { backgroundColor: theme.background }]}
+      >
         <KeyboardGestureArea
           style={styles.root}
           interpolator="ios"

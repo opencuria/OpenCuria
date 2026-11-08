@@ -17,7 +17,10 @@ labels and stable `testID`s.
   only on expansion.
 - `ChatComposer`: controlled draft. It clears on send and restores the draft when
   `onSend` rejects; `contextKey` discards late picker, search and send results.
-- `ChatGates`: one system modal for pending permissions and questions (permission first).
+  It hosts the sheet stack; `gates` passes pending questions and permissions.
+- `ComposerSheets`: the sheet stack behind the composer top, as in the webapp (shared
+  `composerSheets` order: mentions, questions, permissions). Only the top sheet is
+  interactive; gate sheets fold into their header and shrink with the keyboard.
 - `WorkspaceSidebar`, `MediaViewer`: sidebar with shared `conversationGroups` rules and
   the full-screen picture gallery.
 

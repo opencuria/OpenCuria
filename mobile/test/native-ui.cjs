@@ -75,6 +75,7 @@ exports.MediaViewerFrame = ({
     children,
   )
 exports.ComposerSurface = ({ children }) => h(View, null, children)
+exports.ComposerSheetSurface = ({ children, style }) => h(View, { style }, children)
 exports.NativeTextField = React.forwardRef(({ label, ...props }, ref) =>
   h(TextInput, {
     ...props,

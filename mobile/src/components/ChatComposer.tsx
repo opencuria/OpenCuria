@@ -8,7 +8,6 @@ import React, {
 } from "react";
 import { Image } from "expo-image";
 import {
-  AtSign,
   ArrowUp,
   FileText,
   Plus,
@@ -35,12 +34,14 @@ import {
   filterSkillCandidates,
   type MentionCandidate,
 } from "@opencuria/chat-core/harnessMentions";
+import { buildComposerSheets } from "@opencuria/chat-core/composerSheets";
 import { Banner, NativeAction } from "../ui/primitives";
 import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerAction, ComposerActionContent } from "../ui/ComposerAction";
 import { ComposerEditor } from "./ComposerEditor";
+import { ComposerSheetStack, type ComposerGates } from "./ComposerSheets";
 import {
   COMPOSER_INPUT_NATIVE_ID,
   ComposerDismissArea,
@@ -119,6 +120,8 @@ export interface ChatComposerProps {
   onChooseFiles?: () => Promise<
     ComposerAttachment | ComposerAttachment[] | null
   >;
+  /** Pending questions and permissions, shown as sheets above the editor. */
+  gates?: ComposerGates;
   testID?: string;
 }
 
@@ -159,6 +162,7 @@ export function ChatComposer({
   onTakePhoto,
   onChoosePhotos,
   onChooseFiles,
+  gates,
   testID = "chat-composer",
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -212,6 +216,19 @@ export function ChatComposer({
     const agentCandidates = filterMentionCandidates(query.query, []);
     return [...agentCandidates, ...matchedFiles].slice(0, 10);
   }, [proposals, query, searched, skills]);
+
+  const sheets = useMemo(
+    () =>
+      buildComposerSheets({
+        mention:
+          query && candidates.length
+            ? { candidates: candidates.slice(0, 10), activeIndex: -1 }
+            : null,
+        questions: gates?.questions,
+        permissions: gates?.permissions,
+      }),
+    [candidates, gates?.permissions, gates?.questions, query],
+  );
 
   const cancelSearch = useCallback(() => {
     queryGeneration.current += 1;
@@ -650,68 +667,11 @@ export function ChatComposer({
           style={{ marginBottom: 8 }}
         />
       ) : null}
-      {query && candidates.length > 0 ? (
-        <View
-          accessibilityLabel={`${query.kind === "skill" ? "Skills" : "Context"} suggestions`}
-          style={[
-            styles.suggestionPanel,
-            { backgroundColor: theme.raised, borderColor: theme.border },
-          ]}
-        >
-          <View style={styles.suggestionTitle}>
-            <Text
-              style={{
-                color: theme.mutedText,
-                fontSize: 12,
-                fontWeight: "600",
-              }}
-            >
-              {query.kind === "skill" ? "Skills" : "Add context"}
-            </Text>
-            <Text style={{ color: theme.subtleText, fontSize: 12 }}>
-              Select to add
-            </Text>
-          </View>
-          <ScrollView
-            keyboardShouldPersistTaps="handled"
-            scrollsToTop={false}
-            style={{ maxHeight: 192 }}
-          >
-            {candidates.slice(0, 10).map((candidate) => (
-              <NativeAction
-                key={`${candidate.kind}:${candidate.insert}`}
-                accessibilityRole="button"
-                accessibilityLabel={`Add ${candidate.label}`}
-                onPress={() => selectCandidate(candidate)}
-                style={({ pressed }) => [
-                  styles.suggestionItem,
-                  {
-                    backgroundColor: pressed
-                      ? theme.surfaceMuted
-                      : "transparent",
-                  },
-                ]}
-              >
-                {candidate.kind === "skill" ? (
-                  <Sparkles size={16} color={theme.primary} />
-                ) : candidate.kind === "agent" ? (
-                  <AtSign size={16} color={theme.primary} />
-                ) : (
-                  <FileText size={16} color={theme.mutedText} />
-                )}
-                <Text
-                  numberOfLines={1}
-                  style={{ flex: 1, color: theme.text, fontSize: 14 }}
-                >
-                  {candidate.label}
-                </Text>
-                <Plus size={16} color={theme.subtleText} />
-              </NativeAction>
-            ))}
-          </ScrollView>
-        </View>
-      ) : null}
-
+      <ComposerSheetStack
+        sheets={sheets}
+        gates={gates}
+        onSelectCandidate={selectCandidate}
+      />
       <ComposerDismissArea enabled={!inputScrolls}>
         <View
           collapsable={false}
@@ -937,25 +897,5 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 15,
-  },
-  suggestionPanel: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 17,
-    marginBottom: 8,
-    overflow: "hidden",
-  },
-  suggestionTitle: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    paddingBottom: 6,
-  },
-  suggestionItem: {
-    minHeight: 46,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 14,
   },
 });

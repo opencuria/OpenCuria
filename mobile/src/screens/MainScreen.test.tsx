@@ -250,7 +250,6 @@ jest.mock("../components", () => {
         ),
       );
     },
-    ChatGates: () => ReactRuntime.createElement(View),
     ChatLayout: ({
       children,
       composer,

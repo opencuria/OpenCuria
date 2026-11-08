@@ -8,7 +8,7 @@ import {
   questionInputCacheKey,
   saveQuestionInputCache,
 } from './questionInputCache'
-import type { QuestionInputDraft } from './questionInputCache'
+import type { QuestionDraft } from '@opencuria/chat-core/harnessQuestion'
 
 const identity = { userId: 17, organizationId: 'org-a' }
 const request = {
@@ -16,7 +16,7 @@ const request = {
   session_id: 'session-a',
   request_id: 'question/one ?&',
 }
-const draft: QuestionInputDraft = { answers: ['blue'], custom: ['manual'] }
+const draft: QuestionDraft = { answers: ['blue'], custom: ['manual'] }
 
 function key(overrides: Partial<typeof request> = {}): string {
   return questionInputCacheKey(identity, { ...request, ...overrides })

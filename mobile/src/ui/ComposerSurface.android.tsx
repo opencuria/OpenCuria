@@ -1,5 +1,5 @@
 import React from "react";
-import { StyleSheet, View } from "react-native";
+import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { Host, Shape, Surface } from "@expo/ui/jetpack-compose";
 import { fillMaxSize } from "@expo/ui/jetpack-compose/modifiers";
 import { useTheme } from "./theme";
@@ -35,6 +35,48 @@ export function ComposerSurface({
         </Surface>
       </Host>
       <View style={{ padding: 6 }}>{children}</View>
+    </View>
+  );
+}
+
+const SHEET_RADIUS = 22;
+
+/** Material surface of the composer sheet stack; the composer overlaps its lower edge. */
+export function ComposerSheetSurface({
+  children,
+  style,
+}: React.PropsWithChildren<{
+  style?: StyleProp<ViewStyle>;
+}>): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View collapsable={false} style={style}>
+      <Host
+        pointerEvents="none"
+        style={StyleSheet.absoluteFill}
+        colorScheme={theme.scheme}
+        seedColor={theme.primary}
+        ignoreSafeAreaKeyboardInsets
+      >
+        <Surface
+          color={theme.raised}
+          tonalElevation={1}
+          shadowElevation={3}
+          border={{ width: StyleSheet.hairlineWidth, color: theme.border }}
+          shape={Shape.RoundedCorner({
+            cornerRadii: {
+              topStart: SHEET_RADIUS,
+              topEnd: SHEET_RADIUS,
+              bottomStart: SHEET_RADIUS,
+              bottomEnd: SHEET_RADIUS,
+            },
+          })}
+          modifiers={[fillMaxSize()]}
+        >
+          {null}
+        </Surface>
+      </Host>
+      {children}
     </View>
   );
 }

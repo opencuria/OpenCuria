@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessSheetStack from './HarnessSheetStack.vue'
-import type { ComposerSheet } from '@/lib/composerSheets'
+import type { ComposerSheet } from '@opencuria/chat-core/composerSheets'
 import type { HarnessTodo } from '@opencuria/chat-core/harness'
 
 vi.mock('@/components/chat/HarnessMentionSheet.vue', () => ({

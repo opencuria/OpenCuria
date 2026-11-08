@@ -1,1 +1,1 @@
-export { ComposerSurface } from "./ComposerSurface.ios";
+export { ComposerSheetSurface, ComposerSurface } from "./ComposerSurface.ios";

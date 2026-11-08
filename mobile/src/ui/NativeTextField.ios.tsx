@@ -55,8 +55,8 @@ export function NativeTextField(
       frame({ minHeight: 44, maxWidth: Infinity }),
       accessibilityLabel(props.accessibilityLabel ?? props.label),
       keyboardType(props.keyboardType ?? "default"),
-      autocorrectionDisabled(),
-      textInputAutocapitalization("never"),
+      ...(props.prose ? [] : [autocorrectionDisabled()]),
+      textInputAutocapitalization(props.prose ? "sentences" : "never"),
       submitLabel(props.returnKeyType ?? "done"),
       onSubmit(() => props.onSubmitEditing?.()),
       ...(props.label === "Password"

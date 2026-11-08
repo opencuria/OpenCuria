@@ -50,8 +50,8 @@ export function NativeTextField(
           if (focused) props.onFocus?.();
         }}
         keyboardOptions={{
-          capitalization: "none",
-          autoCorrectEnabled: false,
+          capitalization: props.prose ? "sentences" : "none",
+          autoCorrectEnabled: Boolean(props.prose),
           keyboardType: props.secureTextEntry
             ? "password"
             : props.keyboardType === "email-address"

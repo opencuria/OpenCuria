@@ -19,7 +19,7 @@ import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
 import { Button } from '@/components/ui/button'
 import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
-import { buildComposerSheets } from '@/lib/composerSheets'
+import { buildComposerSheets } from '@opencuria/chat-core/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'

@@ -13,7 +13,7 @@ import {
   buildComposerSheets,
   type ContextSheetState,
   type NoticeSheetState,
-} from '@/lib/composerSheets'
+} from '@opencuria/chat-core/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'

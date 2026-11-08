@@ -9,7 +9,7 @@ import HarnessQueueSheet from '@/components/chat/HarnessQueueSheet.vue'
 import HarnessQuestionSheet from '@/components/chat/HarnessQuestionSheet.vue'
 import HarnessTodoSheet from '@/components/chat/HarnessTodoSheet.vue'
 import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
-import type { ComposerSheet } from '@/lib/composerSheets'
+import type { ComposerSheet } from '@opencuria/chat-core/composerSheets'
 import type { HarnessPermissionResponse } from '@opencuria/chat-core/harness'
 
 const props = defineProps<{
