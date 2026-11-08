@@ -103,7 +103,8 @@ function mountSection() {
 
 async function initStore() {
   const store = useGitStore()
-  await store.initialize('workspace-1')
+  store.bind('workspace-1', false)
+  await store.refresh()
   return store
 }
 

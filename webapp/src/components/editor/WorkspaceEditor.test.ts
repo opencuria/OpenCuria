@@ -159,7 +159,7 @@ describe('editor tabs and unsaved-close dialog', () => {
     expect(saveEditorFile).toHaveBeenCalledWith(WS, FILE, 'saved draft\n', 'revision-1')
     expect(store.tabs).toHaveLength(0)
     expect(wrapper.find('[data-testid="editor-unsaved-dialog"]').exists()).toBe(false)
-    expect(mocks.refreshGit).toHaveBeenCalledWith({ silent: true, forceDetails: true })
+    expect(mocks.refreshGit).toHaveBeenCalledWith({ silent: true, force: true })
   })
 
   it('discards only after choosing Don’t save, and Cancel retains the draft', async () => {

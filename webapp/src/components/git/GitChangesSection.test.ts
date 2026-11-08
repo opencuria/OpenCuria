@@ -67,7 +67,8 @@ function mountSection() {
 /** Bind the store to a workspace snapshot before mounting the section. */
 async function initStore() {
   const store = useGitStore()
-  await store.initialize('workspace-1')
+  store.bind('workspace-1', false)
+  await store.refresh()
   return store
 }
 
@@ -313,8 +314,7 @@ describe('GitChangesSection', () => {
       branches: [{ name: 'main', tip_hash: 'f4a9c21', upstream: 'origin/main', ahead: 0, behind: 1 }],
     })
     setupGitRepos(getRepos, getRepo, getHistory, [behindOnly])
-    await store.refresh()
-    await store.ensureDetails('/workspace/repo-app', { force: true })
+    await store.refresh({ force: true })
     await nextTick()
     expect(store.suggestedRemoteAction).toBe('pull')
     const pullPrimary = wrapper.get('[data-testid="git-remote-primary"]')
@@ -610,7 +610,7 @@ describe('GitChangesSection', () => {
     expect(box.value).toBe('my draft')
 
     setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ changes: [] })])
-    await initStore()
+    await useGitStore().refresh({ force: true })
     await nextTick()
     expect(
       wrapper.get('[data-testid="git-generate-message"]').attributes('disabled'),

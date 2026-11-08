@@ -62,12 +62,12 @@ async function savePending(): Promise<void> {
   if (!id || !(await store.saveTab(id))) return
   store.closeTab(id)
   cancelDialog()
-  void git.refresh({ silent: true, forceDetails: true })
+  void git.refresh({ silent: true, force: true })
 }
 
 async function save(): Promise<void> {
   if (tab.value && (await store.saveTab(tab.value.id)))
-    void git.refresh({ silent: true, forceDetails: true })
+    void git.refresh({ silent: true, force: true })
 }
 
 function reload(): void {
@@ -89,7 +89,7 @@ defineExpose({ save, reload, download })
 async function applyChange(action: 'stage' | 'revert', range: MonacoChangeRange): Promise<void> {
   if (!tab.value) return
   if (await store.applyChange(tab.value.id, action, range))
-    void git.refresh({ silent: true, forceDetails: true })
+    void git.refresh({ silent: true, force: true })
 }
 
 function handleKeydown(event: KeyboardEvent): void {

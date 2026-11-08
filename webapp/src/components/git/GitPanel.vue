@@ -8,7 +8,8 @@
  * between them. Each section scrolls vertically on its own; nothing
  * scrolls horizontally.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { useDocumentVisibility } from '@vueuse/core'
 import { useGitStore } from '@/stores/git'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import {
@@ -29,124 +30,32 @@ const props = defineProps<{
 
 const store = useGitStore()
 const sidePanel = useSidePanelStore()
+const pageVisibility = useDocumentVisibility()
 const fetchBusy = ref(false)
 const gitVisible = computed(
-  () => sidePanel.activeTab === 'git' && sidePanel.isOpen,
+  () => sidePanel.activeTab === 'git' && sidePanel.isOpen && pageVisibility.value === 'visible',
 )
 
-/** Throttle for tab-visibility auto-fetches (ms). */
-const AUTO_FETCH_THROTTLE_MS = 10_000
-let lastAutoFetchAt: number | null = null
-let lastAutoFetchKey: string | null = null
-let activation: { workspaceId: string; generation: number; promise: Promise<void> } | null = null
-let lifecycleGeneration = 0
-let mounted = false
-
-function shouldAutoFetch(): boolean {
-  const repo = store.currentRepo
-  if (!gitVisible.value || !repo) return false
-  if (store.busyOperation !== null || fetchBusy.value) return false
-  const key = `${props.workspaceId}:${repo.path}`
-  return lastAutoFetchKey !== key || lastAutoFetchAt === null ||
-    Date.now() - lastAutoFetchAt >= AUTO_FETCH_THROTTLE_MS
-}
-
-function autoFetchSilent(): void {
-  if (!shouldAutoFetch()) return
-  const repo = store.currentRepo
-  if (!repo) return
-  lastAutoFetchAt = Date.now()
-  lastAutoFetchKey = `${props.workspaceId}:${repo.path}`
-  void store.fetchRemote({ silent: true })
-}
-
-/** Initialize or refresh once on activation; timers only run while visible. */
-function activateGitTab(): Promise<void> {
-  if (!mounted || !gitVisible.value) return Promise.resolve()
-  const workspaceId = props.workspaceId
-  const generation = lifecycleGeneration
-  if (activation?.workspaceId === workspaceId && activation.generation === generation) {
-    return activation.promise
-  }
-
-  const promise = (async () => {
-    // Load summaries first, so a hide during that request cannot trigger a
-    // chained details request. Details are requested only after rechecking
-    // the activation token and visibility.
-    if (store.workspaceId !== workspaceId) {
-      await store.initialize(workspaceId, { withDetails: false })
-    } else {
-      await store.refresh({ silent: true, withDetails: false })
-    }
-    if (
-      !mounted || generation !== lifecycleGeneration ||
-      !gitVisible.value || props.workspaceId !== workspaceId
-    ) return
-
-    const repo = store.currentRepo
-    if (repo && !store.repoDetails[repo.path]) {
-      await store.ensureDetails(repo.path, { silent: true })
-    }
-    if (
-      !mounted || generation !== lifecycleGeneration ||
-      !gitVisible.value || props.workspaceId !== workspaceId
-    ) return
-    autoFetchSilent()
-    store.startPolling()
-  })()
-  activation = { workspaceId, generation, promise }
-  void promise.finally(() => {
-    if (activation?.promise === promise) activation = null
-  })
-  return promise
-}
-
+// Load and poll only while the tab is shown; a store reset re-binds.
 watch(
-  () => [props.workspaceId, gitVisible.value] as const,
-  ([workspaceId, visible], [previousWorkspaceId, wasVisible]) => {
-    if (!visible) {
-      lifecycleGeneration += 1
-      activation = null
-      store.stopPolling()
-      return
-    }
-    if (!wasVisible || workspaceId !== previousWorkspaceId) {
-      lifecycleGeneration += 1
-      activation = null
-      if (workspaceId !== previousWorkspaceId) store.stopPolling()
-      void activateGitTab()
-    }
-  },
+  () => [props.workspaceId, gitVisible.value, store.workspaceId] as const,
+  ([workspaceId, visible]) => store.bind(workspaceId, visible),
+  { immediate: true },
 )
-
-onMounted(() => {
-  mounted = true
-  if (gitVisible.value) void activateGitTab()
-})
 
 onUnmounted(() => {
-  mounted = false
-  lifecycleGeneration += 1
-  activation = null
-  store.stopPolling()
+  if (store.workspaceId === props.workspaceId) store.bind(props.workspaceId, false)
 })
 
 async function handleRetry(): Promise<void> {
-  if (!gitVisible.value) return
   await store.refresh()
 }
 
 async function handleRefreshAll(): Promise<void> {
-  if (!gitVisible.value || fetchBusy.value || store.loading || store.busyOperation !== null) return
+  if (fetchBusy.value || store.loading || store.busyOperation !== null) return
   fetchBusy.value = true
   try {
-    // Fetch first (explicit: errors toast), then reload summaries+details.
-    if (store.currentRepo) {
-      lastAutoFetchAt = Date.now()
-      lastAutoFetchKey = `${props.workspaceId}:${store.currentRepo.path}`
-      await store.fetchRemote({ silent: false })
-    }
-    if (gitVisible.value) await store.refresh()
+    await store.fetchAndRefresh()
   } finally {
     fetchBusy.value = false
   }

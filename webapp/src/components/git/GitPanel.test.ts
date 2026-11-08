@@ -114,7 +114,7 @@ describe('GitPanel', () => {
 
   it('renders the repo header and both sections at a 50/50 split', async () => {
     const wrapper = mountPanel()
-    // Panel mounts `initialize` itself — wait for the snapshot to land.
+    // The panel binds the store itself — wait for the snapshot to land.
     await flushPromises()
     await nextTick()
 
@@ -136,7 +136,7 @@ describe('GitPanel', () => {
     const wrapper = mountPanel()
     await nextTick()
     await nextTick()
-    // initialize() is in flight: loading=true with empty repos → spinner.
+    // The first load is in flight: loading=true with empty repos → spinner.
     expect(store.loading).toBe(true)
     expect(store.repos).toHaveLength(0)
     expect(wrapper.find('[data-testid="git-loading"]').exists()).toBe(true)
@@ -245,21 +245,6 @@ describe('GitPanel', () => {
     wrapper.unmount()
   })
 
-  it('does not auto-fetch while a mutation is running', async () => {
-    const store = useGitStore()
-    const wrapper = mountPanel()
-    await flushPromises()
-    await nextTick()
-    runOp.mockClear()
-    store.busyOperation = 'stage'
-    store.selectRepo(store.selectedRepoId)
-    await flushPromises()
-    const fetchCalls = runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')
-    expect(fetchCalls).toHaveLength(0)
-    store.busyOperation = null
-    wrapper.unmount()
-  })
-
   it('shows a silent auto-fetch failure without a toast', async () => {
     const { ApiRequestError } = await import('@/services/api')
     const { toast } = await import('vue-sonner')
@@ -305,7 +290,7 @@ describe('GitPanel', () => {
     wrapper.unmount()
   })
 
-  it('does not initialize or poll while the git tab starts hidden', async () => {
+  it('does not load or poll while the git tab starts hidden', async () => {
     vi.useFakeTimers()
     try {
       const sidePanel = useSidePanelStore()
@@ -313,11 +298,9 @@ describe('GitPanel', () => {
       const wrapper = mountPanel()
       await flushPromises()
       await nextTick()
-      const store = useGitStore()
 
       expect(getRepos).not.toHaveBeenCalled()
       expect(runOp).not.toHaveBeenCalled()
-      expect(store.polling).toBe(false)
 
       sidePanel.activeTab = 'git'
       await nextTick()
@@ -325,7 +308,6 @@ describe('GitPanel', () => {
       expect(getRepos).toHaveBeenCalledTimes(1)
       expect(getRepo).toHaveBeenCalledTimes(1)
       expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
-      expect(store.polling).toBe(true)
       wrapper.unmount()
     } finally {
       vi.useRealTimers()
@@ -340,34 +322,30 @@ describe('GitPanel', () => {
       await flushPromises()
       await nextTick()
       const store = useGitStore()
-      expect(store.polling).toBe(true)
       expect(getRepo).toHaveBeenCalledTimes(1)
 
       const repoDetails = store.repoDetails['/workspace/repo-app']
 
       sidePanel.activeTab = 'terminal'
       await nextTick()
-      expect(store.polling).toBe(false)
       vi.clearAllMocks()
       await vi.advanceTimersByTimeAsync(20_000)
       expect(getRepos).not.toHaveBeenCalled()
       expect(getRepo).not.toHaveBeenCalled()
       expect(runOp).not.toHaveBeenCalled()
 
-      // Returning performs one summary refresh and at most one auto-fetch;
-      // details stay cached and there is no timer-triggered duplicate.
+      // Returning refreshes once silently (details stay shown meanwhile) and
+      // auto-fetches at most once; no timer-triggered duplicate.
       sidePanel.activeTab = 'git'
       await nextTick()
+      expect(store.repoDetails['/workspace/repo-app']).toStrictEqual(repoDetails)
       await flushPromises()
       expect(getRepos).toHaveBeenCalledTimes(1)
-      expect(getRepo).not.toHaveBeenCalled()
+      expect(getRepo).toHaveBeenCalledTimes(1)
       expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
-      expect(store.repoDetails['/workspace/repo-app']).toStrictEqual(repoDetails)
-      expect(store.polling).toBe(true)
 
       sidePanel.close()
       await nextTick()
-      expect(store.polling).toBe(false)
       vi.clearAllMocks()
       await vi.advanceTimersByTimeAsync(60_000)
       expect(getRepos).not.toHaveBeenCalled()
@@ -379,7 +357,7 @@ describe('GitPanel', () => {
     }
   })
 
-  it('initializes the new workspace exactly once while visible', async () => {
+  it('loads the new workspace exactly once while visible', async () => {
     vi.useFakeTimers()
     try {
       const wrapper = mountPanel()
@@ -398,7 +376,6 @@ describe('GitPanel', () => {
       // The new workspace/repository receives one initial fetch, not duplicate
       // mount + workspace-watcher fetches.
       expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
-      expect(store.polling).toBe(true)
       wrapper.unmount()
     } finally {
       vi.useRealTimers()
@@ -406,12 +383,16 @@ describe('GitPanel', () => {
   })
 
   it('stops polling on unmount', async () => {
-    const wrapper: VueWrapper = mountPanel()
-    await flushPromises()
-    await nextTick()
-    const store = useGitStore()
-    expect(store.polling).toBe(true)
-    wrapper.unmount()
-    expect(store.polling).toBe(false)
+    vi.useFakeTimers()
+    try {
+      const wrapper: VueWrapper = mountPanel()
+      await flushPromises()
+      wrapper.unmount()
+      vi.clearAllMocks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(getRepos).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

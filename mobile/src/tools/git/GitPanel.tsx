@@ -55,6 +55,10 @@ import {
   groupRefTags,
   type GitRefGroup,
 } from "@opencuria/chat-core/gitRefGroups";
+import {
+  selectedGitRepo,
+  type GitController,
+} from "@opencuria/chat-core/gitController";
 import { insertStashCommits } from "@opencuria/chat-core/gitStash";
 import type {
   GitCommit,
@@ -74,7 +78,7 @@ import type { WorkspaceToolProps } from "../types";
 import { GitBranchSheet, type GitBranchForm } from "./GitBranchSheet";
 import { gitActionButton } from "./gitActionButton";
 import { GitCommitSheet } from "./GitCommitSheet";
-import { GitController, selectedGitRepo } from "./gitController";
+import { createGitController } from "./gitController";
 import { GitDiffSheet, type GitDiffTarget } from "./GitDiffSheet";
 import {
   branchActiveForeground,
@@ -113,7 +117,7 @@ function gitControllerFor(
   }
   let controller = byWorkspace.get(workspaceId);
   if (!controller) {
-    controller = new GitController(client, workspaceId);
+    controller = createGitController(client, workspaceId);
     byWorkspace.set(workspaceId, controller);
   }
   return controller;
