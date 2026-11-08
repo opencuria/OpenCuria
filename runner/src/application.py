@@ -12,7 +12,8 @@ from .interfaces.websocket import (
     WebSocketInterface,
     _ReconnectingAsyncClient,
 )
-from .journal import Journal, OperationExecutor
+from .journal import Journal
+from .operation_executor import OperationExecutor
 from .service import WorkspaceService
 from .workspace_evidence import WorkspaceEvidence
 
@@ -37,10 +38,14 @@ class RunnerApplication:
         )
         journal = Journal(settings.state_dir, defer_recovery=True)
         try:
+            evidence = WorkspaceEvidence(service, journal)
             configure = getattr(service, "configure_operation_persistence", None)
             if configure is not None:
-                configure(journal)
-            evidence = WorkspaceEvidence(service, journal)
+                configure(
+                    journal,
+                    checkpoint=evidence.checkpoint,
+                    scrub_proof=evidence.scrub_proof,
+                )
             publisher = publish or sio.emit
             commands = LifecycleCommands(service, evidence, publisher)
             operations = OperationExecutor(

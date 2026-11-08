@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.journal import COMMANDS, Journal, OperationExecutor
+from src.journal import Journal
+from src.operation_executor import COMMANDS
 from src.service import WorkspaceService
 
 WORKSPACE = str(uuid.UUID(int=101))
@@ -52,9 +53,7 @@ class Socket:
 
 @pytest.fixture(autouse=True)
 def no_foreign_helpers(monkeypatch):
-    monkeypatch.setattr(
-        OperationExecutor, "helpers_active", staticmethod(lambda: False)
-    )
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
 
 
 def executor_for(tmp_path, observation=None, handler=None):
@@ -90,7 +89,9 @@ async def test_inspect_request_does_not_seal_unverified_missing_identity(
     if failure == "build":
         observed = snapshot("running", workspace_id="image-build-orphan")
     executor, _, _ = executor_for(tmp_path, observed)
-    monkeypatch.setattr(executor, "helpers_active", lambda: failure == "helper")
+    monkeypatch.setattr(
+        "src.operation_executor.disk_helpers_active", lambda: failure == "helper"
+    )
     await executor.inspect_request(command())
     assert executor.journal.lookup(OPERATION) is None
     assert executor.emit.call_args.args[1]["quiescent"] is False

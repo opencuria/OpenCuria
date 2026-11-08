@@ -54,6 +54,7 @@ class Matrix:
                 for name in (
                     "runner/src/runtime/qemu_runtime.py",
                     "runner/src/journal.py",
+                    "runner/src/operation_executor.py",
                     "runner/src/service.py",
                     "runner/src/services/workspace_lifecycle.py",
                 )

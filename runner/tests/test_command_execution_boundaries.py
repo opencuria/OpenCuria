@@ -7,7 +7,8 @@ import pytest
 from src.application import RunnerApplication
 from src.commands import CommandResult, LifecycleCommands
 from src.config import RunnerSettings
-from src.journal import Journal, OperationExecutor
+from src.journal import Journal
+from src.operation_executor import OperationExecutor
 from src.service import WorkspaceService
 from src.workspace_evidence import WorkspaceEvidence
 
@@ -99,9 +100,13 @@ async def test_application_wires_evidence_before_transport_and_releases_writer(
     transport = application.interface
     original_emit = transport._sio.emit
     assert original_emit.__func__.__module__ == "socketio.async_client"
-    assert application.operations.commands._evidence.journal is application.journal
+    assert application.operations.commands._evidence is application.evidence
+    assert application.evidence.journal is application.journal
     assert service.journal is application.journal
-    assert service.lifecycle.checkpoint_hook.__self__.journal is application.journal
+    # Commands and lifecycle hooks share the one evidence the application owns.
+    for manager in (service.lifecycle, service.images):
+        assert manager.checkpoint_hook.__self__ is application.evidence
+        assert manager.scrub_proof_hook.__self__ is application.evidence
     # Keep this test about ownership and lifecycle rather than real connections.
     transport.stop = AsyncMock()
     await application.stop()

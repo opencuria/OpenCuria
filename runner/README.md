@@ -36,9 +36,13 @@ its replayable envelope. Progress uses a separate best-effort publication port.
 No component replaces Socket.IO methods or inspects already registered handlers.
 
 `WorkspaceEvidence` records initialization and credential-scrub proofs while the
-lifecycle mutex is held. Its journal is injected into `WorkspaceService` by the
-application, independently of the WebSocket adapter. Reconnects replay committed
-outcomes; cancellation of a delivery waiter cannot cancel admitted runtime work.
+lifecycle mutex is held. The application injects the journal and these evidence
+hooks into `WorkspaceService`, independently of the WebSocket adapter. `Journal`
+(`src/journal.py`) only stores records; `OperationExecutor`
+(`src/operation_executor.py`) owns admission, recovery and replay. The runner
+import graph stays acyclic (`tests/test_module_dependencies.py`). Reconnects
+replay committed outcomes; cancellation of a delivery waiter cannot cancel
+admitted runtime work.
 Shutdown drains effects before the application releases the journal writer lock.
 
 Failed commands publish a generic text and a stable `diagnostic_code`

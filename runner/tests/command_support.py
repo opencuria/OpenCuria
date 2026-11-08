@@ -3,7 +3,7 @@
 from functools import partial
 from types import SimpleNamespace
 
-from src.journal import COMMANDS, OperationExecutor
+from src.operation_executor import COMMANDS, OperationExecutor
 
 
 def make_executor(socket, journal, reconciler=None, observer=None):

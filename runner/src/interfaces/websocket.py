@@ -24,7 +24,7 @@ import structlog
 
 from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
-from ..journal import COMMANDS, OperationExecutor
+from ..operation_executor import COMMANDS, OperationExecutor
 from ..runtime.artifacts import ArtifactRequestError
 from ..service import WorkspaceService
 from ..services.sessions.terminals import CLOSED, EXITED

@@ -1172,7 +1172,7 @@ async def test_restarted_partial_create_can_be_recovered_and_removed(
         Socket(handler), journal, observer=service,
         reconciler=service.publication_evidence,
     )
-    monkeypatch.setattr(executor, "helpers_active", lambda: False)
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
     service.lifecycle._confirm_workspace_ended = AsyncMock()
     try:
         await executor.replay()

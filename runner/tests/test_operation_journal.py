@@ -6,13 +6,13 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
-from src.journal import Journal, OperationExecutor
+from src.journal import Journal
 
 
 @pytest.fixture(autouse=True)
 def isolated_helper_observation(monkeypatch):
     """Keep synthetic inventories independent of unrelated host disk helpers."""
-    monkeypatch.setattr(OperationExecutor, "helpers_active", staticmethod(lambda: False))
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
 
 
 def command():
@@ -69,7 +69,7 @@ async def test_duplicate_and_outage_dont_abort_work(tmp_path):
         def on(self, event, handler):
             self.handlers["/"][event] = handler
 
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     sio = Socket()
     entered = asyncio.Event()
@@ -132,7 +132,7 @@ def test_checkpoint_survives_restart_only_exact_incarnation(tmp_path):
 
 @pytest.mark.asyncio
 async def test_inspect_running_and_interrupted_are_distinct(tmp_path):
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):
@@ -180,7 +180,7 @@ async def test_inspect_running_and_interrupted_are_distinct(tmp_path):
 async def test_unrecorded_identity_can_inspect_fresh_quiescence_without_execution(
     tmp_path,
 ):
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):
@@ -215,7 +215,7 @@ async def test_unrecorded_identity_can_inspect_fresh_quiescence_without_executio
 async def test_safe_transient_start_retry_is_bounded_and_terminal_only_after_finish(
     tmp_path, monkeypatch
 ):
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):
@@ -245,7 +245,7 @@ async def test_safe_transient_start_retry_is_bounded_and_terminal_only_after_fin
         },
     )()
     executor = make_executor(sio, Journal(str(tmp_path)), observer=observer)
-    monkeypatch.setattr("src.journal.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("src.operation_executor.asyncio.sleep", AsyncMock())
     await sio.handlers["/"]["task:resume_workspace"](command())
     assert len(calls) == 3
     result = executor.journal.pending()[0][1]
@@ -259,7 +259,7 @@ async def test_safe_transient_start_retry_is_bounded_and_terminal_only_after_fin
 async def test_finished_capture_enospc_with_exact_scrub_checkpoint_stays_known(
     tmp_path,
 ):
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):
@@ -300,7 +300,7 @@ async def test_finished_capture_enospc_with_exact_scrub_checkpoint_stays_known(
 
 @pytest.mark.asyncio
 async def test_sealed_unrecorded_identity_cannot_execute_delayed_recipe(tmp_path):
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):
@@ -333,7 +333,7 @@ async def test_sealed_unrecorded_identity_cannot_execute_delayed_recipe(tmp_path
 
 @pytest.mark.asyncio
 async def test_effect_then_generic_exception_is_unknown(tmp_path):
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):
@@ -390,7 +390,7 @@ async def test_resume_result_checkpoint_matches_terminal_envelope(
     tmp_path, credentials_present
 ):
     """Persist the same acknowledged presence for replay and incarnation proof."""
-    from src.journal import COMMANDS
+    from src.operation_executor import COMMANDS
 
     class Socket:
         def __init__(self):

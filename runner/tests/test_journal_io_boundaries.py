@@ -13,7 +13,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.journal import COMMANDS, Journal, _disk_helper_active
+from src.journal import Journal
+from src.operation_executor import COMMANDS
+from src.runtime.recovery import _disk_helper_active
 from src.runtime.inventory import RuntimeInventory, StorageResource
 from src.service import WorkspaceService
 
@@ -175,7 +177,7 @@ async def test_recovery_retries_transient_inspection_and_continues_other_records
         side_effect=[OSError("runtime unavailable"), None, None]
     )
     executor = make_executor(socket, journal, reconciler=reconciler)
-    monkeypatch.setattr(executor, "helpers_active", lambda: False)
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
     await executor.replay()
     assert journal.lookup("first")[2] is None
     assert journal.lookup("second")[2]["execution_finished"] is True
@@ -196,7 +198,7 @@ async def test_orphan_helpers_keep_crashed_operations_unfinished_and_target_fenc
     handler = AsyncMock()
     socket = Socket(handler)
     executor = make_executor(socket, journal)
-    monkeypatch.setattr(executor, "helpers_active", lambda: True)
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: True)
     await executor.replay()
     assert journal.pending() == []
     assert journal.unfinished()
@@ -204,7 +206,7 @@ async def test_orphan_helpers_keep_crashed_operations_unfinished_and_target_fenc
     await socket.handlers["/"]["task:create_workspace"](command("replacement"))
     handler.assert_not_awaited()
     assert journal.lookup("replacement") is None
-    monkeypatch.setattr(executor, "helpers_active", lambda: False)
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
     await executor.replay()
     result = journal.pending()[0][1]
     assert result["execution_finished"] is True
@@ -329,7 +331,7 @@ async def test_orphan_guest_script_keeps_build_unfinished_until_guest_stops(
     if stage == "restart":
         journal.begin("task:build_image", data)
     executor = make_executor(socket, journal, observer=observer)
-    monkeypatch.setattr(executor, "helpers_active", lambda: False)
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
     if stage == "failed_cleanup":
         await socket.handlers["/"]["task:build_image"](data)
     await executor.replay()

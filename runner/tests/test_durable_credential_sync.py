@@ -36,8 +36,6 @@ async def test_credential_replay_returns_ack_without_repeating_secret_write(tmp_
 async def test_inspection_does_not_recover_while_disk_helpers_are_active(
     tmp_path, monkeypatch
 ):
-    from src.journal import OperationExecutor
-
     executor, _, observer = executor_for(tmp_path, snapshot("running"))
     payload = command()
     executor.journal.begin("task:inject_credentials", payload)
@@ -51,7 +49,7 @@ async def test_inspection_does_not_recover_while_disk_helpers_are_active(
         },
     )
     observer.recover_interrupted_operation = AsyncMock(return_value="stopped")
-    monkeypatch.setattr(OperationExecutor, "helpers_active", staticmethod(lambda: True))
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: True)
     evidence = await executor.inspect(payload)
     observer.recover_interrupted_operation.assert_not_awaited()
     assert not evidence["execution_finished"]
@@ -63,7 +61,6 @@ async def test_inspection_does_not_recover_while_disk_helpers_are_active(
 async def test_inspection_reports_only_typed_publication_ownership_conflicts(
     tmp_path, monkeypatch, finished
 ):
-    from src.journal import OperationExecutor
     from src.runtime.recovery import RecoveryConflict
 
     executor, _, observer = executor_for(tmp_path, snapshot("stopped"))
@@ -82,9 +79,7 @@ async def test_inspection_reports_only_typed_publication_ownership_conflicts(
     observer.recover_interrupted_operation = AsyncMock(
         side_effect=RecoveryConflict("Publication staging file ownership changed")
     )
-    monkeypatch.setattr(
-        OperationExecutor, "helpers_active", staticmethod(lambda: False)
-    )
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
     evidence = await executor.inspect(payload)
     assert evidence["identity"]["operation_id"] == payload["operation_id"]
     assert evidence["instance_id"] == executor.journal.instance_id

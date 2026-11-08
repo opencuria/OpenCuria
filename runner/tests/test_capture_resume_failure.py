@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 from src.config import RunnerSettings
 from tests.command_support import make_interface as WebSocketInterface
-from src.journal import COMMANDS, Journal
+from src.journal import Journal
+from src.operation_executor import COMMANDS
 from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 

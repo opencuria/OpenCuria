@@ -220,7 +220,8 @@ async def test_mutation_cancellation_drains_thread_and_holds_lock():
 @pytest.mark.asyncio
 async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
     from src.config import RunnerSettings
-    from src.journal import COMMANDS, Journal
+    from src.journal import Journal
+    from src.operation_executor import COMMANDS
     from src.service import WorkspaceService
 
     r = runtime(tmp_path)
@@ -559,7 +560,8 @@ async def test_source_scrub_survives_corrupt_output_but_not_external_disk_write(
 @pytest.mark.asyncio
 async def test_truncated_conversion_failure_retains_safe_source_evidence(tmp_path):
     from src.config import RunnerSettings
-    from src.journal import COMMANDS, Journal
+    from src.journal import Journal
+    from src.operation_executor import COMMANDS
     from src.service import WorkspaceService
 
     r = runtime(tmp_path)

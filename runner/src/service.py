@@ -17,6 +17,7 @@ from .config import RunnerSettings
 from .journal import Journal
 from .runtime.artifacts import RuntimeArtifactManager
 from .runtime.base import RuntimeBackend
+from .runtime.recovery import disk_helpers_active
 from .services.capture_fence import CaptureFence
 from .services.credentials import WORKSPACE_CREDENTIAL_ENV_FILE, CredentialManager
 from .services.files import FileManager
@@ -33,18 +34,17 @@ from .services.workspace_registry import WorkspaceRegistry
 
 logger = structlog.get_logger(__name__)
 
+#: Persist readiness/scrub evidence for a workspace at a lifecycle boundary.
+CheckpointHook = Callable[[uuid.UUID, bool | None, str], Awaitable[None]]
+#: Prove that a stopped workspace's disk was scrubbed of credentials.
+ScrubProofHook = Callable[[uuid.UUID], Awaitable[bool]]
+
 
 class WorkspaceService:
     """Wire canonical managers to one registry and shared runtime."""
 
-    def __init__(
-        self,
-        runtime: RuntimeBackend,
-        settings: RunnerSettings,
-        *,
-        journal: Journal | None = None,
-    ) -> None:
-        self.journal = journal
+    def __init__(self, runtime: RuntimeBackend, settings: RunnerSettings) -> None:
+        self.journal: Journal | None = None
         self._runtime = runtime
         self._settings = settings
         self.registry = WorkspaceRegistry(runtime, settings)
@@ -114,8 +114,6 @@ class WorkspaceService:
         self.runtime_artifacts = RuntimeArtifactManager(
             runtime, get_cached, get_runtime, settings.state_dir
         )
-        if journal is not None:
-            self.configure_operation_persistence(journal)
         for manager in (
             self.images,
             self.terminal_manager,
@@ -130,18 +128,21 @@ class WorkspaceService:
         ):
             manager.capture_fence = self.capture_fence
 
-    def configure_operation_persistence(self, journal: Journal) -> None:
-        """Attach one application-owned journal to lifecycle evidence boundaries."""
-        from .workspace_evidence import WorkspaceEvidence
-
+    def configure_operation_persistence(
+        self,
+        journal: Journal,
+        *,
+        checkpoint: CheckpointHook,
+        scrub_proof: ScrubProofHook,
+    ) -> None:
+        """Attach the application-owned journal and evidence to lifecycle effects."""
         if self.journal is not None and self.journal is not journal:
             raise RuntimeError("Workspace persistence is already configured")
         self.journal = journal
-        evidence = WorkspaceEvidence(self, journal)
-        self.lifecycle.checkpoint_hook = evidence.checkpoint
-        self.lifecycle.scrub_proof_hook = evidence.scrub_proof
-        self.images.scrub_proof_hook = evidence.scrub_proof
-        self.images.checkpoint_hook = evidence.checkpoint
+        self.lifecycle.checkpoint_hook = checkpoint
+        self.lifecycle.scrub_proof_hook = scrub_proof
+        self.images.scrub_proof_hook = scrub_proof
+        self.images.checkpoint_hook = checkpoint
 
     async def inventory_for_runner(self) -> dict:
         """Collect the QEMU storage inventory with explicit completeness."""
@@ -323,9 +324,7 @@ class WorkspaceService:
         recover = getattr(self._runtime, "recover_image_publication", None)
         if recover is None:
             return
-        from .journal import OperationExecutor
-
-        if await asyncio.to_thread(OperationExecutor.helpers_active):
+        if await asyncio.to_thread(disk_helpers_active):
             raise RuntimeError("Image publication helpers have not finished")
         await recover(identity)
 

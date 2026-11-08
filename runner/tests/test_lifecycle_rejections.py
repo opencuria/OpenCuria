@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.config import RunnerSettings
-from src.journal import Journal, OperationExecutor
+from src.journal import Journal
 from src.models import WorkspaceInfo
 from src.runtime.diagnostics import (
     DISK_SHRINK_UNSUPPORTED,
@@ -28,9 +28,7 @@ SECRET_PATH = "/var/lib/opencuria/secret-token"
 @pytest.fixture(autouse=True)
 def isolated_helper_observation(monkeypatch):
     """Keep journal inspection independent of unrelated host disk helpers."""
-    monkeypatch.setattr(
-        OperationExecutor, "helpers_active", staticmethod(lambda: False)
-    )
+    monkeypatch.setattr("src.operation_executor.disk_helpers_active", lambda: False)
 
 
 @pytest.fixture
@@ -127,7 +125,7 @@ async def test_failure_after_effects_stays_unknown_and_is_retried(stopped, monke
     interface, service, runtime, ws = stopped
     scrubbed(interface, ws)
     runtime.start_workspace.side_effect = RuntimeError(f"boot failed {SECRET_PATH}")
-    monkeypatch.setattr("src.journal.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("src.operation_executor.asyncio.sleep", AsyncMock())
 
     event, result = await run(interface, "task:resume_workspace", command(ws))
 

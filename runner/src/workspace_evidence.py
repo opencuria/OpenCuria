@@ -6,6 +6,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from .journal import Journal
+from .operation_context import current_operation_id
 
 if TYPE_CHECKING:
     from .service import WorkspaceService
@@ -50,8 +51,6 @@ class WorkspaceEvidence:
         except Exception:  # noqa: BLE001 - inspection/transport is not proof
             observed = None
         if observed:
-            from .journal import current_operation_id
-
             await self.journal.call(
                 "checkpoint",
                 str(workspace_id),
