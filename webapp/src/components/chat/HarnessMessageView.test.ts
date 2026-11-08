@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { getCurrentInstance, nextTick, reactive } from 'vue'
 
 import HarnessMessageView from './HarnessMessageView.vue'
 import HarnessMessageFooter from './HarnessMessageFooter.vue'
-import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
+import type { HarnessMessage, HarnessPart, HarnessPartDelta } from '@opencuria/chat-core/harness'
+import { applyPartDelta } from '@opencuria/chat-core/harnessReducer'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
 vi.mock('@/services/harness.api', async () => {
@@ -930,5 +932,82 @@ describe('HarnessMessageView', () => {
       wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
     ).toEqual(['text', 'steer', 'text'])
     expect(wrapper.get('[data-block-kind="steer"]').text()).toContain('Change course')
+  })
+})
+
+describe('HarnessMessageView live store updates', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    resetProviderCatalogCache()
+  })
+
+  /** Mount a live turn on a reactive store array, counting component updates. */
+  function mountLiveTurn(parts: HarnessPart[]) {
+    const updates = new Map<string, number>()
+    const messages = reactive([makeAssistant(parts, { completed_at: null })]) as HarnessMessage[]
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: messages[0]!, streaming: true, models: [] },
+      global: {
+        mixins: [
+          {
+            updated() {
+              const name = getCurrentInstance()?.type.__name
+              if (name) updates.set(name, (updates.get(name) ?? 0) + 1)
+            },
+          },
+        ],
+      },
+    })
+    const apply = async (delta: HarnessPartDelta, partId: string) => {
+      applyPartDelta(messages, 'session-1', delta, { messageId: 'msg-1', partId })
+      await nextTick()
+    }
+    return { wrapper, updates, apply }
+  }
+
+  function workTurn(): HarnessPart[] {
+    const parts: HarnessPart[] = []
+    for (let step = 0; step < 3; step += 1) {
+      parts.push(makePart({ id: `intro-${step}`, output: `Step ${step}` }))
+      parts.push(makePart({ id: `read-${step}`, type: 'tool', tool: 'read', title: 'Read a' }))
+      parts.push(makePart({ id: `grep-${step}`, type: 'tool', tool: 'grep', title: 'Grep b' }))
+    }
+    parts.push(makePart({ id: 'live', state: 'running', output: 'Answer' }))
+    return parts
+  }
+
+  it('re-renders only the streaming text block for each streamed token', async () => {
+    const { wrapper, updates, apply } = mountLiveTurn(workTurn())
+
+    for (let token = 0; token < 5; token += 1) await apply({ text: ' more' }, 'live')
+
+    expect(wrapper.get('[data-part-id="live"]').text()).toBe('Answer more more more more more')
+    expect(Object.fromEntries(updates)).toEqual({ HarnessBlockList: 5 })
+  })
+
+  it('still updates a reused group when one of its tools changes state', async () => {
+    const parts = workTurn()
+    parts.splice(9, 0, makePart({ id: 'bash', type: 'tool', tool: 'bash', state: 'running' }))
+    const { wrapper, apply } = mountLiveTurn(parts)
+    const lastGroup = () => wrapper.findAll('[data-testid="harness-worked-group"]')[2]!
+    expect(lastGroup().find('[data-testid="harness-worked-live"]').exists()).toBe(true)
+
+    await apply({ tool_completed: 'bash', display: { summary: 'Ran ls' } }, 'bash')
+
+    expect(lastGroup().find('[data-testid="harness-worked-live"]').exists()).toBe(false)
+    expect(lastGroup().get('[data-testid="harness-worked-count"]').text()).toBe('3')
+  })
+
+  it('renders a newly queued tool next to the reused blocks', async () => {
+    const parts = workTurn().slice(0, -1)
+    const { wrapper, apply } = mountLiveTurn(parts)
+
+    await apply({ tool_started: 'glob', title: 'Glob *.ts', state: 'running' }, 'glob')
+
+    const counts = wrapper
+      .findAll('[data-testid="harness-worked-count"]')
+      .map((count) => count.text())
+    expect(counts).toEqual(['2', '2', '3'])
+    expect(wrapper.get('[data-testid="harness-worked-live"]').text()).toBe('Glob *.ts')
   })
 })

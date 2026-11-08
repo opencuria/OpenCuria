@@ -280,14 +280,67 @@ function wrapWorkSlice<Block extends { kind: string }>(
   return [...blocks.slice(0, start), shell, ...blocks.slice(lastWork + 1)];
 }
 
-/** Build timeline blocks, wrapping work after the assistant turn is idle. */
+function sameParts(previous: HarnessPart[], next: HarnessPart[]): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((part, index) => part === next[index])
+  );
+}
+
+function reuseBlock(
+  previous: MessageRenderBlock | undefined,
+  next: MessageRenderBlock,
+): MessageRenderBlock {
+  if (previous?.kind === "group" && next.kind === "group") {
+    return sameParts(previous.parts, next.parts) ? previous : next;
+  }
+  if (previous?.kind === "workedFor" && next.kind === "workedFor") {
+    const blocks = reuseBlocks(previous.blocks, next.blocks);
+    return blocks === previous.blocks
+      ? previous
+      : { kind: "workedFor", blocks };
+  }
+  if (
+    previous?.kind === next.kind &&
+    "part" in previous &&
+    "part" in next &&
+    previous.part === next.part
+  ) {
+    return previous;
+  }
+  return next;
+}
+
+/** Keep each block whose kind and part references match the same position. */
+function reuseBlocks<Block extends MessageRenderBlock>(
+  previous: Block[],
+  next: Block[],
+): Block[] {
+  let unchanged = previous.length === next.length;
+  const blocks = next.map((block, index) => {
+    // A reused block came from `previous`, so it is a `Block` as well.
+    const reused = reuseBlock(previous[index], block) as Block;
+    if (reused !== previous[index]) unchanged = false;
+    return reused;
+  });
+  return unchanged ? previous : blocks;
+}
+
+/**
+ * Build timeline blocks, wrapping work after the assistant turn is idle.
+ *
+ * Pass the previous result as `previous` to keep unchanged block objects
+ * (and the whole array when nothing moved), so renderers can skip blocks a
+ * streamed delta did not touch. Parts are compared by reference: mutable
+ * stores keep a part's object, immutable snapshots replace changed parts.
+ */
 export function buildMessageBlocks(
   parts: HarnessPart[],
-  options: { finished?: boolean } = {},
+  options: { finished?: boolean; previous?: MessageRenderBlock[] } = {},
 ): MessageRenderBlock[] {
-  const blocks = buildRenderBlocks(parts);
-  if (!options.finished) return blocks;
-  return wrapFinishedWork(blocks);
+  const rendered = buildRenderBlocks(parts);
+  const blocks = options.finished ? wrapFinishedWork(rendered) : rendered;
+  return options.previous ? reuseBlocks(options.previous, blocks) : blocks;
 }
 
 /** Number of grouped tool rows inside a work run. */

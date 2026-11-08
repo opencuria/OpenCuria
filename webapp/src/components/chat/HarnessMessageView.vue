@@ -63,7 +63,10 @@ onUnmounted(() => pinMessage?.(props.message.id, false))
 const finished = computed(() => props.streaming !== true)
 const copyText = computed(() => getMessageCopyText(props.message, props.streaming === true))
 
-const blocks = computed(() => buildMessageBlocks(props.message.parts, { finished: finished.value }))
+// Reusing the previous blocks keeps a streamed token from re-rendering every row.
+const blocks = computed<MessageRenderBlock[]>((previous) =>
+  buildMessageBlocks(props.message.parts, { finished: finished.value, previous }),
+)
 const blockPage = ref(props.streaming ? lastHarnessPage(blocks.value.length) : 0)
 const followingTail = ref(props.streaming === true)
 const visibleEntries = computed(() => {
@@ -272,8 +275,16 @@ const messageSkills = computed(() => {
   })
 })
 
+/** One list per block object, so an unchanged block keeps an unchanged prop. */
+const singleBlockLists = new WeakMap<RenderBlock, RenderBlock[]>()
 function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
-  return block.kind === 'workedFor' ? [] : [block]
+  if (block.kind === 'workedFor') return []
+  let list = singleBlockLists.get(block)
+  if (!list) {
+    list = [block]
+    singleBlockLists.set(block, list)
+  }
+  return list
 }
 </script>
 
