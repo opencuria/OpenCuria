@@ -93,6 +93,15 @@ class MembershipRepository:
         ).first()
 
     @staticmethod
+    def get_active(user, organization: Organization) -> Membership | None:
+        """Fetch a membership only while its user account is active."""
+        return Membership.objects.filter(
+            user=user,
+            organization=organization,
+            user__is_active=True,
+        ).first()
+
+    @staticmethod
     def create(
         *,
         user,

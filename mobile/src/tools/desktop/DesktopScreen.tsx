@@ -36,7 +36,10 @@ import {
   zoomAround,
   type Size,
 } from "./pointerMath";
-import { DESKTOP_VIEWER_BRIDGE } from "./viewerBridge";
+import {
+  DESKTOP_VIEWER_BRIDGE,
+  isDesktopViewerNavigation,
+} from "./viewerBridge";
 
 /** Shared values describing what the screen shows; owned by the panel. */
 export interface DesktopViewport {
@@ -310,7 +313,12 @@ export const DesktopScreen = forwardRef<
               key={viewerKey}
               ref={webViewRef}
               source={{ uri: url }}
+              // Every navigation reaches the filter below, which keeps the
+              // WebView on this desktop's route; nothing is opened externally.
               originWhitelist={["*"]}
+              onShouldStartLoadWithRequest={(request) =>
+                isDesktopViewerNavigation(url, request.url)
+              }
               injectedJavaScriptBeforeContentLoaded={DESKTOP_VIEWER_BRIDGE}
               injectedJavaScript={DESKTOP_VIEWER_BRIDGE}
               onMessage={(event: WebViewMessageEvent) =>

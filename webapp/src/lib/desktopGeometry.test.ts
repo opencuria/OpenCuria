@@ -24,25 +24,23 @@ describe('desktopGeometry', () => {
   })
 
   it('asks KasmVNC to scale locally instead of resizing the desktop', () => {
-    expect(buildDesktopViewerUrl('http://ws.test', '/ws/desktop/ws-1/', 'tok')).toBe(
-      'http://ws.test/ws/desktop/ws-1/?token=tok&resize=scale',
+    expect(buildDesktopViewerUrl('http://ws.test', '/ws/desktop/ws-1/', 'tkt')).toBe(
+      'http://ws.test/ws/desktop/ws-1/?ticket=tkt&resize=scale',
     )
   })
 
-  it('associates owning document and websocket without associating observers', () => {
+  it('associates the owning viewer without associating observers', () => {
     const url = new URL(
-      buildDesktopViewerUrl('https://ws.test', '/ws/desktop/ws-1/', 'tok', {
+      buildDesktopViewerUrl('https://ws.test', '/ws/desktop/ws-1/', 'tkt', {
         viewer_client_id: 'client-1',
         intent_revision: 3,
       }),
     )
+    // The proxy derives the websocket path, with the same association.
     expect(url.searchParams.get('viewer_client_id')).toBe('client-1')
-    const socket = new URL(url.searchParams.get('path')!, 'https://ws.test/')
-    expect(socket.pathname).toBe('/ws/desktop/ws-1/')
-    expect(socket.searchParams.get('token')).toBe('tok')
-    expect(socket.searchParams.get('viewer_client_id')).toBe('client-1')
-    expect(socket.searchParams.get('intent_revision')).toBe('3')
-    expect(buildDesktopViewerUrl('', '/ws/desktop/ws-1/', 'tok')).not.toContain('viewer_client_id')
+    expect(url.searchParams.get('intent_revision')).toBe('3')
+    expect(url.searchParams.has('path')).toBe(false)
+    expect(buildDesktopViewerUrl('', '/ws/desktop/ws-1/', 'tkt')).not.toContain('viewer_client_id')
   })
 
   it('caps the desktop modal width by viewport width and aspect-matched height', () => {

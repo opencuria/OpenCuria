@@ -85,8 +85,11 @@ function fakeClient() {
     readClipboard: jest.fn(async () => ({ text: "from desktop" })),
     writeClipboard: jest.fn(async (_id: string, text: string) => ({ text })),
     viewerUrl: jest.fn(
-      (proxy: string, intent: { intent_revision: number }) =>
-        `https://curia.test${proxy}?intent_revision=${intent.intent_revision}`,
+      async (
+        _workspaceId: string,
+        proxy: string,
+        intent: { intent_revision: number },
+      ) => `https://curia.test${proxy}?intent_revision=${intent.intent_revision}`,
     ),
   };
   const client = {
@@ -188,6 +191,16 @@ it("starts the desktop when shown and loads the viewer once the lease is held", 
   const fake = await renderConnected();
   expect(fake.desktop.start).toHaveBeenCalledWith(
     "ws",
+    {
+      viewer_client_id: "11111111-2222-4333-8444-555555555555",
+      intent_revision: 1,
+    },
+    expect.anything(),
+  );
+  // The viewer page opens with a ticket issued for this workspace.
+  expect(fake.desktop.viewerUrl).toHaveBeenCalledWith(
+    "ws",
+    "/ws/desktop/ws/",
     {
       viewer_client_id: "11111111-2222-4333-8444-555555555555",
       intent_revision: 1,

@@ -248,17 +248,21 @@ describe("desktop viewer coordinator", () => {
 });
 
 describe("desktop surface rules", () => {
-  it("attaches the viewer intent to page and websocket path", () => {
+  it("opens the viewer with a ticket and the viewer intent only", () => {
     const url = new URL(
-      buildDesktopViewerUrl("https://curia.test", "/ws/desktop/ws/", "t k", {
+      buildDesktopViewerUrl("https://curia.test", "/ws/desktop/ws/", "t:k", {
         viewer_client_id: VIEWER,
         intent_revision: 4,
       }),
     );
+    expect(url.origin + url.pathname).toBe("https://curia.test/ws/desktop/ws/");
+    expect(url.searchParams.get("ticket")).toBe("t:k");
+    expect(url.searchParams.get("resize")).toBe("scale");
     expect(url.searchParams.get("viewer_client_id")).toBe(VIEWER);
-    expect(url.searchParams.get("path")).toBe(
-      `ws/desktop/ws/?token=t+k&viewer_client_id=${VIEWER}&intent_revision=4`,
-    );
+    expect(url.searchParams.get("intent_revision")).toBe("4");
+    // The proxy derives the WebSocket path; no credential is ever in a URL.
+    expect(url.searchParams.has("path")).toBe(false);
+    expect(url.searchParams.has("token")).toBe(false);
   });
 
   it("falls back to the default framebuffer", () => {

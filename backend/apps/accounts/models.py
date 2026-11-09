@@ -129,6 +129,34 @@ class User(AbstractUser):
         return self.email
 
 
+class SsoIdentity(models.Model):
+    """External OIDC identity bound to a local account by issuer and subject.
+
+    SSO logins resolve accounts through this binding, never through the
+    mutable ``email`` claim alone.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="sso_identities"
+    )
+    issuer = models.CharField(max_length=255)
+    subject = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "accounts_ssoidentity"
+        verbose_name = "SSO identity"
+        verbose_name_plural = "SSO identities"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["issuer", "subject"], name="accounts_sso_identity_unique"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.issuer} {self.subject}"
+
+
 class APIKey(models.Model):
     """
     Long-lived API key for external integrations (n8n, Zapier, custom scripts).

@@ -837,13 +837,8 @@ class WebSocketInterface(Interface):
         @sio.on("desktop:proxy_http_request")
         async def on_desktop_proxy_http_request(data: dict) -> dict:
             workspace_id = uuid.UUID(data["workspace_id"])
-            rest_path = data.get("path", "/")
-            query_string = data.get("query_string", "")
-            return await self._desktop_proxy.fetch_http(
-                workspace_id,
-                rest_path,
-                query_string,
-            )
+            rest_path = str(data.get("path", "/"))
+            return await self._desktop_proxy.fetch_http(workspace_id, rest_path)
 
         @sio.on("desktop:proxy_ws_open")
         async def on_desktop_proxy_ws_open(data: dict) -> dict:

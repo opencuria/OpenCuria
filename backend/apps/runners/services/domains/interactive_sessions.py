@@ -15,6 +15,7 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 from common import realtime
 from common.exceptions import ConflictError
 
+from ...desktop_tickets import issue_desktop_ticket
 from ...enums import TaskType, WorkspaceStatus
 from ...exceptions import (
     HarnessActionError,
@@ -536,6 +537,23 @@ class InteractiveSessionsService:
                 epoch=own.get("epoch"),
             )
         return result
+
+    async def issue_desktop_ticket(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user,
+        organization_id: uuid.UUID,
+    ) -> str:
+        """Return a single-use ticket that opens the desktop viewer for *user*.
+
+        The ticket replaces access tokens in viewer URLs; the proxy re-checks
+        workspace access when redeeming it and on every later request.
+        """
+        await sync_to_async(self.workspace_access.get_workspace_for_desktop_user)(
+            workspace_id, user=user, organization_id=organization_id
+        )
+        return issue_desktop_ticket(workspace_id, user.id)
 
     def get_desktop_proxy_target(self, workspace_id: str) -> dict | None:
         """Return the connected runner serving the workspace's active desktop."""

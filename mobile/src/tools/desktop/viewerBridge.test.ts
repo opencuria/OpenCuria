@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DESKTOP_VIEWER_BRIDGE,
+  isDesktopViewerNavigation,
   keyCommand,
   parseDesktopViewerMessage,
   pointerCommand,
@@ -222,5 +223,33 @@ describe("page messages", () => {
       hotX: 0,
       hotY: 4,
     });
+  });
+});
+
+describe("viewer navigation", () => {
+  const viewer = "https://curia.test/ws/desktop/ws-1/?ticket=t&resize=scale";
+
+  it("stays on this desktop's proxy route", () => {
+    for (const target of [
+      viewer,
+      "https://curia.test/ws/desktop/ws-1/vnc.html?autoconnect=true",
+      "about:blank",
+    ]) {
+      expect(isDesktopViewerNavigation(viewer, target)).toBe(true);
+    }
+  });
+
+  it("drops other desktops, origins, schemes and app routes", () => {
+    for (const target of [
+      "https://curia.test/ws/desktop/ws-2/vnc.html",
+      "https://curia.test/api/v1/auth/me/",
+      "https://evil.test/ws/desktop/ws-1/vnc.html",
+      "http://curia.test/ws/desktop/ws-1/vnc.html",
+      "intent://scan/#Intent;scheme=zxing;end",
+      "javascript:alert(1)",
+      "not a url",
+    ]) {
+      expect(isDesktopViewerNavigation(viewer, target)).toBe(false);
+    }
   });
 });

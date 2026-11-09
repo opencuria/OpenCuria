@@ -30,6 +30,7 @@ vi.mock('@/lib/clipboard', () => ({
 
 vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
+  issueDesktopTicket: vi.fn(),
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
   renewDesktop: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock('@/services/socket', () => ({
 }))
 
 const getDesktopStatus = vi.mocked(workspacesApi.getDesktopStatus)
+const issueDesktopTicket = vi.mocked(workspacesApi.issueDesktopTicket)
 const startDesktop = vi.mocked(workspacesApi.startDesktop)
 const stopDesktop = vi.mocked(workspacesApi.stopDesktop)
 
@@ -132,7 +134,11 @@ describe('DesktopSurface', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     localStorage.clear()
-    localStorage.setItem('kern_access_token', 'tok')
+    let tickets = 0
+    issueDesktopTicket.mockImplementation(async () => ({
+      ticket: `ticket-${++tickets}`,
+      expires_in: 60,
+    }))
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}
@@ -187,8 +193,10 @@ describe('DesktopSurface', () => {
     const iframe = surface.querySelector('iframe')
     expect(iframe).toBeTruthy()
     expect(surface.parentElement).not.toBe(sidebarHost)
+    await flushPromises()
     expect(iframe?.getAttribute('src')).toContain('/ws/desktop/ws-1/')
-    expect(iframe?.getAttribute('src')).toContain('token=tok')
+    expect(iframe?.getAttribute('src')).toContain('ticket=ticket-1')
+    expect(iframe?.getAttribute('src')).not.toContain('token')
     expect(surface.style.position).toBe('fixed')
     expect(surface.style.zIndex).toBe('var(--z-desktop-surface)')
     expect(surface.style.left).toBe('10px')
@@ -613,28 +621,65 @@ describe('DesktopSurface', () => {
     expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
   })
 
-  it('uses refreshed credentials for both viewer and websocket on reconnect', async () => {
+  it('opens every viewer with a fresh ticket and never an access token', async () => {
+    localStorage.setItem('kern_access_token', 'secret-access-token')
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
     mountSurface()
     await nextTick()
     store.setViewerIntent(1, 'held')
-    await nextTick()
+    await flushPromises()
     const iframe = document.querySelector('iframe')!
-    expect(new URL(iframe.src).searchParams.get('token')).toBe('tok')
+    expect(issueDesktopTicket).toHaveBeenLastCalledWith('ws-1')
+    const first = new URL(iframe.src).searchParams
+    expect(first.get('intent_revision')).toBe('1')
+    const firstTicket = first.get('ticket')
 
-    // REST reconciliation can refresh the access token without changing the
-    // proxy URL or the held intent. The next viewer must use that new token.
-    localStorage.setItem('kern_access_token', 'refreshed-token')
+    // Tickets are single-use: a remounted viewer must never reuse one.
     store.bumpViewer()
-    await nextTick()
+    await flushPromises()
 
     const replacement = document.querySelector('iframe')!
     expect(replacement).not.toBe(iframe)
     const params = new URL(replacement.src).searchParams
-    expect(params.get('token')).toBe('refreshed-token')
-    const socketUrl = new URL(params.get('path')!, window.location.origin)
-    expect(socketUrl.searchParams.get('token')).toBe('refreshed-token')
-    expect(socketUrl.searchParams.get('intent_revision')).toBe('1')
+    expect(params.get('ticket')).toMatch(/^ticket-\d+$/)
+    expect(params.get('ticket')).not.toBe(firstTicket)
+    expect(params.get('intent_revision')).toBe('1')
+    expect(params.has('token')).toBe(false)
+    expect(params.has('path')).toBe(false)
+    expect(replacement.src).not.toContain('secret-access-token')
+  })
+
+  it('drops a ticket that arrives after the viewer moved on', async () => {
+    let release: (value: { ticket: string; expires_in: number }) => void = () => {}
+    issueDesktopTicket.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    )
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    store.bumpViewer()
+    await flushPromises()
+    const current = document.querySelector('iframe')!.src
+
+    release({ ticket: 'stale-ticket', expires_in: 60 })
+    await flushPromises()
+
+    expect(document.querySelector('iframe')!.src).toBe(current)
+    expect(current).not.toContain('stale-ticket')
+  })
+
+  it('treats a failed ticket request as a lost viewer', async () => {
+    issueDesktopTicket.mockRejectedValue(new Error('offline'))
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await flushPromises()
+
+    expect(document.querySelector('iframe')!.hasAttribute('src')).toBe(false)
+    expect(
+      document.querySelector('[data-testid="desktop-surface-loading"]')?.textContent,
+    ).toContain('Desktop disconnected')
   })
 })

@@ -61,6 +61,15 @@ def test_deactivated_users_keep_membership_but_lose_active_access(org_member):
     assert service.get_active_membership(user.id, org.id) is None
     with pytest.raises(AuthenticationError, match="Active organization membership"):
         service.require_active_membership(user.id, org.id)
+    # REST authorization (also reached with API keys) treats them as outsiders.
+    with pytest.raises(NotFoundError):
+        service.require_membership(user, org.id)
+    with pytest.raises(NotFoundError):
+        service.require_admin(user, org.id)
+
+    user.is_active = True
+    user.save(update_fields=["is_active"])
+    assert service.require_admin(user, org.id) == org
 
 
 @pytest.mark.django_db

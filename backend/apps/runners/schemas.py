@@ -326,6 +326,13 @@ class DesktopRenewOut(Schema):
     epoch: str | None = None
 
 
+class DesktopTicketOut(Schema):
+    """Single-use ticket for opening the desktop viewer (``?ticket=``)."""
+
+    ticket: str
+    expires_in: int
+
+
 class DesktopStartOut(Schema):
     """Response schema after desktop start is dispatched."""
 

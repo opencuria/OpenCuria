@@ -108,28 +108,34 @@ const scaledIframeStyle = computed<CSSProperties>(() => ({
   height: `${desktopSize.value.height}px`,
 }))
 
-const desktopViewer = computed(() => {
-  // Resolve credentials together with the remount key: REST reconciliation
-  // may rotate the token without changing the proxy URL or viewer intent.
-  const key = `${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`
-  if (!desktopStore.proxyUrl) return { key, src: '' }
-  const token = localStorage.getItem('kern_access_token') || ''
-  const config = getConfig()
-  return {
-    key,
-    src: buildDesktopViewerUrl(
-      config.wsBaseUrl || '',
-      desktopStore.proxyUrl,
-      token,
-      desktopStore.intentRevision !== null
-        ? {
-            viewer_client_id: desktopStore.viewerClientId,
-            intent_revision: desktopStore.intentRevision,
-          }
-        : undefined,
-    ),
+const viewerKey = computed(() => `${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`)
+const viewerSrc = ref('')
+let viewerRequest = 0
+
+/**
+ * Open each viewer with a fresh single-use ticket; access tokens never enter
+ * viewer URLs. Stale answers are dropped when the route or intent moved on.
+ */
+async function loadViewerSrc(): Promise<void> {
+  const request = ++viewerRequest
+  viewerSrc.value = ''
+  const proxyUrl = desktopStore.proxyUrl
+  if (!proxyUrl) return
+  const intent =
+    desktopStore.intentRevision !== null
+      ? {
+          viewer_client_id: desktopStore.viewerClientId,
+          intent_revision: desktopStore.intentRevision,
+        }
+      : undefined
+  try {
+    const { ticket } = await workspacesApi.issueDesktopTicket(props.workspaceId)
+    if (disposed || request !== viewerRequest) return
+    viewerSrc.value = buildDesktopViewerUrl(getConfig().wsBaseUrl || '', proxyUrl, ticket, intent)
+  } catch {
+    if (!disposed && request === viewerRequest) markViewerDisconnected()
   }
-})
+}
 
 // --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
 
@@ -162,7 +168,7 @@ function bindDesktopIframeListeners(): void {
   })
 
   const onFrameError = (event: ErrorEvent) => {
-    // Never log the raw message or URL: either may contain the desktop token.
+    // Never log the raw message or URL: either may contain the desktop ticket.
     // Script basename and coordinates identify parser failures without secrets.
     let script = '[unknown]'
     try {
@@ -338,6 +344,8 @@ function readIframeConnection(): boolean | null {
 
 function handleIframeLoad(event: Event): void {
   if (event.currentTarget !== desktopIframeRef.value) return
+  // The blank placeholder awaiting its ticket is not a viewer load.
+  if (!viewerSrc.value) return
   bindDesktopIframeListeners()
   observeIframeConnection()
   const connected = readIframeConnection()
@@ -442,6 +450,12 @@ watch(
 watch([sidebarDesktopHost, modalDesktopHost], refreshHostBounds)
 
 watch(
+  () => [viewerKey.value, desktopStore.intentRevision, desktopStore.viewerClientId] as const,
+  () => void loadViewerSrc(),
+  { immediate: true },
+)
+
+watch(
   () => [desktopStore.proxyUrl, desktopStore.viewerGeneration] as const,
   async () => {
     iframeLoaded.value = false
@@ -491,9 +505,9 @@ watch(desktopIframeRef, () => {
         :style="scaledFrameStyle"
       >
         <iframe
-          :key="desktopViewer.key"
+          :key="viewerKey"
           ref="desktopIframeRef"
-          :src="desktopViewer.src"
+          :src="viewerSrc || undefined"
           title="Desktop"
           class="block border-0 transition-opacity duration-200"
           :class="{ 'opacity-0': !iframeLoaded }"

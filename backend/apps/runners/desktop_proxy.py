@@ -1,14 +1,15 @@
 """ASGI reverse proxy for KasmVNC desktop sessions.
 
 Routes ``/ws/desktop/{workspace_id}/`` to the KasmVNC server running
-inside the workspace VM.  Handles both HTTP requests (for the
-KasmVNC web client static files) and WebSocket connections (for the
-VNC data stream).
+inside the workspace VM. HTTP requests serve the pinned KasmVNC web client
+(``kasmvnc_client``): the viewer runs on the platform origin, so a workspace
+can supply only byte-identical copies of its files, never its own HTML,
+scripts, headers or redirects. WebSocket connections carry the VNC stream.
 
-Authentication is enforced via JWT ``token`` query-parameter or a
-``desktop_auth`` cookie (set automatically after the first
-authenticated request so that KasmVNC sub-resources load without
-needing the token on every URL).
+The viewer opens ``/ws/desktop/{workspace_id}/?ticket=…`` with a single-use
+ticket (``desktop_tickets``). Redeeming it sets the path-scoped HttpOnly
+``desktop_auth`` cookie that authenticates every later request. Access
+tokens are never accepted in URLs, and query strings never reach the guest.
 """
 
 from __future__ import annotations
@@ -30,6 +31,13 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from common import realtime
 
+from .desktop_tickets import redeem_desktop_ticket
+from .kasmvnc_client import (
+    ClientFile,
+    accept_client_file,
+    cached_client_file,
+    lookup_client_file,
+)
 from .services import get_runner_service
 from .services.infra.desktop_tunnels import register_ws_tunnel, unregister_ws_tunnel
 from .voice_viewer_bridge import VOICE_VIEWER_BRIDGE
@@ -87,30 +95,28 @@ def _viewer_query(query_string: str | bytes) -> dict:
 
 def build_vnc_redirect_url(
     workspace_id: str,
-    token: str | None,
     viewer_client_id: str | None = None,
     intent_revision: int | None = None,
 ) -> str:
     """Return the Location for the KasmVNC client, with a safe WebSocket path.
 
-    ``path`` is query-encoded so ``?token=`` stays inside the KasmVNC
+    The URL carries no credentials; the ``desktop_auth`` cookie does. ``path``
+    is query-encoded so the viewer association stays inside the KasmVNC
     WebSocket path instead of being parsed as another ``vnc.html``
     parameter. ``reconnect=false`` disables KasmVNC's iframe VDI
     auto-reconnect, which races the idle timer against a torn-down
     ``UI.rfb``.
     """
-    token_value = token or ""
-    ws_path = f"ws/desktop/{workspace_id}/?token={token_value}"
+    ws_path = f"ws/desktop/{workspace_id}/"
     association = {}
     if viewer_client_id is not None and intent_revision is not None:
         association = {
             "viewer_client_id": viewer_client_id,
             "intent_revision": intent_revision,
         }
-        ws_path += "&" + urlencode(association)
+        ws_path += "?" + urlencode(association)
     query = urlencode(
         {
-            "token": token_value,
             "autoconnect": "true",
             "resize": "scale",
             "reconnect": "false",
@@ -158,25 +164,24 @@ def inject_kasm_idle_guard(html: bytes) -> bytes:
     return _KASM_IDLE_GUARD_SCRIPT + html
 
 
-def _is_vnc_html_path(rest_path: str) -> bool:
-    """Return whether this proxied path is the KasmVNC client page."""
-    return rest_path.split("?", 1)[0] == "/vnc.html"
+def client_file_response(file: ClientFile, body: bytes) -> tuple[list, bytes]:
+    """Return headers and body for a verified client file, never upstream's.
 
-
-def apply_vnc_client_patches(
-    rest_path: str,
-    headers: list[list[bytes]],
-    body: bytes,
-) -> tuple[list[list[bytes]], bytes]:
-    """Inject the idle-timer guard into vnc.html and fix Content-Length."""
-    if not _is_vnc_html_path(rest_path):
-        return headers, body
-    patched = inject_kasm_idle_guard(body)
-    if patched == body:
-        return headers, body
-    headers = [item for item in headers if item[0].lower() != b"content-length"]
-    headers.append([b"content-length", str(len(patched)).encode()])
-    return headers, patched
+    Only vnc.html is patched (idle guard and voice bridge) and never cached,
+    so a reload always picks up the current bridge.
+    """
+    if file.path == "vnc.html":
+        body = inject_kasm_idle_guard(body)
+        cache_control = b"no-store"
+    else:
+        cache_control = b"private, max-age=3600"
+    headers = [
+        [b"content-type", file.content_type.encode()],
+        [b"content-length", str(len(body)).encode()],
+        [b"cache-control", cache_control],
+        [b"x-content-type-options", b"nosniff"],
+    ]
+    return headers, body
 
 
 def _sign_cookie(workspace_id: str, user_id: str, ts: int) -> str:
@@ -247,30 +252,28 @@ async def desktop_proxy_app(scope, receive, send):
     workspace_id = match.group("workspace_id")
     rest_path = match.group("rest")
 
-    # --- Authenticate via JWT query parameter OR signed cookie ---
+    # --- Authenticate via a single-use ticket (entry page) OR signed cookie ---
     query_string = scope.get("query_string", b"").decode("utf-8", errors="replace")
     params = parse_qs(query_string)
-    token = (params.get("token") or [None])[0]
+    ticket = (params.get("ticket") or [None])[0]
 
-    user = None
     user_id_str = ""
     set_cookie = False  # Whether we need to set the auth cookie
 
-    if token:
-        user = await _validate_token(token)
-        if user:
-            user_id_str = str(user.pk)
+    if ticket and scope["type"] == "http" and rest_path == "/":
+        user_id = await _redeem_ticket(ticket, workspace_id)
+        if user_id is not None:
+            user_id_str = str(user_id)
             set_cookie = True
-    else:
-        # Try cookie-based auth
+    if not user_id_str:
+        # A reloaded entry page keeps working while its cookie is valid.
         cookie_value = _get_cookie_from_scope(scope, _COOKIE_NAME)
         if cookie_value:
             result = _verify_cookie(cookie_value)
             if result and result[0] == workspace_id:
                 user_id_str = result[1]
-                user = True  # Cookie is valid — no need to fetch user object
 
-    if not user:
+    if not user_id_str:
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 4001})
         else:
@@ -317,11 +320,12 @@ async def desktop_proxy_app(scope, receive, send):
     if set_cookie:
         cookie_value = _sign_cookie(workspace_id, user_id_str, int(time.time()))
         cookie_path = f"/ws/desktop/{workspace_id}/"
+        secure = "; Secure" if scope.get("scheme") == "https" else ""
         cookie_header = (
             f"{_COOKIE_NAME}={cookie_value}; "
             f"Path={cookie_path}; "
             f"Max-Age={_COOKIE_MAX_AGE}; "
-            f"HttpOnly; SameSite=Lax"
+            f"HttpOnly; SameSite=Lax{secure}"
         )
 
     if scope["type"] == "websocket":
@@ -343,13 +347,24 @@ async def desktop_proxy_app(scope, receive, send):
             proxy_target["runner_sid"],
             rest_path,
             workspace_id,
-            token,
             query_string,
             cookie_header,
         )
     else:
         await send({"type": "http.response.start", "status": 400, "headers": []})
         await send({"type": "http.response.body", "body": b"Bad Request"})
+
+
+async def _send_plain(send, status: int, body: bytes) -> None:
+    """Send a short text response."""
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [[b"content-type", b"text/plain"]],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 async def _proxy_http(
@@ -359,11 +374,10 @@ async def _proxy_http(
     runner_sid,
     rest_path,
     workspace_id,
-    token,
     query_string,
     cookie_header,
 ):
-    """Reverse-proxy HTTP requests to KasmVNC through the runner."""
+    """Serve the entry redirect and the pinned KasmVNC client files."""
     if not await _desktop_workspace_available(workspace_id):
         await _reject_unavailable_desktop(scope, send)
         return
@@ -374,7 +388,7 @@ async def _proxy_http(
         # SetDesktopSize and would shrink/grow the real X11 framebuffer
         # when switching between the chat mini viewer and fullscreen.
         association = _viewer_query(query_string)
-        redirect_url = build_vnc_redirect_url(workspace_id, token, **association)
+        redirect_url = build_vnc_redirect_url(workspace_id, **association)
         resp_headers = [[b"location", redirect_url.encode()]]
         if cookie_header:
             resp_headers.append([b"set-cookie", cookie_header.encode()])
@@ -388,56 +402,61 @@ async def _proxy_http(
         await send({"type": "http.response.body", "body": b""})
         return
 
-    try:
-        response = await realtime.get_sio_server().call(
-            "desktop:proxy_http_request",
-            {
-                "workspace_id": workspace_id,
-                "path": rest_path,
-                "query_string": query_string,
-                "method": scope.get("method", "GET"),
-            },
-            to=runner_sid,
-            timeout=15,
-        )
+    if scope.get("method", "GET") != "GET":
+        await _send_plain(send, 405, b"Method Not Allowed")
+        return
+    file = lookup_client_file(rest_path)
+    if file is None:
+        await _send_plain(send, 404, b"Not Found")
+        return
 
-        headers = [
-            [key.encode(), value.encode()] for key, value in response.get("headers", [])
-        ]
-        if cookie_header:
-            headers.append([b"set-cookie", cookie_header.encode()])
+    body = cached_client_file(file)
+    if body is None:
+        try:
+            body = await _fetch_client_file(runner_sid, workspace_id, file)
+        except SocketIOTimeoutError:
+            logger.error("Desktop HTTP proxy via runner timed out")
+            await _send_plain(send, 504, b"Gateway Timeout")
+            return
+        except Exception:
+            logger.error("Desktop HTTP proxy via runner failed")
+            await _send_plain(send, 502, b"Bad Gateway")
+            return
+        if body is None:
+            logger.warning(
+                "Desktop viewer file failed its integrity check "
+                "(workspace=%s, file=%s)",
+                workspace_id,
+                file.path,
+            )
+            await _send_plain(send, 502, b"Bad Gateway")
+            return
 
-        body = response.get("body", "")
-        if response.get("body_encoding") == "base64":
-            body_bytes = base64.b64decode(body)
-        elif isinstance(body, str):
-            body_bytes = body.encode()
-        else:
-            body_bytes = bytes(body)
+    headers, body = client_file_response(file, body)
+    await send({"type": "http.response.start", "status": 200, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
 
-        headers, body_bytes = apply_vnc_client_patches(rest_path, headers, body_bytes)
 
-        await send(
-            {
-                "type": "http.response.start",
-                "status": int(response.get("status", 200)),
-                "headers": headers,
-            }
-        )
-        await send(
-            {
-                "type": "http.response.body",
-                "body": body_bytes,
-            }
-        )
-    except SocketIOTimeoutError:
-        logger.error("Desktop HTTP proxy via runner timed out")
-        await send({"type": "http.response.start", "status": 504, "headers": []})
-        await send({"type": "http.response.body", "body": b"Gateway Timeout"})
-    except Exception:
-        logger.error("Desktop HTTP proxy via runner failed")
-        await send({"type": "http.response.start", "status": 502, "headers": []})
-        await send({"type": "http.response.body", "body": b"Bad Gateway"})
+async def _fetch_client_file(
+    runner_sid: str, workspace_id: str, file: ClientFile
+) -> bytes | None:
+    """Read *file* from the workspace; None unless it is the pinned file."""
+    response = await realtime.get_sio_server().call(
+        "desktop:proxy_http_request",
+        {"workspace_id": workspace_id, "path": f"/{file.path}"},
+        to=runner_sid,
+        timeout=15,
+    )
+    if not isinstance(response, dict) or response.get("status") != 200:
+        return None
+    body = response.get("body", "")
+    if response.get("body_encoding") == "base64":
+        body_bytes = base64.b64decode(body)
+    elif isinstance(body, str):
+        body_bytes = body.encode()
+    else:
+        body_bytes = bytes(body)
+    return body_bytes if accept_client_file(file, body_bytes) else None
 
 
 async def _proxy_websocket(
@@ -471,7 +490,6 @@ async def _proxy_websocket(
             {
                 "workspace_id": workspace_id,
                 "tunnel_id": tunnel_id,
-                "query_string": query_string,
                 "subprotocols": client_protocols,
             },
             to=runner_sid,
@@ -729,18 +747,10 @@ def _get_cookie_from_scope(scope: dict, name: str) -> str | None:
     return None
 
 
-async def _validate_token(token: str):
-    """Validate a JWT token and return the user, or None."""
-    from asgiref.sync import sync_to_async
-
-    from apps.accounts.auth_backends import get_auth_backend
-
-    try:
-        backend = get_auth_backend()
-        user = await sync_to_async(backend.validate_access_token)(token)
-        return user
-    except Exception:
-        return None
+@sync_to_async
+def _redeem_ticket(ticket: str, workspace_id: str) -> int | None:
+    """Redeem a single-use desktop ticket and return its user ID."""
+    return redeem_desktop_ticket(ticket, workspace_id)
 
 
 @sync_to_async

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -187,9 +188,8 @@ async def test_normal_terminal_input_dispatches(interaction_service):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope_type", ["http", "websocket"])
 async def test_new_proxy_requests_blocked_after_auth(monkeypatch, scope_type):
-    monkeypatch.setattr(
-        desktop_proxy, "_validate_token", AsyncMock(return_value=SimpleNamespace(pk=1))
-    )
+    workspace_id = str(uuid.uuid4())
+    cookie = desktop_proxy._sign_cookie(workspace_id, "1", int(time.time()))
     access = AsyncMock(return_value=True)
     monkeypatch.setattr(desktop_proxy, "_user_can_access_workspace", access)
     monkeypatch.setattr(
@@ -201,8 +201,9 @@ async def test_new_proxy_requests_blocked_after_auth(monkeypatch, scope_type):
     await desktop_proxy.desktop_proxy_app(
         {
             "type": scope_type,
-            "path": f"/ws/desktop/{uuid.uuid4()}/",
-            "query_string": b"token=ok",
+            "path": f"/ws/desktop/{workspace_id}/",
+            "query_string": b"",
+            "headers": [(b"cookie", f"desktop_auth={cookie}".encode())],
         },
         AsyncMock(),
         send,

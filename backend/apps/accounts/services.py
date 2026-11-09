@@ -81,8 +81,8 @@ class APIKeyService:
     def authenticate(self, token: str) -> APIKey | None:
         """Return the active, unexpired key for *token* and record its use.
 
-        Returns None when the token is unknown, revoked or expired;
-        rejected attempts never count as a use.
+        Returns None when the token is unknown, revoked or expired, or when
+        its user is deactivated; rejected attempts never count as a use.
         """
         if not token:
             return None

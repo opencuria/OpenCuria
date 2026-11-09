@@ -1,19 +1,19 @@
 """
 Repository layer for the accounts app.
 
-Encapsulates all database queries and writes for users and API keys.
+Encapsulates all database queries and writes for users, SSO identities and
+API keys.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
 
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from .models import APIKey, User
+from .models import APIKey, SsoIdentity, User
 
 
 class UserRepository:
@@ -41,11 +41,9 @@ class UserRepository:
         return user.check_password(password)
 
     @staticmethod
-    def get_or_create_by_email(
-        email: str, *, defaults: dict[str, Any]
-    ) -> tuple[User, bool]:
-        """Fetch an account or insert one with the supplied profile defaults."""
-        return User.objects.get_or_create(email=email, defaults=defaults)
+    def create_without_password(email: str, **profile: str) -> User:
+        """Insert an account that can only sign in through an external identity."""
+        return User.objects.create_user(email=email, password=None, **profile)
 
     @staticmethod
     def update_profile(user: User, **fields: str) -> User:
@@ -55,6 +53,30 @@ class UserRepository:
         if fields:
             user.save(update_fields=list(fields))
         return user
+
+
+class SsoIdentityRepository:
+    """Bindings of external OIDC identities to local accounts."""
+
+    @staticmethod
+    def get_user(issuer: str, subject: str) -> User | None:
+        """Return the account bound to an identity, including disabled ones."""
+        identity = (
+            SsoIdentity.objects.select_related("user")
+            .filter(issuer=issuer, subject=subject)
+            .first()
+        )
+        return identity.user if identity else None
+
+    @staticmethod
+    def exists_for_user(user: User) -> bool:
+        """Return whether any external identity is already bound to *user*."""
+        return SsoIdentity.objects.filter(user=user).exists()
+
+    @staticmethod
+    def create(*, user: User, issuer: str, subject: str) -> SsoIdentity:
+        """Bind an identity to *user*; the pair (issuer, subject) is unique."""
+        return SsoIdentity.objects.create(user=user, issuer=issuer, subject=subject)
 
 
 class APIKeyRepository:
@@ -72,10 +94,14 @@ class APIKeyRepository:
 
     @staticmethod
     def get_active_by_hash(key_hash: str) -> APIKey | None:
-        """Fetch an active key and its user by token hash."""
+        """Fetch an active key of an active user by token hash.
+
+        Deactivating a user is the offboarding mechanism, so it must revoke
+        every key the user created as well.
+        """
         return (
             APIKey.objects.select_related("user")
-            .filter(key_hash=key_hash, is_active=True)
+            .filter(key_hash=key_hash, is_active=True, user__is_active=True)
             .first()
         )
 

@@ -25,38 +25,26 @@ export function workspaceDesktopSize(
 }
 
 /**
- * URL of the KasmVNC client behind the backend's desktop proxy. The viewer
- * intent is attached to both the page and the WebSocket `path`, because
- * KasmVNC reads `path` for its websocket URL and the proxy authorizes both.
+ * URL of the KasmVNC client behind the backend's desktop proxy. `ticket` is
+ * a single-use desktop ticket, never an access token: the proxy trades it
+ * for a path-scoped cookie and derives the WebSocket path, including the
+ * viewer intent, itself.
  */
 export function buildDesktopViewerUrl(
   base: string,
   proxyUrl: string,
-  token: string,
+  ticket: string,
   intent?: DesktopViewerIntent,
 ): string {
-  const params = new URLSearchParams({
-    token,
-    resize: "scale",
-  });
+  const [path, query = ""] = proxyUrl.split("?");
+  const params = new URLSearchParams(query);
+  params.set("ticket", ticket);
+  params.set("resize", "scale");
   if (intent) {
     params.set("viewer_client_id", intent.viewer_client_id);
     params.set("intent_revision", String(intent.intent_revision));
   }
-  const [path, query = ""] = proxyUrl.split("?");
-  const merged = new URLSearchParams(query);
-  params.forEach((value, key) => merged.set(key, value));
-  if (intent) {
-    const socketPath =
-      merged.get("path") ||
-      `${path!.replace(/^\//, "")}?token=${encodeURIComponent(token)}`;
-    const [socketBase, socketQuery = ""] = socketPath.split("?");
-    const socketParams = new URLSearchParams(socketQuery);
-    socketParams.set("viewer_client_id", intent.viewer_client_id);
-    socketParams.set("intent_revision", String(intent.intent_revision));
-    merged.set("path", `${socketBase}?${socketParams}`);
-  }
-  return `${base}${path}?${merged}`;
+  return `${base}${path}?${params}`;
 }
 
 export type DesktopConnectionStatus =

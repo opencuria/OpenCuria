@@ -87,6 +87,11 @@ export function startDesktop(
   return desktopApi.start(id, intent, signal)
 }
 
+/** Single-use ticket for the viewer URL; access tokens never enter URLs. */
+export function issueDesktopTicket(id: string): Promise<{ ticket: string; expires_in: number }> {
+  return desktopApi.ticket(id)
+}
+
 export function stopDesktop(id: string, intent: DesktopViewerIntent): Promise<{ task_id: string }> {
   return desktopApi.stop(id, intent)
 }

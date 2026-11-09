@@ -145,8 +145,13 @@ export interface OpenCuriaClient {
   git: ReturnType<typeof createGitApi>;
   /** KasmVNC desktop: viewer lease, Computer Use takeover and clipboard. */
   desktop: ReturnType<typeof createDesktopApi> & {
-    /** Authenticated KasmVNC client URL for a ready desktop route. */
-    viewerUrl(proxyUrl: string, intent?: DesktopViewerIntent): string;
+    /** KasmVNC client URL for a ready desktop route, with a fresh ticket. */
+    viewerUrl(
+      workspaceId: string,
+      proxyUrl: string,
+      intent?: DesktopViewerIntent,
+      signal?: AbortSignal,
+    ): Promise<string>;
   };
   /** Workspace PTY: REST start plus Socket.IO input/resize/close. */
   terminal: ReturnType<typeof createTerminalApi>;
@@ -303,16 +308,21 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     harness,
     apps: createAppsApi(() => api, options.wsBaseUrl),
     git: createGitApi(() => api),
-    desktop: {
-      ...createDesktopApi(() => api),
-      viewerUrl: (proxyUrl, intent) =>
-        buildDesktopViewerUrl(
-          options.wsBaseUrl,
-          proxyUrl,
-          options.getAccessToken() ?? "",
-          intent,
-        ),
-    },
+    desktop: (() => {
+      const desktop = createDesktopApi(() => api);
+      return {
+        ...desktop,
+        viewerUrl: async (workspaceId, proxyUrl, intent, signal) => {
+          const { ticket } = await desktop.ticket(workspaceId, signal);
+          return buildDesktopViewerUrl(
+            options.wsBaseUrl,
+            proxyUrl,
+            ticket,
+            intent,
+          );
+        },
+      };
+    })(),
     terminal: createTerminalApi(() => api, realtime),
     skills: createSkillsApi(() => api),
     realtime,

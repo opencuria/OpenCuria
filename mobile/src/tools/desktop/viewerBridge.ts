@@ -97,6 +97,28 @@ export function parseDesktopViewerMessage(
   return null;
 }
 
+/**
+ * Whether the viewer WebView may navigate to `target`: only to pages of this
+ * desktop's own proxy route (the ticket entry and its vnc.html redirect).
+ * Everything else, including links and redirects to other origins, is dropped
+ * instead of being opened in the WebView or handed to the system.
+ */
+export function isDesktopViewerNavigation(
+  viewerUrl: string,
+  target: string,
+): boolean {
+  if (target === "about:blank") return true;
+  try {
+    const viewer = new URL(viewerUrl);
+    const next = new URL(target);
+    return (
+      next.origin === viewer.origin && next.pathname.startsWith(viewer.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function call(method: string, ...args: unknown[]): string {
   return `window.__opencuriaDesktop&&window.__opencuriaDesktop.${method}(${args
     .map((arg) => JSON.stringify(arg))

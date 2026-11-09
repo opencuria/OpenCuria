@@ -322,6 +322,19 @@ def test_realtime_access_rules_share_one_membership_lookup(workspace_access_setu
         with pytest.raises(WorkspaceNotFoundError):
             service.workspace_access.resolve_desktop_viewer(user_id, target)
 
+    # Live sockets and desktop cookies stop working once a user is deactivated.
+    get_user_model().objects.filter(pk__in=[owner.pk, admin.pk]).update(
+        is_active=False
+    )
+    assert not service.workspace_access.can_user_access_workspace(
+        owner.id, workspace_id
+    )
+    assert not service.workspace_access.can_user_view_workspace_desktop(
+        str(admin.id), workspace_id
+    )
+    with pytest.raises(WorkspaceNotFoundError):
+        service.workspace_access.resolve_desktop_viewer(str(owner.id), workspace_id)
+
 
 @pytest.mark.django_db
 def test_active_workspace_owner_requires_creator_org_and_active_membership(
@@ -353,3 +366,47 @@ def test_active_workspace_owner_requires_creator_org_and_active_membership(
     get_user_model().objects.filter(pk=owner.pk).update(is_active=True)
     Membership.objects.filter(user=owner, organization=org).delete()
     assert not owns(owner)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("actor_key", "status"),
+    [("owner", 200), ("foreign_admin", 200), ("foreign_member", 404)],
+)
+def test_desktop_ticket_follows_desktop_access(
+    workspace_access_setup, actor_key: str, status: int
+):
+    """Only the owner and org admins get a ticket, bound to them and the workspace."""
+    from apps.runners.desktop_tickets import redeem_desktop_ticket
+
+    actor = workspace_access_setup[actor_key]
+    workspace_id = str(workspace_access_setup["owner_workspace"].id)
+    client = _make_client(
+        user=actor,
+        org=workspace_access_setup["org"],
+        permissions=[APIKeyPermission.TERMINAL_ACCESS.value],
+    )
+
+    response = client.post(f"/api/v1/workspaces/{workspace_id}/desktop/ticket/")
+
+    assert response.status_code == status
+    if status == 200:
+        body = response.json()
+        assert body["expires_in"] == 60
+        other_workspace = str(workspace_access_setup["admin_workspace"].id)
+        assert redeem_desktop_ticket(body["ticket"], other_workspace) is None
+        assert redeem_desktop_ticket(body["ticket"], workspace_id) == actor.id
+
+
+@pytest.mark.django_db
+def test_desktop_ticket_requires_terminal_access(workspace_access_setup):
+    client = _make_client(
+        user=workspace_access_setup["owner"],
+        org=workspace_access_setup["org"],
+        permissions=[APIKeyPermission.WORKSPACES_READ.value],
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_access_setup['owner_workspace'].id}"
+        "/desktop/ticket/"
+    )
+    assert response.status_code == 403

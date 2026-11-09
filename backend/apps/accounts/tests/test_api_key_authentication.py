@@ -71,3 +71,21 @@ def test_rest_rejects_unknown_key():
     response = Client().get(PROFILE_URL, HTTP_X_API_KEY="kai_unknown")
 
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("header", ["HTTP_AUTHORIZATION", "HTTP_X_API_KEY"])
+def test_rest_rejects_key_of_deactivated_user(user: User, header: str):
+    """Deactivating a user offboards them, including every key they created."""
+    key, token = _issue_key(user)
+    User.objects.filter(pk=user.pk).update(is_active=False)
+    value = f"Bearer {token}" if header == "HTTP_AUTHORIZATION" else token
+
+    response = Client().get(PROFILE_URL, **{header: value})
+
+    assert response.status_code == 401
+    key.refresh_from_db()
+    assert key.is_active is True
+    assert key.last_used_at is None
+
+    User.objects.filter(pk=user.pk).update(is_active=True)
+    assert Client().get(PROFILE_URL, **{header: value}).status_code == 200

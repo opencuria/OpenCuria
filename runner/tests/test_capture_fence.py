@@ -185,7 +185,7 @@ async def test_desktop_proxy_paths_are_guarded(service, tmp_path):
     interface._desktop_proxy._tunnels["tunnel"] = SimpleNamespace(workspace_id=ws)
     async with svc.capture_fence.capture(ws):
         for method, args in [
-            (interface._desktop_proxy.fetch_http, (ws, "/", "")),
+            (interface._desktop_proxy.fetch_http, (ws, "/vnc.html")),
             (interface._desktop_proxy.open_tunnel, (ws, "new")),
             (interface._desktop_proxy.send, ("tunnel",)),
         ]:

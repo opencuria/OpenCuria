@@ -43,7 +43,7 @@ def test_revision_must_be_positive_integer(revision):
 
 def test_redirect_preserves_viewer_in_nested_websocket_path():
     workspace, client = str(uuid.uuid4()), str(uuid.uuid4())
-    redirect = build_vnc_redirect_url(workspace, "jwt", client, 7)
+    redirect = build_vnc_redirect_url(workspace, client, 7)
     outer = parse_qs(urlparse(redirect).query)
     nested = parse_qs(urlparse(outer["path"][0]).query)
     assert outer["viewer_client_id"] == nested["viewer_client_id"] == [client]

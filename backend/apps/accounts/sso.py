@@ -12,11 +12,12 @@ from urllib import error, parse, request
 
 import jwt
 from django.conf import settings
+from django.db import IntegrityError, transaction
 
 from common.exceptions import AuthenticationError
 
 from .models import User
-from .repositories import UserRepository
+from .repositories import SsoIdentityRepository, UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -142,29 +143,76 @@ class KeycloakSsoService:
 
         return payload
 
+    def _get_or_create_user(self, claims: dict[str, Any]) -> User:
+        """Resolve the account bound to ``(iss, sub)``, linking it on first use.
+
+        The ``email`` claim is user-editable at many IdPs, so it only selects
+        an account for the first binding, and only when the IdP verified it.
+        """
+        issuer = claims.get("iss") or self.config.issuer
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject:
+            raise AuthenticationError("SSO token did not include a subject claim")
+
+        user = SsoIdentityRepository.get_user(issuer, subject)
+        if user is None:
+            user = self._bind_identity(issuer, subject, claims)
+        if not user.is_active:
+            raise AuthenticationError("Account is disabled")
+
+        updates: dict[str, str] = {}
+        first_name = claims.get("given_name", "")
+        last_name = claims.get("family_name", "")
+        if first_name and user.first_name != first_name:
+            updates["first_name"] = first_name
+        if last_name and user.last_name != last_name:
+            updates["last_name"] = last_name
+        if updates:
+            UserRepository.update_profile(user, **updates)
+        return user
+
     @staticmethod
-    def _get_or_create_user(claims: dict[str, Any]) -> User:
+    def _bind_identity(issuer: str, subject: str, claims: dict[str, Any]) -> User:
+        """Bind a new identity to a new or SSO-only account with its email."""
         email = claims.get("email")
         if not email:
             raise AuthenticationError("SSO token did not include an email claim")
+        if claims.get("email_verified") is not True:
+            raise AuthenticationError("SSO account email is not verified")
 
-        defaults = {
-            "username": email,
-            "first_name": claims.get("given_name", ""),
-            "last_name": claims.get("family_name", ""),
-        }
-        user, created = UserRepository.get_or_create_by_email(email, defaults=defaults)
-        if not created:
-            updates: dict[str, str] = {}
-            first_name = claims.get("given_name", "")
-            last_name = claims.get("family_name", "")
-            if first_name and user.first_name != first_name:
-                updates["first_name"] = first_name
-            if last_name and user.last_name != last_name:
-                updates["last_name"] = last_name
-            if updates:
-                UserRepository.update_profile(user, **updates)
-
-        if not user.is_active:
-            raise AuthenticationError("Account is disabled")
+        try:
+            with transaction.atomic():
+                user = UserRepository.get_by_email(email)
+                if user is None:
+                    user = UserRepository.create_without_password(
+                        email,
+                        first_name=claims.get("given_name", ""),
+                        last_name=claims.get("family_name", ""),
+                    )
+                elif not _may_link_by_email(user) or (
+                    SsoIdentityRepository.exists_for_user(user)
+                ):
+                    raise AuthenticationError(
+                        "An account with this email already exists. "
+                        "Sign in with your password."
+                    )
+                SsoIdentityRepository.create(
+                    user=user, issuer=issuer, subject=subject
+                )
+        except IntegrityError:
+            # A concurrent first login bound the identity or created the account.
+            user = SsoIdentityRepository.get_user(issuer, subject)
+            if user is None:
+                raise AuthenticationError("SSO login failed. Try again.") from None
         return user
+
+
+def _may_link_by_email(user: User) -> bool:
+    """Return whether a verified email may bind an identity to *user*.
+
+    Only accounts without a usable password and without staff rights qualify,
+    i.e. accounts that SSO provisioned itself. Password and staff accounts are
+    never taken over through an email match; admins bind them explicitly.
+    """
+    has_password = bool(user.password) and user.has_usable_password()
+    return not (has_password or user.is_staff or user.is_superuser)

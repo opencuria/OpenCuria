@@ -130,7 +130,11 @@ class WorkspaceAccessService:
     def _workspace_membership(
         self, user_id: int | str, workspace_id: str
     ) -> tuple[Workspace, Membership] | None:
-        """Return the workspace and the user's membership in its organization."""
+        """Return the workspace and the active user's membership in its org.
+
+        Long-lived sockets and desktop cookies re-check this on every use, so
+        deactivating a user ends their live access too.
+        """
         try:
             workspace_uuid = uuid.UUID(str(workspace_id))
             member_id = int(user_id)
@@ -139,7 +143,7 @@ class WorkspaceAccessService:
         workspace = self.workspaces.get_by_id(workspace_uuid)
         if workspace is None:
             return None
-        membership = OrganizationService().get_membership(
+        membership = OrganizationService().get_active_membership(
             member_id, workspace.runner.organization_id
         )
         if membership is None:

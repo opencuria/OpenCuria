@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import shutil
 import subprocess
+import time
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -17,16 +19,19 @@ from django.contrib.auth import get_user_model
 
 from apps.accounts.auth_backends import get_auth_backend
 from apps.organizations.models import Membership, MembershipRole
+from apps.runners import kasmvnc_client
 from apps.runners.desktop_proxy import (
     _get_desktop_proxy_target,
     _proxy_websocket,
+    _sign_cookie,
     _user_can_access_workspace,
+    _verify_cookie,
     _ws_proxy_loop,
-    apply_vnc_client_patches,
     build_vnc_redirect_url,
     desktop_proxy_app,
     inject_kasm_idle_guard,
 )
+from apps.runners.desktop_tickets import issue_desktop_ticket
 from apps.runners.models import Runner
 from apps.runners.services.infra.desktop_tunnels import (
     _WS_TUNNELS,
@@ -46,6 +51,81 @@ def available_desktop_workspace(monkeypatch):
         "apps.runners.desktop_proxy._desktop_workspace_available",
         AsyncMock(return_value=True),
     )
+
+
+TARGET = {
+    "runner_sid": "runner-sid",
+    "runner_id": "runner-id",
+    "desktop_info": {"port": 6901},
+}
+
+
+@pytest.fixture(autouse=True)
+def fresh_client_cache(monkeypatch):
+    """Verified client files are cached per process; isolate each test."""
+    monkeypatch.setattr(kasmvnc_client, "_VERIFIED", {})
+
+
+@pytest.fixture
+def pinned_client(monkeypatch) -> dict[str, bytes]:
+    """A tiny pinned client; the proxy rules do not depend on real Kasm bytes."""
+    files = {
+        "vnc.html": b"<html><head></head><body>kasm</body></html>",
+        "dist/main.bundle.js": b"/* kasm bundle */",
+    }
+    digests = {path: hashlib.sha256(body).hexdigest() for path, body in files.items()}
+    monkeypatch.setattr(kasmvnc_client, "client_files", lambda: digests)
+    return files
+
+
+def _authorize(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._user_can_access_workspace",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._get_desktop_proxy_target",
+        AsyncMock(return_value=TARGET),
+    )
+
+
+def _runner_sio(monkeypatch, answer) -> AsyncMock:
+    sio = AsyncMock()
+    sio.call = AsyncMock(return_value=answer)
+    monkeypatch.setattr("common.realtime.get_sio_server", lambda: sio)
+    return sio
+
+
+def _runner_answer(body: bytes, status: int = 200, headers=()) -> dict:
+    return {
+        "status": status,
+        "headers": [list(header) for header in headers],
+        "body": base64.b64encode(body).decode("ascii"),
+        "body_encoding": "base64",
+    }
+
+
+def _scope(
+    workspace_id: str,
+    rest: str,
+    *,
+    query: bytes = b"",
+    cookie: bool = True,
+    method: str = "GET",
+    kind: str = "http",
+) -> dict:
+    headers = []
+    if cookie:
+        value = _sign_cookie(workspace_id, "1", int(time.time()))
+        headers.append((b"cookie", f"desktop_auth={value}".encode()))
+    return {
+        "type": kind,
+        "method": method,
+        "path": f"/ws/desktop/{workspace_id}{rest}",
+        "query_string": query,
+        "headers": headers,
+        "subprotocols": [],
+    }
 
 
 async def _call_http(scope: dict) -> list[dict]:
@@ -103,7 +183,7 @@ async def test_proxy_returns_not_found_for_member_without_workspace_access(
         status="running",
         created_by=owner,
     )
-    token = get_auth_backend().generate_tokens(member).access_token
+    ticket = issue_desktop_ticket(workspace.id, member.id)
     proxy_http = AsyncMock()
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._get_desktop_proxy_target",
@@ -121,7 +201,7 @@ async def test_proxy_returns_not_found_for_member_without_workspace_access(
         "type": "http",
         "method": "GET",
         "path": f"/ws/desktop/{workspace.id}/",
-        "query_string": f"token={token}".encode(),
+        "query_string": f"ticket={ticket}".encode(),
         "headers": [],
     }
 
@@ -200,104 +280,124 @@ async def test_proxy_target_needs_an_active_desktop_and_a_connected_runner(
 
 
 @pytest.mark.asyncio
-async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
+async def test_proxy_serves_only_verified_pinned_files_with_own_headers(
+    monkeypatch, pinned_client
+):
+    """Workspace bytes reach the platform origin only as the pinned Kasm files."""
     workspace_id = str(uuid.uuid4())
-    sio = AsyncMock()
-    sio.call = AsyncMock(
-        return_value={
-            "status": 200,
-            "headers": [["Content-Type", "text/plain"]],
-            "body": base64.b64encode(b"desktop asset").decode("ascii"),
-            "body_encoding": "base64",
-        }
-    )
-    monkeypatch.setattr(
-        "common.realtime.get_sio_server", lambda: sio
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._validate_token",
-        AsyncMock(return_value=SimpleNamespace(pk=1)),
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._user_can_access_workspace",
-        AsyncMock(return_value=True),
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._get_desktop_proxy_target",
-        AsyncMock(
-            return_value={
-                "runner_sid": "runner-sid",
-                "runner_id": "runner-id",
-                "desktop_info": {"port": 6901},
-            }
+    _authorize(monkeypatch)
+    bundle = pinned_client["dist/main.bundle.js"]
+    sio = _runner_sio(
+        monkeypatch,
+        _runner_answer(
+            bundle,
+            headers=[
+                ("Set-Cookie", "desktop_auth=forged"),
+                ("Content-Type", "text/html"),
+                ("Location", "https://evil.example/"),
+            ],
         ),
     )
 
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": f"/ws/desktop/{workspace_id}/dist/main.bundle.js",
-        "query_string": b"token=test-token",
-        "headers": [],
-    }
-
-    events = await _call_http(scope)
+    events = await _call_http(
+        _scope(workspace_id, "/dist/main.bundle.js", query=b"ticket=x&token=y")
+    )
 
     sio.call.assert_awaited_once_with(
         "desktop:proxy_http_request",
-        {
-            "workspace_id": workspace_id,
-            "path": "/dist/main.bundle.js",
-            "query_string": "token=test-token",
-            "method": "GET",
-        },
+        {"workspace_id": workspace_id, "path": "/dist/main.bundle.js"},
         to="runner-sid",
         timeout=15,
     )
     assert events[0]["status"] == 200
-    assert [b"Content-Type", b"text/plain"] in events[0]["headers"]
-    assert events[1]["body"] == b"desktop asset"
+    headers = dict(events[0]["headers"])
+    assert headers[b"content-type"] == b"text/javascript; charset=utf-8"
+    assert headers[b"x-content-type-options"] == b"nosniff"
+    assert headers[b"content-length"] == str(len(bundle)).encode()
+    assert not {b"set-cookie", b"location"} & headers.keys()
+    assert events[1]["body"] == bundle
+
+    # Verified bytes are cached by digest; other viewers never read them again.
+    other = await _call_http(_scope(str(uuid.uuid4()), "/dist/main.bundle.js"))
+    assert (other[0]["status"], other[1]["body"]) == (200, bundle)
+    sio.call.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _runner_answer(b"<script>parent.localStorage</script>"),
+        _runner_answer(b"/* kasm bundle */", status=302),
+        _runner_answer(b"/* kasm bundle */", status=404),
+        {"error": "Desktop connection unavailable"},
+        None,
+    ],
+    ids=["tampered", "redirect", "missing", "error", "no-answer"],
+)
+async def test_proxy_refuses_workspace_bytes_other_than_the_pinned_file(
+    monkeypatch, pinned_client, answer
+):
+    _authorize(monkeypatch)
+    _runner_sio(monkeypatch, answer)
+
+    events = await _call_http(_scope(str(uuid.uuid4()), "/dist/main.bundle.js"))
+
+    assert events[0]["status"] == 502
+    assert events[1]["body"] == b"Bad Gateway"
+    assert kasmvnc_client._VERIFIED == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rest", "method", "status"),
+    [
+        ("/evil.html", "GET", 404),
+        ("/vnc.html.bak", "GET", 404),
+        ("/api/get_frame_stats", "GET", 404),
+        ("/vnc.html", "POST", 405),
+    ],
+)
+async def test_proxy_never_asks_the_workspace_for_unpinned_requests(
+    monkeypatch, pinned_client, rest, method, status
+):
+    _authorize(monkeypatch)
+    sio = _runner_sio(monkeypatch, _runner_answer(b"anything"))
+
+    events = await _call_http(_scope(str(uuid.uuid4()), rest, method=method))
+
+    assert events[0]["status"] == status
+    sio.call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_proxy_entry_redeems_ticket_into_cookie_and_credential_free_redirect(
     monkeypatch,
 ):
     """Mini and fullscreen viewers must never ask KasmVNC to resize X11."""
     workspace_id = str(uuid.uuid4())
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._validate_token",
-        AsyncMock(return_value=SimpleNamespace(pk=1)),
+    client_id = str(uuid.uuid4())
+    _authorize(monkeypatch)
+    ticket = issue_desktop_ticket(workspace_id, 1)
+    scope = _scope(
+        workspace_id,
+        "/",
+        cookie=False,
+        query=(
+            f"ticket={ticket}&resize=remote&viewer_client_id={client_id}"
+            "&intent_revision=3"
+        ).encode(),
     )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._user_can_access_workspace",
-        AsyncMock(return_value=True),
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._get_desktop_proxy_target",
-        AsyncMock(
-            return_value={
-                "runner_sid": "runner-sid",
-                "runner_id": "runner-id",
-                "desktop_info": {"port": 6901},
-            }
-        ),
-    )
-
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": f"/ws/desktop/{workspace_id}/",
-        "query_string": b"token=test-token&resize=remote",
-        "headers": [],
-    }
+    scope["scheme"] = "https"
 
     events = await _call_http(scope)
 
     assert events[0]["type"] == "http.response.start"
     assert events[0]["status"] == 302
-    location = dict(events[0]["headers"])[b"location"].decode()
+    headers = dict(events[0]["headers"])
+    location = headers[b"location"].decode()
     assert "vnc.html" in location
+    assert "ticket" not in location and "token" not in location
     assert "resize=scale" in location
     assert "resize=remote" not in location
     assert "autoconnect=true" in location
@@ -307,8 +407,75 @@ async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
     assert redirect_query["clipboard_seamless"] == ["false"]
     assert redirect_query["enable_webrtc"] == ["false"]
     assert "reconnect=false" in location
-    assert f"path=ws%2Fdesktop%2F{workspace_id}%2F%3Ftoken%3Dtest-token" in location
-    assert f"path=ws/desktop/{workspace_id}/?token=" not in location
+    assert redirect_query["path"] == [
+        f"ws/desktop/{workspace_id}/?viewer_client_id={client_id}&intent_revision=3"
+    ]
+    cookie = headers[b"set-cookie"].decode()
+    value = cookie.split(";", 1)[0].removeprefix("desktop_auth=")
+    assert _verify_cookie(value) == (workspace_id, "1")
+    assert f"Path=/ws/desktop/{workspace_id}/" in cookie
+    assert "HttpOnly" in cookie and "Secure" in cookie
+
+    replay = await _call_http(scope)
+    assert replay[0]["status"] == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rest", "kind"), [("/vnc.html", "http"), ("/", "websocket")]
+)
+async def test_ticket_opens_only_the_entry_page(monkeypatch, pinned_client, rest, kind):
+    workspace_id = str(uuid.uuid4())
+    _authorize(monkeypatch)
+    ticket = issue_desktop_ticket(workspace_id, 1)
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    await desktop_proxy_app(
+        _scope(
+            workspace_id,
+            rest,
+            cookie=False,
+            kind=kind,
+            query=f"ticket={ticket}".encode(),
+        ),
+        AsyncMock(),
+        send,
+    )
+
+    if kind == "http":
+        assert sent[0]["status"] == 401
+    else:
+        assert sent == [{"type": "websocket.close", "code": 4001}]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["http", "websocket"])
+async def test_proxy_rejects_access_tokens_in_urls(user, monkeypatch, kind):
+    """Platform access tokens are never accepted where URLs leak them."""
+    workspace_id = str(uuid.uuid4())
+    _authorize(monkeypatch)
+    token = get_auth_backend().generate_tokens(user).access_token
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    await desktop_proxy_app(
+        _scope(
+            workspace_id, "/", cookie=False, kind=kind, query=f"token={token}".encode()
+        ),
+        AsyncMock(),
+        send,
+    )
+
+    if kind == "http":
+        assert sent[0]["status"] == 401
+    else:
+        assert sent == [{"type": "websocket.close", "code": 4001}]
 
 
 @pytest.mark.asyncio
@@ -562,6 +729,7 @@ async def test_runner_rejected_handshake_never_accepts_browser(monkeypatch, resp
     )
     send.assert_awaited_once_with({"type": "websocket.close", "code": 1011})
     assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"
+    assert "query_string" not in sio.call.await_args.args[1]
 
 
 @pytest.mark.asyncio
@@ -619,31 +787,29 @@ async def test_incomplete_websocket_handshake_closes_runner_tunnel(
 
 def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():
     workspace_id = "297de18f-3cc8-4e14-b64a-35c80856d51b"
-    location = build_vnc_redirect_url(workspace_id, "tok+/=x")
+    location = build_vnc_redirect_url(workspace_id)
 
     assert location.startswith(f"/ws/desktop/{workspace_id}/vnc.html?")
     assert "autoconnect=true" in location
     assert "resize=scale" in location
     assert "reconnect=false" in location
-    assert "path=ws%2Fdesktop%2F" in location
-    assert "%3Ftoken%3D" in location
-    assert f"path=ws/desktop/{workspace_id}/?token=" not in location
+    assert parse_qs(urlsplit(location).query)["path"] == [f"ws/desktop/{workspace_id}/"]
+    assert "token" not in location
 
 
-def test_build_vnc_redirect_preserves_viewer_association_and_authentication():
+def test_build_vnc_redirect_preserves_viewer_association_without_credentials():
     workspace_id = "297de18f-3cc8-4e14-b64a-35c80856d51b"
     client_id = "e6bd8acd-9977-4d3d-9b49-7c07adbd9eed"
-    token = "authenticated-token"
 
-    location = build_vnc_redirect_url(workspace_id, token, client_id, 12)
+    location = build_vnc_redirect_url(workspace_id, client_id, 12)
     query = parse_qs(urlsplit(location).query)
     ws_path_url = urlsplit(query["path"][0])
     ws_path = parse_qs(ws_path_url.query)
 
-    assert query["token"] == [token]
+    assert "token" not in query and "token" not in ws_path
     assert query["viewer_client_id"] == [client_id]
     assert query["intent_revision"] == ["12"]
-    assert ws_path["token"] == [token]
+    assert ws_path_url.path == f"ws/desktop/{workspace_id}/"
     assert ws_path["viewer_client_id"] == [client_id]
     assert ws_path["intent_revision"] == ["12"]
     assert query["clipboard_up"] == ["true"]
@@ -1157,90 +1323,20 @@ def test_inject_kasm_idle_guard_inserts_after_doctype_without_head():
     assert patched.index(b"data-opencuria-kasm-idle-guard") < patched.index(b"<body>")
 
 
-def test_apply_vnc_client_patches_rewrites_vnc_html_content_length():
-    body = b"<html><head></head><body>ok</body></html>"
-    headers = [
-        [b"Content-Type", b"text/html"],
-        [b"Content-Length", str(len(body)).encode()],
-    ]
-
-    next_headers, next_body = apply_vnc_client_patches("/vnc.html", headers, body)
-
-    assert b"data-opencuria-kasm-idle-guard" in next_body
-    assert next_body != body
-    header_map = {key.lower(): value for key, value in next_headers}
-    assert header_map[b"content-length"] == str(len(next_body)).encode()
-    assert header_map[b"content-type"] == b"text/html"
-
-
-def test_apply_vnc_client_patches_leaves_non_html_assets_unchanged():
-    body = b"/* kasm bundle */ UI.rfb.lastActiveAt"
-    headers = [[b"Content-Type", b"application/javascript"], [b"Content-Length", b"99"]]
-
-    next_headers, next_body = apply_vnc_client_patches(
-        "/dist/main.bundle.js",
-        headers,
-        body,
-    )
-
-    assert next_headers is headers
-    assert next_body is body
-
-
 @pytest.mark.asyncio
-async def test_proxy_vnc_html_injects_idle_guard(monkeypatch):
-    workspace_id = str(uuid.uuid4())
-    original = b"<html><head></head><body>kasm</body></html>"
-    sio = AsyncMock()
-    sio.call = AsyncMock(
-        return_value={
-            "status": 200,
-            "headers": [
-                ["Content-Type", "text/html"],
-                ["Content-Length", str(len(original))],
-            ],
-            "body": base64.b64encode(original).decode("ascii"),
-            "body_encoding": "base64",
-        }
-    )
-    monkeypatch.setattr(
-        "common.realtime.get_sio_server", lambda: sio
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._validate_token",
-        AsyncMock(return_value=SimpleNamespace(pk=1)),
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._user_can_access_workspace",
-        AsyncMock(return_value=True),
-    )
-    monkeypatch.setattr(
-        "apps.runners.desktop_proxy._get_desktop_proxy_target",
-        AsyncMock(
-            return_value={
-                "runner_sid": "runner-sid",
-                "runner_id": "runner-id",
-                "desktop_info": {"port": 6901},
-            }
-        ),
-    )
+async def test_proxy_vnc_html_injects_idle_guard(monkeypatch, pinned_client):
+    _authorize(monkeypatch)
+    _runner_sio(monkeypatch, _runner_answer(pinned_client["vnc.html"]))
 
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": f"/ws/desktop/{workspace_id}/vnc.html",
-        "query_string": b"token=test-token",
-        "headers": [],
-    }
-
-    events = await _call_http(scope)
+    events = await _call_http(_scope(str(uuid.uuid4()), "/vnc.html"))
 
     body = events[1]["body"]
-    header_map = {key.lower(): value for key, value in events[0]["headers"]}
+    header_map = dict(events[0]["headers"])
     assert events[0]["status"] == 200
     assert b"data-opencuria-kasm-idle-guard" in body
     assert header_map[b"content-length"] == str(len(body)).encode()
-    assert header_map[b"content-type"] == b"text/html"
+    assert header_map[b"content-type"] == b"text/html; charset=utf-8"
+    assert header_map[b"cache-control"] == b"no-store"
 
 
 @pytest.mark.asyncio

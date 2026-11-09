@@ -156,18 +156,8 @@ export function DesktopPanel({
   const proxyUrlRef = useRef(proxyUrl);
   proxyUrlRef.current = proxyUrl;
   const viewerKey = `${proxyUrl}:${snapshot.revision}:${generation}`;
-  const url = useMemo(
-    () =>
-      proxyUrl
-        ? client.desktop.viewerUrl(proxyUrl, {
-            viewer_client_id: coordinator.viewerClientId,
-            intent_revision: snapshot.revision,
-          })
-        : "",
-    // The token is resolved together with the remount key.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [viewerKey],
-  );
+  // Each viewer page opens with its own single-use ticket (never a token).
+  const [url, setUrl] = useState("");
 
   const setStatus = useCallback((status: ViewerStatus) => {
     viewerStatusRef.current = status;
@@ -233,6 +223,31 @@ export function DesktopPanel({
     },
     [recovery],
   );
+
+  useEffect(() => {
+    setUrl("");
+    if (!proxyUrl) return;
+    const controller = new AbortController();
+    client.desktop
+      .viewerUrl(
+        workspaceId,
+        proxyUrl,
+        {
+          viewer_client_id: coordinator.viewerClientId,
+          intent_revision: snapshot.revision,
+        },
+        controller.signal,
+      )
+      .then((next) => {
+        if (!controller.signal.aborted) setUrl(next);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) recovery.markDisconnected();
+      });
+    return () => controller.abort();
+    // The ticket is issued together with the remount key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewerKey]);
 
   useEffect(() => {
     setStatus("connecting");

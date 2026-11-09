@@ -1676,25 +1676,37 @@ describe("workspace tools", () => {
     ]);
   });
 
-  it("builds the authenticated KasmVNC viewer URL for a desktop route", () => {
-    const client = clientOptions().create(
-      vi.fn() as unknown as typeof globalThis.fetch,
-    );
+  it("opens the KasmVNC viewer with a fresh single-use ticket", async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    const fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", url: String(input) });
+        return jsonResponse({ ticket: "ticket:1", expires_in: 60 });
+      },
+    ) as unknown as typeof globalThis.fetch;
+    const client = clientOptions().create(fetch);
+
     const url = new URL(
-      client.desktop.viewerUrl("/ws/desktop/ws-1/", {
+      await client.desktop.viewerUrl("ws-1", "/ws/desktop/ws-1/", {
         viewer_client_id: "viewer",
         intent_revision: 2,
       }),
     );
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        url: "https://api.example/api/v1/workspaces/ws-1/desktop/ticket/",
+      },
+    ]);
     expect(url.origin + url.pathname).toBe(
       "https://api.example/ws/desktop/ws-1/",
     );
-    expect(url.searchParams.get("token")).toBe("old-access");
+    expect(url.searchParams.get("ticket")).toBe("ticket:1");
     expect(url.searchParams.get("resize")).toBe("scale");
     expect(url.searchParams.get("intent_revision")).toBe("2");
-    expect(url.searchParams.get("path")).toBe(
-      "ws/desktop/ws-1/?token=old-access&viewer_client_id=viewer&intent_revision=2",
-    );
+    // The access token never appears in the viewer URL.
+    expect(url.toString()).not.toContain("old-access");
   });
 });
 

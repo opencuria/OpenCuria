@@ -806,7 +806,10 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_desktop_proxy_http_request_uses_runner_local_fetch(self) -> None:
+    async def test_desktop_proxy_http_request_never_forwards_query_string(
+        self,
+    ) -> None:
+        """Viewer URLs may carry backend credentials; the guest never sees them."""
         service = DummyService()
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
@@ -826,14 +829,12 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             {
                 "workspace_id": str(workspace_id),
                 "path": "/vnc.html",
-                "query_string": "autoconnect=true",
+                "query_string": "token=secret",
             }
         )
 
         interface._desktop_proxy.fetch_http.assert_awaited_once_with(
-            workspace_id,
-            "/vnc.html",
-            "autoconnect=true",
+            workspace_id, "/vnc.html"
         )
         self.assertEqual(result["status"], 200)
 

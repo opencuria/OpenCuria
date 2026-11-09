@@ -60,6 +60,13 @@ export function createDesktopApi(api: () => ApiClient) {
         signal,
       );
     },
+    /** Single-use ticket for the viewer URL; access tokens never enter URLs. */
+    ticket: (workspaceId: string, signal?: AbortSignal) =>
+      api().post<{ ticket: string; expires_in: number }>(
+        desktopPath(workspaceId, "ticket/"),
+        undefined,
+        signal,
+      ),
     /** Abort the Computer Use agent driving the desktop. */
     takeControl: (workspaceId: string, signal?: AbortSignal) =>
       api().post<{ aborted_session_ids: string[] }>(

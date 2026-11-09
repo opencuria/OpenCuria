@@ -31,6 +31,7 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
+from .desktop_tickets import DESKTOP_TICKET_MAX_AGE_SECONDS
 from .exceptions import (
     AdminRoleRequiredError,
     ImageRecipeNotFoundError,
@@ -54,6 +55,7 @@ from .schemas import (
     DesktopStatusOut,
     DesktopStopOut,
     DesktopTakeControlOut,
+    DesktopTicketOut,
     DesktopViewerIntentIn,
     EditorFileWriteIn,
     GitHistoryQuery,
@@ -479,6 +481,28 @@ async def start_desktop(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/ticket/",
+    response={200: DesktopTicketOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Issue a desktop viewer ticket",
+)
+async def issue_desktop_ticket(request: HttpRequest, workspace_id: uuid.UUID):
+    """Return a short-lived, single-use ticket for the desktop viewer URL."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    try:
+        ticket = await _get_service().interactive_sessions.issue_desktop_ticket(
+            workspace_id,
+            user=request.user,
+            organization_id=get_organization_id(request),
+        )
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    return 200, DesktopTicketOut(
+        ticket=ticket, expires_in=DESKTOP_TICKET_MAX_AGE_SECONDS
+    )
 
 
 @workspace_router.post(

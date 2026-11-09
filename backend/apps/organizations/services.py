@@ -147,15 +147,16 @@ class OrganizationService:
 
     def require_membership(self, user, org_id) -> Organization:
         """
-        Validate that the user is a member of the organization.
+        Validate that the user is an active member of the organization.
 
-        Returns the Organization. Raises NotFoundError if not a member.
+        Returns the Organization. Raises NotFoundError if not a member or if
+        the user account is deactivated.
         """
         org = self.organizations.get_by_id(uuid.UUID(str(org_id)))
         if org is None:
             raise NotFoundError("Organization", str(org_id))
 
-        membership = self.memberships.get(user=user, organization=org)
+        membership = self.memberships.get_active(user=user, organization=org)
         if membership is None:
             raise NotFoundError("Organization", str(org_id))
 

@@ -3,6 +3,10 @@
 The control interface supplies desktop lookup, capture admission and an event
 sink. This component owns upstream connections and their readers; it never
 imports the runner control adapter or workspace orchestration.
+
+The guest is untrusted: every upstream connection is pinned to the guest's
+KasmVNC listener and redirects are refused, so a workspace can never make the
+runner host dial another VM or a host-local service.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import aiohttp
 import structlog
@@ -23,6 +27,83 @@ from ..models import DesktopSession
 from ..services.capture_fence import CaptureFence
 
 logger = structlog.get_logger(__name__)
+
+#: Guest port of KasmVNC's web client and WebSocket listener.
+DESKTOP_UPSTREAM_PORT = 6901
+#: The largest KasmVNC client file is below 1 MiB.
+_MAX_HTTP_BODY_BYTES = 8 * 1024 * 1024
+_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        # aiohttp decompresses the payload before it is read. The browser must
+        # receive headers describing those bytes.
+        "content-encoding",
+        "content-length",
+    }
+)
+
+
+class DesktopUpstreamError(aiohttp.ClientError):
+    """The guest answered outside the pinned desktop upstream contract."""
+
+
+def _pinned_upstream(guest_ip: str, port: int) -> aiohttp.ClientMiddlewareType:
+    """Return a middleware that allows only the guest listener and no redirects.
+
+    aiohttp runs session middlewares for every hop, including redirect hops
+    and WebSocket handshakes, which have no ``allow_redirects`` switch.
+    """
+
+    async def middleware(
+        request: aiohttp.ClientRequest, handler: aiohttp.ClientHandlerType
+    ) -> aiohttp.ClientResponse:
+        url = request.url
+        if url.scheme not in ("http", "ws") or (url.host, url.port) != (
+            guest_ip,
+            port,
+        ):
+            raise DesktopUpstreamError("Desktop upstream outside the guest listener")
+        response = await handler(request)
+        if 300 <= response.status < 400:
+            response.release()
+            raise DesktopUpstreamError("Desktop upstream redirects are refused")
+        return response
+
+    return middleware
+
+
+def _is_plain_path(rest_path: str) -> bool:
+    """Return whether *rest_path* is an absolute path without query or fragment."""
+    return (
+        rest_path.startswith("/")
+        and rest_path.isascii()
+        and rest_path.isprintable()
+        and not any(char in rest_path for char in "?#\\")
+        and ".." not in rest_path.split("/")
+    )
+
+
+def _bad_gateway() -> dict[str, object]:
+    """Describe an unusable upstream answer without forwarding any of it."""
+    return {
+        "status": 502,
+        "headers": [["Content-Type", "text/plain"]],
+        "body": base64.b64encode(b"Bad Gateway").decode("ascii"),
+        "body_encoding": "base64",
+    }
+
+
+async def _read_limited(response: aiohttp.ClientResponse) -> bytes | None:
+    """Read the decompressed body, or return None once it exceeds the limit."""
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        body += chunk
+        if len(body) > _MAX_HTTP_BODY_BYTES:
+            return None
+    return bytes(body)
 
 
 class DesktopProxyEvents(Protocol):
@@ -68,14 +149,23 @@ class DesktopProxy:
         get_session: Callable[[uuid.UUID], DesktopSession | None],
         events: DesktopProxyEvents,
         capture_fence: CaptureFence | None = None,
+        *,
+        upstream_port: int = DESKTOP_UPSTREAM_PORT,
     ) -> None:
         """Inject desktop observations, outbound transport and capture admission."""
         self._get_guest_ip = get_guest_ip
         self._get_session = get_session
         self._events = events
         self._capture_fence = capture_fence
+        self._port = upstream_port
         self._tunnels: dict[str, _Tunnel] = {}
         self._opening: dict[str, _OpeningTunnel] = {}
+
+    def _client_session(self, guest_ip: str, **options: Any) -> aiohttp.ClientSession:
+        """Open a session that can reach only this guest's desktop listener."""
+        return aiohttp.ClientSession(
+            middlewares=(_pinned_upstream(guest_ip, self._port),), **options
+        )
 
     def _interaction(
         self, workspace_id: uuid.UUID | None
@@ -88,41 +178,48 @@ class DesktopProxy:
         self,
         workspace_id: uuid.UUID,
         rest_path: str,
-        query_string: str = "",
     ) -> dict[str, object]:
-        """Fetch a desktop HTTP resource from the local workspace runtime."""
+        """Fetch one desktop client file from the local workspace runtime.
+
+        Query strings are never forwarded to the guest. Redirects, oversized
+        bodies and connection failures yield a 502 answer instead of raising.
+        """
+        if not _is_plain_path(rest_path):
+            return _bad_gateway()
         async with self._interaction(workspace_id):
             guest_ip = self._get_guest_ip(workspace_id)
-            upstream_url = f"http://{guest_ip}:6901{rest_path}"
-            if query_string:
-                upstream_url = f"{upstream_url}?{query_string}"
-
-            async with (
-                aiohttp.ClientSession() as session,
-                session.get(upstream_url) as resp,
-            ):
-                headers: list[list[str]] = []
-                for key, value in resp.headers.items():
-                    # aiohttp decompresses the payload before resp.read(). The
-                    # browser must receive headers describing those bytes.
-                    if key.lower() in (
-                        "transfer-encoding",
-                        "connection",
-                        "keep-alive",
-                        "content-encoding",
-                        "content-length",
-                    ):
-                        continue
-                    headers.append([key, value])
-
-                body = await resp.read()
-                headers.append(["Content-Length", str(len(body))])
-                return {
-                    "status": resp.status,
-                    "headers": headers,
-                    "body": base64.b64encode(body).decode("ascii"),
-                    "body_encoding": "base64",
-                }
+            upstream_url = f"http://{guest_ip}:{self._port}{rest_path}"
+            try:
+                async with (
+                    self._client_session(guest_ip, timeout=_HTTP_TIMEOUT) as session,
+                    session.get(upstream_url, allow_redirects=False) as resp,
+                ):
+                    body = await _read_limited(resp)
+                    if body is None:
+                        logger.warning(
+                            "desktop_proxy_http_body_too_large",
+                            workspace_id=str(workspace_id),
+                        )
+                        return _bad_gateway()
+                    headers = [
+                        [key, value]
+                        for key, value in resp.headers.items()
+                        if key.lower() not in _HOP_BY_HOP_HEADERS
+                    ]
+                    headers.append(["Content-Length", str(len(body))])
+                    return {
+                        "status": resp.status,
+                        "headers": headers,
+                        "body": base64.b64encode(body).decode("ascii"),
+                        "body_encoding": "base64",
+                    }
+            except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+                logger.warning(
+                    "desktop_proxy_http_failed",
+                    workspace_id=str(workspace_id),
+                    error_type=type(exc).__name__,
+                )
+                return _bad_gateway()
 
     async def _read(
         self,
@@ -191,11 +288,11 @@ class DesktopProxy:
                 if opening.invalidated or current_generation != generation:
                     raise RuntimeError("Desktop changed while opening proxy tunnel")
                 guest_ip = self._get_guest_ip(workspace_id)
-                upstream_url = f"ws://{guest_ip}:6901/websockify"
-                upstream_origin = f"http://{guest_ip}:6901"
+                upstream_url = f"ws://{guest_ip}:{self._port}/websockify"
+                upstream_origin = f"http://{guest_ip}:{self._port}"
                 chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
 
-                session = aiohttp.ClientSession()
+                session = self._client_session(guest_ip)
                 opening.session = session
                 websocket = await session.ws_connect(
                     upstream_url,
