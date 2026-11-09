@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from apps.harness.engines.claude.engine import ClaudeEngine
+from apps.harness.engines.claude.permissionbridge import PermissionBridge
 from apps.harness.tests.test_claude_engine import (
     FixtureSessionStore,
     LocalSseWorkspaceAccessor,
@@ -434,6 +435,49 @@ async def test_real_cli_ignores_repository_settings_and_hooks(
         and "managed-settings-only" in event.get("output", "")
         for event in events
     ), "The excluded repository deny rule must not block managed Bash"
+
+
+@pytest.mark.asyncio
+async def test_real_cli_blocks_auto_allowed_tool_when_permission_gate_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raising PreToolUse gate blocks Read instead of counting as no decision."""
+    require_pinned_cli()
+    secret = "GATE_FAILURE_FILE_SENTINEL"
+
+    def failing_decide(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("permission gate fixture failure")
+
+    monkeypatch.setattr(PermissionBridge, "decide", failing_decide)
+    (
+        result,
+        events,
+        _questions,
+        requests,
+        permissions,
+        _store,
+        _accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Read",
+        tool_arguments={"file_path": str(tmp_path / "workspace" / "gate.txt")},
+        tools=default_tool_registry(),
+        fixture_files={"gate.txt": f"{secret}\n".encode()},
+    )
+
+    assert result.output == "fixture answer"
+    assert permissions == []
+    tool_results = [
+        block
+        for request in requests
+        for message in request.get("messages", [])
+        if message.get("role") == "user"
+        for block in (message.get("content") or [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert tool_results, "The real CLI never reported the blocked Read call"
+    assert secret not in json.dumps(requests)
+    assert not any(event.get("type") == "tool_completed" for event in events)
 
 
 @pytest.mark.asyncio

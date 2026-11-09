@@ -812,6 +812,19 @@ async def test_scope_rejects_finished_child_when_parent_tool_is_gone(
         bridge.scope(engine, {"agent_id": "invented-child"})
 
 
+def test_only_the_pre_tool_use_gate_blocks_on_callback_failure(fake_accessor) -> None:
+    engine, bridge, _options, _events = _bridge_case(fake_accessor)
+    hooks = bridge.hooks(engine)
+
+    assert hooks["PreToolUse"][0].on_failure == "block"
+    assert all(
+        matcher.on_failure is None
+        for event, matchers in hooks.items()
+        if event != "PreToolUse"
+        for matcher in matchers
+    )
+
+
 @pytest.mark.asyncio
 async def test_ambiguous_subagent_parent_correlation_fails_closed(
     fake_accessor,

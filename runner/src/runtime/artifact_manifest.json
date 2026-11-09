@@ -2,33 +2,33 @@
   "schema_version": 1,
   "artifacts": {
     "claude-agent": {
-      "version": "2.1.316",
-      "manifest_url": "https://downloads.claude.ai/claude-code-releases/2.1.316/manifest.json",
-      "signature_url": "https://downloads.claude.ai/claude-code-releases/2.1.316/manifest.json.sig",
-      "signature_sha256": "863fe4c0bb7e3e5fb547241bee0b267ee2ff890cbd75911a0748d199afbc8af2",
-      "manifest_sha256": "dec9788b857718ec2d65904c8db139da70f8a0b04468b96474e8462c256535d3",
-      "release_manifest_sha256": "ac9d8bb6a65febbccf9e65bde2e3e4298b8d6974e96f559fbf1d740891a747db",
+      "version": "2.1.321",
+      "manifest_url": "https://downloads.claude.ai/claude-code-releases/2.1.321/manifest.json",
+      "signature_url": "https://downloads.claude.ai/claude-code-releases/2.1.321/manifest.json.sig",
+      "signature_sha256": "0270d98c48cb12c9f956e55d3b0cbae10d7e239f1362bf0ccfaf16c59b20e8a6",
+      "manifest_sha256": "c32595914a31ba15d0c1a287f214658355994fcb2c2d42ca3883ec8aff4c485d",
+      "release_manifest_sha256": "d073d63928081951b871b35780d7abc83c26fa9b8b97f1ace64fc90d4591d325",
       "signing_fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
       "platforms": {
         "linux-x64": {
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-x64/claude",
-          "sha256": "fd13c70000fec3f2116dfbcbb6121210b4a29328bf0e46210a59dd594a67d824",
-          "size": 328262000
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-x64/claude",
+          "sha256": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+          "size": 341910032
         },
         "linux-arm64": {
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-arm64/claude",
-          "sha256": "55cdb8e162d190432696ea54010e0fca2e18d06fa7a7127fd563b9ffd4f22624",
-          "size": 328459544
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-arm64/claude",
+          "sha256": "6bea0633074627ba79328e00115ed0588c3acf906a8463612b25db696dbfd3f0",
+          "size": 341501368
         },
         "linux-x64-musl": {
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-x64-musl/claude",
-          "sha256": "8bc3d015479b8b87dfde3f69f9bdb96c658758a8eb31892fd8fbece8d8a08bcf",
-          "size": 314779944
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-x64-musl/claude",
+          "sha256": "efc4a3d94daf10c550cde589a4add37f67519be54252ba88f27e9627f7ad62b4",
+          "size": 328366664
         },
         "linux-arm64-musl": {
-          "url": "https://downloads.claude.ai/claude-code-releases/2.1.316/linux-arm64-musl/claude",
-          "sha256": "d774cb39055cff62af476af32702f1fc4f888a7e395a37434a95d6f5a98818a0",
-          "size": 311914480
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-arm64-musl/claude",
+          "sha256": "d223ea603b4fe8521d35a47f1972fbb36f1028a40927f16160e6258e0b92d597",
+          "size": 325808392
         }
       }
     },

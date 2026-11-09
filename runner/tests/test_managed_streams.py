@@ -837,7 +837,7 @@ async def test_agent_stream_private_environment_ignores_workspace_credentials(
             "ANTHROPIC_API_KEY": "subscription-key",
             "CLAUDE_CONFIG_DIR": f"{runtime.config_root}/{workspace}/config",
             "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-            "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
+            "CLAUDE_AGENT_SDK_VERSION": "0.2.180",
             "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
             "DISABLE_UPDATES": "1",
             "DISABLE_TELEMETRY": "1",
@@ -868,7 +868,7 @@ async def test_agent_stream_private_environment_ignores_workspace_credentials(
     assert values["env"]["ANTHROPIC_API_KEY"] == "subscription-key"
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in values["env"]
     assert values["env"]["CLAUDE_CODE_ENTRYPOINT"] == "sdk-py"
-    assert values["env"]["CLAUDE_AGENT_SDK_VERSION"] == "0.2.176"
+    assert values["env"]["CLAUDE_AGENT_SDK_VERSION"] == "0.2.180"
     assert values["env"]["CLAUDE_CONFIG_DIR"] == (
         f"{runtime.config_root}/{workspace}/config"
     )
@@ -892,7 +892,7 @@ def test_isolated_agent_env_rejects_runner_owned_environment(key):
         "ANTHROPIC_API_KEY": "private-key",
         "CLAUDE_CONFIG_DIR": f"{ISOLATED_AGENT_CONFIG_ROOT}/{uuid.uuid4()}/config",
         "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-        "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.180",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
         "DISABLE_UPDATES": "1",
         "DISABLE_TELEMETRY": "1",
@@ -910,7 +910,7 @@ def test_isolated_agent_env_rejects_unmanaged_config_dir():
         "ANTHROPIC_API_KEY": "private-key",
         "CLAUDE_CONFIG_DIR": "/tmp/claude-config",
         "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-        "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.180",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
         "DISABLE_UPDATES": "1",
         "DISABLE_TELEMETRY": "1",
@@ -928,7 +928,7 @@ def test_isolated_agent_env_requires_exactly_one_authentication_value():
         "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
         "CLAUDE_CONFIG_DIR": f"{ISOLATED_AGENT_CONFIG_ROOT}/{uuid.uuid4()}/config",
         "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-        "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.180",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
         "DISABLE_UPDATES": "1",
         "DISABLE_TELEMETRY": "1",
@@ -946,7 +946,7 @@ def _claude_env(config_dir: str, **extra: str) -> dict[str, str]:
         "ANTHROPIC_API_KEY": "private-key",
         "CLAUDE_CONFIG_DIR": config_dir,
         "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-        "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.180",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
         "DISABLE_UPDATES": "1",
         "DISABLE_TELEMETRY": "1",
@@ -1040,7 +1040,7 @@ async def test_guest_supervisor_forwards_fixed_fork_subagent_setting(tmp_path):
     assert proc.returncode == 0, stderr.decode()
     child_env = json.loads(marker.read_text())
     assert child_env["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
-    assert child_env["CLAUDE_AGENT_SDK_VERSION"] == "0.2.176"
+    assert child_env["CLAUDE_AGENT_SDK_VERSION"] == "0.2.180"
 
 
 def test_isolated_agent_config_root_is_testable_without_internal_workspace_state():
@@ -1049,7 +1049,7 @@ def test_isolated_agent_config_root_is_testable_without_internal_workspace_state
         "ANTHROPIC_API_KEY": "private-key",
         "CLAUDE_CONFIG_DIR": f"{temp_root}/{uuid.uuid4()}/config",
         "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-        "CLAUDE_AGENT_SDK_VERSION": "0.2.176",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.180",
         "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
         "DISABLE_UPDATES": "1",
         "DISABLE_TELEMETRY": "1",

@@ -192,7 +192,7 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
             0,
             result={
                 "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.316/claude",
+                "path": "/opt/opencuria/runtimes/claude-agent/2.1.321/claude",
             },
         ),
     )

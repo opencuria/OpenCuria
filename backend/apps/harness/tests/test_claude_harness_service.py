@@ -527,8 +527,8 @@ class FakeClaudeEngine:
                 external_id,
                 {
                     "harness_id": "claude",
-                    "cli_version": "2.1.316",
-                    "sdk_version": "0.2.176",
+                    "cli_version": "2.1.321",
+                    "sdk_version": "0.2.180",
                     "model": model,
                     "mode": mode,
                 },
@@ -599,8 +599,8 @@ class FakeClaudeEngine:
                 metadata={
                     "harness_id": "claude",
                     "external_session_id": external_id,
-                    "cli_version": "2.1.316",
-                    "sdk_version": "0.2.176",
+                    "cli_version": "2.1.321",
+                    "sdk_version": "0.2.180",
                     "model": model,
                     "reasoning_effort": "high",
                 },

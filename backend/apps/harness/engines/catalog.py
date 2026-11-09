@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from apps.harness.providers.models_catalog import ProviderModel
 
 ENGINE_IDS = ("native", "claude", "codex")
-CLAUDE_AGENT_SDK_VERSION = "0.2.176"
-CLAUDE_CODE_CLI_VERSION = "2.1.316"
+CLAUDE_AGENT_SDK_VERSION = "0.2.180"
+CLAUDE_CODE_CLI_VERSION = "2.1.321"
 DEFAULT_CLAUDE_MODEL = "sonnet"
 DEFAULT_CLAUDE_EFFORT = "high"
 # Ultracode is a Claude Code session setting, not a model effort: the CLI's
@@ -56,14 +56,12 @@ class ClaudeModelSpec:
         )
 
 
-# First-party defaults for the aliases resolved by the pinned CLI. Haiku joined
-# Sonnet/Opus on 5.5 with a 1M window in CLI 2.1.293; 200K/64K is now stale.
-# The ``fable`` alias resolves to Fable 5.1 in CLI 2.1.316; its default output
-# cap is 64K (128K only when raised via CLAUDE_CODE_MAX_OUTPUT_TOKENS).
+# First-party defaults for the aliases resolved by the pinned CLI 2.1.321:
+# Sonnet/Opus/Haiku 5.5 and Fable 5.2, each with a 1M window and 128K output.
 CLAUDE_MODELS: tuple[ClaudeModelSpec, ...] = (
     ClaudeModelSpec("sonnet", "Claude Sonnet", "sonnet", 1_000_000, 128_000),
     ClaudeModelSpec("opus", "Claude Opus", "opus", 1_000_000, 128_000),
-    ClaudeModelSpec("fable", "Claude Fable", "fable", 1_000_000, 64_000),
+    ClaudeModelSpec("fable", "Claude Fable", "fable", 1_000_000, 128_000),
     ClaudeModelSpec("haiku", "Claude Haiku", "haiku", 1_000_000, 128_000),
 )
 

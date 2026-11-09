@@ -537,8 +537,16 @@ class PermissionBridge:
             return {}
 
         return {
+            # A failing gate must block: otherwise the CLI treats it as "no
+            # decision" and runs natively auto-allowed tools such as Read. The
+            # SDK refuses to start against a CLI that cannot honor this.
             "PreToolUse": [
-                HookMatcher(matcher=None, hooks=[pre_tool_use], timeout=120)
+                HookMatcher(
+                    matcher=None,
+                    hooks=[pre_tool_use],
+                    timeout=120,
+                    on_failure="block",
+                )
             ],
             "PostToolUse": [
                 HookMatcher(matcher=None, hooks=[post_tool_use], timeout=120)
