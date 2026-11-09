@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from ..workspace_admission_repository import WorkspaceAdmissionRepository
+
+if TYPE_CHECKING:
+    from ..models import Workspace
 
 
 class WorkspaceAdmissionService:
@@ -24,6 +28,17 @@ class WorkspaceAdmissionService:
     def ensure_interactions_available(self, workspace_id: uuid.UUID) -> None:
         """Raise ConflictError while a lifecycle operation blocks live work."""
         self.repository.ensure_interactions_available(workspace_id)
+
+    def interaction_target(
+        self, workspace_id: uuid.UUID, *, fenced: bool = True
+    ) -> Workspace | None:
+        """Return the workspace and its runner for one live runner call.
+
+        Re-reads persisted state on every call so each call routes to the
+        runner's current session and honors the interaction fence (skipped only
+        with ``fenced=False``). Returns None when the workspace is gone.
+        """
+        return self.repository.interaction_target(workspace_id, fenced=fenced)
 
     def admit_run(
         self,

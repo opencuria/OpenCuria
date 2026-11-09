@@ -20,6 +20,22 @@ from .locking import lock_runner
 from .models import Workspace
 
 
+def _raise_if_interactions_blocked(workspace: Workspace) -> None:
+    """Raise ConflictError while persisted lifecycle state blocks live work."""
+    if workspace.active_operation == "capturing_image":
+        raise ConflictError("Workspace is currently capturing image")
+    if workspace.active_operation in {"resetting", "updating"}:
+        raise ConflictError(f"Workspace is currently {workspace.active_operation}")
+    if workspace.current_task_id and not workspace.active_operation:
+        raise ConflictError(
+            "Workspace recovery is waiting for the runner to verify its state"
+        )
+    if workspace.status == "failed":
+        raise ConflictError(
+            "Workspace runtime is unavailable; reset or delete the workspace"
+        )
+
+
 class WorkspaceAdmissionRepository:
     """Lock-ordered admission checks on persisted workspace lifecycle state."""
 
@@ -29,19 +45,24 @@ class WorkspaceAdmissionRepository:
 
         Saved history readers deliberately do not call this guard.
         """
-        workspace = Workspace.objects.get(id=workspace_id)
-        if workspace.active_operation == "capturing_image":
-            raise ConflictError("Workspace is currently capturing image")
-        if workspace.active_operation in {"resetting", "updating"}:
-            raise ConflictError(f"Workspace is currently {workspace.active_operation}")
-        if workspace.current_task_id and not workspace.active_operation:
-            raise ConflictError(
-                "Workspace recovery is waiting for the runner to verify its state"
-            )
-        if workspace.status == "failed":
-            raise ConflictError(
-                "Workspace runtime is unavailable; reset or delete the workspace"
-            )
+        _raise_if_interactions_blocked(Workspace.objects.get(id=workspace_id))
+
+    @staticmethod
+    def interaction_target(
+        workspace_id: uuid.UUID, *, fenced: bool = True
+    ) -> Workspace | None:
+        """Read a workspace with its runner and apply the live interaction fence.
+
+        One query serves both the fence and the routing target of a live
+        runner call. ``fenced=False`` skips only the fence. Returns None when
+        the workspace is gone.
+        """
+        workspace = (
+            Workspace.objects.select_related("runner").filter(id=workspace_id).first()
+        )
+        if workspace is not None and fenced:
+            _raise_if_interactions_blocked(workspace)
+        return workspace
 
     @staticmethod
     def admit_run(

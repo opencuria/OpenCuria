@@ -154,6 +154,51 @@ def test_unresolved_fence_blocks_reservation(harness_workspace, scheduled):
     assert HarnessSession.objects.get(id=session.id).status == "idle"
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "fence",
+    [
+        {"active_operation": "capturing_image"},
+        {"active_operation": "resetting"},
+        {"active_operation": "updating"},
+        {"status": "failed"},
+        {"current_task": "failed-stop"},
+    ],
+)
+def test_interaction_target_applies_the_interaction_fence(harness_workspace, fence):
+    """The routing read fences like ensure_interactions_available, unless skipped."""
+    from apps.runners.models import Task
+    from apps.runners.services.workspace_admission import WorkspaceAdmissionService
+
+    if "current_task" in fence:
+        fence = {
+            "current_task": Task.objects.create(
+                runner=harness_workspace.runner,
+                workspace=harness_workspace,
+                type="stop_workspace",
+                status="failed",
+            )
+        }
+    admission = WorkspaceAdmissionService()
+    assert admission.interaction_target(harness_workspace.id).runner.sid
+    Workspace.objects.filter(id=harness_workspace.id).update(**fence)
+    with pytest.raises(ConflictError):
+        admission.ensure_interactions_available(harness_workspace.id)
+    with pytest.raises(ConflictError):
+        admission.interaction_target(harness_workspace.id)
+    target = admission.interaction_target(harness_workspace.id, fenced=False)
+    assert target.runner_id == harness_workspace.runner_id
+
+
+@pytest.mark.django_db
+def test_interaction_target_is_none_for_missing_workspace():
+    import uuid
+
+    from apps.runners.services.workspace_admission import WorkspaceAdmissionService
+
+    assert WorkspaceAdmissionService().interaction_target(uuid.uuid4()) is None
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_pending_question_cannot_resume_during_capture(harness_workspace):
     from apps.harness.repositories import QuestionRequestRepository

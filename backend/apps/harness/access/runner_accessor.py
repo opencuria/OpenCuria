@@ -1845,42 +1845,40 @@ async def create_harness_accessor(
         WorkspaceNotFoundError,
     )
 
-    admission = WorkspaceAdmissionService()
+    workspace_uuid = _uuid.UUID(workspace_id)
+    # Each call re-reads the live runner session and the interaction fence in
+    # one query: SIDs rotate on reconnect and lifecycle fences start at any time.
+    interaction_target = sync_to_async(WorkspaceAdmissionService().interaction_target)
 
-    _service_workspace_lookup = service.runner_lifecycle.get_workspace_or_none
-
-    workspace = await sync_to_async(_service_workspace_lookup)(
-        _uuid.UUID(workspace_id)
-    )
+    workspace = await interaction_target(workspace_uuid, fenced=not allow_lease_cleanup)
     if workspace is None:
         raise WorkspaceNotFoundError(workspace_id)
-    if not allow_lease_cleanup:
-        await sync_to_async(admission.ensure_interactions_available)(workspace.id)
     runner = workspace.runner
     if not runner.is_online or not runner.sid:
         raise RunnerOfflineError(str(runner.id))
 
-    async def _emit(event: str, payload: dict[str, Any]) -> None:
-        """Emit *event* to the workspace's current runner SID."""
-        current = await sync_to_async(_service_workspace_lookup)(
-            _uuid.UUID(workspace_id)
-        )
+    async def _live_runner(event: str, *, fenced: bool = True) -> Any:
+        """Return the workspace's current online runner for one call."""
+        current = await interaction_target(workspace_uuid, fenced=fenced)
         if current is None:
             raise RunnerAccessorError(
                 f"{event} failed: workspace {workspace_id} not found"
             )
-        cleanup_release = (
-            allow_lease_cleanup
-            and event == "harness:desktop_action"
-            and payload.get("action") == "release"
-        )
-        if not cleanup_release:
-            await sync_to_async(admission.ensure_interactions_available)(current.id)
         live_runner = current.runner
         if not live_runner.is_online or not live_runner.sid:
             raise RunnerAccessorError(
                 f"{event} failed: runner {live_runner.id} is offline"
             )
+        return live_runner
+
+    async def _emit(event: str, payload: dict[str, Any]) -> None:
+        """Emit *event* to the workspace's current runner SID."""
+        cleanup_release = (
+            allow_lease_cleanup
+            and event == "harness:desktop_action"
+            and payload.get("action") == "release"
+        )
+        live_runner = await _live_runner(event, fenced=not cleanup_release)
         try:
             await service.runner_transport.emit_harness_event(
                 live_runner, event, payload
@@ -1895,31 +1893,16 @@ async def create_harness_accessor(
 
     async def _desktop_geometry() -> tuple[int, int]:
         """Return the workspace's configured desktop framebuffer size."""
-        current = await sync_to_async(_service_workspace_lookup)(
-            _uuid.UUID(workspace_id)
-        )
+        current = await interaction_target(workspace_uuid)
         if current is None:
             return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
-        await sync_to_async(admission.ensure_interactions_available)(current.id)
         return int(current.desktop_width), int(current.desktop_height)
 
     async def _call(
         event: str, payload: dict[str, Any], timeout: float | None = None
     ) -> dict[str, Any]:
         """ACKed call to the workspace's current runner (stream control)."""
-        current = await sync_to_async(_service_workspace_lookup)(
-            _uuid.UUID(workspace_id)
-        )
-        if current is None:
-            raise RunnerAccessorError(
-                f"{event} failed: workspace {workspace_id} not found"
-            )
-        await sync_to_async(admission.ensure_interactions_available)(current.id)
-        live_runner = current.runner
-        if not live_runner.is_online or not live_runner.sid:
-            raise RunnerAccessorError(
-                f"{event} failed: runner {live_runner.id} is offline"
-            )
+        live_runner = await _live_runner(event)
         try:
             return await service.stream_transport.call_stream_event(
                 live_runner,

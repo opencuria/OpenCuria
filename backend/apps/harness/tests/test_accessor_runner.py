@@ -274,15 +274,14 @@ class _RecordingRunnerService:
     """Minimal runner service for create_harness_accessor tests."""
 
     def __init__(self) -> None:
-        from apps.runners.repositories import WorkspaceRepository
-
-        self.workspaces = WorkspaceRepository
-        self.runner_lifecycle = self
         self.runner_transport = self
+        self.stream_transport = self
         self.emitted: list[tuple[str, str, dict]] = []
+        self.called: list[tuple[str, str, dict]] = []
 
-    def get_workspace_or_none(self, workspace_id):  # type: ignore[no-untyped-def]
-        return self.workspaces.get_by_id(workspace_id)
+    async def call_stream_event(self, runner, event, payload, timeout=None) -> dict:  # type: ignore[no-untyped-def]
+        self.called.append((str(runner.sid), event, payload))
+        return {"ok": True}
 
     async def emit_harness_event(self, runner, event, payload) -> None:  # type: ignore[no-untyped-def]
         self.emitted.append((str(runner.sid), event, payload))
@@ -395,6 +394,103 @@ async def test_emit_fails_when_runner_goes_offline_mid_run(harness_workspace) ->
     runner.save(update_fields=["status", "sid"])
     with pytest.raises(RunnerAccessorError, match="offline"):
         await accessor.list_dir("/workspace")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_factory_stream_calls_use_live_runner_and_fence(
+    harness_workspace,
+) -> None:
+    """ACKed stream control re-reads the runner SID and the interaction fence."""
+    from apps.runners.models import Workspace
+    from common.exceptions import ConflictError
+
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    stream = await accessor.open_process(["cat"])
+    runner = harness_workspace.runner
+    runner.sid = "rotated-sid"
+    runner.save(update_fields=["sid"])
+    await stream.send(b"ping\n")
+    assert service.called[-1][:2] == ("rotated-sid", "workspace:stream_input")
+    Workspace.objects.filter(id=harness_workspace.id).update(
+        active_operation="capturing_image"
+    )
+    calls = len(service.called)
+    with pytest.raises(ConflictError):
+        await stream.send(b"ping\n")
+    assert len(service.called) == calls
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_factory_desktop_hold_uses_configured_geometry_and_fence(
+    harness_workspace,
+) -> None:
+    """Desktop holds carry the persisted framebuffer size behind the fence."""
+    from apps.runners.models import Workspace
+    from common.exceptions import ConflictError
+
+    Workspace.objects.filter(id=harness_workspace.id).update(
+        desktop_width=1600, desktop_height=900
+    )
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    await accessor.desktop_action("hold", {"lease_id": "viewer"})
+    args = service.emitted[-1][2]["args"]
+    assert (args["desktop_width"], args["desktop_height"]) == (1600, 900)
+    Workspace.objects.filter(id=harness_workspace.id).update(
+        active_operation="capturing_image"
+    )
+    with pytest.raises(ConflictError):
+        await accessor.desktop_action("hold", {"lease_id": "viewer"})
+    assert len(service.emitted) == 1
+
+
+def _attach_credentials(workspace, count: int = 2) -> None:
+    """Attach ordinary credentials, as most workspaces carry a few."""
+    from apps.credentials.enums import CredentialType
+    from apps.credentials.models import Credential, CredentialService
+    from common.utils import encrypt_value
+
+    for index in range(count):
+        credential_service = CredentialService.objects.create(
+            name=f"Token {index}",
+            slug=f"token-{uuid.uuid4().hex[:8]}",
+            credential_type=CredentialType.ENV,
+            env_var_name=f"TOKEN_{index}",
+        )
+        workspace.credentials.add(
+            Credential.objects.create(
+                user=workspace.created_by,
+                service=credential_service,
+                name=f"Token {index}",
+                encrypted_value=encrypt_value("secret"),
+                created_by=workspace.created_by,
+            )
+        )
+
+
+@pytest.mark.django_db
+def test_runner_calls_read_workspace_and_runner_once(
+    harness_workspace, django_assert_num_queries
+) -> None:
+    """Routing a call reads one row pair, not the workspace's related graph."""
+    from asgiref.sync import async_to_sync
+
+    _attach_credentials(harness_workspace)
+    service = _RecordingRunnerService()
+    with django_assert_num_queries(1):
+        accessor = async_to_sync(create_harness_accessor)(
+            service, str(harness_workspace.id)
+        )
+    with django_assert_num_queries(1):
+        async_to_sync(accessor.list_dir)("/workspace")
+    stream = async_to_sync(accessor.open_process)(["cat"])
+    with django_assert_num_queries(1):
+        async_to_sync(stream.send)(b"ping\n")
+    async_to_sync(stream.aclose)()
+    # Geometry and the emit each re-check the fence at their own moment.
+    with django_assert_num_queries(2):
+        async_to_sync(accessor.desktop_action)("hold", {"lease_id": "viewer"})
 
 
 async def test_cancelled_wait_still_emits_cancel() -> None:
