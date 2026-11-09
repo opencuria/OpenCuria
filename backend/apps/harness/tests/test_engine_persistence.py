@@ -23,15 +23,23 @@ from common.utils import decrypt_value
 def test_claude_catalog_is_separate_and_constrained() -> None:
     models = list_claude_models()
     assert ENGINE_IDS == ("native", "claude", "codex")
-    assert {model.id for model in models} == {"sonnet", "opus", "haiku"}
+    assert {model.id for model in models} == {"sonnet", "opus", "fable", "haiku"}
     assert all(model.provider == "claude" for model in models)
     assert all(model.supports_tools for model in models)
     assert all(model.context_length == 1_000_000 for model in models)
-    assert all(model.max_output_tokens == 128_000 for model in models)
+    assert {model.id: model.max_output_tokens for model in models} == {
+        "sonnet": 128_000,
+        "opus": 128_000,
+        "fable": 64_000,
+        "haiku": 128_000,
+    }
     assert CLAUDE_AGENT_SDK_VERSION == "0.2.176"
     assert CLAUDE_CODE_CLI_VERSION == "2.1.316"
     assert normalize_claude_model(" Opus ") == "opus"
+    assert normalize_claude_model(" Fable ") == "fable"
     assert resolve_claude_sdk_model("sonnet") == "sonnet"
+    assert resolve_claude_sdk_model("fable") == "fable"
+    assert resolve_claude_sdk_model("claude-fable-5-1") == "claude-fable-5-1"
     assert resolve_claude_sdk_model("claude-haiku-5-5") == "claude-haiku-5-5"
     assert resolve_claude_sdk_model("claude-opus-4-6-20250514") == (
         "claude-opus-4-6-20250514"

@@ -24,10 +24,11 @@ CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max", CLAUDE_ULTRACODE_EFFO
 CLAUDE_MODEL_ALIASES: dict[str, str] = {
     "sonnet": "sonnet",
     "opus": "opus",
+    "fable": "fable",
     "haiku": "haiku",
 }
 _CLAUDE_MODEL_PATTERN = re.compile(
-    r"^claude-(?:sonnet|opus|haiku)-\d+(?:-\d+)*(?:-\d{8})?$"
+    r"^claude-(?:sonnet|opus|fable|haiku)-\d+(?:-\d+)*(?:-\d{8})?$"
 )
 
 
@@ -57,9 +58,12 @@ class ClaudeModelSpec:
 
 # First-party defaults for the aliases resolved by the pinned CLI. Haiku joined
 # Sonnet/Opus on 5.5 with a 1M window in CLI 2.1.293; 200K/64K is now stale.
+# The ``fable`` alias resolves to Fable 5.1 in CLI 2.1.316; its default output
+# cap is 64K (128K only when raised via CLAUDE_CODE_MAX_OUTPUT_TOKENS).
 CLAUDE_MODELS: tuple[ClaudeModelSpec, ...] = (
     ClaudeModelSpec("sonnet", "Claude Sonnet", "sonnet", 1_000_000, 128_000),
     ClaudeModelSpec("opus", "Claude Opus", "opus", 1_000_000, 128_000),
+    ClaudeModelSpec("fable", "Claude Fable", "fable", 1_000_000, 64_000),
     ClaudeModelSpec("haiku", "Claude Haiku", "haiku", 1_000_000, 128_000),
 )
 

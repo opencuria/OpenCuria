@@ -102,7 +102,12 @@ def test_engine_availability_follows_provider_account_selection(
 
     models = read.get("/api/v1/harness/engines/claude/models/")
     assert models.status_code == 200
-    assert {item["id"] for item in models.json()} == {"sonnet", "opus", "haiku"}
+    assert {item["id"] for item in models.json()} == {
+        "sonnet",
+        "opus",
+        "fable",
+        "haiku",
+    }
     assert all(item["provider"] == "claude" for item in models.json())
 
 
