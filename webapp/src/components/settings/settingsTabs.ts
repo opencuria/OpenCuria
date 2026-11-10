@@ -3,6 +3,8 @@
 /** Window event that opens Settings with context IDs (never a workspace form payload). */
 export const OPEN_SETTINGS_EVENT = 'opencuria:open-settings'
 export const CLOSE_SETTINGS_EVENT = 'opencuria:close-settings'
+/** Window event fired after the sheet closed, so views can reload what Settings may change. */
+export const SETTINGS_CLOSED_EVENT = 'opencuria:settings-closed'
 
 /** Query param on `/` that opens the sheet via deep-link (`/?settings=<tab>`). */
 export const SETTINGS_QUERY_PARAM = 'settings'

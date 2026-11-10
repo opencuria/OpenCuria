@@ -17,6 +17,8 @@ export const useRunnerStore = defineStore('runners', () => {
   // --- State ---
   const runners = ref<Runner[]>([])
   const loading = ref(false)
+  /** True once a list request settled; later refreshes keep the current list on screen. */
+  const loaded = ref(false)
   const error = ref<string | null>(null)
 
   // --- Getters ---
@@ -36,13 +38,15 @@ export const useRunnerStore = defineStore('runners', () => {
 
   async function fetchRunners(): Promise<void> {
     loading.value = true
-    error.value = null
     try {
       runners.value = await runnersApi.listRunners()
+      // Cleared only on success so a failing background refresh does not blink.
+      error.value = null
     } catch (e: unknown) {
       error.value = e instanceof Error ? e.message : 'Failed to load runners'
     } finally {
       loading.value = false
+      loaded.value = true
     }
   }
 
@@ -89,6 +93,7 @@ export const useRunnerStore = defineStore('runners', () => {
     // State
     runners,
     loading,
+    loaded,
     error,
     // Getters
     onlineRunners,

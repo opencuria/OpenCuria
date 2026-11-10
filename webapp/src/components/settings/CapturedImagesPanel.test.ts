@@ -66,6 +66,7 @@ const image: CapturedImage = {
 const imageStore = {
   capturedImages: [image],
   loading: false,
+  capturedImagesLoaded: true,
   error: null,
   fetchCapturedImages,
   renameCapturedImage,
@@ -107,6 +108,19 @@ describe('CapturedImagesPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     imageStore.capturedImages = [image]
+    imageStore.loading = false
+    imageStore.capturedImagesLoaded = true
+  })
+
+  it('keeps the empty state on screen while a poll refreshes an empty list', () => {
+    imageStore.capturedImages = []
+    imageStore.loading = true
+    const wrapper = mountPanel()
+    try {
+      expect(wrapper.text()).toContain('No captured images yet')
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('shows a capture in progress without offering a workspace before a ready version exists', () => {

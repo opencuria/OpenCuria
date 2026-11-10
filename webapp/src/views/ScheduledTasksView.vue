@@ -152,6 +152,10 @@ const rangeLabel = computed(() =>
 const showsToday = computed(() => gridDays.value.some((day) => isSameDay(day, today.value)))
 const narrowWeekday = new Intl.DateTimeFormat(undefined, { weekday: 'narrow', timeZone: 'UTC' })
 
+const showIntro = computed(
+  () => taskStore.loaded && !taskStore.tasks.length && !taskStore.loadError,
+)
+
 const selectedTask = computed(() =>
   selection.value ? (tasksById.value.get(selection.value.block.taskId) ?? null) : null,
 )
@@ -356,7 +360,7 @@ onMounted(async () => {
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto">
           <div
-            v-if="taskStore.loading && !taskStore.tasks.length"
+            v-if="!taskStore.loaded && !taskStore.tasks.length"
             class="space-y-2 p-4"
             aria-label="Loading scheduled tasks"
           >
@@ -376,6 +380,12 @@ onMounted(async () => {
               ><RefreshCw />Retry</Button
             >
           </div>
+          <EmptyState
+            v-else-if="!taskStore.tasks.length"
+            :icon="CalendarClock"
+            title="No tasks yet"
+            description="Tasks you schedule are listed here."
+          />
           <EmptyState
             v-else-if="!railTasks.length"
             :icon="CalendarClock"
@@ -505,19 +515,47 @@ onMounted(async () => {
           </button>
         </div>
 
-        <ScheduleWeekGrid
-          :days="gridDays"
-          :blocks="gridBlocks"
-          :tasks="tasksById"
-          :colors="colors"
-          :now="now"
-          :zone="zone"
-          :focus-task-id="focusTaskId"
-          :movable-task-ids="movableTaskIds"
-          @create="createAt"
-          @select="selectBlock"
-          @move="moveBlock"
-        />
+        <div class="relative flex min-h-0 flex-1 flex-col">
+          <ScheduleWeekGrid
+            :days="gridDays"
+            :blocks="gridBlocks"
+            :tasks="tasksById"
+            :colors="colors"
+            :now="now"
+            :zone="zone"
+            :focus-task-id="focusTaskId"
+            :movable-task-ids="movableTaskIds"
+            @create="createAt"
+            @select="selectBlock"
+            @move="moveBlock"
+          />
+          <!-- First use: explain the calendar without blocking clicks on free slots. -->
+          <div
+            v-if="showIntro"
+            class="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-4"
+          >
+            <div
+              class="pointer-events-auto w-full max-w-sm rounded-xl border border-border bg-card shadow-[0_2px_4px_rgb(0_0_0/0.04),0_16px_40px_-12px_rgb(0_0_0/0.18)]"
+              data-testid="schedule-intro"
+            >
+              <EmptyState
+                :icon="CalendarClock"
+                title="Put an agent on a schedule"
+                description="Each run starts a new chat in the workspace you pick, for daily reports, dependency checks or weekly cleanups."
+                class="py-8"
+              >
+                <template #action>
+                  <Button size="sm" data-testid="schedule-intro-new" @click="openNew()"
+                    ><Plus />New task</Button
+                  >
+                  <p class="mt-1 basis-full text-xs text-muted-foreground">
+                    Or pick a free slot in the calendar.
+                  </p>
+                </template>
+              </EmptyState>
+            </div>
+          </div>
+        </div>
       </section>
     </div>
 

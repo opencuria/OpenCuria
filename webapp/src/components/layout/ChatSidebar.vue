@@ -3,7 +3,7 @@
  * ChatSidebar — chat-first navigation: brand, new chat, command palette,
  * inbox, workspace-grouped conversations, scheduled tasks, account.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CalendarClock as CalendarClockIcon, Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
@@ -54,6 +54,11 @@ import {
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { HarnessConversation } from '@opencuria/chat-core/harness'
 
+// Mounted on first use: the dialog loads runners and images when it mounts.
+const CreateWorkspaceDialog = defineAsyncComponent(
+  () => import('@/components/workspaces/CreateWorkspaceDialog.vue'),
+)
+
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -65,6 +70,8 @@ const harnessStore = useHarnessStore()
 const { isMobile, setOpenMobile } = useSidebar()
 
 const searchOpen = ref(false)
+const createWorkspaceOpen = ref(false)
+const createWorkspaceMounted = ref(false)
 const visibleConversationCounts = ref<Record<string, number>>({})
 const deleteTarget = ref<HarnessConversation | null>(null)
 const { collapsedWorkspaceIds, setCollapsed } = useSidebarWorkspaceCollapse(() =>
@@ -130,6 +137,22 @@ function handleOpenWorkspaces(): void {
 function handleOpenScheduledTasks(): void {
   closeMobileSidebar()
   void router.push('/scheduled-tasks')
+}
+
+/** Let the mobile drawer finish closing so the dialog owns focus. */
+async function handleNewWorkspace(): Promise<void> {
+  if (isMobile.value) {
+    setOpenMobile(false)
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    )
+  }
+  createWorkspaceMounted.value = true
+  createWorkspaceOpen.value = true
+}
+
+function handleCreatedWorkspace(workspaceId: string | null): void {
+  if (workspaceId) handleOpenWorkspace(workspaceId)
 }
 
 function handleMarkAllRead(): void {
@@ -406,6 +429,7 @@ watch(
           :workspaces="workspaceStore.workspaces"
           :conversations="conversationStore.conversations"
           :total-count="workspaceTotal"
+          :loading="!workspaceStore.loaded"
           :active-session-id="activeSessionId"
           :active-workspace-id="activeWorkspaceId"
           @select="handleSelectConversation"
@@ -417,6 +441,7 @@ watch(
           @open="handleOpenWorkspace"
           @open-all="handleOpenWorkspaces"
           @create="handleOpenWorkspaces"
+          @new-workspace="handleNewWorkspace"
         />
 
         <ScheduledTasksSection :tasks="scheduledTasks" @open-all="handleOpenScheduledTasks" />
@@ -432,6 +457,14 @@ watch(
   </Sidebar>
 
   <CommandPalette v-model:open="searchOpen" />
+
+  <CreateWorkspaceDialog
+    v-if="createWorkspaceMounted"
+    v-model:open="createWorkspaceOpen"
+    @created="handleCreatedWorkspace"
+  >
+    <span class="hidden" aria-hidden="true" />
+  </CreateWorkspaceDialog>
 
   <Dialog
     :open="deleteTarget !== null"

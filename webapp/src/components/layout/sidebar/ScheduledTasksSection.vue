@@ -11,6 +11,7 @@ import {
   scheduleStateLabel,
 } from '@opencuria/chat-core/scheduledTasks'
 import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
+import SidebarPlaceholderRow from './SidebarPlaceholderRow.vue'
 
 const props = defineProps<{ tasks: ScheduledTask[] }>()
 const emit = defineEmits<{ 'open-all': [] }>()
@@ -66,8 +67,9 @@ function cadence(task: ScheduledTask): string {
         <Plus />
       </Button>
     </div>
+    <!-- Only the first load shows a skeleton; polls refresh in place. -->
     <div
-      v-if="tasksStore.loading && !tasks.length"
+      v-if="!tasksStore.loaded && !tasks.length"
       class="space-y-1 px-2 py-1"
       aria-label="Loading scheduled tasks"
       data-testid="scheduled-tasks-loading"
@@ -108,11 +110,20 @@ function cadence(task: ScheduledTask): string {
         />
       </button>
     </div>
+    <SidebarPlaceholderRow
+      v-else-if="!tasks.length && !tasksStore.loadError"
+      :icon="CalendarClock"
+      title="Schedule a task"
+      description="Run agents on a schedule."
+      data-testid="scheduled-tasks-empty"
+      @click="openNew"
+    />
     <p
-      v-else-if="!tasksStore.loading && !tasksStore.loadError"
+      v-else-if="!tasksStore.loadError"
       class="px-2 py-1 text-[11px] text-muted-foreground"
+      data-testid="scheduled-tasks-none-upcoming"
     >
-      No scheduled tasks
+      No upcoming runs
     </p>
     <div v-if="tasksStore.loadError" class="flex items-center justify-between gap-2 px-2 py-1">
       <p class="min-w-0 truncate text-[11px] text-destructive">Couldn’t load tasks</p>

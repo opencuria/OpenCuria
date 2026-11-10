@@ -36,6 +36,7 @@ import { cn } from '@/lib/utils'
 import {
   CLOSE_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
+  SETTINGS_CLOSED_EVENT,
   resolveSettingsTab,
   type SettingsTabId,
 } from './settingsTabs'
@@ -150,6 +151,7 @@ watch(open, (isOpen) => {
     selectedRunnerActivity.value = false
     detailTab.value = null
     settingsContext.value = { version: settingsContext.value.version + 1 }
+    window.dispatchEvent(new Event(SETTINGS_CLOSED_EVENT))
   }
 })
 

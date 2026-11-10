@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** Shared workspace navigation and chat history, online first. */
 import { computed } from 'vue'
-import { CheckCheck, MessageSquare, Plus } from '@lucide/vue'
+import { CheckCheck, Container, PowerOff, Plus } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
@@ -11,6 +11,7 @@ import {
 import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import ConversationWorkspaceGroup from './ConversationWorkspaceGroup.vue'
+import SidebarPlaceholderRow from './SidebarPlaceholderRow.vue'
 
 const props = defineProps<{
   workspaces: Workspace[]
@@ -19,12 +20,15 @@ const props = defineProps<{
   activeSessionId: string | null
   activeWorkspaceId: string | null
   collapsedWorkspaceIds?: string[]
+  /** First workspace load still pending; later polls keep the current list. */
+  loading?: boolean
 }>()
 
 const emit = defineEmits<{
   open: [workspaceId: string]
   'open-all': []
   create: []
+  'new-workspace': []
   select: [conversation: HarnessConversation]
   rename: [conversation: HarnessConversation, title: string]
   delete: [conversation: HarnessConversation]
@@ -82,13 +86,30 @@ const hasUnread = computed(() =>
       </Button>
     </div>
 
-    <div
-      v-if="groups.length === 0"
-      class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground"
-    >
-      <MessageSquare class="size-3.5 shrink-0 opacity-60" />
-      <span>No running workspaces</span>
-    </div>
+    <template v-if="groups.length === 0">
+      <div
+        v-if="props.loading"
+        class="space-y-1 py-1"
+        aria-label="Loading workspaces"
+        data-testid="workspaces-loading"
+      >
+        <div class="h-8 animate-pulse rounded-lg bg-muted/60" />
+        <div class="h-8 w-3/4 animate-pulse rounded-lg bg-muted/40" />
+      </div>
+      <SidebarPlaceholderRow
+        v-else-if="props.totalCount === 0"
+        :icon="Container"
+        title="Create a workspace"
+        description="Your chats will appear here."
+        class="mt-1"
+        data-testid="sidebar-create-workspace"
+        @click="emit('new-workspace')"
+      />
+      <div v-else class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
+        <PowerOff class="size-3.5 shrink-0 opacity-60" aria-hidden="true" />
+        <span>No running workspaces</span>
+      </div>
+    </template>
 
     <div class="flex flex-col gap-3 pt-1">
       <ConversationWorkspaceGroup
@@ -111,6 +132,7 @@ const hasUnread = computed(() =>
     </div>
 
     <Button
+      v-if="props.totalCount > 0"
       variant="ghost"
       size="sm"
       data-testid="all-workspaces"

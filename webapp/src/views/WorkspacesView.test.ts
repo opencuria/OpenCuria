@@ -9,6 +9,7 @@ import { WorkspaceStatus, type Runner, type RunnerSystemMetrics, type Workspace 
 const workspaceStore = {
   workspaces: [] as Workspace[],
   loading: false,
+  loaded: true,
   error: null,
   getWorkspaceTransitionLabel: () => null,
 }
@@ -121,6 +122,39 @@ describe('WorkspacesView workspace storage', () => {
     mounted.splice(0).forEach((wrapper) => wrapper.unmount())
     vi.useRealTimers()
     vi.restoreAllMocks()
+    workspaceStore.loading = false
+    workspaceStore.loaded = true
+  })
+
+  it('guides to the first workspace without search controls or a polling spinner', async () => {
+    workspaceStore.workspaces = []
+    workspaceStore.loading = true
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="workspaces-loading"]').exists()).toBe(false)
+    expect(wrapper.find('input').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="workspaces-empty"]').text()).toContain('No workspaces yet')
+    await wrapper.get('[data-testid="workspaces-empty-create"]').trigger('click')
+    expect(wrapper.getComponent({ name: 'CreateWorkspaceDialog' }).props('open')).toBe(true)
+  })
+
+  it('shows a skeleton only until the first workspace list arrives', async () => {
+    workspaceStore.workspaces = []
+    workspaceStore.loaded = false
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="workspaces-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspaces-empty"]').exists()).toBe(false)
+  })
+
+  it('tells a search without matches apart from an empty organization', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('input').setValue('nope')
+    const empty = wrapper.get('[data-testid="workspaces-no-results"]')
+    expect(empty.text()).toContain('Nothing matches “nope”')
+    await empty.get('button').trigger('click')
+    expect(wrapper.findAllComponents(WorkspaceCard)).toHaveLength(3)
   })
 
   it('F080 prioritizes runner offline on cards while an operation is interrupted', async () => {

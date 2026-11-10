@@ -119,6 +119,40 @@ describe('usePolling', () => {
     wrapper.unmount()
   })
 
+  it('refreshes on demand without overlapping a fetch in flight, then keeps the interval', async () => {
+    let resolve!: () => void
+    const fetchFn = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done
+        }),
+    )
+    const { controls, wrapper } = createPoller(fetchFn)
+    controls.refresh()
+    expect(fetchFn).not.toHaveBeenCalled()
+
+    controls.start()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    controls.refresh()
+    controls.refresh()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    resolve()
+    await flushPromises()
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    resolve()
+    await flushPromises()
+
+    controls.refresh()
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    resolve()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(999)
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchFn).toHaveBeenCalledTimes(4)
+    wrapper.unmount()
+  })
+
   it('stops timers and visibility listeners when stopped or unmounted', async () => {
     const fetchFn = vi.fn().mockResolvedValue(undefined)
     const { controls, wrapper } = createPoller(fetchFn)

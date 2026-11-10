@@ -58,7 +58,7 @@ onMounted(() => {
       </template>
 
       <div
-        v-if="runnerStore.loading && !runnerStore.runners.length"
+        v-if="!runnerStore.loaded && !runnerStore.runners.length"
         class="flex justify-center py-12"
       >
         <LoadingSpinner :size="24" />

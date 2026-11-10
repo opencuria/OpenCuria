@@ -10,14 +10,13 @@
  */
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Container, Plus } from '@lucide/vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
 import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
-import { Button } from '@/components/ui/button'
+import WorkspaceSetupCard from '@/components/workspaces/WorkspaceSetupCard.vue'
 import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
 import { buildComposerSheets } from '@opencuria/chat-core/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
@@ -197,6 +196,8 @@ const readyWorkspace = computed(() => {
 })
 
 const hasWorkspaces = computed(() => workspaceStore.workspaces.length > 0)
+/** First-run guide, only once the list is known to be empty (no flash on reload). */
+const showSetup = computed(() => workspaceStore.loaded && !hasWorkspaces.value)
 
 const busyMessage = computed(() => {
   if (!hasWorkspaces.value) return ''
@@ -392,7 +393,12 @@ watch(
             <template v-else>How can I help?</template>
           </h1>
 
-          <div class="mt-4 flex justify-center">
+          <!-- Nothing to pick without workspaces; keep its space during the first load. -->
+          <div
+            v-if="!showSetup"
+            class="mt-4 flex justify-center"
+            :class="{ invisible: !workspaceStore.loaded }"
+          >
             <WorkspacePicker
               :model-value="selectedWorkspaceId"
               @update:model-value="handleSelectionChange"
@@ -400,19 +406,18 @@ watch(
           </div>
         </div>
 
+        <!-- Same footprint as the composer, so its arrival does not shift the page. -->
         <div
-          v-if="!hasWorkspaces"
-          class="mx-auto mt-6 flex max-w-md flex-col items-center gap-3 rounded-lg border border-border bg-card px-6 py-8"
-          data-testid="chat-home-empty"
+          v-if="!workspaceStore.loaded && !hasWorkspaces"
+          class="mt-6 px-3 pt-3 pb-2 sm:px-4 sm:pt-4"
+          aria-label="Loading workspaces"
+          data-testid="chat-home-loading"
         >
-          <Container :size="20" class="text-muted-foreground" aria-hidden="true" />
-          <p class="text-sm text-muted-foreground">
-            No workspace yet. Create a workspace to get started.
-          </p>
-          <Button size="sm" data-testid="chat-home-create" @click="createOpen = true">
-            <Plus :size="14" aria-hidden="true" />
-            Create workspace
-          </Button>
+          <div class="h-[7.5rem] animate-pulse rounded-3xl bg-muted/50" />
+        </div>
+
+        <div v-else-if="showSetup" class="mt-8" data-testid="chat-home-empty">
+          <WorkspaceSetupCard @create="createOpen = true" />
           <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreatedWorkspace">
             <span class="hidden" aria-hidden="true" />
           </CreateWorkspaceDialog>

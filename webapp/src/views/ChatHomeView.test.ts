@@ -21,6 +21,7 @@ const workspaceStore = {
     )
   },
   workspaces: [] as Workspace[],
+  loaded: true,
   activeWorkspace: null as Workspace | null,
   fetchWorkspaces: vi.fn().mockResolvedValue(undefined),
   getWorkspaceTransitionLabel: vi.fn().mockReturnValue(null),
@@ -221,6 +222,7 @@ describe('ChatHomeView', () => {
     vi.clearAllMocks()
     clearComposerTransition()
     workspaceStore.workspaces = [makeWorkspace()]
+    workspaceStore.loaded = true
     workspaceStore.activeWorkspace = null
     harnessStore.activeSessionId = null
     harnessStore.createSession.mockReset()
@@ -405,8 +407,21 @@ describe('ChatHomeView', () => {
     const { wrapper } = await mountHome()
 
     expect(wrapper.find('[data-testid="chat-home-empty"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-setup"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(false)
+    // Nothing to pick yet: the workspace picker stays out of the way.
+    expect(wrapper.findComponent({ name: 'WorkspacePicker' }).exists()).toBe(false)
+  })
+
+  it('does not flash the setup guide before the first workspace load settles', async () => {
+    workspaceStore.workspaces = []
+    workspaceStore.loaded = false
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.find('[data-testid="chat-home-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="chat-home-empty"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(false)
   })
 
   it('renders the mention sheet stack above the home composer', async () => {

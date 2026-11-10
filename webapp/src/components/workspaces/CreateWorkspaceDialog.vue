@@ -36,10 +36,12 @@ import {
   definitionArtifactForRunner,
   fitQemuResources,
   qemuResourceLimits,
-  workspaceImageOptions,
   type WorkspaceImageOption,
 } from '@opencuria/chat-core/workspaceCreation'
-import { X } from '@lucide/vue'
+import { CloudAlert, Layers, Plus, X } from '@lucide/vue'
+import EmptyState from '@/components/common/EmptyState.vue'
+import { OPEN_SETTINGS_EVENT, type SettingsTabId } from '@/components/settings/settingsTabs'
+import { useWorkspaceImageReadiness } from '@/composables/useWorkspaceImageReadiness'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
 
 type SelectableImageOption = WorkspaceImageOption<RunnerImageBuild, ImageArtifact>
@@ -121,14 +123,26 @@ watch(
   { immediate: true },
 )
 
-const groupedImageOptions = computed(() =>
-  workspaceImageOptions<RunnerImageBuild, ImageArtifact>({
-    definitions: imageStore.imageDefinitions,
-    buildsByDefinition: imageStore.runnerBuildsByDefinition,
-    capturedImages: imageStore.capturedImages,
-    runners: runnerStore.runners,
-  }),
+const imageReadiness = useWorkspaceImageReadiness()
+const groupedImageOptions = imageReadiness.imageOptions
+/**
+ * Nothing to start from: explain instead of showing a form that cannot be
+ * submitted. A restored draft keeps its form so the user's input stays visible.
+ */
+const imageUnavailable = computed<'error' | 'empty' | null>(() => {
+  if (!imageReadiness.checked.value || imageReadiness.ready.value || restoringDraftId.value)
+    return null
+  return imageReadiness.error.value ? 'error' : 'empty'
+})
+const imageSetupTab = computed<SettingsTabId>(() =>
+  imageReadiness.onlineRunner.value ? 'image-definitions' : 'runners',
 )
+
+function openImageSetup(): void {
+  const tab = imageSetupTab.value
+  handleClose()
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab } }))
+}
 
 const imageOptions = computed(() => {
   const definitionOptions = groupedImageOptions.value.definitions.map((option) => ({
@@ -228,13 +242,7 @@ onUnmounted(() => {
 })
 
 onMounted(async () => {
-  if (!runnerStore.runners.length) {
-    await runnerStore.fetchRunners()
-  }
-  await Promise.all([
-    imageStore.fetchCapturedImages(),
-    imageStore.fetchImageDefinitionsWithBuilds(),
-  ])
+  await imageReadiness.check()
   if (props.resumeDraftId) {
     await nextTick()
     restorationPending.value = false
@@ -393,6 +401,8 @@ watch(open, (isOpen) => {
     clearTimeout(resetTimer)
     resetTimer = undefined
   }
+  // The dialog stays mounted between uses; runners and images may have changed.
+  if (isOpen) void imageReadiness.check()
 })
 
 async function navigateToCredentials(serviceId?: string, reconnectId?: string): Promise<void> {
@@ -463,7 +473,7 @@ const isValid = computed(
 <template>
   <Dialog :open="open" @update:open="(v) => (v ? (open = true) : handleClose())">
     <DialogTrigger v-if="!hideTrigger" as-child>
-      <slot><Button @click="open = true">Create Workspace</Button></slot>
+      <slot><Button @click="open = true"><Plus />Create workspace</Button></slot>
     </DialogTrigger>
 
     <DialogContent class="sm:max-w-lg">
@@ -475,7 +485,42 @@ const isValid = computed(
       </DialogHeader>
 
       <DialogBody>
-        <form id="create-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+        <EmptyState
+          v-if="imageUnavailable === 'error'"
+          :icon="CloudAlert"
+          title="Couldn’t check available images"
+          :description="imageReadiness.error.value ?? undefined"
+          data-testid="create-workspace-image-error"
+        >
+          <template #action>
+            <Button variant="outline" size="sm" @click="imageReadiness.check()">Try again</Button>
+          </template>
+        </EmptyState>
+        <EmptyState
+          v-else-if="imageUnavailable === 'empty'"
+          :icon="Layers"
+          title="No workspace image yet"
+          :description="
+            authStore.isAdmin
+              ? imageSetupTab === 'runners'
+                ? 'Workspaces start from an image, built on a runner. Connect a runner first.'
+                : 'Workspaces start from an image. Build one on your runner first.'
+              : 'Workspaces start from an image. You can create one as soon as an image is ready.'
+          "
+          data-testid="create-workspace-no-image"
+        >
+          <template v-if="authStore.isAdmin" #action>
+            <Button size="sm" data-testid="create-workspace-image-setup" @click="openImageSetup">
+              {{ imageSetupTab === 'runners' ? 'Open runners' : 'Open image definitions' }}
+            </Button>
+          </template>
+        </EmptyState>
+        <form
+          v-else
+          id="create-workspace-form"
+          class="flex flex-col gap-4"
+          @submit.prevent="handleSubmit"
+        >
           <div class="rounded-md border border-border bg-muted/50 p-1">
             <div class="grid grid-cols-2 gap-1">
               <Button
@@ -524,7 +569,10 @@ const isValid = computed(
                 </template>
               </SelectContent>
             </Select>
-            <p v-if="!selectedImageOption" class="text-xs text-destructive mt-1">
+            <p
+              v-if="imageReadiness.checked.value && !selectedImageOption"
+              class="text-xs text-destructive mt-1"
+            >
               No active organization or captured images are available.
             </p>
           </div>
@@ -694,8 +742,15 @@ const isValid = computed(
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-        <Button type="submit" form="create-workspace-form" :disabled="!isValid || submitting">
+        <Button variant="outline" type="button" @click="handleClose">{{
+          imageUnavailable ? 'Close' : 'Cancel'
+        }}</Button>
+        <Button
+          v-if="!imageUnavailable"
+          type="submit"
+          form="create-workspace-form"
+          :disabled="!isValid || submitting"
+        >
           {{
             submitting
               ? selectedImageOption?.kind === 'captured'

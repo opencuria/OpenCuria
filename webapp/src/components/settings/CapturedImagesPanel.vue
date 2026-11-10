@@ -108,7 +108,10 @@ async function confirmRename(image: CapturedImage): Promise<void> {
         <CreateImageArtifactDialog />
       </template>
 
-      <div v-if="imageStore.loading && !images.length" class="flex justify-center py-12">
+      <div
+        v-if="!imageStore.capturedImagesLoaded && !images.length"
+        class="flex justify-center py-12"
+      >
         <LoadingSpinner :size="24" />
       </div>
 

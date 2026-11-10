@@ -16,6 +16,7 @@ export function usePolling(
   start: () => void
   stop: () => void
   restart: () => void
+  refresh: () => void
 } {
   const isPolling = ref(false)
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -117,6 +118,11 @@ export function usePolling(
     if (isPolling.value) scheduleNext()
   }
 
+  /** Fetch now and restart the interval; queued behind a fetch already in flight. */
+  function refresh(): void {
+    if (isPolling.value) void runFetch()
+  }
+
   watch(
     () => toValue(intervalMs),
     () => {
@@ -129,5 +135,5 @@ export function usePolling(
     stop()
   })
 
-  return { isPolling, start, stop, restart }
+  return { isPolling, start, stop, restart, refresh }
 }

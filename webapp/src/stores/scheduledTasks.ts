@@ -33,6 +33,8 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
   const newTaskPrefill = ref<ScheduledTaskPrefill | null>(null)
   const dialogOpen = ref(false)
   const loading = ref(false)
+  /** True once a list request settled for this organization; polls then refresh silently. */
+  const loaded = ref(false)
   const loadError = ref('')
   const organizationId = ref<string | null>(authStore.activeOrganizationId)
   let generation = 0
@@ -70,6 +72,7 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
       dialogOpen.value = false
       loadError.value = ''
       loading.value = false
+      loaded.value = false
     }
     return generation
   }
@@ -84,7 +87,6 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
     if (force) loadGeneration += 1
     const requestMutationGeneration = mutationGeneration
     loading.value = true
-    loadError.value = ''
     const requestId = ++loadGeneration
     const request = listScheduledTasks()
       .then((result) => {
@@ -94,6 +96,8 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
           requestId !== loadGeneration
         )
           return
+        // Clear a previous error only on success so a failing poll does not blink.
+        loadError.value = ''
         if (requestMutationGeneration === mutationGeneration)
           tasks.value = [...result].sort((a, b) => a.next_run_at.localeCompare(b.next_run_at))
         else {
@@ -112,6 +116,7 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
       .finally(() => {
         if (generation === requestGeneration && requestId === loadGeneration) {
           loading.value = false
+          loaded.value = true
           pendingLoad = null
         }
       })
@@ -182,6 +187,7 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
     newTaskPrefill,
     dialogOpen,
     loading,
+    loaded,
     loadError,
     refresh,
     create,

@@ -20,17 +20,24 @@ export const useImageStore = defineStore('images', () => {
   const imageDefinitions = ref<ImageDefinition[]>([])
   const runnerBuildsByDefinition = ref<Record<string, RunnerImageBuild[]>>({})
   const loading = ref(false)
+  /** True once the captured image list settled; later refreshes keep it on screen. */
+  const capturedImagesLoaded = ref(false)
+  /** Captured image list error (shown by the captured images panel). */
   const error = ref<string | null>(null)
+  /** Image definition or build list error, kept apart from captured images. */
+  const definitionsError = ref<string | null>(null)
 
   async function fetchCapturedImages(): Promise<void> {
     loading.value = true
-    error.value = null
     try {
       capturedImages.value = await workspacesApi.listCapturedImages()
+      // Cleared only on success so a failing background refresh does not blink.
+      error.value = null
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load images'
     } finally {
       loading.value = false
+      capturedImagesLoaded.value = true
     }
   }
 
@@ -65,7 +72,6 @@ export const useImageStore = defineStore('images', () => {
   }
 
   async function fetchImageDefinitionsWithBuilds(): Promise<void> {
-    error.value = null
     try {
       const defs = await workspacesApi.listImageDefinitions()
       imageDefinitions.value = defs
@@ -78,8 +84,9 @@ export const useImageStore = defineStore('images', () => {
       )
 
       runnerBuildsByDefinition.value = Object.fromEntries(pairs)
+      definitionsError.value = null
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to load image definitions'
+      definitionsError.value = e instanceof Error ? e.message : 'Failed to load image definitions'
     }
   }
 
@@ -88,7 +95,9 @@ export const useImageStore = defineStore('images', () => {
     imageDefinitions,
     runnerBuildsByDefinition,
     loading,
+    capturedImagesLoaded,
     error,
+    definitionsError,
     fetchCapturedImages,
     renameCapturedImage,
     createWorkspaceFromCapturedImage,

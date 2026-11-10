@@ -38,6 +38,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   const workspaces = ref<Workspace[]>([])
   const activeWorkspace = ref<WorkspaceDetail | null>(null)
   const loading = ref(false)
+  /** True once the list loaded for the active organization; polls then refresh silently. */
+  const loaded = ref(false)
   const error = ref<string | null>(null)
   const pendingCaptures = ref<
     Record<string, { requesting: boolean; observed: boolean; completed: boolean }>
@@ -282,6 +284,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       workspaceListFlights.clear()
       workspaceListGeneration += 1
       workspaces.value = []
+      loaded.value = false
     }
     let flight = workspaceListFlights.get(key)
     if (!flight) {
@@ -351,6 +354,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         activeListRequestKey === key
       ) {
         loading.value = false
+        loaded.value = true
         activeListRequestKey = null
       }
     }
@@ -789,6 +793,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     workspaces,
     activeWorkspace,
     loading,
+    loaded,
     error,
     pendingWorkspaceOperations,
     pendingCaptures,

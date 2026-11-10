@@ -5,6 +5,7 @@ import RunnersPanel from './RunnersPanel.vue'
 const store = reactive({
   runners: [{ id: 'r', name: 'Selected runner', status: 'online' }],
   loading: false,
+  loaded: true,
   error: null,
 })
 vi.mock('@/stores/runners', () => ({ useRunnerStore: () => store }))
@@ -26,6 +27,20 @@ const stubs = {
 }
 beforeEach(() => {
   store.runners = [{ id: 'r', name: 'Selected runner', status: 'online' }]
+  store.loading = false
+  store.loaded = true
+})
+it('shows a spinner only for the first load, not while a poll refreshes an empty list', async () => {
+  store.runners = []
+  store.loaded = false
+  store.loading = true
+  const w = mount(RunnersPanel, { global: { stubs: { ...stubs, LoadingSpinner: true } } })
+  expect(w.findComponent({ name: 'LoadingSpinner' }).exists()).toBe(true)
+  store.loaded = true
+  await w.vm.$nextTick()
+  expect(w.findComponent({ name: 'LoadingSpinner' }).exists()).toBe(false)
+  expect(w.text()).toContain('Select runner')
+  w.unmount()
 })
 it('opens the requested activity view without resetting it during polling', async () => {
   const w = mount(RunnersPanel, {

@@ -84,6 +84,35 @@ describe('scheduled task store', () => {
     expect(store.loadError).toBe('')
   })
 
+  it('marks the first load and keeps errors visible until a retry succeeds', async () => {
+    let resolveRetry!: (tasks: ScheduledTask[]) => void
+    api.list
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockReturnValueOnce(new Promise((done) => (resolveRetry = done)))
+    const store = useScheduledTaskStore()
+    expect(store.loaded).toBe(false)
+    await expect(store.refresh()).rejects.toThrow('network down')
+    expect(store.loaded).toBe(true)
+    const retry = store.refresh(true)
+    expect(store.loading).toBe(true)
+    expect(store.loadError).toBe('network down')
+    resolveRetry([])
+    await retry
+    expect(store.loadError).toBe('')
+    expect(store.loaded).toBe(true)
+  })
+
+  it('resets the first-load mark when the organization changes', async () => {
+    api.list.mockResolvedValue([task('one')])
+    const store = useScheduledTaskStore()
+    await store.refresh()
+    expect(store.loaded).toBe(true)
+    useAuthStore().activeOrganizationId = 'org-2'
+    await Promise.resolve()
+    expect(store.loaded).toBe(false)
+    expect(store.tasks).toEqual([])
+  })
+
   it('updates its list through create/update/delete mutations', async () => {
     const store = useScheduledTaskStore()
     api.create.mockResolvedValue(task('created'))

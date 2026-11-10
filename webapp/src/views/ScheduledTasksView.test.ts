@@ -102,6 +102,41 @@ afterEach(() => {
 })
 
 describe('ScheduledTasksView', () => {
+  it('introduces the calendar once loaded without tasks and keeps free slots clickable', async () => {
+    api.list.mockResolvedValue([])
+    const { wrapper } = await mountView()
+    const store = useScheduledTaskStore()
+    expect(wrapper.find('[data-testid="schedule-intro"]').exists()).toBe(false)
+    await store.refresh()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="schedule-intro"]').text()).toContain(
+      'Put an agent on a schedule',
+    )
+    expect(wrapper.text()).toContain('No tasks yet')
+    await wrapper.get('[data-testid="schedule-intro-new"]').trigger('click')
+    expect(store.dialogOpen).toBe(true)
+    expect(store.selectedTaskId).toBeNull()
+    store.closeDialog()
+    grid(wrapper).vm.$emit('create', new Date(Date.UTC(2026, 5, 20)), 9 * 60)
+    expect(store.dialogOpen).toBe(true)
+  })
+
+  it('keeps the empty rail in place while a poll refreshes an empty list', async () => {
+    api.list.mockResolvedValue([])
+    const store = useScheduledTaskStore()
+    await store.refresh()
+    const { wrapper } = await mountView()
+    let resolve!: (tasks: ScheduledTask[]) => void
+    api.list.mockReturnValueOnce(new Promise((done) => (resolve = done)))
+    const poll = store.refresh(true)
+    await flushPromises()
+    expect(store.loading).toBe(true)
+    expect(wrapper.find('[aria-label="Loading scheduled tasks"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="schedule-intro"]').exists()).toBe(true)
+    resolve([])
+    await poll
+  })
+
   it('lists tasks by workspace and draws their runs in the week', async () => {
     await useScheduledTaskStore().refresh()
     const { wrapper } = await mountView()

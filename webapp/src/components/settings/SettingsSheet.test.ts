@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import SettingsSheet from './SettingsSheet.vue'
-import { OPEN_SETTINGS_EVENT } from './settingsTabs'
+import { CLOSE_SETTINGS_EVENT, OPEN_SETTINGS_EVENT, SETTINGS_CLOSED_EVENT } from './settingsTabs'
 import * as harnessApi from '@/services/harness.api'
 import * as providerCatalog from '@/lib/providerCatalog'
 
@@ -293,6 +293,19 @@ describe('SettingsSheet', () => {
 
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
     expect(wrapper.text()).toContain('Providers')
+  })
+
+  it('announces closing so views can reload what Settings may have changed', async () => {
+    const closed = vi.fn()
+    window.addEventListener(SETTINGS_CLOSED_EVENT, closed)
+    mountSheet()
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners' } }))
+    await settleAsyncComponents()
+    expect(closed).not.toHaveBeenCalled()
+    window.dispatchEvent(new Event(CLOSE_SETTINGS_EVENT))
+    await flushPromises()
+    expect(closed).toHaveBeenCalledTimes(1)
+    window.removeEventListener(SETTINGS_CLOSED_EVENT, closed)
   })
 
   it('opens admin-only and unknown tabs as the first member tab for non-admins', async () => {

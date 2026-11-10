@@ -1,8 +1,9 @@
 import { nextTick } from 'vue'
-import { shallowMount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount, shallowMount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CreateWorkspaceDialog from './CreateWorkspaceDialog.vue'
+import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
 const routerPush = vi.fn()
@@ -115,8 +116,9 @@ vi.mock('@/stores/workspaces', () => ({
 vi.mock('@/stores/images', () => ({
   useImageStore: () => imageStore,
 }))
+const authStore = { user: { id: 1 }, activeOrganizationId: 'org-1', initialized: true, isAdmin: false }
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => ({ user: { id: 1 }, activeOrganizationId: 'org-1', initialized: true }),
+  useAuthStore: () => authStore,
 }))
 vi.mock('@/stores/notifications', () => ({
   useNotificationStore: () => ({
@@ -263,5 +265,126 @@ describe('CreateWorkspaceDialog', () => {
       imageStore.imageDefinitions = []
       imageStore.runnerBuildsByDefinition = {}
     }
+  })
+})
+
+describe('CreateWorkspaceDialog without a workspace image', () => {
+  const slot = { template: '<div><slot /></div>' }
+  const stubs = {
+    Dialog: slot,
+    DialogTrigger: slot,
+    DialogContent: slot,
+    DialogHeader: slot,
+    DialogTitle: slot,
+    DialogDescription: slot,
+    DialogBody: slot,
+    DialogFooter: slot,
+    WorkspacePluginCredentialSelection: true,
+    Select: slot,
+    SelectTrigger: slot,
+    SelectValue: slot,
+    SelectContent: slot,
+    SelectItem: slot,
+    SelectLabel: slot,
+  }
+  const capturedImages = imageStore.capturedImages
+  const runner = runnerStore.runners[0]!
+
+  async function openDialog(props: Record<string, unknown> = {}) {
+    const wrapper = mount(CreateWorkspaceDialog, { props: { hideTrigger: true, ...props }, global: { stubs } })
+    await flushPromises()
+    ;(wrapper.vm as typeof wrapper.vm & { open: boolean }).open = true
+    await flushPromises()
+    return wrapper
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    imageStore.capturedImages = []
+    imageStore.imageDefinitions = []
+    imageStore.runnerBuildsByDefinition = {}
+    authStore.isAdmin = false
+  })
+
+  afterEach(() => {
+    imageStore.capturedImages = capturedImages
+    Object.assign(imageStore, { definitionsError: null })
+    runner.status = 'online'
+    authStore.isAdmin = false
+  })
+
+  it('explains the wait to members instead of showing a form that cannot be sent', async () => {
+    const wrapper = await openDialog()
+    const notice = wrapper.get('[data-testid="create-workspace-no-image"]')
+    expect(notice.text()).toContain('as soon as an image is ready')
+    expect(notice.text()).not.toMatch(/runner|admin|settings/i)
+    expect(wrapper.find('[data-testid="create-workspace-image-setup"]').exists()).toBe(false)
+    expect(wrapper.find('#create-workspace-form').exists()).toBe(false)
+    expect(wrapper.find('button[type="submit"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Close')
+  })
+
+  it.each([
+    ['online', 'image-definitions', 'Open image definitions'],
+    ['offline', 'runners', 'Open runners'],
+  ])('sends admins with a %s runner to %s', async (status, tab, label) => {
+    authStore.isAdmin = true
+    runner.status = status
+    const listener = vi.fn()
+    window.addEventListener(OPEN_SETTINGS_EVENT, listener)
+    const wrapper = await openDialog()
+    const action = wrapper.get('[data-testid="create-workspace-image-setup"]')
+    expect(action.text()).toBe(label)
+    await action.trigger('click')
+    expect((listener.mock.calls[0]![0] as CustomEvent).detail).toEqual({ tab })
+    expect((wrapper.vm as typeof wrapper.vm & { open: boolean }).open).toBe(false)
+    window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
+  })
+
+  it('offers a retry instead of claiming nothing exists when the check failed', async () => {
+    Object.assign(imageStore, { definitionsError: 'Failed to load image definitions' })
+    const wrapper = await openDialog()
+    const error = wrapper.get('[data-testid="create-workspace-image-error"]')
+    expect(error.text()).toContain('Failed to load image definitions')
+    expect(wrapper.find('[data-testid="create-workspace-no-image"]').exists()).toBe(false)
+    const calls = fetchImageDefinitionsWithBuilds.mock.calls.length
+    await error.get('button').trigger('click')
+    expect(fetchImageDefinitionsWithBuilds).toHaveBeenCalledTimes(calls + 1)
+  })
+
+  it('re-checks runners and images every time it opens', async () => {
+    imageStore.capturedImages = capturedImages
+    const wrapper = await openDialog()
+    expect(fetchRunners).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('#create-workspace-form').exists()).toBe(true)
+    const vm = wrapper.vm as typeof wrapper.vm & { open: boolean }
+    vm.open = false
+    await flushPromises()
+    vm.open = true
+    await flushPromises()
+    expect(fetchRunners).toHaveBeenCalledTimes(3)
+    expect(fetchCapturedImages).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps a restored draft visible even when no image is ready', async () => {
+    const saved = saveWorkspaceDraft(
+      {
+        mode: 'create',
+        name: 'Draft without image',
+        credentialIds: [],
+        pluginIds: [],
+        repos: [],
+        imageValue: 'captured:captured-image-1',
+      },
+      { userId: 1, organizationId: 'org-1' },
+      '/workspaces',
+    )
+    const wrapper = mount(CreateWorkspaceDialog, {
+      props: { resumeDraftId: saved.id, hideTrigger: true },
+      global: { stubs },
+    })
+    await flushPromises()
+    expect(wrapper.find('#create-workspace-form').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="create-workspace-no-image"]').exists()).toBe(false)
   })
 })

@@ -268,6 +268,20 @@ describe('ConversationWorkspaceList', () => {
     expect(wrapper.find('[data-testid="mark-all-read"]').exists()).toBe(false)
   })
 
+  it('offers a create placeholder instead of navigation when no workspace exists', async () => {
+    const wrapper = mountList({ workspaces: [], conversations: [], totalCount: 0 })
+    expect(wrapper.find('[data-testid="all-workspaces"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('No running workspaces')
+    await wrapper.get('[data-testid="sidebar-create-workspace"]').trigger('click')
+    expect(wrapper.emitted('new-workspace')).toHaveLength(1)
+  })
+
+  it('shows a skeleton instead of the empty placeholder during the first load', () => {
+    const wrapper = mountList({ workspaces: [], conversations: [], totalCount: 0, loading: true })
+    expect(wrapper.find('[data-testid="workspaces-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="sidebar-create-workspace"]').exists()).toBe(false)
+  })
+
   it('does not show history without a known running workspace', () => {
     const wrapper = mountList({
       workspaces: [],
