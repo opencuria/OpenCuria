@@ -4,87 +4,21 @@ from __future__ import annotations
 
 import os
 
-from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.credentials.models import CredentialService
-from apps.credentials.services import OrgCredentialServiceActivationSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
-from apps.runners.models import ImageBuildJob, ImageDefinition, Runner
-from apps.runners.services import RunnerService
+from apps.runners.models import Runner
 from common.utils import hash_token
-
-# Default packages installed in the workspace image.
-DEFAULT_WORKSPACE_PACKAGES = [
-    "curl",
-    "wget",
-    "git",
-    "openssh-client",
-    "build-essential",
-    "ca-certificates",
-    "gnupg",
-    "lsb-release",
-    "software-properties-common",
-    "python3",
-    "python3-pip",
-    "python3-venv",
-    "vim",
-    "nano",
-    "jq",
-    "zip",
-    "unzip",
-]
-
-DEFAULT_WORKSPACE_INIT_SCRIPT = r"""#!/bin/bash
-set -euo pipefail
-# Node.js 22.x
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
-# GitHub CLI
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-    && apt-get update && apt-get install -y gh \
-    && rm -rf /var/lib/apt/lists/*
-
-mkdir -p /workspace
-
-# Default agent instruction files
-printf '%s\n' \
-      '# Agent Environment & Operating Protocol' \
-      '' \
-      'You are operating within a **dedicated, isolated Virtual Machine (VM)**.' \
-      'You have **full administrative access** to this system.' \
-      '' \
-      '## The AGENTS.md Protocol' \
-      '1. **Read on Startup:** Always check this file first.' \
-      '2. **Self-Modification:** You may edit this file.' \
-    > /workspace/AGENTS.md \
-  && printf '%s\n' \
-      '# Critical Instructions for Claude / AI Agent' \
-      '' \
-      '## Mandatory Initialization' \
-      'Before performing any task, read the AGENTS.md file in the root directory.' \
-    > /workspace/CLAUDE.md
-
-"""
-
-# Default environment variables baked into the workspace image.
-_DEFAULT_ENV_VARS = {"PATH": "/root/.local/bin:$" + "{PATH}"}
 
 
 class Command(BaseCommand):
     """Create the minimum data required for a local docker compose stack."""
 
     help = (
-        "Ensure that a local admin user, organization, runner, and default "
-        "workspace image definition exist for the all-in-one compose stack."
+        "Ensure that a local admin user, organization and runner exist for the "
+        "all-in-one compose stack."
     )
 
     def add_arguments(self, parser) -> None:
@@ -116,14 +50,6 @@ class Command(BaseCommand):
             default=os.getenv("LOCAL_RUNNER_API_TOKEN", ""),
             help="Plaintext runner token used by the local runner container.",
         )
-        parser.add_argument(
-            "--image-definition-name",
-            default=os.getenv(
-                "LOCAL_IMAGE_DEFINITION_NAME",
-                "Local Workspace",
-            ),
-            help="Display name of the seeded default image definition.",
-        )
 
     def handle(self, *args, **options) -> None:
         runner_token = options["runner_token"].strip()
@@ -138,24 +64,16 @@ class Command(BaseCommand):
             name=options["organization_name"].strip(),
             user=user,
         )
-        self._ensure_credential_services()
         runner = self._ensure_runner(
             organization=org,
             name=options["runner_name"].strip(),
             runner_token=runner_token,
         )
-        build = self._ensure_pending_image_build(
-            organization=org,
-            user=user,
-            runner=runner,
-            definition_name=options["image_definition_name"].strip(),
-        )
 
         self.stdout.write(
             self.style.SUCCESS(
                 "Local deployment bootstrap complete: "
-                f"admin={user.email}, org={org.slug}, runner={runner.name}, "
-                f"image_build={build.id} (status={build.status})"
+                f"admin={user.email}, org={org.slug}, runner={runner.name}"
             )
         )
 
@@ -203,20 +121,7 @@ class Command(BaseCommand):
             user=user,
             organization=org,
         ).exclude(role=MembershipRole.ADMIN).update(role=MembershipRole.ADMIN)
-        OrgCredentialServiceActivationSvc().activate_global_services(org.id)
         return org
-
-    def _ensure_credential_services(self) -> None:
-        CredentialService.objects.get_or_create(
-            slug="github-token",
-            organization=None,
-            defaults={
-                "name": "GitHub Token",
-                "credential_type": "env",
-                "env_var_name": "GITHUB_TOKEN",
-                "label": "GitHub PAT",
-            },
-        )
 
     def _ensure_runner(self, *, organization, name: str, runner_token: str) -> Runner:
         runner, _ = Runner.objects.get_or_create(
@@ -235,67 +140,3 @@ class Command(BaseCommand):
         if update_fields:
             runner.save(update_fields=update_fields)
         return runner
-
-    def _ensure_pending_image_build(
-        self,
-        *,
-        organization,
-        user,
-        runner: Runner,
-        definition_name: str,
-    ) -> ImageBuildJob:
-        """Seed the default definition and request a durable image generation.
-
-        The lifecycle outbox delivers its build task when the runner is online.
-        Preserve successful builds and generations already awaiting completion.
-        """
-        definition, _ = ImageDefinition.objects.get_or_create(
-            organization=organization,
-            name=definition_name,
-            defaults={
-                "created_by": user,
-                "description": "Default workspace image for the local all-in-one stack.",
-                "base_distro": "ubuntu:22.04",
-                "packages": DEFAULT_WORKSPACE_PACKAGES,
-                "custom_init_script": DEFAULT_WORKSPACE_INIT_SCRIPT,
-                "env_vars": _DEFAULT_ENV_VARS,
-            },
-        )
-        definition_updates: list[str] = []
-        if definition.created_by_id is None:
-            definition.created_by = user
-            definition_updates.append("created_by")
-        if definition.base_distro != "ubuntu:22.04":
-            definition.base_distro = "ubuntu:22.04"
-            definition_updates.append("base_distro")
-        if definition.packages != DEFAULT_WORKSPACE_PACKAGES:
-            definition.packages = DEFAULT_WORKSPACE_PACKAGES
-            definition_updates.append("packages")
-        if definition.custom_init_script != DEFAULT_WORKSPACE_INIT_SCRIPT:
-            definition.custom_init_script = DEFAULT_WORKSPACE_INIT_SCRIPT
-            definition_updates.append("custom_init_script")
-        if definition.env_vars != _DEFAULT_ENV_VARS:
-            definition.env_vars = _DEFAULT_ENV_VARS
-            definition_updates.append("env_vars")
-        if definition.description != "Default workspace image for the local all-in-one stack.":
-            definition.description = (
-                "Default workspace image for the local all-in-one stack."
-            )
-            definition_updates.append("description")
-        if definition_updates:
-            definition.save(update_fields=definition_updates)
-
-        build = ImageBuildJob.objects.filter(
-            image_definition=definition,
-            runner=runner,
-        ).first()
-        if build and (
-            build.status == ImageBuildJob.Status.ACTIVE or build.pending_generation_id
-        ):
-            return build
-
-        return async_to_sync(RunnerService().image_lifecycle.trigger_build_job)(
-            image_definition=definition,
-            runner=runner,
-            created_by=user,
-        )

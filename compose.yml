@@ -94,8 +94,6 @@ services:
     - ${LOCAL_RUNNER_NAME:-local-qemu}
     - --runner-token
     - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-    - --image-definition-name
-    - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Workspace}
     environment:
       DJANGO_ENV: development
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
@@ -109,7 +107,6 @@ services:
       LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}
       LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-qemu}
       LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Workspace}
     volumes:
     - backend-data:/data
     networks:

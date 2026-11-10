@@ -33,9 +33,8 @@ docker compose up -d
 - Web app: `http://127.0.0.1:8080` (login: `LOCAL_ADMIN_EMAIL` / `LOCAL_ADMIN_PASSWORD`)
 - API docs: `http://127.0.0.1:8000/api/v1/docs`
 
-Compose bootstraps the admin, organization, runner and default image definition.
-Then set up a native runner as below, using `LOCAL_RUNNER_API_TOKEN` as its token.
-Workspaces can be created once the default image build has finished.
+Compose bootstraps the admin, organization and runner record. Then set up a native
+runner as below, using `LOCAL_RUNNER_API_TOKEN` as its token.
 
 ## Distributed setup
 
@@ -68,6 +67,12 @@ sudo journalctl -u opencuria-runner -f
 ```
 
 The runner should then show up online in the backend.
+
+## First workspace
+
+No image is built during installation. Once the runner is online, an admin builds
+an image definition on it under **Settings → Image Definitions**: the bundled
+`Ubuntu 24.04` or a custom one. Workspaces can be created once the build is ready.
 
 ## Develop from source
 
