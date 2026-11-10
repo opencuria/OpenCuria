@@ -400,7 +400,9 @@ async def test_real_codex_steering_image_fallback_does_not_end_run(
             **case.files,
         },
     )
-    assert result.output == "Local done."
+    # Codex either drops the in-flight sample for the steer or completes it
+    # first and answers the steer in a second message; both keep the run alive.
+    assert result.output in {"Local done.", "Local done." * 2}
     assert state.get("codex_dirty") is False
     assert accepted == [case.prompt]
     assert not channel.pending()

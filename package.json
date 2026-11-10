@@ -25,6 +25,7 @@
   },
   "overrides": {
     "@expo/ui": "57.0.26",
+    "dompurify": "^3.4.17",
     "shell-quote": "^1.8.5",
     "tinypool": "^2.1.2",
     "proxy-addr": "^2.0.8",

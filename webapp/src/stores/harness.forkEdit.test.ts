@@ -276,7 +276,9 @@ describe('harness store fork/edit', () => {
   it('editMessage forwards mode/model/effort overrides', async () => {
     const store = useHarnessStore()
     store.sessions = [makeSession()]
-    editMock.mockResolvedValueOnce(makeSession())
+    editMock.mockResolvedValueOnce(
+      makeSession({ mode: 'plan', model: 'acme/other', reasoning_effort: 'low' }),
+    )
 
     await store.editMessage('session-1', 'msg-1', 'edited', {
       mode: 'plan',
@@ -291,7 +293,12 @@ describe('harness store fork/edit', () => {
       skill_ids: undefined,
       reasoning_effort: 'low',
     })
-    expect(useRecentModels().entries.value[0]).toEqual({ id: 'acme/other', effort: 'low' })
+    expect(useRecentModels().entries.value[0]).toEqual({
+      id: 'acme/other',
+      effort: 'low',
+      harnessId: 'native',
+      mode: 'plan',
+    })
   })
 
   it('editMessage maps 409 to an Agent-is-running notification', async () => {

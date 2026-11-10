@@ -244,7 +244,7 @@ def test_recovery_clears_only_matching_stop_intent_and_external_projections():
     native = registry.get("native-child")
     other = registry.get("other-projection")
     service.reconcile_recovered_run("root", "old-root")
-    assert "root" not in registry.aborts
+    assert not registry.is_aborted("root")
     assert registry.get("projection") is None
     assert registry.get("native-child") is native
     assert registry.get("other-projection") is other
@@ -311,11 +311,11 @@ async def test_recovery_never_drops_a_matching_task_or_admission_reference():
     assert registry.get("root").abort_requested
 
 
-def test_context_compatibility_projection_records_recovery_identity():
+def test_released_context_keeps_recovery_identity_until_stop_clears():
     from apps.harness.run_state import RunRegistry
 
     registry = RunRegistry()
-    registry.contexts["session"] = {"message_id": "old-assistant"}
+    registry.attach_context("session", {"message_id": "old-assistant"})
     registry.request_abort("session")
     registry.release_context("session")
     assert registry.get("session").assistant_message_id == "old-assistant"
