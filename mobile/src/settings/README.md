@@ -45,6 +45,11 @@ stack that covers every setting of the webapp.
 - Rules shared with the webapp live in `@opencuria/chat-core`
   (`harnessAgents`, `providerAccounts`, `pluginForms`, `plugins`,
   `imageDefinitionLifecycle`); pages only arrange them as rows.
-- Hide admin-only areas when `useSettings().isAdmin` is false; the server
+- Members never see settings only admins may change: no links, no read-only
+  copies, no admin hints. List such pages in `ADMIN_PAGES` (`routes.ts`) and
+  hide their links when `useSettings().isAdmin` is false; the server
   enforces every rule again.
+- Workspace names are private to their owners: the server sends them only to
+  the owner, so show image usage as counts and other users' workspaces by
+  owner.
 - Test pages with `renderSettingsPage` and `mockClient` from `testUtils.tsx`.

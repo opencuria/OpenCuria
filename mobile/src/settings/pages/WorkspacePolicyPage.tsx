@@ -41,12 +41,11 @@ export function parseTimeoutMinutes(text: string): number | null {
 
 /**
  * Organization-wide workspace policy ("General" in the webapp): auto-stop
- * after inactivity and how many image versions to keep. Admins edit it and
- * changes save automatically; members see it read-only.
+ * after inactivity and how many image versions to keep. Admin-only (members
+ * never reach it); changes save automatically.
  */
 export function WorkspacePolicyPage(): React.JSX.Element {
-  const { client, organizationId, organization, isAdmin, resources } =
-    useSettings();
+  const { client, organizationId, organization, resources } = useSettings();
   const policy = useResource(
     resources,
     `organization:${organizationId ?? ""}`,
@@ -86,7 +85,7 @@ export function WorkspacePolicyPage(): React.JSX.Element {
     },
     {
       valid,
-      enabled: isAdmin && Boolean(organizationId),
+      enabled: Boolean(organizationId),
       failure: "Failed to update workspace policy",
     },
   );
@@ -101,7 +100,6 @@ export function WorkspacePolicyPage(): React.JSX.Element {
             kind: "picker",
             id: "timeout",
             label: "Stop after",
-            disabled: !isAdmin,
             value: custom ? CUSTOM : form.minutes,
             groups: [
               {
@@ -127,7 +125,6 @@ export function WorkspacePolicyPage(): React.JSX.Element {
                   label: "Minutes",
                   placeholder: "Minutes (1–10080)",
                   keyboard: "number" as const,
-                  disabled: !isAdmin,
                   value: form.minutes,
                   onChange: (value: string) => edit({ minutes: value }),
                 },
@@ -157,7 +154,6 @@ export function WorkspacePolicyPage(): React.JSX.Element {
                   ? `Inactive workspaces stop after ${formatMinutesAsDuration(minutes)}.`
                   : undefined
                 : "Inactive workspaces keep running until someone stops them.",
-              disabled: !isAdmin,
               value: form.stopInactive,
               onChange: (value) => edit({ stopInactive: value }),
             },
@@ -174,7 +170,6 @@ export function WorkspacePolicyPage(): React.JSX.Element {
               kind: "stepper",
               id: "versions",
               label: "Versions to keep",
-              disabled: !isAdmin,
               value: form.versions,
               min: 1,
               max: 20,
@@ -184,11 +179,7 @@ export function WorkspacePolicyPage(): React.JSX.Element {
             },
           ],
         },
-        autosaveSection(autosave, {
-          editable: isAdmin,
-          readOnlyNote:
-            "Only organization admins can change the workspace policy.",
-        }),
+        autosaveSection(autosave),
       ]
     : [];
 

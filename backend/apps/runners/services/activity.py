@@ -1,5 +1,7 @@
 """Present execution, unresolved outcomes and history as distinct activity states."""
 
+from common.user_labels import workspace_title
+
 from ..storage_schemas import RunnerActivityOut
 
 OPERATION_TITLES = {
@@ -25,9 +27,24 @@ class ActivityService:
     """Project existing workflow facts; never resolve or release an operation."""
 
     @staticmethod
-    def project(records: dict) -> list[RunnerActivityOut]:
-        """Group children under their workflow and retain closed failures in history."""
+    def project(records: dict, viewer_id: int | None = None) -> list[RunnerActivityOut]:
+        """Group children under their workflow and retain closed failures in history.
+
+        Workspaces are named only for their owner (``viewer_id``); everyone
+        else sees them by owner label, since workspace names are private.
+        """
         operations = {str(op["task_id"]): op for op in records["operations"]}
+        owners = records.get("workspace_owners", {})
+
+        def workspace_target(workspace_id, name: str | None) -> str:
+            owner = owners.get(str(workspace_id), {})
+            return workspace_title(
+                name,
+                owner_id=owner.get("owner_id"),
+                owner=owner.get("owner_label"),
+                viewer_id=viewer_id,
+            )
+
         grouped: set[str] = set()
         activities: list[RunnerActivityOut] = []
         names = {}
@@ -143,7 +160,7 @@ class ActivityService:
                 record,
                 "capture",
                 "Save workspace as image",
-                request["workspace__name"],
+                workspace_target(request["workspace_id"], request["workspace__name"]),
                 [request["child_id"], request["image__creating_task_id"]]
                 + [recreate["child_id"] for recreate in recreates],
             )
@@ -157,7 +174,7 @@ class ActivityService:
                 request,
                 "recreate",
                 title,
-                request["workspace__name"],
+                workspace_target(request["workspace_id"], request["workspace__name"]),
                 [request["child_id"]],
             )
         for request in records["deletions"]:
@@ -204,8 +221,11 @@ class ActivityService:
                     id=identity,
                     kind="operation",
                     title=title,
-                    target_name=op["task__workspace__name"]
-                    or names.get(op["target"], "Image"),
+                    target_name=workspace_target(
+                        op["task__workspace_id"], op["task__workspace__name"]
+                    )
+                    if op["task__workspace_id"]
+                    else names.get(op["target"], "Image"),
                     state=state,
                     outcome=outcome,
                     summary=ActivityService.summary(title, state, outcome, op["phase"]),

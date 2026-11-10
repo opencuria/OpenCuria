@@ -39,6 +39,7 @@ async def test_skill_lifecycle_by_name(world):
 
 
 async def test_organization_skills_require_admin(world):
+    # Members are not offered the organization scope at all.
     member_error = await fails(
         world.ctx(),
         "skill_create",
@@ -46,7 +47,7 @@ async def test_organization_skills_require_admin(world):
         body="Body",
         scope="organization",
     )
-    assert "Only organization admins" in member_error
+    assert "'scope' was unexpected" in member_error
 
     created = await ok(
         world.ctx(role="admin"),

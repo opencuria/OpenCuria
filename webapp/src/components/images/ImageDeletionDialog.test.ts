@@ -14,7 +14,8 @@ const graph = {
   blockers: [],
   counts: { images: 1, workspaces: 1 },
   images: [{ id: 'i', name: 'Base', owner_id: '1' }],
-  workspaces: [{ id: 'w', name: 'Other owner data', owner_id: '2' }],
+  // Other users' workspace names never reach the client; only their owner does.
+  workspaces: [{ id: 'w', name: '', owner_id: '2', owner_label: 'Bob' }],
 }
 const stubs = Object.fromEntries(
   [
@@ -104,7 +105,7 @@ describe('durable deletion confirmation', () => {
       .findAll('button')
       .find((b) => b.text() === 'Force delete…')!
       .trigger('click')
-    expect(w.text()).toContain('Other owner data')
+    expect(w.text()).toContain('Workspace · Bob')
     const confirm = () => w.findAll('button').find((b) => b.text() === 'Delete permanently')!
     expect(confirm().attributes('disabled')).toBeDefined()
     await w

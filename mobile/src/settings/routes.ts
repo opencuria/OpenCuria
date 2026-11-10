@@ -14,3 +14,29 @@ export function parseRoute(value: string): { page: string; argument: string } {
     ? { page: value, argument: "" }
     : { page: value.slice(0, index), argument: value.slice(index + 1) };
 }
+
+/**
+ * Pages with settings only organization admins may change. Members never see
+ * links to them, and opening one anyway shows "Page unavailable".
+ */
+export const ADMIN_PAGES: ReadonlySet<string> = new Set([
+  "policy",
+  "agents",
+  "image-definitions",
+  "image-definition",
+  "image-definition-editor",
+  "image-definition-rebuild",
+  "build-log",
+  "runners",
+  "runner",
+  "runner-new",
+  "runner-token",
+  "runner-limits",
+  "runner-operation",
+  "credential-services",
+  "credential-service-new",
+  "plugin-editor",
+  "plugin-skill",
+  "plugin-mcp",
+  "plugin-requirement",
+]);

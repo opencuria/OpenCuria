@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /**
  * Version history of one image (captured image or runner build), newest first:
- * version, message, size, retention state and the workspaces based on it.
- * Missing messages and sizes are left out rather than shown as placeholders.
+ * version, message, size, retention state and how many workspaces use it.
+ * Which workspaces those are stays private to their owners. Missing messages
+ * and sizes are left out rather than shown as placeholders.
  */
 import { Trash2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
@@ -34,11 +35,10 @@ function deletable(version: ImageArtifact): boolean {
   )
 }
 
-/** "Sep 6, 07:07 AM · 2.1 GiB · Used by api, web"; unknown sizes are left out. */
+/** "Sep 6, 07:07 AM · 2.1 GiB · Used by 2 workspaces"; unknown sizes are left out. */
 function details(version: ImageArtifact): string {
-  const used = version.workspace_count
-    ? `Used by ${(version.workspaces ?? []).map((ws) => ws.name).join(', ') || version.workspace_count}`
-    : ''
+  const count = version.workspace_count ?? 0
+  const used = count ? `Used by ${count} ${count === 1 ? 'workspace' : 'workspaces'}` : ''
   return [
     formatDate(version.created_at),
     version.size_bytes == null ? '' : formatStorageBytes(version.size_bytes),

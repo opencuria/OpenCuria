@@ -1,5 +1,6 @@
 <!--
   WorkspacePolicyTab — General settings: automatic workspace stop and image version retention.
+  Admin-only: SettingsSheet never shows it to members.
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
@@ -18,7 +19,6 @@ import { formatMinutesAsDuration } from '@opencuria/chat-core/workspaceLifecycle
 
 const authStore = useAuthStore()
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)
-const canEdit = computed(() => authStore.isAdmin)
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -73,7 +73,7 @@ const autosave = useAutosave({
       organizationSettings.value?.workspace_auto_stop_timeout_minutes ||
     policy.value.image_versions_to_keep !==
       (organizationSettings.value?.image_versions_to_keep ?? 2),
-  enabled: () => canEdit.value && !loading.value && !!organizationSettings.value && !error.value,
+  enabled: () => !loading.value && !!organizationSettings.value && !error.value,
   valid: () => !validationError.value,
   errorMessage: 'Failed to update workspace policy',
   save: async (isCurrent) => {
@@ -146,7 +146,7 @@ watch(activeOrganizationId, () => {
             </div>
             <p class="text-sm text-muted-foreground">{{ workspacePolicySummary }}</p>
           </label>
-          <Switch id="workspace-auto-stop" v-model="autoStopEnabled" :disabled="!canEdit" />
+          <Switch id="workspace-auto-stop" v-model="autoStopEnabled" />
         </div>
 
         <div v-if="autoStopEnabled" class="space-y-3 border-t border-border px-4 py-4">
@@ -154,7 +154,6 @@ watch(activeOrganizationId, () => {
             <Label for="auto-stop-minutes">Inactivity timeout (minutes)</Label>
             <Input
               id="auto-stop-minutes"
-              :disabled="!canEdit"
               :model-value="String(autoStopTimeoutMinutes)"
               type="number"
               min="1"
@@ -167,7 +166,6 @@ watch(activeOrganizationId, () => {
             <Button
               v-for="preset in workspacePolicyPresetOptions"
               :key="preset.value"
-              :disabled="!canEdit"
               size="sm"
               variant="outline"
               type="button"
@@ -190,7 +188,6 @@ watch(activeOrganizationId, () => {
           </label>
           <Input
             id="image-versions-to-keep"
-            :disabled="!canEdit"
             class="w-20"
             data-testid="image-versions-to-keep"
             :model-value="String(imageVersionsToKeep)"

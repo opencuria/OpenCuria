@@ -90,15 +90,25 @@ def _gap_hint(gaps: list[dict[str, Any]] | None) -> str:
     )
 
 
+def tools_for(ctx: ToolContext) -> list[ToolSpec]:
+    """Return the tool contracts *ctx* may see and call.
+
+    Members get no admin-only tools or arguments; handlers still enforce
+    the admin role themselves.
+    """
+    return [spec for tool in TOOLS if (spec := tool.for_role(admin=ctx.is_admin))]
+
+
 async def call_tool(
     ctx: ToolContext,
     name: str,
     arguments: dict[str, Any] | None,
     *,
-    tools: Sequence[ToolSpec] = TOOLS,
+    tools: Sequence[ToolSpec] | None = None,
 ) -> CallToolResult:
     """Validate and run one tool call within the owner's scope."""
-    spec = next((tool for tool in tools if tool.name == name), None)
+    available = tools_for(ctx) if tools is None else tools
+    spec = next((tool for tool in available if tool.name == name), None)
     if spec is None:
         return _error(f"Unknown tool '{name}'.")
     args = dict(arguments or {})
@@ -139,7 +149,7 @@ def create_mcp_server(ctx: ToolContext) -> Server:
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
-        return [spec.to_mcp() for spec in TOOLS]
+        return [spec.to_mcp() for spec in tools_for(ctx)]
 
     @server.call_tool(validate_input=False)
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> CallToolResult:

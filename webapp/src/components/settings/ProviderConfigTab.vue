@@ -1,4 +1,4 @@
-<!-- Provider accounts plus organization-wide small-model defaults. -->
+<!-- Provider accounts plus organization-wide small-model defaults (admins only). -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
@@ -121,24 +121,30 @@ async function refreshAll(): Promise<void> {
   const previousConfig = config.value
   const revision = ++loadRevision
   invalidateProviderCatalog()
+  // Organization-wide defaults are admin settings; members only manage accounts.
+  const admin = isAdmin.value
   const [configRes, accountRes, modelsRes, externalModels, voiceResult] = await Promise.all([
-    getProviderConfig().catch((error: unknown) => {
-      if (isNotFoundError(error)) return null
-      throw error
-    }),
+    admin
+      ? getProviderConfig().catch((error: unknown) => {
+          if (isNotFoundError(error)) return null
+          throw error
+        })
+      : null,
     listProviderAccounts(),
     loadProviderModelsCached().catch(() => [] as ProviderModel[]),
     Promise.all([
       loadEngineModelsCached('claude').catch(() => [] as ProviderModel[]),
       loadEngineModelsCached('codex').catch(() => [] as ProviderModel[]),
     ]).then((rows) => rows.flat()),
-    getVoiceSettings().then(
-      (value) => ({ value, error: '' }),
-      () => ({
-        value: null,
-        error: 'Speech models could not be loaded. You can enter a model ID manually.',
-      }),
-    ),
+    admin
+      ? getVoiceSettings().then(
+          (value) => ({ value, error: '' }),
+          () => ({
+            value: null,
+            error: 'Speech models could not be loaded. You can enter a model ID manually.',
+          }),
+        )
+      : { value: null, error: '' },
   ])
   if (context !== currentContextKey() || revision !== loadRevision) return
   if (
@@ -199,7 +205,7 @@ async function handleAccountsChanged(): Promise<void> {
 const autosave = useAutosave({
   source: () => [smallModel.value, smallEffort.value, speechModel.value, voiceCleanupModel.value],
   dirty: () => defaultsDirty.value,
-  enabled: () => !loading.value && !error.value,
+  enabled: () => isAdmin.value && !loading.value && !error.value,
   errorMessage: 'Failed to save default models',
   save: async (isCurrent) => {
     const saved = await saveProviderConfig({
@@ -235,7 +241,11 @@ watch(organizationId, () => {
     <template v-else>
       <SettingsSection
         title="Providers"
-        description="Manage personal and organization-shared accounts. Provider secrets are encrypted at rest."
+        :description="
+          isAdmin
+            ? 'Manage personal and organization-shared accounts. Provider secrets are encrypted at rest.'
+            : 'Connect personal accounts or use organization-shared ones. Provider secrets are encrypted at rest.'
+        "
       >
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <SettingsRow
@@ -293,6 +303,7 @@ watch(organizationId, () => {
       </SettingsSection>
 
       <SettingsSection
+        v-if="isAdmin"
         title="Small Model"
         description="Background tasks like session titles. Primary and subagent models are configured under Agents."
       >
@@ -340,6 +351,7 @@ watch(organizationId, () => {
       </SettingsSection>
 
       <SettingsSection
+        v-if="isAdmin"
         title="Voice input"
         description="Models used for dictation. Audio is sent to your selected speech provider."
       >

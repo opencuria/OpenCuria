@@ -156,7 +156,7 @@ function credentialTypeLabel(type: string): string {
         @back="backToList"
       >
         <template #meta>
-          <span class="inline-flex items-center gap-1.5"
+          <span v-if="isAdmin" class="inline-flex items-center gap-1.5"
             ><span
               class="size-1.5 rounded-full"
               :class="selectedPlugin.org_enabled ? 'bg-success' : 'bg-muted-foreground'"
@@ -358,7 +358,7 @@ function credentialTypeLabel(type: string): string {
             {{ plugin.description || 'No description provided.' }}
           </p>
           <div class="mt-auto flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            <Badge :variant="plugin.org_enabled ? 'secondary' : 'outline'">{{ pluginAvailability(plugin) }}</Badge>
+            <Badge v-if="isAdmin" :variant="plugin.org_enabled ? 'secondary' : 'outline'">{{ pluginAvailability(plugin) }}</Badge>
             <span>{{ plugin.skills.length }} {{ plugin.skills.length === 1 ? 'skill' : 'skills' }} ·</span>
             <span>{{ plugin.mcp_servers.length }} {{ plugin.mcp_servers.length === 1 ? 'MCP server' : 'MCP servers' }} ·</span>
             <span>{{ plugin.credential_requirements.length }} {{ plugin.credential_requirements.length === 1 ? 'service' : 'services' }}</span>
@@ -367,8 +367,12 @@ function credentialTypeLabel(type: string): string {
       </div>
     </SettingsSection>
 
-    <PluginEditorDialog v-model:open="editorOpen" :plugin="editingPlugin" />
-    <Dialog :open="!!deletingPlugin" @update:open="(value) => !value && (deletingPlugin = null)">
+    <PluginEditorDialog v-if="isAdmin" v-model:open="editorOpen" :plugin="editingPlugin" />
+    <Dialog
+      v-if="isAdmin"
+      :open="!!deletingPlugin"
+      @update:open="(value) => !value && (deletingPlugin = null)"
+    >
       <DialogContent
         ><DialogHeader
           ><DialogTitle>Delete Plugin</DialogTitle

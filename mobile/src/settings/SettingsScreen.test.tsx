@@ -31,12 +31,12 @@ jest.mock("react-native-safe-area-context", () => ({
   useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
 }));
 
-function renderScreen(role = "admin", offline = false) {
+function screenProps(role = "admin", offline = false) {
   const organizations = [
     { ...testOrganization, role },
     { ...testOrganization, id: "org-2", name: "Beta", role: "member" },
   ];
-  const props = {
+  return {
     visible: true,
     onClose: jest.fn(),
     client: mockClient({}),
@@ -53,6 +53,10 @@ function renderScreen(role = "admin", offline = false) {
     createOrganization: jest.fn(async () => undefined),
     signOut: jest.fn(),
   };
+}
+
+function renderScreen(role = "admin", offline = false) {
+  const props = screenProps(role, offline);
   render(
     <ThemeProvider>
       <SettingsScreen {...props} />
@@ -87,13 +91,59 @@ it("shows the profile, organization and every settings area like ChatGPT's setti
   expect(screen.getByText("Server: curia.example")).toBeTruthy();
 });
 
-it("hides admin-only areas from members", () => {
+it("shows members only the areas they can change something in", () => {
   renderScreen("member");
-  expect(screen.queryByRole("link", { name: /^Runners/ })).toBeNull();
-  expect(
-    screen.queryByRole("link", { name: /^Credential services/ }),
-  ).toBeNull();
+  for (const title of [
+    "Agents",
+    "Workspace policy",
+    "Image definitions",
+    "Runners",
+    "Credential services",
+  ])
+    expect(
+      screen.queryByRole("link", { name: new RegExp(`^${title}`) }),
+    ).toBeNull();
+  for (const title of [
+    "Provider & Models",
+    "Skills",
+    "Plugins",
+    "Credentials",
+    "Captured images",
+    "API keys",
+    "Notifications",
+  ])
+    expect(
+      screen.getByRole("link", { name: new RegExp(`^${title}`) }),
+    ).toBeTruthy();
   expect(screen.getByText("Role: Member")).toBeTruthy();
+});
+
+it("closes an admin-only page when the user is no longer an admin", async () => {
+  const client = mockClient({
+    organizations: {
+      get: jest.fn(async () => ({
+        ...testOrganization,
+        role: "admin",
+        workspace_auto_stop_timeout_minutes: null,
+        image_versions_to_keep: 2,
+      })),
+    },
+  });
+  const admin = { ...screenProps("admin"), client };
+  const view = render(
+    <ThemeProvider>
+      <SettingsScreen {...admin} />
+    </ThemeProvider>,
+  );
+  fireEvent.press(screen.getByRole("link", { name: /^Workspace policy/ }));
+  expect(await screen.findByTestId("settings-policy")).toBeTruthy();
+  view.rerender(
+    <ThemeProvider>
+      <SettingsScreen {...screenProps("member")} client={client} />
+    </ThemeProvider>,
+  );
+  expect(await screen.findByText("Page unavailable")).toBeTruthy();
+  expect(screen.queryByTestId("settings-policy")).toBeNull();
 });
 
 it("switches organizations from the card and confirms signing out", () => {
@@ -180,24 +230,6 @@ describe("workspace policy", () => {
       screen.getByText("Enter a whole number of minutes between 1 and 10080."),
     ).toBeTruthy();
     expect(screen.getByText("Check your input")).toBeTruthy();
-  });
-
-  it("is read-only for members", async () => {
-    renderSettingsPage(<WorkspacePolicyPage />, {
-      admin: false,
-      client: mockClient({
-        organizations: { get: jest.fn(async () => organization) },
-      }),
-    });
-    const toggle = await screen.findByRole("switch", {
-      name: "Stop inactive workspaces",
-    });
-    expect(toggle).toBeDisabled();
-    expect(
-      screen.getByText(
-        "Only organization admins can change the workspace policy.",
-      ),
-    ).toBeTruthy();
   });
 
   it("offers a retry when the policy cannot load", async () => {

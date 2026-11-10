@@ -24,6 +24,8 @@ const props = defineProps<{
   node: RunnerTopologyNode
   generations: RunnerStorageGeneration[]
   busy?: boolean
+  /** Signed-in user; only their own workspaces can be opened. */
+  viewerId?: string
 }>()
 const emit = defineEmits<{
   close: []
@@ -33,6 +35,10 @@ const emit = defineEmits<{
 const image = computed(() => props.node.generation)
 const resource = computed(() => props.node.resource)
 const workspace = computed(() => props.node.workspace)
+/** Workspaces are private: only the owner can open one. */
+const ownWorkspace = computed(
+  () => !!workspace.value && !!props.viewerId && workspace.value.owner_id === props.viewerId,
+)
 const canRebuild = computed(
   () =>
     image.value &&
@@ -181,7 +187,7 @@ function openWorkspace() {
             class="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
           >
             <div class="min-w-0">
-              <p class="font-medium">{{ ws.name }}</p>
+              <p class="font-medium">{{ ws.name || 'Workspace' }}</p>
               <p class="text-muted-foreground">
                 {{ ws.owner_label }} · {{ ws.last_activity_at || 'Activity unknown' }}
                 <template v-if="ws.allocated_bytes != null">
@@ -266,7 +272,7 @@ function openWorkspace() {
         </CollapsibleContent>
       </Collapsible>
       <div class="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <Button v-if="workspace" as-child variant="outline" size="sm"
+        <Button v-if="workspace && ownWorkspace" as-child variant="outline" size="sm"
           ><RouterLink :to="`/workspaces/${workspace.id}`" @click="openWorkspace"
             >Open workspace<ArrowUpRight /></RouterLink
         ></Button>

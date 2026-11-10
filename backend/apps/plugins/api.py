@@ -84,13 +84,21 @@ plugin_router = Router(tags=["plugins"])
     summary="List plugins",
 )
 def list_plugins(request: HttpRequest):
-    """Return visible global + org-owned plugins with readiness summary."""
+    """Return visible global + org-owned plugins with readiness summary.
+
+    Members get only the plugins activated for the organization, without
+    MCP server configuration.
+    """
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_READ):
         return _perm_denied(APIKeyPermission.PLUGINS_READ)
     org_id = get_organization_id(request)
-    _get_org_service().require_membership(request.user, org_id)
+    org_service = _get_org_service()
+    org_service.require_membership(request.user, org_id)
 
-    payloads = _get_plugin_service().list_visible(org_id=org_id)
+    payloads = _get_plugin_service().list_visible(
+        org_id=org_id,
+        admin=org_service.get_user_role(request.user, org_id) == "admin",
+    )
     return [_plugin_to_out(p) for p in payloads]
 
 

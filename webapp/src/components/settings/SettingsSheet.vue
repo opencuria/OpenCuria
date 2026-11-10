@@ -8,7 +8,8 @@
              (CustomEvent, detail `{ tab?: string }`),
            (b) controlled via v-model:open (defineModel).
   Tab selection: `resolveSettingsTab()` validates event and deep-link input.
-  Runners tab is admin-only (authStore.isAdmin).
+  Tabs with only admin-editable settings are admin-only (authStore.isAdmin);
+  members never see them and land on their first visible tab instead.
   Focus trap / Esc / backdrop come from Dialog (reka-ui).
 -->
 <script setup lang="ts">
@@ -76,9 +77,9 @@ interface SettingsNavItem {
 }
 
 const navItems: SettingsNavItem[] = [
-  { id: 'general', label: 'General', icon: Settings2 },
+  { id: 'general', label: 'General', icon: Settings2, adminOnly: true },
   { id: 'provider', label: 'Provider & Models', icon: Bot },
-  { id: 'agents', label: 'Agents', icon: Sparkles },
+  { id: 'agents', label: 'Agents', icon: Sparkles, adminOnly: true },
   { id: 'skills', label: 'Skills', icon: BookText },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
   { id: 'plugins', label: 'Plugins', icon: Puzzle },
@@ -86,25 +87,32 @@ const navItems: SettingsNavItem[] = [
   { id: 'images', label: 'Captured Images', icon: Camera },
   { id: 'runners', label: 'Runners', icon: Server, adminOnly: true },
   { id: 'credential-services', label: 'Credential Services', icon: Shield, adminOnly: true },
-  { id: 'image-definitions', label: 'Image Definitions', icon: Layers },
+  { id: 'image-definitions', label: 'Image Definitions', icon: Layers, adminOnly: true },
 ]
 
 const visibleNavItems = computed(() => navItems.filter((item) => !item.adminOnly || isAdmin.value))
 
+/** The tab itself when the user may see it, otherwise their first visible tab. */
+function allowedTab(tab: SettingsTabId): SettingsTabId {
+  return visibleNavItems.value.some((item) => item.id === tab)
+    ? tab
+    : (visibleNavItems.value[0]?.id ?? tab)
+}
+
+/** Rendered tab: admin-only content never shows for members, however the tab was set. */
+const shownTab = computed(() => allowedTab(activeTab.value))
+
 const activeLabel = computed(
-  () => visibleNavItems.value.find((item) => item.id === activeTab.value)?.label ?? 'Settings',
+  () => visibleNavItems.value.find((item) => item.id === shownTab.value)?.label ?? 'Settings',
 )
 
 function openSheet(tab?: unknown): void {
-  const next = resolveSettingsTab(tab)
-  // Runners is admin-only — fall back to General.
-  activeTab.value =
-    (next === 'runners' || next === 'credential-services') && !isAdmin.value ? 'general' : next
+  activeTab.value = allowedTab(resolveSettingsTab(tab))
   open.value = true
 }
 
 async function selectTab(id: SettingsTabId): Promise<void> {
-  if (id !== activeTab.value && (await flushChanges())) activeTab.value = id
+  if (id !== shownTab.value && (await flushChanges())) activeTab.value = id
 }
 
 function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): void {
@@ -129,7 +137,7 @@ function setDetailOpen(tab: SettingsTabId, isOpen: boolean): void {
   else if (detailTab.value === tab) detailTab.value = null
 }
 
-watch(activeTab, (tab, previous) => {
+watch(shownTab, (tab, previous) => {
   detailTab.value = null
   if (previous === 'runners' && tab !== 'runners') {
     selectedRunnerId.value = undefined
@@ -187,12 +195,14 @@ onUnmounted(() => {
   window.removeEventListener(CLOSE_SETTINGS_EVENT, closeSheet)
 })
 
-// If an admin has Runners open and loses the role (org switch), fall back.
-watch(isAdmin, (admin) => {
-  if (!admin && (activeTab.value === 'runners' || activeTab.value === 'credential-services')) {
-    activeTab.value = 'general'
-  }
-})
+// Keep the selected tab visible, e.g. when an admin switches to an org as member.
+watch(
+  shownTab,
+  (tab) => {
+    if (tab !== activeTab.value) activeTab.value = tab
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -228,12 +238,12 @@ watch(isAdmin, (admin) => {
             :key="item.id"
             type="button"
             role="tab"
-            :aria-selected="activeTab === item.id"
+            :aria-selected="shownTab === item.id"
             :data-testid="`settings-nav-${item.id}`"
             :class="
               cn(
                 'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors',
-                activeTab === item.id
+                shownTab === item.id
                   ? 'border-primary/40 bg-primary/10 text-primary'
                   : 'border-border text-muted-foreground hover:text-foreground',
               )
@@ -259,12 +269,12 @@ watch(isAdmin, (admin) => {
               :key="item.id"
               type="button"
               role="tab"
-              :aria-selected="activeTab === item.id"
+              :aria-selected="shownTab === item.id"
               :data-testid="`settings-nav-${item.id}`"
               :class="
                 cn(
                   'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-                  activeTab === item.id
+                  shownTab === item.id
                     ? 'bg-muted text-foreground'
                     : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
                 )
@@ -291,16 +301,16 @@ watch(isAdmin, (admin) => {
           <div
             :key="`${authStore.user?.id}:${authStore.activeOrganizationId}`"
             class="mx-auto min-w-0 w-full p-4 lg:p-6"
-            :class="detailTab === activeTab ? 'max-w-none' : 'max-w-3xl'"
+            :class="detailTab === shownTab ? 'max-w-none' : 'max-w-3xl'"
             role="tabpanel"
             :aria-label="activeLabel"
           >
-            <WorkspacePolicyTab v-if="open && activeTab === 'general'" />
-            <ProviderConfigTab v-else-if="open && activeTab === 'provider'" />
-            <AgentConfigTab v-else-if="open && activeTab === 'agents'" />
-            <SkillsPanel v-else-if="open && activeTab === 'skills'" />
+            <WorkspacePolicyTab v-if="open && shownTab === 'general'" />
+            <ProviderConfigTab v-else-if="open && shownTab === 'provider'" />
+            <AgentConfigTab v-else-if="open && shownTab === 'agents'" />
+            <SkillsPanel v-else-if="open && shownTab === 'skills'" />
             <CredentialsPanel
-              v-else-if="open && activeTab === 'credentials'"
+              v-else-if="open && shownTab === 'credentials'"
               :initial-service-id="settingsContext.serviceId"
               :initial-credential-id="settingsContext.credentialId"
               :workspace-draft-id="settingsContext.workspaceDraftId"
@@ -308,22 +318,22 @@ watch(isAdmin, (admin) => {
               @context-consumed="clearCredentialsContext"
             />
             <PluginsPanel
-              v-else-if="open && activeTab === 'plugins'"
+              v-else-if="open && shownTab === 'plugins'"
               :initial-plugin-id="settingsContext.pluginId"
               :context-version="settingsContext.version"
               @detail-change="setDetailOpen('plugins', $event)"
             />
-            <ApiKeysPanel v-else-if="open && activeTab === 'api-keys'" />
-            <CapturedImagesPanel v-else-if="open && activeTab === 'images'" />
+            <ApiKeysPanel v-else-if="open && shownTab === 'api-keys'" />
+            <CapturedImagesPanel v-else-if="open && shownTab === 'images'" />
             <RunnersPanel
-              v-else-if="open && activeTab === 'runners' && isAdmin"
+              v-else-if="open && shownTab === 'runners'"
               :runner-id="selectedRunnerId"
               :runner-activity="selectedRunnerActivity"
               :context-version="settingsContext.version"
               @detail-change="setDetailOpen('runners', $event)"
             />
-            <CredentialServicesTab v-else-if="open && activeTab === 'credential-services'" />
-            <ImageDefinitionsTab v-else-if="open && activeTab === 'image-definitions'" />
+            <CredentialServicesTab v-else-if="open && shownTab === 'credential-services'" />
+            <ImageDefinitionsTab v-else-if="open && shownTab === 'image-definitions'" />
           </div>
         </ScrollArea>
       </div>

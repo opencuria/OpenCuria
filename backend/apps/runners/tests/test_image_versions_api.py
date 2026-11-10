@@ -12,6 +12,7 @@ from apps.organizations.models import Membership, MembershipRole
 from apps.runners.models import WorkspaceRecreateRequest
 from apps.runners.services import get_runner_service
 from apps.runners.tests.test_image_versions import make_line, qemu_workspace
+from common.exceptions import NotFoundError
 from common.utils import generate_api_token, hash_token
 
 pytestmark = pytest.mark.django_db
@@ -51,7 +52,11 @@ def test_captured_images_list_versions_and_latest(member, runner, organization):
     versions = {v["version"]: v for v in image["versions"]}
     assert versions[2]["is_latest"] and versions[2]["retention"] == "latest"
     assert versions[1]["retention"] == "kept"
-    assert versions[1]["workspaces"][0]["name"] == "Versioned"
+    # Usage is a count only; workspace names stay private to their owners.
+    assert versions[1]["workspace_count"] == 1
+    assert versions[2]["workspace_count"] == 0
+    assert "workspaces" not in versions[1]
+    assert "Versioned" not in response.content.decode()
     assert versions[2]["source_workspace_id"] is None
     assert versions[2]["source_runner_id"] == str(runner.id)
     assert "runtime_type" not in versions[2]
@@ -66,6 +71,27 @@ def test_captured_images_are_owner_scoped(member, runner, organization):
     )
     auth = headers(other, organization, [APIKeyPermission.IMAGES_READ])
     assert Client().get("/api/v1/captured-images/", **auth).json() == []
+
+
+@pytest.mark.parametrize("role", [MembershipRole.MEMBER, MembershipRole.ADMIN])
+def test_captured_versions_cannot_start_other_users_workspaces(
+    member, runner, organization, role
+):
+    """A capture holds its owner's files; nobody else may start a workspace on it."""
+    _, (version,) = make_line(runner, member)
+    other = get_user_model().objects.create_user(email="y@example.com", password="x")
+    Membership.objects.create(user=other, organization=organization, role=role)
+    response = Client().post(
+        "/api/v1/workspaces/",
+        data=json.dumps({"name": "Borrowed", "image_artifact_id": str(version.id)}),
+        content_type="application/json",
+        **headers(other, organization, [APIKeyPermission.WORKSPACES_CREATE]),
+    )
+    assert response.status_code == 404, response.content
+    lifecycle = get_runner_service().workspace_lifecycle
+    with pytest.raises(NotFoundError):
+        lifecycle._placement_for_image_instance(version, user=other)
+    assert lifecycle._placement_for_image_instance(version, user=member) == runner
 
 
 def test_rename_captured_image(member, runner, organization):

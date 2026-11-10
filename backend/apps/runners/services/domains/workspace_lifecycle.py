@@ -148,14 +148,21 @@ class WorkspaceLifecycleService:
         self,
         image: ImageInstance,
         *,
+        user,
         organization_id: uuid.UUID | None = None,
         requested_runner_id: uuid.UUID | None = None,
     ) -> Runner:
         """Resolve the runner from the image, not origin_workspace.
 
         ``origin_workspace`` is provenance only. Captured images stay
-        usable after the source workspace is deleted or pending deletion.
+        usable after the source workspace is deleted or pending deletion,
+        but only for the user who captured them: a capture holds that
+        user's workspace files.
         """
+        if image.build_job_id is None and image.created_by_id != getattr(
+            user, "id", None
+        ):
+            raise NotFoundError("ImageArtifact", str(image.id))
         selected_build_job = image.build_job
         if selected_build_job is not None:
             if (
@@ -235,6 +242,7 @@ class WorkspaceLifecycleService:
 
         runner = self._placement_for_image_instance(
             selected_image,
+            user=user,
             organization_id=organization_id,
             requested_runner_id=runner_id,
         )
@@ -1207,6 +1215,7 @@ class WorkspaceLifecycleService:
 
         runner = self._placement_for_image_instance(
             image,
+            user=user,
             organization_id=organization_id,
         )
         source_workspace = image.origin_workspace

@@ -1,6 +1,10 @@
 /**
  * Image version rules shared by the web and native clients: version labels,
  * reset/update targets and capture targets of a workspace.
+ *
+ * Workspace names are private to their owners: views that list workspaces
+ * using an image (deletion preview, runner storage) get a name only for the
+ * viewer's own workspaces and show everyone else's by owner.
  */
 
 export type ImageVersionRetention = "latest" | "kept" | "expires_when_unused";
@@ -49,6 +53,17 @@ export interface WorkspaceRecreateOption {
 
 /** Select value for "capture as a new image" (instead of a new version). */
 export const NEW_IMAGE = "__new__";
+
+/** Own workspaces by name, others as "Workspace · Ada" (names are private). */
+export function sharedWorkspaceLabel(workspace: {
+  name?: string | null;
+  owner_label?: string | null;
+}): string {
+  if (workspace.name) return workspace.name;
+  return workspace.owner_label
+    ? `Workspace · ${workspace.owner_label}`
+    : "Workspace";
+}
 
 /** "name · v3" for the version a workspace is based on. */
 export function versionLabel(

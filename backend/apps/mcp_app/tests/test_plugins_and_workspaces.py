@@ -77,8 +77,9 @@ async def test_admin_creates_activates_and_edits_a_plugin(world):
     ]
     assert len(updated["mcp_servers"]) == 1  # untouched lists stay
 
+    # Members are not offered admin-only tools at all.
     member_error = await fails(world.ctx(), "plugin_delete", plugin="Acme tools")
-    assert "Only organization admins" in member_error
+    assert "Unknown tool 'plugin_delete'" in member_error
     assert (await ok(admin, "plugin_delete", plugin="Acme tools"))["deleted"] is True
 
 
@@ -105,6 +106,7 @@ async def test_enable_plugin_in_a_workspace(world):
     )
     ctx = world.ctx()
 
+    # Members only see plugins activated for the organization.
     not_active = await fails(
         ctx,
         "plugin_set_active",
@@ -112,7 +114,8 @@ async def test_enable_plugin_in_a_workspace(world):
         active=True,
         workspace="billing-api",
     )
-    assert "not activated for the organization" in not_active
+    assert "No plugin 'Docs helper' found" in not_active
+    assert (await ok(ctx, "plugin_list", query="docs"))["plugins"] == []
 
     await ok(admin, "plugin_set_active", plugin="Docs helper", active=True)
     enabled = await ok(

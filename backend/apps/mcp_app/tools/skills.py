@@ -136,6 +136,21 @@ async def skill_get(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         the skill is selected for a chat or scheduled task. Check skill_list
         first to avoid duplicates; update an existing skill with skill_update.
     """,
+    member_schema=obj(
+        {
+            "name": string(
+                "Short descriptive name, e.g. 'Python style guide'.", minLength=1
+            ),
+            "body": SKILL_BODY,
+        },
+        ("name", "body"),
+    ),
+    member_description="""
+        Create a personal skill: reusable Markdown instructions that agents
+        follow when the skill is selected for a chat or scheduled task. Check
+        skill_list first to avoid duplicates; update an existing skill with
+        skill_update.
+    """,
 )
 async def skill_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     def create() -> dict[str, Any]:
@@ -177,6 +192,11 @@ async def skill_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         Rename a skill or replace its Markdown body. Personal skills can be
         changed by their owner, organization skills only by admins. Chats and
         schedules that use the skill pick up the new text on their next turn.
+    """,
+    member_description="""
+        Rename one of the user's personal skills or replace its Markdown body.
+        Chats and schedules that use the skill pick up the new text on their
+        next turn.
     """,
 )
 async def skill_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

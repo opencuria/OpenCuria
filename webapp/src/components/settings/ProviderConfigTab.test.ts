@@ -69,7 +69,7 @@ const stubs = {
   },
 }
 
-function mountTab(admin = false) {
+function mountTab(admin = true) {
   setActivePinia(createPinia())
   const auth = useAuthStore()
   auth.organizations = [
@@ -202,6 +202,19 @@ describe('ProviderConfigTab', () => {
 
     expect(wrapper.find('[data-testid="defaults-no-provider-hint"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-status-openrouter"]').exists()).toBe(false)
+  })
+
+  it('shows members their accounts but none of the organization-wide defaults', async () => {
+    const wrapper = mountTab(false)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="provider-manage-openrouter"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('Small Model')
+    expect(wrapper.text()).not.toContain('Voice input')
+    expect(wrapper.find('#provider-small-model').exists()).toBe(false)
+    expect(harnessApi.getProviderConfig).not.toHaveBeenCalled()
+    expect(getVoiceSettings).not.toHaveBeenCalled()
+    await vi.runAllTimersAsync()
+    expect(harnessApi.saveProviderConfig).not.toHaveBeenCalled()
   })
 
   it('opens account management and passes provider accounts and org-admin status', async () => {

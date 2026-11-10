@@ -85,10 +85,10 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
     schema=obj({}),
     description="""
         Start here. Returns the signed-in user, the active organization and the
-        user's role in it (organization skills and plugins need the 'admin'
-        role), counts of workspaces, chats (running / waiting for input),
-        scheduled tasks and skills, the chat engines with their connection
-        status, and current_workspace_id, the workspace the agent runs in.
+        user's role in it, counts of workspaces, chats (running / waiting for
+        input), scheduled tasks and skills, the chat engines with their
+        connection status, and current_workspace_id, the workspace the agent
+        runs in.
     """,
 )
 async def opencuria_context(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

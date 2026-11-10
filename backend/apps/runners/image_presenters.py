@@ -75,7 +75,6 @@ def image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifact
         is_latest=extras["is_latest"],
         retention=extras["retention"],
         workspace_count=extras["workspace_count"],
-        workspaces=extras["workspaces"],
     )
 
 

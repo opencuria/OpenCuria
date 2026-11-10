@@ -73,3 +73,20 @@ def test_annotations_match_behavior():
         )
         if annotations.readOnlyHint:
             assert annotations.idempotentHint is True
+
+
+def test_members_are_not_offered_admin_only_tools_or_arguments():
+    """Admin-only tools and arguments are hidden; the text never points at them."""
+    admin = {tool.name: tool.for_role(admin=True) for tool in TOOLS}
+    member = {tool.name: spec for tool in TOOLS if (spec := tool.for_role(admin=False))}
+    admin_only = {"plugin_create", "plugin_update", "plugin_delete"}
+    assert admin_only <= set(admin)
+    assert not admin_only & set(member)
+    assert "scope" in admin["skill_create"].input_schema["properties"]
+    assert "scope" not in member["skill_create"].input_schema["properties"]
+    assert "workspace" not in admin["plugin_set_active"].input_schema["required"]
+    assert "workspace" in member["plugin_set_active"].input_schema["required"]
+    for tool in member.values():
+        jsonschema.Draft202012Validator.check_schema(tool.input_schema)
+        text = tool.description + str(tool.input_schema)
+        assert "admin" not in text.lower(), tool.name

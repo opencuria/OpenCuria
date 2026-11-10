@@ -31,7 +31,7 @@ def _client(*, user, org, permissions: list[str]) -> Client:
 
 @pytest.fixture
 def computer_use_setup(db):
-    """Org + owner + outsider for Computer Use config tests."""
+    """Org + member owner + admin + outsider for Computer Use config tests."""
     user_model = get_user_model()
     org = Organization.objects.create(
         name=f"ComputerUse {uuid.uuid4().hex[:6]}",
@@ -40,11 +40,15 @@ def computer_use_setup(db):
     owner = user_model.objects.create_user(
         email=f"as-owner-{uuid.uuid4().hex[:6]}@example.com", password="secret"
     )
+    admin = user_model.objects.create_user(
+        email=f"as-admin-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
     outsider = user_model.objects.create_user(
         email=f"as-out-{uuid.uuid4().hex[:6]}@example.com", password="secret"
     )
     Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
-    return {"org": org, "owner": owner, "outsider": outsider}
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    return {"org": org, "owner": owner, "admin": admin, "outsider": outsider}
 
 
 URL = "/api/v1/computer-use-config/"
@@ -96,7 +100,21 @@ def test_api_permissions_and_tenant_boundary(computer_use_setup):
     assert read.get(URL).status_code == 200
     assert read.put(URL, data="{}", content_type="application/json").status_code == 403
     assert run.get(URL).status_code == 403
-    response = run.put(
+    # Members read the org-wide runtime settings; only admins change them.
+    denied = run.put(
+        URL,
+        data=json.dumps({"enable_recording": True}),
+        content_type="application/json",
+    )
+    assert denied.status_code == 403
+    assert denied.json()["code"] == "forbidden"
+    assert not ComputerUseConfig.objects.exists()
+    admin = _client(
+        user=fixture["admin"],
+        org=fixture["org"],
+        permissions=[APIKeyPermission.HARNESS_RUN.value],
+    )
+    response = admin.put(
         URL,
         data=json.dumps({"enable_recording": True}),
         content_type="application/json",

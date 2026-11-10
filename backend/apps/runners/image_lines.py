@@ -13,7 +13,6 @@ import uuid
 from dataclasses import dataclass
 
 from django.db.models import (
-    Count,
     OuterRef,
     Q,
     QuerySet,
@@ -146,18 +145,19 @@ class ImageLineRepository:
 
     @staticmethod
     def pin_counts(image_ids) -> dict[uuid.UUID, int]:
-        """Number of pinning workspaces per image id."""
-        ids = list(image_ids)
+        """Number of distinct pinning workspaces per image id.
+
+        Only counts leave this repository: workspace names are private to
+        their owners and never part of image usage.
+        """
+        ids = set(image_ids)
         counts: dict[uuid.UUID, int] = {}
-        live = Workspace.objects.exclude(status__in=PIN_TERMINAL_STATUSES)
-        for field in ("base_image_instance_id", "pending_base_image_instance_id"):
-            rows = (
-                live.filter(**{f"{field}__in": ids})
-                .values(field)
-                .annotate(total=Count("id"))
-            )
-            for row in rows:
-                counts[row[field]] = counts.get(row[field], 0) + row["total"]
+        pins = ImageLineRepository.pinning_workspaces(ids).values_list(
+            "base_image_instance_id", "pending_base_image_instance_id"
+        )
+        for base_id, pending_id in pins:
+            for image_id in {base_id, pending_id} & ids:
+                counts[image_id] = counts.get(image_id, 0) + 1
         return counts
 
     @staticmethod
@@ -270,27 +270,6 @@ class ImageLineRepository:
                 "build_job__image_definition",
             )
         )
-
-    @staticmethod
-    def pinning_workspace_refs(image_ids) -> dict[uuid.UUID, list[dict]]:
-        """Workspaces (id, name, owner) per pinned image id."""
-        ids = set(image_ids)
-        refs: dict[uuid.UUID, list[dict]] = {}
-        for ws in ImageLineRepository.pinning_workspaces(ids).only(
-            "id",
-            "name",
-            "created_by_id",
-            "base_image_instance_id",
-            "pending_base_image_instance_id",
-        ):
-            for image_id in {
-                ws.base_image_instance_id,
-                ws.pending_base_image_instance_id,
-            } & ids:
-                refs.setdefault(image_id, []).append(
-                    {"id": ws.id, "name": ws.name, "created_by_id": ws.created_by_id}
-                )
-        return refs
 
     @staticmethod
     def finalize_captured(line_id: uuid.UUID) -> bool:

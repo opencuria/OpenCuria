@@ -167,9 +167,12 @@ def skill_names(ctx: ToolContext, ids: Iterable[Any]) -> list[str]:
 
 
 def plugin(ctx: ToolContext, ref: str) -> dict[str, Any]:
-    """Resolve a visible plugin by ID, slug or name (serialized dict)."""
+    """Resolve a visible plugin by ID, slug or name (serialized dict).
+
+    Members only resolve plugins activated for the organization.
+    """
     return pick(
-        PluginService().list_visible(org_id=ctx.organization_id),
+        PluginService().list_visible(org_id=ctx.organization_id, admin=ctx.is_admin),
         ref,
         kind="plugin",
         list_tool="plugin_list",
@@ -180,7 +183,9 @@ def plugin(ctx: ToolContext, ref: str) -> dict[str, Any]:
 
 def plugin_ids(ctx: ToolContext, refs: list[str]) -> list[uuid.UUID]:
     """Resolve plugin references to IDs, preserving order."""
-    visible = PluginService().list_visible(org_id=ctx.organization_id)
+    visible = PluginService().list_visible(
+        org_id=ctx.organization_id, admin=ctx.is_admin
+    )
     resolved: list[uuid.UUID] = []
     for ref in refs:
         found = pick(

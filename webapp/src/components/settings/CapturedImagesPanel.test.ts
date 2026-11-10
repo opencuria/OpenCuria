@@ -59,7 +59,6 @@ const image: CapturedImage = {
       retention: 'kept',
       message: 'Initial',
       workspace_count: 1,
-      workspaces: [{ id: 'ws', name: 'feature-x', created_by_id: 1 }],
     }),
   ],
 }
@@ -140,7 +139,9 @@ describe('CapturedImagesPanel', () => {
       expect(rows[0]!.text()).toContain('v2')
       expect(rows[0]!.text()).toContain('Latest')
       expect(rows[1]!.text()).toContain('Kept')
-      expect(rows[1]!.text()).toContain('feature-x')
+      // Usage is a count; which workspaces use a version stays private.
+      expect(rows[1]!.text()).toContain('Used by 1 workspace')
+      expect(rows[0]!.text()).not.toContain('Used by')
       expect(wrapper.get('[data-testid="new-workspace"]').attributes('data-image')).toBe('line-1')
     } finally {
       wrapper.unmount()

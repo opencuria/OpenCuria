@@ -118,6 +118,13 @@ def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
 
+def _visible_vm_metrics(vm_metrics: dict | None, visible: set[str] | None):
+    """Keep the per-VM metrics of *visible* workspaces (``None`` keeps all)."""
+    if vm_metrics is None or visible is None:
+        return vm_metrics
+    return {key: value for key, value in vm_metrics.items() if key in visible}
+
+
 async def _require_org_membership_async(
     request: HttpRequest, org_id: uuid.UUID
 ) -> None:
@@ -261,6 +268,9 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     metrics = service.runner_lifecycle.get_latest_runner_metrics(runner_id)
     if metrics is None:
         return 404, ErrorOut(detail="No metrics available yet", code="not_found")
+    visible = service.runner_lifecycle.visible_vm_metric_ids(
+        runner_id, organization_id=org_id, user=request.user
+    )
 
     return 200, RunnerSystemMetricsOut(
         runner_id=metrics.runner_id,
@@ -270,7 +280,7 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
         ram_total_bytes=metrics.ram_total_bytes,
         disk_used_bytes=metrics.disk_used_bytes,
         disk_total_bytes=metrics.disk_total_bytes,
-        vm_metrics=metrics.vm_metrics,
+        vm_metrics=_visible_vm_metrics(metrics.vm_metrics, visible),
     )
 
 
@@ -293,6 +303,9 @@ def get_runner_metrics_history(
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
     metrics = service.runner_lifecycle.list_runner_metrics(runner_id, hours=hours)
+    visible = service.runner_lifecycle.visible_vm_metric_ids(
+        runner_id, organization_id=org_id, user=request.user
+    )
 
     return 200, [
         RunnerSystemMetricsOut(
@@ -303,7 +316,7 @@ def get_runner_metrics_history(
             ram_total_bytes=m.ram_total_bytes,
             disk_used_bytes=m.disk_used_bytes,
             disk_total_bytes=m.disk_total_bytes,
-            vm_metrics=m.vm_metrics,
+            vm_metrics=_visible_vm_metrics(m.vm_metrics, visible),
         )
         for m in metrics
     ]

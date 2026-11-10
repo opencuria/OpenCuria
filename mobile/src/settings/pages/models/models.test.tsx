@@ -530,16 +530,13 @@ describe("skills", () => {
     expect(navigation.pop).toHaveBeenCalled();
   });
 
-  it("keeps organization skills read-only for members and reports failures", async () => {
+  it("shows members organization skills as text without admin controls", async () => {
     renderSettingsPage(<SkillPage skillId="s1" />, {
       admin: false,
       client: mockClient({ skills: { list: jest.fn(async () => skills) } }),
     });
-    expect(
-      await screen.findByText(
-        "Only organization admins can edit organization skills.",
-      ),
-    ).toBeTruthy();
+    expect(await screen.findByText(/Use strict types\./)).toBeTruthy();
+    expect(screen.queryByText(/Only organization admins/)).toBeNull();
     expect(screen.queryByTestId("save-skill")).toBeNull();
     expect(screen.queryByRole("button", { name: "Delete skill" })).toBeNull();
   });

@@ -26,15 +26,13 @@ export function loadErrorSections(
 
 /**
  * The save state below automatically saved settings, with Retry after a
- * failure; read-only viewers get `readOnlyNote` instead.
+ * failure.
  */
 export function autosaveSection(
   autosave: Autosave,
-  options: { editable?: boolean; readOnlyNote?: string; id?: string } = {},
+  options: { id?: string } = {},
 ): NativeFormSection {
   const id = options.id ?? "save-status";
-  if (options.editable === false)
-    return { id, footer: options.readOnlyNote, rows: [] };
   return {
     id,
     footer: autosaveText(autosave),

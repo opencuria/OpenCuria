@@ -41,10 +41,13 @@ export function versionTitle(version: ImageArtifact): string {
   return [`v${version.version ?? "?"}`, label].filter(Boolean).join(" · ");
 }
 
-/** "Installed Playwright · Nov 4, 2026 · 2.1 GiB · Used by api". */
+/**
+ * "Installed Playwright · Nov 4, 2026 · 2.1 GiB · Used by 2 workspaces".
+ * Which workspaces use a version stays private to their owners.
+ */
 export function versionSubtitle(version: ImageArtifact): string {
   const used = version.workspace_count
-    ? `Used by ${version.workspaces?.map((workspace) => workspace.name).join(", ") || version.workspace_count}`
+    ? `Used by ${count(version.workspace_count, "workspace")}`
     : "";
   return [
     version.message || "No description",

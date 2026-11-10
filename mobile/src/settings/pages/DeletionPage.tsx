@@ -253,11 +253,12 @@ export function DeletionPage({
                   value: `Image · ${image.owner_label || image.owner_id || "unknown owner"}`,
                 }),
               ),
+              // Only the owner gets a workspace name; others show by owner.
               ...graph.workspaces.map(
                 (workspace): NativeFormRow => ({
                   kind: "value",
                   id: `workspace-${workspace.id}`,
-                  label: workspace.name,
+                  label: workspace.name || "Workspace",
                   value: `Workspace · ${workspace.owner_label || workspace.owner_id || "unknown owner"}`,
                 }),
               ),

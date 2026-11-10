@@ -14,6 +14,7 @@ import {
   captureTargetCandidates,
   defaultCaptureTarget,
   nextImageVersion,
+  sharedWorkspaceLabel,
   workspaceRecreateOptions,
 } from "../src/imageVersions";
 import {
@@ -322,5 +323,15 @@ describe("image versions", () => {
       NEW_IMAGE,
     );
     expect(nextImageVersion(images[0])).toBe(4);
+  });
+
+  it("labels other users' workspaces by owner only", () => {
+    expect(sharedWorkspaceLabel({ name: "api", owner_label: "Ada" })).toBe(
+      "api",
+    );
+    expect(sharedWorkspaceLabel({ name: "", owner_label: "Ada" })).toBe(
+      "Workspace · Ada",
+    );
+    expect(sharedWorkspaceLabel({ name: "" })).toBe("Workspace");
   });
 });

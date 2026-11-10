@@ -1,3 +1,4 @@
+import { sharedWorkspaceLabel } from '@opencuria/chat-core/imageVersions'
 import type {
   RunnerStorageGeneration,
   RunnerStorageResource,
@@ -95,10 +96,10 @@ export function buildRunnerTopology(
             : 1
       const node: RunnerTopologyNode = {
         key: keyFor('physical', resource.physical_id),
-        label: resource.workspace?.name
+        label: resource.workspace
           ? column === 1
-            ? `${resource.workspace.name} · ${/(?:cloud[-_]?init|seed).*\.iso$/i.test(resource.physical_id.split('/').pop() || '') ? 'Boot seed' : resource.kind === 'file' ? 'Workspace file' : 'Workspace disk'}`
-            : resource.workspace.name
+            ? `${sharedWorkspaceLabel(resource.workspace)} · ${/(?:cloud[-_]?init|seed).*\.iso$/i.test(resource.physical_id.split('/').pop() || '') ? 'Boot seed' : resource.kind === 'file' ? 'Workspace file' : 'Workspace disk'}`
+            : sharedWorkspaceLabel(resource.workspace)
           : shortLabel(resource.physical_id),
         column,
         resource,
@@ -170,7 +171,7 @@ export function buildRunnerTopology(
       if (!consumers.length) {
         const node = {
           key: keyFor('workspace', workspace.id),
-          label: workspace.name,
+          label: sharedWorkspaceLabel(workspace),
           column: 0,
           workspace,
         }
@@ -286,13 +287,13 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
     const existing = workspaces.get(key)
     if (existing && rank > workspaceRanks.get(key)!) {
       existing.workspace = node.workspace
-      existing.label = node.workspace.name
+      existing.label = sharedWorkspaceLabel(node.workspace)
     }
     workspaceRanks.set(key, Math.max(workspaceRanks.get(key) ?? -1, rank))
     if (!existing)
       workspaces.set(key, {
         key,
-        label: node.workspace.name,
+        label: sharedWorkspaceLabel(node.workspace),
         column: 0,
         workspace: node.workspace,
         storage: {
@@ -326,7 +327,9 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
           if (!workspace.resource) {
             workspace.resource = node.resource
             workspace.workspace = node.workspace
-            workspace.label = node.workspace?.name ?? workspace.label
+            workspace.label = node.workspace
+              ? sharedWorkspaceLabel(node.workspace)
+              : workspace.label
           }
         } else workspace.storage!.resources.push(node.resource)
       }

@@ -319,3 +319,51 @@ def test_only_changed_approval_or_proven_inconsistency_needs_attention(
     activity = detail(user, runner)["activities"][0]
     assert activity["state"] == state
     assert activity["outcome"] == outcome
+
+
+def test_storage_names_workspaces_for_their_owner_only(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    """Admins see other users' workspaces by owner label, never by name."""
+    admin = User.objects.create_user(
+        email=f"storage-admin-{uuid.uuid4().hex[:6]}@example.com",
+        password="secret",
+        first_name="Ada",
+        last_name="Admin",
+    )
+    Membership.objects.create(user=user, organization=runner.organization)
+    image = ImageInstance.objects.create(
+        runner=runner,
+        name="Base",
+        created_by=admin,
+        is_legacy=True,
+        runner_ref="/images/base",
+    )
+    workspace.name = "secret-project"
+    workspace.base_image_instance = image
+    workspace.save(update_fields=["name", "base_image_instance"])
+    own = Workspace.objects.create(
+        runner=runner,
+        created_by=admin,
+        name="admin-box",
+        status="running",
+        base_image_instance=image,
+    )
+    command(workspace, "intervention")
+    command(own, "intervention")
+    CaptureRequest.objects.create(
+        workspace=workspace, image=image, phase="failed", diagnostic=""
+    )
+
+    result = RunnerStorageOut(**detail(admin, runner)).model_dump(mode="json")
+
+    payload = str(result)
+    assert "secret-project" not in payload
+    [generation] = result["generations"]
+    names = {ws["id"]: ws["name"] for ws in generation["dependencies"]}
+    assert names == {str(workspace.id): "", str(own.id): "admin-box"}
+    targets = {activity["target_name"] for activity in result["activities"]}
+    owner = f"Workspace · User {user.pk}"
+    assert {"admin-box", owner} <= targets
+    operations = {op["task__workspace__name"] for op in result["operations"]}
+    assert operations == {None, "admin-box"}

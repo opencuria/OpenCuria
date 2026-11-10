@@ -361,11 +361,14 @@ describe("plugins", () => {
         plugins: { list: jest.fn(async () => [plugin()]) },
       }),
     });
+    // Activation is an admin setting; members never see a plugin's status.
     expect(
       await screen.findByRole("button", {
-        name: "Playwright, Inactive · Organization · 1 skill · 1 service",
+        name: "Playwright, Organization · 1 skill · 1 service",
       }),
     ).toBeTruthy();
+    expect(screen.queryByText(/Inactive/)).toBeNull();
+    expect(screen.queryByText(/Activate a plugin/)).toBeNull();
     expect(screen.queryByTestId("new-plugin")).toBeNull();
   });
 

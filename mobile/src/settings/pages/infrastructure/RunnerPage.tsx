@@ -257,13 +257,14 @@ export function RunnerPage({
         ...(generation.is_current && generation.definition_id && !deleting
           ? [{ id: "rebuild", title: "Build new generation", symbol: "hammer" }]
           : []),
-        ...dependents
-          .filter((dependent) =>
-            workspaces.some((workspace) => workspace.id === dependent.id),
+        // Only your own workspaces can be opened; their names come from your list.
+        ...workspaces
+          .filter((workspace) =>
+            dependents.some((dependent) => dependent.id === workspace.id),
           )
-          .map((dependent) => ({
-            id: `open:${dependent.id}`,
-            title: `Open ${dependent.name}`,
+          .map((workspace) => ({
+            id: `open:${workspace.id}`,
+            title: `Open ${workspace.name}`,
             symbol: "bubble.left",
           })),
         ...(!deleting

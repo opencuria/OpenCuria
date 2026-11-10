@@ -246,7 +246,13 @@ async function backToWorkspace(): Promise<void> {
 
 <template>
   <div class="space-y-6">
-    <SettingsSection description="Manage personal and organization credentials.">
+    <SettingsSection
+      :description="
+        authStore.isAdmin
+          ? 'Manage personal and organization credentials.'
+          : 'Manage personal credentials and use organization ones.'
+      "
+    >
       <template #actions>
         <div v-if="activeDraft" class="flex flex-wrap gap-2">
           <Button

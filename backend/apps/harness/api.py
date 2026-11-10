@@ -105,6 +105,21 @@ def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid
         raise NotFoundError("Workspace", str(workspace_id))
 
 
+def _org_admin_denied(
+    request: HttpRequest, org_id: uuid.UUID
+) -> tuple[int, dict] | None:
+    """Return a 403 response unless the user administers the organization.
+
+    Organization-wide harness settings apply to every member's runs, so only
+    admins may change them; members keep read access for their own runs.
+    """
+    organizations = OrganizationService()
+    organizations.require_membership(request.user, org_id)
+    if organizations.get_user_role(request.user, org_id) != "admin":
+        return 403, {"detail": "Admin role required", "code": "forbidden"}
+    return None
+
+
 def _agent_config_to_out(row: dict) -> AgentConfigOut:
     """Map an AgentConfigService row to AgentConfigOut."""
     return AgentConfigOut(
@@ -979,12 +994,13 @@ def list_org_agent_configs(request: HttpRequest):
     summary="Save (bulk upsert) per-agent model/effort configs",
 )
 def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
-    """Validate and upsert per-agent configs."""
+    """Validate and upsert per-agent configs (organization admins only)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
         from apps.harness.services import AgentConfigService
 
         rows = AgentConfigService().save_configs(
@@ -1027,12 +1043,13 @@ def get_org_subagent_config(request: HttpRequest):
     summary="Save (upsert) the org-wide subagent depth config",
 )
 def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
-    """Validate and upsert the org subagent config."""
+    """Validate and upsert the org subagent config (organization admins only)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
         from apps.harness.services import SubagentConfigService
 
         return 200, SubagentConfigOut(
@@ -1075,12 +1092,13 @@ def get_org_computer_use_config(request: HttpRequest):
     summary="Save (upsert) the org-wide computer-use runtime config",
 )
 def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfigIn):
-    """Validate and upsert the org computer-use config."""
+    """Validate and upsert the org computer-use config (organization admins only)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
         from apps.harness.services import ComputerUseConfigService
 
         # Partial payloads merge: only explicitly sent fields are updated.
@@ -1123,12 +1141,16 @@ def get_org_provider_config(request: HttpRequest):
     summary="Save the org-wide helper-model defaults",
 )
 def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
-    """Save helper-model and voice defaults; agent models belong to AgentConfig."""
+    """Save helper-model and voice defaults (organization admins only).
+
+    Agent models belong to AgentConfig.
+    """
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
         org_id = get_organization_id(request)
-        OrganizationService().require_membership(request.user, org_id)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
         from apps.harness.services import ProviderConfigService
 
         config = ProviderConfigService().save_config(

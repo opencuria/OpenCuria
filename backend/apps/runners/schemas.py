@@ -421,16 +421,12 @@ class ProcessOut(Schema):
 # ---------------------------------------------------------------------------
 
 
-class ImageVersionWorkspaceOut(Schema):
-    """A workspace that is based on an image version."""
-
-    id: uuid.UUID
-    name: str
-    created_by_id: int | None = None
-
-
 class ImageArtifactOut(Schema):
-    """Response schema for a concrete image artifact (one image version)."""
+    """Response schema for a concrete image artifact (one image version).
+
+    ``workspace_count`` is the only usage fact: which workspaces use a
+    version, and their names, stay private to the workspace owners.
+    """
 
     id: uuid.UUID
     source_workspace_id: uuid.UUID | None = None
@@ -459,7 +455,6 @@ class ImageArtifactOut(Schema):
     is_latest: bool = False
     retention: str | None = None
     workspace_count: int = 0
-    workspaces: list[ImageVersionWorkspaceOut] = []
 
 
 class ImageArtifactCreateIn(Schema):

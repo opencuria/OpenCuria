@@ -86,7 +86,6 @@ const image: CapturedImage = {
       message: "",
       created_at: "2026-10-01T00:00:00Z",
       workspace_count: 1,
-      workspaces: [{ id: "w1", name: "api", created_by_id: 7 }],
     },
   ],
 };
@@ -147,6 +146,8 @@ describe("captured images", () => {
       },
     );
     expect(await screen.findByText("v2 · Latest")).toBeTruthy();
+    // Usage is a count; which workspaces use a version stays private.
+    expect(screen.getByText(/Used by 1 workspace/)).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Actions for v2 · Latest" }),
     ).toBeNull();

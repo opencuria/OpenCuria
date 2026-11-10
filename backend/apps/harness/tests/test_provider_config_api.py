@@ -24,7 +24,7 @@ from common.utils import generate_api_token, hash_token
 
 @pytest.fixture
 def provider_setup(db):
-    """Create one org member and one outsider; no workspace is needed here."""
+    """Create an org member, an org admin and an outsider; no workspace needed."""
     users = get_user_model()
     org = Organization.objects.create(
         name=f"Provider API {uuid.uuid4().hex[:6]}",
@@ -33,11 +33,15 @@ def provider_setup(db):
     owner = users.objects.create_user(
         email=f"provider-owner-{uuid.uuid4().hex[:8]}@example.com", password="secret"
     )
+    admin = users.objects.create_user(
+        email=f"provider-admin-{uuid.uuid4().hex[:8]}@example.com", password="secret"
+    )
     outsider = users.objects.create_user(
         email=f"provider-outsider-{uuid.uuid4().hex[:8]}@example.com", password="secret"
     )
     Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
-    return {"org": org, "owner": owner, "outsider": outsider}
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    return {"org": org, "owner": owner, "admin": admin, "outsider": outsider}
 
 
 def _client(*, user, org, permissions: list[str]) -> Client:
@@ -68,7 +72,7 @@ DEFAULT_FIELDS = {
 @pytest.mark.django_db(transaction=True)
 def test_provider_defaults_roundtrip_has_only_model_fields(provider_setup):
     client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
+        user=provider_setup["admin"], org=provider_setup["org"], permissions=BOTH
     )
 
     missing = client.get(ORG_URL)
@@ -102,7 +106,7 @@ def test_provider_defaults_roundtrip_has_only_model_fields(provider_setup):
 def test_voice_defaults_roundtrip_and_legacy_save_preserves_choices(provider_setup):
     """Org settings persist and old clients cannot clear voice choices."""
     client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
+        user=provider_setup["admin"], org=provider_setup["org"], permissions=BOTH
     )
     saved = client.put(
         ORG_URL,
@@ -158,7 +162,7 @@ def test_saving_defaults_does_not_mutate_or_delete_provider_accounts(provider_se
     )
     original_config = dict(account.config)
 
-    client = _client(user=owner, org=org, permissions=BOTH)
+    client = _client(user=provider_setup["admin"], org=org, permissions=BOTH)
     response = client.put(
         ORG_URL,
         data=json.dumps(
@@ -198,6 +202,27 @@ def test_provider_config_permissions_and_membership(provider_setup):
     assert denied_put.status_code == 403
     assert denied_put.json()["code"] == "permission_denied"
     assert run_client.get(ORG_URL).status_code == 403
+
+    # Org-wide defaults apply to everyone: members read them, admins change them.
+    member = _client(user=owner, org=org, permissions=BOTH)
+    assert member.get(ORG_URL).status_code == 200
+    member_put = member.put(
+        ORG_URL,
+        data=json.dumps({"small_model": "x"}),
+        content_type="application/json",
+    )
+    assert member_put.status_code == 403
+    assert member_put.json()["code"] == "forbidden"
+    assert not ProviderConfig.objects.filter(organization=org).exists()
+    admin = _client(user=provider_setup["admin"], org=org, permissions=BOTH)
+    assert (
+        admin.put(
+            ORG_URL,
+            data=json.dumps({"small_model": "x"}),
+            content_type="application/json",
+        ).status_code
+        == 200
+    )
 
     outsider_client = _client(user=outsider, org=org, permissions=BOTH)
     assert outsider_client.get(ORG_URL).status_code == 404

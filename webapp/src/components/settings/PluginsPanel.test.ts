@@ -135,15 +135,22 @@ describe('PluginsPanel overview and details', () => {
     expect(routerReplace).toHaveBeenCalledWith({ path: '/', query: {} })
   })
 
-  it('shows active availability and correctly pluralized compact catalog counts', async () => {
+  it('shows correctly pluralized compact catalog counts and availability only to admins', async () => {
     const p = plugin()
     pluginStore.plugins = [p]
     pluginStore.globalPlugins = [p]
+    auth.isAdmin = true
+    const admin = mountPanel()
+    await flushPromises()
+    expect(admin.text()).toContain('Active')
+    admin.unmount()
+    auth.isAdmin = false
     const wrapper = mountPanel()
     await flushPromises()
     expect(wrapper.find('[data-testid="plugin-open-p-1"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('Notion tools')
-    expect(wrapper.text()).toContain('Active')
+    // Activation is an admin setting; members only get activated plugins.
+    expect(wrapper.text()).not.toContain('Active')
     expect(wrapper.text()).toContain('1 skill')
     expect(wrapper.text()).toContain('1 MCP server')
     expect(wrapper.text()).toContain('1 service')
@@ -177,6 +184,7 @@ describe('PluginsPanel overview and details', () => {
   it('uses the shared detail header and reports detail state while opening and leaving', async () => {
     const p = plugin({ published: false, org_enabled: false })
     pluginStore.plugins = [p]
+    auth.isAdmin = true
     const wrapper = mountPanel()
     await flushPromises()
     expect(wrapper.emitted('detail-change')).toEqual([[false]])

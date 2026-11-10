@@ -16,7 +16,7 @@ import { useTheme } from "../ui/theme";
 import { ToastHost } from "../ui/ToastHost";
 import { isOrganizationAdmin } from "./profile";
 import { ResourceStore } from "./resources";
-import { parseRoute } from "./routes";
+import { ADMIN_PAGES, parseRoute } from "./routes";
 import {
   SettingsEnvironmentContext,
   SettingsNavigationContext,
@@ -64,10 +64,12 @@ const GROUPS = [
 function renderRoute(
   value: string,
   choices: Map<string, SettingsChoice>,
+  isAdmin: boolean,
 ): React.ReactNode {
   const { page, argument } = parseRoute(value);
   const choice = page === "choice" ? choices.get(argument) : undefined;
   if (choice) return <ChoicePage choice={choice} />;
+  if (!isAdmin && ADMIN_PAGES.has(page)) return unavailablePage();
   switch (page) {
     case "policy":
       return <WorkspacePolicyPage />;
@@ -85,6 +87,10 @@ function renderRoute(
     const node = render(page, argument);
     if (node !== undefined) return node;
   }
+  return unavailablePage();
+}
+
+function unavailablePage(): React.ReactNode {
   return (
     <SettingsPage
       title="Unavailable"
@@ -210,7 +216,9 @@ export function SettingsScreen(
               path={path}
               onPathChange={setPath}
               root={<RootPage />}
-              renderRoute={(value) => renderRoute(value, choices.current)}
+              renderRoute={(value) =>
+                renderRoute(value, choices.current, environment.isAdmin)
+              }
             />
           </View>
           {sheet}

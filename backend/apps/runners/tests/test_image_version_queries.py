@@ -121,7 +121,9 @@ def test_captured_list_and_detail_preserve_version_and_pin_rules(
     )
     assert facts[versions[2].id]["retention"] == "kept"
     assert all(facts[v.id]["retention"] is None for v in versions[3:6])
-    assert len(facts[versions[1].id]["workspaces"]) == 2
+    # Base and pending pins of one workspace count once per version.
+    assert facts[versions[1].id]["workspace_count"] == 2
+    assert "workspaces" not in facts[versions[1].id]
 
 
 @pytest.mark.parametrize(

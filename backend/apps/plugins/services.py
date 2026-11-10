@@ -327,10 +327,45 @@ class PluginService:
 
     # -- Queries ------------------------------------------------------------
 
-    def list_visible(self, *, org_id: uuid.UUID) -> list[dict]:
-        """Return visible plugin definitions and their service dependencies."""
+    def list_visible(self, *, org_id: uuid.UUID, admin: bool = True) -> list[dict]:
+        """Return visible plugin definitions and their service dependencies.
+
+        Members (``admin=False``) see only plugins activated for the
+        organization and none of the MCP server configuration admins
+        maintain: drafts, activation and server setup are admin settings.
+        """
         plugins = list(self.plugins.list_visible_to_org(org_id))
-        return self._serialize_plugins(plugins, org_id=org_id)
+        payloads = self._serialize_plugins(plugins, org_id=org_id)
+        if admin:
+            return payloads
+        return [
+            self._member_view(payload)
+            for payload in payloads
+            if payload["org_enabled"] and payload["enabled"] and payload["published"]
+        ]
+
+    @staticmethod
+    def _member_view(payload: dict) -> dict:
+        """Keep what members use a plugin for; blank its server configuration."""
+        return {
+            **payload,
+            "mcp_servers": [
+                {
+                    **server,
+                    "command": "",
+                    "args": [],
+                    "cwd": "",
+                    "env": {},
+                    "resources": {},
+                    "tool_policy": {},
+                    "runtime_artifact": None,
+                    "url": "",
+                    "headers": {},
+                    "oauth_requirement_key": "",
+                }
+                for server in payload["mcp_servers"]
+            ],
+        }
 
     def get_visible_model(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID):
         """Return the visible plugin model or raise NotFoundError."""

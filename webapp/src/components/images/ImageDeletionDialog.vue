@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog'
 import { useAuthStore } from '@/stores/auth'
 import * as api from '@/services/runnerStorage.api'
+import { sharedWorkspaceLabel } from '@opencuria/chat-core/imageVersions'
 import type { DeletionTarget, DeletionGraph, DeletionRequest } from '@opencuria/client/types'
 const props = defineProps<{ target: DeletionTarget | null; name?: string }>()
 const emit = defineEmits<{ close: []; requested: [request: DeletionRequest] }>()
@@ -202,7 +203,11 @@ async function cancel() {
               <span class="text-muted-foreground">· {{ i.id }}</span>
             </p>
             <p v-for="w in graph.workspaces" :key="w.id">
-              Workspace: {{ w.name }} · {{ w.owner_label || w.owner_id || 'unknown owner' }}
+              {{
+                w.name
+                  ? `Workspace: ${w.name} · ${w.owner_label || w.owner_id || 'unknown owner'}`
+                  : sharedWorkspaceLabel(w)
+              }}
               <span class="text-muted-foreground">· {{ w.id }}</span>
             </p>
             <p v-for="blocker in graph.blockers" :key="blocker" class="text-destructive">

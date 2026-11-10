@@ -44,11 +44,11 @@ function toForm(config: ProviderConfig): DefaultsForm {
 }
 
 /**
- * Provider & Models: the provider accounts, then the organization's small
- * model and dictation models, which save automatically.
+ * Provider & Models: the provider accounts, then (for admins) the
+ * organization's small model and dictation models, which save automatically.
  */
 export function ProvidersPage(): React.JSX.Element {
-  const { client, resources } = useSettings();
+  const { client, resources, isAdmin } = useSettings();
   const navigation = useSettingsNavigation();
   const accounts = useResource(resources, PROVIDER_ACCOUNTS, () =>
     client.providerAccounts.list(),
@@ -59,11 +59,18 @@ export function ProvidersPage(): React.JSX.Element {
   const engines = useResource(resources, ENGINE_MODELS, () =>
     loadEngineModels(client),
   );
-  const config = useResource(resources, PROVIDER_CONFIG, () =>
-    loadProviderConfig(client),
+  // Organization-wide defaults are admin settings; members only see accounts.
+  const config = useResource(
+    resources,
+    PROVIDER_CONFIG,
+    () => loadProviderConfig(client),
+    { enabled: isAdmin },
   );
-  const voice = useResource(resources, "voice-settings", () =>
-    client.agentSettings.getVoiceSettings(),
+  const voice = useResource(
+    resources,
+    "voice-settings",
+    () => client.agentSettings.getVoiceSettings(),
+    { enabled: isAdmin },
   );
   const [form, setForm] = useState<DefaultsForm | null>(null);
   useEffect(() => {
@@ -81,7 +88,7 @@ export function ProvidersPage(): React.JSX.Element {
       });
       config.set(saved);
     },
-    { failure: "Failed to save default models" },
+    { enabled: isAdmin, failure: "Failed to save default models" },
   );
 
   const catalog = native.data ?? [];
@@ -151,15 +158,17 @@ export function ProvidersPage(): React.JSX.Element {
   const small = form
     ? resolveCatalogModel(catalog, form.small_model)
     : undefined;
+  const providers: NativeFormSection = {
+    id: "providers",
+    title: "Providers",
+    footer: isAdmin
+      ? "Manage personal and organization-shared accounts. Provider secrets are encrypted at rest."
+      : "Connect personal accounts or use organization-shared ones. Provider secrets are encrypted at rest.",
+    rows: providerRows,
+  };
   const sections: NativeFormSection[] = form
     ? [
-        {
-          id: "providers",
-          title: "Providers",
-          footer:
-            "Manage personal and organization-shared accounts. Provider secrets are encrypted at rest.",
-          rows: providerRows,
-        },
+        providers,
         {
           id: "small-model",
           title: "Small model",
@@ -239,20 +248,22 @@ export function ProvidersPage(): React.JSX.Element {
         autosaveSection(autosave),
       ]
     : [];
+  const ready = isAdmin ? Boolean(form) : Boolean(accounts.data);
+  const visible = isAdmin ? sections : ready ? [providers] : [];
 
-  const error = accounts.error ?? config.error;
+  const error = accounts.error ?? (isAdmin ? config.error : null);
   return (
     <SettingsPage
       title="Provider & Models"
       sections={
-        error && !form
+        error && !ready
           ? loadErrorSections(error, () => {
               void accounts.reload();
-              void config.reload();
+              if (isAdmin) void config.reload();
             })
-          : sections
+          : visible
       }
-      loading={!form && !error}
+      loading={!ready && !error}
       onRefresh={async () => {
         await Promise.allSettled([
           accounts.reload(),

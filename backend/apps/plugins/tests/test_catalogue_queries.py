@@ -151,13 +151,16 @@ def test_empty_catalogue_skips_related_queries(
         assert PluginService().list_visible(org_id=org.id) == []
 
 
+@pytest.mark.parametrize(("role", "visible"), [("admin", 12), ("member", 4)])
 def test_catalogue_rest_query_count_is_bounded(
-    catalogue, django_assert_num_queries
+    catalogue, django_assert_num_queries, role: str, visible: int
 ) -> None:
     """Measure the authenticated adapter through complete JSON serialization."""
     org, _, user, services = catalogue
-    for index in range(12):
-        _plugin(org, index, services)
+    Membership.objects.filter(user=user, organization=org).update(role=role)
+    plugins = [_plugin(org, index, services) for index in range(12)]
+    for plugin in plugins[:4]:
+        OrgPluginActivation.objects.create(organization=org, plugin=plugin)
     token = generate_api_token()
     APIKey.objects.create(
         user=user,
@@ -167,10 +170,26 @@ def test_catalogue_rest_query_count_is_bounded(
         permissions=[APIKeyPermission.PLUGINS_READ.value],
     )
     client = Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org.id))
-    with django_assert_num_queries(9):
+    with django_assert_num_queries(11):
         response = client.get("/api/v1/plugins/")
         assert response.status_code == 200
-        assert len(response.json()) == 12
+        assert len(response.json()) == visible
+    servers = [server for row in response.json() for server in row["mcp_servers"]]
+    assert servers
+    if role == "admin":
+        assert all(server["command"] == "synthetic-mcp" for server in servers)
+        return
+    # Members only see activated plugins and never their server configuration.
+    assert all(row["org_enabled"] for row in response.json())
+    assert all(
+        (server["command"], server["args"], server["env"]) == ("", [], {})
+        and server["name"]
+        for server in servers
+    )
+    assert "synthetic-mcp" not in response.content.decode()
+    assert {
+        row["credential_requirements"][0]["service_name"] for row in response.json()
+    }
 
 
 def test_catalogue_refreshes_changed_components_and_activations(catalogue) -> None:

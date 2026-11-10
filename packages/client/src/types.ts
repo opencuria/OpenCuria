@@ -424,14 +424,8 @@ export interface ImageArtifact {
   message?: string;
   is_latest?: boolean;
   retention?: ImageVersionRetention | null;
+  /** How many workspaces use this version; which ones stays private to their owners. */
   workspace_count?: number;
-  workspaces?: ImageVersionWorkspace[];
-}
-
-export interface ImageVersionWorkspace {
-  id: string;
-  name: string;
-  created_by_id: number | null;
 }
 
 /** A versioned captured image with all of its versions (newest first). */
@@ -553,6 +547,7 @@ export interface DeletionGraph {
   }>;
   workspaces: Array<{
     id: string;
+    /** Only the owner gets the workspace name; it is empty for everyone else. */
     name: string;
     owner_id: string | null;
     owner_label?: string;
@@ -575,6 +570,7 @@ export interface DeletionRequest extends DeletionTarget {
 
 export interface RunnerStorageWorkspace {
   id: string;
+  /** Only the owner gets the workspace name; it is empty for everyone else. */
   name: string;
   owner_id: string | null;
   owner_label: string;
@@ -679,6 +675,7 @@ export interface RunnerStorage {
     task_id: string;
     task__status: string;
     task__error: string;
+    /** Only set for the viewer's own workspaces. */
     task__workspace__name?: string | null;
     phase: string;
     target: string;

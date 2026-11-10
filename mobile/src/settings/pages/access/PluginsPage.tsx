@@ -18,8 +18,10 @@ export function PluginsPage(): React.JSX.Element {
     ? [
         {
           id: "plugins",
-          footer:
-            "Plugins bundle skills, MCP servers and the credentials they need. Activate a plugin for the organization, then enable it per workspace.",
+          // Members only get activated plugins; activation is an admin setting.
+          footer: isAdmin
+            ? "Plugins bundle skills, MCP servers and the credentials they need. Activate a plugin for the organization, then enable it per workspace."
+            : "Plugins bundle skills, MCP servers and the credentials they need. Enable them per workspace.",
           rows: plugins.data.map((plugin) => {
             const status = pluginStatus(plugin);
             return {
@@ -27,8 +29,11 @@ export function PluginsPage(): React.JSX.Element {
               id: `plugin-${plugin.id}`,
               testID: `plugin-${plugin.id}`,
               title: plugin.name,
-              subtitle: `${status} · ${pluginSubtitle(plugin)}`,
-              subtitleTone: status === "Active" ? "success" : "muted",
+              subtitle: isAdmin
+                ? `${status} · ${pluginSubtitle(plugin)}`
+                : pluginSubtitle(plugin),
+              subtitleTone:
+                isAdmin && status === "Active" ? "success" : "muted",
               onPress: () => navigation.push(route("plugin", plugin.id)),
             };
           }),

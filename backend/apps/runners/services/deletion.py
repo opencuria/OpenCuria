@@ -2,6 +2,7 @@
 
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.user_labels import private_workspace_name
 
 from ..deletion_repository import DeletionRepository
 from ..image_lines import ImageLineRepository
@@ -29,7 +30,9 @@ class DeletionService:
 
     def preview(self, user, org_id, kind, target_id):
         self.authorize(user, org_id, kind, target_id, force=True)
-        return DeletionRepository.preview(org_id, kind, target_id)
+        return self._graph_for(
+            user, DeletionRepository.preview(org_id, kind, target_id)
+        )
 
     def request(self, user, org_id, kind, target_id, mode="deferred", fingerprint=""):
         target = self.authorize(user, org_id, kind, target_id, force=mode == "force")
@@ -39,8 +42,11 @@ class DeletionService:
                 raise ConflictError(
                     "The latest version can only be removed by deleting the image"
                 )
-        return DeletionRepository.request(
-            org_id, user, kind, target_id, mode, fingerprint
+        return self._request_for(
+            user,
+            DeletionRepository.request(
+                org_id, user, kind, target_id, mode, fingerprint
+            ),
         )
 
     def list(self, user, org_id, request_id=None):
@@ -53,7 +59,7 @@ class DeletionService:
                 self.authorize(user, org_id, row["target_type"], row["target_id"])
             except AuthenticationError:
                 continue
-            visible.append(row)
+            visible.append(self._request_for(user, row))
         if request_id and not visible:
             raise NotFoundError("Deletion request", str(request_id))
         return visible
@@ -61,4 +67,33 @@ class DeletionService:
     def cancel(self, user, org_id, request_id):
         row = self.list(user, org_id, request_id)[0]
         self.authorize(user, org_id, row["target_type"], row["target_id"])
-        return DeletionRepository.cancel(org_id, request_id)
+        return self._request_for(user, DeletionRepository.cancel(org_id, request_id))
+
+    @staticmethod
+    def _graph_for(user, graph: dict) -> dict:
+        """Show workspace names in a deletion graph to their owner only.
+
+        Admins review other users' workspaces by owner label; the stored
+        approval and its fingerprint stay unchanged.
+        """
+        if not graph.get("workspaces"):
+            return graph
+        return {
+            **graph,
+            "workspaces": [
+                {
+                    **workspace,
+                    "name": private_workspace_name(
+                        workspace.get("name"),
+                        owner_id=workspace.get("owner_id"),
+                        viewer_id=user.id,
+                    ),
+                }
+                for workspace in graph["workspaces"]
+            ],
+        }
+
+    @classmethod
+    def _request_for(cls, user, request: dict) -> dict:
+        """Present a deletion request with its approval graph for *user*."""
+        return {**request, "approval": cls._graph_for(user, request["approval"])}

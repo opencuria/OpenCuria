@@ -90,7 +90,7 @@ def test_rest_roundtrip_and_default_input(computer_use_setup) -> None:
         permissions=READ,
     )
     run = _client(
-        user=computer_use_setup["owner"], org=computer_use_setup["org"], permissions=RUN
+        user=computer_use_setup["admin"], org=computer_use_setup["org"], permissions=RUN
     )
     assert read.get(URL).json() == {"max_depth": 2}
     assert not SubagentConfig.objects.exists()
@@ -120,14 +120,15 @@ def test_rest_validation(computer_use_setup, value) -> None:
 
 
 def test_rest_permissions_and_membership(computer_use_setup) -> None:
-    """Read/run permissions, authentication and org membership are enforced."""
-    for permissions, get_status, put_status in (
-        (READ, 200, 403),
-        (RUN, 403, 200),
-        ([], 403, 403),
+    """Read/run permissions, admin role, authentication and membership."""
+    for user, permissions, get_status, put_status in (
+        ("admin", READ, 200, 403),
+        ("admin", RUN, 403, 200),
+        ("admin", [], 403, 403),
+        ("owner", READ + RUN, 200, 403),
     ):
         client = _client(
-            user=computer_use_setup["owner"],
+            user=computer_use_setup[user],
             org=computer_use_setup["org"],
             permissions=permissions,
         )
@@ -151,3 +152,29 @@ def test_rest_permissions_and_membership(computer_use_setup) -> None:
         anonymous.put(URL, data="{}", content_type="application/json").status_code
         == 401
     )
+
+
+def test_agent_configs_are_read_by_members_and_saved_by_admins(
+    computer_use_setup,
+) -> None:
+    """Per-agent defaults apply org-wide, so only admins may change them."""
+    url = "/api/v1/agent-configs/"
+    payload = json.dumps({"configs": [{"agent": "build", "model": "acme/model"}]})
+    member = _client(
+        user=computer_use_setup["owner"],
+        org=computer_use_setup["org"],
+        permissions=READ + RUN,
+    )
+    assert member.get(url).status_code == 200
+    denied = member.put(url, data=payload, content_type="application/json")
+    assert denied.status_code == 403
+    assert denied.json()["code"] == "forbidden"
+    admin = _client(
+        user=computer_use_setup["admin"],
+        org=computer_use_setup["org"],
+        permissions=READ + RUN,
+    )
+    saved = admin.put(url, data=payload, content_type="application/json")
+    assert saved.status_code == 200, saved.content
+    build = next(row for row in member.get(url).json() if row["agent"] == "build")
+    assert build["model"] == "acme/model"

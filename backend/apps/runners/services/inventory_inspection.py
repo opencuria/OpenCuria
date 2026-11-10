@@ -108,6 +108,15 @@ class InventoryInspectionService:
             }
         )
         workspaces = data.workspaces
+        # Owners of every workspace on the runner. Presentation uses them to
+        # show other users' workspaces by owner instead of their private names.
+        result["workspace_owners"] = {
+            str(w.id): {
+                "owner_id": str(w.created_by_id),
+                "owner_label": owner_label(w.created_by),
+            }
+            for w in workspaces
+        }
         # Reverse physical dependencies recursively; provenance is deliberately ignored.
         # Domain observations alone describe workspace runtime state.
         # Disks retain dependency ownership, never state authority. Prefer managed

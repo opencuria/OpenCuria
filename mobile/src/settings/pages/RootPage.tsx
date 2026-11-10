@@ -181,7 +181,7 @@ export function RootPage(): React.JSX.Element {
           prominent: true,
           rows: [
             link("providers", "Provider & Models", "cpu"),
-            link("agents", "Agents", "sparkles"),
+            ...(isAdmin ? [link("agents", "Agents", "sparkles")] : []),
             link("skills", "Skills", "book.closed"),
             link("plugins", "Plugins", "puzzlepiece.extension"),
             link("credentials", "Credentials", "key"),
@@ -192,14 +192,20 @@ export function RootPage(): React.JSX.Element {
           title: "Workspaces",
           prominent: true,
           rows: [
-            link("policy", "Workspace policy", "slider.horizontal.3"),
+            ...(isAdmin
+              ? [link("policy", "Workspace policy", "slider.horizontal.3")]
+              : []),
             link("captured-images", "Captured images", "camera"),
-            link(
-              "image-definitions",
-              "Image definitions",
-              "square.stack.3d.up",
-            ),
-            ...(isAdmin ? [link("runners", "Runners", "server.rack")] : []),
+            ...(isAdmin
+              ? [
+                  link(
+                    "image-definitions",
+                    "Image definitions",
+                    "square.stack.3d.up",
+                  ),
+                  link("runners", "Runners", "server.rack"),
+                ]
+              : []),
           ],
         },
         {

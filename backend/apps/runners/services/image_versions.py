@@ -87,10 +87,10 @@ class ImageVersionService:
         for image in images:
             line = self.lines.line_of(image)
             if line is None:
-                extras[image.id] = self._extra(image, None, {}, set())
+                extras[image.id] = self._extra(image, None, {}, 0)
             else:
                 lines.setdefault(line, []).append(image)
-        usage = self.lines.pinning_workspace_refs(i.id for i in images)
+        usage = self.lines.pin_counts(i.id for i in images)
         keep_by_org = {
             org_id: ImageRetentionService.keep_for(org_id)
             for org_id in {
@@ -115,7 +115,7 @@ class ImageVersionService:
             latest = latest_by_line[line]
             for image in members:
                 extras[image.id] = self._extra(
-                    image, line, labels, usage.get(image.id, [])
+                    image, line, labels, usage.get(image.id, 0)
                 )
                 extras[image.id]["is_latest"] = bool(latest and latest.id == image.id)
         return _VersionFacts(
@@ -126,14 +126,14 @@ class ImageVersionService:
         )
 
     @staticmethod
-    def _extra(image, line, labels, workspaces) -> dict:
+    def _extra(image, line, labels, workspace_count: int) -> dict:
+        """Version facts; usage is a count because workspace names are private."""
         return {
             "version": image.generation,
             "message": image.message,
             "is_latest": False,
             "retention": labels.get(image.id),
-            "workspace_count": len(workspaces),
-            "workspaces": list(workspaces),
+            "workspace_count": workspace_count,
             "captured_image_id": image.captured_image_id,
             "line_kind": line.kind if line else None,
         }

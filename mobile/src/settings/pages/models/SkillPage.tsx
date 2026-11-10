@@ -5,10 +5,11 @@ import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
+import { TextPage } from "../TextPage";
 import { SKILLS, canEditSkill } from "./SkillsPage";
 
 /**
- * Creates or edits a skill. Organization skills are read-only for members;
+ * Creates or edits a skill. Members view organization skills as plain text;
  * sharing is chosen once, when an admin creates the skill.
  */
 export function SkillPage({
@@ -89,6 +90,17 @@ export function SkillPage({
     );
   };
 
+  if (skill && !editable)
+    return (
+      <TextPage
+        title={skill.name}
+        label="Markdown"
+        text={skill.body}
+        monospace={false}
+        testID="settings-skill"
+      />
+    );
+
   const remove = () =>
     Alert.alert(`Delete ${skill?.name ?? "skill"}?`, "This cannot be undone.", [
       { text: "Cancel", style: "cancel" },
@@ -114,9 +126,7 @@ export function SkillPage({
     ? [
         {
           id: "skill",
-          footer: editable
-            ? "Markdown appended to harness prompts."
-            : "Only organization admins can edit organization skills.",
+          footer: "Markdown appended to harness prompts.",
           rows: [
             {
               kind: "text",
@@ -124,7 +134,6 @@ export function SkillPage({
               label: "Name",
               placeholder: "e.g. TypeScript Expert",
               value: form.name,
-              disabled: !editable,
               autoFocus: !skill,
               onChange: (name) => setForm({ ...form, name }),
             },
@@ -137,7 +146,6 @@ export function SkillPage({
               multiline: true,
               prose: true,
               lines: [6, 16],
-              disabled: !editable,
               onChange: (body) => setForm({ ...form, body }),
             },
           ],
@@ -160,7 +168,7 @@ export function SkillPage({
               },
             ]
           : []),
-        ...(skill && editable
+        ...(skill
           ? [
               {
                 id: "delete",
@@ -192,17 +200,13 @@ export function SkillPage({
         description: skills.error ?? "This skill no longer exists.",
         symbol: "exclamationmark.triangle.fill",
       }}
-      primaryAction={
-        editable
-          ? {
-              title: skill ? "Save" : "Create",
-              onPress: save,
-              busy: busy === "save",
-              disabled: !valid || Boolean(busy),
-              testID: "save-skill",
-            }
-          : undefined
-      }
+      primaryAction={{
+        title: skill ? "Save" : "Create",
+        onPress: save,
+        busy: busy === "save",
+        disabled: !valid || Boolean(busy),
+        testID: "save-skill",
+      }}
       testID="settings-skill"
     />
   );

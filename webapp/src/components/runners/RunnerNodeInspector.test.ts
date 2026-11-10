@@ -84,6 +84,7 @@ function setup(
   nodePatch: Partial<RunnerTopologyNode> = {},
   generations = [generation],
   busy = false,
+  viewerId?: string,
 ) {
   w = mount(RunnerNodeInspector, {
     attachTo: document.body,
@@ -97,6 +98,7 @@ function setup(
       },
       generations,
       busy,
+      viewerId,
     },
     global: {
       stubs: {
@@ -239,11 +241,16 @@ describe('selected runner resource inspector', () => {
     const closed = vi.fn()
     window.addEventListener('opencuria:close-settings', closed)
     try {
-      setup({
+      const node = {
         generation: undefined,
         workspace,
         resource: { ...resource, kind: 'workspace', workspace, image_id: null },
-      })
+      }
+      // Workspaces are private: other users cannot open them.
+      setup(node, [generation], false, 'bob')
+      expect(w.find('a').exists()).toBe(false)
+      w.unmount()
+      setup(node, [generation], false, 'alice')
       expect(w.text()).toContain('Alice')
       expect(w.text()).toContain('2026-10-01')
       expect(w.text()).toContain('Lifecycle: stopped')

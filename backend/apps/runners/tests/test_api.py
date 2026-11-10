@@ -173,6 +173,47 @@ class TestRunnerMetrics:
         assert response.status_code == 200
         assert [row["cpu_usage_percent"] for row in response.json()] == [2.0, 3.0]
 
+    def test_members_only_get_vm_metrics_of_their_workspaces(
+        self, client, auth_context, runner
+    ):
+        """Workspaces are private: other users' VM usage stays with admins."""
+        member = get_user_model().objects.create_user(
+            email=f"metrics-member-{uuid.uuid4().hex[:6]}@example.com",
+            password="secret",
+        )
+        org = auth_context["organization"]
+        Membership.objects.create(
+            user=member, organization=org, role=MembershipRole.MEMBER
+        )
+        own = Workspace.objects.create(runner=runner, created_by=member, name="own")
+        other = Workspace.objects.create(
+            runner=runner, created_by=auth_context["user"], name="other"
+        )
+        _metrics(runner, minutes_ago=1, cpu=5.0)
+        RunnerSystemMetrics.objects.update(
+            vm_metrics={str(own.id): {"cpu": 1}, str(other.id): {"cpu": 2}}
+        )
+        token = generate_api_token()
+        APIKey.objects.create(
+            user=member,
+            name="metrics-member",
+            key_hash=hash_token(token),
+            key_prefix=token[:12],
+            permissions=[APIKeyPermission.RUNNERS_READ.value],
+        )
+        as_member = Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org.id))
+        latest = f"/api/v1/runners/{runner.id}/metrics/latest/"
+        history = f"/api/v1/runners/{runner.id}/metrics/history/"
+
+        assert as_member.get(latest).json()["vm_metrics"] == {str(own.id): {"cpu": 1}}
+        assert [row["vm_metrics"] for row in as_member.get(history).json()] == [
+            {str(own.id): {"cpu": 1}}
+        ]
+        assert set(client.get(latest).json()["vm_metrics"]) == {
+            str(own.id),
+            str(other.id),
+        }
+
     def test_foreign_org_runner_is_not_found(self, client):
         foreign = Runner.objects.create(
             name="foreign-runner",

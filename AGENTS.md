@@ -42,6 +42,10 @@ Follow SOLID, separation of concerns and DRY. Extend existing structures:
 - UI: less is more. Few controls, concise copy, one design language; reuse existing
   components and patterns before creating new ones.
 - Harness prompts: role, scope and hard constraints only; never repeat tool schemas.
+- Roles: members never see settings only org admins may change (no read-only copies,
+  no admin hints, no admin-only MCP tools); the backend enforces every admin rule.
+  Workspace names are private to their owner: image usage and shared admin views
+  (storage, deletion, activity) show counts or owner labels only.
 
 ## Code
 

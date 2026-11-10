@@ -45,6 +45,7 @@ def test_inspection_without_observations_preserves_empty_contract(runner) -> Non
             }
         ],
         "generations": [],
+        "workspace_owners": {},
         "pin_diagnostics": [],
         "operations": [],
         "capture_requests": [],

@@ -112,13 +112,20 @@ export function PluginPage({
       id: "plugin",
       footer: plugin.description || "No description provided.",
       rows: [
-        {
-          kind: "value",
-          id: "status",
-          label: "Status",
-          value: `${pluginStatus(plugin)} · ${pluginOwner(plugin)}`,
-          tone: plugin.org_enabled ? "success" : "muted",
-        },
+        isAdmin
+          ? {
+              kind: "value" as const,
+              id: "status",
+              label: "Status",
+              value: `${pluginStatus(plugin)} · ${pluginOwner(plugin)}`,
+              tone: plugin.org_enabled ? "success" : "muted",
+            }
+          : {
+              kind: "value" as const,
+              id: "status",
+              label: "Provided by",
+              value: pluginOwner(plugin),
+            },
         ...(isAdmin
           ? [
               {

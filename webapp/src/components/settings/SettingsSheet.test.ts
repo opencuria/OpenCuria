@@ -243,14 +243,30 @@ describe('SettingsSheet', () => {
     expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
   })
 
-  it('hides admin-only services and runners tabs for members while keeping plugins visible', () => {
+  it('shows members only the tabs they can change something in', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
-    expect(wrapper.find('[data-testid="settings-nav-runners"]').exists()).toBe(false)
+    for (const tab of ['general', 'agents', 'runners', 'credential-services', 'image-definitions'])
+      expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(false)
+    for (const tab of ['provider', 'skills', 'credentials', 'plugins', 'api-keys', 'images'])
+      expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="settings-nav-credential-services"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="settings-nav-general"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="settings-nav-plugins"]').exists()).toBe(true)
+    authMock.isAdmin = true
+  })
+
+  it('never renders admin-only content for members, even through the tab model', async () => {
+    authMock.isAdmin = false
+    const wrapper = mountSheet()
+    await wrapper.setProps({ open: true, tab: 'general' })
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
+    for (const tab of ['agents', 'credential-services', 'image-definitions'] as const) {
+      await wrapper.setProps({ tab })
+      await settleAsyncComponents()
+      expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+    }
     authMock.isAdmin = true
   })
 
@@ -279,20 +295,27 @@ describe('SettingsSheet', () => {
     expect(wrapper.text()).toContain('Providers')
   })
 
-  it('falls back to general for unknown tabs and hides runners for non-admins', async () => {
+  it('opens admin-only and unknown tabs as the first member tab for non-admins', async () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
 
-    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners' } }))
-    await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
+    for (const tab of ['runners', 'general', 'image-definitions', 'nope']) {
+      window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab } }))
+      await flushPromises()
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe(
+        'Provider & Models',
+      )
+    }
+    authMock.isAdmin = true
+  })
 
+  it('falls back to general for unknown tabs for admins', async () => {
+    const wrapper = mountSheet()
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'nope' } }))
     await flushPromises()
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
-    authMock.isAdmin = true
   })
 
   it('opens the plugins tab via event', async () => {

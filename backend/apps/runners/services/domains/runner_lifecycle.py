@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from django.utils import timezone
 
+from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError
 from common.utils import generate_api_token, hash_token
 
@@ -200,6 +201,23 @@ class RunnerLifecycleService:
         """Return the host metrics samples of the last *hours*, oldest first."""
         since = timezone.now() - timedelta(hours=hours)
         return list(self.runner_metrics.get_history(runner_id, since))
+
+    def visible_vm_metric_ids(
+        self, runner_id: uuid.UUID, *, organization_id: uuid.UUID, user
+    ) -> set[str] | None:
+        """Workspaces whose VM metrics *user* may see; ``None`` means all.
+
+        Organization admins see every VM of the runner; members only their
+        own workspaces, which are private to their owners.
+        """
+        if OrganizationService().get_user_role(user, organization_id) == "admin":
+            return None
+        return {
+            str(workspace.id)
+            for workspace in self.workspaces.list_for_scope(
+                runner_id=runner_id, organization_id=organization_id, user=user
+            )
+        }
 
     def update_runner_qemu_settings(
         self,

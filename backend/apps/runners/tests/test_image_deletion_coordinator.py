@@ -918,3 +918,63 @@ asyncio.run(run())
     row = ImageDeletionRequest.objects.get(pk=plan["id"])
     assert list(row.children) == ["workspace:" + str(ws.id)]
     assert Repo.delivery_allowed(next(iter(row.children.values())))
+
+
+def test_deletion_views_name_workspaces_for_their_owner_only(runner, user):
+    """Admins review other users' workspaces by owner label, never by name."""
+    import json
+
+    from django.contrib.auth import get_user_model
+
+    admin = get_user_model().objects.create_user(
+        email=f"deletion-admin-{uuid.uuid4().hex[:6]}@example.com",
+        password="secret",
+        first_name="Ada",
+        last_name="Admin",
+    )
+    Membership.objects.create(
+        user=admin, organization=runner.organization, role="admin"
+    )
+    Membership.objects.create(
+        user=user, organization=runner.organization, role="member"
+    )
+    base = image(runner, admin)
+    private = Workspace.objects.create(
+        runner=runner,
+        created_by=user,
+        name="secret-project",
+        status="stopped",
+        base_image_instance=base,
+    )
+    own = Workspace.objects.create(
+        runner=runner,
+        created_by=admin,
+        name="admin-box",
+        status="stopped",
+        base_image_instance=base,
+    )
+    observe(
+        runner,
+        [
+            resource(base),
+            resource(private, [base.runner_ref]),
+            resource(own, [base.runner_ref]),
+        ],
+    )
+    service = DeletionService()
+
+    preview = service.preview(admin, runner.organization_id, "image", base.id)
+
+    names = {w["id"]: w["name"] for w in preview["workspaces"]}
+    assert names == {str(private.id): "", str(own.id): "admin-box"}
+    labels = {w["id"]: w["owner_label"] for w in preview["workspaces"]}
+    assert labels[str(own.id)] == "Ada Admin"
+    assert "@" not in labels[str(private.id)]
+    # Presentation never changes the structural approval.
+    assert (
+        preview["fingerprint"]
+        == Repo.preview(runner.organization_id, "image", base.id)["fingerprint"]
+    )
+    service.request(admin, runner.organization_id, "image", base.id)
+    listed = json.dumps(service.list(admin, runner.organization_id), default=str)
+    assert "secret-project" not in listed and "admin-box" in listed

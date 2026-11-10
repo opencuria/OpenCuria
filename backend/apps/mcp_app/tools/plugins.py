@@ -117,7 +117,8 @@ COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 
-def _summary(plugin: dict[str, Any]) -> dict[str, Any]:
+def _summary(plugin: dict[str, Any], *, admin: bool = True) -> dict[str, Any]:
+    """Summarize a plugin; availability and activation are admin settings."""
     return compact(
         {
             "plugin_id": plugin["id"],
@@ -125,8 +126,8 @@ def _summary(plugin: dict[str, Any]) -> dict[str, Any]:
             "slug": plugin["slug"],
             "description": preview(plugin["description"], 200),
             "scope": "global" if plugin["is_global"] else "organization",
-            "available": plugin["enabled"] and plugin["published"],
-            "active_in_organization": plugin["org_enabled"],
+            "available": plugin["enabled"] and plugin["published"] if admin else None,
+            "active_in_organization": plugin["org_enabled"] if admin else None,
             "skills": [skill["name"] for skill in plugin["skills"]],
             "mcp_servers": [server["name"] for server in plugin["mcp_servers"]],
             "required_credentials": [
@@ -138,35 +139,39 @@ def _summary(plugin: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _full(plugin: dict[str, Any]) -> dict[str, Any]:
-    data = _summary(plugin)
+def _server(server: dict[str, Any], *, admin: bool) -> dict[str, Any]:
+    """Present an MCP server; members get its name, never its configuration."""
+    if not admin:
+        return {"name": server["name"], "slug": server["slug"]}
+    return compact(
+        {
+            "name": server["name"],
+            "slug": server["slug"],
+            "transport": server["transport"],
+            "command": server["command"],
+            "args": server["args"],
+            "cwd": server["cwd"] if server["transport"] == "stdio" else None,
+            "env": server["env"],
+            "url": server["url"],
+            "headers": server["headers"],
+            "auth_type": None if server["auth_type"] == "none" else server["auth_type"],
+            "oauth_requirement_key": server["oauth_requirement_key"],
+            "startup_timeout_seconds": server["startup_timeout_seconds"],
+            "request_timeout_seconds": server["request_timeout_seconds"],
+        }
+    )
+
+
+def _full(plugin: dict[str, Any], *, admin: bool = True) -> dict[str, Any]:
+    data = _summary(plugin, admin=admin)
     data["description"] = plugin["description"]
-    data["editable"] = not plugin["is_global"]
+    data["editable"] = admin and not plugin["is_global"]
     data["skills"] = [
         {"name": skill["name"], "slug": skill["slug"], "body": skill["body"]}
         for skill in plugin["skills"]
     ]
     data["mcp_servers"] = [
-        compact(
-            {
-                "name": server["name"],
-                "slug": server["slug"],
-                "transport": server["transport"],
-                "command": server["command"],
-                "args": server["args"],
-                "cwd": server["cwd"] if server["transport"] == "stdio" else None,
-                "env": server["env"],
-                "url": server["url"],
-                "headers": server["headers"],
-                "auth_type": None
-                if server["auth_type"] == "none"
-                else server["auth_type"],
-                "oauth_requirement_key": server["oauth_requirement_key"],
-                "startup_timeout_seconds": server["startup_timeout_seconds"],
-                "request_timeout_seconds": server["request_timeout_seconds"],
-            }
-        )
-        for server in plugin["mcp_servers"]
+        _server(server, admin=admin) for server in plugin["mcp_servers"]
     ]
     data["credential_requirements"] = [
         compact(
@@ -259,6 +264,13 @@ def _editable(ctx: ToolContext, ref: str, action: str) -> dict[str, Any]:
         active_in_organization. With workspace: the activated plugins with
         enabled (in that workspace), ready and missing_credentials.
     """,
+    member_description="""
+        List the plugins available in the organization. A plugin bundles
+        skills, MCP servers (extra tools for agents, e.g. browser automation
+        or GitHub) and the credentials they need; enable it per workspace
+        with plugin_set_active. With workspace: the plugins with enabled (in
+        that workspace), ready and missing_credentials.
+    """,
 )
 async def plugin_list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     def build() -> dict[str, Any]:
@@ -286,8 +298,10 @@ async def plugin_list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             ]
         else:
             rows = [
-                _summary(plugin)
-                for plugin in PluginService().list_visible(org_id=ctx.organization_id)
+                _summary(plugin, admin=ctx.is_admin)
+                for plugin in PluginService().list_visible(
+                    org_id=ctx.organization_id, admin=ctx.is_admin
+                )
             ]
         rows = [
             row
@@ -314,13 +328,20 @@ async def plugin_list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         configuration (credentials appear only as {{credential.KEY}}
         placeholders, never as secrets) and credential requirements.
     """,
+    member_description="""
+        Get a plugin: its skills with their Markdown, the names of its MCP
+        servers and the credentials a workspace needs to use it.
+    """,
 )
 async def plugin_get(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    return await sync_to_async(lambda: _full(resolve.plugin(ctx, args["plugin"])))()
+    return await sync_to_async(
+        lambda: _full(resolve.plugin(ctx, args["plugin"]), admin=ctx.is_admin)
+    )()
 
 
 @tool(
     "plugin_create",
+    admin_only=True,
     title="Create plugin",
     schema=obj(
         {
@@ -370,6 +391,7 @@ async def plugin_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 
 @tool(
     "plugin_update",
+    admin_only=True,
     title="Update plugin",
     idempotent=True,
     schema=obj(
@@ -416,6 +438,7 @@ async def plugin_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 
 @tool(
     "plugin_delete",
+    admin_only=True,
     title="Delete plugin",
     destructive=True,
     schema=obj({"plugin": PLUGIN_REF}, ("plugin",)),
@@ -456,6 +479,20 @@ async def plugin_delete(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         the missing credentials listed if the workspace lacks a required
         credential; attach one with workspace_update.
     """,
+    member_schema=obj(
+        {
+            "plugin": PLUGIN_REF,
+            "active": boolean("true to enable, false to disable."),
+            "workspace": string("Workspace ID or name to enable/disable it in."),
+        },
+        ("plugin", "active", "workspace"),
+    ),
+    member_description="""
+        Enable or disable a plugin in one workspace; its agents get the
+        plugin's skills and MCP tools from their next turn. Enabling fails
+        with the missing credentials listed if the workspace lacks a required
+        credential; attach one with workspace_update.
+    """,
 )
 async def plugin_set_active(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     active = bool(args["active"])
@@ -479,8 +516,7 @@ async def plugin_set_active(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
             if not plugin["org_enabled"]:
                 raise ToolError(
                     f"'{plugin['name']}' is not activated for the organization. "
-                    "An admin must activate it first (plugin_set_active without "
-                    "workspace)."
+                    "Activate it first (plugin_set_active without workspace)."
                 )
             selected.append(plugin["id"])
         elif not active:

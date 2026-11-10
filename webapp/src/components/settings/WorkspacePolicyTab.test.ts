@@ -106,13 +106,4 @@ describe('WorkspacePolicyTab', () => {
     expect(updatePolicyMock).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('All changes saved')
   })
-  it('shows the policy as read-only to organization members', async () => {
-    useAuthStore().organizations[0]!.role = 'member'
-    const wrapper = mount(WorkspacePolicyTab)
-    await flushPromises()
-    expect(wrapper.get('#workspace-auto-stop').attributes('disabled')).toBeDefined()
-    expect(wrapper.get('#image-versions-to-keep').attributes('disabled')).toBeDefined()
-    await autosave()
-    expect(updatePolicyMock).not.toHaveBeenCalled()
-  })
 })
