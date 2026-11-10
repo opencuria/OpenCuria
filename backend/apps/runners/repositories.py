@@ -542,6 +542,36 @@ class WorkspaceRepository:
         return bool(changed)
 
     @staticmethod
+    def list_provisioned_ids(workspace_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return workspaces whose latest create or remove was a completed create.
+
+        A failed create, reset or removal can leave a partial guest behind, so
+        only a successful latest provisioning makes an observed guest usable.
+        """
+        if not workspace_ids:
+            return set()
+        creates = [
+            TaskType.CREATE_WORKSPACE,
+            TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
+        ]
+        latest = Task.objects.filter(
+            workspace_id=OuterRef("pk"),
+            type__in=[*creates, TaskType.REMOVE_WORKSPACE],
+        ).order_by("-created_at", "-id")
+        return set(
+            Workspace.objects.filter(pk__in=workspace_ids)
+            .annotate(
+                provisioning_type=Subquery(latest.values("type")[:1]),
+                provisioning_status=Subquery(latest.values("status")[:1]),
+            )
+            .filter(
+                provisioning_type__in=creates,
+                provisioning_status=TaskStatus.COMPLETED,
+            )
+            .values_list("pk", flat=True)
+        )
+
+    @staticmethod
     def update_credentials_present(
         workspace: Workspace,
         credentials_present: bool,

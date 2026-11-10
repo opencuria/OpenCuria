@@ -358,10 +358,140 @@ def test_replaced_runner_session_cannot_change_workspace_status(runner, workspac
     assert workspace.status == "running"
 
 
+def _heartbeat_service() -> RunnerService:
+    service = RunnerService()
+    service.heartbeat_reconciler.auto_stop_inactive_workspaces = AsyncMock(
+        return_value=[]
+    )
+    return service
+
+
+def _record_task(runner, workspace, task_type: str, status: str) -> None:
+    """Record finished lifecycle history without an owning operation."""
+    from apps.runners.models import Task
+
+    Task.objects.create(
+        runner=runner, workspace=workspace, type=task_type, status=status
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("backend_status", ["running", "stopped"])
+def test_transitional_stopping_observation_keeps_state_until_stopped(
+    runner, workspace, backend_status
+):
+    workspace.status = backend_status
+    workspace.save(update_fields=["status"])
+    service = _heartbeat_service()
+    report = [{"workspace_id": str(workspace.id), "status": "stopping"}]
+
+    service.heartbeat_reconciler.handle_heartbeat(runner, report)
+    workspace.refresh_from_db()
+    assert workspace.status == backend_status
+
+    report[0]["status"] = "stopped"
+    service.heartbeat_reconciler.handle_heartbeat(runner, report)
+    workspace.refresh_from_db()
+    assert workspace.status == "stopped"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "observed,expected",
+    [("stopped", "stopped"), ("exited", "stopped"), ("running", "running")],
+)
+def test_failed_provisioned_workspace_follows_runner_observation(
+    runner, workspace, observed, expected
+):
+    _record_task(runner, workspace, "create_workspace", "completed")
+    _record_task(runner, workspace, "stop_workspace", "failed")
+    workspace.status = "failed"
+    workspace.save(update_fields=["status"])
+    service = _heartbeat_service()
+    service.frontend_bus.forward_workspace_status = Mock()
+
+    service.heartbeat_reconciler.handle_heartbeat(
+        runner, [{"workspace_id": str(workspace.id), "status": observed}]
+    )
+
+    workspace.refresh_from_db()
+    assert workspace.status == expected
+    service.frontend_bus.forward_workspace_status.assert_called_once()
+    assert (
+        service.frontend_bus.forward_workspace_status.call_args.kwargs["status"]
+        == expected
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("observed", ["paused", "stopping", "removed", "unknown"])
+def test_failed_provisioned_workspace_stays_failed_without_usable_state(
+    runner, workspace, observed
+):
+    _record_task(runner, workspace, "create_workspace", "completed")
+    workspace.status = "failed"
+    workspace.save(update_fields=["status"])
+    service = _heartbeat_service()
+
+    service.heartbeat_reconciler.handle_heartbeat(
+        runner, [{"workspace_id": str(workspace.id), "status": observed}]
+    )
+
+    workspace.refresh_from_db()
+    assert workspace.status == "failed"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "history",
+    [
+        [],
+        [("create_workspace", "failed")],
+        [("create_workspace_from_image_artifact", "failed")],
+        [("create_workspace", "completed"), ("remove_workspace", "failed")],
+        [("create_workspace", "completed"), ("create_workspace", "failed")],
+    ],
+)
+@pytest.mark.parametrize("observed", ["running", "stopped"])
+def test_failed_provisioning_is_not_recovered_by_heartbeat(
+    runner, workspace, history, observed
+):
+    for task_type, status in history:
+        _record_task(runner, workspace, task_type, status)
+    workspace.status = "failed"
+    workspace.save(update_fields=["status"])
+    service = _heartbeat_service()
+
+    service.heartbeat_reconciler.handle_heartbeat(
+        runner, [{"workspace_id": str(workspace.id), "status": observed}]
+    )
+
+    workspace.refresh_from_db()
+    assert workspace.status == "failed"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_failed_workspace_recovery_requires_current_runner_session(runner, workspace):
+    from apps.runners.models import Runner
+
+    _record_task(runner, workspace, "create_workspace", "completed")
+    workspace.status = "failed"
+    workspace.save(update_fields=["status"])
+    Runner.objects.filter(pk=runner.id).update(sid="replacement-session")
+    service = _heartbeat_service()
+
+    service.heartbeat_reconciler.handle_heartbeat(
+        runner, [{"workspace_id": str(workspace.id), "status": "stopped"}]
+    )
+
+    workspace.refresh_from_db()
+    assert workspace.status == "failed"
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
     "observed",
-    ["paused", "suspended", "stopping", "unknown", "crashed", "invalid-state", None],
+    ["paused", "suspended", "unknown", "crashed", "invalid-state", None],
 )
 def test_unusable_runtime_observation_is_failed_and_keeps_resources(
     runner, workspace, observed

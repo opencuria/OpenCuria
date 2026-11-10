@@ -199,6 +199,16 @@ class HeartbeatReconcilerService:
         # Check backend workspaces for this runner
         backend_workspaces = list(self.workspaces.list_by_runner(runner.id))
         runner_id_str = str(runner.id)
+        # Failed workspaces follow observed power states again once they were
+        # provisioned; failed creations may hide a partial guest.
+        recoverable_ids = self.workspaces.list_provisioned_ids(
+            [
+                ws.id
+                for ws in backend_workspaces
+                if ws.status == WorkspaceStatus.FAILED
+                and str(ws.id) in runner_ws_states
+            ]
+        )
 
         # Unknown resources are inventory evidence, never cleanup authority.
 
@@ -213,13 +223,14 @@ class HeartbeatReconcilerService:
             runner_status = runner_ws_states.get(ws_id_str)
             runner_payload = runner_ws_payloads.get(ws_id_str, {})
 
-            if ws.status in (WorkspaceStatus.FAILED, WorkspaceStatus.DELETED):
+            if ws.status == WorkspaceStatus.DELETED or (
+                ws.status == WorkspaceStatus.FAILED and ws.id not in recoverable_ids
+            ):
                 continue
             if ws.status in (
                 WorkspaceStatus.PENDING_DELETION,
                 WorkspaceStatus.DELETING,
                 WorkspaceStatus.DELETE_FAILED,
-                WorkspaceStatus.DELETED,
             ):
                 self.session_store.cleanup_desktop_state(ws_id_str)
                 continue
@@ -234,12 +245,20 @@ class HeartbeatReconcilerService:
             else:
                 # Map the observed VM status to workspace status
                 new_status = self._map_instance_status(runner_status)
+                if new_status is None:
+                    # A transitional power state settles in a later observation.
+                    continue
+                if ws.status == WorkspaceStatus.FAILED and new_status not in {
+                    WorkspaceStatus.RUNNING,
+                    WorkspaceStatus.STOPPED,
+                }:
+                    continue
                 if new_status != ws.status:
                     # Never promote CREATING → RUNNING via heartbeat.
                     # Only the explicit workspace:created event (sent after
                     # repos are cloned and SSH is established) may do that.
                     if (
-                        ws.status in {WorkspaceStatus.CREATING, WorkspaceStatus.FAILED}
+                        ws.status == WorkspaceStatus.CREATING
                         and new_status == WorkspaceStatus.RUNNING
                     ):
                         continue
@@ -406,11 +425,15 @@ class HeartbeatReconcilerService:
         return changed
 
     @staticmethod
-    def _map_instance_status(status: str) -> str:
+    def _map_instance_status(status: str) -> str | None:
         """Map a runtime instance status string to a WorkspaceStatus value.
 
-        Supports normalized QEMU/libvirt domain states.
+        Supports normalized QEMU/libvirt domain states. Returns None for
+        transitional states that keep the current workspace status; unknown
+        or unusable states map to FAILED.
         """
+        if status in {"creating", "stopping"}:
+            return None
         mapping = {
             "running": WorkspaceStatus.RUNNING,
             "blocked": WorkspaceStatus.RUNNING,
