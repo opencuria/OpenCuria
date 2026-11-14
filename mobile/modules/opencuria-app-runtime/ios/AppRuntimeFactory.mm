@@ -5,6 +5,7 @@
 #import <ExpoModulesCore/EXHostWrapper.h>
 #import <ExpoModulesCore/EXReactSchedulerDispatch.h>
 #import <React/RCTComponentViewFactory.h>
+#import <React/RCTExceptionsManager.h>
 #import <ReactCommon/RCTHost.h>
 #import <react/renderer/runtimescheduler/RuntimeSchedulerBinding.h>
 
@@ -13,6 +14,54 @@
 #else
 #import "ExpoModulesCore-Swift.h"
 #endif
+
+// RCTExceptionsManager.mm sends every fatal report (`reportException` with
+// `isFatal`, `reportFatalException`) through this method, which ends in
+// RCTFatal in release builds. Check it still exists when upgrading React Native.
+@interface RCTExceptionsManager (OCFatalReport)
+- (void)reportFatal:(NSString *)message
+              stack:(NSArray<NSDictionary *> *)stack
+        exceptionId:(double)exceptionId
+    extraDataAsJSON:(nullable NSString *)extraDataAsJSON;
+@end
+
+/**
+ The app instance's ExceptionsManager. Once the bundle has run, React Native
+ reports uncaught JavaScript errors (e.g. in a render) through this module
+ instead of the host delegate, and RCTFatal would end the whole OpenCuria
+ process. Fatal reports go to the app's error screen instead.
+ */
+@interface OCAppExceptionsManager : RCTExceptionsManager
+- (instancetype)initWithFatalHandler:(void (^)(NSString *message))onFatal;
+@end
+
+@implementation OCAppExceptionsManager {
+  void (^_onFatal)(NSString *message);
+}
+
+// Not RCT_EXPORT_MODULE: its +load would register this class process-wide.
++ (NSString *)moduleName
+{
+  return @"ExceptionsManager";
+}
+
+- (instancetype)initWithFatalHandler:(void (^)(NSString *message))onFatal
+{
+  if (self = [super init]) {
+    _onFatal = [onFatal copy];
+  }
+  return self;
+}
+
+- (void)reportFatal:(NSString *)message
+              stack:(NSArray<NSDictionary *> *)stack
+        exceptionId:(double)exceptionId
+    extraDataAsJSON:(nullable NSString *)extraDataAsJSON
+{
+  _onFatal(message ?: @"");
+}
+
+@end
 
 @implementation OCAppRuntimeFactory {
   // The context lives as long as this factory's single React instance.
@@ -56,7 +105,20 @@
   [appContext registerNativeModules];
 }
 
-// Implementing this keeps fatal errors away from RCTFatal (RCTHost.mm).
+// [JS thread] The app's own ExceptionsManager; every other module as usual.
+- (id<RCTTurboModule>)getModuleInstanceFromClass:(Class)moduleClass
+{
+  if (moduleClass == [RCTExceptionsManager class]) {
+    __weak OCAppRuntimeFactory *weakSelf = self;
+    return (id<RCTTurboModule>)[[OCAppExceptionsManager alloc] initWithFatalHandler:^(NSString *message) {
+      [weakSelf reportFatalError:message];
+    }];
+  }
+  return [super getModuleInstanceFromClass:moduleClass];
+}
+
+// Implementing this keeps fatal errors away from RCTFatal (RCTHost.mm) while
+// the bundle loads; later ones reach OCAppExceptionsManager.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-implementations"
 - (void)host:(RCTHost *)host
@@ -72,16 +134,21 @@
   if (!isFatal) {
     return;
   }
-  NSString *text = originalMessage ?: message;
+  [self reportFatalError:originalMessage ?: message];
+}
+#pragma clang diagnostic pop
+
+// [Any thread]
+- (void)reportFatalError:(NSString *)message
+{
   dispatch_async(dispatch_get_main_queue(), ^{
     // Read on the main thread, where it is set; calling a nil block crashes.
     void (^onFatalError)(NSString *) = self.onFatalError;
     if (onFatalError) {
-      onFatalError(text);
+      onFatalError(message);
     }
   });
 }
-#pragma clang diagnostic pop
 
 - (void)invalidate
 {

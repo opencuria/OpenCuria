@@ -269,7 +269,11 @@ final class AppRuntimeViewController: UIViewController, UIAdaptivePresentationCo
   private func showError(_ message: String) {
     guard isViewLoaded else { return }
     stop()
-    let text = message.components(separatedBy: ", stack:").first ?? message
+    // Without React Native's stack and component stack, as on Android.
+    let text = message
+      .components(separatedBy: ", stack:").first?
+      .components(separatedBy: "\n\nThis error is located at:").first?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? message
     let alert = UIAlertController(
       title: "\(launch.name) stopped",
       message: String(text.prefix(600)),
