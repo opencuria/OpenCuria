@@ -174,3 +174,39 @@ async def test_session_store_never_persists_inline_media(harness_workspace) -> N
     }
     assert encoded not in str(stored)
     assert entry["toolUseResult"]["file"]["base64"] == encoded
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_session_store_keeps_rows_with_object_type_fields(
+    harness_workspace,
+) -> None:
+    """A ``type`` key holding an object (e.g. a JSON schema) is plain data."""
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    external_id = str(uuid.uuid4())
+    store = HarnessClaudeSessionStore(
+        session_id=session.id, external_session_id=external_id
+    )
+    key = {"project_key": "workspace", "session_id": external_id}
+    schema = {"type": "object", "properties": {"type": {"type": "string"}}}
+    entry = {
+        "type": "assistant",
+        "uuid": str(uuid.uuid4()),
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "mcp_schema",
+                    "input": {"type": {"enum": ["a"]}, "schema": schema},
+                }
+            ]
+        },
+    }
+
+    await store.append(key, [entry])
+
+    assert await store.load(key) == [entry]

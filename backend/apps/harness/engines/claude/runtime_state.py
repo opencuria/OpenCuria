@@ -18,7 +18,7 @@ MANAGED_STATE_PREFIX = f"{HARNESS_WORKSPACE_ROOT}/.opencuria/harness/claude/"
 AUTH_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 MAX_SKILL_COUNT = 128
 MAX_SKILL_BODY_BYTES = 64 * 1024
-MAX_MANAGED_FILE_BYTES = 10 * 1024 * 1024
+MAX_MANAGED_FILE_BYTES = 64 * 1024 * 1024
 # ``engine_state`` key holding the CLI's cumulative cost after the last turn.
 CLI_TOTAL_COST_KEY = "cli_total_cost_usd"
 
@@ -77,7 +77,7 @@ target = os.path.abspath(sys.argv[2])
 mode = int(sys.argv[3], 8)
 if os.path.commonpath((root, target)) != root or target == root:
     raise SystemExit(2)
-limit = 10 * 1024 * 1024
+limit = int(sys.argv[4])
 parent = os.path.dirname(target)
 leaf = os.path.basename(target)
 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -275,7 +275,7 @@ class ClaudeRuntimeState:
             raise ValueError("Claude managed file exceeds the size limit")
         await self._run_managed_script(
             _SAFE_WRITE_SCRIPT,
-            [self.root, path, "600"],
+            [self.root, path, "600", str(MAX_MANAGED_FILE_BYTES)],
             payload=raw,
         )
 

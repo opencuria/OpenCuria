@@ -9,10 +9,13 @@ from ...media.tool_media import OMITTED_MEDIA_NOTICE
 
 def _is_media_block(value: dict[str, Any]) -> bool:
     """Match API image/document blocks and MCP image items carrying base64."""
+    kind = value.get("type")
+    if not isinstance(kind, str):
+        return False
     source = value.get("source")
-    if value.get("type") in {"image", "document"} and isinstance(source, dict):
+    if kind in {"image", "document"} and isinstance(source, dict):
         return source.get("type") == "base64" and isinstance(source.get("data"), str)
-    return value.get("type") == "image" and isinstance(value.get("data"), str)
+    return kind == "image" and isinstance(value.get("data"), str)
 
 
 def strip_transcript_media(entry: Any) -> Any:
@@ -31,7 +34,7 @@ def strip_transcript_media(entry: Any) -> Any:
     stripped = {key: strip_transcript_media(value) for key, value in entry.items()}
     file = stripped.get("file")
     if (
-        stripped.get("type") in {"image", "pdf"}
+        stripped.get("type") in ("image", "pdf")
         and isinstance(file, dict)
         and file.get("base64")
     ):

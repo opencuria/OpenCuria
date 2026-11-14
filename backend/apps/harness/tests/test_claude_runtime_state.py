@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 from apps.harness.engines.claude.runtime_state import (
+    _SAFE_WRITE_SCRIPT,
+    MAX_MANAGED_FILE_BYTES,
     MAX_SKILL_BODY_BYTES,
     MAX_SKILL_COUNT,
     ClaudeRuntimeState,
@@ -109,13 +111,59 @@ async def test_managed_write_is_atomic_private_and_does_not_follow_file_symlink(
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert not list(target.parent.glob(".opencuria-*.tmp"))
     write_command = next(
-        command
-        for command in accessor.commands
-        if "limit = 10 * 1024 * 1024" in command[2]
+        command for command in accessor.commands if command[2] == _SAFE_WRITE_SCRIPT
     )
-    assert write_command[-3:] == [str(root), str(target), "600"]
+    assert write_command[-4:] == [
+        str(root),
+        str(target),
+        "600",
+        str(MAX_MANAGED_FILE_BYTES),
+    ]
     assert all("new prompt" not in argument for argument in write_command)
     assert accessor.environments and all(env is None for env in accessor.environments)
+
+
+@pytest.mark.asyncio
+async def test_managed_write_accepts_long_resumed_transcripts(tmp_path: Path) -> None:
+    """Transcripts beyond the former 10 MiB bound still restore for resume."""
+    root = tmp_path / "managed"
+    state = _runtime(root)
+    target = root / "session" / "transcript.jsonl"
+    payload = b"x" * (10 * 1024 * 1024 + 1)
+    await state.ensure_managed_dir(str(target.parent))
+
+    await state.write_managed_file(str(target), payload)
+
+    assert target.stat().st_size == len(payload)
+
+
+@pytest.mark.asyncio
+async def test_managed_write_over_limit_is_rejected(tmp_path: Path) -> None:
+    """Both the backend and the workspace script enforce the managed bound."""
+    root = tmp_path / "managed"
+    accessor = _LocalAccessor()
+    state = ClaudeRuntimeState(
+        accessor=accessor,  # type: ignore[arg-type]
+        auth_env={"ANTHROPIC_API_KEY": "not-a-real-secret"},
+        root=str(root),
+        sdk_version="test",
+    )
+    target = root / "session" / "transcript.jsonl"
+    await state.ensure_managed_dir(str(target.parent))
+
+    with pytest.raises(ValueError, match="exceeds the size limit"):
+        await state.write_managed_file(
+            str(target), b"x" * (MAX_MANAGED_FILE_BYTES + 1)
+        )
+    assert all(command[2] != _SAFE_WRITE_SCRIPT for command in accessor.commands)
+    with pytest.raises(RuntimeError, match="managed workspace operation failed"):
+        await state._run_managed_script(
+            _SAFE_WRITE_SCRIPT,
+            [str(root), str(target), "600", "4"],
+            payload=b"12345",
+        )
+    assert not target.exists()
+    assert not list(target.parent.glob(".opencuria-*.tmp"))
 
 
 @pytest.mark.asyncio

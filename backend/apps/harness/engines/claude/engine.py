@@ -57,6 +57,7 @@ from .policy import (
 from .runtime_state import (
     CLI_TOTAL_COST_KEY,
     MANAGED_STATE_PREFIX,
+    MAX_MANAGED_FILE_BYTES,
     ClaudeRuntimeState,
     validate_claude_skills,
 )
@@ -66,7 +67,8 @@ from .transport import ClaudeWorkspaceTransport
 log = structlog.get_logger(__name__)
 CLI_VERSION = CLAUDE_CODE_CLI_VERSION
 SDK_VERSION = CLAUDE_AGENT_SDK_VERSION
-MAX_RESTORED_TRANSCRIPT_BYTES = 10 * 1024 * 1024
+# A bounded total keeps every restored transcript file within the managed bound.
+MAX_RESTORED_TRANSCRIPT_BYTES = MAX_MANAGED_FILE_BYTES
 MAX_MANAGED_PROMPT_BYTES = 256 * 1024
 CANCEL_CLEANUP_TIMEOUT_S = 3.0
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
