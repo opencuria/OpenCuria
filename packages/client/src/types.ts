@@ -391,6 +391,16 @@ export interface ApiKeyCreateInput {
 
 export type ImageVersionRetention = "latest" | "kept" | "expires_when_unused";
 
+/** Operating system of an image and of the workspaces started from it. */
+export type GuestOs = "linux" | "windows";
+
+/** Smallest workspace resources an image supports. */
+export interface ImageMinimums {
+  vcpus: number;
+  memory_mb: number;
+  disk_size_gb: number;
+}
+
 export interface ImageArtifact {
   id: string;
   source_workspace_id: string | null;
@@ -426,6 +436,10 @@ export interface ImageArtifact {
   retention?: ImageVersionRetention | null;
   /** How many workspaces use this version; which ones stays private to their owners. */
   workspace_count?: number;
+  /** Missing means Linux. */
+  guest_os?: GuestOs;
+  /** Guest OS minimums, raised to this version's virtual disk. */
+  minimums?: ImageMinimums;
 }
 
 /** A versioned captured image with all of its versions (newest first). */
@@ -441,6 +455,10 @@ export interface CapturedImage {
   latest_version: number | null;
   total_size_bytes: number;
   workspace_count: number;
+  /** Guest OS of the latest version; missing means Linux. */
+  guest_os?: GuestOs;
+  /** Minimum resources of the latest version. */
+  minimums?: ImageMinimums;
   versions: ImageArtifact[];
 }
 
@@ -461,6 +479,9 @@ export interface ImageDefinition {
   /** A global recipe; only custom definitions can be edited. */
   is_standard: boolean;
   base_distro: string;
+  /** Derived from `base_distro`; missing means Linux. */
+  guest_os?: GuestOs;
+  minimums?: ImageMinimums;
   packages: string[];
   env_vars: Record<string, string>;
   custom_init_script: string;
