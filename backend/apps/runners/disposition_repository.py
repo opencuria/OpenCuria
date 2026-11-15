@@ -140,6 +140,10 @@ class DispositionRepository:
         """Read the current locked operation and workspace fence."""
         return _snapshot(self._command)
 
+    def workspace(self) -> Workspace | None:
+        """Return the locked workspace of the operation, if any."""
+        return self._workspace
+
     def fail_task(self, error: str) -> None:
         """Persist the terminal task outcome selected by the service."""
         task = self._task

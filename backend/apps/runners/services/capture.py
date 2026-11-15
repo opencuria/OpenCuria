@@ -12,6 +12,7 @@ from collections.abc import Callable
 import structlog
 
 from apps.credentials.services import CredentialSvc
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError, NotFoundError
 
 from ..capture_repository import CaptureRepository
@@ -199,8 +200,13 @@ class CaptureService:
                         and not request.resume_suppressed
                         and ws.status == "stopped"
                     ):
-                        CaptureService._child(request, ws, "resume")
-                        return
+                        try:
+                            WindowsLicenseService().admit(ws)
+                        except ConflictError as exc:
+                            request.diagnostic += f"; workspace remains stopped: {exc}"
+                        else:
+                            CaptureService._child(request, ws, "resume")
+                            return
                 else:
                     CaptureService._child(request, ws, "capture")
                     return
@@ -230,6 +236,7 @@ class CaptureService:
                             disk_size_gb=ws.qemu_disk_size_gb,
                             exclude_workspace_id=ws.id,
                         )
+                        WindowsLicenseService().admit(ws)
                     except ConflictError as exc:
                         request.diagnostic += f"; workspace remains stopped: {exc}"
                     else:
@@ -295,6 +302,14 @@ class CaptureService:
             return (
                 f"Image saved as v{image.generation}, but replacement cannot reserve "
                 f"runner resources: {exc}; the workspace stays on its previous version"
+            )
+        try:
+            # The replacement boots the stopped source again (running cap).
+            WindowsLicenseService().admit_recreate(ws)
+        except ConflictError as exc:
+            return (
+                f"Image saved as v{image.generation}, but the workspace cannot "
+                f"start: {exc} It stays on its previous version"
             )
         return None
 

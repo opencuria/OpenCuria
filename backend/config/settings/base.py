@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     "apps.skills",
     "apps.mcp_app",
     "apps.mobile_apps",
+    "apps.licensing",
 ]
 
 MIDDLEWARE = [

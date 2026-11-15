@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import structlog
 
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError, NotFoundError
 
 from ..enums import TaskType, WorkspaceStatus
@@ -163,6 +164,9 @@ class RecreateService:
             disk_size_gb=disk_size_gb,
             exclude_workspace_id=ws.id,
         )
+        # Same identity: the workspace keeps its license (the guest OS of an
+        # image line never changes).
+        WindowsLicenseService().admit_recreate(ws)
         ws.qemu_disk_size_gb = disk_size_gb
         ws.pending_base_image_instance = target
         RecreateRepository.save_workspace(

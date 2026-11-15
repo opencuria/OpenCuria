@@ -123,6 +123,15 @@ class MembershipRepository:
         ).select_related("user")
 
     @staticmethod
+    def list_active_for_organization(org_id: uuid.UUID) -> list[Membership]:
+        """List memberships of active users with the user loaded."""
+        return list(
+            Membership.objects.filter(
+                organization_id=org_id, user__is_active=True
+            ).select_related("user")
+        )
+
+    @staticmethod
     def list_for_user(user) -> QuerySet[Membership]:
         """List all memberships for a user."""
         return Membership.objects.filter(

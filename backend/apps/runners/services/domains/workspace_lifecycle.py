@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError, NotFoundError
 from common.utils import generate_uuid
 
@@ -268,6 +269,11 @@ class WorkspaceLifecycleService:
             vcpus=resolved_qemu_vcpus,
             memory_mb=resolved_qemu_memory_mb,
             disk_size_gb=resolved_qemu_disk_size_gb,
+        )
+        await sync_to_async(WindowsLicenseService().preflight)(
+            organization_id=runner.organization_id,
+            guest_os=selected_image.guest_os,
+            owner_id=getattr(user, "id", None),
         )
 
         resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
@@ -644,6 +650,7 @@ class WorkspaceLifecycleService:
             disk_size_gb=qemu_disk_size_gb,
             exclude_workspace_id=workspace.id,
         )
+        await sync_to_async(WindowsLicenseService().preflight_workspace)(workspace)
 
         task_id = generate_uuid()
         workspace, task = await sync_to_async(WorkspaceCapacityService.resume)(
@@ -714,6 +721,10 @@ class WorkspaceLifecycleService:
                 memory_mb=memory_mb,
                 disk_size_gb=disk_size_gb,
                 exclude_workspace_id=workspace.id,
+            )
+            # The recreate boots a workspace that is not running.
+            await sync_to_async(WindowsLicenseService().preflight_recreate)(
+                workspace
             )
 
         try:
@@ -1254,6 +1265,11 @@ class WorkspaceLifecycleService:
             vcpus=qemu_vcpus,
             memory_mb=qemu_memory_mb,
             disk_size_gb=qemu_disk_size_gb,
+        )
+        await sync_to_async(WindowsLicenseService().preflight)(
+            organization_id=runner.organization_id,
+            guest_os=image.guest_os,
+            owner_id=getattr(user, "id", None),
         )
 
         workspace_id = generate_uuid()
