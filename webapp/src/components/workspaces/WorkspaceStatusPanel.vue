@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * WorkspaceStatusPanel — compact resource overview of one workspace.
+ * WorkspaceStatusPanel — compact resource overview of one workspace, plus the
+ * license state of Windows workspaces.
  *
  * Storage is the last observation reported by the runner (kept while the
  * workspace is stopped). Memory and CPU are live VM metrics, loaded only
@@ -12,6 +13,7 @@ import type { VmSystemMetrics, Workspace } from '@/types'
 import { WorkspaceStatus } from '@/types'
 import { Button } from '@/components/ui/button'
 import UsageMeter from '@/components/common/UsageMeter.vue'
+import WorkspaceGuestBadge from './WorkspaceGuestBadge.vue'
 import { usePolling } from '@/composables/usePolling'
 import {
   formatStorageBytes,
@@ -112,6 +114,15 @@ onMounted(start)
 
 <template>
   <div class="flex flex-col gap-4 text-xs" data-testid="workspace-status-panel">
+    <section
+      v-if="workspace.guest_os === 'windows'"
+      class="flex items-center justify-between gap-3"
+      data-testid="workspace-status-system"
+    >
+      <span class="font-medium text-foreground">System</span>
+      <WorkspaceGuestBadge :workspace="workspace" />
+    </section>
+
     <section class="flex flex-col gap-1.5" data-testid="workspace-status-storage">
       <div class="flex items-baseline justify-between gap-3">
         <span class="font-medium text-foreground">Storage</span>
