@@ -5,6 +5,7 @@ import { useWorkspaceStore } from './workspaces'
 import { WorkspaceOperation, WorkspaceStatus, type Workspace } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { toast } from 'vue-sonner'
+import { ApiRequestError } from '@opencuria/client/api'
 
 vi.mock('vue-sonner', () => ({
   toast: {
@@ -24,6 +25,8 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     listWorkspaces: vi.fn(),
     recreateWorkspace: vi.fn(),
     deleteWorkspace: vi.fn(),
+    createWorkspace: vi.fn(),
+    resumeWorkspace: vi.fn(),
   }
 })
 
@@ -584,5 +587,45 @@ describe('recreateWorkspace', () => {
     )
     expect(await store.recreateWorkspace('workspace-1', 'v1')).toBe(false)
     expect(toast.error).toHaveBeenCalled()
+  })
+})
+
+describe('Windows license refusals', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('shows the server detail as is when creation or start is refused', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ status: WorkspaceStatus.STOPPED })]
+    const unavailable = 'All Windows licenses are in use.'
+    vi.mocked(workspacesApi.createWorkspace).mockRejectedValue(
+      new ApiRequestError(409, unavailable, 'windows_license_unavailable'),
+    )
+    expect(
+      await store.createWorkspace({
+        name: 'win',
+        image_id: 'image-1',
+        repos: [],
+        credential_ids: [],
+        plugin_ids: [],
+      }),
+    ).toBe(false)
+    expect(toast.error).toHaveBeenCalledWith('Creation failed', {
+      description: unavailable,
+      duration: 8000,
+    })
+
+    const limit = 'The organization runs the maximum number of Windows workspaces.'
+    vi.mocked(workspacesApi.resumeWorkspace).mockRejectedValue(
+      new ApiRequestError(409, limit, 'windows_running_limit'),
+    )
+    await store.resumeWorkspace('workspace-1')
+    expect(toast.error).toHaveBeenLastCalledWith('Resume failed', {
+      description: limit,
+      duration: 8000,
+    })
+    expect(store.pendingWorkspaceOperations['workspace-1']).toBeUndefined()
   })
 })
