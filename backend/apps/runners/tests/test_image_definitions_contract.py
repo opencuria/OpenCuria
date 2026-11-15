@@ -25,7 +25,7 @@ from apps.runners.models import (
 from common.utils import hash_token
 
 from .test_image_definitions_api import _auth_headers, _create_api_key
-from .test_windows_images import built_image
+from .test_windows_images import built_image, seed
 
 _ALL_IMAGE_PERMISSIONS = [
     APIKeyPermission.IMAGE_DEFINITIONS_READ.value,
@@ -495,3 +495,18 @@ def test_built_recipe_cannot_change_its_os(client, recipe_org, user):
         recipe_org["admin_headers"],
     )
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+def test_windows_11_is_seeded_as_an_unbuilt_global_recipe(client, recipe_org):
+    definition = ImageDefinition.objects.get(id=seed.WINDOWS_11_ID)
+
+    assert definition.organization_id is None and definition.is_active
+    assert definition.name == "Windows 11"
+    assert definition.base_distro == "windows:11"
+    assert definition.packages == ["OpenJS.NodeJS.LTS"]
+    assert definition.env_vars == {} and definition.custom_init_script == ""
+    assert not ImageBuildJob.objects.filter(image_definition=definition).exists()
+    listed = client.get("/api/v1/image-definitions/", **recipe_org["member_headers"])
+    [entry] = [e for e in listed.json() if e["id"] == str(seed.WINDOWS_11_ID)]
+    assert entry["is_standard"] is True and entry["guest_os"] == "windows"

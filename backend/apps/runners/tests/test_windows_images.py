@@ -1,7 +1,8 @@
-"""Windows 11 images: guest facts for clients, resource floors."""
+"""Windows 11 images: guest facts for clients, resource floors, the seed."""
 
 from __future__ import annotations
 
+import importlib
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -26,6 +27,10 @@ from apps.runners.services.workspace_capacity import WorkspaceCapacityService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_image_versions import make_line, qemu_workspace
 from common.exceptions import ConflictError
+
+seed = importlib.import_module(
+    "apps.runners.migrations.0035_seed_windows_11_image_definition"
+)
 
 
 def built_image(runner, user, base_distro: str = "windows:11") -> ImageInstance:
@@ -382,3 +387,22 @@ async def test_recreate_raises_stored_resources_to_the_guest_minimum(
     await workspace.arefresh_from_db()
     assert (workspace.qemu_vcpus, workspace.qemu_memory_mb) == (2, 4096)
     assert workspace.qemu_disk_size_gb == 64
+
+
+# ---------------------------------------------------------------------------
+# Seeded recipe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_windows_11_seed_is_idempotent_and_reversible():
+    from django.apps import apps
+    from django.db import connection
+
+    editor = SimpleNamespace(connection=connection)
+    seed.seed_windows_11(apps, editor)
+    assert ImageDefinition.objects.filter(name="Windows 11").count() == 1
+    seed.unseed_windows_11(apps, editor)
+    assert not ImageDefinition.objects.filter(id=seed.WINDOWS_11_ID).exists()
+    seed.seed_windows_11(apps, editor)
+    assert ImageDefinition.objects.filter(id=seed.WINDOWS_11_ID).exists()
