@@ -26,6 +26,7 @@ from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
 from ..operation_executor import COMMANDS, OperationExecutor
 from ..runtime.artifacts import ArtifactRequestError
+from ..runtime.display_stream import novnc_file
 from ..service import WorkspaceService
 from ..services.sessions.terminals import CLOSED, EXITED
 from ..services.system_metrics import SystemMetricsCollector
@@ -100,6 +101,9 @@ class WebSocketInterface(Interface):
             ),
             events=self._sio,
             capture_fence=getattr(service, "capture_fence", None),
+            desktop_kind=lambda workspace_id: service.desktop.desktop_kind(workspace_id),
+            open_display=lambda workspace_id: service.desktop.open_display(workspace_id),
+            display_file=novnc_file,
         )
         self._uploads = UploadTransfers()
         terminals = getattr(self._service, "terminal_manager", None)

@@ -33,8 +33,10 @@ from common import realtime
 
 from .desktop_tickets import redeem_desktop_ticket
 from .kasmvnc_client import (
+    KASMVNC,
     ClientFile,
     accept_client_file,
+    client_for_guest,
     cached_client_file,
     lookup_client_file,
 )
@@ -349,6 +351,7 @@ async def desktop_proxy_app(scope, receive, send):
             workspace_id,
             query_string,
             cookie_header,
+            client_for_guest(proxy_target.get("guest_os")),
         )
     else:
         await send({"type": "http.response.start", "status": 400, "headers": []})
@@ -376,8 +379,9 @@ async def _proxy_http(
     workspace_id,
     query_string,
     cookie_header,
+    viewer_client=KASMVNC,
 ):
-    """Serve the entry redirect and the pinned KasmVNC client files."""
+    """Serve the entry redirect and the pinned desktop client files."""
     if not await _desktop_workspace_available(workspace_id):
         await _reject_unavailable_desktop(scope, send)
         return
@@ -405,7 +409,7 @@ async def _proxy_http(
     if scope.get("method", "GET") != "GET":
         await _send_plain(send, 405, b"Method Not Allowed")
         return
-    file = lookup_client_file(rest_path)
+    file = lookup_client_file(rest_path, viewer_client)
     if file is None:
         await _send_plain(send, 404, b"Not Found")
         return

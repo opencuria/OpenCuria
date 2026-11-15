@@ -74,7 +74,9 @@ def pinned_client(monkeypatch) -> dict[str, bytes]:
         "dist/main.bundle.js": b"/* kasm bundle */",
     }
     digests = {path: hashlib.sha256(body).hexdigest() for path, body in files.items()}
-    monkeypatch.setattr(kasmvnc_client, "client_files", lambda: digests)
+    monkeypatch.setattr(
+        kasmvnc_client, "client_files", lambda client=kasmvnc_client.KASMVNC: digests
+    )
     return files
 
 
@@ -272,6 +274,7 @@ async def test_proxy_target_needs_an_active_desktop_and_a_connected_runner(
         "runner_id": str(workspace.runner_id),
         "runner_sid": workspace.runner.sid,
         "desktop_info": {"port": 6901},
+        "guest_os": "linux",
     }
 
     Runner.objects.filter(pk=workspace.runner_id).update(sid="")
@@ -1429,3 +1432,45 @@ async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch):
     )
     assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"
     renew.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_windows_desktops_serve_only_the_pinned_novnc_client(monkeypatch):
+    """QEMU displays (Windows) use upstream noVNC; Kasm files are never served."""
+    novnc = {"vnc.html": b"<html><head></head><body>novnc</body></html>",
+             "core/rfb.js": b"/* novnc rfb */"}
+    kasm = {"dist/main.bundle.js": b"/* kasm bundle */"}
+
+    def files(client=kasmvnc_client.KASMVNC):
+        source = novnc if client == kasmvnc_client.NOVNC else kasm
+        return {path: hashlib.sha256(body).hexdigest() for path, body in source.items()}
+
+    monkeypatch.setattr(kasmvnc_client, "client_files", files)
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._user_can_access_workspace",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._get_desktop_proxy_target",
+        AsyncMock(return_value={**TARGET, "guest_os": "windows"}),
+    )
+    sio = _runner_sio(monkeypatch, _runner_answer(novnc["core/rfb.js"]))
+
+    events = await _call_http(_scope(str(uuid.uuid4()), "/core/rfb.js"))
+    assert (events[0]["status"], events[1]["body"]) == (200, novnc["core/rfb.js"])
+
+    sio.call.reset_mock()
+    refused = await _call_http(_scope(str(uuid.uuid4()), "/dist/main.bundle.js"))
+    assert refused[0]["status"] == 404
+    sio.call.assert_not_awaited()
+
+
+def test_guest_os_selects_the_viewer_and_manifests_are_typed():
+    assert kasmvnc_client.client_for_guest("windows") == kasmvnc_client.NOVNC
+    assert kasmvnc_client.client_for_guest("linux") == kasmvnc_client.KASMVNC
+    assert kasmvnc_client.client_for_guest(None) == kasmvnc_client.KASMVNC
+    files = kasmvnc_client.client_files(kasmvnc_client.NOVNC)
+    assert {"vnc.html", "core/rfb.js", "app/ui.js", "defaults.json"} <= files.keys()
+    for path in files:
+        assert kasmvnc_client.lookup_client_file(f"/{path}", kasmvnc_client.NOVNC)
+    assert kasmvnc_client.lookup_client_file("/dist/main.bundle.js", kasmvnc_client.NOVNC) is None

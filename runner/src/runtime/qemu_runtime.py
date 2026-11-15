@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import tarfile
 import urllib.request
@@ -72,6 +73,7 @@ from .linux_seed import (
     GUEST_SSH_SESSIONS_SCRIPT as _GUEST_SSH_SESSIONS_SCRIPT,
 )
 from .recovery import RecoveryConflict
+from .rfb import RFBClient
 from .managed_process import (
     ProcessProfile,
     isolated_agent_env_preamble,
@@ -1313,6 +1315,42 @@ class QemuRuntime(RuntimeBackend):
         del workspace_id
         return self._get_workspace_vm_ip(instance_id)
 
+
+    async def desktop_kind(self, instance_id: str) -> str:
+        """Return where a guest's desktop is served (``guest`` or ``qemu``)."""
+        return (await self._resolve_guest(instance_id)).desktop
+
+    async def open_display(
+        self, instance_id: str
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Open a stream to QEMU's display of a running guest.
+
+        libvirt hands over a connected socket, so no VNC port is ever listening
+        on the host and no other process can reach the display.
+        """
+
+        def open_fd() -> int:
+            domain = self._get_domain(instance_id)
+            return domain.openGraphicsFD(0, libvirt.VIR_DOMAIN_OPEN_GRAPHICS_SKIPAUTH)
+
+        fd = await asyncio.to_thread(open_fd)
+        sock = socket.socket(fileno=fd)
+        try:
+            return await asyncio.open_connection(sock=sock)
+        except BaseException:
+            sock.close()
+            raise
+
+    @contextlib.asynccontextmanager
+    async def display_client(self, instance_id: str):
+        """Yield a negotiated RFB control connection to QEMU's display."""
+        reader, writer = await self.open_display(instance_id)
+        client = RFBClient(reader, writer)
+        try:
+            await asyncio.wait_for(client.handshake(), 10)
+            yield client
+        finally:
+            await client.close()
 
     # ── RuntimeBackend implementation ─────────────────────────────────
 

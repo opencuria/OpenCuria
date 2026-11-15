@@ -26,6 +26,8 @@ GUEST_OS_VALUES = frozenset({LINUX, WINDOWS})
 METADATA_NS = "https://opencuria.dev/libvirt"
 
 FirstBootState = Literal["done", "degraded", "pending"]
+#: Where the desktop is served: an in-guest KasmVNC server or QEMU's display.
+DesktopKind = Literal["guest", "qemu"]
 
 
 class GuestBootstrapError(RuntimeError):
@@ -68,6 +70,8 @@ class GuestOS(ABC):
     compress_publication: bool
     #: Whether captures boot a disposable copy to generalize it first.
     generalize_on_publish: bool
+    #: Where the workspace desktop is served from.
+    desktop: DesktopKind
     #: Smallest resources a guest of this OS runs with (image builds).
     min_vcpus: int
     min_memory_mb: int
@@ -104,6 +108,7 @@ class LinuxGuest(GuestOS):
     dhcp = False
     compress_publication = False
     generalize_on_publish = False
+    desktop: DesktopKind = "guest"
     min_vcpus = 1
     min_memory_mb = 1
     min_disk_gb = 1
@@ -162,6 +167,7 @@ class WindowsGuest(GuestOS):
     dhcp = True
     compress_publication = True
     generalize_on_publish = True
+    desktop: DesktopKind = "qemu"
     min_vcpus = 2
     min_memory_mb = 4096
     min_disk_gb = 64
