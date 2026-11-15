@@ -17,9 +17,16 @@ import {
   unsharePayload,
 } from "../src/providerAccounts";
 import {
+  BASE_DISTRO_PRESETS,
+  baseDistroLabel,
+  guestOsForDistro,
+  guestOsLabel,
   imageDefinitionForm,
+  imageOsBadge,
   imageDefinitionPayload,
+  isBaseDistroSupported,
   isImageDefinitionFormValid,
+  recipeFieldHints,
 } from "../src/imageDefinitionLifecycle";
 
 describe("workspace policy durations", () => {
@@ -205,7 +212,7 @@ describe("image definition form", () => {
       envVars: "A=1",
     });
     expect(isImageDefinitionFormValid({ ...form, envVars: "=x" })).toBe(false);
-    // QEMU builds need an Ubuntu cloud image.
+    // QEMU builds need an Ubuntu cloud image or Windows 11.
     expect(isImageDefinitionFormValid(form)).toBe(false);
     expect(
       isImageDefinitionFormValid({ ...form, customBaseDistro: "ubuntu:25.04" }),
@@ -218,5 +225,40 @@ describe("image definition form", () => {
       env_vars: { A: "1" },
       custom_init_script: "",
     });
+  });
+
+  it("offers Ubuntu and Windows 11 editions with OS-specific hints", () => {
+    expect(BASE_DISTRO_PRESETS.map(baseDistroLabel)).toEqual([
+      "Ubuntu 22.04",
+      "Ubuntu 24.04",
+      "Windows 11 Pro",
+      "Windows 11 Enterprise",
+      "Windows 11 Education",
+      "Windows 11 Pro Education",
+      "Windows 11 Pro for Workstations",
+    ]);
+    expect(BASE_DISTRO_PRESETS.every(isBaseDistroSupported)).toBe(true);
+    expect(isBaseDistroSupported(" Windows:11-Pro ")).toBe(true);
+    expect(isBaseDistroSupported("windows:10")).toBe(false);
+    expect(guestOsForDistro("windows:11-enterprise")).toBe("windows");
+    expect(guestOsForDistro("ubuntu:24.04")).toBe("linux");
+    expect(guestOsForDistro("windows:10")).toBe("linux");
+    expect(guestOsLabel("windows")).toBe("Windows");
+    expect(guestOsLabel(undefined)).toBe("Linux");
+    expect(imageOsBadge("windows")).toBe("Windows");
+    expect(imageOsBadge("linux")).toBeNull();
+    expect(recipeFieldHints("windows:11")).toMatchObject({
+      packages: "Git.Git, Python.Python.3.12",
+      initScript: "# PowerShell",
+    });
+    expect(recipeFieldHints("ubuntu:24.04").initScript).toBe("#!/bin/bash");
+
+    const form = imageDefinitionForm({
+      name: "Win",
+      base_distro: "windows:11",
+    });
+    expect(form.baseDistroPreset).toBe("windows:11");
+    expect(isImageDefinitionFormValid(form)).toBe(true);
+    expect(imageDefinitionPayload(form).base_distro).toBe("windows:11");
   });
 });

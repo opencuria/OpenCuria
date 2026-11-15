@@ -18,7 +18,23 @@ export interface RunnerResourceInput {
   qemu_default_disk_size_gb: number;
 }
 
-export interface ImageDefinitionOptionInput {
+/** Operating system of an image and of the workspaces started from it. */
+export type GuestOs = "linux" | "windows";
+
+/** Smallest workspace resources an image supports. */
+export interface ImageMinimums {
+  vcpus: number;
+  memory_mb: number;
+  disk_size_gb: number;
+}
+
+/** What the server reports about an image's guest; missing means Linux. */
+export interface ImageGuestInput {
+  guest_os?: GuestOs;
+  minimums?: ImageMinimums | null;
+}
+
+export interface ImageDefinitionOptionInput extends ImageGuestInput {
   id: string;
   name: string;
   is_active: boolean;
@@ -31,7 +47,7 @@ export interface RunnerImageBuildOptionInput {
   image_artifact_id?: string | null;
 }
 
-export interface CapturedImageArtifactInput {
+export interface CapturedImageArtifactInput extends ImageGuestInput {
   id: string;
   status: string;
   source_runner_id?: string | null;
@@ -49,27 +65,33 @@ export interface CapturedImageOptionInput<
   versions: A[];
 }
 
+/** The guest of an image option: its OS and the resources it needs. */
+export interface ImageGuest {
+  guestOs: GuestOs;
+  minimums: ImageMinimums | null;
+}
+
 /** An image a new workspace can start from. */
 export type WorkspaceImageOption<
   B extends RunnerImageBuildOptionInput = RunnerImageBuildOptionInput,
   A extends CapturedImageArtifactInput = CapturedImageArtifactInput,
 > =
-  | {
+  | (ImageGuest & {
       kind: "definition";
       value: string;
       label: string;
       definitionId: string;
       /** Active builds on online runners. */
       runnerBuilds: B[];
-    }
-  | {
+    })
+  | (ImageGuest & {
       kind: "captured";
       value: string;
       label: string;
       capturedImageId: string;
       /** Latest ready version; captured clones always start from it. */
       imageArtifact: A;
-    };
+    });
 
 export interface WorkspaceImageOptions<
   B extends RunnerImageBuildOptionInput = RunnerImageBuildOptionInput,
@@ -157,6 +179,13 @@ function isOnline(runner: Pick<RunnerResourceInput, "status">): boolean {
   return runner.status === "online";
 }
 
+function imageGuest(image: ImageGuestInput): ImageGuest {
+  return {
+    guestOs: image.guest_os === "windows" ? "windows" : "linux",
+    minimums: image.minimums ?? null,
+  };
+}
+
 /** Images a new workspace can start from right now, grouped by origin. */
 export function workspaceImageOptions<
   B extends RunnerImageBuildOptionInput,
@@ -184,6 +213,7 @@ export function workspaceImageOptions<
       label: definition.name,
       definitionId: definition.id,
       runnerBuilds,
+      ...imageGuest(definition),
     });
   }
   const captured: WorkspaceImageOptions<B, A>["captured"] = [];
@@ -203,6 +233,7 @@ export function workspaceImageOptions<
       label: `${image.name} · v${image.latest_version}`,
       capturedImageId: image.id,
       imageArtifact: artifact,
+      ...imageGuest(artifact),
     });
   }
   return { definitions, captured };
@@ -248,22 +279,56 @@ export function definitionArtifactForRunner(
   );
 }
 
-/** QEMU limits and defaults of a runner. */
+/**
+ * QEMU limits and defaults of a runner. An image's minimum resources raise
+ * the runner's minimums and defaults, never above its maximums: the server
+ * explains runners that are too small for the image.
+ */
 export function qemuResourceLimits(
   runner: RunnerResourceInput | null | undefined,
   fallback: QemuResourceLimits = DEFAULT_QEMU_LIMITS,
+  minimums?: ImageMinimums | null,
 ): QemuResourceLimits {
-  if (!runner) return fallback;
+  const limits = runner
+    ? {
+        minVcpus: runner.qemu_min_vcpus,
+        maxVcpus: runner.qemu_max_vcpus,
+        defaultVcpus: runner.qemu_default_vcpus,
+        minMemoryMb: runner.qemu_min_memory_mb,
+        maxMemoryMb: runner.qemu_max_memory_mb,
+        defaultMemoryMb: runner.qemu_default_memory_mb,
+        minDiskSizeGb: runner.qemu_min_disk_size_gb,
+        maxDiskSizeGb: runner.qemu_max_disk_size_gb,
+        defaultDiskSizeGb: runner.qemu_default_disk_size_gb,
+      }
+    : fallback;
+  if (!minimums) return limits;
+  const raise = (value: number, floor: number, max: number) =>
+    Math.min(Math.max(value, floor), max);
   return {
-    minVcpus: runner.qemu_min_vcpus,
-    maxVcpus: runner.qemu_max_vcpus,
-    defaultVcpus: runner.qemu_default_vcpus,
-    minMemoryMb: runner.qemu_min_memory_mb,
-    maxMemoryMb: runner.qemu_max_memory_mb,
-    defaultMemoryMb: runner.qemu_default_memory_mb,
-    minDiskSizeGb: runner.qemu_min_disk_size_gb,
-    maxDiskSizeGb: runner.qemu_max_disk_size_gb,
-    defaultDiskSizeGb: runner.qemu_default_disk_size_gb,
+    ...limits,
+    minVcpus: raise(limits.minVcpus, minimums.vcpus, limits.maxVcpus),
+    defaultVcpus: raise(limits.defaultVcpus, minimums.vcpus, limits.maxVcpus),
+    minMemoryMb: raise(
+      limits.minMemoryMb,
+      minimums.memory_mb,
+      limits.maxMemoryMb,
+    ),
+    defaultMemoryMb: raise(
+      limits.defaultMemoryMb,
+      minimums.memory_mb,
+      limits.maxMemoryMb,
+    ),
+    minDiskSizeGb: raise(
+      limits.minDiskSizeGb,
+      minimums.disk_size_gb,
+      limits.maxDiskSizeGb,
+    ),
+    defaultDiskSizeGb: raise(
+      limits.defaultDiskSizeGb,
+      minimums.disk_size_gb,
+      limits.maxDiskSizeGb,
+    ),
   };
 }
 

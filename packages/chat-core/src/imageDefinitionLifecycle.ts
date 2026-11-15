@@ -3,6 +3,8 @@
  * the web and native settings, plus the definition form.
  */
 
+import type { GuestOs } from "./workspaceCreation";
+
 export interface ImageDefinitionBuildSummary {
   active: number;
   building: number;
@@ -296,11 +298,91 @@ export function visibleImageDefinitions<T extends { status: string }>(
   );
 }
 
-export const BASE_DISTRO_PRESETS = ["ubuntu:22.04", "ubuntu:24.04"];
+/** Windows 11 recipe values and their labels; `windows:11` installs Pro. */
+const WINDOWS_DISTRO_LABELS = new Map([
+  ["windows:11", "Windows 11 Pro"],
+  ["windows:11-pro", "Windows 11 Pro"],
+  ["windows:11-enterprise", "Windows 11 Enterprise"],
+  ["windows:11-education", "Windows 11 Education"],
+  ["windows:11-pro-education", "Windows 11 Pro Education"],
+  ["windows:11-pro-workstations", "Windows 11 Pro for Workstations"],
+]);
 
-/** QEMU builds start from Ubuntu cloud images (`ubuntu:<version>`) only. */
+export const BASE_DISTRO_PRESETS = [
+  "ubuntu:22.04",
+  "ubuntu:24.04",
+  "windows:11",
+  "windows:11-enterprise",
+  "windows:11-education",
+  "windows:11-pro-education",
+  "windows:11-pro-workstations",
+];
+
+function normalizedDistro(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+/** The guest OS a recipe base distro builds; anything else counts as Linux. */
+export function guestOsForDistro(value: string | null | undefined): GuestOs {
+  return WINDOWS_DISTRO_LABELS.has(normalizedDistro(value))
+    ? "windows"
+    : "linux";
+}
+
+/** "Windows" or "Linux". */
+export function guestOsLabel(guestOs: GuestOs | null | undefined): string {
+  return guestOs === "windows" ? "Windows" : "Linux";
+}
+
+/** The OS label of an image option; Linux, the default, has none. */
+export function imageOsBadge(
+  guestOs: GuestOs | null | undefined,
+): string | null {
+  return guestOs === "windows" ? guestOsLabel(guestOs) : null;
+}
+
+/** "Ubuntu 24.04" for `ubuntu:24.04`, "Windows 11 Pro" for `windows:11`. */
+export function baseDistroLabel(value: string): string {
+  return (
+    WINDOWS_DISTRO_LABELS.get(normalizedDistro(value)) ??
+    value.replace(/^ubuntu:/i, "Ubuntu ")
+  );
+}
+
+/** QEMU builds start from Ubuntu cloud images (`ubuntu:<version>`) or Windows 11. */
 export function isBaseDistroSupported(value: string): boolean {
-  return /^ubuntu:\S+$/i.test(value.trim());
+  return (
+    /^ubuntu:\S+$/i.test(value.trim()) ||
+    WINDOWS_DISTRO_LABELS.has(normalizedDistro(value))
+  );
+}
+
+/** Placeholders and hints of the recipe fields in the terms of its guest OS. */
+export interface RecipeFieldHints {
+  /** Example package list. */
+  packages: string;
+  /** What the package list holds. */
+  packagesHint: string;
+  /** How the init script starts (bash or PowerShell). */
+  initScript: string;
+}
+
+const RECIPE_FIELD_HINTS: Record<GuestOs, RecipeFieldHints> = {
+  linux: {
+    packages: "python3, nodejs, ffmpeg",
+    packagesHint: "Packages are comma-separated.",
+    initScript: "#!/bin/bash",
+  },
+  windows: {
+    packages: "Git.Git, Python.Python.3.12",
+    packagesHint: "Packages are comma-separated winget IDs.",
+    initScript: "# PowerShell",
+  },
+};
+
+/** Recipe field placeholders and hints for a base distro. */
+export function recipeFieldHints(baseDistro: string): RecipeFieldHints {
+  return RECIPE_FIELD_HINTS[guestOsForDistro(baseDistro)];
 }
 
 /** The editable fields of an image definition. */
