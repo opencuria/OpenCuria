@@ -1080,9 +1080,11 @@ async def test_isolated_agents_pass_display_to_native_shell_children(
     home = "/tmp/opencuria-agent-home-" + uuid.uuid4().hex
     marker = tmp_path / "shell-env.json"
     if real_display and (
-        not shutil.which("Xvfb") or Path("/tmp/.X11-unix/X1").exists()
+        not shutil.which("Xvfb")
+        or not shutil.which("xdpyinfo")
+        or Path("/tmp/.X11-unix/X1").exists()
     ):
-        pytest.skip("Real display test needs Xvfb and an unused :1")
+        pytest.skip("Real display test needs Xvfb, xdpyinfo and an unused :1")
     shell = 'printf "%s|%s" "$DISPLAY" "$XAUTHORITY"'
     if real_display:
         shell += "; xdpyinfo >/dev/null"

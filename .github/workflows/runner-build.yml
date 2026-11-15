@@ -87,7 +87,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvirt-dev qemu-utils
+          sudo apt-get install -y libvirt-dev qemu-utils x11-utils
       - name: Provide guest workspace root
         # File-service tests run real guest commands against /workspace.
         run: sudo install -d -o "$(id -u)" -g "$(id -g)" /workspace
