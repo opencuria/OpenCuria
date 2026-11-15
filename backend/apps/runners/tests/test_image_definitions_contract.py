@@ -374,3 +374,77 @@ def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
     for schema in (WorkspaceCreateIn, ImageDefinitionCreateIn, ImageDefinitionUpdateIn):
         assert "runtime_type" not in schema.model_fields
         assert "custom_dockerfile" not in schema.model_fields
+
+
+# ---------------------------------------------------------------------------
+# Windows recipes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("body", "status", "code"),
+    [
+        (
+            {"base_distro": "windows:11", "packages": ["git && x"]},
+            400,
+            "invalid_package_id",
+        ),
+        (
+            {"base_distro": "windows:11", "env_vars": {"A B": "1"}},
+            400,
+            "invalid_env_var_name",
+        ),
+        ({"base_distro": "windows:10"}, 409, "unsupported_base_distro"),
+    ],
+)
+def test_invalid_recipes_are_rejected_with_a_code(
+    client, recipe_org, body, status, code
+):
+    response = _post(
+        client,
+        "/api/v1/image-definitions/",
+        {"name": "Invalid", **body},
+        recipe_org["admin_headers"],
+    )
+
+    assert response.status_code == status, response.content
+    assert response.json()["code"] == code
+    assert not ImageDefinition.objects.filter(name="Invalid").exists()
+
+
+@pytest.mark.django_db
+def test_recipe_update_validates_against_the_effective_os(client, recipe_org):
+    definition = recipe_org["definition"]
+    definition.packages = ["build-essential", "libc6:amd64"]
+    definition.save()
+    url = f"/api/v1/image-definitions/{definition.id}/"
+
+    # Unbuilt recipes may switch OS, but the kept packages must fit winget.
+    switched = _patch(
+        client, url, {"base_distro": "windows:11"}, recipe_org["admin_headers"]
+    )
+    assert switched.status_code == 400
+    assert switched.json()["code"] == "invalid_package_id"
+    renamed = _patch(client, url, {"name": "Renamed"}, recipe_org["admin_headers"])
+    assert renamed.status_code == 200
+    switched = _patch(
+        client,
+        url,
+        {"base_distro": "windows:11", "packages": ["Git.Git"]},
+        recipe_org["admin_headers"],
+    )
+    assert switched.status_code == 200, switched.content
+    assert switched.json()["guest_os"] == "windows"
+
+
+@pytest.mark.django_db
+def test_members_cannot_create_windows_recipes(client, recipe_org):
+    response = _post(
+        client,
+        "/api/v1/image-definitions/",
+        {"name": "Member win", "base_distro": "windows:11"},
+        recipe_org["member_headers"],
+    )
+
+    assert response.status_code == 403

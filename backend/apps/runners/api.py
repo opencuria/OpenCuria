@@ -1656,6 +1656,8 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
         description=defn.description,
         is_standard=defn.organization_id is None,
         base_distro=defn.base_distro,
+        guest_os=guest_os,
+        minimums=minimums_out(guest_os),
         packages=list(defn.packages or []),
         env_vars=dict(defn.env_vars or {}),
         custom_init_script=defn.custom_init_script or "",
@@ -1748,7 +1750,7 @@ def list_image_definitions(request: HttpRequest):
 
 @image_definition_router.post(
     "/",
-    response={201: ImageDefinitionOut, 403: ErrorOut},
+    response={201: ImageDefinitionOut, 400: ErrorOut, 403: ErrorOut, 409: ErrorOut},
     summary="Create image definition",
 )
 def create_image_definition(request: HttpRequest, payload: ImageDefinitionCreateIn):

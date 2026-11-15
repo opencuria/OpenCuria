@@ -58,6 +58,11 @@ def guest_os_for_distro(base_distro: str | None) -> str:
     raise ValueError(f"Unsupported base distro: {base_distro!r}")
 
 
+def distro_guest_os(base_distro: str | None) -> str:
+    """Guest OS of a stored recipe; values that cannot be built count as Linux."""
+    return WINDOWS if normalize_base_distro(base_distro) in WINDOWS_EDITIONS else LINUX
+
+
 def is_supported_base_distro(base_distro: str | None) -> bool:
     """Whether a recipe base distro can be built."""
     try:
