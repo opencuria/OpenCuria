@@ -48,6 +48,7 @@ import {
   workspaceState,
   workspaceStorage,
   workspaceSymbol,
+  workspaceSystem,
   workspaceTint,
 } from "./workspacePresentation";
 
@@ -267,6 +268,7 @@ function DetailSheet({
   };
 
   const storage = workspaceStorage(workspace);
+  const system = workspaceSystem(workspace);
   const stopsSoon = autoStopLabel(workspace);
   const problem = workspace.intervention_required
     ? workspace.runner_online
@@ -294,6 +296,17 @@ function DetailSheet({
       label: "Image",
       value: workspaceImageLabel(workspace) ?? "—",
     },
+    ...(system
+      ? [
+          {
+            kind: "value" as const,
+            id: "system",
+            label: "System",
+            value: system.text,
+            tone: system.tone,
+          },
+        ]
+      : []),
     ...(workspace.base_image?.update_available && !workspace.pending_base_image
       ? [
           {

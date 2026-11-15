@@ -302,6 +302,35 @@ it("edits a workspace and saves only what changed", async () => {
   tree.unmount();
 });
 
+it("shows the license state of a Windows workspace in its details", async () => {
+  const windows = workspace({
+    id: "ws-win",
+    name: "win",
+    guest_os: "windows",
+    windows_license: {
+      kind: "user",
+      activation_status: "failed",
+      activation_code: "0xC004F074",
+    },
+  });
+  const { tree } = renderSheet(mockClient(), [windows, docs]);
+  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  fireEvent.press(screen.getByRole("button", { name: "Details for win" }));
+  const sheet = await screen.findByTestId("workspace-detail-sheet");
+  expect(
+    within(sheet).getByText("System: Windows · Activation failed (0xC004F074)"),
+  ).toBeTruthy();
+  tree.unmount();
+
+  const linux = renderSheet();
+  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  fireEvent.press(screen.getByRole("button", { name: "Details for api" }));
+  const linuxSheet = await screen.findByTestId("workspace-detail-sheet");
+  expect(within(linuxSheet).getByText("Image: node-dev · v3")).toBeTruthy();
+  expect(within(linuxSheet).queryByText(/^System:/)).toBeNull();
+  linux.tree.unmount();
+});
+
 it("blocks creation until required plugin credentials are selected", async () => {
   const { client, onRefresh, tree } = renderSheet();
   await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
