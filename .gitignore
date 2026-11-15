@@ -5,15 +5,11 @@
 .env.*.local
 !.env.example
 *.sqlite3
-
-# Docker volumes (created by docker compose on dev machines)
-certs/
-html/
-pgdata/
-redisdata/
+*.execution.lock
 
 # Python
 __pycache__/
+/backend/media/
 .venv/
 *.egg-info/
 
@@ -24,3 +20,15 @@ dist/
 # IDE
 .vscode/
 .idea/
+# Local verification artifacts
+/.opencuria/
+
+# Generated native projects and Expo state (use Expo prebuild)
+/mobile/.expo/
+/mobile/android/
+/mobile/ios/
+/mobile/coverage/
+/mobile/.worklets/
+
+# Hosting push signing files (mounted read-only into the backend).
+/secrets/

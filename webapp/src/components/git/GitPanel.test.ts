@@ -1,0 +1,398 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
+
+import GitPanel from './GitPanel.vue'
+import * as gitApi from '@/services/git.api'
+import { useGitStore } from '@/stores/git'
+import { useSidePanelStore } from '@/stores/sidePanel'
+import {
+  makeRawChange,
+  makeRepoSnapshot,
+  setupGitRepos,
+} from '@/stores/git.fixtures'
+
+vi.mock('vue-sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
+}))
+
+vi.mock('@/services/git.api', () => ({
+  getGitCommitDetails: vi.fn(),
+  getGitHistory: vi.fn(),
+  getGitRepo: vi.fn(),
+  getGitRepos: vi.fn(),
+  runGitOperation: vi.fn(),
+}))
+
+const getRepos = vi.mocked(gitApi.getGitRepos)
+const getRepo = vi.mocked(gitApi.getGitRepo)
+const getHistory = vi.mocked(gitApi.getGitHistory)
+const getDetails = vi.mocked(gitApi.getGitCommitDetails)
+const runOp = vi.mocked(gitApi.runGitOperation)
+
+const sectionStubs = {
+  GitChangesSection: { template: '<div data-testid="stub-changes" />' },
+  GitGraphSection: { template: '<div data-testid="stub-graph" />' },
+}
+
+function stubPointerCapture(): void {
+  HTMLElement.prototype.setPointerCapture = vi.fn()
+  HTMLElement.prototype.releasePointerCapture = vi.fn()
+  HTMLElement.prototype.hasPointerCapture = vi.fn(() => true)
+}
+
+function stubContainerRect(): void {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    top: 0,
+    height: 400,
+    left: 0,
+    right: 400,
+    bottom: 400,
+    width: 400,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  } as DOMRect)
+}
+
+function mountPanel() {
+  return mount(GitPanel, {
+    props: { workspaceId: 'workspace-1' },
+    global: { stubs: sectionStubs },
+  })
+}
+
+async function dispatchPointer(
+  element: Element,
+  type: string,
+  init: PointerEventInit = {},
+): Promise<void> {
+  element.dispatchEvent(new PointerEvent(type, { bubbles: true, ...init }))
+  await nextTick()
+}
+
+describe('GitPanel', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    const sidePanel = useSidePanelStore()
+    sidePanel.isOpen = true
+    sidePanel.activeTab = 'git'
+    stubPointerCapture()
+    stubContainerRect()
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
+    getDetails.mockResolvedValue({
+      ok: true,
+      repo_path: '/workspace/repo-app',
+      details: {
+        hash: 'f4a9c21',
+        message: 'commit f4a9c21',
+        body: '',
+        parents: [],
+        author: 'Timo Kamphaus',
+        author_email: 'timo@opencuria.local',
+        author_date: '2026-09-05T10:00:00Z',
+        committer: 'Timo Kamphaus',
+        committer_email: 'timo@opencuria.local',
+        committer_date: '2026-09-05T10:00:00Z',
+        file_changes: [],
+      },
+    })
+    runOp.mockImplementation(async (_ws, payload) => ({
+      ok: true,
+      snapshot: makeRepoSnapshot(),
+      repo_path: '/workspace/repo-app',
+      operation: payload.operation,
+    }) as never)
+  })
+
+  it('renders the repo header and both sections at a 50/50 split', async () => {
+    const wrapper = mountPanel()
+    // The panel binds the store itself — wait for the snapshot to land.
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="side-panel-git"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-repo-select"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-current-branch"]').text()).toBe('main')
+    expect(wrapper.find('[data-testid="git-ahead"]').text()).toContain('2')
+    expect(wrapper.find('[data-testid="stub-changes"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="stub-graph"]').exists()).toBe(true)
+    expect(
+      wrapper.get('[data-testid="git-changes-container"]').attributes('style'),
+    ).toContain('height: 50%')
+    wrapper.unmount()
+  })
+
+  it('shows a loading state before the snapshot resolves', async () => {
+    getRepos.mockReturnValue(new Promise(() => {}))
+    const store = useGitStore()
+    const wrapper = mountPanel()
+    await nextTick()
+    await nextTick()
+    // The first load is in flight: loading=true with empty repos → spinner.
+    expect(store.loading).toBe(true)
+    expect(store.repos).toHaveLength(0)
+    expect(wrapper.find('[data-testid="git-loading"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('shows an error state with retry', async () => {
+    const { ApiRequestError } = await import('@/services/api')
+    getRepos.mockRejectedValue(new ApiRequestError(500, 'boom', 'error'))
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-error"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-error"]').text()).toContain('boom')
+
+    // Retry re-requests the snapshot.
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
+    await wrapper.find('[data-testid="git-retry"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(getRepos.mock.calls.length).toBeGreaterThanOrEqual(2)
+    wrapper.unmount()
+  })
+
+  it('shows an empty state with refresh', async () => {
+    setupGitRepos(getRepos, getRepo, getHistory, [])
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-empty"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="git-retry"]').exists()).toBe(true)
+
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
+    await wrapper.find('[data-testid="git-retry"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(getRepos.mock.calls.length).toBeGreaterThanOrEqual(2)
+    wrapper.unmount()
+  })
+
+  it('updates the branch label when switching repositories', async () => {
+    const second = makeRepoSnapshot({
+      id: '/workspace/docs',
+      path: '/workspace/docs',
+      name: 'docs',
+      currentBranch: 'main',
+      headHash: 'd1o2c3s',
+      branches: [
+        { name: 'main', tip_hash: 'd1o2c3s', upstream: 'origin/main', ahead: 0, behind: 1 },
+      ],
+      changes: [
+        makeRawChange('docs/readme.md', {
+          status: 'M',
+          staged: false,
+          staged_kind: null,
+          unstaged: 'M',
+        }),
+      ],
+    })
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot(), second])
+    const store = useGitStore()
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+
+    store.selectRepo('/workspace/docs')
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    expect(wrapper.find('[data-testid="git-current-branch"]').text()).toBe('main')
+    expect(wrapper.find('[data-testid="git-behind"]').text()).toContain('1')
+    expect(wrapper.text()).toContain('/workspace/docs')
+    wrapper.unmount()
+  })
+
+  it('refreshes + fetches via the single header button', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    const callsBefore = getRepos.mock.calls.length
+    const fetchBefore = runOp.mock.calls.length
+
+    await wrapper.find('[data-testid="git-refresh"]').trigger('click')
+    await flushPromises()
+    await nextTick()
+    // Combined handler: fetch (runGitOperation) first, then refresh (getGitRepos).
+    expect(runOp.mock.calls.length).toBeGreaterThan(fetchBefore)
+    expect(runOp.mock.calls[runOp.mock.calls.length - 1]?.[1]).toMatchObject({
+      operation: 'fetch',
+    })
+    expect(getRepos.mock.calls.length).toBeGreaterThan(callsBefore)
+    wrapper.unmount()
+  })
+
+  it('fetches silently after mount (auto-fetch)', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    await vi.waitFor(() => {
+      const fetchCalls = runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')
+      expect(fetchCalls.length).toBeGreaterThan(0)
+    })
+    wrapper.unmount()
+  })
+
+  it('shows a silent auto-fetch failure without a toast', async () => {
+    const { ApiRequestError } = await import('@/services/api')
+    const { toast } = await import('vue-sonner')
+    // Mount-time silent auto-fetch fails: no error toast.
+    runOp.mockRejectedValueOnce(new ApiRequestError(500, 'fetch failed', 'fetch_failed'))
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    await vi.waitFor(() => {
+      expect(runOp.mock.calls.some(([, p]) => p.operation === 'fetch')).toBe(true)
+    })
+    await flushPromises()
+    expect(toast.error).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('resizes the sections via the drag handle and clamps the split', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    await nextTick()
+    const handle = wrapper.get('[data-testid="git-split-handle"]')
+
+    await dispatchPointer(handle.element, 'pointerdown', {
+      clientY: 200,
+      pointerId: 1,
+    })
+    expect(
+      wrapper.get('[data-testid="git-changes-container"]').attributes('style'),
+    ).toContain('height: 50%')
+
+    await dispatchPointer(handle.element, 'pointermove', { clientY: 100 })
+    expect(
+      wrapper.get('[data-testid="git-changes-container"]').attributes('style'),
+    ).toContain('height: 25%')
+
+    // Clamped at 80%
+    await dispatchPointer(handle.element, 'pointermove', { clientY: 390 })
+    expect(
+      wrapper.get('[data-testid="git-changes-container"]').attributes('style'),
+    ).toContain('height: 80%')
+
+    await dispatchPointer(handle.element, 'pointerup', { pointerId: 1 })
+    wrapper.unmount()
+  })
+
+  it('does not load or poll while the git tab starts hidden', async () => {
+    vi.useFakeTimers()
+    try {
+      const sidePanel = useSidePanelStore()
+      sidePanel.activeTab = 'desktop'
+      const wrapper = mountPanel()
+      await flushPromises()
+      await nextTick()
+
+      expect(getRepos).not.toHaveBeenCalled()
+      expect(runOp).not.toHaveBeenCalled()
+
+      sidePanel.activeTab = 'git'
+      await nextTick()
+      await flushPromises()
+      expect(getRepos).toHaveBeenCalledTimes(1)
+      expect(getRepo).toHaveBeenCalledTimes(1)
+      expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops all git polling while hidden and refreshes once on return without dropping details', async () => {
+    vi.useFakeTimers()
+    try {
+      const sidePanel = useSidePanelStore()
+      const wrapper = mountPanel()
+      await flushPromises()
+      await nextTick()
+      const store = useGitStore()
+      expect(getRepo).toHaveBeenCalledTimes(1)
+
+      const repoDetails = store.repoDetails['/workspace/repo-app']
+
+      sidePanel.activeTab = 'terminal'
+      await nextTick()
+      vi.clearAllMocks()
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(getRepos).not.toHaveBeenCalled()
+      expect(getRepo).not.toHaveBeenCalled()
+      expect(runOp).not.toHaveBeenCalled()
+
+      // Returning refreshes once silently (details stay shown meanwhile) and
+      // auto-fetches at most once; no timer-triggered duplicate.
+      sidePanel.activeTab = 'git'
+      await nextTick()
+      expect(store.repoDetails['/workspace/repo-app']).toStrictEqual(repoDetails)
+      await flushPromises()
+      expect(getRepos).toHaveBeenCalledTimes(1)
+      expect(getRepo).toHaveBeenCalledTimes(1)
+      expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
+
+      sidePanel.close()
+      await nextTick()
+      vi.clearAllMocks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(getRepos).not.toHaveBeenCalled()
+      expect(getRepo).not.toHaveBeenCalled()
+      expect(runOp).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('loads the new workspace exactly once while visible', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = mountPanel()
+      await flushPromises()
+      const store = useGitStore()
+      getRepos.mockClear()
+      getRepo.mockClear()
+      runOp.mockClear()
+
+      await wrapper.setProps({ workspaceId: 'workspace-2' })
+      await flushPromises()
+      expect(store.workspaceId).toBe('workspace-2')
+      expect(getRepos).toHaveBeenCalledTimes(1)
+      expect(getRepos).toHaveBeenCalledWith('workspace-2')
+      expect(getRepo).toHaveBeenCalledTimes(1)
+      // The new workspace/repository receives one initial fetch, not duplicate
+      // mount + workspace-watcher fetches.
+      expect(runOp.mock.calls.filter(([, payload]) => payload.operation === 'fetch')).toHaveLength(1)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops polling on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper: VueWrapper = mountPanel()
+      await flushPromises()
+      wrapper.unmount()
+      vi.clearAllMocks()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(getRepos).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

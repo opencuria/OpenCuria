@@ -12,6 +12,7 @@ from ..access.base import (
     BLOCKED_ENV_EXACT,
     BLOCKED_ENV_PREFIXES,
     HARNESS_WORKSPACE_ROOT,
+    sanitize_exec_workdir,
     sanitize_harness_path,
     validate_harness_env,
 )
@@ -37,7 +38,8 @@ __all__ = [
 # Output truncation for bash, mirroring OpenCode's max_lines/max_bytes.
 BASH_MAX_LINES = MAX_LINES
 BASH_MAX_BYTES = MAX_BYTES
-BASH_DEFAULT_TIMEOUT = 60.0
+BASH_DEFAULT_TIMEOUT = 180.0
+BASH_MAX_TIMEOUT = 1200.0
 
 # Safety caps for search-style tools (OpenCode grep/glob limit).
 GLOB_MAX_RESULTS = 100
@@ -134,7 +136,15 @@ class BashArgs(BaseModel):
 
     command: str = Field(description="Shell command to run.")
     workdir: str = Field(default=HARNESS_WORKSPACE_ROOT)
-    timeout: float = Field(default=BASH_DEFAULT_TIMEOUT, gt=0, le=600)
+    timeout: float = Field(
+        default=BASH_DEFAULT_TIMEOUT,
+        gt=0,
+        le=BASH_MAX_TIMEOUT,
+        description=(
+            f"Timeout in seconds. Defaults to {BASH_DEFAULT_TIMEOUT:.0f} "
+            f"and may not exceed {BASH_MAX_TIMEOUT:.0f}."
+        ),
+    )
     env: dict[str, str] = Field(default_factory=dict)
 
 
@@ -166,7 +176,8 @@ class BashTool(Tool):
     description = (
         "Run a shell command in the workspace. Returns exit code, "
         "stdout, and stderr; non-zero exits raise a tool error. "
-        "Default timeout is 60s (max 600s). Output is tail-truncated "
+        f"Default timeout is {BASH_DEFAULT_TIMEOUT:.0f}s "
+        f"(max {BASH_MAX_TIMEOUT:.0f}s). Output is tail-truncated "
         "(last lines kept; full output spilled to a file when clipped). "
         "Independent bash calls in one step run in parallel."
     )
@@ -189,7 +200,10 @@ class BashTool(Tool):
         args = validated
         if not args.command.strip():
             raise ToolError("command must not be empty", tool=self.name)
-        workdir = sanitize_harness_path(args.workdir or ctx.directory)
+        try:
+            workdir = sanitize_exec_workdir(args.workdir or ctx.directory)
+        except ValueError as exc:
+            raise ToolError(str(exc), tool=self.name) from exc
         try:
             env = validate_harness_env(args.env or {})
         except ValueError as exc:
@@ -234,7 +248,7 @@ class GlobTool(Tool):
 
     name = "glob"
     description = (
-        "Find files matching a glob pattern under a workspace path. "
+        "Find files matching a glob pattern under a path in the workspace VM. "
         "Implemented via the workspace accessor (find on the runner)."
     )
     args_schema: type[BaseModel] = GlobArgs
@@ -287,7 +301,7 @@ class GrepTool(Tool):
 
     name = "grep"
     description = (
-        "Search file contents under a workspace path. Uses ripgrep when "
+        "Search file contents under a path in the workspace VM. Uses ripgrep when "
         "available (respects .gitignore by default), else grep -r."
     )
     args_schema: type[BaseModel] = GrepArgs
@@ -347,7 +361,7 @@ class ListTool(Tool):
     """List directory entries via the workspace accessor."""
 
     name = "list"
-    description = "List files and directories under a workspace path."
+    description = "List files and directories under a path in the workspace VM."
     args_schema: type[BaseModel] = ListArgs
     permission_key = "read"
 

@@ -5,11 +5,12 @@ import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
 import HarnessNoticeSheet from '@/components/chat/HarnessNoticeSheet.vue'
 import HarnessPermissionSheet from '@/components/chat/HarnessPermissionSheet.vue'
 import HarnessProcessSheet from '@/components/chat/HarnessProcessSheet.vue'
+import HarnessQueueSheet from '@/components/chat/HarnessQueueSheet.vue'
 import HarnessQuestionSheet from '@/components/chat/HarnessQuestionSheet.vue'
 import HarnessTodoSheet from '@/components/chat/HarnessTodoSheet.vue'
-import type { MentionCandidate } from '@/lib/harnessMentions'
-import type { ComposerSheet } from '@/lib/composerSheets'
-import type { HarnessPermissionResponse } from '@/types/harness'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
+import type { ComposerSheet } from '@opencuria/chat-core/composerSheets'
+import type { HarnessPermissionResponse } from '@opencuria/chat-core/harness'
 
 const props = defineProps<{
   sheets: ComposerSheet[]
@@ -26,6 +27,7 @@ const emit = defineEmits<{
   'close-context': []
   'close-processes': []
   'dismiss-notice': [messageId: string]
+  'withdraw-steer': [steerId: string]
 }>()
 
 const todoOpen = ref(false)
@@ -73,6 +75,9 @@ function peekOffset(index: number): number {
             @hover="emit('mention-hover', $event)"
           />
         </template>
+        <template v-else-if="sheets[0]?.kind === 'processes'">
+          <HarnessProcessSheet @close="emit('close-processes')" />
+        </template>
         <template v-else-if="sheets[0]?.kind === 'question' && sheets[0]?.questions">
           <HarnessQuestionSheet
             :requests="sheets[0].questions!"
@@ -88,14 +93,17 @@ function peekOffset(index: number): number {
             @resolve="(requestId, response) => emit('resolve', requestId, response)"
           />
         </template>
+        <template v-else-if="sheets[0]?.kind === 'queue' && sheets[0]?.queue">
+          <HarnessQueueSheet
+            :steers="sheets[0].queue!"
+            @withdraw="(steerId) => emit('withdraw-steer', steerId)"
+          />
+        </template>
         <template v-else-if="sheets[0]?.kind === 'notice' && sheets[0]?.notice">
           <HarnessNoticeSheet
             :notice="sheets[0].notice!"
             @dismiss="(messageId) => emit('dismiss-notice', messageId)"
           />
-        </template>
-        <template v-else-if="sheets[0]?.kind === 'processes'">
-          <HarnessProcessSheet @close="emit('close-processes')" />
         </template>
         <template v-else-if="sheets[0]?.kind === 'context' && sheets[0]?.context">
           <HarnessContextSheet :context="sheets[0].context!" @close="emit('close-context')" />

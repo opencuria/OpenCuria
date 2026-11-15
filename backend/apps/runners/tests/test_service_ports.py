@@ -1,0 +1,285 @@
+"""Runner service port injection, gateway routing and admission contracts."""
+
+from __future__ import annotations
+
+import asyncio
+import types
+import uuid
+from unittest.mock import MagicMock
+
+import pytest
+
+from apps.runners.services import RunnerRepositories, RunnerService
+from apps.runners.services.infra.harness_gateway import get_harness_gateway
+
+
+class _FakeResolver:
+    def __init__(self):
+        self.calls = []
+
+    def resolve_workspace_credentials(self, workspace):
+        self.calls.append(workspace)
+        return {"ok": True}
+
+
+class _FakeHarnessGateway:
+    def __init__(self, *, busy=False):
+        self.calls = []
+        self.busy = busy
+
+    def route_harness_result(self, data):
+        self.calls.append(("result", data))
+        return True
+
+    def route_harness_file_chunk(self, data):
+        self.calls.append(("chunk", data))
+        return True
+
+    def route_stream_output(self, data):
+        self.calls.append(("stream_output", data))
+        return True
+
+    def route_stream_closed(self, data):
+        self.calls.append(("stream_closed", data))
+        return True
+
+    def fail_streams(self, matches_workspace, error):
+        self.calls.append(("fail_streams", matches_workspace, error))
+
+    async def desktop_action(self, runner_service, workspace_id, action, args):
+        self.calls.append(("desktop_action", workspace_id, action, args))
+        return {"ok": True}
+
+    def has_busy_computeruse_session(self, workspace_id):
+        self.calls.append(("busy", workspace_id))
+        return False
+
+    def has_busy_session(self, workspace_id):
+        self.calls.append(("busy_session", workspace_id))
+        return self.busy
+
+    def busy_workspace_ids(self, workspace_ids):
+        self.calls.append(("busy_workspaces", workspace_ids))
+        return set(workspace_ids) if self.busy else set()
+
+    async def abort_busy_computeruse(self, workspace_id):
+        self.calls.append(("abort_computeruse", workspace_id))
+        return [uuid.UUID(int=1)]
+
+
+def test_constructor_injects_ports():
+    resolver = _FakeResolver()
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(
+        None,
+        credential_resolver=resolver,
+        harness_gateway=gateway,
+    )
+    assert svc.runner_transport.sio is None
+    assert svc.credential_sync._credential_resolver is resolver
+    assert svc._harness() is gateway
+
+
+def test_constructor_defaults_and_positional():
+    svc_default = RunnerService()
+    assert svc_default.runner_transport.sio is None
+    assert svc_default.credential_sync._credential_resolver is None
+    assert svc_default._harness_gateway is None
+    assert svc_default._harness() is get_harness_gateway()
+    sentinel = object()
+    svc_positional = RunnerService(sentinel)
+    assert svc_positional.runner_transport.sio is sentinel
+
+
+def test_registered_harness_gateway_is_the_harness_adapter():
+    from apps.harness.runner_gateway import RunnerHarnessGateway
+
+    assert isinstance(get_harness_gateway(), RunnerHarnessGateway)
+
+
+def test_harness_reply_and_stream_routing_use_gateway():
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    result = {"request_id": "r1", "workspace_id": "w"}
+    chunk = {"request_id": "r2", "workspace_id": "w"}
+    assert (
+        svc.runner_transport.route_harness_reply("harness:list_result", result) is True
+    )
+    svc.runner_transport.validate_file_chunk = MagicMock(return_value=True)
+    assert (
+        svc.runner_transport.route_harness_reply("harness:read_file_chunk", chunk)
+        is True
+    )
+    assert svc.runner_transport.route_harness_reply("terminal:output", {}) is None
+    assert gateway.calls == [("result", result), ("chunk", chunk)]
+
+
+def test_fail_streams_for_runner_matches_owned_workspaces():
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
+    runner_id = uuid.uuid4()
+    owned, foreign = uuid.uuid4(), uuid.uuid4()
+    svc.workspaces.get_runner_id.side_effect = lambda ws: (
+        runner_id if ws == owned else uuid.uuid4()
+    )
+    svc.stream_transport.fail_streams_for_runner(str(runner_id))
+    [(kind, matches, error)] = gateway.calls
+    assert kind == "fail_streams"
+    assert error == f"runner {runner_id} disconnected"
+    assert matches(str(owned)) is True
+    assert matches(str(foreign)) is False
+    assert matches("not-a-uuid") is False
+
+
+def test_fail_streams_for_runner_rejects_invalid_runner_id():
+    gateway = _FakeHarnessGateway()
+    RunnerService(harness_gateway=gateway).stream_transport.fail_streams_for_runner(
+        "bogus"
+    )
+    assert gateway.calls == []
+
+
+def test_viewer_rpc_maps_harness_failures_to_conflict():
+    from apps.runners.exceptions import HarnessActionError
+    from common.exceptions import ConflictError
+
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    workspace_id = uuid.uuid4()
+    assert asyncio.run(
+        svc.interactive_sessions._viewer_rpc(workspace_id, "status", {})
+    ) == {"ok": True}
+    assert gateway.calls == [("desktop_action", str(workspace_id), "status", {})]
+
+    for error in (HarnessActionError("down"), TimeoutError()):
+        async def _fail(*args, error=error):
+            raise error
+
+        gateway.desktop_action = _fail
+        with pytest.raises(ConflictError, match="could not be confirmed"):
+            asyncio.run(
+                svc.interactive_sessions._viewer_rpc(workspace_id, "status", {})
+            )
+
+
+def test_take_desktop_control_checks_availability_before_gateway():
+    from common.exceptions import ConflictError
+
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    workspace = types.SimpleNamespace(
+        id=uuid.uuid4(), status="running", active_operation=None, current_task_id=None
+    )
+    svc.workspace_access.get_workspace_for_desktop_user = MagicMock(
+        return_value=workspace
+    )
+    context = {"user": types.SimpleNamespace(id=1), "organization_id": uuid.uuid4()}
+    assert asyncio.run(
+        svc.interactive_sessions.take_desktop_control(workspace.id, **context)
+    ) == [uuid.UUID(int=1)]
+    svc.workspace_access.get_workspace_for_desktop_user.assert_called_once_with(
+        workspace.id, **context
+    )
+    assert gateway.calls == [("abort_computeruse", workspace.id)]
+
+    gateway.calls.clear()
+    workspace.active_operation = "stopping"
+    with pytest.raises(ConflictError):
+        asyncio.run(
+            svc.interactive_sessions.take_desktop_control(workspace.id, **context)
+        )
+    assert gateway.calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lifecycle_admissions_ask_gateway_for_busy_agents(runner, user):
+    """Capture, recreate and auto-stop take the busy check from the port."""
+    from datetime import timedelta
+
+    from asgiref.sync import async_to_sync
+    from django.utils import timezone
+
+    from apps.runners.models import Task
+    from apps.runners.tests.test_image_versions import make_line, qemu_workspace
+    from common.exceptions import ConflictError
+
+    runner.organization.workspace_auto_stop_timeout_minutes = 1
+    runner.organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
+    _, (v1,) = make_line(runner, user)
+    workspace = qemu_workspace(runner, user, v1)
+    workspace.last_activity_at = timezone.now() - timedelta(hours=1)
+    workspace.save(update_fields=["last_activity_at"])
+    gateway = _FakeHarnessGateway(busy=True)
+    svc = RunnerService(harness_gateway=gateway)
+
+    with pytest.raises(ConflictError, match="agent is active"):
+        async_to_sync(svc.image_lifecycle.create_image_artifact)(
+            workspace.id, "capture"
+        )
+    with pytest.raises(ConflictError, match="agent is active"):
+        async_to_sync(svc.workspace_lifecycle.recreate_workspace)(workspace.id, v1.id)
+    with pytest.raises(ConflictError, match="no longer eligible"):
+        async_to_sync(svc.workspace_lifecycle.stop_workspace)(
+            workspace.id, auto_stop=True
+        )
+
+    assert gateway.calls == [("busy_session", workspace.id)] * 3
+    workspace.refresh_from_db()
+    assert workspace.active_operation is None
+    assert not Task.objects.filter(workspace=workspace).exists()
+
+
+def test_deactivate_runner_image_rejects_frozen_definition():
+    from apps.runners.models import ImageDefinition
+    from common.exceptions import ConflictError
+
+    frozen = types.SimpleNamespace(status=ImageDefinition.Status.DELETED)
+    svc = RunnerService()
+    with pytest.raises(ConflictError):
+        svc.image_lifecycle.deactivate_runner_image(
+            types.SimpleNamespace(image_definition=frozen, runner=object())
+        )
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_workspace_list_reads_activity_in_one_gateway_batch(busy):
+    """A workspace list must never perform a harness query per workspace."""
+    gateway = _FakeHarnessGateway(busy=busy)
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
+    workspaces = [types.SimpleNamespace(id=uuid.uuid4()) for _ in range(3)]
+    svc.workspaces.list_for_scope.return_value = workspaces
+
+    assert svc.runner_lifecycle.list_workspaces() == workspaces
+    assert gateway.calls == [("busy_workspaces", [ws.id for ws in workspaces])]
+    assert all(ws.has_active_harness_session is busy for ws in workspaces)
+
+
+def test_missing_workspace_and_empty_list_do_not_query_harness():
+    """There is no harness activity to resolve when no workspace was found."""
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
+    svc.workspaces.get_by_id.return_value = None
+    svc.workspaces.list_for_scope.return_value = []
+
+    assert svc.runner_lifecycle.list_workspaces() == []
+    assert svc.runner_lifecycle.get_workspace_or_none(uuid.uuid4()) is None
+    assert gateway.calls == []
+
+
+def test_workspace_read_propagates_activity_lookup_failure():
+    """A failed activity read must never silently report an idle workspace."""
+    gateway = _FakeHarnessGateway()
+    gateway.busy_workspace_ids = MagicMock(side_effect=RuntimeError("unavailable"))
+    svc = RunnerService(
+        harness_gateway=gateway, repositories=RunnerRepositories(workspaces=MagicMock())
+    )
+    svc.workspaces.get_by_id.return_value = types.SimpleNamespace(id=uuid.uuid4())
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        svc.runner_lifecycle.get_workspace_or_none(uuid.uuid4())

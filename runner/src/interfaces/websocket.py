@@ -1,10 +1,9 @@
 """WebSocket interface using python-socketio (async client).
 
 Connects to the Django backend, authenticates with a Bearer token,
-and listens for task events.  Harness exec output is streamed back
-to the backend in real time via ``harness:*`` events.
+and handles task and harness request/reply events.
 
-Includes a periodic heartbeat that reports workspace container states
+Includes a periodic heartbeat that reports workspace VM states
 so the backend can reconcile its records with actual runtime state.
 
 A separate metrics loop collects host CPU, RAM, and disk usage every
@@ -16,360 +15,420 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import os
 import time
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 
 import aiohttp
-import psutil
 import socketio
 import structlog
 
 from ..config import RunnerSettings
+from ..git import GIT_OPERATIONS, git_timeout_for
+from ..operation_executor import COMMANDS, OperationExecutor
+from ..runtime.artifacts import ArtifactRequestError
 from ..service import WorkspaceService
+from ..services.sessions.terminals import CLOSED, EXITED
+from ..services.system_metrics import SystemMetricsCollector
 from .base import Interface
+from .desktop_proxy import DesktopProxy
+from .file_transfers import UploadTarget, UploadTransfers, emit_chunked_result
 
 logger = structlog.get_logger(__name__)
 
-
-async def _stream_with_timeout(agen, timeout_s: float):
-    """Yield items from *agen* enforcing an overall timeout."""
-    iterator = agen.__aiter__()
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    try:
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
-            try:
-                item = await asyncio.wait_for(iterator.__anext__(), remaining)
-            except StopAsyncIteration:
-                return
-            yield item
-    finally:
-        # Never orphan the wrapped runtime generator: on timeout or
-        # cancellation the remote exec would otherwise keep running
-        # with no consumer left draining it.
-        aclose = getattr(agen, "aclose", None)
-        if aclose is not None:
-            with contextlib.suppress(Exception):
-                await aclose()
+# Align with backend Socket.IO / Uvicorn 200 MiB caps. Passed to aiohttp
+# ws_connect as max_msg_size (Engine.IO clients have no
+# max_http_buffer_size). aiohttp's 4 MiB default would drop inbound
+# workspace file payloads.
+SOCKETIO_MAX_HTTP_BUFFER_SIZE = 200 * 1024 * 1024
 
 
-@dataclass
-class DesktopProxyTunnel:
-    """State for a desktop WebSocket tunnel proxied through the runner."""
+class _ReconnectingAsyncClient(socketio.AsyncClient):
+    """Socket.IO client whose reconnect loop survives transport failures.
 
-    session: aiohttp.ClientSession
-    websocket: aiohttp.ClientWebSocketResponse
-    reader_task: asyncio.Task
+    python-socketio only retries ``ConnectionError``; Engine.IO lets aiohttp
+    handshake timeouts and socket errors escape, which kills the reconnect
+    task and with it the runner. Normalise them so reconnects keep going.
+    """
+
+    async def connect(self, *args, **kwargs):  # type: ignore[override]
+        """Connect, reporting transport failures as ``ConnectionError``."""
+        try:
+            return await super().connect(*args, **kwargs)
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as exc:
+            raise socketio.exceptions.ConnectionError(
+                f"Connection error: {type(exc).__name__}"
+            ) from exc
 
 
 class WebSocketInterface(Interface):
     """python-socketio async client that bridges backend ↔ service."""
 
-    def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
+    def __init__(
+        self,
+        service: WorkspaceService,
+        settings: RunnerSettings,
+        operations: OperationExecutor,
+        *,
+        sio: socketio.AsyncClient,
+        inventory_epoch: str,
+    ) -> None:
         super().__init__(service)
         self._settings = settings
-        self._sio = socketio.AsyncClient(
-            reconnection=True,
-            reconnection_attempts=0,  # unlimited
-            reconnection_delay=2,
-            reconnection_delay_max=30,
-            logger=False,
-        )
+        self._sio = sio
+        self._operations = operations
+        self._inventory_epoch = inventory_epoch
+        self._desktop_epoch = self._inventory_epoch
+        self._inventory_sequence = 0
+        self._stopping = asyncio.Event()
+        self._last_inventory_at = 0.0
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
+        self._desktop_lease_task: asyncio.Task | None = None
+        self._terminal_sweep_task: asyncio.Task | None = None
+        self._observation_task: asyncio.Task | None = None
+        self._inventory_lock = asyncio.Lock()
+        self._cached_heartbeat_workspaces: list[dict] = []
         self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._delivery_task: asyncio.Task | None = None
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self._health_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self._vm_cpu_samples: dict[str, tuple[int, float, int]] = {}
-        self._disk_usage_path = self._resolve_disk_usage_path()
-        self._desktop_proxy_tunnels: dict[str, DesktopProxyTunnel] = {}
+        self._system_metrics = SystemMetricsCollector(settings)
+        self._desktop_proxy = DesktopProxy(
+            get_guest_ip=lambda workspace_id: service.desktop.get_desktop_guest_ip(
+                workspace_id
+            ),
+            get_session=lambda workspace_id: service.desktop.get_desktop_session(
+                workspace_id
+            ),
+            events=self._sio,
+            capture_fence=getattr(service, "capture_fence", None),
+        )
+        self._uploads = UploadTransfers()
+        terminals = getattr(self._service, "terminal_manager", None)
+        if terminals is not None:
+            terminals.on_closed = self._emit_terminal_closed
         self._setup_handlers()
+        desktop = getattr(self._service, "desktop", None)
+        self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
 
-    async def _fetch_desktop_http(
-        self,
-        workspace_id: uuid.UUID,
-        rest_path: str,
-        query_string: str = "",
-    ) -> dict[str, object]:
-        """Fetch a desktop HTTP resource from the local workspace runtime."""
-        container_ip = self._service.get_desktop_container_ip(workspace_id)
-        upstream_url = f"http://{container_ip}:6901{rest_path}"
-        if query_string:
-            upstream_url = f"{upstream_url}?{query_string}"
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(upstream_url) as resp:
-                headers: list[list[str]] = []
-                for key, value in resp.headers.items():
-                    if key.lower() in ("transfer-encoding", "connection", "keep-alive"):
-                        continue
-                    headers.append([key, value])
-
-                body = await resp.read()
-                return {
-                    "status": resp.status,
-                    "headers": headers,
-                    "body": base64.b64encode(body).decode("ascii"),
-                    "body_encoding": "base64",
-                }
-
-    async def _desktop_proxy_reader(
-        self,
-        tunnel_id: str,
-        websocket: aiohttp.ClientWebSocketResponse,
+    async def _emit_terminal_closed(
+        self, terminal_id: str, workspace_id: uuid.UUID | str | None, reason: str
     ) -> None:
-        """Forward upstream desktop WebSocket frames back to the backend."""
-        close_code = 1000
+        """Stop the PTY pump and tell the backend, which drops the route."""
+        reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
+        if reader is not None and reader is not asyncio.current_task():
+            reader.cancel()
+        if not self._sio.connected:
+            # Undelivered closes are reconciled by the next lease renewal.
+            return
+        await self._sio.emit(
+            "terminal:closed",
+            {
+                "workspace_id": str(workspace_id or ""),
+                "terminal_id": terminal_id,
+                "reason": reason,
+            },
+        )
+
+    async def _terminal_sweep_loop(self) -> None:
+        """Close unrenewed and idle terminals, also while disconnected."""
+        while True:
+            try:
+                await self._service.terminal_manager.expire_terminals()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("terminal_sweep_failed")
+            await asyncio.sleep(self._settings.terminal_sweep_interval)
+
+    def _desktop_lifecycle_payload(self, workspace_id: uuid.UUID) -> dict | None:
+        """Return a desktop:process payload for *workspace_id*, if any."""
         try:
-            async for msg in websocket:
-                if msg.type == aiohttp.WSMsgType.BINARY:
-                    await self._sio.emit(
-                        "desktop:proxy_ws_frame",
-                        {
-                            "tunnel_id": tunnel_id,
-                            "data": base64.b64encode(msg.data).decode("ascii"),
-                            "encoding": "base64",
-                        },
-                    )
-                elif msg.type == aiohttp.WSMsgType.TEXT:
-                    await self._sio.emit(
-                        "desktop:proxy_ws_frame",
-                        {
-                            "tunnel_id": tunnel_id,
-                            "text": msg.data,
-                        },
-                    )
-                elif msg.type in (
-                    aiohttp.WSMsgType.CLOSE,
-                    aiohttp.WSMsgType.CLOSING,
-                    aiohttp.WSMsgType.CLOSED,
-                ):
-                    close_code = websocket.close_code or 1000
-                    break
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    close_code = 1011
-                    break
-        except asyncio.CancelledError:
-            close_code = websocket.close_code or 1000
-            raise
+            state = self._service.desktop.get_desktop_state_payload(workspace_id)
         except Exception:
-            logger.exception("desktop_proxy_reader_failed", tunnel_id=tunnel_id)
-            close_code = 1011
-        finally:
-            await self._finalize_desktop_proxy_tunnel(tunnel_id, close_code=close_code)
-
-    async def _open_desktop_proxy_tunnel(
-        self,
-        workspace_id: uuid.UUID,
-        tunnel_id: str,
-        subprotocols: list[str] | None = None,
-    ) -> dict[str, object]:
-        """Open a runner-local WebSocket tunnel to the desktop session."""
-        container_ip = self._service.get_desktop_container_ip(workspace_id)
-        upstream_url = f"ws://{container_ip}:6901/websockify"
-        upstream_origin = f"http://{container_ip}:6901"
-        chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
-
-        session = aiohttp.ClientSession()
-        try:
-            websocket = await session.ws_connect(
-                upstream_url,
-                protocols=["binary"] if chosen_protocol else None,
-                max_msg_size=16 * 1024 * 1024,
-                headers={"Origin": upstream_origin},
+            logger.exception(
+                "desktop_lifecycle_payload_failed",
+                workspace_id=str(workspace_id),
             )
-        except Exception:
-            await session.close()
-            raise
+            return None
+        return state
 
-        reader_task = asyncio.create_task(
-            self._desktop_proxy_reader(tunnel_id, websocket)
-        )
-        self._desktop_proxy_tunnels[tunnel_id] = DesktopProxyTunnel(
-            session=session,
-            websocket=websocket,
-            reader_task=reader_task,
-        )
-        return {"ok": True, "subprotocol": chosen_protocol}
+    @staticmethod
+    def _viewer_lease_payload(data: dict) -> dict:
+        """Forward the backend-derived viewer identity without replacing it."""
+        required = ("lease_id", "kind", "owner_id", "revision", "epoch")
+        missing = [
+            key
+            for key in required
+            if key not in data or data[key] is None or data[key] == ""
+        ]
+        if missing:
+            raise ValueError(
+                f"Viewer lease identity is missing required fields: {', '.join(missing)}"
+            )
+        for key in ("lease_id", "kind", "owner_id", "epoch"):
+            if not isinstance(data[key], str) or not data[key].strip():
+                raise ValueError(f"Viewer lease {key} must be a non-empty string")
+        if data["kind"] != "viewer":
+            raise ValueError("Viewer tasks require a viewer lease")
+        if type(data["revision"]) is not int or data["revision"] < 1:
+            raise ValueError("Viewer lease revision must be a positive integer")
+        return {
+            **{key: data[key] for key in required},
+            **{
+                key: data[key]
+                for key in ("desktop_width", "desktop_height")
+                if key in data
+            },
+        }
 
-    async def _send_desktop_proxy_tunnel_message(
-        self,
-        tunnel_id: str,
-        *,
-        text: str | None = None,
-        data: str | None = None,
-        encoding: str | None = None,
+    async def _announce_desktop_change(
+        self, workspace_id: uuid.UUID, before: object, result: dict
     ) -> None:
-        """Forward a browser frame from the backend to the upstream desktop WS."""
-        tunnel = self._desktop_proxy_tunnels.get(tunnel_id)
-        if tunnel is None:
-            raise RuntimeError(f"Unknown desktop proxy tunnel: {tunnel_id}")
-
-        if text is not None:
-            await tunnel.websocket.send_str(text)
+        """Publish lifecycle before replies; only invalidate replaced processes."""
+        after = self._service.desktop.get_desktop_session(workspace_id)
+        stopped = bool(result.get("stopped")) or (before is not None and after is None)
+        replaced = after is not None and after is not before
+        ending = stopped and after is None
+        generation = result.get(
+            "generation",
+            getattr(before, "generation", None)
+            if ending
+            else getattr(after, "generation", None),
+        )
+        epoch = result.get("epoch", self._desktop_epoch)
+        if replaced or ending:
+            await self._desktop_proxy.close_workspace(
+                workspace_id,
+                generation=(after.generation if replaced else generation),
+                keep_generation=after.generation if replaced else None,
+                include_generation=ending,
+            )
+        # Tunnel closure awaits network effects; lifecycle may move on while
+        # suspended. A newer session's own start event owns its fresh route.
+        current = self._service.desktop.get_desktop_session(workspace_id)
+        if replaced and current is not after:
             return
-
-        if data is None:
+        if ending and current is not None:
             return
-
-        if encoding == "base64":
-            await tunnel.websocket.send_bytes(base64.b64decode(data))
-            return
-
-        await tunnel.websocket.send_bytes(data.encode("utf-8"))
-
-    async def _close_desktop_proxy_tunnel(self, tunnel_id: str) -> None:
-        """Close an active desktop WebSocket tunnel."""
-        tunnel = self._desktop_proxy_tunnels.get(tunnel_id)
-        if tunnel is None:
-            return
-        await tunnel.websocket.close()
-
-    async def _finalize_desktop_proxy_tunnel(
-        self,
-        tunnel_id: str,
-        *,
-        close_code: int = 1000,
-    ) -> None:
-        """Release runner-side resources for a desktop proxy tunnel."""
-        tunnel = self._desktop_proxy_tunnels.pop(tunnel_id, None)
-        if tunnel is None:
-            return
-
-        current = asyncio.current_task()
-        if tunnel.reader_task is not current:
-            tunnel.reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await tunnel.reader_task
-
-        if not tunnel.websocket.closed:
-            with contextlib.suppress(Exception):
-                await tunnel.websocket.close()
-        with contextlib.suppress(Exception):
-            await tunnel.session.close()
-
-        if self._sio.connected:
+        if current is not None:
+            state = self._desktop_lifecycle_payload(workspace_id)
+            if state is not None:
+                await self._sio.emit("desktop:process", state)
+        elif ending:
             await self._sio.emit(
-                "desktop:proxy_ws_closed",
+                "desktop:stopped",
                 {
-                    "tunnel_id": tunnel_id,
-                    "code": close_code,
+                    "workspace_id": str(workspace_id),
+                    **result,
+                    "generation": generation,
+                    "epoch": epoch,
                 },
             )
+        elif result.get("process_alive") and result.get("generation") is not None:
+            await self._sio.emit(
+                "desktop:viewer_released",
+                {
+                    **result,
+                    "workspace_id": str(workspace_id),
+                    "generation": generation,
+                    "epoch": epoch,
+                },
+            )
+        elif result.get("process_alive"):
+            state = self._desktop_lifecycle_payload(workspace_id)
+            if state is not None:
+                await self._sio.emit("desktop:process", state)
+
+    async def _desktop_lease_tick(self) -> None:
+        """Maintain workspaces concurrently without an unbounded task backlog."""
+        desktop = self._service.desktop
+        workspace_ids = await desktop.maintenance_workspace_ids()
+
+        async def maintain(workspace_id: uuid.UUID) -> None:
+            before = desktop.get_desktop_session(workspace_id)
+            previous = self._desktop_lifecycle_payload(workspace_id)
+            try:
+                await desktop.maintain_workspace(workspace_id)
+            finally:
+                current = self._desktop_lifecycle_payload(workspace_id)
+                if previous != current or before is not desktop.get_desktop_session(
+                    workspace_id
+                ):
+                    if self._sio.connected:
+                        await self._announce_desktop_change(
+                            workspace_id,
+                            before,
+                            {
+                                "stopped": current is None,
+                                "generation": (
+                                    current.get("generation")
+                                    if current is not None
+                                    else desktop.get_desktop_generation(workspace_id)
+                                ),
+                                "epoch": self._desktop_epoch,
+                            },
+                        )
+                    elif before is not desktop.get_desktop_session(workspace_id):
+                        await self._desktop_proxy.close_workspace(workspace_id)
+
+        await self._service.run_desktop_workers(workspace_ids, maintain)
+
+    async def _desktop_lease_loop(self) -> None:
+        """Maintain durable owners independently of transport and inventory scans."""
+        while True:
+            try:
+                await self._desktop_lease_tick()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("desktop_lease_tick_failed")
+            await asyncio.sleep(self._settings.desktop_lease_interval)
+
+    async def _send_inventory(self) -> None:
+        async with self._inventory_lock:
+            await self._collect_inventory()
+
+    async def _collect_inventory(self) -> None:
+        """Full scans have their own monotonic sequence; heartbeats are not scans."""
+        import time
+
+        collector = getattr(self._service, "inventory_for_runner", None)
+        snapshot = (
+            await collector()
+            if collector
+            else {
+                "schema_version": 1,
+                "complete": False,
+                "runtimes": [],
+                "errors": ["Inventory unsupported"],
+            }
+        )
+        self._inventory_sequence += 1
+        snapshot.update(
+            inventory_epoch=self._inventory_epoch,
+            inventory_sequence=self._inventory_sequence,
+        )
+        self._last_inventory_at = time.monotonic()
+        self._latest_inventory = snapshot
+        if self._sio.connected:
+            await self._sio.emit("runner:inventory", snapshot)
 
     # -- heartbeat -------------------------------------------------------------
 
-    async def _heartbeat_loop(self) -> None:
-        """Periodically send workspace container states to the backend."""
-        interval = self._settings.heartbeat_interval
+    async def _heartbeat_loop(
+        self, initial_workspaces: list[dict] | None = None
+    ) -> None:
+        """Transport health never awaits runtime scans, guest probes or recovery."""
+        if initial_workspaces is not None:
+            self._cached_heartbeat_workspaces = initial_workspaces
         while True:
             try:
-                if not self._sio.connected:
-                    await asyncio.sleep(interval)
-                    continue
-
-                # Sync cache from runtime to catch externally killed containers
-                await self._service.sync_from_runtime()
-                workspaces = await self._service.get_workspace_heartbeat_statuses()
-
-                await self._sio.emit(
-                    "runner:heartbeat",
-                    {"workspaces": workspaces},
-                )
-                logger.debug(
-                    "heartbeat_sent",
-                    workspace_count=len(workspaces),
-                )
-                await asyncio.sleep(interval)
+                if self._sio.connected:
+                    await self._sio.emit(
+                        "runner:heartbeat",
+                        {
+                            "workspaces": self._cached_heartbeat_workspaces,
+                            "workspace_states_observed": False,
+                            "snapshot_complete": False,
+                            "inventory_epoch": self._inventory_epoch,
+                            "desktop_epoch": self._desktop_epoch,
+                            "inventory_sequence": self._inventory_sequence,
+                        },
+                    )
+                    await self._operations.heartbeat()
+                await asyncio.sleep(self._settings.heartbeat_interval)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("heartbeat_failed")
-                await asyncio.sleep(interval)
+                await asyncio.sleep(self._settings.heartbeat_interval)
+
+    async def _delivery_loop(self) -> None:
+        """Retry durable results independently of runtime scans and health ticks."""
+        while True:
+            try:
+                if self._sio.connected:
+                    await self._operations.replay(recover=False)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("operation_delivery_failed")
+            await asyncio.sleep(self._settings.heartbeat_interval)
+
+    async def _observation_loop(self) -> None:
+        """Collect slow observations separately from transport health."""
+        while True:
+            try:
+                await self._service.registry.sync_from_runtime()
+                desktop = getattr(self._service, "desktop", None)
+                registry = self._service.registry
+                previous_desktops = (
+                    {
+                        workspace_id: (
+                            desktop.get_desktop_session(workspace_id),
+                            self._desktop_lifecycle_payload(workspace_id),
+                        )
+                        for workspace_id in registry.cached_workspaces()
+                    }
+                    if desktop is not None
+                    else {}
+                )
+                await self._service.recover_desktop_sessions_from_runtime()
+                for workspace_id, (before, previous) in previous_desktops.items():
+                    current = self._desktop_lifecycle_payload(workspace_id)
+                    if previous != current and self._sio.connected:
+                        await self._announce_desktop_change(
+                            workspace_id,
+                            before,
+                            {
+                                "stopped": current is None,
+                                "generation": (
+                                    current.get("generation")
+                                    if current is not None
+                                    else desktop.get_desktop_generation(workspace_id)
+                                ),
+                                "epoch": self._desktop_epoch,
+                            },
+                        )
+                await self._service.refresh_credential_presence()
+                workspaces = await registry.get_workspace_heartbeat_statuses()
+                self._cached_heartbeat_workspaces = workspaces
+                if self._sio.connected:
+                    await self._sio.emit(
+                        "runner:heartbeat",
+                        {
+                            "workspaces": workspaces,
+                            "workspace_states_observed": True,
+                            "snapshot_complete": False,
+                            "desktop_epoch": self._desktop_epoch,
+                        },
+                    )
+                    for workspace in workspaces:
+                        desktop = workspace.get("desktop")
+                        if desktop:
+                            await self._sio.emit(
+                                "desktop:process",
+                                {
+                                    "workspace_id": workspace["workspace_id"],
+                                    **desktop,
+                                },
+                            )
+                    await self._operations.replay()
+                if (
+                    time.monotonic() - self._last_inventory_at
+                    >= self._settings.inventory_interval
+                ):
+                    await self._send_inventory()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("observation_failed")
+            await asyncio.sleep(self._settings.heartbeat_interval)
 
     # -- system metrics loop ---------------------------------------------------
 
-    def _compute_vm_cpu_percent(
-        self, workspace_id: str, cpu_time_ns: int, vcpu_count: int
-    ) -> float:
-        """Compute VM CPU utilisation percentage from cumulative CPU time."""
-        now = time.monotonic()
-        prev = self._vm_cpu_samples.get(workspace_id)
-        self._vm_cpu_samples[workspace_id] = (cpu_time_ns, now, max(vcpu_count, 1))
-        if prev is None:
-            return 0.0
-
-        prev_cpu_time_ns, prev_sample_ts, prev_vcpu_count = prev
-        elapsed_s = now - prev_sample_ts
-        if elapsed_s <= 0:
-            return 0.0
-
-        cpu_delta_ns = max(cpu_time_ns - prev_cpu_time_ns, 0)
-        capacity_ns = elapsed_s * max(prev_vcpu_count, 1) * 1_000_000_000
-        if capacity_ns <= 0:
-            return 0.0
-
-        cpu_percent = (cpu_delta_ns / capacity_ns) * 100
-        return round(max(0.0, min(cpu_percent, 100.0)), 1)
-
-    def _build_vm_metrics_payload(
-        self, raw_vm_metrics: dict[str, dict]
-    ) -> dict[str, dict[str, float | int]]:
-        """Normalise raw VM metrics for transport to backend/webapp."""
-        vm_metrics: dict[str, dict[str, float | int]] = {}
-        observed_workspace_ids = set(raw_vm_metrics.keys())
-
-        for workspace_id, metric in raw_vm_metrics.items():
-            cpu_time_ns = int(metric.get("cpu_time_ns", 0))
-            vcpu_count = int(metric.get("vcpu_count", 1))
-            vm_metrics[workspace_id] = {
-                "cpu_usage_percent": self._compute_vm_cpu_percent(
-                    workspace_id, cpu_time_ns, vcpu_count
-                ),
-                "ram_used_bytes": int(metric.get("ram_used_bytes", 0)),
-                "ram_total_bytes": int(metric.get("ram_total_bytes", 0)),
-                "disk_used_bytes": int(metric.get("disk_used_bytes", 0)),
-                "disk_total_bytes": int(metric.get("disk_total_bytes", 0)),
-            }
-
-        # Remove stale CPU samples for VMs that no longer exist.
-        for workspace_id in list(self._vm_cpu_samples.keys()):
-            if workspace_id not in observed_workspace_ids:
-                self._vm_cpu_samples.pop(workspace_id, None)
-
-        return vm_metrics
-
-    def _storage_root_path(self) -> Path:
-        """Return the shared storage root for runner-managed QEMU artifacts."""
-        storage_dirs = [
-            self._settings.qemu_image_cache_dir,
-            self._settings.qemu_disk_dir,
-            self._settings.qemu_snapshot_dir,
-        ]
-        expanded = [str(Path(path).expanduser()) for path in storage_dirs if path]
-        if not expanded:
-            return Path("/")
-        return Path(os.path.commonpath(expanded))
-
-    def _resolve_disk_usage_path(self) -> str:
-        """Resolve an existing path on the filesystem used for runner storage."""
-        probe = self._storage_root_path()
-        while not probe.exists():
-            if probe.parent == probe:
-                return "/"
-            probe = probe.parent
-        return str(probe)
-
     async def _metrics_loop(self) -> None:
         """Collect host system metrics every 60 s and emit to backend."""
-        # Trigger the first psutil CPU sample so the 60-s average is meaningful
-        psutil.cpu_percent(interval=None)
+        self._system_metrics.prime_cpu_sample()
 
         while True:
             try:
@@ -377,29 +436,17 @@ class WebSocketInterface(Interface):
                 if not self._sio.connected:
                     continue
 
-                cpu = await asyncio.to_thread(psutil.cpu_percent, 1)
-                ram = psutil.virtual_memory()
-                disk = psutil.disk_usage(self._disk_usage_path)
-                raw_vm_metrics = await self._service.get_vm_metrics()
-                vm_metrics = self._build_vm_metrics_payload(raw_vm_metrics)
-
-                payload = {
-                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                    "cpu_usage_percent": cpu,
-                    "ram_used_bytes": ram.used,
-                    "ram_total_bytes": ram.total,
-                    "disk_used_bytes": disk.used,
-                    "disk_total_bytes": disk.total,
-                    "vm_metrics": vm_metrics,
-                }
+                payload = await self._system_metrics.collect(
+                    self._service.registry.get_vm_metrics
+                )
                 await self._sio.emit("runner:system_metrics", payload)
                 logger.debug(
                     "system_metrics_sent",
-                    cpu=cpu,
-                    ram_used=ram.used,
-                    disk_used=disk.used,
-                    disk_path=self._disk_usage_path,
-                    vm_count=len(vm_metrics),
+                    cpu=payload["cpu_usage_percent"],
+                    ram_used=payload["ram_used_bytes"],
+                    disk_used=payload["disk_used_bytes"],
+                    disk_path=self._system_metrics.disk_usage_path,
+                    vm_count=len(payload["vm_metrics"]),
                 )
             except asyncio.CancelledError:
                 break
@@ -411,340 +458,122 @@ class WebSocketInterface(Interface):
     def _setup_handlers(self) -> None:
         sio = self._sio
 
+        async def dispatch(event: str, data: dict) -> dict | None:
+            return await self._operations.execute(event, data)
+
+        # Register command entry points once, before delivery. The executor owns
+        # admission/effects/results; Socket.IO owns only inbound/outbound delivery.
+        from functools import partial
+
+        for event in COMMANDS:
+            sio.on(event, partial(dispatch, event))
+        sio.on("operation:ack", self._operations.acknowledge)
+        sio.on("operation:inspect", self._operations.inspect)
+        sio.on("operation:seal", self._operations.seal)
+        sio.on("operation:inspect_request", self._operations.inspect_request)
+
+        @sio.on("inventory:refresh")
+        async def refresh_inventory(data=None) -> None:
+            await self._send_inventory()
+
         @sio.event
         async def connect() -> None:
             logger.info("websocket_connected", url=self._settings.backend_url)
-            # Sync cache from runtime before registering
-            await self._service.sync_from_runtime()
-            await self._service.recover_desktop_sessions_from_runtime()
-            # Announce this runner to the backend
+            # Register immediately on reconnect; cached state is not fresh evidence.
             await sio.emit(
                 "runner:register",
                 {
-                    "supported_runtimes": self._service.supported_runtimes,
                     "status": "ready",
+                    "inventory_epoch": self._inventory_epoch,
+                    "desktop_leases": {
+                        "protocol_version": 2,
+                        "epoch": self._desktop_epoch,
+                    },
                 },
             )
-            # Re-announce live desktop processes so the backend can
-            # reconstruct VNC proxy routing. Do not treat this as a
-            # viewer acquire — desktop:started is reserved for that.
-            for workspace in await self._service.get_workspace_heartbeat_statuses():
-                desktop = workspace.get("desktop")
-                if not desktop:
-                    continue
-                await sio.emit(
-                    "desktop:process",
-                    {
-                        "workspace_id": workspace["workspace_id"],
-                        "port": desktop["port"],
-                        "container_ip": desktop["container_ip"],
-                        "network_name": desktop["network_name"],
-                        "viewer": bool(desktop.get("viewer")),
-                        "computer_use": bool(desktop.get("computer_use")),
-                    },
-                )
-            # Start heartbeat
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            if self._delivery_task is None or self._delivery_task.done():
+                self._delivery_task = asyncio.create_task(self._delivery_loop())
+            if self._observation_task is None or self._observation_task.done():
+                self._observation_task = asyncio.create_task(self._observation_loop())
+            if self._desktop_lease_task is None or self._desktop_lease_task.done():
+                if getattr(self._service, "configure_desktop_leases", None) is not None:
+                    self._desktop_lease_task = asyncio.create_task(
+                        self._desktop_lease_loop()
+                    )
+            if self._terminal_sweep_task is None or self._terminal_sweep_task.done():
+                self._terminal_sweep_task = asyncio.create_task(
+                    self._terminal_sweep_loop()
+                )
             # Start system metrics loop
             if self._metrics_task is None or self._metrics_task.done():
                 self._metrics_task = asyncio.create_task(self._metrics_loop())
-            # Start SSH health check loop (self-healing)
-            if self._health_check_task is None or self._health_check_task.done():
-                self._health_check_task = asyncio.create_task(
-                    self._service.run_health_check_loop()
-                )
 
         @sio.event
         async def disconnect() -> None:
             logger.warning("websocket_disconnected")
-            # Stop heartbeat on disconnect (will be restarted on reconnect)
-            if self._heartbeat_task and not self._heartbeat_task.done():
-                self._heartbeat_task.cancel()
-            self._heartbeat_task = None
+            # Connection loss is not runtime shutdown authority. Keep lifecycle
+            # handlers and execution streams alive; journal results for replay.
+            # Continue offline inventory collection; never infer absent resources
+            # from transport disconnect. Reconnect reuses this scan loop.
             # Stop metrics loop on disconnect
             if self._metrics_task and not self._metrics_task.done():
                 self._metrics_task.cancel()
             self._metrics_task = None
-            if self._desktop_proxy_tunnels:
-                for tunnel_id in list(self._desktop_proxy_tunnels.keys()):
-                    with contextlib.suppress(Exception):
-                        await self._close_desktop_proxy_tunnel(tunnel_id)
-            # Keep the health check loop running across reconnects — workspaces
-            # can still be unreachable even when the backend connection is down.
-            # The loop will restart automatically on the next connect() if needed.
+            await self._desktop_proxy.close_all()
+            # Backend waiters are gone after reconnect; partial uploads expire
+            # with this connection rather than being reused by new requests.
+            self._uploads.clear()
 
         @sio.event
         async def connect_error(data: object) -> None:
             logger.error("websocket_connect_error", data=data)
 
-        # -- task events -------------------------------------------------------
-
-        @sio.on("task:create_workspace")
-        async def on_create_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            # Use workspace_id from backend if provided
-            raw_ws_id = data.get("workspace_id")
-            workspace_id = uuid.UUID(raw_ws_id) if raw_ws_id else None
-
-            log = logger.bind(task_id=task_id)
-            log.info("task_received", task="create_workspace")
-
-            try:
-                ws_id, credentials_present = await self._service.create_workspace(
-                    repos=data.get("repos", []),
-                    qemu_vcpus=data.get("qemu_vcpus"),
-                    qemu_memory_mb=data.get("qemu_memory_mb"),
-                    qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                    workspace_id=workspace_id,
-                    runtime_type=data.get("runtime_type", "docker"),
-                    image_tag=data.get("image_tag") or None,
-                    base_image_path=data.get("base_image_path") or None,
-                )
-                await sio.emit(
-                    "workspace:created",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(ws_id),
-                        "status": "created",
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info("task_completed", workspace_id=str(ws_id))
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "error": str(exc),
-                    },
-                )
-                log.exception("task_failed")
-
-        @sio.on("task:build_image")
-        async def on_build_image(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            build_job_id = data.get("build_job_id", "")
-            runtime_type = data.get("runtime_type", "docker")
-            log = logger.bind(task_id=task_id, build_job_id=build_job_id)
-            log.info("task_received", task="build_image", runtime_type=runtime_type)
-            try:
-
-                async def _progress(line: str) -> None:
-                    await sio.emit(
-                        "image:build_progress",
-                        {
-                            "task_id": task_id,
-                            "build_job_id": build_job_id,
-                            "line": line,
-                        },
-                    )
-
-                result = await self._service.build_image(
-                    runtime_type=runtime_type,
-                    build_job_id=build_job_id,
-                    dockerfile_content=data.get("dockerfile_content", ""),
-                    image_tag=data.get("image_tag", ""),
-                    base_distro=data.get("base_distro", ""),
-                    init_script=data.get("init_script", ""),
-                    image_path=data.get("image_path", ""),
-                    progress_callback=_progress,
-                )
-                await sio.emit(
-                    "image:built",
-                    {
-                        "task_id": task_id,
-                        "build_job_id": build_job_id,
-                        "image_tag": result.get("image_tag", ""),
-                        "image_path": result.get("image_path", ""),
-                    },
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "image:build_failed",
-                    {
-                        "task_id": task_id,
-                        "build_job_id": build_job_id,
-                        "error": str(exc),
-                    },
-                )
-                log.exception("image_build_failed")
-
-        @sio.on("task:stop_workspace")
-        async def on_stop_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                credentials_present = await self._service.stop_workspace(workspace_id)
-                await sio.emit(
-                    "workspace:stopped",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info("workspace_stopped")
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("stop_failed")
-
-        @sio.on("task:resume_workspace")
-        async def on_resume_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                credentials_present = await self._service.resume_workspace(
-                    workspace_id,
-                    qemu_vcpus=data.get("qemu_vcpus"),
-                    qemu_memory_mb=data.get("qemu_memory_mb"),
-                    qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
-                await sio.emit(
-                    "workspace:resumed",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info("workspace_resumed")
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("resume_failed")
-
-        @sio.on("task:update_workspace")
-        async def on_update_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(
-                task_id=task_id,
-                workspace_id=str(workspace_id),
+        async def _fail_upload(
+            *,
+            workspace_id: str,
+            request_id: str,
+            path: str,
+            error: str,
+            log_msg: str,
+        ) -> None:
+            self._uploads.discard("browser-upload", request_id)
+            await sio.emit(
+                "files:upload_result",
+                {
+                    "workspace_id": workspace_id,
+                    "request_id": request_id,
+                    "path": path,
+                    "status": "error",
+                    "error": error,
+                },
             )
-            try:
-                await self._service.update_workspace_resources(
-                    workspace_id,
-                    qemu_vcpus=int(data["qemu_vcpus"]),
-                    qemu_memory_mb=int(data["qemu_memory_mb"]),
-                    qemu_disk_size_gb=int(data["qemu_disk_size_gb"]),
-                )
-                await sio.emit(
-                    "workspace:updated",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                    },
-                )
-                log.info("workspace_updated")
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("update_workspace_failed")
+            logger.error(log_msg, error=error, request_id=request_id)
 
-        @sio.on("task:inject_credentials")
-        async def on_inject_credentials(data: dict) -> dict:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                credentials_present = await self._service.inject_credentials(
-                    workspace_id,
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
-                await sio.emit(
-                    "workspace:credentials_injected",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info(
-                    "workspace_credentials_injected",
-                    credentials_present=credentials_present,
-                )
-                return {
-                    "ok": True,
-                    "credentials_present": credentials_present,
-                }
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("inject_credentials_failed")
-                return {"ok": False, "error": str(exc)}
+        def _file_request_echo(
+            data: object, *, default_path: str = "/workspace"
+        ) -> tuple[str, str, str]:
+            """Return best-effort ``(workspace_id, request_id, path)`` echo fields.
 
-        @sio.on("task:remove_workspace")
-        async def on_remove_workspace(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                # Check if workspace exists in cache before removal
-                already_absent = workspace_id not in self._service._cache
-                await self._service.remove_workspace(workspace_id)
-                await sio.emit(
-                    "workspace:removed",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "result": "already_absent" if already_absent else "deleted",
-                        "already_absent": already_absent,
-                    },
-                )
-                log.info("workspace_removed", already_absent=already_absent)
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("remove_failed")
+            Never raises: malformed payloads echo raw strings so the error
+            result stays correlatable. Callers must parse/validate inside
+            their ``try`` and answer with a small structured error instead
+            of letting ``uuid.UUID``/``KeyError`` escape unanswered. The
+            workspace echo is always the raw string, never ``str()`` of an
+            unparsed UUID object.
+            """
+            raw = data if isinstance(data, dict) else {}
+            ws = raw.get("workspace_id", "")
+            req = raw.get("request_id", "")
+            path = raw.get("path", default_path)
+            return (
+                ws if isinstance(ws, str) else "",
+                req if isinstance(req, str) else "",
+                path if isinstance(path, str) else default_path,
+            )
 
-        @sio.on("task:cleanup_unknown_workspace")
-        async def on_cleanup_unknown_workspace(data: dict) -> None:
-            raw_workspace_id = data.get("workspace_id", "")
-            log = logger.bind(workspace_id=raw_workspace_id)
-            try:
-                workspace_id = uuid.UUID(raw_workspace_id)
-                cleaned = await self._service.cleanup_unknown_workspace(workspace_id)
-                await sio.emit(
-                    "workspace:cleanup_unknown_done",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "cleaned": cleaned,
-                    },
-                )
-                log.info("unknown_workspace_cleanup_done", cleaned=cleaned)
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:cleanup_unknown_failed",
-                    {
-                        "workspace_id": raw_workspace_id,
-                        "error": str(exc),
-                    },
-                )
-                log.exception("unknown_workspace_cleanup_failed")
-
-        # -- terminal events ---------------------------------------------------
+        # -- task events -------------------------------------------------------
 
         @sio.on("task:start_terminal")
         async def on_start_terminal(data: dict) -> None:
@@ -756,7 +585,8 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_terminal")
 
             try:
-                terminal_id = await self._service.start_terminal(
+                # Step 2: terminal sessions go through the TerminalManager.
+                terminal_id = await self._service.terminal_manager.start_terminal(
                     workspace_id,
                     cols=cols,
                     rows=rows,
@@ -770,36 +600,43 @@ class WebSocketInterface(Interface):
                     },
                 )
 
-                # Start background reader task
+                # Pump output until the PTY ends; whoever closes it first
+                # (shell exit, client, lease/idle expiry) notifies once.
                 async def _read_pty() -> None:
                     try:
-                        async for chunk in self._service.read_terminal(terminal_id):
-                            await sio.emit(
-                                "terminal:output",
-                                {
-                                    "workspace_id": str(workspace_id),
-                                    "terminal_id": terminal_id,
-                                    "data": base64.b64encode(chunk).decode("ascii"),
-                                },
-                            )
+                        async for chunk in self._service.terminal_manager.read_terminal(
+                            terminal_id
+                        ):
+                            # Output during a backend outage is dropped; the
+                            # lease decides whether the terminal survives it.
+                            with contextlib.suppress(socketio.exceptions.SocketIOError):
+                                await sio.emit(
+                                    "terminal:output",
+                                    {
+                                        "workspace_id": str(workspace_id),
+                                        "terminal_id": terminal_id,
+                                        "data": base64.b64encode(chunk).decode(
+                                            "ascii"
+                                        ),
+                                    },
+                                )
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
                         log.exception("pty_read_failed")
                     finally:
                         try:
-                            await self._service.close_terminal(terminal_id)
+                            await self._service.terminal_manager.close_terminal(
+                                terminal_id, EXITED
+                            )
                         except Exception:
                             log.exception("terminal_cleanup_failed")
-                        await sio.emit(
-                            "terminal:closed",
-                            {
-                                "workspace_id": str(workspace_id),
-                                "terminal_id": terminal_id,
-                            },
-                        )
-                        self._running_tasks.pop(f"terminal:{terminal_id}", None)
+                        if self._running_tasks.get(reader_key) is asyncio.current_task():
+                            self._running_tasks.pop(reader_key, None)
 
+                reader_key = f"terminal:{terminal_id}"
                 reader = asyncio.create_task(_read_pty())
-                self._running_tasks[f"terminal:{terminal_id}"] = reader
+                self._running_tasks[reader_key] = reader
 
                 log.info("terminal_started", terminal_id=terminal_id)
             except Exception as exc:
@@ -809,44 +646,72 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("start_terminal_failed")
 
+        async def _open_terminal(data: dict) -> str | None:
+            """Return the addressed terminal, or report it closed to the backend."""
+            terminal_id = str(data.get("terminal_id") or "")
+            workspace_id = str(data.get("workspace_id") or "")
+            try:
+                owned = self._service.terminal_manager.belongs_to(
+                    terminal_id, uuid.UUID(workspace_id)
+                )
+            except ValueError:
+                owned = False
+            if owned:
+                return terminal_id
+            await self._emit_terminal_closed(terminal_id, workspace_id, EXITED)
+            return None
+
         @sio.on("terminal:input")
         async def on_terminal_input(data: dict) -> None:
-            terminal_id = data["terminal_id"]
-            raw = base64.b64decode(data["data"])
+            terminal_id = await _open_terminal(data)
+            if terminal_id is None:
+                return
             try:
-                await self._service.write_terminal(terminal_id, raw)
+                raw = base64.b64decode(data["data"])
+                await self._service.terminal_manager.write_terminal(terminal_id, raw)
             except Exception:
                 logger.exception("terminal_write_failed", terminal_id=terminal_id)
 
         @sio.on("terminal:resize")
         async def on_terminal_resize(data: dict) -> None:
-            terminal_id = data["terminal_id"]
+            terminal_id = await _open_terminal(data)
+            if terminal_id is None:
+                return
             cols = data.get("cols", 80)
             rows = data.get("rows", 24)
             try:
-                await self._service.resize_terminal(terminal_id, cols, rows)
+                await self._service.terminal_manager.resize_terminal(
+                    terminal_id, cols, rows
+                )
             except Exception:
                 logger.exception("terminal_resize_failed", terminal_id=terminal_id)
 
         @sio.on("terminal:close")
         async def on_terminal_close(data: dict) -> None:
-            terminal_id = data["terminal_id"]
-            workspace_id = data.get("workspace_id", "")
+            terminal_id = await _open_terminal(data)
+            if terminal_id is None:
+                return
             try:
-                # Cancel the reader task
-                reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
-                if reader:
-                    reader.cancel()
-                await self._service.close_terminal(terminal_id)
-                await sio.emit(
-                    "terminal:closed",
-                    {
-                        "workspace_id": workspace_id,
-                        "terminal_id": terminal_id,
-                    },
+                await self._service.terminal_manager.close_terminal(
+                    terminal_id, CLOSED
                 )
             except Exception:
                 logger.exception("terminal_close_failed", terminal_id=terminal_id)
+
+        @sio.on("terminal:renew")
+        async def on_terminal_renew(data: dict) -> None:
+            """Extend leases of attached terminals; report unknown ones closed."""
+            leases: list[tuple[str, uuid.UUID]] = []
+            for lease in (data or {}).get("terminals", []):
+                try:
+                    leases.append(
+                        (str(lease["terminal_id"]), uuid.UUID(lease["workspace_id"]))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("terminal_renew_invalid_lease")
+            unknown = self._service.terminal_manager.renew_terminals(leases)
+            for terminal_id, workspace_id in unknown:
+                await self._emit_terminal_closed(terminal_id, workspace_id, EXITED)
 
         # -- desktop session events --------------------------------------------
 
@@ -858,31 +723,30 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_desktop")
 
             try:
-                session = await self._service.start_desktop(
-                    workspace_id,
-                    width=data.get("desktop_width"),
-                    height=data.get("desktop_height"),
+                lease = self._viewer_lease_payload(data)
+                before = self._service.desktop.get_desktop_session(workspace_id)
+                result = await self._service.desktop.desktop_action(
+                    workspace_id, "hold", lease
                 )
-
-                # Get container IP for backend proxy
-                container_ip = self._service.get_desktop_container_ip(workspace_id)
-                network_name = self._service.get_desktop_network_name(workspace_id)
-
+                if not result.get("ok"):
+                    raise RuntimeError("Viewer lease could not be held")
+                await self._announce_desktop_change(workspace_id, before, result)
+                state = self._desktop_lifecycle_payload(workspace_id) or {}
+                current = self._service.desktop.get_desktop_session(workspace_id)
+                if current is None:
+                    return
                 await sio.emit(
                     "desktop:started",
                     {
+                        **result,
+                        **state,
                         "task_id": task_id,
                         "workspace_id": str(workspace_id),
-                        "port": session.port,
-                        "container_ip": container_ip,
-                        "network_name": network_name,
-                        "viewer": session.viewer_held,
-                        "computer_use": bool(session.computeruse_run_ids),
+                        "generation": current.generation,
+                        "epoch": self._desktop_epoch,
                     },
                 )
-                log.info(
-                    "desktop_started", port=session.port, container_ip=container_ip
-                )
+                log.info("desktop_started", port=current.port)
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
@@ -898,29 +762,24 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="stop_desktop")
 
             try:
-                result = await self._service.stop_desktop(workspace_id)
-                if result.stopped or not result.process_alive:
-                    await sio.emit(
-                        "desktop:stopped",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                        },
-                    )
-                    log.info("desktop_stopped")
-                else:
-                    await sio.emit(
-                        "desktop:viewer_released",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                            "computer_use_active": result.computer_use_active,
-                        },
-                    )
-                    log.info(
-                        "desktop_viewer_released",
-                        computer_use_active=result.computer_use_active,
-                    )
+                lease = self._viewer_lease_payload(data)
+                before = self._service.desktop.get_desktop_session(workspace_id)
+                result = await self._service.desktop.desktop_action(
+                    workspace_id, "release", lease
+                )
+                if not result.get("ok"):
+                    raise RuntimeError("Viewer lease cleanup could not be confirmed")
+                await self._announce_desktop_change(workspace_id, before, result)
+                await sio.emit(
+                    "desktop:viewer_released",
+                    {
+                        **result,
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                        "generation": result["generation"],
+                        "epoch": result["epoch"],
+                    },
+                )
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
@@ -933,7 +792,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(workspace_id=str(workspace_id))
             try:
-                await self._service.write_desktop_clipboard(
+                await self._service.desktop.write_desktop_clipboard(
                     workspace_id,
                     data.get("text", ""),
                 )
@@ -944,39 +803,66 @@ class WebSocketInterface(Interface):
 
         @sio.on("desktop:clipboard_read")
         async def on_desktop_clipboard_read(data: dict) -> dict:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(workspace_id=str(workspace_id))
+            workspace_id: uuid.UUID | None = None
             try:
-                text = await self._service.read_desktop_clipboard(workspace_id)
+                if not isinstance(data, dict):
+                    raise TypeError("Invalid clipboard read request")
+                workspace_id = uuid.UUID(data["workspace_id"])
+                options: dict[str, bool] = {}
+                copy_requested = False
+                if "copy_selection" in data:
+                    if type(data["copy_selection"]) is not bool:
+                        raise ValueError("copy_selection must be a boolean")
+                    copy_requested = data["copy_selection"]
+                if "shift" in data:
+                    if type(data["shift"]) is not bool:
+                        raise ValueError("shift must be a boolean")
+                    if not copy_requested:
+                        raise ValueError("shift requires copy_selection")
+                if copy_requested:
+                    options["copy_selection"] = True
+                    if "shift" in data:
+                        options["shift"] = data["shift"]
+                text = await self._service.desktop.read_desktop_clipboard(
+                    workspace_id, **options
+                )
                 return {"ok": True, "text": text}
             except Exception as exc:
-                log.exception("desktop_clipboard_read_failed")
+                logger.exception(
+                    "desktop_clipboard_read_failed",
+                    workspace_id=str(workspace_id) if workspace_id else None,
+                )
                 return {"ok": False, "error": str(exc)}
 
         @sio.on("desktop:proxy_http_request")
         async def on_desktop_proxy_http_request(data: dict) -> dict:
             workspace_id = uuid.UUID(data["workspace_id"])
-            rest_path = data.get("path", "/")
-            query_string = data.get("query_string", "")
-            return await self._fetch_desktop_http(
-                workspace_id,
-                rest_path,
-                query_string,
-            )
+            rest_path = str(data.get("path", "/"))
+            return await self._desktop_proxy.fetch_http(workspace_id, rest_path)
 
         @sio.on("desktop:proxy_ws_open")
         async def on_desktop_proxy_ws_open(data: dict) -> dict:
             workspace_id = uuid.UUID(data["workspace_id"])
             tunnel_id = data["tunnel_id"]
-            return await self._open_desktop_proxy_tunnel(
-                workspace_id,
-                tunnel_id,
-                list(data.get("subprotocols") or []),
-            )
+            try:
+                return await self._desktop_proxy.open_tunnel(
+                    workspace_id,
+                    tunnel_id,
+                    list(data.get("subprotocols") or []),
+                )
+            except (aiohttp.ClientError, OSError, RuntimeError, ValueError):
+                # Always ACK a failed handshake so the browser can recover
+                # immediately instead of waiting for the control RPC timeout.
+                logger.warning(
+                    "desktop_proxy_ws_open_failed",
+                    workspace_id=str(workspace_id),
+                    tunnel_id=tunnel_id,
+                )
+                return {"ok": False, "error": "Desktop connection unavailable"}
 
         @sio.on("desktop:proxy_ws_send")
         async def on_desktop_proxy_ws_send(data: dict) -> None:
-            await self._send_desktop_proxy_tunnel_message(
+            await self._desktop_proxy.send(
                 data["tunnel_id"],
                 text=data.get("text"),
                 data=data.get("data"),
@@ -985,104 +871,539 @@ class WebSocketInterface(Interface):
 
         @sio.on("desktop:proxy_ws_close")
         async def on_desktop_proxy_ws_close(data: dict) -> None:
-            await self._close_desktop_proxy_tunnel(data["tunnel_id"])
+            await self._desktop_proxy.close_tunnel(data["tunnel_id"])
 
         # -- harness workspace-access RPC ----------------------------------------
+
+        #: Generic stream chunk cap (raw bytes per workspace:stream_output).
+        STREAM_OUTPUT_CHUNK = 64 * 1024
+        #: ACK timeout for one workspace:stream_output event.
+        STREAM_OUTPUT_ACK_TIMEOUT = 15.0
+
+        class _StreamOutputRejected(RuntimeError):
+            """Raised when the backend NACKs a stream output chunk."""
 
         async def _harness_result(event: str, data: dict) -> None:
             await sio.emit(event, data)
 
-        @sio.on("harness:exec_stream")
-        async def on_harness_exec_stream(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            timeout = data.get("timeout")
-            log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
-            log.info("harness_received", task="exec_stream")
-            task_key = f"harness:{request_id}"
-
-            async def _run() -> None:
-                coro = self._service.exec_harness_command_stream(
-                    workspace_id,
-                    data.get("command", []),
-                    workdir=data.get("workdir", "/workspace"),
-                    env=data.get("env", {}),
-                )
+        @sio.on("workspace:artifact_ensure")
+        async def on_workspace_artifact_ensure(data: dict) -> dict:
+            """Ensure the one approved native artifact and emit its correlated reply."""
+            raw = data if isinstance(data, dict) else {}
+            workspace_echo = raw.get("workspace_id", "")
+            request_id = raw.get("request_id", "")
+            result: dict = {
+                "workspace_id": (
+                    workspace_echo if isinstance(workspace_echo, str) else ""
+                ),
+                "request_id": request_id if isinstance(request_id, str) else "",
+                "ok": False,
+            }
+            try:
+                workspace_id = uuid.UUID(result["workspace_id"])
+                if (
+                    not result["request_id"]
+                    or len(result["request_id"]) > 128
+                    or not result["request_id"].strip()
+                ):
+                    raise ValueError("request_id is required")
+                task_key = f"harness:{result['request_id']}"
+                active = self._running_tasks.get(task_key)
+                if active is not None and not active.done():
+                    raise ValueError("request_id is already active")
+                artifact_id = raw.get("artifact_id")
+                version = raw.get("version")
+                if not isinstance(artifact_id, str) or not isinstance(version, str):
+                    raise TypeError("Invalid artifact identity")
+                current = asyncio.current_task()
+                assert current is not None
+                self._running_tasks[task_key] = current
                 try:
-                    timeout_s = float(timeout) if timeout is not None else None
-                    if timeout_s is not None:
-                        async for stream, text in _stream_with_timeout(coro, timeout_s):
-                            if stream == "exit":
-                                await _harness_result(
-                                    "harness:exec_done",
-                                    {
-                                        "workspace_id": str(workspace_id),
-                                        "request_id": request_id,
-                                        "exit_code": int(text),
-                                    },
-                                )
-                            else:
-                                await _harness_result(
-                                    "harness:exec_chunk",
-                                    {
-                                        "workspace_id": str(workspace_id),
-                                        "request_id": request_id,
-                                        "stream": stream,
-                                        "data": text,
-                                    },
-                                )
-                    else:
-                        async for stream, text in coro:
-                            if stream == "exit":
-                                await _harness_result(
-                                    "harness:exec_done",
-                                    {
-                                        "workspace_id": str(workspace_id),
-                                        "request_id": request_id,
-                                        "exit_code": int(text),
-                                    },
-                                )
-                            else:
-                                await _harness_result(
-                                    "harness:exec_chunk",
-                                    {
-                                        "workspace_id": str(workspace_id),
-                                        "request_id": request_id,
-                                        "stream": stream,
-                                        "data": text,
-                                    },
-                                )
-                except asyncio.TimeoutError:
-                    await _harness_result(
-                        "harness:exec_done",
+                    ensured = (
+                        await self._service.runtime_artifacts.ensure_runtime_artifact(
+                            workspace_id, artifact_id, version
+                        )
+                    )
+                finally:
+                    if self._running_tasks.get(task_key) is current:
+                        self._running_tasks.pop(task_key, None)
+                result.update(ensured)
+                result.update(
+                    workspace_id=str(workspace_id),
+                    request_id=raw["request_id"],
+                    ok=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except (ArtifactRequestError, ValueError) as exc:
+                result["error"] = str(exc)
+            except Exception:
+                result["error"] = "Runtime artifact provisioning failed"
+                logger.warning(
+                    "runtime_artifact_ensure_failed",
+                    workspace_id=result["workspace_id"],
+                    request_id=result["request_id"],
+                    artifact_id=raw.get("artifact_id")
+                    if isinstance(raw.get("artifact_id"), str)
+                    else "",
+                )
+            await _harness_result("workspace:artifact_ensure_result", result)
+            return result
+
+        async def _emit_stream_output(
+            *,
+            connection_id: str,
+            workspace_id: str,
+            stream: str,
+            payload_b64: str,
+        ) -> None:
+            """Emit one stream output chunk via ACK/backpressure.
+
+            Uses ``sio.call`` so the backend ACKs every chunk; an ACK
+            timeout fails the stream (cleanup) instead of buffering
+            unbounded fire-and-forget output.
+            """
+            from socketio.exceptions import (
+                TimeoutError as _SIOTimeoutError,
+            )
+
+            try:
+                ack = await sio.call(
+                    "workspace:stream_output",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": workspace_id,
+                        "stream": stream,
+                        "data": payload_b64,
+                    },
+                    timeout=STREAM_OUTPUT_ACK_TIMEOUT,
+                )
+            except _SIOTimeoutError as exc:
+                raise TimeoutError("workspace:stream_output ACK timed out") from exc
+            # Backend ACKs every chunk with {ok: bool}: a negative ACK
+            # (unknown/mismatch/invalid/closed stream) closes the runner
+            # side instead of retrying forever.
+            if isinstance(ack, dict) and ack.get("ok") is False:
+                raise _StreamOutputRejected(
+                    f"stream {connection_id!r} output rejected: "
+                    f"{ack.get('error', 'not accepted')}"
+                )
+
+        def _stream_echo(
+            data: object,
+        ) -> tuple[str, str]:
+            """Return best-effort ``(workspace_id, connection_id)`` echo."""
+            raw = data if isinstance(data, dict) else {}
+            ws = raw.get("workspace_id", "")
+            conn = raw.get("connection_id", "")
+            return (
+                ws if isinstance(ws, str) else "",
+                conn if isinstance(conn, str) else "",
+            )
+
+        def _decode_stream_data(raw: object) -> bytes:
+            """Strictly validate a base64 stream input chunk (max 64KiB raw)."""
+            import base64 as _b64
+
+            if not isinstance(raw, str) or not raw:
+                raise ValueError("data must be non-empty base64")
+            try:
+                decoded = _b64.b64decode(raw, validate=True)
+            except Exception as exc:
+                raise ValueError("invalid base64 stream data") from exc
+            if not decoded or len(decoded) > STREAM_OUTPUT_CHUNK:
+                raise ValueError("stream data exceeds 64KiB chunk limit")
+            return decoded
+
+        async def _close_stream_evidence(connection_id: str) -> dict:
+            """Report termination only when stream_close verifies it."""
+            try:
+                result = await self._service.streams.stream_close(connection_id)
+                if result.get("closed") is True:
+                    return {"closed": True}
+                return {"closed": False, "error": "stream termination unverified"}
+            except Exception as exc:
+                return {"closed": False, "error": str(exc)}
+
+        async def _pump_stream_to_backend(
+            *,
+            connection_id: str,
+            workspace_id: str,
+        ) -> None:
+            """Forward stream stdout/stderr chunks until EOF, then closed.
+
+            Both runtime streams are pumped *concurrently* (two reader
+            tasks): a stderr-only process must never block on an idle
+            stdout, and vice versa.  Chunks are emitted in arrival order
+            via a single bounded sender queue.  ``stream_close`` (full
+            close) cancels this pump; a natural EOF instead reads the
+            exit code and then removes/closes the service session — no
+            entry is left in ``_streams`` and no double-cancel can race
+            (the task key is popped exactly once, by whoever finishes
+            first, guarded by ``done()`` checks).
+            """
+            import base64 as _b64
+
+            task_key = f"stream:{connection_id}"
+            sender_queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue(
+                maxsize=128
+            )
+
+            async def _read_loop(stream_name: str) -> None:
+                """Pump one runtime stream into the sender queue."""
+                try:
+                    while True:
+                        try:
+                            chunk = await self._service.streams.stream_read_once(
+                                connection_id, stream_name, STREAM_OUTPUT_CHUNK
+                            )
+                        except ValueError:
+                            # Session gone (full close raced us): stop.
+                            break
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "stream_read_failed",
+                                connection_id=connection_id,
+                                stream=stream_name,
+                            )
+                            break
+                        if not chunk:
+                            break
+                        try:
+                            await sender_queue.put((stream_name, bytes(chunk)))
+                        except asyncio.CancelledError:
+                            raise
+                finally:
+                    # EOF marker per reader; retry briefly if the sender
+                    # queue is momentarily full (sender is alive and
+                    # draining in the success path). Never block forever:
+                    # on cancel/timeout the outer handler tears down.
+                    for _ in range(100):
+                        try:
+                            sender_queue.put_nowait(None)
+                            break
+                        except asyncio.QueueFull:
+                            await asyncio.sleep(0.01)
+
+            async def _sender_loop() -> None:
+                """Emit queued chunks with ACK/backpressure; EOF after both.
+
+                Same-stream chunks that queued up behind a pending ACK
+                leave as one emit of at most ``STREAM_OUTPUT_CHUNK`` bytes,
+                so a burst of small reads costs one backend round trip
+                instead of one per read. Nothing waits to batch, and arrival
+                order across stdout/stderr is preserved.
+                """
+                eofs = 0
+                held: tuple[str, bytes] | None = None
+                while held is not None or eofs < 2:
+                    item = held if held is not None else await sender_queue.get()
+                    held = None
+                    if item is None:
+                        eofs += 1
+                        continue
+                    stream_name, payload = item
+                    parts = [payload]
+                    size = len(payload)
+                    while size < STREAM_OUTPUT_CHUNK:
+                        try:
+                            queued = sender_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if queued is None:
+                            eofs += 1
+                        elif (
+                            queued[0] == stream_name
+                            and size + len(queued[1]) <= STREAM_OUTPUT_CHUNK
+                        ):
+                            parts.append(queued[1])
+                            size += len(queued[1])
+                        else:
+                            held = queued
+                            break
+                    await _emit_stream_output(
+                        connection_id=connection_id,
+                        workspace_id=workspace_id,
+                        stream=stream_name,
+                        payload_b64=_b64.b64encode(b"".join(parts)).decode("ascii"),
+                    )
+
+            readers: list[asyncio.Task] = []
+            sender: asyncio.Task | None = None
+            try:
+                readers = [
+                    asyncio.create_task(_read_loop("stdout")),
+                    asyncio.create_task(_read_loop("stderr")),
+                ]
+                sender = asyncio.create_task(_sender_loop())
+                # Wait until both readers hit EOF AND the sender drained.
+                await asyncio.gather(*readers)
+                await sender
+                exit_code: int | None = None
+                try:
+                    exit_code = await self._service.streams.stream_wait(connection_id)
+                except ValueError:
+                    exit_code = None
+                except Exception:
+                    logger.exception("stream_wait_failed", connection_id=connection_id)
+                # Natural EOF: remove + close the service session now
+                # that the exit code is known.  Pop the task key first
+                # so a concurrent full close cannot double-cancel.
+                self._running_tasks.pop(task_key, None)
+                close_evidence = await _close_stream_evidence(connection_id)
+                await sio.emit(
+                    "workspace:stream_closed",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": workspace_id,
+                        **close_evidence,
+                        **(
+                            {"exit_code": int(exit_code)}
+                            if exit_code is not None
+                            else {}
+                        ),
+                    },
+                )
+            except asyncio.CancelledError:
+                # Our own teardown (full close / disconnect / shutdown):
+                # report only verified cleanup evidence, then re-raise
+                # so task bookkeeping stays correct.
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*readers, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    if sender is not None:
+                        await sender
+                close_evidence = await _close_stream_evidence(connection_id)
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_closed",
                         {
-                            "workspace_id": str(workspace_id),
-                            "request_id": request_id,
-                            "error": "Execution timed out",
+                            "connection_id": connection_id,
+                            "workspace_id": workspace_id,
+                            **close_evidence,
                         },
                     )
-                    log.warning("harness_exec_timeout")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    await _harness_result(
-                        "harness:exec_done",
+                raise
+            except TimeoutError:
+                # A genuine ACK timeout from _emit_stream_output: close
+                # the stream and report it so the backend can correlate
+                # the failed stream.
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*readers, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    if sender is not None:
+                        await sender
+                close_evidence = await _close_stream_evidence(connection_id)
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_closed",
                         {
-                            "workspace_id": str(workspace_id),
-                            "request_id": request_id,
+                            "connection_id": connection_id,
+                            "workspace_id": workspace_id,
+                            **close_evidence,
+                            "error": "stream output ACK timed out",
+                        },
+                    )
+                raise
+            except Exception as exc:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(*readers, return_exceptions=True)
+                with contextlib.suppress(Exception):
+                    if sender is not None:
+                        await sender
+                close_evidence = await _close_stream_evidence(connection_id)
+                with contextlib.suppress(Exception):
+                    await sio.emit(
+                        "workspace:stream_closed",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": workspace_id,
+                            **close_evidence,
                             "error": str(exc),
                         },
                     )
-                    log.exception("harness_exec_stream_failed")
-                finally:
-                    self._running_tasks.pop(task_key, None)
-                    # Close the service generator so a timed-out or
-                    # cancelled exec does not linger without a consumer.
-                    with contextlib.suppress(Exception):
-                        await coro.aclose()
+                logger.exception("stream_pump_failed", connection_id=connection_id)
+            finally:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                if sender is not None and not sender.done():
+                    sender.cancel()
+                self._running_tasks.pop(task_key, None)
 
-            task = asyncio.create_task(_run())
-            self._running_tasks[task_key] = task
+        @sio.on("workspace:stream_start")
+        async def on_workspace_stream_start(data: dict) -> dict:
+            ws_echo, conn_echo = _stream_echo(data)
+            raw = data if isinstance(data, dict) else {}
+            kind = raw.get("kind", "")
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                if not isinstance(conn_echo, str) or not conn_echo.strip():
+                    raise ValueError("connection_id must not be empty")
+                task_key = f"stream:{conn_echo}"
+                existing = self._running_tasks.get(task_key)
+                if existing is not None and not existing.done():
+                    raise ValueError(f"Duplicate connection_id: {conn_echo!r}")
+                if kind == "process":
+                    await self._service.streams.stream_start_process(
+                        workspace_id,
+                        conn_echo,
+                        raw.get("command", []),
+                        workdir=raw.get("workdir", "/workspace"),
+                        env=raw.get("env", {}),
+                        **(
+                            {"owner": raw["owner"]}
+                            if raw.get("owner") is not None
+                            else {}
+                        ),
+                        **(
+                            {"process_profile": raw["process_profile"]}
+                            if "process_profile" in raw
+                            else {}
+                        ),
+                    )
+                elif kind == "tcp":
+                    await self._service.streams.stream_start_tcp(
+                        workspace_id,
+                        conn_echo,
+                        raw.get("host", ""),
+                        raw.get("port", 0),
+                        tls=bool(raw.get("tls", False)),
+                        server_hostname=raw.get("server_hostname"),
+                    )
+                else:
+                    raise ValueError(
+                        f"unknown stream kind: {kind!r} (expected 'process' or 'tcp')"
+                    )
+                pump = asyncio.create_task(
+                    _pump_stream_to_backend(
+                        connection_id=conn_echo,
+                        workspace_id=str(workspace_id),
+                    )
+                )
+                self._running_tasks[task_key] = pump
+                return {
+                    "ok": True,
+                    "connection_id": conn_echo,
+                    "workspace_id": str(workspace_id),
+                }
+            except Exception as exc:
+                logger.warning(
+                    "stream_start_rejected",
+                    connection_id=conn_echo,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connection_id": conn_echo,
+                    "workspace_id": ws_echo,
+                    "error": str(exc),
+                }
+
+        @sio.on("workspace:stream_input")
+        async def on_workspace_stream_input(data: dict) -> dict:
+            ws_echo, conn_echo = _stream_echo(data)
+            raw = data if isinstance(data, dict) else {}
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                session = self._service.streams.get_stream(conn_echo)
+                if session.workspace_id != workspace_id:
+                    raise ValueError("workspace mismatch for stream")
+                decoded = _decode_stream_data(raw.get("data", ""))
+                await self._service.streams.stream_write(conn_echo, decoded)
+                return {
+                    "ok": True,
+                    "connection_id": conn_echo,
+                    "workspace_id": str(workspace_id),
+                }
+            except Exception as exc:
+                logger.warning(
+                    "stream_input_rejected",
+                    connection_id=conn_echo,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connection_id": conn_echo,
+                    "workspace_id": ws_echo,
+                    "error": str(exc),
+                }
+
+        @sio.on("workspace:stream_close")
+        async def on_workspace_stream_close(data: dict) -> dict:
+            ws_echo, conn_echo = _stream_echo(data)
+            raw = data if isinstance(data, dict) else {}
+
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                if conn_echo:
+                    try:
+                        session = self._service.streams.get_stream(conn_echo)
+                    except ValueError:
+                        session = None
+                    if session is None:
+                        reader = getattr(self._service.streams, "stream_record", None)
+                        record = await reader(conn_echo) if reader else None
+                        if record and record["workspace_id"] != str(workspace_id):
+                            raise ValueError("workspace mismatch for stream")
+                    if session is not None and (session.workspace_id != workspace_id):
+                        raise ValueError("workspace mismatch for stream")
+                if raw.get("eof") and conn_echo:
+                    # Half-close: deliver stdin EOF but NEVER cancel the
+                    # output pump — the process reply still follows.
+                    await self._service.streams.stream_write_eof(conn_echo)
+                    return {
+                        "ok": True,
+                        "connection_id": conn_echo,
+                        "workspace_id": str(workspace_id),
+                        "eof": True,
+                        "closed": False,
+                    }
+                # Full close: stop the pump exactly once (guard against
+                # a concurrently finishing natural-EOF pump), then kill
+                # the process tree.
+                task = self._running_tasks.pop(f"stream:{conn_echo}", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                result = await self._service.streams.stream_close(conn_echo)
+                return {
+                    "ok": True,
+                    "connection_id": conn_echo,
+                    "workspace_id": str(workspace_id),
+                    "closed": result.get("closed") is True,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "stream_close_rejected",
+                    connection_id=conn_echo,
+                    error=str(exc),
+                )
+                return {
+                    "ok": False,
+                    "connection_id": conn_echo,
+                    "workspace_id": ws_echo,
+                    "closed": False,
+                    "error": str(exc),
+                }
 
         @sio.on("harness:exec_wait")
         async def on_harness_exec_wait(data: dict) -> None:
@@ -1096,7 +1417,7 @@ class WebSocketInterface(Interface):
             async def _run() -> None:
                 try:
                     timeout_s = float(timeout) if timeout is not None else None
-                    coro = self._service.exec_harness_command(
+                    coro = self._service.harness.exec_harness_command(
                         workspace_id,
                         data.get("command", []),
                         workdir=data.get("workdir", "/workspace"),
@@ -1151,27 +1472,34 @@ class WebSocketInterface(Interface):
 
         @sio.on("harness:read_file")
         async def on_harness_read_file(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data.get("path", "/workspace")
+            ws_echo, request_id, path = _file_request_echo(data)
             try:
-                result = await self._service.read_file(
-                    workspace_id, path, max_size=data.get("max_size")
+                workspace_id = uuid.UUID(ws_echo)
+                result = await self._service.files.read_file(
+                    workspace_id,
+                    path,
+                    max_size=data.get("max_size"),
+                    allow_external=True,
                 )
-                await _harness_result(
-                    "harness:read_file_result",
-                    {
+                await emit_chunked_result(
+                    sio.emit,
+                    chunk_event="harness:read_file_chunk",
+                    result_event="harness:read_file_result",
+                    base={
                         "workspace_id": str(workspace_id),
                         "request_id": request_id,
                         "path": path,
-                        **result,
+                        "size": result.get("size", 0),
+                        "truncated": result.get("truncated", False),
+                        "mime_type": result.get("mime_type", ""),
                     },
+                    content=str(result.get("content", "")),
                 )
             except Exception as exc:
                 await _harness_result(
                     "harness:read_file_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
                         "path": path,
                         "error": str(exc),
@@ -1179,17 +1507,99 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_read_file_failed")
 
-        @sio.on("harness:write_file")
-        async def on_harness_write_file(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data.get("path", "/workspace")
+        @sio.on("harness:write_file_start")
+        async def on_harness_write_file_start(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data)
             try:
-                await self._service.write_file_content(
+                workspace_id = uuid.UUID(ws_echo)
+                from ..services.files import FILE_UPLOAD_MAX_SIZE, FileManager
+
+                total = self._uploads.parse_total_chunks(data.get("total_chunks", -1))
+                if not request_id:
+                    raise ValueError("request_id must not be empty")
+                FileManager._file_path(path, allow_external=True)
+                try:
+                    mode = int(data.get("mode", 0o644))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid file mode: {data.get('mode')!r}"
+                    ) from exc
+                if mode < 0 or mode > 0o777:
+                    raise ValueError(f"Invalid file mode: {mode!r}")
+                self._uploads.prune()
+                self._uploads.start(
+                    "harness-write",
+                    request_id,
+                    target=UploadTarget(
+                        workspace_id=str(workspace_id), path=path, mode=mode
+                    ),
+                    total_chunks=total,
+                    max_size=FILE_UPLOAD_MAX_SIZE,
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:write_file_result",
+                    {
+                        "workspace_id": ws_echo,
+                        "request_id": request_id,
+                        "path": path,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_write_file_start_failed")
+
+        @sio.on("harness:write_file_chunk")
+        async def on_harness_write_file_chunk(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data)
+            if not isinstance(request_id, str) or not request_id:
+                logger.warning("harness_write_file_chunk_missing_request_id")
+                return
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                self._uploads.prune()
+                self._uploads.append(
+                    "harness-write",
+                    request_id,
+                    workspace_id=str(workspace_id),
+                    path=path,
+                    index=data.get("index", -1),
+                    total_chunks=data.get("total_chunks", -1),
+                    content=data.get("content", ""),
+                )
+            except Exception as exc:
+                self._uploads.discard("harness-write", request_id)
+                await _harness_result(
+                    "harness:write_file_result",
+                    {
+                        "workspace_id": ws_echo,
+                        "request_id": request_id,
+                        "path": path,
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_write_file_chunk_failed")
+
+        @sio.on("harness:write_file_finish")
+        async def on_harness_write_file_finish(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data)
+            if not isinstance(request_id, str) or not request_id:
+                logger.warning("harness_write_file_finish_missing_request_id")
+                return
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                target, content = self._uploads.finish(
+                    "harness-write",
+                    request_id,
+                    workspace_id=str(workspace_id),
+                    path=path,
+                    announcement=data,
+                )
+                await self._service.files.write_file_content(
                     workspace_id,
                     path,
-                    data.get("content", ""),
-                    mode=int(data.get("mode", 0o644)),
+                    content,
+                    mode=target.mode,
+                    allow_external=True,
                 )
                 await _harness_result(
                     "harness:write_file_result",
@@ -1201,24 +1611,26 @@ class WebSocketInterface(Interface):
                     },
                 )
             except Exception as exc:
+                self._uploads.discard("harness-write", request_id)
                 await _harness_result(
                     "harness:write_file_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
                         "path": path,
                         "error": str(exc),
                     },
                 )
-                logger.exception("harness_write_file_failed")
+                logger.exception("harness_write_file_finish_failed")
 
         @sio.on("harness:list")
         async def on_harness_list(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data.get("path", "/workspace")
+            ws_echo, request_id, path = _file_request_echo(data)
             try:
-                raw_entries = await self._service.list_files(workspace_id, path)
+                workspace_id = uuid.UUID(ws_echo)
+                raw_entries = await self._service.files.list_files(
+                    workspace_id, path, allow_external=True
+                )
                 entries = [
                     {
                         "name": entry.get("name", ""),
@@ -1241,7 +1653,7 @@ class WebSocketInterface(Interface):
                 await _harness_result(
                     "harness:list_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
                         "path": path,
                         "entries": [],
@@ -1250,89 +1662,88 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_list_failed")
 
-        @sio.on("harness:stat")
-        async def on_harness_stat(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data.get("path", "/workspace")
-            try:
-                result = await self._service.stat_path(workspace_id, path)
-                await _harness_result(
-                    "harness:stat_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        **result,
-                    },
-                )
-            except Exception as exc:
-                await _harness_result(
-                    "harness:stat_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("harness_stat_failed")
-
         @sio.on("harness:desktop_action")
         async def on_harness_desktop_action(data: dict) -> None:
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             action = data.get("action", "")
             args = data.get("args") or {}
+            task_key = f"harness:{request_id}"
+
+            async def _run() -> None:
+                try:
+                    before = self._service.desktop.get_desktop_session(workspace_id)
+                    result = await self._service.desktop.desktop_action(
+                        workspace_id, action, args
+                    )
+                    if action in {"hold", "release"} and result.get("ok"):
+                        await self._announce_desktop_change(
+                            workspace_id, before, result
+                        )
+                    await _harness_result(
+                        "harness:desktop_action_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            **result,
+                        },
+                    )
+                except asyncio.CancelledError:
+                    # Cancelled via harness:cancel: no result is emitted;
+                    # the backend waiter cleans up via its cancel path.
+                    raise
+                except Exception as exc:
+                    await _harness_result(
+                        "harness:desktop_action_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "error": str(exc),
+                        },
+                    )
+                    logger.exception("harness_desktop_action_failed")
+                finally:
+                    self._running_tasks.pop(task_key, None)
+
+            task = asyncio.create_task(_run())
+            self._running_tasks[task_key] = task
             try:
-                result = await self._service.desktop_action(workspace_id, action, args)
-                await _harness_result(
-                    "harness:desktop_action_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        **result,
-                    },
-                )
-            except Exception as exc:
-                await _harness_result(
-                    "harness:desktop_action_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("harness_desktop_action_failed")
+                await task
+            except asyncio.CancelledError:
+                pass
 
         @sio.on("harness:process_start")
         async def on_harness_process_start(data: dict) -> None:
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
-            log = logger.bind(
-                workspace_id=str(workspace_id), request_id=request_id
-            )
+            log = logger.bind(workspace_id=str(workspace_id), request_id=request_id)
             log.info("harness_received", task="process_start")
             try:
-                result = await self._service.start_background_process(
+                result = await self._service.background.start_background_process(
                     workspace_id,
                     process_id,
                     str(data.get("command", "")),
                     workdir=data.get("workdir", "/workspace"),
                     env=data.get("env"),
                     name=str(data.get("name", "") or ""),
+                    log_path=data["log_path"],
+                    exit_path=data["exit_path"],
                 )
+                payload = {
+                    "workspace_id": str(workspace_id),
+                    "request_id": request_id,
+                    "process_id": result["process_id"],
+                    "pid": result["pid"],
+                    "log_path": result["log_path"],
+                    "exit_path": result["exit_path"],
+                    "status": "running",
+                }
+                if data.get("run_count") is not None:
+                    payload["run_count"] = data.get("run_count")
                 await _harness_result(
                     "harness:process_start_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "process_id": result["process_id"],
-                        "pid": result["pid"],
-                        "log_path": result["log_path"],
-                        "exit_path": result["exit_path"],
-                        "status": "running",
-                    },
+                    payload,
                 )
             except Exception as exc:
                 await _harness_result(
@@ -1351,7 +1762,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             request_id = data.get("request_id", "")
             try:
-                processes = await self._service.list_background_processes(
+                processes = await self._service.background.list_background_processes(
                     workspace_id
                 )
                 await _harness_result(
@@ -1380,7 +1791,7 @@ class WebSocketInterface(Interface):
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
             try:
-                process = await self._service.get_background_status(
+                process = await self._service.background.get_background_status(
                     workspace_id, process_id
                 )
                 await _harness_result(
@@ -1409,7 +1820,7 @@ class WebSocketInterface(Interface):
             request_id = data.get("request_id", "")
             process_id = str(data.get("process_id", ""))
             try:
-                result = await self._service.stop_background_process(
+                result = await self._service.background.stop_background_process(
                     workspace_id, process_id
                 )
                 await _harness_result(
@@ -1433,23 +1844,322 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_process_stop_failed")
 
+        @sio.on("harness:process_verify")
+        async def on_harness_process_verify(data: dict) -> None:
+            raw = data if isinstance(data, dict) else {}
+            request_id = raw.get("request_id", "")
+            try:
+                workspace_id = uuid.UUID(raw["workspace_id"])
+            except (KeyError, ValueError, TypeError, AttributeError) as exc:
+                await _harness_result(
+                    "harness:process_verify_result",
+                    {
+                        "workspace_id": str(raw.get("workspace_id", "")),
+                        "request_id": request_id if isinstance(request_id, str) else "",
+                        "processes": [],
+                        "error": f"Invalid workspace_id: {exc}",
+                    },
+                )
+                logger.warning("harness_process_verify_invalid_workspace")
+                return
+            try:
+                raw_expected = raw.get("expected", [])
+                if not isinstance(raw_expected, list):
+                    raise ValueError("expected must be a list")
+                processes = await self._service.background.verify_and_reattach_background_processes(
+                    workspace_id, raw_expected
+                )
+                await _harness_result(
+                    "harness:process_verify_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": processes,
+                    },
+                )
+            except Exception as exc:
+                await _harness_result(
+                    "harness:process_verify_result",
+                    {
+                        "workspace_id": str(workspace_id),
+                        "request_id": request_id,
+                        "processes": [],
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("harness_process_verify_failed")
+
         @sio.on("harness:cancel")
         async def on_harness_cancel(data: dict) -> None:
+            if not isinstance(data, dict):
+                logger.warning("harness_cancel_invalid_payload")
+                return
             request_id = data.get("request_id", "")
+            # Empty/missing IDs must never touch task keys ("harness:"/"git:"
+            # would collide across unrelated requests).
+            if not isinstance(request_id, str) or not request_id.strip():
+                logger.warning("harness_cancel_missing_request_id")
+                return
+            self._uploads.cancel("harness-write", request_id, data.get("workspace_id"))
             task = self._running_tasks.pop(f"harness:{request_id}", None)
             if task is not None and not task.done():
                 task.cancel()
                 logger.info("harness_cancelled", request_id=request_id)
+            git_task = self._running_tasks.pop(f"git:{request_id}", None)
+            if git_task is not None and not git_task.done():
+                git_task.cancel()
+                logger.info("git_operation_cancelled", request_id=request_id)
+
+        # -- git operations (productive git integration) -------------------------
+
+        @sio.on("git:operation")
+        async def on_git_operation(data: dict) -> None:
+            if not isinstance(data, dict):
+                # No request_id to correlate with: log only, as the
+                # hardened backend would drop such a reply as well.
+                logger.warning("git_operation_invalid_payload")
+                return
+            raw_workspace_id = data.get("workspace_id", "")
+            request_id = data.get("request_id", "")
+            operation = data.get("operation", "")
+            raw_args = data.get("args", {})
+            repo_path = data.get("repo_path")
+            # Echo convention: keep raw echo values verbatim for
+            # request_id/operation so the hardened backend correlation
+            # (exact string match) cannot be fooled by str() coercion.
+            # Non-string values are rejected fail-closed below.
+            has_request_id = isinstance(request_id, str) and bool(request_id.strip())
+            has_operation = isinstance(operation, str) and bool(operation.strip())
+            log = logger.bind(request_id=request_id, git_operation=operation)
+            log.info("git_operation_received")
+            task_key = f"git:{request_id}" if has_request_id else ""
+
+            # Trust boundary: request_id and operation are required
+            # non-empty strings on EVERY result path (the backend drops
+            # replies without them). A present request_id gets a
+            # structured validation error; without one there is nobody
+            # to correlate with, so log only.
+            if not has_request_id or not has_operation:
+                if has_request_id:
+                    try:
+                        workspace_echo = str(raw_workspace_id or "")
+                        uuid.UUID(workspace_echo)
+                    except (ValueError, AttributeError, TypeError):
+                        workspace_echo = str(raw_workspace_id or "")
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            "workspace_id": workspace_echo,
+                            "request_id": request_id,
+                            "operation": (
+                                operation if isinstance(operation, str) else ""
+                            ),
+                            "ok": False,
+                            "code": "invalid_request",
+                            "message": "request_id and operation are required non-empty strings",
+                        },
+                    )
+                    log.warning("git_operation_invalid_request")
+                else:
+                    log.warning("git_operation_missing_request_id")
+                return
+
+            # Trust boundary: args must be a dict. Non-dict values are
+            # rejected fail-closed (structured invalid_argument) rather
+            # than silently replaced with {}.
+            if raw_args is None:
+                op_args: dict = {}
+            elif isinstance(raw_args, dict):
+                op_args = raw_args
+            else:
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "invalid_argument",
+                        "message": f"Invalid args for git operation {operation!r}: must be an object",
+                    },
+                )
+                log.warning("git_operation_invalid_args")
+                return
+
+            # Trust boundary: repo_path, when present, must be a string.
+            # The service normalizer validates content fail-closed.
+            if repo_path is not None and not isinstance(repo_path, str):
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "invalid_argument",
+                        "message": f"Invalid repo_path for git operation {operation!r}: must be a string",
+                    },
+                )
+                log.warning("git_operation_invalid_repo_path")
+                return
+
+            # Duplicate in-flight request_ids would make cancel ambiguous
+            # (second task overwrites the first in _running_tasks). Reject
+            # fail-closed so the first waiter keeps its correlation.
+            existing = self._running_tasks.get(task_key)
+            if existing is not None and not existing.done():
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "conflict",
+                        "message": f"Duplicate git request_id: {request_id!r}",
+                    },
+                )
+                log.warning("git_operation_duplicate_request_id")
+                return
+
+            # Unknown operations are rejected here (structured
+            # unknown_operation) without spawning a task, instead of
+            # round-tripping through execute_git_operation.
+            if operation not in GIT_OPERATIONS:
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "unknown_operation",
+                        "message": f"Unknown git operation: {operation!r}",
+                    },
+                )
+                log.warning("git_operation_unknown_operation")
+                return
+
+            try:
+                workspace_id = uuid.UUID(str(raw_workspace_id))
+            except (ValueError, AttributeError, TypeError):
+                await sio.emit(
+                    "git:operation_result",
+                    {
+                        "workspace_id": str(raw_workspace_id or ""),
+                        "request_id": request_id,
+                        "operation": operation,
+                        "ok": False,
+                        "code": "invalid_workspace_id",
+                        "message": f"Invalid workspace_id: {raw_workspace_id!r}",
+                    },
+                )
+                log.warning("git_operation_invalid_workspace")
+                return
+
+            async def _run() -> None:
+                try:
+                    timeout = git_timeout_for(operation) + 30.0
+                    result = await asyncio.wait_for(
+                        self._service.git.execute_git_operation(
+                            workspace_id,
+                            operation,
+                            repo_path,
+                            dict(op_args),
+                        ),
+                        timeout,
+                    )
+                    if not isinstance(result, dict):
+                        result = {
+                            "ok": False,
+                            "code": "git_failed",
+                            "message": "Git operation returned no result",
+                        }
+                    # Echo keys win over any service payload keys so the
+                    # hardened backend correlation can never be overridden.
+                    safe_result = {
+                        k: v
+                        for k, v in result.items()
+                        if k not in ("workspace_id", "request_id", "operation")
+                    }
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            **safe_result,
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "operation": operation,
+                        },
+                    )
+                except asyncio.TimeoutError:
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "operation": operation,
+                            "ok": False,
+                            "code": "timeout",
+                            "message": "Git operation timed out",
+                        },
+                    )
+                    log.warning("git_operation_timeout")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await sio.emit(
+                        "git:operation_result",
+                        {
+                            "workspace_id": str(workspace_id),
+                            "request_id": request_id,
+                            "operation": operation,
+                            "ok": False,
+                            "code": "git_failed",
+                            "message": str(exc),
+                        },
+                    )
+                    log.exception("git_operation_failed")
+                finally:
+                    # Only drop our own registration: without the identity
+                    # check a duplicate request could pop the newer task
+                    # (or a cancel could race a finishing task and swallow
+                    # the cleanup of its replacement).
+                    if task_key:
+                        current = asyncio.current_task()
+                        if self._running_tasks.get(task_key) is current:
+                            self._running_tasks.pop(task_key, None)
+
+            task = asyncio.create_task(_run())
+            if task_key:
+                self._running_tasks[task_key] = task
+
+                # Consume task exceptions on the event loop: without a
+                # done-callback an unretrieved failure logs "Task exception
+                # was never retrieved". The _run() body already emits a
+                # structured git:operation_result for every failure path,
+                # so the callback only drains the exception (identity
+                # check: never pop a replacement task registered under a
+                # reused request_id after cancel/finish).
+                def _consume_git_task_result(
+                    done: asyncio.Task,  # type: ignore[type-arg]
+                    _key: str = task_key,
+                    _task: asyncio.Task = task,  # type: ignore[assignment]
+                ) -> None:
+                    if self._running_tasks.get(_key) is _task:
+                        self._running_tasks.pop(_key, None)
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        done.exception()
+
+                task.add_done_callback(_consume_git_task_result)
 
         # -- file explorer events ----------------------------------------------
 
         @sio.on("files:list")
         async def on_files_list(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data.get("path", "/workspace")
+            ws_echo, request_id, path = _file_request_echo(data)
             try:
-                entries = await self._service.list_files(workspace_id, path)
+                workspace_id = uuid.UUID(ws_echo)
+                entries = await self._service.files.list_files(workspace_id, path)
                 await sio.emit(
                     "files:list_result",
                     {
@@ -1463,7 +2173,7 @@ class WebSocketInterface(Interface):
                 await sio.emit(
                     "files:list_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
                         "path": path,
                         "entries": [],
@@ -1474,12 +2184,12 @@ class WebSocketInterface(Interface):
 
         @sio.on("files:find")
         async def on_files_find(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            query = data.get("query", "")
-            limit = data.get("limit", 50)
+            ws_echo, request_id, _path = _file_request_echo(data)
+            query = data.get("query", "") if isinstance(data, dict) else ""
+            limit = data.get("limit", 50) if isinstance(data, dict) else 50
             try:
-                result = await self._service.find_files(
+                workspace_id = uuid.UUID(ws_echo)
+                result = await self._service.files.find_files(
                     workspace_id, query=query, limit=limit
                 )
                 await sio.emit(
@@ -1496,9 +2206,9 @@ class WebSocketInterface(Interface):
                 await sio.emit(
                     "files:find_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
-                        "query": query,
+                        "query": query if isinstance(query, str) else "",
                         "paths": [],
                         "truncated": False,
                         "error": str(exc),
@@ -1506,32 +2216,79 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("files_find_failed")
 
+        @sio.on("files:editor_read")
+        async def on_editor_read(data: dict) -> dict:
+            try:
+                return await self._service.files.read_editor_file(
+                    uuid.UUID(data["workspace_id"]), data["path"]
+                )
+            except Exception as exc:
+                return {"ok": False, "code": "file_read_failed", "message": str(exc)}
+
+        @sio.on("files:editor_write")
+        async def on_editor_write(data: dict) -> dict:
+            try:
+                return await self._service.files.save_editor_file(
+                    uuid.UUID(data["workspace_id"]),
+                    data["path"],
+                    data["content"],
+                    data["expected_revision"],
+                )
+            except Exception as exc:
+                return {"ok": False, "code": "file_write_failed", "message": str(exc)}
+
         @sio.on("files:read")
         async def on_files_read(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data["path"]
-            max_size = data.get("max_size")
+            raw = data if isinstance(data, dict) else {}
+            ws_echo = raw.get("workspace_id", "")
+            ws_echo = ws_echo if isinstance(ws_echo, str) else ""
+            request_id = raw.get("request_id", "")
+            request_id = request_id if isinstance(request_id, str) else ""
+            if not isinstance(raw.get("path", None), str):
+                await sio.emit(
+                    "files:content_result",
+                    {
+                        "workspace_id": ws_echo,
+                        "request_id": request_id,
+                        "path": "/workspace",
+                        "content": "",
+                        "size": 0,
+                        "truncated": False,
+                        "error": "path must be a string",
+                    },
+                )
+                logger.exception("files_read_failed")
+                return
+            path = raw.get("path")
+            max_size = raw.get("max_size")
             try:
-                result = await self._service.read_file(
+                workspace_id = uuid.UUID(ws_echo)
+                result = await self._service.files.read_file(
                     workspace_id,
                     path,
                     max_size=max_size,
                 )
-                await sio.emit(
-                    "files:content_result",
-                    {
+                await emit_chunked_result(
+                    sio.emit,
+                    chunk_event="files:content_chunk",
+                    result_event="files:content_result",
+                    base={
                         "workspace_id": str(workspace_id),
                         "request_id": request_id,
                         "path": path,
-                        **result,
+                        "size": result.get("size", 0),
+                        "truncated": result.get("truncated", False),
+                        "mime_type": result.get(
+                            "mime_type", "application/octet-stream"
+                        ),
                     },
+                    content=str(result.get("content", "")),
                 )
             except Exception as exc:
                 await sio.emit(
                     "files:content_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
                         "path": path,
                         "content": "",
@@ -1542,18 +2299,103 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("files_read_failed")
 
-        @sio.on("files:upload")
-        async def on_files_upload(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data["path"]
+        @sio.on("files:upload_start")
+        async def on_files_upload_start(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data)
             try:
-                await self._service.upload_file(
+                workspace_id = uuid.UUID(ws_echo)
+                from ..services.files import FILE_UPLOAD_MAX_SIZE
+
+                self._uploads.prune()
+                total = self._uploads.parse_total_chunks(data.get("total_chunks", -1))
+                from ..services.workspace_helpers import sanitize_path
+
+                if not request_id:
+                    raise ValueError("request_id must not be empty")
+                sanitize_path(path)
+                try:
+                    filename = str(data.get("filename", ""))
+                    is_directory = bool(data.get("is_directory", False))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("invalid upload fields") from exc
+                from ..services.workspace_helpers import (
+                    sanitize_filename as _sanitize_filename,
+                )
+
+                _sanitize_filename(filename)
+                self._uploads.start(
+                    "browser-upload",
+                    request_id,
+                    target=UploadTarget(
+                        workspace_id=str(workspace_id),
+                        path=path,
+                        filename=filename,
+                        is_directory=is_directory,
+                    ),
+                    total_chunks=total,
+                    max_size=FILE_UPLOAD_MAX_SIZE,
+                )
+            except Exception as exc:
+                await sio.emit(
+                    "files:upload_result",
+                    {
+                        "workspace_id": ws_echo,
+                        "request_id": request_id,
+                        "path": path,
+                        "status": "error",
+                        "error": str(exc),
+                    },
+                )
+                logger.exception("files_upload_failed")
+
+        @sio.on("files:upload_chunk")
+        async def on_files_upload_chunk(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data, default_path="")
+            if not isinstance(request_id, str) or not request_id:
+                logger.warning("files_upload_chunk_missing_request_id")
+                return
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                self._uploads.prune()
+                self._uploads.append(
+                    "browser-upload",
+                    request_id,
+                    workspace_id=str(workspace_id),
+                    path=path,
+                    index=data.get("index", -1),
+                    total_chunks=data.get("total_chunks", -1),
+                    content=data.get("content", ""),
+                )
+            except Exception as exc:
+                await _fail_upload(
+                    workspace_id=ws_echo,
+                    request_id=request_id,
+                    path=path,
+                    error=str(exc),
+                    log_msg="files_upload_chunk_failed",
+                )
+
+        @sio.on("files:upload_finish")
+        async def on_files_upload_finish(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data, default_path="")
+            if not isinstance(request_id, str) or not request_id:
+                logger.warning("files_upload_finish_missing_request_id")
+                return
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                target, content_b64 = self._uploads.finish(
+                    "browser-upload",
+                    request_id,
+                    workspace_id=str(workspace_id),
+                    path=path,
+                    announcement=data,
+                )
+                await self._service.files.upload_file(
                     workspace_id,
                     path=path,
-                    filename=data["filename"],
-                    content_b64=data["content"],
-                    is_directory=data.get("is_directory", False),
+                    filename=target.filename,
+                    content_b64=content_b64,
+                    is_directory=target.is_directory,
                 )
                 await sio.emit(
                     "files:upload_result",
@@ -1565,44 +2407,66 @@ class WebSocketInterface(Interface):
                     },
                 )
             except Exception as exc:
-                await sio.emit(
-                    "files:upload_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "status": "error",
-                        "error": str(exc),
-                    },
+                await _fail_upload(
+                    workspace_id=ws_echo,
+                    request_id=request_id,
+                    path=path,
+                    error=str(exc),
+                    log_msg="files_upload_finish_failed",
                 )
-                logger.exception("files_upload_failed")
 
         @sio.on("files:download")
         async def on_files_download(data: dict) -> None:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            request_id = data.get("request_id", "")
-            path = data["path"]
-            try:
-                result = await self._service.download_file(workspace_id, path)
+            raw = data if isinstance(data, dict) else {}
+            ws_echo = raw.get("workspace_id", "")
+            ws_echo = ws_echo if isinstance(ws_echo, str) else ""
+            request_id = raw.get("request_id", "")
+            request_id = request_id if isinstance(request_id, str) else ""
+            if not isinstance(raw.get("path", None), str):
                 await sio.emit(
                     "files:download_result",
                     {
+                        "workspace_id": ws_echo,
+                        "request_id": request_id,
+                        "path": "/workspace",
+                        "content": "",
+                        "filename": "",
+                        "is_archive": False,
+                        "size": 0,
+                        "error": "path must be a string",
+                    },
+                )
+                logger.exception("files_download_failed")
+                return
+            path = raw.get("path")
+            try:
+                workspace_id = uuid.UUID(ws_echo)
+                result = await self._service.files.download_file(workspace_id, path)
+                await emit_chunked_result(
+                    sio.emit,
+                    chunk_event="files:download_chunk",
+                    result_event="files:download_result",
+                    base={
                         "workspace_id": str(workspace_id),
                         "request_id": request_id,
                         "path": path,
-                        **result,
+                        "filename": result.get("filename", ""),
+                        "is_archive": result.get("is_archive", False),
+                        "size": result.get("size", 0),
                     },
+                    content=str(result.get("content", "")),
                 )
             except Exception as exc:
                 await sio.emit(
                     "files:download_result",
                     {
-                        "workspace_id": str(workspace_id),
+                        "workspace_id": ws_echo,
                         "request_id": request_id,
                         "path": path,
                         "content": "",
                         "filename": "",
                         "is_archive": False,
+                        "size": 0,
                         "error": str(exc),
                     },
                 )
@@ -1610,204 +2474,95 @@ class WebSocketInterface(Interface):
 
         # -- image artifact events ---------------------------------------------
 
-        @sio.on("task:create_image_artifact")
-        async def on_create_image_artifact(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            name = data["name"]
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            log.info("task_received", task="create_image_artifact")
-            try:
-                artifact = await self._service.create_image_artifact(workspace_id, name)
-                await sio.emit(
-                    "image_artifact:created",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "image_artifact_id": artifact.artifact_id,
-                        "name": artifact.name,
-                        "created_at": artifact.created_at.isoformat()
-                        if isinstance(artifact.created_at, datetime)
-                        else str(artifact.created_at),
-                        "size_bytes": artifact.size_bytes,
-                    },
-                )
-                log.info(
-                    "image_artifact_created", image_artifact_id=artifact.artifact_id
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "image_artifact:failed",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "error": str(exc),
-                    },
-                )
-                log.exception("create_image_artifact_failed")
-
-        @sio.on("task:list_image_artifacts")
-        async def on_list_image_artifacts(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                artifacts = await self._service.list_image_artifacts(workspace_id)
-                await sio.emit(
-                    "image_artifact:list",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "image_artifacts": [
-                            {
-                                "image_artifact_id": artifact.artifact_id,
-                                "name": artifact.name,
-                                "created_at": artifact.created_at,
-                                "size_bytes": artifact.size_bytes,
-                            }
-                            for artifact in artifacts
-                        ],
-                    },
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("list_image_artifacts_failed")
-
-        @sio.on("task:delete_image_artifact")
-        async def on_delete_image_artifact(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            image_artifact_id = data["image_artifact_id"]
-            image_instance_id = data.get("image_instance_id", "")
-            runtime_type = data.get("runtime_type", "")
-            raw_workspace_id = data.get("workspace_id")
-            workspace_id = uuid.UUID(raw_workspace_id) if raw_workspace_id else None
-            log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
-            try:
-                result = "deleted"
-                if runtime_type:
-                    result = await self._service.delete_image_reference(
-                        runtime_type=runtime_type,
-                        image_ref=image_artifact_id,
-                    )
-                elif workspace_id is not None:
-                    await self._service.delete_image_artifact(
-                        workspace_id, image_artifact_id
-                    )
-                else:
-                    raise RuntimeError(
-                        "Either runtime_type or workspace_id is required for image deletion"
-                    )
-                await sio.emit(
-                    "image_artifact:deleted",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id) if workspace_id else "",
-                        "image_instance_id": image_instance_id,
-                        "image_artifact_id": image_artifact_id,
-                        "result": result,
-                        "already_absent": result == "already_absent",
-                    },
-                )
-                log.info(
-                    "image_artifact_deleted",
-                    image_artifact_id=image_artifact_id,
-                    result=result,
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "image_artifact:delete_failed",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("delete_image_artifact_failed")
-
-        @sio.on("task:create_workspace_from_image_artifact")
-        async def on_create_workspace_from_image_artifact(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            image_artifact_id = data["image_artifact_id"]
-            raw_ws_id = data.get("workspace_id")
-            new_workspace_id = uuid.UUID(raw_ws_id) if raw_ws_id else uuid.uuid4()
-            runtime_type = data.get("runtime_type", "qemu")
-            log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
-            log.info("task_received", task="create_workspace_from_image_artifact")
-            try:
-                (
-                    ws_id,
-                    credentials_present,
-                ) = await self._service.create_workspace_from_image_artifact(
-                    image_artifact_id=image_artifact_id,
-                    new_workspace_id=new_workspace_id,
-                    runtime_type=runtime_type,
-                    qemu_vcpus=data.get("qemu_vcpus"),
-                    qemu_memory_mb=data.get("qemu_memory_mb"),
-                    qemu_disk_size_gb=data.get("qemu_disk_size_gb"),
-                    env_vars=data.get("env_vars", {}),
-                    files=data.get("files", []),
-                    ssh_keys=data.get("ssh_keys", []),
-                )
-                await sio.emit(
-                    "workspace:created",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(ws_id),
-                        "status": "created",
-                        "credentials_present": credentials_present,
-                    },
-                )
-                log.info(
-                    "workspace_created_from_image_artifact",
-                    workspace_id=str(ws_id),
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(new_workspace_id),
-                        "error": str(exc),
-                    },
-                )
-                log.exception("clone_failed")
-
     # -- lifecycle -------------------------------------------------------------
 
     async def start(self) -> None:
-        """Connect to the backend and block until disconnected."""
+        """Keep connecting through startup outages and failed reconnect loops."""
         headers = {"Authorization": f"Bearer {self._settings.api_token}"}
+        url = self._settings.backend_url
+        auth = {"token": self._settings.api_token} if self._settings.api_token else None
 
         logger.info(
             "websocket_connecting",
             url=self._settings.backend_url,
         )
 
-        await self._sio.connect(
-            self._settings.backend_url,
-            headers=headers,
-            transports=["websocket"],
-            socketio_path=self._settings.socketio_path,
-        )
-
-        # Block until the connection is closed (reconnects are automatic)
-        await self._sio.wait()
+        retry_delay = 2
+        while not self._stopping.is_set():
+            try:
+                if not self._sio.connected:
+                    await self._sio.connect(
+                        url,
+                        headers=headers,
+                        auth=auth,
+                        transports=["websocket"],
+                        socketio_path=self._settings.socketio_path,
+                    )
+                retry_delay = 2
+                await self._sio.wait()
+            except (
+                socketio.exceptions.ConnectionError,
+                asyncio.TimeoutError,
+                aiohttp.ClientError,
+                OSError,
+            ) as exc:
+                logger.warning(
+                    "websocket_retrying",
+                    error_type=type(exc).__name__,
+                    retry_delay=retry_delay,
+                )
+            if not self._stopping.is_set():
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), retry_delay)
+                except asyncio.TimeoutError:
+                    pass
+                retry_delay = min(retry_delay * 2, 30)
 
     async def stop(self) -> None:
         """Cancel running tasks, stop heartbeat and metrics loop, and disconnect."""
-        # Cancel heartbeat
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-        # Cancel metrics loop
-        if self._metrics_task and not self._metrics_task.done():
-            self._metrics_task.cancel()
-        # Cancel health check loop
-        if self._health_check_task and not self._health_check_task.done():
-            self._health_check_task.cancel()
+        self._stopping.set()
+        # Runtime effects in executor threads are not cancellable. Wait for
+        # lifecycle completion/journal fsync instead of announcing interruption.
+        await self._operations.drain()
 
-        for task_id, task in self._running_tasks.items():
+        if self._desktop_lease_task is not None:
+            self._desktop_lease_task.cancel()
+            await asyncio.gather(self._desktop_lease_task, return_exceptions=True)
+            self._desktop_lease_task = None
+        try:
+            await asyncio.wait_for(
+                self._service.streams.close_all_streams(reason="runner_shutdown"),
+                self._settings.stream_shutdown_timeout,
+            )
+        except Exception:
+            # Durable closing ownership remains protective for the next retry.
+            # A timeout is not evidence of guest-side process termination.
+            logger.warning("stream_shutdown_unconfirmed", exc_info=True)
+        maintenance = [
+            task
+            for task in (
+                self._heartbeat_task,
+                self._delivery_task,
+                self._observation_task,
+                self._metrics_task,
+                self._terminal_sweep_task,
+            )
+            if task is not None
+        ]
+        for task in maintenance:
+            task.cancel()
+        await asyncio.gather(*maintenance, return_exceptions=True)
+
+        running_tasks = list(self._running_tasks.items())
+        for task_id, task in running_tasks:
             task.cancel()
             logger.info("task_cancelled", task_id=task_id)
         self._running_tasks.clear()
+        await asyncio.gather(
+            *(task for _, task in running_tasks), return_exceptions=True
+        )
 
-        if self._sio.connected:
-            await self._sio.disconnect()
+        # shutdown also aborts an offline reconnect task; disconnect releases
+        # the HTTP session after an initial handshake that never connected.
+        await self._sio.shutdown()
+        await self._sio.disconnect()

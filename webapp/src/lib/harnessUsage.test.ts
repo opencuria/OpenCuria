@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessMessage, HarnessPart } from '@/types/harness'
-import type { ProviderModel } from './harnessModels'
-import { formatMessageHoverLine, formatMessageUsage, resolveMessageUsage } from './harnessUsage'
+import type { HarnessMessage, HarnessPart } from '@opencuria/chat-core/harness'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
+import {
+  formatMessageHoverLine,
+  formatMessageUsage,
+  resolveMessageUsage,
+} from '@opencuria/chat-core/harnessUsage'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -61,6 +65,13 @@ describe('resolveMessageUsage', () => {
     expect(usage.cost).toBeCloseTo(0.0123)
     expect(usage.promptTokens).toBe(15)
     expect(usage.completionTokens).toBe(6)
+  })
+
+  it('reads tokens from compact timeline parts after reload', () => {
+    expect(resolveMessageUsage(makeMessage({ parts: [makePart({
+      meta: {},
+      display: { tokens: { prompt_tokens: 1204, completion_tokens: 318 } },
+    })] }))).toEqual({ cost: 0, promptTokens: 1204, completionTokens: 318 })
   })
 })
 

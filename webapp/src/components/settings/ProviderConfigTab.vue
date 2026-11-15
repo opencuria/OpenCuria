@@ -1,212 +1,430 @@
+<!-- Provider accounts plus organization-wide small-model defaults (admins only). -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
+import ModelPicker from '@/components/common/ModelPicker.vue'
+import SettingsRow from './SettingsRow.vue'
+import SettingsSection from './SettingsSection.vue'
+import { PROVIDER_META, type ProviderMeta } from './providerMeta'
 import {
-  deleteProviderConfig,
+  providerAccountsSummary,
+  providerModelCount,
+  type ProviderAccountProvider,
+} from '@opencuria/chat-core/providerAccounts'
+import type { ProviderModel } from '@opencuria/chat-core/harnessModels'
+import {
+  invalidateProviderCatalog,
+  loadProviderModelsCached,
+  loadEngineModelsCached,
+} from '@/lib/providerCatalog'
+import { ApiRequestError } from '@/services/api'
+import { getVoiceSettings, type VoiceConfig } from '@/services/voice.api'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from './AutosaveStatus.vue'
+import { useAuthStore } from '@/stores/auth'
+import {
   getProviderConfig,
+  listProviderAccounts,
   saveProviderConfig,
   type HarnessProviderConfig,
+  type ProviderAccount,
 } from '@/services/harness.api'
 
-const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
+const authStore = useAuthStore()
+const isAdmin = computed(() => authStore.isAdmin)
+const organizationId = computed(
+  () => `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}`,
+)
 
+let loadRevision = 0
+let loadStateRevision = 0
 const loading = ref(true)
-const saving = ref(false)
-const deleting = ref(false)
 const error = ref<string | null>(null)
 const config = ref<HarnessProviderConfig | null>(null)
-
-const apiKey = ref('')
-const baseUrl = ref(DEFAULT_BASE_URL)
-const defaultModel = ref('')
+const accounts = ref<ProviderAccount[]>([])
+const catalog = ref<ProviderModel[]>([])
+const externalCatalog = ref<ProviderModel[]>([])
 const smallModel = ref('')
-const computerUseModel = ref('')
+const smallEffort = ref('')
+const speechModel = ref('')
+const voiceCleanupModel = ref('')
+const voiceSettings = ref<VoiceConfig | null>(null)
+const voiceCatalogError = ref('')
+const speechCatalog = computed<ProviderModel[]>(() =>
+  (voiceSettings.value?.models ?? []).map((model) => ({
+    ...model,
+    provider: model.id.split('/')[0] || '',
+    reasoning_efforts: [],
+    default_effort: '',
+    supports_tools: false,
+    context_length: 0,
+    max_output_tokens: 0,
+  })),
+)
+const activeProvider = ref<ProviderAccountProvider | null>(null)
 
-const apiKeyPlaceholder = computed(() => {
-  if (config.value?.has_api_key && config.value.api_key_hint) {
-    return `Saved key (${config.value.api_key_hint})`
+const accountsByProvider = computed(() => {
+  const map = new Map<ProviderAccountProvider, ProviderAccount[]>()
+  for (const account of accounts.value) {
+    const list = map.get(account.provider) ?? []
+    list.push(account)
+    map.set(account.provider, list)
   }
-  if (config.value?.has_api_key) {
-    return 'Saved key (leave blank to keep)'
-  }
-  return 'sk-or-...'
+  return map
 })
+const activeAccountByProvider = computed(() => {
+  const map = new Map<ProviderAccountProvider, ProviderAccount>()
+  for (const account of accounts.value) {
+    if (account.is_active) map.set(account.provider, account)
+  }
+  return map
+})
+const anyConnected = computed(() =>
+  accounts.value.some((account) => account.is_active && account.connected),
+)
 
-function applyConfig(next: HarnessProviderConfig): void {
-  config.value = next
-  baseUrl.value = next.base_url || DEFAULT_BASE_URL
-  defaultModel.value = next.default_model || ''
-  smallModel.value = next.small_model || ''
-  computerUseModel.value = next.computer_use_model || ''
-  apiKey.value = ''
+function currentContextKey(): string {
+  return `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}`
 }
 
-async function loadConfig(): Promise<void> {
+function modelCount(meta: ProviderMeta): number {
+  return providerModelCount(meta, [catalog.value, externalCatalog.value])
+}
+const defaultsDirty = computed(
+  () =>
+    smallModel.value.trim() !== (config.value?.small_model ?? '') ||
+    smallEffort.value.trim() !== (config.value?.small_effort ?? '') ||
+    speechModel.value.trim() !== (config.value?.speech_model ?? '') ||
+    voiceCleanupModel.value.trim() !== (config.value?.voice_cleanup_model ?? ''),
+)
+
+function applyConfig(next: HarnessProviderConfig | null): void {
+  config.value = next
+  smallModel.value = next?.small_model || ''
+  smallEffort.value = next?.small_effort || ''
+  speechModel.value = next?.speech_model || ''
+  voiceCleanupModel.value = next?.voice_cleanup_model || ''
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    (error instanceof ApiRequestError && error.status === 404) ||
+    (error instanceof Error && error.message.toLowerCase().includes('not found'))
+  )
+}
+
+async function refreshAll(): Promise<void> {
+  const context = currentContextKey()
+  const previousConfig = config.value
+  const revision = ++loadRevision
+  invalidateProviderCatalog()
+  // Organization-wide defaults are admin settings; members only manage accounts.
+  const admin = isAdmin.value
+  const [configRes, accountRes, modelsRes, externalModels, voiceResult] = await Promise.all([
+    admin
+      ? getProviderConfig().catch((error: unknown) => {
+          if (isNotFoundError(error)) return null
+          throw error
+        })
+      : null,
+    listProviderAccounts(),
+    loadProviderModelsCached().catch(() => [] as ProviderModel[]),
+    Promise.all([
+      loadEngineModelsCached('claude').catch(() => [] as ProviderModel[]),
+      loadEngineModelsCached('codex').catch(() => [] as ProviderModel[]),
+    ]).then((rows) => rows.flat()),
+    admin
+      ? getVoiceSettings().then(
+          (value) => ({ value, error: '' }),
+          () => ({
+            value: null,
+            error: 'Speech models could not be loaded. You can enter a model ID manually.',
+          }),
+        )
+      : { value: null, error: '' },
+  ])
+  if (context !== currentContextKey() || revision !== loadRevision) return
+  if (
+    loading.value ||
+    (config.value === previousConfig && !defaultsDirty.value && !autosave.saving)
+  )
+    applyConfig(configRes)
+  accounts.value = accountRes
+  catalog.value = modelsRes
+  externalCatalog.value = externalModels
+  voiceSettings.value = voiceResult.value
+  voiceCatalogError.value = voiceResult.error
+}
+
+async function loadState(): Promise<void> {
+  const context = currentContextKey()
+  const revision = ++loadStateRevision
   loading.value = true
   error.value = null
   try {
-    applyConfig(await getProviderConfig())
+    await refreshAll()
+    if (context !== currentContextKey() || revision !== loadStateRevision) return
   } catch (e: unknown) {
+    if (context !== currentContextKey() || revision !== loadStateRevision) return
     config.value = null
-    baseUrl.value = DEFAULT_BASE_URL
-    defaultModel.value = ''
+    accounts.value = []
+    catalog.value = []
+    externalCatalog.value = []
     smallModel.value = ''
-    computerUseModel.value = ''
-    apiKey.value = ''
-    const message = e instanceof Error ? e.message : 'Failed to load provider config'
-    if (!message.toLowerCase().includes('not found')) {
-      error.value = message
-    }
+    smallEffort.value = ''
+    speechModel.value = ''
+    voiceCleanupModel.value = ''
+    voiceSettings.value = null
+    voiceCatalogError.value = ''
+    const message = e instanceof Error ? e.message : 'Failed to load provider settings'
+    if (!message.toLowerCase().includes('not found')) error.value = message
   } finally {
-    loading.value = false
+    if (revision === loadStateRevision) loading.value = false
   }
 }
 
-async function handleSave(): Promise<void> {
-  if (saving.value) return
-  saving.value = true
-  error.value = null
-  try {
+function openProviderDialog(provider: ProviderAccountProvider): void {
+  activeProvider.value = provider
+}
+
+function rowDetail(meta: ProviderMeta): string {
+  return providerAccountsSummary(meta, accountsByProvider.value.get(meta.id) ?? [])
+}
+
+function handleDialogClosed(open: boolean): void {
+  if (!open) activeProvider.value = null
+}
+
+async function handleAccountsChanged(): Promise<void> {
+  await refreshAll()
+}
+
+const autosave = useAutosave({
+  source: () => [smallModel.value, smallEffort.value, speechModel.value, voiceCleanupModel.value],
+  dirty: () => defaultsDirty.value,
+  enabled: () => isAdmin.value && !loading.value && !error.value,
+  errorMessage: 'Failed to save default models',
+  save: async (isCurrent) => {
     const saved = await saveProviderConfig({
-      api_key: apiKey.value,
-      base_url: baseUrl.value.trim() || DEFAULT_BASE_URL,
-      default_model: defaultModel.value.trim(),
       small_model: smallModel.value.trim(),
-      computer_use_model: computerUseModel.value.trim(),
+      small_effort: smallEffort.value.trim(),
+      speech_model: speechModel.value.trim(),
+      voice_cleanup_model: voiceCleanupModel.value.trim(),
     })
-    applyConfig(saved)
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : 'Failed to save provider config'
-  } finally {
-    saving.value = false
-  }
-}
+    if (isCurrent()) config.value = saved
+  },
+})
 
-async function handleDelete(): Promise<void> {
-  if (deleting.value || !config.value) return
-  deleting.value = true
-  error.value = null
-  try {
-    await deleteProviderConfig()
-    config.value = null
-    apiKey.value = ''
-    baseUrl.value = DEFAULT_BASE_URL
-    defaultModel.value = ''
-    smallModel.value = ''
-    computerUseModel.value = ''
-  } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : 'Failed to delete provider config'
-  } finally {
-    deleting.value = false
-  }
-}
-
-onMounted(() => {
-  void loadConfig()
+onMounted(() => void loadState())
+watch(organizationId, () => {
+  activeProvider.value = null
+  void loadState()
 })
 </script>
 
 <template>
-  <div class="space-y-4">
-    <p class="text-sm text-muted-foreground">
-      Configure the OpenRouter API key and default models used by the agent harness across
-      all workspaces in this organization.
-    </p>
-
+  <div class="space-y-6">
     <div v-if="loading" class="flex justify-center py-12">
       <LoadingSpinner :size="24" />
     </div>
 
     <div
       v-else-if="error"
-      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
+      class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
     >
       {{ error }}
     </div>
 
-    <div v-else class="rounded-lg border border-border bg-card p-5 space-y-5">
-      <div>
-        <h3 class="text-base font-semibold text-foreground">OpenRouter Provider</h3>
-        <p class="mt-1 text-sm text-muted-foreground">
-          The API key is encrypted at rest. Only a masked hint is shown after saving.
-        </p>
-      </div>
-
-      <div class="grid gap-4 max-w-xl">
-        <div class="space-y-2">
-          <Label for="provider-api-key">API Key</Label>
-          <Input
-            id="provider-api-key"
-            v-model="apiKey"
-            type="password"
-            autocomplete="off"
-            :placeholder="apiKeyPlaceholder"
-          />
-          <p
-            v-if="config?.has_api_key && config.api_key_hint"
-            class="text-xs text-muted-foreground"
+    <template v-else>
+      <SettingsSection
+        title="Providers"
+        :description="
+          isAdmin
+            ? 'Manage personal and organization-shared accounts. Provider secrets are encrypted at rest.'
+            : 'Connect personal accounts or use organization-shared ones. Provider secrets are encrypted at rest.'
+        "
+      >
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <SettingsRow
+            v-for="meta in PROVIDER_META"
+            :key="meta.id"
+            class="transition-colors hover:bg-muted/40"
+            :icon-class="
+              accountsByProvider.get(meta.id)?.length ? 'bg-success/10 text-success' : undefined
+            "
+            :data-testid="`provider-row-${meta.id}`"
           >
-            Current key: {{ config.api_key_hint }}
-          </p>
+            <template #icon>
+              <component :is="meta.icon" :size="16" aria-hidden="true" />
+            </template>
+            <div class="min-w-0 space-y-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-sm font-medium text-foreground">{{ meta.name }}</span>
+                <span
+                  v-if="activeAccountByProvider.get(meta.id)?.connected"
+                  class="text-xs font-medium text-success"
+                  :data-testid="`provider-status-${meta.id}`"
+                  >Active</span
+                >
+              </div>
+              <p class="text-sm text-muted-foreground" :data-testid="`provider-detail-${meta.id}`">
+                {{ rowDetail(meta) }}
+              </p>
+            </div>
+            <template #badges>
+              <span
+                v-if="accountsByProvider.get(meta.id)?.length"
+                class="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
+                :data-testid="`provider-account-count-${meta.id}`"
+                >{{ accountsByProvider.get(meta.id)?.length }}
+                {{ accountsByProvider.get(meta.id)?.length === 1 ? 'account' : 'accounts' }}</span
+              >
+              <span
+                v-if="modelCount(meta)"
+                class="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
+                :data-testid="`provider-model-count-${meta.id}`"
+                >{{ modelCount(meta) }} models</span
+              >
+            </template>
+            <template #actions>
+              <Button
+                size="sm"
+                :variant="accountsByProvider.get(meta.id)?.length ? 'outline' : 'default'"
+                :data-testid="`provider-manage-${meta.id}`"
+                @click="openProviderDialog(meta.id)"
+                >Manage</Button
+              >
+            </template>
+          </SettingsRow>
         </div>
+      </SettingsSection>
 
-        <div class="space-y-2">
-          <Label for="provider-base-url">Base URL</Label>
-          <Input
-            id="provider-base-url"
-            v-model="baseUrl"
-            type="url"
-            placeholder="https://openrouter.ai/api/v1"
-          />
-        </div>
-
-        <div class="space-y-2">
-          <Label for="provider-default-model">Default Model</Label>
-          <Input
-            id="provider-default-model"
-            v-model="defaultModel"
-            placeholder="e.g. anthropic/claude-sonnet-4"
-          />
-        </div>
-
-        <div class="space-y-2">
-          <Label for="provider-small-model">Small Model</Label>
-          <Input
-            id="provider-small-model"
-            v-model="smallModel"
-            placeholder="e.g. openai/gpt-4o-mini"
-          />
-        </div>
-
-        <div class="space-y-2">
-          <Label for="provider-computer-use-model">Computer-use model</Label>
-          <Input
-            id="provider-computer-use-model"
-            v-model="computerUseModel"
-            placeholder="e.g. anthropic/claude-sonnet-4"
-          />
-        </div>
-      </div>
-
-      <div class="flex flex-wrap items-center gap-2">
-        <Button size="sm" :disabled="saving" @click="handleSave">
-          <LoadingSpinner v-if="saving" :size="12" />
-          <span v-else>Save Provider Config</span>
-        </Button>
-        <Button
-          v-if="config"
-          size="sm"
-          variant="outline"
-          :disabled="deleting"
-          @click="handleDelete"
+      <SettingsSection
+        v-if="isAdmin"
+        title="Small Model"
+        description="Background tasks like session titles. Primary and subagent models are configured under Agents."
+      >
+        <div
+          v-if="!anyConnected"
+          class="rounded-md border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
+          data-testid="defaults-no-provider-hint"
         >
-          <LoadingSpinner v-if="deleting" :size="12" />
-          <span v-else>Delete Config</span>
-        </Button>
-      </div>
-    </div>
+          No provider connected yet. Connect an account above to browse available models — or enter
+          provider/model ids manually.
+        </div>
+
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="provider-small-model" class="block text-sm font-medium"
+                >Small Model</Label
+              >
+              <p class="text-sm text-muted-foreground">
+                Background tasks like session titles and compaction.
+              </p>
+            </div>
+            <div class="w-full shrink-0 sm:w-80">
+              <ModelPicker
+                input-id="provider-small-model"
+                v-model:model="smallModel"
+                v-model:effort="smallEffort"
+                :models="catalog"
+                variant="field"
+                manual-fallback
+                allow-default
+                default-model-label="None"
+                default-option-label="None"
+                allow-effort-default
+                default-effort-label="Provider default"
+                effort-fallback="model-default"
+              />
+            </div>
+          </div>
+        </div>
+
+        <AutosaveStatus :state="autosave" data-testid="defaults-status" />
+      </SettingsSection>
+
+      <SettingsSection
+        v-if="isAdmin"
+        title="Voice input"
+        description="Models used for dictation. Audio is sent to your selected speech provider."
+      >
+        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="provider-speech-model" class="block text-sm font-medium"
+                >Speech recognition</Label
+              >
+              <p class="text-sm text-muted-foreground">
+                Transcribes speech and provides timing for pointing.
+              </p>
+            </div>
+            <div class="w-full shrink-0 sm:w-80">
+              <ModelPicker
+                input-id="provider-speech-model"
+                v-model:model="speechModel"
+                effort=""
+                :models="speechCatalog"
+                :show-effort="false"
+                variant="field"
+                manual-fallback
+                allow-default
+                default-model-label="Automatic"
+                default-option-label="Automatic"
+              />
+            </div>
+          </div>
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="provider-voice-cleanup-model" class="block text-sm font-medium"
+                >Text cleanup</Label
+              >
+              <p class="text-sm text-muted-foreground">Removes fillers and improves punctuation.</p>
+            </div>
+            <div class="w-full shrink-0 sm:w-80">
+              <ModelPicker
+                input-id="provider-voice-cleanup-model"
+                v-model:model="voiceCleanupModel"
+                effort=""
+                :models="catalog"
+                :show-effort="false"
+                variant="field"
+                manual-fallback
+                allow-default
+                default-model-label="Small Model / Build default"
+                default-option-label="Small Model / Build default"
+              />
+            </div>
+          </div>
+        </div>
+        <p
+          v-if="voiceCatalogError"
+          class="text-sm text-muted-foreground"
+          data-testid="voice-catalog-error"
+        >
+          {{ voiceCatalogError }}
+        </p>
+        <AutosaveStatus :state="autosave" data-testid="voice-defaults-status" />
+      </SettingsSection>
+    </template>
+
+    <ProviderConnectionDialog
+      :open="activeProvider !== null"
+      :provider="activeProvider"
+      :accounts="activeProvider ? (accountsByProvider.get(activeProvider) ?? []) : []"
+      :is-admin="isAdmin"
+      @update:open="handleDialogClosed"
+      @changed="handleAccountsChanged"
+    />
   </div>
 </template>

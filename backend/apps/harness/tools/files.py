@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-import difflib
+import base64
 
 from pydantic import BaseModel, Field
 
 from ..access.base import sanitize_harness_path
 from ..access.runner_accessor import RunnerAccessorError
+from ..image_processing import image_path_notice, prepare_image
+from ..media.formats import (
+    SUPPORTED_IMAGE_MIMES,
+    is_pdf_attachment,
+    sniff_attachment_mime,
+)
+from ..media.limits import MAX_MEDIA_INGEST_BYTES
 from .base import Tool, ToolContext, ToolError, ToolResult
+from .file_diffs import build_patch_metadata
 from .file_locks import get_lock
 from .truncate import MAX_BYTES, MAX_LINES
 
@@ -29,10 +37,31 @@ _READ_FOOTER_RESERVE = 256
 # Binary detection: NUL byte in the probed prefix means "not text".
 _BINARY_PROBE_BYTES = 4096
 
+# Bytes probed for magic-byte sniffing (OpenCode ``SAMPLE_BYTES``).
+_MEDIA_SNIFF_BYTES = 4096
+
 
 def _is_binary(content: bytes) -> bool:
     """Return True when *content* looks like a binary file."""
     return b"\x00" in content[:_BINARY_PROBE_BYTES]
+
+
+def _media_attachment(
+    mime: str, content: bytes, *, filename: str = ""
+) -> dict[str, object]:
+    """Build an OpenCode-style file attachment dict.
+
+    ``filename`` is the workspace basename (e.g. ``cat.png``) so
+    providers and compaction placeholders can name the file without
+    parsing the data URL. Fallback is ``""`` when unknown.
+    """
+    encoded = base64.b64encode(content).decode("ascii")
+    return {
+        "type": "file",
+        "mime": mime,
+        "url": f"data:{mime};base64,{encoded}",
+        "filename": filename,
+    }
 
 
 def _clip_line(line: str) -> str:
@@ -86,9 +115,7 @@ async def _miss_message(safe_path: str, exc: Exception, ctx: ToolContext) -> str
     return f"{base}\nDid you mean one of these?\n{listed}"
 
 
-async def _sibling_suggestions_async(
-    safe_path: str, ctx: ToolContext
-) -> list[str]:
+async def _sibling_suggestions_async(safe_path: str, ctx: ToolContext) -> list[str]:
     """Awaitable sibling lookup (best effort, swallows errors)."""
     accessor = getattr(ctx, "accessor", None)
     list_dir = getattr(accessor, "list_dir", None)
@@ -118,33 +145,6 @@ async def _sibling_suggestions_async(
     return ranked[:3]
 
 
-def _patch_metadata(
-    path: str,
-    *,
-    old_text: str,
-    new_text: str,
-) -> dict[str, str]:
-    """Build unified-diff patch metadata for write/edit tools."""
-    old_lines = old_text.splitlines(keepends=True)
-    new_lines = new_text.splitlines(keepends=True)
-    diff_lines = difflib.unified_diff(
-        old_lines,
-        new_lines,
-        fromfile=f"a/{path.lstrip('/')}",
-        tofile=f"b/{path.lstrip('/')}",
-        lineterm="",
-    )
-    unified = "\n".join(diff_lines)
-    if not unified and old_text != new_text:
-        unified = f"--- a/{path}\n+++ b/{path}\n(content changed)"
-    return {
-        "path": path,
-        "old_content": old_text,
-        "new_content": new_text,
-        "unified_diff": unified,
-    }
-
-
 class ReadArgs(BaseModel):
     """Arguments for the read tool.
 
@@ -153,7 +153,9 @@ class ReadArgs(BaseModel):
     with ``lineno = offset + index``).
     """
 
-    path: str = Field(description="Workspace-relative or /workspace path.")
+    path: str = Field(
+        description="Workspace-relative or absolute path in the workspace VM."
+    )
     offset: int = Field(
         default=0,
         ge=0,
@@ -172,14 +174,18 @@ class ReadArgs(BaseModel):
 class WriteArgs(BaseModel):
     """Arguments for the write tool."""
 
-    path: str = Field(description="Workspace-relative or /workspace path.")
+    path: str = Field(
+        description="Workspace-relative or absolute path in the workspace VM."
+    )
     content: str = Field(description="Full file content (replaces file).")
 
 
 class EditArgs(BaseModel):
     """Arguments for the edit tool."""
 
-    path: str = Field(description="Workspace-relative or /workspace path.")
+    path: str = Field(
+        description="Workspace-relative or absolute path in the workspace VM."
+    )
     old_string: str = Field(description="Exact string to replace.")
     new_string: str = Field(default="", description="Replacement string.")
     replace_all: bool = Field(default=False, description="Replace every occurrence.")
@@ -197,11 +203,13 @@ class ReadTool(Tool):
 
     name = "read"
     description = (
-        "Read a text file from the workspace. Paged via offset/limit "
+        "Read a text file from the workspace VM. Paged via offset/limit "
         "(defaults: offset 0, limit 2000 lines, at most 50 KB per page). "
         "Offset and displayed line numbers are 0-based. "
         "Use offset to continue in large files. Rejects binary files. "
-        "Lines longer than 2000 characters are truncated."
+        "Lines longer than 2000 characters are truncated. "
+        "This tool can read image files and PDFs and return them "
+        "as file attachments."
     )
     args_schema: type[BaseModel] = ReadArgs
     permission_key = "read"
@@ -228,6 +236,13 @@ class ReadTool(Tool):
                 await _miss_message(safe_path, exc, ctx), tool=self.name
             ) from exc
         content = stored.content
+        mime = sniff_attachment_mime(
+            content[:_MEDIA_SNIFF_BYTES],
+            safe_path,
+            getattr(stored, "mime", ""),
+        )
+        if mime in SUPPORTED_IMAGE_MIMES or is_pdf_attachment(mime):
+            return await self._execute_media(args.path, safe_path, mime, ctx)
         if _is_binary(content):
             raise ToolError(
                 f"Refusing to read binary file: {args.path}",
@@ -248,9 +263,7 @@ class ReadTool(Tool):
                 tool=self.name,
             )
         page, more, cut = paginate_read(lines, offset=args.offset, limit=args.limit)
-        numbered = [
-            f"{args.offset + index}: {line}" for index, line in enumerate(page)
-        ]
+        numbered = [f"{args.offset + index}: {line}" for index, line in enumerate(page)]
         output = "\n".join(numbered)
         last = args.offset + len(page)
         next_offset = last
@@ -283,6 +296,67 @@ class ReadTool(Tool):
             },
         )
 
+    async def _execute_media(
+        self, display_path: str, safe_path: str, mime: str, ctx: ToolContext
+    ) -> ToolResult:
+        """Return an image/PDF file as a file attachment (OpenCode parity).
+
+        Re-reads up to ``MAX_MEDIA_INGEST_BYTES`` so media larger than
+        the text fetch budget is still fully attached. Oversized media
+        raises ``ToolError`` with an ingestion-limit message.
+        """
+        try:
+            stored = await ctx.accessor.read_file(
+                safe_path, max_size=MAX_MEDIA_INGEST_BYTES + 1
+            )
+        except RunnerAccessorError as exc:
+            raise ToolError(
+                await _miss_message(safe_path, exc, ctx), tool=self.name
+            ) from exc
+        content = stored.content
+        on_disk = stored.size or len(content)
+        if on_disk > MAX_MEDIA_INGEST_BYTES or (len(content) > MAX_MEDIA_INGEST_BYTES):
+            if mime in SUPPORTED_IMAGE_MIMES:
+                return ToolResult(
+                    output=image_path_notice(safe_path, "image exceeds the read limit"),
+                    metadata={"path": safe_path, "size": on_disk},
+                )
+            raise ToolError(
+                f"Media exceeds {MAX_MEDIA_INGEST_BYTES} byte ingestion "
+                f"limit: {display_path}",
+                tool=self.name,
+            )
+        if mime in SUPPORTED_IMAGE_MIMES:
+            try:
+                if stored.truncated:
+                    raise ValueError("Image read was truncated")
+                preview = await prepare_image(content)
+                content, mime = preview.content, preview.mime
+            except Exception:
+                return ToolResult(
+                    output=image_path_notice(safe_path, "preview unavailable"),
+                    metadata={"path": safe_path, "size": on_disk},
+                )
+        output = (
+            "PDF read successfully"
+            if is_pdf_attachment(mime)
+            else "Image read successfully"
+        )
+        filename = safe_path.rsplit("/", 1)[-1] or ""
+        attachment = _media_attachment(mime, content, filename=filename)
+        metadata = {
+            "path": safe_path,
+            "mime": mime,
+            "size": on_disk,
+            "attachments": [attachment],
+        }
+        return ToolResult(
+            output=output,
+            truncated=False,
+            metadata=metadata,
+            attachments=[attachment],
+        )
+
 
 class WriteTool(Tool):
     """Create or overwrite a file with the given content."""
@@ -312,17 +386,23 @@ class WriteTool(Tool):
             old_text = ""
             try:
                 stored = await ctx.accessor.read_file(safe_path)
+                if stored.truncated:
+                    raise ToolError(
+                        f"Refusing to overwrite {args.path}: existing file "
+                        "read was truncated",
+                        tool=self.name,
+                    )
                 if not _is_binary(stored.content):
                     old_text = stored.content.decode("utf-8", errors="replace")
             except RunnerAccessorError:
                 old_text = ""
             try:
-                await ctx.accessor.write_file(
-                    safe_path, args.content.encode("utf-8")
-                )
+                await ctx.accessor.write_file(safe_path, args.content.encode("utf-8"))
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
-        patch = _patch_metadata(safe_path, old_text=old_text, new_text=args.content)
+        patch = await build_patch_metadata(
+            safe_path, old_text=old_text, new_text=args.content
+        )
         return ToolResult(
             output=f"Wrote {len(args.content.encode('utf-8'))} bytes to {safe_path}",
             metadata=patch,
@@ -360,6 +440,11 @@ class EditTool(Tool):
                 stored = await ctx.accessor.read_file(safe_path)
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
+            if stored.truncated:
+                raise ToolError(
+                    f"Refusing to edit {args.path}: existing file read was truncated",
+                    tool=self.name,
+                )
             if _is_binary(stored.content):
                 raise ToolError(
                     f"Refusing to edit binary file: {args.path}",
@@ -392,7 +477,9 @@ class EditTool(Tool):
                 await ctx.accessor.write_file(safe_path, updated.encode("utf-8"))
             except RunnerAccessorError as exc:
                 raise ToolError(str(exc), tool=self.name) from exc
-            patch = _patch_metadata(safe_path, old_text=text, new_text=updated)
+            patch = await build_patch_metadata(
+                safe_path, old_text=text, new_text=updated
+            )
             patch["replacements"] = occurrences if args.replace_all else 1
             return ToolResult(
                 output=f"Replaced {occurrences if args.replace_all else 1} "

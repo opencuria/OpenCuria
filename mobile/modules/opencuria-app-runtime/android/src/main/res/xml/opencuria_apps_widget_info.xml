@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 4 × 2 cells by default, down to 2 × 1; min sizes follow the 70n − 30 dp rule. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+  android:description="@string/opencuria_apps_widget_description"
+  android:initialLayout="@layout/opencuria_apps_widget_loading"
+  android:minWidth="250dp"
+  android:minHeight="110dp"
+  android:minResizeWidth="110dp"
+  android:minResizeHeight="40dp"
+  android:previewLayout="@layout/opencuria_apps_widget_preview"
+  android:resizeMode="horizontal|vertical"
+  android:targetCellWidth="4"
+  android:targetCellHeight="2"
+  android:updatePeriodMillis="0"
+  android:widgetCategory="home_screen" />

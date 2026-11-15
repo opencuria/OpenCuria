@@ -9,15 +9,15 @@ import uuid
 
 import pytest
 
-from apps.harness.access.base import ExecChunk
 from apps.harness.access.runner_accessor import (
+    HARNESS_CHUNK_B64_SIZE,
     RunnerAccessorError,
     RunnerWorkspaceAccessor,
     create_harness_accessor,
-    route_harness_chunk,
-    route_harness_done,
+    route_harness_file_chunk,
     route_harness_result,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 
 
 class FakeTransport:
@@ -73,46 +73,27 @@ async def test_exec_wait_result_and_request_id_correlation() -> None:
     assert payload["request_id"]
 
 
-async def test_exec_stream_chunks_stdout_stderr_and_exit() -> None:
-    """exec_stream yields separated stdout/stderr chunks then exit code."""
+async def test_exec_wait_allows_external_workdir() -> None:
+    """exec_wait forwards workdir outside /workspace to the runner."""
     transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": "ws-1",
+                "exit_code": 0,
+                "stdout": "/tmp",
+                "stderr": "",
+            }
+        )
+
+    transport.auto_reply = auto_reply
     accessor = _accessor(transport)
-
-    async def consume():
-        chunks: list[ExecChunk] = []
-        async for chunk in accessor.exec_stream(["ls"]):
-            chunks.append(chunk)
-        return chunks
-
-    task = asyncio.create_task(consume())
-    await transport.event.wait()
-    payload = _request_id(transport, "harness:exec_stream")
-    request_id = payload["request_id"]
-    route_harness_chunk(
-        {
-            "request_id": request_id,
-            "workspace_id": "ws-1",
-            "stream": "stdout",
-            "data": "hello",
-        }
-    )
-    route_harness_chunk(
-        {
-            "request_id": request_id,
-            "workspace_id": "ws-1",
-            "stream": "stderr",
-            "data": "oops",
-        }
-    )
-    route_harness_done(
-        {"request_id": request_id, "workspace_id": "ws-1", "exit_code": 3}
-    )
-    chunks = await task
-    assert [c.stream for c in chunks] == ["stdout", "stderr", ""]
-    assert chunks[0].data == "hello"
-    assert chunks[1].data == "oops"
-    assert chunks[2].done is True
-    assert chunks[2].exit_code == 3
+    result = await accessor.exec_wait(["pwd"], workdir="/tmp")
+    assert result.stdout == "/tmp"
+    payload = _request_id(transport, "harness:exec_wait")
+    assert payload["workdir"] == "/tmp"
 
 
 async def test_runner_error_raises() -> None:
@@ -145,27 +126,8 @@ async def test_exec_wait_timeout_sends_cancel() -> None:
     assert events[-1] == "harness:cancel"
 
 
-async def test_exec_stream_cancel_sends_cancel() -> None:
-    """Cancelling exec_stream emits harness:cancel for cleanup."""
-    transport = FakeTransport()
-    accessor = _accessor(transport)
-    task = asyncio.create_task(
-        _collect(accessor.exec_stream(["sleep", "5"], timeout=30.0))
-    )
-    await transport.event.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    events = [event for event, _ in transport.emitted]
-    assert "harness:cancel" in events
-
-
-async def _collect(agen):
-    return [chunk async for chunk in agen]
-
-
-async def test_read_write_list_stat_roundtrip() -> None:
-    """read/write/list/stat use request_id correlation and sandbox paths."""
+async def test_read_write_list_roundtrip() -> None:
+    """read/write/list use request_id correlation and sandbox paths."""
     transport = FakeTransport()
     accessor = _accessor(transport)
 
@@ -182,7 +144,7 @@ async def test_read_write_list_stat_roundtrip() -> None:
                     "mime": "text/plain",
                 }
             )
-        elif event == "harness:write_file":
+        elif event == "harness:write_file_finish":
             route_harness_result(
                 {"request_id": rid, "workspace_id": "ws-1", "ok": True}
             )
@@ -201,17 +163,6 @@ async def test_read_write_list_stat_roundtrip() -> None:
                     ],
                 }
             )
-        elif event == "harness:stat":
-            route_harness_result(
-                {
-                    "request_id": rid,
-                    "workspace_id": "ws-1",
-                    "path": "/workspace/a.txt",
-                    "is_dir": False,
-                    "size": 2,
-                    "mime": "text/plain",
-                }
-            )
 
     transport.auto_reply = auto_reply
     content = await accessor.read_file("/workspace/a.txt")
@@ -221,43 +172,14 @@ async def test_read_write_list_stat_roundtrip() -> None:
     entries = await accessor.list_dir("/workspace")
     assert entries[0].name == "a.txt"
     assert entries[0].is_dir is False
-    info = await accessor.stat("/workspace/a.txt")
-    assert info.size == 2
-    assert info.is_dir is False
 
-    with pytest.raises(ValueError, match="under /workspace"):
-        await accessor.read_file("/etc/passwd")
+    external = await accessor.read_file("/etc/passwd")
+    assert external.content == b"hi"
+    assert transport.emitted[-1][1]["path"] == "/etc/passwd"
 
 
-async def test_desktop_action_returns_screenshot_payload() -> None:
-    """desktop_action emits harness:desktop_action and returns image fields."""
-    transport = FakeTransport()
-
-    async def auto_reply(event: str, payload: dict) -> None:
-        route_harness_result(
-            {
-                "request_id": payload["request_id"],
-                "workspace_id": "ws-1",
-                "ok": True,
-                "image_b64": "aGVsbG8=",
-                "mime": "image/png",
-                "width": 10,
-                "height": 20,
-            }
-        )
-
-    transport.auto_reply = auto_reply
-    accessor = _accessor(transport)
-    result = await accessor.desktop_action("screenshot", {"full": True})
-    assert result["image_b64"] == "aGVsbG8="
-    assert result["width"] == 10
-    payload = _request_id(transport, "harness:desktop_action")
-    assert payload["action"] == "screenshot"
-    assert payload["args"] == {"full": True}
-
-
-async def test_desktop_action_ensure_includes_geometry() -> None:
-    """ensure/hold attach the workspace framebuffer size for Xvnc start."""
+async def test_desktop_action_hold_includes_geometry() -> None:
+    """Hold attaches the workspace framebuffer size for Xvnc start."""
     transport = FakeTransport()
 
     async def auto_reply(event: str, payload: dict) -> None:
@@ -276,11 +198,15 @@ async def test_desktop_action_ensure_includes_geometry() -> None:
 
     transport.auto_reply = auto_reply
     accessor = _accessor(transport, desktop_geometry=geometry)
-    result = await accessor.desktop_action("ensure")
+    result = await accessor.desktop_action("hold", {"lease_id": "viewer-lease"})
     assert result["ok"] is True
     payload = _request_id(transport, "harness:desktop_action")
-    assert payload["action"] == "ensure"
-    assert payload["args"] == {"desktop_width": 1280, "desktop_height": 720}
+    assert payload["action"] == "hold"
+    assert payload["args"] == {
+        "lease_id": "viewer-lease",
+        "desktop_width": 1280,
+        "desktop_height": 720,
+    }
 
 
 async def test_desktop_action_runner_error_raises() -> None:
@@ -299,7 +225,7 @@ async def test_desktop_action_runner_error_raises() -> None:
     transport.auto_reply = auto_reply
     accessor = _accessor(transport)
     with pytest.raises(RunnerAccessorError, match="desktop unavailable"):
-        await accessor.desktop_action("screenshot")
+        await accessor.desktop_action("binding")
 
 
 async def test_desktop_action_timeout_sends_cancel() -> None:
@@ -307,7 +233,7 @@ async def test_desktop_action_timeout_sends_cancel() -> None:
     transport = FakeTransport()
     accessor = _accessor(transport, default_timeout=30.0)
     with pytest.raises(TimeoutError, match="timed out"):
-        await accessor.desktop_action("screenshot", timeout=0.02)
+        await accessor.desktop_action("binding", timeout=0.02)
     events = [event for event, _ in transport.emitted]
     assert events[0] == "harness:desktop_action"
     assert events[-1] == "harness:cancel"
@@ -316,8 +242,6 @@ async def test_desktop_action_timeout_sends_cancel() -> None:
 async def test_unknown_request_id_returns_false() -> None:
     """Routing helpers return False for unknown request ids."""
     assert route_harness_result({"request_id": "nope"}) is False
-    assert route_harness_chunk({"request_id": "nope"}) is False
-    assert route_harness_done({"request_id": "nope"}) is False
 
 
 async def test_result_delivered_from_worker_thread() -> None:
@@ -350,10 +274,14 @@ class _RecordingRunnerService:
     """Minimal runner service for create_harness_accessor tests."""
 
     def __init__(self) -> None:
-        from apps.runners.repositories import WorkspaceRepository
-
-        self.workspaces = WorkspaceRepository
+        self.runner_transport = self
+        self.stream_transport = self
         self.emitted: list[tuple[str, str, dict]] = []
+        self.called: list[tuple[str, str, dict]] = []
+
+    async def call_stream_event(self, runner, event, payload, timeout=None) -> dict:  # type: ignore[no-untyped-def]
+        self.called.append((str(runner.sid), event, payload))
+        return {"ok": True}
 
     async def emit_harness_event(self, runner, event, payload) -> None:  # type: ignore[no-untyped-def]
         self.emitted.append((str(runner.sid), event, payload))
@@ -424,6 +352,36 @@ async def test_create_harness_accessor_rejects_unknown_workspace() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("fence", ["failed", "capturing_image", "resetting"])
+async def test_recovery_accessor_only_releases_lease_across_interaction_fence(
+    harness_workspace, fence
+) -> None:
+    """Cleanup can settle a failed VM without admitting new live interaction."""
+    from common.exceptions import ConflictError
+
+    workspace = harness_workspace
+    if fence == "failed":
+        workspace.status = fence
+    else:
+        workspace.active_operation = fence
+    workspace.save(update_fields=["status", "active_operation"])
+    service = _RecordingRunnerService()
+    with pytest.raises(ConflictError):
+        await create_harness_accessor(service, str(workspace.id))
+    accessor = await create_harness_accessor(
+        service, str(workspace.id), allow_lease_cleanup=True
+    )
+    await accessor.desktop_action("release", {"lease_id": str(uuid.uuid4())})
+    assert service.emitted[-1][1] == "harness:desktop_action"
+    assert service.emitted[-1][2]["action"] == "release"
+    with pytest.raises(ConflictError):
+        await accessor.list_dir("/workspace")
+    with pytest.raises(ConflictError):
+        await accessor.desktop_action("reserve", {})
+    assert len(service.emitted) == 1
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_emit_fails_when_runner_goes_offline_mid_run(harness_workspace) -> None:
     """A later emit surfaces a tool-level accessor error if the runner drops."""
     from apps.runners.enums import RunnerStatus
@@ -436,6 +394,103 @@ async def test_emit_fails_when_runner_goes_offline_mid_run(harness_workspace) ->
     runner.save(update_fields=["status", "sid"])
     with pytest.raises(RunnerAccessorError, match="offline"):
         await accessor.list_dir("/workspace")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_factory_stream_calls_use_live_runner_and_fence(
+    harness_workspace,
+) -> None:
+    """ACKed stream control re-reads the runner SID and the interaction fence."""
+    from apps.runners.models import Workspace
+    from common.exceptions import ConflictError
+
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    stream = await accessor.open_process(["cat"])
+    runner = harness_workspace.runner
+    runner.sid = "rotated-sid"
+    runner.save(update_fields=["sid"])
+    await stream.send(b"ping\n")
+    assert service.called[-1][:2] == ("rotated-sid", "workspace:stream_input")
+    Workspace.objects.filter(id=harness_workspace.id).update(
+        active_operation="capturing_image"
+    )
+    calls = len(service.called)
+    with pytest.raises(ConflictError):
+        await stream.send(b"ping\n")
+    assert len(service.called) == calls
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_factory_desktop_hold_uses_configured_geometry_and_fence(
+    harness_workspace,
+) -> None:
+    """Desktop holds carry the persisted framebuffer size behind the fence."""
+    from apps.runners.models import Workspace
+    from common.exceptions import ConflictError
+
+    Workspace.objects.filter(id=harness_workspace.id).update(
+        desktop_width=1600, desktop_height=900
+    )
+    service = _RecordingRunnerService()
+    accessor = await create_harness_accessor(service, str(harness_workspace.id))
+    await accessor.desktop_action("hold", {"lease_id": "viewer"})
+    args = service.emitted[-1][2]["args"]
+    assert (args["desktop_width"], args["desktop_height"]) == (1600, 900)
+    Workspace.objects.filter(id=harness_workspace.id).update(
+        active_operation="capturing_image"
+    )
+    with pytest.raises(ConflictError):
+        await accessor.desktop_action("hold", {"lease_id": "viewer"})
+    assert len(service.emitted) == 1
+
+
+def _attach_credentials(workspace, count: int = 2) -> None:
+    """Attach ordinary credentials, as most workspaces carry a few."""
+    from apps.credentials.enums import CredentialType
+    from apps.credentials.models import Credential, CredentialService
+    from common.utils import encrypt_value
+
+    for index in range(count):
+        credential_service = CredentialService.objects.create(
+            name=f"Token {index}",
+            slug=f"token-{uuid.uuid4().hex[:8]}",
+            credential_type=CredentialType.ENV,
+            env_var_name=f"TOKEN_{index}",
+        )
+        workspace.credentials.add(
+            Credential.objects.create(
+                user=workspace.created_by,
+                service=credential_service,
+                name=f"Token {index}",
+                encrypted_value=encrypt_value("secret"),
+                created_by=workspace.created_by,
+            )
+        )
+
+
+@pytest.mark.django_db
+def test_runner_calls_read_workspace_and_runner_once(
+    harness_workspace, django_assert_num_queries
+) -> None:
+    """Routing a call reads one row pair, not the workspace's related graph."""
+    from asgiref.sync import async_to_sync
+
+    _attach_credentials(harness_workspace)
+    service = _RecordingRunnerService()
+    with django_assert_num_queries(1):
+        accessor = async_to_sync(create_harness_accessor)(
+            service, str(harness_workspace.id)
+        )
+    with django_assert_num_queries(1):
+        async_to_sync(accessor.list_dir)("/workspace")
+    stream = async_to_sync(accessor.open_process)(["cat"])
+    with django_assert_num_queries(1):
+        async_to_sync(stream.send)(b"ping\n")
+    async_to_sync(stream.aclose)()
+    # Geometry and the emit each re-check the fence at their own moment.
+    with django_assert_num_queries(2):
+        async_to_sync(accessor.desktop_action)("hold", {"lease_id": "viewer"})
 
 
 async def test_cancelled_wait_still_emits_cancel() -> None:
@@ -477,6 +532,8 @@ async def test_cancel_during_retry_sleep_propagates() -> None:
     calls = {"n": 0}
 
     class _SlowProvider:
+        name = "fake"
+
         async def chat_stream(self, model, messages, schemas, opts=None):  # type: ignore[no-untyped-def]
             calls["n"] += 1
             from apps.harness.providers.base import ProviderTimeoutError
@@ -487,7 +544,9 @@ async def test_cancel_during_retry_sleep_propagates() -> None:
     from apps.harness.tools import default_tool_registry
 
     runner = HarnessRunner(
-        provider=_SlowProvider(),  # type: ignore[arg-type]
+        model_resolver=StaticModelResolver(
+            _SlowProvider(),  # type: ignore[arg-type]
+        ).resolve,
         tools=default_tool_registry(),
     )
     task = _asyncio.create_task(
@@ -499,3 +558,416 @@ async def test_cancel_during_retry_sleep_propagates() -> None:
     task.cancel()
     with pytest.raises(_asyncio.CancelledError):
         await task
+
+
+# --- Chunked file transfer -------------------------------------------------
+
+
+def _chunk_payloads(raw: bytes, total: int, request_id: str) -> list[dict]:
+    """Split base64(raw) into *total* slices for read_chunk routing."""
+    encoded = base64.b64encode(raw).decode("ascii")
+    size = (len(encoded) + total - 1) // total
+    slices = [encoded[i : i + size] for i in range(0, len(encoded), size)]
+    while len(slices) < total:
+        slices.append("QQ==")
+    return [
+        {
+            "request_id": request_id,
+            "workspace_id": "ws-1",
+            "path": "/workspace/big.bin",
+            "index": index,
+            "total_chunks": total,
+            "content": piece,
+        }
+        for index, piece in enumerate(slices[:total])
+    ]
+
+
+async def test_chunked_read_reassembles_out_of_order() -> None:
+    """Three out-of-order read chunks plus a chunked final join in order."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+    seen: dict[str, dict] = {}
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        seen["payload"] = payload
+        rid = payload["request_id"]
+        chunks = _chunk_payloads(raw, 3, rid)
+        for chunk in (chunks[2], chunks[0], chunks[1]):
+            assert route_harness_file_chunk(chunk) is True
+            await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+                "size": len(raw),
+                "mime": "application/octet-stream",
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    accessor = _accessor(transport)
+    content = await accessor.read_file("/workspace/big.bin")
+    assert content.content == raw
+    assert content.size == len(raw)
+    assert seen["payload"]["path"] == "/workspace/big.bin"
+
+
+async def test_chunked_read_final_total_mismatch_raises() -> None:
+    """Chunks pin total 3 but the final announces total 2 → mismatch error."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        for chunk in _chunk_payloads(raw, 3, rid):
+            route_harness_file_chunk(chunk)
+            await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 2,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="mismatch"):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_incomplete_transfer_raises() -> None:
+    """Only 2 of 3 announced chunks arrive → incomplete/missing error."""
+    transport = FakeTransport()
+    raw = b"0123456789abcdef" * 64
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        for chunk in _chunk_payloads(raw, 3, rid)[:2]:
+            route_harness_file_chunk(chunk)
+            await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="incomplete|missing"):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_bad_index_raises() -> None:
+    """A chunk with an out-of-range index fails the pending read."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        assert route_harness_file_chunk(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "index": 9,
+                "total_chunks": 3,
+                "content": base64.b64encode(b"nope").decode(),
+            }
+        ) is True
+        await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_chunked_read_chunk_workspace_mismatch_raises() -> None:
+    """A chunk for another workspace fails the pending read."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        rid = payload["request_id"]
+        assert route_harness_file_chunk(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-other",
+                "path": "/workspace/big.bin",
+                "index": 0,
+                "total_chunks": 3,
+                "content": base64.b64encode(b"nope").decode(),
+            }
+        ) is True
+        await asyncio.sleep(0)
+        route_harness_result(
+            {
+                "request_id": rid,
+                "workspace_id": "ws-1",
+                "path": "/workspace/big.bin",
+                "chunked": True,
+                "total_chunks": 3,
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    with pytest.raises(RunnerAccessorError, match="workspace mismatch"):
+        await _accessor(transport).read_file("/workspace/big.bin")
+
+
+async def test_read_file_small_inline_payload_needs_no_chunks() -> None:
+    """Small inline finals (no chunked flag) still decode without chunks."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result(
+            {
+                "request_id": payload["request_id"],
+                "workspace_id": "ws-1",
+                "path": "/workspace/a.txt",
+                "content": base64.b64encode(b"hi").decode(),
+                "size": 2,
+                "truncated": False,
+                "mime": "text/plain",
+            }
+        )
+
+    transport.auto_reply = auto_reply
+    content = await _accessor(transport).read_file("/workspace/a.txt")
+    assert content.content == b"hi"
+    assert content.mime == "text/plain"
+
+
+@pytest.mark.parametrize(
+    ("size", "total"),
+    [(0, 0), (2, 1), (HARNESS_CHUNK_B64_SIZE * 3 // 4, 1),
+     (HARNESS_CHUNK_B64_SIZE * 3 // 4 + 1, 2)],
+)
+async def test_write_event_sequence(size: int, total: int) -> None:
+    """Empty, small and multi-chunk writes use the same bounded protocol."""
+    transport = FakeTransport()
+    content = bytes(i % 251 for i in range(size))
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        if event == "harness:write_file_finish":
+            route_harness_result(
+                {
+                    "request_id": payload["request_id"],
+                    "workspace_id": "ws-1",
+                    "ok": True,
+                }
+            )
+
+    transport.auto_reply = auto_reply
+    await _accessor(transport).write_file("/workspace/big.bin", content)
+
+    events = [event for event, _ in transport.emitted]
+    assert events[0] == "harness:write_file_start"
+    assert events[-1] == "harness:write_file_finish"
+    chunk_events = [event for event in events if event == "harness:write_file_chunk"]
+
+    start_payload = _request_id(transport, "harness:write_file_start")
+    assert start_payload["path"] == "/workspace/big.bin"
+    assert start_payload["mode"] == 0o644
+    assert start_payload["total_chunks"] == total
+    assert len(chunk_events) == total
+    assert len(events) == total + 2
+    assert all(
+        payload["request_id"] == start_payload["request_id"]
+        for _, payload in transport.emitted
+    )
+
+    chunk_payloads = [
+        payload
+        for event, payload in transport.emitted
+        if event == "harness:write_file_chunk"
+    ]
+    assert [p["index"] for p in chunk_payloads] == list(range(total))
+    assert all(int(p["total_chunks"]) == total for p in chunk_payloads)
+    assert all(
+        len("".join(str(p["content"]).split())) <= HARNESS_CHUNK_B64_SIZE
+        for p in chunk_payloads
+    )
+    joined = "".join(str(p["content"]) for p in chunk_payloads)
+    assert base64.b64decode(joined) == content
+
+
+async def test_write_file_exact_cap_allowed_plus_one_rejected() -> None:
+    """Exactly 10 MiB passes the cap check; 10 MiB + 1 raises, no emit."""
+    transport = FakeTransport()
+    accessor = _accessor(transport)
+
+    async def auto_reply_ok(event: str, payload: dict) -> None:
+        if event == "harness:write_file_finish":
+            route_harness_result(
+                {
+                    "request_id": payload["request_id"],
+                    "workspace_id": "ws-1",
+                    "ok": True,
+                }
+            )
+
+    transport.auto_reply = auto_reply_ok
+    await accessor.write_file("/workspace/exact.bin", b"x" * (10 * 1024 * 1024))
+    assert transport.emitted, "exact-cap write must emit"
+
+    transport2 = FakeTransport()
+    with pytest.raises(ValueError, match="maximum size"):
+        await _accessor(transport2).write_file(
+            "/workspace/over.bin", b"x" * (10 * 1024 * 1024 + 1)
+        )
+    assert transport2.emitted == []
+
+
+async def test_read_file_timeout_cancels_and_cleans_state() -> None:
+    """A timed-out read emits harness:cancel and drops routing state."""
+    transport = FakeTransport()
+    accessor = _accessor(transport, default_timeout=0.02)
+    with pytest.raises(TimeoutError, match="timed out"):
+        await accessor.read_file("/workspace/big.bin")
+    events = [event for event, _ in transport.emitted]
+    assert events[0] == "harness:read_file"
+    assert events[-1] == "harness:cancel"
+    assert accessor._pending == {}
+    assert accessor._file_chunks == {}
+
+
+async def test_read_file_rejects_invalid_path_before_emit() -> None:
+    """Control characters are rejected before any socket event."""
+    transport = FakeTransport()
+    with pytest.raises(ValueError, match="Invalid path"):
+        await _accessor(transport).read_file("/etc/\x00passwd")
+    assert transport.emitted == []
+
+
+async def _read_with_final(
+    final: dict, *, max_size: int | None = None
+) -> object:
+    """Run read_file against a canned inline final; return FileContent."""
+    transport = FakeTransport()
+
+    async def auto_reply(event: str, payload: dict) -> None:
+        route_harness_result({"request_id": payload["request_id"], **final})
+
+    transport.auto_reply = auto_reply
+    return await _accessor(transport).read_file(
+        "/workspace/a.txt", max_size=max_size
+    )
+
+
+async def test_read_file_rejects_invalid_base64() -> None:
+    """Malformed base64 (validate=True) fails instead of decoding lossy."""
+    with pytest.raises(RunnerAccessorError, match="invalid base64"):
+        await _read_with_final(
+            {
+                "workspace_id": "ws-1",
+                "content": "!!!not-base64!!!",
+                "size": 4,
+                "truncated": False,
+            }
+        )
+
+
+async def test_read_file_rejects_size_mismatch() -> None:
+    """Complete reads require decoded length == reported size."""
+    with pytest.raises(RunnerAccessorError, match="size mismatch"):
+        await _read_with_final(
+            {
+                "workspace_id": "ws-1",
+                "content": base64.b64encode(b"hi").decode(),
+                "size": 99,
+                "truncated": False,
+            }
+        )
+
+
+async def test_read_file_rejects_truncated_empty_payload() -> None:
+    """Truncated reads must carry a non-empty prefix (empty file ⇒ False)."""
+    with pytest.raises(RunnerAccessorError, match="non-empty"):
+        await _read_with_final(
+            {
+                "workspace_id": "ws-1",
+                "content": "",
+                "size": 100,
+                "truncated": True,
+            }
+        )
+
+
+async def test_read_file_allows_truncated_prefix() -> None:
+    """Truncated reads accept decoded length < reported size."""
+    content = await _read_with_final(
+        {
+            "workspace_id": "ws-1",
+            "content": base64.b64encode(b"hi").decode(),
+            "size": 100,
+            "truncated": True,
+        }
+    )
+    assert content.content == b"hi"
+    assert content.truncated is True
+
+
+async def test_read_file_default_cap_is_5mib_not_100mib(
+    monkeypatch,
+) -> None:
+    """Omitted max_size budgets the runner default (5 MiB), not 100 MiB."""
+    from apps.harness.access import runner_accessor as accessor_module
+
+    assert accessor_module.HARNESS_READ_DEFAULT_BYTES == 5 * 1024 * 1024
+    assert accessor_module.HARNESS_READ_MAX_BYTES == 100 * 1024 * 1024
+
+    # Pure arithmetic: the accessor must budget (5 MiB + 2) // 3 * 4 + 4
+    # base64 chars for an omitted max_size, and the 100 MiB formula for
+    # an explicit 100 MiB request.
+    def chars_for(raw: int) -> int:
+        return (raw + 2) // 3 * 4 + 4
+
+    assert chars_for(5 * 1024 * 1024) < chars_for(100 * 1024 * 1024)
+
+    seen: dict[str, object] = {}
+
+    async def fake_wait(self, request_id, payload, timeout):
+        try:
+            read_limit = (
+                int(payload.get("max_size"))
+                if payload.get("max_size") is not None
+                else accessor_module.HARNESS_READ_DEFAULT_BYTES
+            )
+        except (TypeError, ValueError):
+            read_limit = accessor_module.HARNESS_READ_DEFAULT_BYTES
+        if read_limit <= 0 or read_limit > accessor_module.HARNESS_READ_MAX_BYTES:
+            read_limit = accessor_module.HARNESS_READ_DEFAULT_BYTES
+        seen["max_chars"] = chars_for(read_limit)
+        return {
+            "request_id": request_id,
+            "workspace_id": "ws-1",
+            "content": base64.b64encode(b"hi").decode(),
+            "size": 2,
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(
+        accessor_module.RunnerWorkspaceAccessor,
+        "_await_chunked_read_result",
+        fake_wait,
+    )
+    content = await _accessor(FakeTransport()).read_file("/workspace/a.txt")
+    assert content.content == b"hi"
+    expected = (5 * 1024 * 1024 + 2) // 3 * 4 + 4
+    assert seen["max_chars"] == expected

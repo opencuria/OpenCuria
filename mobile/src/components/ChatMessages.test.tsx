@@ -1,0 +1,992 @@
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react-native";
+import * as Sharing from "expo-sharing";
+import { State } from "react-native-gesture-handler";
+import {
+  fireGestureHandler,
+  getByGestureTestId,
+} from "react-native-gesture-handler/jest-utils";
+import { ChatMessages, UserMessageContent } from "./ChatMessages";
+import { Animated, Text } from "react-native";
+import { ThemeProvider } from "../ui/theme";
+import type {
+  HarnessMessage,
+  HarnessPart,
+  HarnessTodo,
+} from "@opencuria/chat-core/harness";
+
+jest.mock("lucide-react-native", () => {
+  const React = require("react");
+  const ReactNative = require("react-native");
+  const icon = (props: Record<string, unknown>) =>
+    React.createElement(ReactNative.View, props);
+  return new Proxy({}, { get: () => icon });
+});
+jest.mock("@legendapp/list/keyboard", () => {
+  const React = require("react");
+  const ReactNative = require("react-native");
+  // Like LegendList, a rendered row updates only for new item data or
+  // extraData; a new renderItem alone does not re-render it.
+  const MockRow = React.memo(
+    ({ item, index, renderItem }: any) => renderItem({ item, index }),
+    (previous: any, next: any) =>
+      previous.item === next.item && previous.extraData === next.extraData,
+  );
+  const MockList = ({
+    data,
+    renderItem,
+    extraData,
+    ListHeaderComponent,
+    onViewableItemsChanged,
+    ref: listRef,
+    ...props
+  }: any) => {
+    React.useEffect(() => {
+      onViewableItemsChanged?.({
+        viewableItems: data.map((item: any) => ({ item, isViewable: true })),
+      });
+    }, [data, onViewableItemsChanged]);
+    React.useImperativeHandle(listRef, () => ({
+      scrollToEnd: mockScrollToEnd,
+      getState: () => ({
+        isNearEnd: mockNearEnd.current,
+        listen: (type: string, callback: (value: boolean) => void) => {
+          if (type !== "isNearEnd") return () => undefined;
+          mockNearEndListeners.add(callback);
+          return () => mockNearEndListeners.delete(callback);
+        },
+      }),
+    }));
+    return React.createElement(
+      ReactNative.ScrollView,
+      props,
+      ListHeaderComponent,
+      ...data.map((item: any, index: number) =>
+        React.createElement(MockRow, {
+          key: item.id,
+          item,
+          index,
+          extraData,
+          renderItem,
+        }),
+      ),
+    );
+  };
+  return { KeyboardAwareLegendList: MockList };
+});
+const mockScrollToEnd = jest.fn().mockResolvedValue(undefined);
+const mockNearEnd = { current: true };
+const mockNearEndListeners = new Set<(nearEnd: boolean) => void>();
+jest.mock("react-native-enriched-markdown", () => ({
+  EnrichedMarkdownText: ({ markdown }: { markdown: string }) => {
+    const React = require("react");
+    const ReactNative = require("react-native");
+    return React.createElement(ReactNative.Text, null, markdown);
+  },
+}));
+jest.mock("expo-image", () => {
+  const React = require("react");
+  const ReactNative = require("react-native");
+  return {
+    Image: (props: Record<string, unknown>) =>
+      React.createElement(ReactNative.Image, props),
+  };
+});
+jest.mock(
+  "remend",
+  () => ({ __esModule: true, default: (markdown: string) => markdown }),
+  { virtual: true },
+);
+jest.mock("react-native-safe-area-context", () => ({
+  useSafeAreaInsets: () => ({ top: 0, right: 0, bottom: 0, left: 0 }),
+}));
+jest.mock("expo-sharing", () => ({
+  isAvailableAsync: jest.fn().mockResolvedValue(true),
+  shareAsync: jest.fn().mockResolvedValue(undefined),
+}));
+
+const message = (parts: HarnessPart[]): HarnessMessage => ({
+  id: "m1",
+  session_id: "s1",
+  role: "assistant",
+  content: "",
+  parts,
+});
+const part = (
+  id: string,
+  type: HarnessPart["type"],
+  output: string,
+  position: number,
+): HarnessPart => ({
+  id,
+  session_id: "s1",
+  type,
+  title: "",
+  state: "completed",
+  output,
+  position,
+});
+
+beforeEach(() => {
+  // Native animations cannot attach to React test renderer's host instances.
+  jest.spyOn(Animated, "spring").mockReturnValue({
+    start: jest.fn(),
+    stop: jest.fn(),
+    reset: jest.fn(),
+  });
+  mockScrollToEnd.mockClear();
+  mockNearEnd.current = true;
+  mockNearEndListeners.clear();
+});
+
+describe("ChatMessages", () => {
+  it("shows loading, empty and loaded content without status badges", () => {
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          loading
+          messages={[message([part("stale", "text", "Previous chat", 0)])]}
+          onPullUpAtEnd={jest.fn()}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("chat-loading")).toBeTruthy();
+    expect(screen.queryByText("Previous chat")).toBeNull();
+    expect(screen.queryByText("What can I help with?")).toBeNull();
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages messages={[]} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("chat-loading")).toBeNull();
+    expect(screen.getByText("What can I help with?")).toBeTruthy();
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[message([part("reply", "text", "Answer", 0)])]}
+          sessions={[
+            {
+              id: "s1",
+              workspace_id: "w1",
+              title: "Chat",
+              mode: "build",
+              agent_name: "build",
+              model: "m",
+              status: "busy",
+              cost: 0,
+              tokens: {},
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText("Answer")).toBeTruthy();
+    expect(screen.queryByText(/is working/)).toBeNull();
+    expect(screen.queryByTestId("chat-loading")).toBeNull();
+  });
+
+  it("folds finished work with its elapsed time and leaves the final answer visible", () => {
+    const transcript = {
+      ...message([
+        part("intro", "text", "Checking the renderer", 0),
+        { ...part("read", "tool", "", 1), tool: "read" },
+        part("answer", "text", "Fixed the layout", 2),
+      ]),
+      created_at: "2026-10-30T10:00:00Z",
+    };
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages busy messages={[transcript]} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("chat-worked-for")).toBeNull();
+    expect(screen.getByText("Checking the renderer")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Explored 1 file" }),
+    ).toBeTruthy();
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              ...transcript,
+              completed_at: "2026-10-30T10:05:11Z",
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    const disclosure = screen.getByRole("button", {
+      name: "Worked for 5m 11s",
+    });
+    expect(disclosure.props.accessibilityState.expanded).toBe(false);
+    expect(screen.queryByText("Checking the renderer")).toBeNull();
+    expect(screen.getByText("Fixed the layout")).toBeTruthy();
+    fireEvent.press(disclosure);
+    expect(disclosure.props.accessibilityState.expanded).toBe(true);
+    expect(screen.getByText("Checking the renderer")).toBeTruthy();
+    const activity = screen.getByRole("button", { name: "Explored 1 file" });
+    expect(disclosure.props.style).toEqual(activity.props.style);
+    fireEvent.press(disclosure);
+    expect(screen.queryByText("Checking the renderer")).toBeNull();
+    expect(screen.getByText("Fixed the layout")).toBeTruthy();
+  });
+
+  it("does not render or allow copying assistant aggregate content", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[{ ...message([]), content: "Unused aggregate" }]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByText("Unused aggregate")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeDisabled();
+  });
+
+  it("keeps a live reply without a server position after the persisted turns", () => {
+    const persisted = (
+      id: string,
+      role: HarnessMessage["role"],
+      position: number,
+    ): HarnessMessage => ({
+      id,
+      session_id: "s1",
+      role,
+      content: id,
+      parts: [],
+      position,
+      completed_at: "2026-10-27T10:00:00Z",
+    });
+    const live: HarnessMessage = {
+      id: "live",
+      session_id: "s1",
+      role: "assistant",
+      content: "",
+      parts: [part("live-text", "text", "Streaming reply", 0)],
+      created_at: "2026-10-27T10:05:00Z",
+    };
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          busy
+          messages={[
+            persisted("first", "user", 0),
+            live,
+            persisted("answer", "assistant", 1),
+            persisted("follow-up", "user", 2),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    const order = screen
+      .getAllByTestId(/^chat-message-(first|answer|follow-up|live)$/)
+      .map((row) => row.props.testID);
+    expect(order).toEqual([
+      "chat-message-first",
+      "chat-message-answer",
+      "chat-message-follow-up",
+      "chat-message-live",
+    ]);
+  });
+
+  it("offers scroll to latest only while the reader is away from the end", async () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[message([part("t", "text", "Answer", 0)])]} />
+      </ThemeProvider>,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Scroll to latest message" }),
+    ).toBeNull();
+
+    act(() => mockNearEndListeners.forEach((listener) => listener(false)));
+    fireEvent.press(
+      screen.getByRole("button", { name: "Scroll to latest message" }),
+    );
+
+    expect(mockScrollToEnd).toHaveBeenCalledWith({ animated: true });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Scroll to latest message" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("opens user actions on long press and keeps edit-and-run available", async () => {
+    const onEdit = jest.fn().mockResolvedValue(undefined);
+    const prompt: HarnessMessage = {
+      id: "prompt",
+      session_id: "s1",
+      role: "user",
+      content: "Original prompt",
+      parts: [],
+    };
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[prompt]} onEdit={onEdit} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: "Edit and run again" }));
+    fireEvent.changeText(
+      screen.getByTestId("chat-edit-prompt"),
+      "Updated prompt",
+    );
+    fireEvent.press(screen.getByRole("button", { name: "Save & run" }));
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith("prompt", "Updated prompt"),
+    );
+  });
+
+  it("allows inspecting a user message while editing is unavailable", () => {
+    const onEdit = jest.fn();
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          disabled
+          onEdit={onEdit}
+          messages={[
+            {
+              id: "prompt",
+              session_id: "s1",
+              role: "user",
+              content: "Saved prompt",
+              parts: [],
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeEnabled();
+    expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("renders ordered work details and fetches omitted heavy detail only when expanded", async () => {
+    const onRequestPartDetail = jest.fn().mockResolvedValue({
+      ...part("tool-1", "tool", "Full output", 0),
+      input: { tool: "read" },
+      detail_loaded: true,
+    });
+    const transcript = message([
+      part("text-1", "text", "Before", 0),
+      {
+        ...part("tool-1", "tool", "", 1),
+        detail_loaded: false,
+        display: { tool: "read", summary: "README.md" },
+      },
+      part("text-2", "text", "After", 2),
+    ]);
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[transcript]}
+          onRequestPartDetail={onRequestPartDetail}
+        />
+      </ThemeProvider>,
+    );
+
+    // Finished turns hide the leading response and work until expanded.
+    expect(screen.queryByText("Before")).toBeNull();
+    expect(screen.getByText("After")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    expect(screen.getByText("Before")).toBeTruthy();
+    expect(screen.getByText("After")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
+    expect(onRequestPartDetail).not.toHaveBeenCalled();
+    fireEvent.press(screen.getByRole("button", { name: "read" }));
+
+    await waitFor(() =>
+      expect(onRequestPartDetail).toHaveBeenCalledWith("s1", "tool-1"),
+    );
+    expect(screen.getByText("Full output")).toBeTruthy();
+    expect(onRequestPartDetail).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads workspace tool media through the shared resolver and file viewer", async () => {
+    const image = "/workspace/.opencuria/tool-media/abc.png";
+    const pdf = "/workspace/.opencuria/tool-media/def.pdf";
+    const onRequestPartDetail = jest.fn().mockResolvedValue({
+      ...part("tool-1", "tool", "Image read successfully", 0),
+      input: { tool: "read" },
+      meta: {
+        attachments: [
+          { type: "file", mime: "image/png", path: image, filename: "cat.png" },
+          {
+            type: "file",
+            mime: "application/pdf",
+            path: pdf,
+            filename: "spec.pdf",
+          },
+        ],
+      },
+      detail_loaded: true,
+    });
+    const resolveMedia = jest.fn(() => new Promise<string>(() => {}));
+    const onOpenFile = jest.fn();
+    const onOpenAttachment = jest.fn();
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message([
+              {
+                ...part("tool-1", "tool", "", 0),
+                detail_loaded: false,
+                display: { tool: "read", summary: "cat.png" },
+              },
+              part("text-1", "text", "Done", 1),
+            ]),
+          ]}
+          onRequestPartDetail={onRequestPartDetail}
+          resolveMedia={resolveMedia}
+          onOpenFile={onOpenFile}
+          onOpenAttachment={onOpenAttachment}
+        />
+      </ThemeProvider>,
+    );
+
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    fireEvent.press(screen.getByRole("button", { name: "Explored 1 file" }));
+    fireEvent.press(screen.getByRole("button", { name: "read" }));
+    await waitFor(() => expect(resolveMedia).toHaveBeenCalledWith(image));
+    fireEvent.press(
+      screen.getByRole("button", { name: "Open attachment spec.pdf" }),
+    );
+    expect(onOpenFile).toHaveBeenCalledWith(pdf);
+    expect(onOpenAttachment).not.toHaveBeenCalled();
+  });
+
+  it("groups all contiguous work, including edits and failures, between text", () => {
+    const transcript = message([
+      part("think", "reasoning", "Plan", 0),
+      { ...part("read", "tool", "", 1), tool: "read", title: "Read a.ts" },
+      { ...part("edit", "tool", "", 2), tool: "edit", call_id: "c1" },
+      {
+        ...part("patch", "patch", "", 3),
+        call_id: "c1",
+        display: { path: "/workspace/a.ts", additions: 2, deletions: 1 },
+      },
+      { ...part("bash", "tool", "", 4), tool: "bash", state: "error" },
+      part("text", "text", "Done", 5),
+      { ...part("grep", "tool", "", 6), tool: "grep" },
+    ]);
+    transcript.completed_at = "2026-10-29T12:00:00Z";
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[transcript]} />
+      </ThemeProvider>,
+    );
+
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    const labels = screen
+      .getAllByTestId(/^chat-(activity|part)-/)
+      .map((row) => row.props.testID);
+    expect(labels).toEqual([
+      "chat-activity-think",
+      "chat-part-text",
+      "chat-activity-grep",
+    ]);
+    fireEvent.press(
+      screen.getByRole("button", {
+        name: "Explored 1 file, edited 1 file, ran 1 command, 1 failed",
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Edited a.ts, +2 −1" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "bash, failed" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Explored 1 search" }),
+    ).toBeTruthy();
+  });
+
+  it("mounts large expanded groups one page at a time", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message(
+              Array.from({ length: 85 }, (_, index) => ({
+                ...part(`read-${index}`, "tool", "", index),
+                tool: "read",
+              })),
+            ),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    fireEvent.press(screen.getByRole("button", { name: "Explored 85 files" }));
+    expect(screen.getAllByTestId(/^chat-work-row-/)).toHaveLength(80);
+    fireEvent.press(screen.getByRole("button", { name: "Show 5 more" }));
+    expect(screen.getAllByTestId(/^chat-work-row-/)).toHaveLength(85);
+    expect(
+      screen.queryByRole("button", { name: /^Show \d+ more$/ }),
+    ).toBeNull();
+  });
+
+  it("expands a lone thought straight to its text", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message([
+              part("think", "reasoning", "Check the renderer first", 0),
+              part("text", "text", "Answer", 1),
+            ]),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByText("Check the renderer first")).toBeNull();
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    fireEvent.press(screen.getByRole("button", { name: "Thought" }));
+    expect(screen.getByText("Check the renderer first")).toBeTruthy();
+  });
+
+  it.each(["child", undefined])(
+    "uses only the explicit subtask chat link: %s",
+    (childId) => {
+      const onOpenSubtask = jest.fn();
+      render(
+        <ThemeProvider>
+          <ChatMessages
+            messages={[
+              message([
+                {
+                  ...part("subtask", "subtask", "", 0),
+                  title: "Find renderer",
+                  display: { child_session_id: childId },
+                },
+              ]),
+            ]}
+            sessions={[
+              {
+                id: "child",
+                workspace_id: "workspace-1",
+                parent_id: "s1",
+                title: "Find renderer",
+                mode: "build",
+                agent_name: "explore",
+                model: "m",
+                status: "idle",
+                cost: 0,
+                tokens: {},
+              },
+            ]}
+            onOpenSubtask={onOpenSubtask}
+          />
+        </ThemeProvider>,
+      );
+      fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+      fireEvent.press(screen.getByRole("button", { name: "Delegated 1 task" }));
+      const row = screen.getByTestId("chat-subtask-subtask");
+      if (childId) {
+        fireEvent.press(row);
+        expect(onOpenSubtask).toHaveBeenCalledWith(childId);
+      } else {
+        expect(row).toBeDisabled();
+        fireEvent.press(row);
+        expect(onOpenSubtask).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("shows the apps a message sent below it, once each, not where the tool ran", () => {
+    const publish = (
+      id: string,
+      position: number,
+      app: Record<string, unknown>,
+    ): HarnessPart => ({
+      ...part(id, "tool", "", position),
+      tool: "mcp_opencuria_mcp_app_publish",
+      display: { tool: "mcp_opencuria_mcp_app_publish", app },
+    });
+    const todo = {
+      app_id: "app-1",
+      version_id: "v-1",
+      name: "Todo",
+      version: 1,
+      version_name: "1.0.0",
+    };
+    const transcript = message([
+      part("bash", "tool", "", 0),
+      publish("publish-1", 1, todo),
+      part("middle", "text", "Now a notes app.", 2),
+      publish("publish-2", 3, {
+        app_id: "app-2",
+        version_id: "n-1",
+        name: "Notes",
+        version: 1,
+        version_name: "",
+      }),
+      publish("publish-3", 4, { ...todo, version_id: "v-2", version: 2 }),
+      part("answer", "text", "Both are on your phone.", 5),
+    ]);
+    transcript.completed_at = "2026-10-18T12:00:00Z";
+    const renderPublishedApp = jest.fn((app: { name: string }) => (
+      <Text>{`Install ${app.name}`}</Text>
+    ));
+
+    const { rerender } = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[transcript]}
+          renderPublishedApp={renderPublishedApp}
+        />
+      </ThemeProvider>,
+    );
+
+    // Below the last text of the message, in the order the apps were sent.
+    const texts = screen
+      .getAllByText(/Both are on your phone\.|Install Todo|Install Notes/)
+      .map((node) => node.props.children);
+    expect(texts).toEqual([
+      "Both are on your phone.",
+      "Install Todo",
+      "Install Notes",
+    ]);
+    expect(screen.getByTestId("chat-app-app-1")).toBeTruthy();
+    expect(screen.getByTestId("chat-app-app-2")).toBeTruthy();
+    // The newest version of an app sent twice.
+    expect(renderPublishedApp).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: "app-1", versionId: "v-2" }),
+    );
+    expect(renderPublishedApp).not.toHaveBeenCalledWith(
+      expect.objectContaining({ versionId: "v-1" }),
+    );
+
+    rerender(
+      <ThemeProvider>
+        <ChatMessages messages={[transcript]} />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText("Sent Todo to your phone")).toBeTruthy();
+    expect(screen.getByText("Sent Notes to your phone")).toBeTruthy();
+  });
+
+  it("keeps a sent app below a reply that is still streaming", () => {
+    const transcript = message([
+      {
+        ...part("publish", "tool", "", 0),
+        tool: "mcp_opencuria_mcp_app_publish",
+        display: {
+          tool: "mcp_opencuria_mcp_app_publish",
+          app: { app_id: "app-1", version_id: "v-1", name: "Todo" },
+        },
+      },
+      part("answer", "text", "Checking the build next.", 1),
+    ]);
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[transcript]}
+          busy
+          renderPublishedApp={(app) => <Text>{`Open ${app.name}`}</Text>}
+        />
+      </ThemeProvider>,
+    );
+    const texts = screen
+      .getAllByText(/Checking the build next\.|Open Todo/)
+      .map((node) => node.props.children);
+    expect(texts).toEqual(["Checking the build next.", "Open Todo"]);
+  });
+
+  it("renders delivered steer blocks in the native user bubble pattern", () => {
+    const transcript = message([
+      part("text-before", "text", "Working on it", 0),
+      {
+        ...part("steer-1", "steer", "Use pnpm instead", 1),
+        meta: { steer_id: "queued-1" },
+      },
+    ]);
+    transcript.completed_at = "2026-10-18T12:00:00Z";
+
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[transcript]} />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId("chat-steer-steer-1")).toBeTruthy();
+    expect(screen.getByTestId("chat-steer-content-steer-1")).toBeTruthy();
+    expect(screen.getByText("Use pnpm instead")).toBeTruthy();
+    expect(screen.getByText("Sent while working")).toBeTruthy();
+  });
+
+  const todo = (
+    id: string,
+    status: HarnessTodo["status"],
+    order: number,
+  ): HarnessTodo => ({
+    id,
+    content: `${id} task`,
+    status,
+    priority: "medium",
+    order,
+  });
+
+  it("shows the to-do list in place of the latest to-do call", () => {
+    const todoCall = (id: string, position: number): HarnessPart => ({
+      ...part(id, "tool", "", position),
+      tool: "todowrite",
+      title: "Update todos (2)",
+    });
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            message([
+              todoCall("todo-1", 0),
+              { ...part("read", "tool", "", 1), tool: "read" },
+              todoCall("todo-2", 2),
+              { ...part("grep", "tool", "", 3), tool: "grep" },
+              part("text", "text", "Answer", 4),
+            ]),
+          ]}
+          todos={[
+            todo("second", "pending", 1),
+            todo("first", "in_progress", 0),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+
+    fireEvent.press(screen.getByRole("button", { name: "Worked" }));
+    const order = screen
+      .getAllByTestId(/^chat-(activity|part)-|^chat-todos$/)
+      .map((row) => row.props.testID);
+    expect(order).toEqual([
+      "chat-activity-todo-1",
+      "chat-todos",
+      "chat-activity-grep",
+      "chat-part-text",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "Explored 1 file, updated to-dos" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "To-dos, 0 of 2 done" }),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId(/^chat-todo-/)
+        .map((row) => row.props.accessibilityLabel),
+    ).toEqual(["first task, in progress", "second task, pending"]);
+  });
+
+  it("appends plan updates without a to-do call and folds finished lists", () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[message([part("text", "text", "Answer", 0)])]}
+          todos={[
+            todo("first", "completed", 0),
+            todo("second", "cancelled", 1),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+
+    const header = screen.getByRole("button", { name: "To-dos, 1 of 2 done" });
+    expect(screen.queryByText("first task")).toBeNull();
+    fireEvent.press(header);
+    expect(screen.getByText("first task")).toBeTruthy();
+    expect(screen.getByText("second task")).toBeTruthy();
+  });
+
+  it("loads screenshots of rows that become visible after their first render", async () => {
+    // Settled rows keep their item identity; only visibility changes.
+    const settled = {
+      ...message([
+        part(
+          "shots",
+          "text",
+          "Ergebnisse:\n\n1. Start\n   ![Start](/workspace/screenshots/start.png)\n2. Login\n   ![Login](/workspace/screenshots/login.png)",
+          0,
+        ),
+      ]),
+      completed_at: "2026-10-30T10:00:05Z",
+    };
+    const resolveMedia = jest.fn(async (path: string) => ({
+      uri: `file:///cache${path}`,
+      release: jest.fn(),
+    }));
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[settled]}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="scope-a"
+        />
+      </ThemeProvider>,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Open image preview Start" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Open image preview Login" }),
+    ).toBeTruthy();
+    expect(resolveMedia.mock.calls.map(([path]) => path)).toEqual([
+      "/workspace/screenshots/start.png",
+      "/workspace/screenshots/login.png",
+    ]);
+
+    // A new media scope (e.g. after a reconnect) reaches the settled row too.
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[settled]}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="scope-b"
+        />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(resolveMedia).toHaveBeenCalledTimes(4));
+    view.unmount();
+    for (const { value } of resolveMedia.mock.results)
+      expect((await value).release).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a tapped picture full screen in a gallery of the whole chat", async () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: "u1",
+        session_id: "s1",
+        role: "user",
+        content: "Compare with @file:/workspace/mock.png",
+        parts: [],
+        position: 0,
+      },
+      {
+        ...message([
+          part(
+            "answer",
+            "text",
+            "Start ![Start](/workspace/start.png)\n\nLogin ![Login](/workspace/login.png)",
+            0,
+          ),
+        ]),
+        id: "a1",
+        position: 1,
+        completed_at: "2026-10-30T10:00:05Z",
+      },
+    ];
+    const releases: jest.Mock[] = [];
+    const resolveMedia = jest.fn(async (path: string) => {
+      const release = jest.fn();
+      releases.push(release);
+      return { uri: `file:///cache${path}`, release };
+    });
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={messages}
+          resolveMedia={resolveMedia}
+          mediaScopeKey="scope"
+        />
+      </ThemeProvider>,
+    );
+    fireEvent.press(
+      await screen.findByRole("button", { name: "Open image preview Login" }),
+    );
+
+    // Every picture of the chat is one swipe or thumbnail away.
+    const viewer = await screen.findByTestId("image-preview");
+    const bar = () => screen.getByTestId("media-viewer-bar");
+    expect(within(bar()).getByText("Login")).toBeTruthy();
+    expect(
+      within(viewer).getByRole("button", {
+        name: "Show image 3 of 3, Login",
+        selected: true,
+      }),
+    ).toBeTruthy();
+    fireEvent.press(
+      within(viewer).getByRole("button", {
+        name: "Show image 1 of 3, mock.png",
+      }),
+    );
+    expect(within(bar()).getByText("mock.png")).toBeTruthy();
+    fireEvent(within(viewer).getByRole("adjustable"), "accessibilityAction", {
+      nativeEvent: { actionName: "increment" },
+    });
+    expect(within(bar()).getByText("Start")).toBeTruthy();
+
+    // Share hands the shown picture's file to the system share sheet.
+    await waitFor(() =>
+      expect(
+        within(bar()).getByRole("button", { name: "Share" }),
+      ).not.toBeDisabled(),
+    );
+    fireEvent.press(within(bar()).getByRole("button", { name: "Share" }));
+    await waitFor(() =>
+      expect(Sharing.shareAsync).toHaveBeenCalledWith(
+        "file:///cache/workspace/start.png",
+        { dialogTitle: "Start" },
+      ),
+    );
+
+    // Swiping left pages on; tapping the picture hides and shows the bars.
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("image-preview-pan"), [
+        { state: State.BEGAN, translationX: 0, velocityX: 0 },
+        { state: State.ACTIVE, translationX: -40, velocityX: -900 },
+        { state: State.ACTIVE, translationX: -160, velocityX: -900 },
+        { state: State.END, translationX: -160, velocityX: -900 },
+      ]),
+    );
+    await waitFor(() => expect(within(bar()).getByText("Login")).toBeTruthy());
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("image-preview-tap"), [
+        { state: State.BEGAN },
+        { state: State.ACTIVE },
+        { state: State.END },
+      ]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("media-viewer-bar")).toBeNull(),
+    );
+    await act(async () =>
+      fireGestureHandler(getByGestureTestId("image-preview-tap"), [
+        { state: State.BEGAN },
+        { state: State.ACTIVE },
+        { state: State.END },
+      ]),
+    );
+    await waitFor(() => expect(bar()).toBeTruthy());
+
+    // Back closes the viewer and gives up its files.
+    fireEvent.press(within(bar()).getByRole("button", { name: "Back" }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("image-preview")).toBeNull(),
+    );
+    view.unmount();
+    for (const release of releases) expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("user message context", () => {
+  it("turns workspace file mentions into ordered chips instead of raw tokens", () => {
+    render(
+      <ThemeProvider>
+        <UserMessageContent
+          markdown={"Open @file:/workspace/src/main.ts after this."}
+        />
+      </ThemeProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Open file /workspace/src/main.ts" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/@file:/)).toBeNull();
+  });
+});

@@ -1,0 +1,15 @@
+{
+  "name": "@opencuria/client",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@opencuria/chat-core": "0.0.0",
+    "socket.io-client": "^4.8.3"
+  }
+}

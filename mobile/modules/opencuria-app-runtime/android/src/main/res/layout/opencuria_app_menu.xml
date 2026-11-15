@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app menu sheet (AppMenuSheet): the app, its actions and the ways that open the menu. -->
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:app="http://schemas.android.com/apk/res-auto"
+  android:layout_width="match_parent"
+  android:layout_height="wrap_content">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="24dp"
+    android:paddingEnd="24dp"
+    android:paddingBottom="16dp">
+
+    <com.google.android.material.bottomsheet.BottomSheetDragHandleView
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content" />
+
+    <LinearLayout
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:gravity="center_vertical"
+      android:orientation="horizontal">
+
+      <ImageView
+        android:id="@+id/opencuria_app_menu_icon"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="16dp"
+        android:importantForAccessibility="no"
+        android:scaleType="centerCrop" />
+
+      <TextView
+        android:id="@+id/opencuria_app_menu_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textAppearance="?attr/textAppearanceTitleLarge" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="16dp"
+      android:orientation="horizontal">
+
+      <com.google.android.material.button.MaterialButton
+        android:id="@+id/opencuria_app_menu_close"
+        style="@style/Widget.Material3.Button.TonalButton.Icon"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:layout_weight="1"
+        android:text="@string/opencuria_app_close"
+        app:icon="@drawable/opencuria_app_menu_close" />
+
+      <com.google.android.material.button.MaterialButton
+        android:id="@+id/opencuria_app_menu_reload"
+        style="@style/Widget.Material3.Button.TonalButton.Icon"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:text="@string/opencuria_app_reload"
+        app:icon="@drawable/opencuria_app_menu_reload" />
+    </LinearLayout>
+
+    <TextView
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="24dp"
+      android:layout_marginBottom="4dp"
+      android:accessibilityHeading="true"
+      android:text="@string/opencuria_app_menu_triggers"
+      android:textAppearance="?attr/textAppearanceTitleSmall"
+      android:textColor="?attr/colorPrimary" />
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+      android:id="@+id/opencuria_app_menu_shake"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:minHeight="56dp"
+      android:text="@string/opencuria_app_menu_shake"
+      android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+      android:id="@+id/opencuria_app_menu_three_fingers"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:minHeight="56dp"
+      android:text="@string/opencuria_app_menu_three_fingers"
+      android:textAppearance="?attr/textAppearanceBodyLarge" />
+
+    <com.google.android.material.materialswitch.MaterialSwitch
+      android:id="@+id/opencuria_app_menu_button"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:minHeight="56dp"
+      android:text="@string/opencuria_app_menu_button"
+      android:textAppearance="?attr/textAppearanceBodyLarge" />
+  </LinearLayout>
+</androidx.core.widget.NestedScrollView>

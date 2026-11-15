@@ -1,0 +1,17 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.opencurianativeui'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.opencurianativeui"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies { implementation 'androidx.appcompat:appcompat:1.7.1' }

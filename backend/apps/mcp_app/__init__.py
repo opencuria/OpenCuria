@@ -1,6 +1,7 @@
-"""MCP (Model Context Protocol) server for opencuria.
+"""In-process management MCP server for workspace agents.
 
-Exposes the same functionality as the REST API through the MCP interface.
-Authentication via API key (kai_... token in Authorization header or X-API-Key).
-Fine-grained permissions are enforced per-tool based on the API key's permission list.
+The built-in OpenCuria plugin exposes task-oriented tools for workspaces,
+chats, skills, plugins and scheduled tasks over the same services as REST.
+Calls act as the workspace owner within the workspace's organization;
+ownership and organization roles bound each operation (see :mod:`.inprocess`).
 """

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessMessage, HarnessPart, HarnessSession } from '@/types/harness'
+import type { HarnessMessage, HarnessPart, HarnessSession } from '@opencuria/chat-core/harness'
 import {
+  collectAncestorSessions,
   collectDescendantSessionIds,
   collectRunningChildSessionIds,
   formatSubagentType,
@@ -9,10 +10,8 @@ import {
   hasRunningToolOrSubtask,
   isTaskToolPart,
   latestRunningChildTool,
-  resolveChildSessionId,
-  buildChildSessionIdMap,
   subtaskActivityLabel,
-} from './harnessSubtaskActivity'
+} from '@opencuria/chat-core/harnessSubtaskActivity'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -75,6 +74,54 @@ describe('gateSourceLabel', () => {
     expect(gateSourceLabel('build')).toBeNull()
     expect(gateSourceLabel('plan')).toBeNull()
     expect(gateSourceLabel('')).toBeNull()
+  })
+})
+
+describe('collectAncestorSessions', () => {
+  it('returns a single session for a root', () => {
+    const sessions = [makeSession({ id: 'root', parent_id: null })]
+    expect(collectAncestorSessions('root', sessions).map((s) => s.id)).toEqual(['root'])
+  })
+
+  it('walks from child to root', () => {
+    const sessions = [
+      makeSession({ id: 'root', parent_id: null }),
+      makeSession({ id: 'child', parent_id: 'root' }),
+    ]
+    expect(collectAncestorSessions('child', sessions).map((s) => s.id)).toEqual([
+      'root',
+      'child',
+    ])
+  })
+
+  it('walks a nested grandchild chain', () => {
+    const sessions = [
+      makeSession({ id: 'root', parent_id: null }),
+      makeSession({ id: 'child', parent_id: 'root' }),
+      makeSession({ id: 'grand', parent_id: 'child' }),
+    ]
+    expect(collectAncestorSessions('grand', sessions).map((s) => s.id)).toEqual([
+      'root',
+      'child',
+      'grand',
+    ])
+  })
+
+  it('stops when a parent is missing', () => {
+    const sessions = [makeSession({ id: 'child', parent_id: 'missing' })]
+    expect(collectAncestorSessions('child', sessions).map((s) => s.id)).toEqual(['child'])
+  })
+
+  it('is cycle-safe', () => {
+    const sessions = [
+      makeSession({ id: 'a', parent_id: 'b' }),
+      makeSession({ id: 'b', parent_id: 'a' }),
+    ]
+    expect(collectAncestorSessions('a', sessions).map((s) => s.id)).toEqual(['b', 'a'])
+  })
+
+  it('returns an empty list when the session is unknown', () => {
+    expect(collectAncestorSessions('missing', [])).toEqual([])
   })
 })
 
@@ -213,207 +260,5 @@ describe('collectRunningChildSessionIds', () => {
       ]),
     ]
     expect(collectRunningChildSessionIds(messages)).toEqual(['child-a', 'child-b'])
-  })
-})
-
-describe('resolveChildSessionId', () => {
-  const child = {
-    id: 'session-child',
-    workspace_id: 'ws-1',
-    parent_id: 'session-parent',
-    title: 'Webapp Login und Dashboard testen',
-    mode: 'build' as const,
-    agent_name: 'computeruse',
-    model: 'm',
-    status: 'idle' as const,
-    cost: 0,
-    tokens: {},
-  }
-
-  it('prefers meta.child_session_id', () => {
-    expect(
-      resolveChildSessionId(
-        makePart({
-          type: 'subtask',
-          session_id: 'session-parent',
-          title: 'Webapp Login und Dashboard testen',
-          meta: { child_session_id: 'from-meta', subtask_id: 'sub-1' },
-        }),
-        [child],
-      ),
-    ).toBe('from-meta')
-  })
-
-  it('falls back to a unique matching child title', () => {
-    expect(
-      resolveChildSessionId(
-        makePart({
-          type: 'subtask',
-          session_id: 'session-parent',
-          title: 'Webapp Login und Dashboard testen',
-          meta: { subtask_id: 'sub-1' },
-        }),
-        [child],
-      ),
-    ).toBe('session-child')
-  })
-
-  it('uses the only child of the parent when titles were rewritten', () => {
-    expect(
-      resolveChildSessionId(
-        makePart({
-          type: 'subtask',
-          session_id: 'session-parent',
-          title: 'Webapp Login und Dashboard testen',
-          meta: { subtask_id: 'sub-1' },
-        }),
-        [{ ...child, title: 'Generated login test title' }],
-      ),
-    ).toBe('session-child')
-  })
-
-  it('returns null when several children share the same title', () => {
-    expect(
-      resolveChildSessionId(
-        makePart({
-          type: 'subtask',
-          session_id: 'session-parent',
-          title: 'Webapp Login und Dashboard testen',
-          meta: { subtask_id: 'sub-1' },
-        }),
-        [child, { ...child, id: 'session-child-2' }],
-      ),
-    ).toBeNull()
-  })
-})
-
-describe('buildChildSessionIdMap', () => {
-  it('maps subtask id and part id for legacy parts without child_session_id', () => {
-    const map = buildChildSessionIdMap(
-      [
-        {
-          id: 'session-parent',
-          workspace_id: 'ws-1',
-          parent_id: null,
-          title: 'parent',
-          mode: 'build',
-          agent_name: 'build',
-          model: 'm',
-          status: 'idle',
-          cost: 0,
-          tokens: {},
-        },
-        {
-          id: 'session-child',
-          workspace_id: 'ws-1',
-          parent_id: 'session-parent',
-          title: 'Find renderer',
-          mode: 'build',
-          agent_name: 'explore',
-          model: 'm',
-          status: 'idle',
-          cost: 0,
-          tokens: {},
-        },
-      ],
-      {
-        'session-parent': [
-          {
-            id: 'msg-1',
-            session_id: 'session-parent',
-            role: 'assistant',
-            content: '',
-            parts: [
-              makePart({
-                id: 'part-sub-1',
-                type: 'subtask',
-                session_id: 'session-parent',
-                title: 'Find renderer',
-                meta: { subtask_id: 'sub-1' },
-              }),
-            ],
-          },
-        ],
-      },
-    )
-
-    expect(map['sub-1']).toBe('session-child')
-    expect(map['part-sub-1']).toBe('session-child')
-  })
-
-  it('pairs leftover subtasks with children in creation order', () => {
-    const map = buildChildSessionIdMap(
-      [
-        {
-          id: 'session-parent',
-          workspace_id: 'ws-1',
-          parent_id: null,
-          title: 'parent',
-          mode: 'build',
-          agent_name: 'build',
-          model: 'm',
-          status: 'idle',
-          cost: 0,
-          tokens: {},
-        },
-        {
-          id: 'child-a',
-          workspace_id: 'ws-1',
-          parent_id: 'session-parent',
-          title: 'Generated A',
-          mode: 'build',
-          agent_name: 'explore',
-          model: 'm',
-          status: 'idle',
-          cost: 0,
-          tokens: {},
-          created_at: '2026-01-01T10:00:00.000Z',
-        },
-        {
-          id: 'child-b',
-          workspace_id: 'ws-1',
-          parent_id: 'session-parent',
-          title: 'Generated B',
-          mode: 'build',
-          agent_name: 'general',
-          model: 'm',
-          status: 'idle',
-          cost: 0,
-          tokens: {},
-          created_at: '2026-01-01T10:00:01.000Z',
-        },
-      ],
-      {
-        'session-parent': [
-          {
-            id: 'msg-1',
-            session_id: 'session-parent',
-            role: 'assistant',
-            content: '',
-            parts: [
-              makePart({
-                id: 'part-a',
-                type: 'subtask',
-                session_id: 'session-parent',
-                title: 'Explore renderer',
-                meta: { subtask_id: 'sub-a' },
-              }),
-              makePart({
-                id: 'part-b',
-                type: 'subtask',
-                session_id: 'session-parent',
-                title: 'General research',
-                meta: { subtask_id: 'sub-b' },
-              }),
-            ],
-          },
-        ],
-      },
-    )
-
-    expect(map['sub-a']).toBe('child-a')
-    expect(map['part-a']).toBe('child-a')
-    expect(map['sub-b']).toBe('child-b')
-    expect(map['part-b']).toBe('child-b')
   })
 })

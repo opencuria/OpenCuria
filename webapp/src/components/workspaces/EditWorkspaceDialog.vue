@@ -1,180 +1,303 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Pencil, Check, Key } from '@lucide/vue'
+import { Pencil } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import type { Workspace, WorkspaceUpdateIn } from '@/types'
-import { RuntimeType } from '@/types'
-import { toggleWorkspaceCredentialSelection } from '@/lib/workspaceCredentialSelection'
-import { DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH } from '@/lib/desktopGeometry'
+import WorkspacePluginCredentialSelection from './WorkspacePluginCredentialSelection.vue'
+import { useAuthStore } from '@/stores/auth'
+import { useNotificationStore } from '@/stores/notifications'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
+import { type Workspace, type WorkspaceUpdateIn } from '@/types'
+import {
+  DEFAULT_DESKTOP_HEIGHT,
+  DEFAULT_DESKTOP_WIDTH,
+  UNLISTED_RUNNER_QEMU_LIMITS,
+  areQemuResourcesValid,
+  isDesktopSizeValid,
+  qemuResourceLimits,
+  workspaceSettingsForm,
+  workspaceUpdatePayload,
+} from '@opencuria/chat-core/workspaceCreation'
+import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from '@/lib/workspaceDraft'
+import type { WorkspaceDraftFields } from '@/lib/workspaceDraft'
 
-const props = defineProps<{
-  workspace: Workspace
-  size?: 'default' | 'sm'
-  disabled?: boolean
-}>()
-
+const props = withDefaults(
+  defineProps<{
+    workspace: Workspace
+    size?: 'default' | 'sm'
+    disabled?: boolean
+    resumeDraftId?: string
+    hideTrigger?: boolean
+    /** Open with the storage size focused, e.g. from a full-disk hint. */
+    focusDisk?: boolean
+  }>(),
+  { hideTrigger: false },
+)
+const open = defineModel<boolean>('open', { default: false })
+const emit = defineEmits<{ draftError: [message: string] }>()
 const credentialStore = useCredentialStore()
 const workspaceStore = useWorkspaceStore()
+watch(
+  () => workspaceStore.isWorkspaceTransitioning(props.workspace.id),
+  (busy) => {
+    if (busy) open.value = false
+  },
+)
 const runnerStore = useRunnerStore()
+const authStore = useAuthStore()
+const notifications = useNotificationStore()
 const router = useRouter()
-
-const open = ref(false)
 const name = ref('')
 const selectedCredentialIds = ref<string[]>([])
+const selectedPluginIds = ref<string[]>([])
+const pluginSelectionValid = ref(false)
+const draftError = ref<string | null>(null)
+const restoringDraftId = ref<string | null>(null)
 const qemuVcpus = ref(2)
 const qemuMemoryMb = ref(4096)
 const qemuDiskSizeGb = ref(50)
-const desktopWidth = ref(1920)
-const desktopHeight = ref(1080)
+const desktopWidth = ref(DEFAULT_DESKTOP_WIDTH)
+const desktopHeight = ref(DEFAULT_DESKTOP_HEIGHT)
 const submitting = ref(false)
-
-const btnSize = computed(() => (props.size === 'sm' ? 'icon-sm' as const : 'icon' as const))
-const qemuDefaults = computed(() => {
-  const runner = runnerStore.runnerById(props.workspace.runner_id)
-  return {
-    vcpus: runner?.qemu_default_vcpus ?? 2,
-    memoryMb: runner?.qemu_default_memory_mb ?? 4096,
-    diskSizeGb: runner?.qemu_default_disk_size_gb ?? 50,
-  }
-})
-
-const qemuLimits = computed(() => {
-  const runner = runnerStore.runnerById(props.workspace.runner_id)
-  if (!runner) {
-    return {
-      minVcpus: 1,
-      maxVcpus: 64,
-      minMemoryMb: 512,
-      maxMemoryMb: 262144,
-      minDiskSizeGb: 10,
-      maxDiskSizeGb: 2000,
-    }
-  }
-  return {
-    minVcpus: runner.qemu_min_vcpus,
-    maxVcpus: runner.qemu_max_vcpus,
-    minMemoryMb: runner.qemu_min_memory_mb,
-    maxMemoryMb: runner.qemu_max_memory_mb,
-    minDiskSizeGb: runner.qemu_min_disk_size_gb,
-    maxDiskSizeGb: runner.qemu_max_disk_size_gb,
-  }
-})
-
-function resolveCurrentQemuResources(workspace: Workspace = props.workspace) {
-  return {
-    vcpus: workspace.qemu_vcpus ?? qemuDefaults.value.vcpus,
-    memoryMb: workspace.qemu_memory_mb ?? qemuDefaults.value.memoryMb,
-    diskSizeGb: workspace.qemu_disk_size_gb ?? qemuDefaults.value.diskSizeGb,
-  }
+let preserveDraftOnClose = false
+let resetTimer: ReturnType<typeof setTimeout> | undefined
+const diskSizeInput = ref<HTMLInputElement | null>(null)
+/** Focus the storage size and keep it in view while plugins and credentials load in. */
+function handleOpenAutoFocus(event: Event): void {
+  const input = diskSizeInput.value
+  if (!props.focusDisk || !input) return
+  event.preventDefault()
+  input.focus({ preventScroll: true })
+  input.select()
+  const reveal = () => input.scrollIntoView({ block: 'center' })
+  reveal()
+  const form = input.form
+  if (!form || typeof ResizeObserver === 'undefined') return
+  const observer = new ResizeObserver(reveal)
+  const settle = () => observer.disconnect()
+  observer.observe(form)
+  form.addEventListener('wheel', settle, { once: true, passive: true })
+  form.addEventListener('touchstart', settle, { once: true, passive: true })
+  setTimeout(settle, 2000)
 }
-
-function syncFormWithWorkspace(workspace: Workspace): void {
-  const currentQemuResources = resolveCurrentQemuResources(workspace)
-  name.value = workspace.name
-  selectedCredentialIds.value = [...workspace.credential_ids]
-  qemuVcpus.value = currentQemuResources.vcpus
-  qemuMemoryMb.value = currentQemuResources.memoryMb
-  qemuDiskSizeGb.value = currentQemuResources.diskSizeGb
-  desktopWidth.value = workspace.desktop_width || DEFAULT_DESKTOP_WIDTH
-  desktopHeight.value = workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT
+const btnSize = computed(() => (props.size === 'sm' ? ('icon-sm' as const) : ('icon' as const)))
+const qemuLimits = computed(() =>
+  qemuResourceLimits(
+    runnerStore.runnerById(props.workspace.runner_id),
+    UNLISTED_RUNNER_QEMU_LIMITS,
+  ),
+)
+const qemuDefaults = computed(() => ({
+  vcpus: qemuLimits.value.defaultVcpus,
+  memoryMb: qemuLimits.value.defaultMemoryMb,
+  diskSizeGb: qemuLimits.value.defaultDiskSizeGb,
+}))
+function syncForm(workspace: Workspace): void {
+  const form = workspaceSettingsForm(workspace, qemuLimits.value)
+  name.value = form.name
+  selectedCredentialIds.value = form.credentialIds
+  selectedPluginIds.value = form.pluginIds
+  qemuVcpus.value = form.vcpus
+  qemuMemoryMb.value = form.memoryMb
+  qemuDiskSizeGb.value = form.diskSizeGb
+  desktopWidth.value = form.desktopWidth
+  desktopHeight.value = form.desktopHeight
 }
-
 watch(
   () => props.workspace,
   (workspace) => {
-    if (open.value) return
-    syncFormWithWorkspace(workspace)
+    if (!open.value) syncForm(workspace)
   },
   { immediate: true, deep: true },
 )
-
-function toggleCredential(id: string): void {
-  const credential = credentialStore.credentials.find((entry) => entry.id === id)
-  if (!credential) return
-  selectedCredentialIds.value = toggleWorkspaceCredentialSelection(
-    selectedCredentialIds.value,
-    credential,
-    credentialStore.credentials,
-  )
+function restoreDraft(id: string): void {
+  if (!authStore.initialized || !authStore.user || !authStore.activeOrganizationId) return
+  const result = readWorkspaceDraft(id, {
+    userId: authStore.user.id,
+    organizationId: authStore.activeOrganizationId,
+  })
+  if (
+    result.status !== 'ok' ||
+    result.draft.fields.mode !== 'edit' ||
+    result.draft.fields.workspaceId !== props.workspace.id
+  ) {
+    draftError.value = `Workspace draft could not be restored (${result.status}). Start a new configuration.`
+    return
+  }
+  const fields = result.draft.fields
+  restoringDraftId.value = id
+  name.value = fields.name
+  selectedCredentialIds.value = [...fields.credentialIds]
+  selectedPluginIds.value = [...fields.pluginIds]
+  qemuVcpus.value = fields.qemuVcpus ?? qemuDefaults.value.vcpus
+  qemuMemoryMb.value = fields.qemuMemoryMb ?? qemuDefaults.value.memoryMb
+  qemuDiskSizeGb.value = fields.qemuDiskSizeGb ?? qemuDefaults.value.diskSizeGb
+  desktopWidth.value = fields.desktopWidth ?? props.workspace.desktop_width
+  desktopHeight.value = fields.desktopHeight ?? props.workspace.desktop_height
+  open.value = true
 }
-
+watch(
+  [
+    () => props.resumeDraftId,
+    () => authStore.initialized,
+    () => authStore.user?.id,
+    () => authStore.activeOrganizationId,
+  ],
+  ([id, initialized, userId, organizationId]) => {
+    if (id && initialized && userId !== undefined && organizationId) restoreDraft(id)
+  },
+  { immediate: true },
+)
+onUnmounted(() => {
+  if (resetTimer) clearTimeout(resetTimer)
+})
 async function handleOpen(): Promise<void> {
   if (props.disabled) return
   open.value = true
-  if (!runnerStore.runners.length) {
-    await runnerStore.fetchRunners()
+  if (restoringDraftId.value && props.resumeDraftId === restoringDraftId.value) {
+    await Promise.all([
+      credentialStore.fetchCredentials(),
+      runnerStore.runners.length ? Promise.resolve() : runnerStore.fetchRunners(),
+    ])
+    return
   }
-  await credentialStore.fetchCredentials()
-  syncFormWithWorkspace(props.workspace)
+  syncForm(props.workspace)
+  await Promise.all([
+    credentialStore.fetchCredentials(),
+    runnerStore.runners.length ? Promise.resolve() : runnerStore.fetchRunners(),
+  ])
 }
-
+const resourceSelectionValid = computed(
+  () =>
+    isDesktopSizeValid(desktopWidth.value, desktopHeight.value) &&
+    areQemuResourcesValid(
+      { vcpus: qemuVcpus.value, memoryMb: qemuMemoryMb.value, diskSizeGb: qemuDiskSizeGb.value },
+      qemuLimits.value,
+    ),
+)
+function buildPayload(): WorkspaceUpdateIn {
+  return workspaceUpdatePayload(
+    props.workspace,
+    {
+      name: name.value,
+      credentialIds: selectedCredentialIds.value,
+      pluginIds: selectedPluginIds.value,
+      vcpus: qemuVcpus.value,
+      memoryMb: qemuMemoryMb.value,
+      diskSizeGb: qemuDiskSizeGb.value,
+      desktopWidth: desktopWidth.value,
+      desktopHeight: desktopHeight.value,
+    },
+    qemuLimits.value,
+  )
+}
 async function handleSubmit(): Promise<void> {
+  if (
+    submitting.value ||
+    !name.value.trim() ||
+    !pluginSelectionValid.value ||
+    !resourceSelectionValid.value ||
+    props.disabled
+  )
+    return
   submitting.value = true
-  const payload: WorkspaceUpdateIn = {
-    name: name.value,
-    credential_ids: selectedCredentialIds.value,
-  }
-  if (props.workspace.runtime_type === RuntimeType.QEMU) {
-    const currentQemuResources = resolveCurrentQemuResources()
-    if (qemuVcpus.value !== currentQemuResources.vcpus) {
-      payload.qemu_vcpus = qemuVcpus.value
-    }
-    if (qemuMemoryMb.value !== currentQemuResources.memoryMb) {
-      payload.qemu_memory_mb = qemuMemoryMb.value
-    }
-    if (qemuDiskSizeGb.value !== currentQemuResources.diskSizeGb) {
-      payload.qemu_disk_size_gb = qemuDiskSizeGb.value
-    }
-  }
-  const currentWidth = props.workspace.desktop_width || DEFAULT_DESKTOP_WIDTH
-  const currentHeight = props.workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT
-  if (desktopWidth.value !== currentWidth) {
-    payload.desktop_width = desktopWidth.value
-  }
-  if (desktopHeight.value !== currentHeight) {
-    payload.desktop_height = desktopHeight.value
-  }
-
-  const success = await workspaceStore.updateWorkspace(props.workspace.id, payload)
-  submitting.value = false
-
-  if (success) {
+  try {
+    const saved = await workspaceStore.updateWorkspace(props.workspace.id, buildPayload())
+    if (!saved) return
+    if (restoringDraftId.value) removeWorkspaceDraft(restoringDraftId.value)
+    restoringDraftId.value = null
+    await workspaceStore.fetchWorkspaceDetail(props.workspace.id)
+    syncForm(props.workspace)
     open.value = false
+  } finally {
+    submitting.value = false
   }
 }
-
 function handleClose(): void {
   open.value = false
-  syncFormWithWorkspace(props.workspace)
+  if (resetTimer) clearTimeout(resetTimer)
+  if (!preserveDraftOnClose && restoringDraftId.value) removeWorkspaceDraft(restoringDraftId.value)
+  if (!preserveDraftOnClose) restoringDraftId.value = null
+  preserveDraftOnClose = false
+  resetTimer = setTimeout(() => {
+    if (open.value) return
+    draftError.value = null
+    syncForm(props.workspace)
+    resetTimer = undefined
+  }, 200)
 }
-
-async function navigateToCredentials(): Promise<void> {
+watch(open, (value) => {
+  if (value && resetTimer) {
+    clearTimeout(resetTimer)
+    resetTimer = undefined
+  }
+})
+async function navigateToCredentials(serviceId?: string, reconnectId?: string): Promise<void> {
+  const fields: WorkspaceDraftFields = {
+    mode: 'edit',
+    workspaceId: props.workspace.id,
+    name: name.value,
+    credentialIds: [...selectedCredentialIds.value],
+    pluginIds: [...selectedPluginIds.value],
+    qemuVcpus: qemuVcpus.value,
+    qemuMemoryMb: qemuMemoryMb.value,
+    qemuDiskSizeGb: qemuDiskSizeGb.value,
+    desktopWidth: desktopWidth.value,
+    desktopHeight: desktopHeight.value,
+  }
+  const result = saveWorkspaceDraft(
+    fields,
+    { userId: authStore.user?.id ?? '', organizationId: authStore.activeOrganizationId ?? '' },
+    `/workspaces/${props.workspace.id}`,
+  )
+  if (result.error) {
+    draftError.value = result.error
+    emit('draftError', result.error)
+    notifications.error('Draft not saved', result.error)
+    return
+  }
+  restoringDraftId.value = result.id
+  preserveDraftOnClose = true
   handleClose()
-  // Settings-Routen sind Redirects aufs Sheet (Schritt 6): Deep-Link nutzen.
-  await router.push({ path: '/', query: { settings: 'credentials' } })
+  restoringDraftId.value = null
+  await router.push({
+    path: '/',
+    query: {
+      settings: 'credentials',
+      ...(serviceId ? { add_credential: serviceId } : {}),
+      ...(reconnectId ? { reconnect_credential: reconnectId } : {}),
+      workspace_draft: result.id,
+    },
+  })
 }
+const canSave = computed(
+  () =>
+    !submitting.value &&
+    !props.disabled &&
+    !!name.value.trim() &&
+    pluginSelectionValid.value &&
+    resourceSelectionValid.value,
+)
 
+defineExpose({ show: handleOpen })
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="(value) => (value ? handleOpen() : handleClose())"
-  >
-    <DialogTrigger as-child>
+  <Dialog :open="open" @update:open="(value) => (value ? handleOpen() : handleClose())">
+    <DialogTrigger v-if="!hideTrigger" as-child>
       <Button
         variant="ghost"
         :size="btnSize"
@@ -186,131 +309,156 @@ async function navigateToCredentials(): Promise<void> {
       </Button>
     </DialogTrigger>
 
-    <DialogContent>
+    <DialogContent class="sm:max-w-xl" @open-auto-focus="handleOpenAutoFocus">
       <DialogHeader>
         <DialogTitle>Edit Workspace</DialogTitle>
-        <DialogDescription>Update the workspace name, desktop size, and attached credentials.</DialogDescription>
+        <DialogDescription
+          >Update the workspace name, desktop size, credentials, and plugins.</DialogDescription
+        >
       </DialogHeader>
 
-      <form class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-          <Input v-model="name" :disabled="submitting || props.disabled" placeholder="Workspace name" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">
-            Credentials
-            <span class="text-muted-foreground font-normal">(optional)</span>
-          </label>
-
-          <div
-            v-if="credentialStore.credentials.length"
-            class="flex flex-col gap-1.5 max-h-56 overflow-y-auto"
-          >
-            <button
-              v-for="cred in credentialStore.credentials"
-              :key="cred.id"
-              type="button"
-              class="flex items-center gap-2 px-3 py-2 rounded-sm border text-left text-sm transition-colors cursor-pointer"
+      <DialogBody>
+        <form id="edit-workspace-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+            <Input
+              v-model="name"
               :disabled="submitting || props.disabled"
-              :class="selectedCredentialIds.includes(cred.id)
-                ? 'border-primary bg-primary/5 text-foreground'
-                : 'border-border bg-background text-muted-foreground hover:bg-muted'"
-              @click="toggleCredential(cred.id)"
-            >
-              <div
-                class="flex items-center justify-center w-4 h-4 rounded-sm border"
-                :class="selectedCredentialIds.includes(cred.id)
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border'"
-              >
-                <Check v-if="selectedCredentialIds.includes(cred.id)" :size="10" />
+              placeholder="Workspace name"
+            />
+          </div>
+
+          <WorkspacePluginCredentialSelection
+            v-model:plugin-ids="selectedPluginIds"
+            v-model:credential-ids="selectedCredentialIds"
+            :disabled="submitting || props.disabled"
+            :active="open"
+            @validity-change="pluginSelectionValid = $event"
+            @add-credential="navigateToCredentials"
+            @reconnect-credential="(id) => navigateToCredentials(undefined, id)"
+          />
+          <p v-if="draftError" class="text-xs text-destructive" role="alert">{{ draftError }}</p>
+          <p v-if="!resourceSelectionValid" class="text-xs text-destructive" role="alert">
+            Restore or adjust resource values to fit the workspace runner's limits.
+          </p>
+
+          <div class="space-y-3">
+            <label class="text-sm font-medium text-foreground block">Desktop size</label>
+            <p class="text-xs text-muted-foreground">Applies the next time the desktop starts.</p>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-sm font-medium text-muted-foreground mb-1 block">Width</label>
+                <Input
+                  v-model.number="desktopWidth"
+                  :disabled="submitting || props.disabled"
+                  type="number"
+                  min="800"
+                  max="3840"
+                  step="2"
+                />
               </div>
-              <span class="flex-1 truncate">{{ cred.name }}</span>
-              <span
-                v-if="cred.credential_type === 'ssh_key'"
-                class="inline-flex items-center gap-1 text-xs text-muted-foreground"
+              <div>
+                <label class="text-sm font-medium text-muted-foreground mb-1 block">Height</label>
+                <Input
+                  v-model.number="desktopHeight"
+                  :disabled="submitting || props.disabled"
+                  type="number"
+                  min="600"
+                  max="2160"
+                  step="2"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-3">
+            <label class="text-sm font-medium text-foreground block">QEMU resources</label>
+
+            <div>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
+              <input
+                v-model.number="qemuVcpus"
+                :disabled="submitting || props.disabled"
+                type="range"
+                class="w-full accent-primary"
+                :min="qemuLimits.minVcpus"
+                :max="qemuLimits.maxVcpus"
+                step="1"
+              />
+              <input
+                v-model.number="qemuVcpus"
+                :disabled="submitting || props.disabled"
+                type="number"
+                class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                :min="qemuLimits.minVcpus"
+                :max="qemuLimits.maxVcpus"
+                step="1"
+              />
+            </div>
+
+            <div>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block">RAM (MiB)</label>
+              <input
+                v-model.number="qemuMemoryMb"
+                :disabled="submitting || props.disabled"
+                type="range"
+                class="w-full accent-primary"
+                :min="qemuLimits.minMemoryMb"
+                :max="qemuLimits.maxMemoryMb"
+                step="256"
+              />
+              <input
+                v-model.number="qemuMemoryMb"
+                :disabled="submitting || props.disabled"
+                type="number"
+                class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                :min="qemuLimits.minMemoryMb"
+                :max="qemuLimits.maxMemoryMb"
+                step="256"
+              />
+            </div>
+
+            <div>
+              <label class="text-sm font-medium text-muted-foreground mb-1 block"
+                >Storage (GiB)</label
               >
-                <Key :size="10" />
-                SSH Key
-              </span>
-              <span v-else-if="cred.target_path" class="text-xs text-muted-foreground">
-                {{ cred.target_path }}
-              </span>
-              <span v-else-if="cred.env_var_name" class="text-xs text-muted-foreground">
-                {{ cred.env_var_name }}
-              </span>
-            </button>
-          </div>
-
-          <p v-else class="text-xs text-muted-foreground">
-            No credentials available.
-            <button type="button" class="underline cursor-pointer" @click="navigateToCredentials">Add credentials</button>
-            first.
-          </p>
-        </div>
-
-        <div class="space-y-3">
-          <label class="text-sm font-medium text-foreground block">Desktop size</label>
-          <p class="text-xs text-muted-foreground">
-            Applies the next time the desktop starts.
-          </p>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">Width</label>
-              <Input
-                v-model.number="desktopWidth"
+              <input
+                v-model.number="qemuDiskSizeGb"
                 :disabled="submitting || props.disabled"
-                type="number"
-                min="800"
-                max="3840"
-                step="2"
+                type="range"
+                class="w-full accent-primary"
+                :min="qemuLimits.minDiskSizeGb"
+                :max="qemuLimits.maxDiskSizeGb"
+                step="1"
               />
-            </div>
-            <div>
-              <label class="text-sm font-medium text-muted-foreground mb-1 block">Height</label>
-              <Input
-                v-model.number="desktopHeight"
+              <input
+                ref="diskSizeInput"
+                v-model.number="qemuDiskSizeGb"
                 :disabled="submitting || props.disabled"
                 type="number"
-                min="600"
-                max="2160"
-                step="2"
+                class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary"
+                :min="qemuLimits.minDiskSizeGb"
+                :max="qemuLimits.maxDiskSizeGb"
+                step="1"
               />
             </div>
           </div>
-        </div>
+        </form>
+      </DialogBody>
 
-        <div v-if="workspace.runtime_type === RuntimeType.QEMU" class="space-y-3">
-          <label class="text-sm font-medium text-foreground block">QEMU resources</label>
-
-          <div>
-            <label class="text-sm font-medium text-muted-foreground mb-1 block">vCPU</label>
-            <input v-model.number="qemuVcpus" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-            <input v-model.number="qemuVcpus" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minVcpus" :max="qemuLimits.maxVcpus" step="1" />
-          </div>
-
-          <div>
-            <label class="text-sm font-medium text-muted-foreground mb-1 block">RAM (MiB)</label>
-            <input v-model.number="qemuMemoryMb" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-            <input v-model.number="qemuMemoryMb" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minMemoryMb" :max="qemuLimits.maxMemoryMb" step="256" />
-          </div>
-
-          <div>
-            <label class="text-sm font-medium text-muted-foreground mb-1 block">Storage (GiB)</label>
-            <input v-model.number="qemuDiskSizeGb" :disabled="submitting || props.disabled" type="range" class="w-full accent-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-            <input v-model.number="qemuDiskSizeGb" :disabled="submitting || props.disabled" type="number" class="mt-1 w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="qemuLimits.minDiskSizeGb" :max="qemuLimits.maxDiskSizeGb" step="1" />
-          </div>
-        </div>
-
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="submitting || props.disabled || !name.trim()">
-            {{ submitting ? 'Saving…' : 'Save Changes' }}
-          </Button>
-        </div>
-      </form>
+      <DialogFooter>
+        <Button variant="outline" type="button" :disabled="submitting" @click="handleClose"
+          >Cancel</Button
+        >
+        <Button
+          type="submit"
+          form="edit-workspace-form"
+          data-testid="edit-workspace-save"
+          :disabled="!canSave"
+        >
+          {{ submitting ? 'Saving…' : 'Save Changes' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

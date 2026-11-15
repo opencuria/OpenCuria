@@ -1,35 +1,76 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import { Button } from '@/components/ui/button'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Textarea } from '@/components/ui/textarea'
+import VoiceInputControl from '@/components/chat/VoiceInputControl.vue'
+import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
+import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
+import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
+import { imageMentionTokens, removeComposerToken } from '@opencuria/chat-core/composerTokens'
 import {
   BookText,
   Check,
   ChevronDown,
   Hammer,
   ListTodo,
+  Loader2,
   Paperclip,
   Send,
   Square,
   X,
 } from '@lucide/vue'
-import type { HarnessSessionMode } from '@/types/harness'
+import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
 import type { FileNode, Skill } from '@/types'
-import { getProviderConfig } from '@/services/harness.api'
-import { resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
-import { loadProviderModelsCached } from '@/lib/providerCatalog'
+import { sendFilesUpload, subscribeToWorkspace } from '@/services/socket'
+import {
+  resolveCatalogModel,
+  snapEffort,
+  harnessEngineLabel,
+  harnessEngineDefaults,
+  harnessSessionModels,
+  type HarnessEngine,
+  type ProviderModel,
+} from '@opencuria/chat-core/harnessModels'
+import { loadEngineModelsCached, providerCatalogContext } from '@/lib/providerCatalog'
+import {
+  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
+  listHarnessEngines,
+} from '@/services/harness.api'
+import {
+  loadRecentModels,
+  recentCatalogModels,
+  recentEffortFor,
+  useRecentModels,
+  type RecentModelEntry,
+} from '@/lib/recentModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
-import WorkspaceFilePicker from '@/components/chat/WorkspaceFilePicker.vue'
-import HarnessModelPicker from '@/components/chat/HarnessModelPicker.vue'
-import { buildWorkspaceReferenceMarkdown, classifyWorkspaceFile } from '@/lib/workspaceFileRefs'
+import ModelPicker from '@/components/common/ModelPicker.vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
+import { fileToBase64, getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
+import {
+  appendUploadMentions,
+  CHAT_UPLOAD_DIR,
+  hasUploadMention,
+  nextChatUploadRequestId,
+  resolveUniqueFilename,
+  sanitizeUploadFilename,
+  uploadTargetPath,
+} from '@opencuria/chat-core/chatUploads'
+import { UPLOAD_MAX_BYTES } from '@opencuria/chat-core/fileChunks'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
+import { useHarnessStore } from '@/stores/harness'
+import { useAuthStore } from '@/stores/auth'
+import { useNotificationStore } from '@/stores/notifications'
 import {
   applyMentionCandidate,
   consumeSlashQuery,
@@ -43,12 +84,29 @@ import {
   createPointerHoverGate,
   MENTION_FIND_LIMIT,
   type MentionCandidate,
-} from '@/lib/harnessMentions'
+} from '@opencuria/chat-core/harnessMentions'
+
+/** External drag state mirrored from the surrounding drop zone (chat history
+ * or home view). Renders a subtle highlight on the composer card only —
+ * there is no full-area overlay. Drop handling lives in the parent, which
+ * forwards files via the exposed `uploadChatFiles`. */
+export interface ChatUploadDragState {
+  active: boolean
+  uploading: boolean
+}
 
 const props = defineProps<{
+  /** Composer fully locked (e.g. workspace not ready for prompts). */
   disabled?: boolean
   sending?: boolean
+  /**
+   * A run is active. The composer stays editable and sends steer the running
+   * turn; an empty composer shows Stop, typed text shows Send plus a compact
+   * Stop. Model/mode pickers lock because they only apply at run start.
+   */
   stoppable?: boolean
+  stopping?: boolean
+  /** Reason the composer is unavailable (shown below the card). */
   busyMessage?: string
   workspaceId?: string
   sessionId?: string | null
@@ -56,6 +114,12 @@ const props = defineProps<{
   model?: string
   effort?: string
   mode?: HarnessSessionMode
+  harnessId?: HarnessId
+  engineLocked?: boolean
+  /** New-chat surfaces opt in; existing sessions and task editors keep their selection. */
+  restoreLastSelection?: boolean
+  /** Persisted session model, never the editable composer selection. */
+  sessionModel?: string
   skillOptions?: Skill[]
   /**
    * External mention navigation state mirrored from the parent sheet stack.
@@ -70,15 +134,37 @@ const props = defineProps<{
    */
   attached?: boolean
   contextUsed?: number
+  contextLimit?: number
   contextOpen?: boolean
+  uploadDrag?: ChatUploadDragState
+  /** Scheduled-task editor uses the shared composer without chat-only state. */
+  variant?: 'chat' | 'scheduled-task'
+  /** Subagent transcript: render only the stop control, with no composer. */
+  stopOnly?: boolean
+  prompt?: string
+  skillIds?: string[]
+  filesAvailable?: boolean
+  promptError?: string
+  resetKey?: string | number
 }>()
 
 const emit = defineEmits<{
-  send: [prompt: string, mode: HarnessSessionMode, model: string, skillIds: string[], effort: string]
+  send: [
+    prompt: string,
+    mode: HarnessSessionMode,
+    model: string,
+    skillIds: string[],
+    effort: string,
+    harnessId: HarnessId,
+  ]
   stop: []
   'update:model': [value: string]
   'update:effort': [value: string]
   'update:mode': [value: HarnessSessionMode]
+  'update:harnessId': [value: HarnessId]
+  'update:prompt': [value: string]
+  'update:skillIds': [value: string[]]
+  uploading: [value: boolean]
   /** Emitted on every textarea change so the parent can mirror `@`/`/` state into the sheet stack. */
   'mention-change': [open: boolean, query: string, candidates: MentionCandidate[], index: number]
   /** Emitted when the user picks a mention candidate from the sheet stack. */
@@ -87,43 +173,237 @@ const emit = defineEmits<{
   'context-metrics': [metrics: { used: number; limit: number; percent: number }]
 }>()
 
-const prompt = ref('')
-const textareaRef = ref<{ $el?: unknown } | null>(null)
+const isScheduledTask = computed(() => props.variant === 'scheduled-task')
+const prompt = ref(props.prompt ?? '')
+/** Voice capture replaces the toolbar and blocks sending until it settles. */
+const voiceBusy = ref(false)
+function insertDictation(text: string, path?: string, send = false): void {
+  const addition = path ? `${text}\n\nPointing recording (transcript, pointer timeline and desktop frames): @file:${path}` : text
+  prompt.value = [prompt.value.trimEnd(), addition].filter(Boolean).join('\n')
+  saveToCache(prompt.value)
+  // The busy flag clears in the same flush; sending earlier would be rejected.
+  void nextTick(() => {
+    if (send) handleSend()
+    resizeTextarea()
+    focusTextarea()
+  })
+}
+const textareaRef = ref<InstanceType<typeof ComposerRichEditor> | null>(null)
+const imageTokens = computed(() => imageMentionTokens(prompt.value))
+function removeImageToken(start: number, end: number): void {
+  const next = removeComposerToken(prompt.value, start, end)
+  prompt.value = next.text
+  void nextTick(() => {
+    textareaRef.value?.focus()
+    textareaRef.value?.setCursor(next.cursor)
+  })
+}
 const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
+const localHarnessId = ref<HarnessId>(props.harnessId ?? 'native')
 const localModel = ref(props.model ?? '')
 const localEffort = ref(props.effort ?? '')
-const catalog = ref<ProviderModel[]>([])
-const orgDefaultModel = ref('')
-const modelLoading = ref(false)
+const engineCatalog = ref<ProviderModel[]>([])
+const catalog = computed(() =>
+  harnessSessionModels(
+    engineCatalog.value,
+    localHarnessId.value,
+    props.engineLocked
+      ? (props.sessionModel ?? harness.sessions.find((s) => s.id === props.sessionId)?.model ?? '')
+      : undefined,
+  ),
+)
+const engines = ref<HarnessEngine[]>([])
+function engineUnavailable(id: HarnessId): boolean {
+  return id !== 'native' && !engines.value.find((engine) => engine.id === id)?.connected
+}
+const { entries: recentEntries } = useRecentModels()
+const recentModels = computed(() =>
+  localHarnessId.value !== 'claude' ? recentCatalogModels(catalog.value) : [],
+)
+const modelLoading = ref(true)
 const providerMissing = ref(false)
-const selectedSkillIds = ref<string[]>([])
-const filePickerOpen = ref(false)
+const selectedSkillIds = ref<string[]>([...(props.skillIds ?? [])])
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const isUploading = ref(false)
+/**
+ * Serializes concurrent `uploadChatFiles` calls (e.g. a drop handled by
+ * both the composer card and the panel zone): later batches chain onto the
+ * in-flight upload instead of sending the same files a second time.
+ */
+let uploadQueue: Promise<void> = Promise.resolve()
+/** Target paths with an in-flight or recently finished chat upload. */
+const inFlightUploadPaths = new Set<string>()
+function uploadReservationKey(workspaceId: string, path: string): string {
+  return `${workspaceId}:${path}`
+}
+const harness = useHarnessStore()
+const authStore = useAuthStore()
+let applyingDefaults = false
+let applyEngineDefaultsAfterCatalog = false
+let modelRequestGeneration = 0
+let selectionRevision = 0
+let catalogContext = ''
+const canRestoreSelection = () =>
+  Boolean(props.restoreLastSelection) && !props.sessionId && !props.engineLocked && !isScheduledTask.value
+let restoreSelectionPending = canRestoreSelection()
+let restoredSelection: RecentModelEntry | undefined
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
   () => props.sessionId,
+  () => localHarnessId.value,
 )
 
 const selectedSkills = computed(() =>
   (props.skillOptions ?? []).filter((skill) => selectedSkillIds.value.includes(skill.id)),
 )
 
-const canSend = computed(() => prompt.value.trim().length > 0 && !props.disabled && !props.sending)
-const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
-const canManageFiles = computed(
-  () => !props.disabled && !props.sending && Boolean(props.workspaceId),
+const hasText = computed(() => prompt.value.trim().length > 0)
+const canSend = computed(
+  () => hasText.value && !voiceBusy.value && !props.disabled && !props.sending && !props.stopping,
 )
+const canStop = computed(() => Boolean(props.stoppable) && !props.sending && !props.stopping)
+const stopTitle = computed(() => (props.stopping ? 'Stopping…' : 'Stop current run'))
+/** A run is active in a chat composer: sends steer it instead of starting one. */
+const steering = computed(
+  () => Boolean(props.stoppable || props.stopping) && !isScheduledTask.value,
+)
+/** Empty composer while steering: the primary action is Stop. */
+const primaryIsStop = computed(() => steering.value && !hasText.value)
+const primaryEnabled = computed(() => (primaryIsStop.value ? canStop.value : canSend.value))
+const primaryTitle = computed(() => {
+  if (primaryIsStop.value) return stopTitle.value
+  return steering.value ? 'Steer the agent' : 'Send'
+})
+const pickersLocked = computed(() => Boolean(props.disabled) || steering.value)
+const composerPlaceholder = computed(() => {
+  if (isScheduledTask.value) {
+    return 'Describe the work… Use / for skills and @ for context'
+  }
+  return steering.value ? 'Steer the agent…' : 'Plan or Build, / for skills, @ for context'
+})
+const canManageFiles = computed(
+  () =>
+    !props.disabled &&
+    !props.sending &&
+    Boolean(props.workspaceId) &&
+    (!isScheduledTask.value || props.filesAvailable !== false),
+)
+const mentionOpen = ref(false)
+const mentionIndex = ref(0)
+const mentionQuery = ref('')
+const composerKind = ref<'mention' | 'skill' | null>(null)
+const mentionSearchPaths = ref<string[]>([])
+const mentionPopupListRef = ref<HTMLElement | null>(null)
+const mentionPointerHover = createPointerHoverGate()
+let mentionFindTimer: ReturnType<typeof setTimeout> | null = null
+let mentionFindGeneration = 0
+let mentionSearchStarted = false
+let releaseMentionSubscription: (() => void) | null = null
+
+const composerId = useId()
+const mentionListboxId = `composer-mentions-${composerId}`
+const skillListboxId = `composer-skills-${composerId}`
+const activeListboxId = computed(() =>
+  composerKind.value === 'skill' ? skillListboxId : mentionListboxId,
+)
+const activeOptionId = computed(() => `${activeListboxId.value}-option-${mentionIndex.value}`)
+const suggestionOpen = computed(
+  () => isScheduledTask.value && mentionOpen.value && mentionCandidates.value.length > 0,
+)
+const suggestionAnchor = ref<HTMLElement | null>(null)
+function suggestionContentElement(): HTMLElement | null {
+  return (
+    document
+      .getElementById(activeListboxId.value)
+      ?.closest<HTMLElement>('[data-testid="composer-suggestions-portal"]') ?? null
+  )
+}
+const suggestionMaxHeight = ref(192)
+let suggestionResizeObserver: ResizeObserver | null = null
+let suggestionVerticalOffset = 0
+
+function clampSuggestionIntoViewport(): void {
+  const content = suggestionContentElement()
+  if (!content) return
+  const viewport = window.visualViewport
+  const viewportTop = viewport?.offsetTop ?? 0
+  const viewportBottom = viewportTop + (viewport?.height ?? window.innerHeight)
+  const rect = content.getBoundingClientRect()
+  // Keep the Popper placement on top; in cramped viewports, offset only the
+  // portalled overlay so at least one option remains reachable without layout shift.
+  const baseTop = rect.top - suggestionVerticalOffset
+  const maxTop = Math.max(viewportTop + 8, viewportBottom - 8 - rect.height)
+  const nextOffset = Math.min(Math.max(baseTop, viewportTop + 8), maxTop) - baseTop
+  suggestionVerticalOffset = nextOffset
+  content.style.translate = `0 ${nextOffset}px`
+}
+
+function updateSuggestionMaxHeight(): void {
+  const anchor = suggestionAnchor.value
+  if (!anchor) return
+  const viewport = window.visualViewport
+  const viewportTop = viewport?.offsetTop ?? 0
+  const viewportBottom = viewportTop + (viewport?.height ?? window.innerHeight)
+  const viewportHeight = Math.max(1, viewportBottom - viewportTop)
+  const maxVisibleHeight = Math.max(1, viewportHeight - 16)
+  const minVisibleHeight = Math.min(48, maxVisibleHeight)
+  const anchorRect = anchor.getBoundingClientRect()
+  if (anchorRect.height === 0) {
+    // jsdom and hidden layout containers don't provide viewport coordinates.
+    suggestionMaxHeight.value = 192
+    return
+  }
+  const availableAbove = Math.floor(anchorRect.top - viewportTop - 8)
+  suggestionMaxHeight.value = Math.min(
+    maxVisibleHeight,
+    Math.max(minVisibleHeight, Math.min(192, availableAbove)),
+  )
+  suggestionVerticalOffset = 0
+  const content = suggestionContentElement()
+  if (content) content.style.translate = ''
+  void nextTick(clampSuggestionIntoViewport)
+}
+
+function stopObservingSuggestionViewport(): void {
+  suggestionResizeObserver?.disconnect()
+  suggestionResizeObserver = null
+  window.removeEventListener('resize', updateSuggestionMaxHeight)
+  window.removeEventListener('scroll', updateSuggestionMaxHeight, true)
+  window.visualViewport?.removeEventListener('resize', updateSuggestionMaxHeight)
+  window.visualViewport?.removeEventListener('scroll', updateSuggestionMaxHeight)
+}
+
+watch(suggestionOpen, async (open) => {
+  stopObservingSuggestionViewport()
+  if (!open) return
+  await nextTick()
+  suggestionVerticalOffset = 0
+  const content = suggestionContentElement()
+  if (content) content.style.translate = ''
+  updateSuggestionMaxHeight()
+  if (typeof ResizeObserver !== 'undefined' && suggestionAnchor.value) {
+    suggestionResizeObserver = new ResizeObserver(() => {
+      updateSuggestionMaxHeight()
+      clampSuggestionIntoViewport()
+    })
+    suggestionResizeObserver.observe(suggestionAnchor.value)
+    const content = suggestionContentElement()
+    if (content) suggestionResizeObserver.observe(content)
+  }
+  window.addEventListener('resize', updateSuggestionMaxHeight)
+  window.addEventListener('scroll', updateSuggestionMaxHeight, true)
+  window.visualViewport?.addEventListener('resize', updateSuggestionMaxHeight)
+  window.visualViewport?.addEventListener('scroll', updateSuggestionMaxHeight)
+})
 
 const CONTEXT_RING_RADIUS = 6
 const contextRingCircumference = 2 * Math.PI * CONTEXT_RING_RADIUS
 
 const contextLimit = computed(() => {
-  const catalogModel = resolveCatalogModel(
-    catalog.value,
-    localModel.value,
-    orgDefaultModel.value,
-  )
-  return catalogModel?.context_length ?? 0
+  if (props.contextLimit && props.contextLimit > 0) return props.contextLimit
+  const catalogModel = resolveCatalogModel(catalog.value, localModel.value)
+  return catalogModel?.context_length ?? (localHarnessId.value === 'claude' ? 200_000 : 0)
 })
 
 const contextUsed = computed(() => Math.max(0, props.contextUsed ?? 0))
@@ -133,8 +413,8 @@ const contextPercent = computed(() => {
   return Math.round((contextUsed.value / contextLimit.value) * 100)
 })
 
-const contextRingOffset = computed(() =>
-  contextRingCircumference * (1 - Math.min(100, Math.max(0, contextPercent.value)) / 100),
+const contextRingOffset = computed(
+  () => contextRingCircumference * (1 - Math.min(100, Math.max(0, contextPercent.value)) / 100),
 )
 
 const contextAriaLabel = computed(() => {
@@ -156,40 +436,155 @@ watch(
 
 const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
 const modeLabel = computed(() => (localMode.value === 'plan' ? 'Plan' : 'Build'))
+const harnessLabel = computed(() =>
+  harnessEngineLabel(localHarnessId.value, engines.value),
+)
+const modeMenuLabel = computed(() => `${harnessLabel.value} ${modeLabel.value}`)
 
 /**
- * Öffnet das Provider-Tab direkt per Window-Event — bewusst OHNE Router-Navigation:
- * Der Host hängt global in AppLayout, der `/?settings=`-Deep-Link bleibt für
- * Redirects/e2e erhalten. So kann der Banner-Klick keine Navigation abbrechen
- * oder eine Replace-Schleife auslösen (gemeldeter "Page Unresponsive"-Hänger).
+ * Open provider settings via a window event, without router navigation.
+ * AppLayout hosts the dialog globally; the `/?settings=` deep link still supports
+ * redirects. Banner clicks cannot interrupt navigation or trigger a replace loop.
  */
 function openProviderSettings(): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
 }
 
+function applyModeDefaults(mode: HarnessSessionMode, opts: { resetDirty?: boolean } = {}): void {
+  const defaults = harness.agentDefault(mode)
+  if (
+    isScheduledTask.value ||
+    localHarnessId.value !== 'native' ||
+    (!defaults.model && !defaults.effort)
+  )
+    return
+  applyingDefaults = true
+  try {
+    localModel.value = defaults.model
+    const catalogModel = resolveCatalogModel(catalog.value, defaults.model)
+    localEffort.value = catalogModel ? snapEffort(catalogModel, defaults.effort) : defaults.effort
+    emit('update:model', localModel.value)
+    emit('update:effort', localEffort.value)
+  } finally {
+    applyingDefaults = false
+  }
+  if (opts.resetDirty) harness.composerDirty = false
+}
+
 async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
+  const requestGeneration = ++modelRequestGeneration
+  const currentContext = () =>
+    `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}:${providerCatalogContext()}`
+  const context = currentContext()
+  const engineId = localHarnessId.value
+  const nextCatalogContext = `${engineId}:${context}`
+  if (catalogContext !== nextCatalogContext) engineCatalog.value = []
+  catalogContext = nextCatalogContext
+  const revision = selectionRevision
+  const promptBeforeLoad = prompt.value
+  const isCurrent = () =>
+    requestGeneration === modelRequestGeneration &&
+    engineId === localHarnessId.value &&
+    context === currentContext()
   try {
-    const config = await getProviderConfig()
-    orgDefaultModel.value = config.default_model || ''
-    if (!config.has_api_key) {
-      providerMissing.value = true
-      catalog.value = []
-      return
+    const [models] = await Promise.all([
+      loadEngineModelsCached(engineId),
+      listHarnessEngines().catch(() => []).then((rows) => {
+        if (isCurrent()) engines.value = rows
+      }),
+      engineId !== 'claude' || restoreSelectionPending ? loadRecentModels() : Promise.resolve([]),
+    ])
+    if (!isCurrent()) return
+    engineCatalog.value = models
+    if (restoreSelectionPending && revision === selectionRevision) {
+      restoreSelectionPending = false
+      const recent = recentEntries.value[0]
+      if (recent && !engineUnavailable(recent.harnessId)) {
+        restoredSelection = recent
+        localMode.value = recent.mode
+        emit('update:mode', localMode.value)
+        if (recent.harnessId !== engineId) {
+          const draftChanged = prompt.value !== promptBeforeLoad
+          if (draftChanged) clearCache()
+          localHarnessId.value = recent.harnessId
+          localModel.value = ''
+          localEffort.value = ''
+          emit('update:harnessId', localHarnessId.value)
+          emit('update:model', '')
+          emit('update:effort', '')
+          if (draftChanged) saveToCache(prompt.value)
+          else prompt.value = loadFromCache()
+          applyEngineDefaultsAfterCatalog = true
+          void loadProviderModels()
+          return
+        }
+      }
     }
-    catalog.value = await loadProviderModelsCached()
+    if (restoredSelection && revision === selectionRevision) {
+      const rememberedModel = models.find((model) => model.id === restoredSelection?.id)
+      if (rememberedModel) {
+        localModel.value = rememberedModel.id
+        localEffort.value = snapEffort(rememberedModel, restoredSelection.effort)
+        emit('update:model', localModel.value)
+        emit('update:effort', localEffort.value)
+        applyEngineDefaultsAfterCatalog = false
+        harness.markComposerDirty()
+      }
+      restoredSelection = undefined
+    }
+    providerMissing.value = engineUnavailable(engineId) || catalog.value.length === 0
+    if (
+      engineId !== 'native' &&
+      !props.engineLocked &&
+      revision === selectionRevision &&
+      (applyEngineDefaultsAfterCatalog || !localModel.value)
+    ) {
+      const defaults = harnessEngineDefaults(engineId, engines.value)
+      const remembered = engineId === 'codex' ? recentCatalogModels(models)[0] : undefined
+      const model = remembered ?? models.find((item) => item.id === defaults.model) ?? models[0]
+      localModel.value = model?.id ?? defaults.model
+      const effort =
+        (engineId === 'codex' ? recentEffortFor(localModel.value) : '') || defaults.effort
+      localEffort.value = model ? snapEffort(model, effort) : effort
+      emit('update:model', localModel.value)
+      emit('update:effort', localEffort.value)
+      applyEngineDefaultsAfterCatalog = false
+    }
+    if (localHarnessId.value === 'native') {
+      if (!isScheduledTask.value) await harness.loadAgentConfigs()
+    }
   } catch {
+    if (!isCurrent()) return
     providerMissing.value = true
-    catalog.value = []
+    engineCatalog.value = []
   } finally {
-    modelLoading.value = false
+    if (isCurrent()) modelLoading.value = false
+  }
+  if (!isCurrent() || revision !== selectionRevision) return
+  if (applyEngineDefaultsAfterCatalog && localHarnessId.value === 'native') {
+    applyModeDefaults(localMode.value, { resetDirty: true })
+    applyEngineDefaultsAfterCatalog = false
+  }
+  if (
+    localHarnessId.value === 'native' &&
+    !isScheduledTask.value &&
+    !harness.composerDirty &&
+    !props.model &&
+    !props.effort
+  ) {
+    applyModeDefaults(localMode.value, { resetDirty: true })
   }
 }
 
 onMounted(() => {
-  const cached = loadFromCache()
-  if (cached) prompt.value = cached
+  if (props.stopOnly) return
+  if (!isScheduledTask.value) {
+    const cached = loadFromCache()
+    if (cached) prompt.value = cached
+  }
+  window.addEventListener(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, loadProviderModels)
   void loadProviderModels()
   void nextTick(() => {
     resizeTextarea()
@@ -198,21 +593,44 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  saveToCache(prompt.value)
+  modelRequestGeneration++
+  window.removeEventListener(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, loadProviderModels)
+  uploadDisposed = true
+  invalidateUploads()
+  if (!isScheduledTask.value && !props.stopOnly) saveToCache(prompt.value)
   if (mentionFindTimer) {
     clearTimeout(mentionFindTimer)
     mentionFindTimer = null
   }
   textareaResizeObserver?.disconnect()
   textareaResizeObserver = null
+  stopObservingSuggestionViewport()
+  releaseMentionSubscription?.()
+  releaseMentionSubscription = null
 })
 
 watch(
   () => props.workspaceId,
   () => {
-    localModel.value = ''
-    emit('update:model', '')
-    prompt.value = loadFromCache()
+    if (isScheduledTask.value) invalidateUploads()
+    if (!isScheduledTask.value) {
+      harness.composerDirty = false
+      prompt.value = loadFromCache()
+    } else {
+      closeComposerQuery()
+      mentionSearchPaths.value = []
+      releaseMentionSubscription?.()
+      releaseMentionSubscription = null
+    }
+    void loadProviderModels()
+  },
+)
+
+watch(
+  () => `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}`,
+  () => {
+    restoreSelectionPending = canRestoreSelection()
+    restoredSelection = undefined
     void loadProviderModels()
   },
 )
@@ -220,21 +638,30 @@ watch(
 watch(
   () => props.sessionId,
   () => {
-    prompt.value = loadFromCache()
+    if (!isScheduledTask.value) prompt.value = loadFromCache()
+    restoreSelectionPending = canRestoreSelection()
+    restoredSelection = undefined
+    if (restoreSelectionPending) void loadProviderModels()
   },
 )
 
 watch(
   () => props.model,
   (next) => {
-    if (typeof next === 'string' && next !== localModel.value) localModel.value = next
+    if (typeof next === 'string' && next !== localModel.value) {
+      selectionRevision++
+      localModel.value = next
+    }
   },
 )
 
 watch(
   () => props.effort,
   (next) => {
-    if (typeof next === 'string' && next !== localEffort.value) localEffort.value = next
+    if (typeof next === 'string' && next !== localEffort.value) {
+      selectionRevision++
+      localEffort.value = next
+    }
   },
 )
 
@@ -245,39 +672,159 @@ watch(
   },
 )
 
+watch(
+  () => props.harnessId,
+  (next) => {
+    if (next && next !== localHarnessId.value) {
+      localHarnessId.value = next
+      if (!isScheduledTask.value) prompt.value = loadFromCache()
+      if (!props.engineLocked) {
+        const defaults = harnessEngineDefaults(next, engines.value)
+        localModel.value = defaults.model
+        localEffort.value = defaults.effort
+        emit('update:model', localModel.value)
+        emit('update:effort', localEffort.value)
+        applyEngineDefaultsAfterCatalog = true
+      }
+      void loadProviderModels()
+    }
+  },
+)
+
 watch(prompt, (value) => {
-  saveToCache(value)
+  if (isScheduledTask.value) emit('update:prompt', value)
+  else saveToCache(value)
   void nextTick(resizeTextarea)
+})
+watch(
+  () => props.prompt,
+  (value) => {
+    if (isScheduledTask.value && typeof value === 'string' && value !== prompt.value) {
+      closeComposerQuery()
+      prompt.value = value
+    }
+  },
+)
+watch(
+  () => props.resetKey,
+  () => {
+    if (!isScheduledTask.value) return
+    invalidateUploads()
+    closeComposerQuery()
+    releaseMentionSubscription?.()
+    releaseMentionSubscription = null
+    selectionRevision++
+    applyEngineDefaultsAfterCatalog = false
+    localMode.value = props.mode ?? 'build'
+    localHarnessId.value = props.harnessId ?? 'native'
+    localModel.value = props.model ?? ''
+    localEffort.value = props.effort ?? ''
+    selectedSkillIds.value = [...(props.skillIds ?? [])]
+  },
+)
+watch(
+  () => props.skillIds,
+  (value) => {
+    if (
+      isScheduledTask.value &&
+      JSON.stringify(value ?? []) !== JSON.stringify(selectedSkillIds.value)
+    )
+      selectedSkillIds.value = [...(value ?? [])]
+  },
+  { deep: true },
+)
+watch(selectedSkillIds, (ids) => {
+  if (isScheduledTask.value) emit('update:skillIds', [...ids])
 })
 
 function handleSend(): void {
-  if (!canSend.value) return
-  emit('send', prompt.value.trim(), localMode.value, localModel.value.trim(), [
-    ...selectedSkillIds.value,
-  ], localEffort.value.trim())
+  if (isScheduledTask.value || !canSend.value) return
+  emit(
+    'send',
+    prompt.value.trim(),
+    localMode.value,
+    localModel.value.trim(),
+    [...selectedSkillIds.value],
+    localEffort.value.trim(),
+    localHarnessId.value,
+  )
   prompt.value = ''
   selectedSkillIds.value = []
   clearCache()
   closeComposerQuery()
 }
 
+function setHarnessMode(harnessId: HarnessId, mode: HarnessSessionMode): void {
+  if (props.engineLocked && harnessId !== localHarnessId.value) return
+  if (
+    harnessId !== 'native' &&
+    harnessId !== localHarnessId.value &&
+    engineUnavailable(harnessId)
+  ) {
+    openProviderSettings()
+    return
+  }
+  selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
+  const harnessChanged = harnessId !== localHarnessId.value
+  // The visible draft follows a manual engine change. Move its cache entry
+  // too, otherwise sending only clears the new key and leaves stale text behind.
+  if (harnessChanged && !isScheduledTask.value) clearCache()
+  localHarnessId.value = harnessId
+  if (harnessChanged) {
+    if (!isScheduledTask.value) saveToCache(prompt.value)
+    emit('update:harnessId', harnessId)
+
+    const defaults = harnessEngineDefaults(harnessId, engines.value)
+    localModel.value = defaults.model
+    localEffort.value = defaults.effort
+    emit('update:model', localModel.value)
+    emit('update:effort', localEffort.value)
+    harness.composerDirty = false
+    applyEngineDefaultsAfterCatalog = true
+    void loadProviderModels()
+  }
+  setMode(mode)
+}
+
 function setMode(mode: HarnessSessionMode): void {
+  if (mode === localMode.value) {
+    emit('update:mode', mode)
+    return
+  }
   localMode.value = mode
   emit('update:mode', mode)
+  if (!isScheduledTask.value && !harness.composerDirty)
+    applyModeDefaults(mode, { resetDirty: true })
 }
 
 function toggleMode(): void {
+  selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
   setMode(localMode.value === 'build' ? 'plan' : 'build')
 }
 
 function setModel(value: string): void {
+  if (!catalog.value.some((model) => model.id === value)) return
+  selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
+  applyEngineDefaultsAfterCatalog = false
   localModel.value = value
   emit('update:model', value)
+  if (!applyingDefaults && !isScheduledTask.value) harness.markComposerDirty()
 }
 
 function setEffort(value: string): void {
+  selectionRevision++
+  restoreSelectionPending = false
+  restoredSelection = undefined
+  applyEngineDefaultsAfterCatalog = false
   localEffort.value = value
   emit('update:effort', value)
+  if (!applyingDefaults && !isScheduledTask.value) harness.markComposerDirty()
 }
 
 function addSkill(id: string): void {
@@ -289,32 +836,272 @@ function addSkill(id: string): void {
 function removeSkill(id: string): void {
   selectedSkillIds.value = selectedSkillIds.value.filter((skillId) => skillId !== id)
 }
+watch(
+  () => props.filesAvailable,
+  (available) => {
+    if (!isScheduledTask.value) return
+    if (!available) {
+      cancelMentionFileSearch()
+    } else if (mentionOpen.value && composerKind.value === 'mention') {
+      scheduleMentionFileSearch(mentionQuery.value)
+    }
+  },
+)
 
-function handleFileSelected(path: string, filename: string): void {
+/**
+ * Upload browser files into the chat upload directory and insert an
+ * `@file:` mention token per uploaded file (exactly like a mention-picker
+ * selection: space-separated, one trailing space).
+ *
+ * Uploads never overwrite: file names are sanitized (`[^a-zA-Z0-9._-] →
+ * _`) and deduplicated against a fresh listing of the upload directory
+ * (`_1`, `_2`, … suffix); a failed listing aborts the upload.
+ * The runner `mkdir -p`s the upload directory on upload; the explorer tree
+ * is refreshed afterwards so the files show up under Files and `@` search.
+ *
+ * Concurrent calls are serialized: a second drop that arrives while an
+ * upload is in flight waits for the first batch instead of uploading the
+ * same files twice.
+ */
+let uploadGeneration = 0
+let uploadDisposed = false
+let uploadDirectoryAbortController: AbortController | null = null
+const ownedPendingUploadIds = new Set<string>()
+
+function invalidateUploads(): void {
+  uploadGeneration += 1
+  uploadDirectoryAbortController?.abort()
+  uploadDirectoryAbortController = null
+  for (const requestId of ownedPendingUploadIds) fileExplorer.cancelUpload(requestId)
+  ownedPendingUploadIds.clear()
+  isUploading.value = false
+  if (isScheduledTask.value && !uploadDisposed) emit('uploading', false)
+}
+
+async function uploadChatFiles(fileList: File[] | FileList): Promise<void> {
+  const files = Array.from(fileList)
+  if (files.length === 0 || !canManageFiles.value || !props.workspaceId) return
+  const workspaceId = props.workspaceId
+  const generation = uploadGeneration
+  // Chain onto an in-flight batch so the same files are never uploaded
+  // twice (double `@file:` references from reentrant drop handlers).
+  const run = uploadQueue.then(() => runChatUpload(files, workspaceId, generation))
+  uploadQueue = run.catch(() => undefined)
+  await run
+}
+
+async function runChatUpload(
+  files: File[],
+  workspaceId: string,
+  generation: number,
+): Promise<void> {
+  if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId) return
+  isUploading.value = true
+  if (isScheduledTask.value) emit('uploading', true)
+  const notify = useNotificationStore()
+  const reserved: string[] = []
+  try {
+    if (isScheduledTask.value && !releaseMentionSubscription)
+      releaseMentionSubscription = subscribeToWorkspace(workspaceId)
+    // List the upload directory itself: the shared explorer tree only holds
+    // it once `.opencuria` was expanded and may be stale, which would let a
+    // same-named upload silently overwrite an earlier chat attachment.
+    const abortController = new AbortController()
+    uploadDirectoryAbortController = abortController
+    const options = { signal: abortController.signal }
+    const root = await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace', options)
+    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
+      return
+    if (!root) {
+      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
+      return
+    }
+    const metadata = root.some((entry) => entry.name === '.opencuria' && entry.type === 'directory')
+      ? await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace/.opencuria', options)
+      : []
+    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
+      return
+    if (metadata === null) {
+      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
+      return
+    }
+    const uploadDirectoryExists = metadata.some(
+      (entry) => entry.name === 'user-uploaded' && entry.type === 'directory',
+    )
+    const directory = uploadDirectoryExists
+      ? await fileExplorer.fetchDirectoryEntries(workspaceId, CHAT_UPLOAD_DIR, options)
+      : []
+    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
+      return
+    if (directory === null) {
+      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
+      return
+    }
+    const taken = new Set(directory.map((entry) => entry.name))
+    // Per-file transfer outcome; resolves to the workspace path on success,
+    // null on failure (failures are toasted via the store already).
+    // Every reserved path is released below, on success and on failure.
+    const transfers: Array<Promise<string | null>> = []
+
+    for (const file of files) {
+      if (file.size > UPLOAD_MAX_BYTES) {
+        const message = `File "${file.name}" exceeds the 10 MB upload limit and was skipped.`
+        notify.error('Upload failed', message)
+        continue
+      }
+      // Skip files whose upload is already referenced or in flight: a
+      // drop handled by more than one drop zone (composer card + parent
+      // panel) runs the second batch after the first, and must not upload
+      // or reference the same file again.
+      const filename = resolveUniqueFilename(taken, sanitizeUploadFilename(file.name))
+      const targetPath = uploadTargetPath(filename)
+      const reservation = uploadReservationKey(workspaceId, targetPath)
+      if (inFlightUploadPaths.has(reservation) || hasUploadMention(prompt.value, targetPath)) {
+        continue
+      }
+      inFlightUploadPaths.add(reservation)
+      reserved.push(reservation)
+      let content: string
+      try {
+        content = await fileToBase64(file)
+      } catch {
+        notify.error('Upload failed', `File "${file.name}" could not be read.`)
+        continue
+      }
+      if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId) {
+        inFlightUploadPaths.delete(reservation)
+        continue
+      }
+      const requestId = nextChatUploadRequestId(filename)
+      // Register first so a synchronous sendFilesUpload throw (oversize
+      // cap) still resolves through the tracked promise instead of
+      // hanging the upload: fail the pending upload, then surface the
+      // error visibly.
+      const tracked = fileExplorer.trackAndUpload(
+        workspaceId,
+        requestId,
+        CHAT_UPLOAD_DIR,
+        filename,
+        content,
+        !isScheduledTask.value,
+      )
+      if (isScheduledTask.value) ownedPendingUploadIds.add(requestId)
+      transfers.push(
+        tracked.then(
+          () => {
+            ownedPendingUploadIds.delete(requestId)
+            return targetPath
+          },
+          () => {
+            ownedPendingUploadIds.delete(requestId)
+            return null
+          },
+        ),
+      )
+      try {
+        sendFilesUpload(workspaceId, requestId, CHAT_UPLOAD_DIR, filename, content, false)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'The file could not be uploaded.'
+        fileExplorer.failUpload(requestId, message)
+      }
+    }
+
+    // Wait for all uploads to complete (success or error); failures are
+    // already consumed above so this never throws.
+    const uploaded = (await Promise.all(transfers)).filter((path): path is string => path !== null)
+    if (
+      uploaded.length > 0 &&
+      !uploadDisposed &&
+      generation === uploadGeneration &&
+      workspaceId === props.workspaceId
+    ) {
+      prompt.value = appendUploadMentions(prompt.value, uploaded)
+      if (isScheduledTask.value) emit('update:prompt', prompt.value)
+      else saveToCache(prompt.value)
+      void nextTick(resizeTextarea)
+      focusTextarea()
+      if (!isScheduledTask.value) fileExplorer.fetchDirectory(workspaceId, '/workspace')
+    }
+  } finally {
+    uploadDirectoryAbortController = null
+    for (const path of reserved) inFlightUploadPaths.delete(path)
+    if (generation === uploadGeneration) {
+      isUploading.value = false
+      if (isScheduledTask.value && !uploadDisposed) emit('uploading', false)
+      if (fileInputRef.value) fileInputRef.value.value = ''
+    }
+  }
+}
+
+function focusTextarea(): void {
+  textareaRef.value?.focus(true)
+}
+
+/** Paperclip: open the native system file dialog for upload only. */
+function triggerFileUpload(): void {
   if (!canManageFiles.value) return
-  const kind = classifyWorkspaceFile(path)
-  const ref = buildWorkspaceReferenceMarkdown(filename, path, kind)
-  prompt.value = prompt.value ? `${prompt.value}\n${ref}` : ref
-  filePickerOpen.value = false
+  fileInputRef.value?.click()
+}
+
+function handleFileInput(event: Event): void {
+  if (!canManageFiles.value) return
+  const files = (event.target as HTMLInputElement).files
+  if (!files || files.length === 0) return
+  void uploadChatFiles(files)
+}
+
+function handleComposerDrop(event: DragEvent): void {
+  if (!canManageFiles.value || !isFileDrag(event)) return
+  // The composer card lives inside the panel/home drop zone: stop
+  // propagation so the same drop is not uploaded a second time by the
+  // parent forwarder (which also calls `uploadChatFiles`).
+  event.preventDefault()
+  event.stopPropagation()
+  const files = getDroppedFiles(event)
+  if (files.length === 0) return
+  void uploadChatFiles(files)
+}
+
+function handleComposerDragOver(event: DragEvent): void {
+  if (!canManageFiles.value || !isFileDrag(event)) return
+  event.preventDefault()
+  event.stopPropagation()
 }
 
 function clearInput(): void {
   prompt.value = ''
   selectedSkillIds.value = []
-  clearCache()
+  if (!isScheduledTask.value) clearCache()
+}
+
+/**
+ * Prefill the composer without sending (OpenCode fork parity: navigate
+ * with prompt). Persists to the per-session cache so it survives remounts.
+ * `append` keeps existing text and adds `text` after a blank line (restoring
+ * withdrawn or stopped steers or a failed send); `skillIds` reselects skills;
+ * `focus` moves the caret to the end.
+ */
+function setPrompt(
+  text: string,
+  options: { append?: boolean; focus?: boolean; skillIds?: string[] } = {},
+): void {
+  // Appending keeps what the user already typed; restored text follows after
+  // a blank line.
+  const current = prompt.value.replace(/\s+$/, '')
+  const next = options.append && current ? `${current}\n\n${text}` : text
+  prompt.value = next
+  const missingSkillIds = (options.skillIds ?? []).filter(
+    (id) => !selectedSkillIds.value.includes(id),
+  )
+  if (missingSkillIds.length)
+    selectedSkillIds.value = [...selectedSkillIds.value, ...missingSkillIds]
+  if (!isScheduledTask.value) saveToCache(next)
+  void nextTick(resizeTextarea)
+  if (options.focus) focusTextarea()
 }
 
 const fileExplorer = useFileExplorerStore()
-const mentionOpen = ref(false)
-const mentionIndex = ref(0)
-const mentionQuery = ref('')
-const composerKind = ref<'mention' | 'skill' | null>(null)
-const mentionSearchPaths = ref<string[]>([])
-const mentionPopupListRef = ref<HTMLElement | null>(null)
-const mentionPointerHover = createPointerHoverGate()
-let mentionFindTimer: ReturnType<typeof setTimeout> | null = null
-let mentionFindGeneration = 0
-let mentionSearchStarted = false
+if (props.variant === 'scheduled-task') useWorkspaceFileEvents(() => props.workspaceId ?? '')
 
 const MENTION_FIND_DEBOUNCE_MS = 150
 
@@ -336,27 +1123,22 @@ const mentionCandidates = computed<MentionCandidate[]>(() => {
 const mentionPopupCandidates = computed<MentionCandidate[]>(() =>
   props.mentionControlled ? [] : mentionCandidates.value,
 )
-
 watch(
   [mentionOpen, mentionQuery, mentionCandidates, mentionIndex],
   ([open, query, candidates, index]) => {
     if (props.mentionControlled) emit('mention-change', open, query, candidates, index)
   },
 )
-
 watch(
   () => props.mentionActiveIndex,
   (index) => {
-    if (props.mentionControlled && typeof index === 'number') {
-      mentionIndex.value = index
-    }
+    if (props.mentionControlled && typeof index === 'number') mentionIndex.value = index
   },
 )
-
 watch(
   () => props.mentionControlled,
   (controlled) => {
-    if (controlled) {
+    if (controlled)
       emit(
         'mention-change',
         mentionOpen.value,
@@ -364,16 +1146,12 @@ watch(
         mentionCandidates.value,
         mentionIndex.value,
       )
-    }
   },
 )
-
 watch(mentionCandidates, (candidates) => {
-  if (mentionIndex.value >= candidates.length) {
+  if (mentionIndex.value >= candidates.length)
     mentionIndex.value = Math.max(0, candidates.length - 1)
-  }
 })
-
 watch(
   () => [mentionIndex.value, mentionPopupCandidates.value.length] as const,
   () => {
@@ -382,9 +1160,7 @@ watch(
       const active = mentionPopupListRef.value?.querySelector<HTMLElement>(
         `[data-mention-index="${mentionIndex.value}"]`,
       )
-      if (typeof active?.scrollIntoView === 'function') {
-        active.scrollIntoView({ block: 'nearest' })
-      }
+      active?.scrollIntoView?.({ block: 'nearest' })
     })
   },
 )
@@ -402,38 +1178,13 @@ function onMentionPopupMouseMove(event: MouseEvent, index: number): void {
   mentionIndex.value = index
 }
 
-function textareaEl(): HTMLTextAreaElement | null {
-  const root = textareaRef.value
-  if (!root) return null
-  const el = (root as { $el?: unknown }).$el
-  return el instanceof HTMLTextAreaElement ? el : null
-}
-
-const MAX_COMPOSER_HEIGHT = 200
 let textareaResizeObserver: ResizeObserver | null = null
-
-/**
- * Grow the composer to fit its content, capped at MAX_COMPOSER_HEIGHT.
- * Empty input resets to CSS min-height so it stays one line.
- */
 function resizeTextarea(): void {
-  const el = textareaEl()
-  if (!el) return
-  if (!el.value) {
-    el.style.height = ''
-    el.style.overflowY = ''
-    return
-  }
-  el.style.height = 'auto'
-  const content = el.scrollHeight
-  if (content <= 0) return
-  el.style.height = `${Math.min(content, MAX_COMPOSER_HEIGHT)}px`
-  el.style.overflowY = content > MAX_COMPOSER_HEIGHT ? 'auto' : 'hidden'
+  textareaRef.value?.resize()
 }
-
 function observeTextareaResize(): void {
   if (typeof ResizeObserver === 'undefined') return
-  const el = textareaEl()
+  const el = textareaRef.value?.el
   if (!el) return
   textareaResizeObserver?.disconnect()
   let lastWidth = el.offsetWidth
@@ -444,6 +1195,16 @@ function observeTextareaResize(): void {
     resizeTextarea()
   })
   textareaResizeObserver.observe(el)
+}
+
+function cancelMentionFileSearch(): void {
+  mentionFindGeneration += 1
+  mentionSearchPaths.value = []
+  mentionSearchStarted = false
+  if (mentionFindTimer) {
+    clearTimeout(mentionFindTimer)
+    mentionFindTimer = null
+  }
 }
 
 function closeComposerQuery(): void {
@@ -463,14 +1224,31 @@ function closeComposerQuery(): void {
 
 async function runMentionFileSearch(workspaceId: string, query: string): Promise<void> {
   const generation = ++mentionFindGeneration
-  const paths = await fileExplorer.findFiles(workspaceId, query, MENTION_FIND_LIMIT)
-  if (generation !== mentionFindGeneration) return
-  mentionSearchPaths.value = paths
+  if (isScheduledTask.value && !releaseMentionSubscription)
+    releaseMentionSubscription = subscribeToWorkspace(workspaceId)
+  try {
+    const paths = await fileExplorer.findFiles(workspaceId, query, MENTION_FIND_LIMIT)
+    if (
+      generation !== mentionFindGeneration ||
+      workspaceId !== props.workspaceId ||
+      (isScheduledTask.value && props.filesAvailable === false) ||
+      composerKind.value !== 'mention'
+    )
+      return
+    mentionSearchPaths.value = paths
+  } catch {
+    if (generation === mentionFindGeneration) mentionSearchPaths.value = []
+  }
 }
 
 function scheduleMentionFileSearch(rawQuery: string): void {
+  mentionFindGeneration += 1
   const fileQuery = mentionFileSearchQuery(rawQuery)
-  if (fileQuery === null || !props.workspaceId) {
+  if (
+    fileQuery === null ||
+    !props.workspaceId ||
+    (isScheduledTask.value && props.filesAvailable === false)
+  ) {
     mentionSearchPaths.value = []
     return
   }
@@ -491,11 +1269,13 @@ function scheduleMentionFileSearch(rawQuery: string): void {
 }
 
 function refreshComposerQuery(): void {
-  const el = textareaEl()
+  const el = textareaRef.value
   if (!el) return
-  const cursor = el.selectionStart ?? el.value.length
-  const mention = detectMentionQuery(el.value, cursor)
+  const cursor = el.cursor()
+  const text = el.value()
+  const mention = detectMentionQuery(text, cursor)
   if (mention !== null) {
+    if (composerKind.value !== 'mention') cancelMentionFileSearch()
     composerKind.value = 'mention'
     mentionQuery.value = mention
     mentionIndex.value = 0
@@ -503,8 +1283,10 @@ function refreshComposerQuery(): void {
     scheduleMentionFileSearch(mention)
     return
   }
-  const slash = detectSlashQuery(el.value, cursor)
+  // Skills only apply at run start; a steer cannot carry them.
+  const slash = steering.value ? null : detectSlashQuery(text, cursor)
   if (slash !== null) {
+    if (composerKind.value === 'mention') cancelMentionFileSearch()
     composerKind.value = 'skill'
     mentionQuery.value = slash
     mentionIndex.value = 0
@@ -515,36 +1297,42 @@ function refreshComposerQuery(): void {
 }
 
 function chooseMention(candidate: MentionCandidate): void {
-  const el = textareaEl()
+  const el = textareaRef.value
   if (!el) return
-  const cursor = el.selectionStart ?? el.value.length
+  const cursor = el.cursor()
+  const text = el.value()
   if (candidate.kind === 'skill') {
     addSkill(candidate.insert)
-    const next = consumeSlashQuery(el.value, cursor)
+    const next = consumeSlashQuery(text, cursor)
     prompt.value = next.text
     closeComposerQuery()
     void nextTick(() => {
       el.focus()
-      el.setSelectionRange(next.cursor, next.cursor)
+      el.setCursor(next.cursor)
     })
     return
   }
-  const next = applyMentionCandidate(el.value, cursor, candidate)
+  if (isScheduledTask.value && candidate.kind === 'file' && props.filesAvailable === false) {
+    closeComposerQuery()
+    return
+  }
+  const next = applyMentionCandidate(text, cursor, candidate)
   prompt.value = next.text
   closeComposerQuery()
   void nextTick(() => {
     el.focus()
-    el.setSelectionRange(next.cursor, next.cursor)
+    el.setCursor(next.cursor)
   })
 }
 
-defineExpose({ clearInput, chooseMention })
+defineExpose({ clearInput, chooseMention, setPrompt, uploadChatFiles })
 
 function onPromptInput(): void {
   refreshComposerQuery()
 }
 
 function onPromptKeydown(e: KeyboardEvent): void {
+  if (e.isComposing) return
   if (mentionOpen.value && mentionCandidates.value.length > 0) {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
@@ -571,11 +1359,12 @@ function onPromptKeydown(e: KeyboardEvent): void {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
+      e.stopPropagation()
       closeComposerQuery()
       return
     }
   }
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !isScheduledTask.value) {
     e.preventDefault()
     handleSend()
   }
@@ -583,6 +1372,10 @@ function onPromptKeydown(e: KeyboardEvent): void {
 
 function handleKeydown(e: KeyboardEvent): void {
   onPromptKeydown(e)
+}
+
+function onSuggestionOpenChange(open: boolean): void {
+  if (!open && mentionOpen.value) closeComposerQuery()
 }
 
 function onComposerKeydown(e: KeyboardEvent): void {
@@ -594,234 +1387,361 @@ function onComposerKeydown(e: KeyboardEvent): void {
 </script>
 
 <template>
+  <div v-if="stopOnly" class="flex justify-end px-3 pb-2 sm:px-4">
+    <Button
+      :disabled="!canStop"
+      size="icon"
+      class="h-8 w-8 shrink-0 rounded-full transition-all"
+      :class="
+        canStop
+          ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+          : 'bg-muted text-muted-foreground'
+      "
+      :title="stopTitle"
+      :aria-label="stopTitle"
+      :aria-busy="stopping"
+      data-testid="composer-stop"
+      @click="emit('stop')"
+    >
+      <Loader2 v-if="stopping" :size="14" class="animate-spin" />
+      <Square v-else :size="14" />
+    </Button>
+  </div>
   <div
-    class="relative min-w-0 w-full bg-transparent px-3 pb-2 sm:px-4"
-    :class="attached ? 'pt-0' : 'pt-3 sm:pt-4'"
+    v-else
+    class="relative min-w-0 w-full bg-transparent"
+    :class="isScheduledTask ? 'p-0' : ['px-3 pb-2 sm:px-4', attached ? 'pt-0' : 'pt-3 sm:pt-4']"
     @keydown="onComposerKeydown"
   >
-    <div
-      class="flex flex-col rounded-3xl border border-border bg-card shadow-sm transition-all duration-200 focus-within:border-primary focus-within:shadow-md"
-      data-testid="composer-card"
-    >
-      <button
-        v-if="providerMissing"
-        type="button"
-        data-testid="composer-provider-cta"
-        class="mx-4 mt-3 w-fit cursor-pointer rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
-        @click="openProviderSettings"
-      >
-        Configure OpenRouter in Org Settings
-      </button>
-
-      <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pt-3">
-        <span
-          v-for="skill in selectedSkills"
-          :key="skill.id"
-          class="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
-        >
-          <BookText :size="10" />
-          {{ skill.name }}
-          <button
-            type="button"
-            class="transition-opacity hover:opacity-70"
-            @click="removeSkill(skill.id)"
-          >
-            <X :size="11" />
-          </button>
-        </span>
-      </div>
-
-      <div class="relative">
-        <Textarea
-          ref="textareaRef"
-          v-model="prompt"
-          :disabled="disabled"
-          :rows="1"
-          placeholder="Plan, Build, / for skills, @ for context"
-          class="min-h-10 max-h-[200px] w-full resize-none !rounded-none !border-0 !bg-transparent px-4 py-2 text-base !shadow-none !outline-none !ring-0 transition-[height] duration-100 ease-out focus:!border-transparent focus:!shadow-none focus-visible:!outline-none focus-visible:ring-0 md:min-h-9"
-          data-testid="composer-textarea"
-          @keydown="handleKeydown"
-          @input="onPromptInput"
-        />
+    <Popover :open="suggestionOpen" @update:open="onSuggestionOpenChange">
+      <PopoverAnchor as-child>
         <div
-          v-if="mentionPopupCandidates.length > 0"
-          ref="mentionPopupListRef"
-          class="absolute bottom-full left-4 right-4 z-10 mb-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-md"
-          role="listbox"
-          :aria-label="composerKind === 'skill' ? 'Skill suggestions' : 'Mention suggestions'"
+          ref="suggestionAnchor"
+          class="flex flex-col rounded-3xl border bg-card shadow-sm transition-all duration-200 focus-within:border-primary focus-within:shadow-md"
+          :class="
+            props.uploadDrag?.active ? 'border-primary ring-2 ring-primary/40' : 'border-border'
+          "
+          data-testid="composer-card"
+          @dragover="handleComposerDragOver"
+          @drop="handleComposerDrop"
         >
-          <button
-            v-for="(candidate, idx) in mentionPopupCandidates"
-            :key="`${candidate.kind}:${candidate.insert}`"
-            type="button"
-            role="option"
-            :aria-selected="idx === mentionIndex"
-            :data-mention-index="idx"
-            class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors"
-            :class="
-              idx === mentionIndex
-                ? 'bg-muted text-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            "
-            @mousedown.prevent="requestMentionSelect(candidate)"
-            @mousemove="onMentionPopupMouseMove($event, idx)"
-          >
+          <div v-if="selectedSkills.length" class="flex flex-wrap gap-1.5 px-4 pt-3">
             <span
-              class="rounded px-1 py-0.5 text-[10px] font-medium"
-              :class="
-                candidate.kind === 'agent' || candidate.kind === 'skill'
-                  ? 'bg-primary/10 text-primary'
-                  : 'bg-muted text-muted-foreground'
-              "
+              v-for="skill in selectedSkills"
+              :key="skill.id"
+              :data-testid="`composer-skill-chip-${skill.id}`"
+              class="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
             >
-              {{ candidate.kind }}
+              <BookText :size="10" />
+              {{ skill.name }}
+              <button
+                type="button"
+                class="transition-opacity hover:opacity-70"
+                :aria-label="`Remove ${skill.name} skill`"
+                :data-testid="`composer-skill-remove-${skill.id}`"
+                @click="removeSkill(skill.id)"
+              >
+                <X :size="11" />
+              </button>
             </span>
-            <span class="truncate flex-1">{{ candidate.label }}</span>
-          </button>
-        </div>
-      </div>
-
-      <div class="flex items-center gap-1 p-2 pl-2 pb-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger as-child>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              class="h-8 gap-1.5 rounded-full px-2.5 text-xs font-medium"
-              data-testid="composer-mode-trigger"
-              :disabled="disabled"
-            >
-              <component :is="modeIcon" :size="14" />
-              {{ modeLabel }}
-              <ChevronDown :size="12" class="opacity-70" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent side="top" align="start" class="min-w-36">
-            <DropdownMenuItem class="text-xs" data-testid="composer-mode-build" @click="setMode('build')">
-              <Hammer :size="14" />
-              Build
-              <Check v-if="localMode === 'build'" class="ml-auto size-3.5" />
-            </DropdownMenuItem>
-            <DropdownMenuItem class="text-xs" data-testid="composer-mode-plan" @click="setMode('plan')">
-              <ListTodo :size="14" />
-              Plan
-              <Check v-if="localMode === 'plan'" class="ml-auto size-3.5" />
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        <HarnessModelPicker
-          :model="localModel"
-          :effort="localEffort"
-          :models="catalog"
-          :loading="modelLoading"
-          :default-model="orgDefaultModel"
-          :disabled="disabled"
-          @update:model="setModel"
-          @update:effort="setEffort"
-        />
-
-        <div class="ml-auto flex items-center gap-1">
-          <Button
+          </div>
+          <button
+            v-if="providerMissing"
             type="button"
-            variant="ghost"
-            size="icon"
-            class="h-8 w-8 text-muted-foreground hover:text-foreground"
-            :class="contextOpen ? 'text-foreground' : ''"
-            :title="contextAriaLabel"
-            :aria-label="contextAriaLabel"
-            data-testid="composer-context-usage"
-            @click="emit('toggle-context')"
+            data-testid="composer-provider-cta"
+            class="mx-4 mt-3 w-fit cursor-pointer rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+            @click="openProviderSettings"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
-              aria-hidden="true"
-              class="shrink-0"
+            {{ localHarnessId === 'native' ? 'Connect a provider in Settings' : `${harnessLabel} unavailable — check accounts in Provider settings` }}
+          </button>
+
+          <HarnessMentionImages
+            v-if="imageTokens.length"
+            :tokens="imageTokens"
+            :workspace-id="workspaceId ?? ''"
+            removable
+            strip-class="px-4 pt-3"
+            @remove="removeImageToken"
+          />
+          <div class="relative">
+            <ComposerRichEditor
+              ref="textareaRef"
+              v-model="prompt"
+              :disabled="disabled"
+              :placeholder="composerPlaceholder"
+              :aria-label="isScheduledTask ? 'Scheduled task prompt' : 'Chat prompt'"
+              :aria-invalid="isScheduledTask ? Boolean(promptError) : undefined"
+              :aria-describedby="isScheduledTask && promptError ? 'task-prompt-error' : undefined"
+              :aria-controls="suggestionOpen ? activeListboxId : undefined"
+              :aria-activedescendant="suggestionOpen ? activeOptionId : undefined"
+              :test-id="isScheduledTask ? 'task-prompt' : 'composer-textarea'"
+              :editor-class="isScheduledTask ? 'min-h-24 md:min-h-24' : undefined"
+              @keydown="handleKeydown"
+              @input="onPromptInput"
+            />
+            <div
+              v-if="!isScheduledTask && mentionPopupCandidates.length > 0"
+              ref="mentionPopupListRef"
+              class="absolute bottom-full left-4 right-4 z-10 mb-1 max-h-48 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-md"
+              role="listbox"
+              :aria-label="composerKind === 'skill' ? 'Skill suggestions' : 'Mention suggestions'"
             >
-              <circle
-                cx="8"
-                cy="8"
-                :r="CONTEXT_RING_RADIUS"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                class="text-muted-foreground/30"
-              />
-              <circle
-                cx="8"
-                cy="8"
-                :r="CONTEXT_RING_RADIUS"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                class="text-primary"
-                :stroke-dasharray="contextRingCircumference"
-                :stroke-dashoffset="contextRingOffset"
-                transform="rotate(-90 8 8)"
-              />
-            </svg>
-          </Button>
-          <div v-if="workspaceId" class="relative">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              class="h-8 w-8 text-muted-foreground hover:text-foreground"
-              :disabled="!canManageFiles"
-              title="Attach a workspace file"
-              data-testid="composer-attach"
-              @click="filePickerOpen = !filePickerOpen"
+              <button
+                v-for="(candidate, idx) in mentionPopupCandidates"
+                :key="`${candidate.kind}:${candidate.insert}`"
+                type="button"
+                role="option"
+                :aria-selected="idx === mentionIndex"
+                :data-mention-index="idx"
+                class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors"
+                :class="
+                  idx === mentionIndex
+                    ? 'bg-muted text-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
+                "
+                @mousedown.prevent="requestMentionSelect(candidate)"
+                @mousemove="onMentionPopupMouseMove($event, idx)"
+              >
+                <WorkspaceFileIcon
+                  v-if="candidate.kind === 'file'"
+                  :path="
+                    candidate.insert.startsWith('file:')
+                      ? candidate.insert.slice('file:'.length)
+                      : candidate.insert
+                  "
+                  :size="15"
+                />
+                <span
+                  v-else
+                  class="rounded px-1 py-0.5 text-[10px] font-medium"
+                  :class="
+                    candidate.kind === 'agent' || candidate.kind === 'skill'
+                      ? 'bg-primary/10 text-primary'
+                      : 'bg-muted text-muted-foreground'
+                  "
+                >
+                  {{ candidate.kind }}
+                </span>
+                <span class="truncate flex-1">{{ candidate.label }}</span>
+              </button>
+            </div>
+            <p
+              v-if="isScheduledTask && promptError"
+              id="task-prompt-error"
+              class="border-t border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive"
+              data-testid="task-prompt-error"
+              role="alert"
             >
-              <Paperclip :size="16" />
-            </Button>
-            <div v-if="filePickerOpen" class="absolute bottom-full right-0 z-20 mb-1">
-              <WorkspaceFilePicker
-                :workspace-id="workspaceId"
-                :disabled="!canManageFiles"
-                @select="handleFileSelected"
-                @close="filePickerOpen = false"
+              {{ promptError }}
+            </p>
+          </div>
+
+          <div
+            class="flex flex-wrap items-center gap-1 p-2 pl-2 pb-2"
+            data-testid="composer-toolbar"
+          >
+            <div
+              v-show="!voiceBusy"
+              class="flex min-w-0 flex-[1_1_10rem] flex-wrap items-center gap-1"
+              data-testid="composer-toolbar-leading"
+            >
+              <DropdownMenu>
+                <DropdownMenuTrigger as-child>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    class="h-8 min-w-0 max-w-full shrink gap-1.5 rounded-full px-2.5 text-xs font-medium"
+                    data-testid="composer-mode-trigger"
+                    :disabled="pickersLocked"
+                  >
+                    <component :is="modeIcon" :size="14" class="shrink-0" />
+                    <span class="min-w-0 truncate">{{ modeMenuLabel }}</span>
+                    <ChevronDown :size="12" class="shrink-0 opacity-70" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="top" align="start" class="min-w-48">
+                  <template v-for="(engine, index) in engines" :key="engine.id">
+                    <DropdownMenuSeparator v-if="index" />
+                    <DropdownMenuLabel class="px-2 pb-1 pt-2">{{ engine.name }} Build/Plan</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      v-for="mode in engine.modes.filter((mode): mode is HarnessSessionMode => mode === 'build' || mode === 'plan')"
+                      :key="mode"
+                      class="text-xs"
+                      :data-testid="`composer-mode-${engine.id}-${mode}`"
+                      :disabled="(engineLocked && localHarnessId !== engine.id) || (localHarnessId !== engine.id && engineUnavailable(engine.id))"
+                      :title="engineUnavailable(engine.id) ? `Connect ${engine.name} in Provider settings first.` : undefined"
+                      @click="setHarnessMode(engine.id, mode)"
+                    >
+                      <component :is="mode === 'plan' ? ListTodo : Hammer" :size="14" />
+                      {{ engine.name }} {{ mode === 'plan' ? 'Plan' : 'Build' }}
+                      <Check v-if="localHarnessId === engine.id && localMode === mode" class="ml-auto size-3.5" />
+                    </DropdownMenuItem>
+                    <button
+                      v-if="engineUnavailable(engine.id)"
+                      type="button"
+                      class="w-full px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+                      :data-testid="`${engine.id}-provider-settings`"
+                      @click.stop="openProviderSettings"
+                    >Connect {{ engine.name }} in Provider settings</button>
+                  </template>
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <ModelPicker
+                :model="localModel"
+                :effort="localEffort"
+                :models="catalog"
+                :recent-models="recentModels"
+                :recent-efforts="localHarnessId !== 'claude' ? recentEntries : []"
+                :loading="modelLoading"
+                :disabled="pickersLocked"
+                :default-model-label="isScheduledTask ? 'Agent default' : 'Select model…'"
+                :allow-default="isScheduledTask"
+                @update:model="setModel"
+                @update:effort="setEffort"
               />
             </div>
+
+            <div
+              class="flex items-center gap-1"
+              :class="voiceBusy ? 'min-w-0 flex-1' : 'ml-auto shrink-0'"
+            >
+              <Button
+                v-if="!isScheduledTask && !voiceBusy"
+                type="button"
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 text-muted-foreground hover:text-foreground"
+                :class="contextOpen ? 'text-foreground' : ''"
+                :title="contextAriaLabel"
+                :aria-label="contextAriaLabel"
+                data-testid="composer-context-usage"
+                @click="emit('toggle-context')"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" class="shrink-0">
+                  <circle
+                    cx="8"
+                    cy="8"
+                    :r="CONTEXT_RING_RADIUS"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    class="text-muted-foreground/30"
+                  />
+                  <circle
+                    cx="8"
+                    cy="8"
+                    :r="CONTEXT_RING_RADIUS"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    class="text-primary"
+                    :stroke-dasharray="contextRingCircumference"
+                    :stroke-dashoffset="contextRingOffset"
+                    transform="rotate(-90 8 8)"
+                  />
+                </svg>
+              </Button>
+              <div v-if="workspaceId" v-show="!voiceBusy" class="relative">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8 text-muted-foreground hover:text-foreground"
+                  :disabled="!canManageFiles || isUploading"
+                  title="Upload a file to the workspace"
+                  aria-label="Upload a file to the workspace"
+                  data-testid="composer-attach"
+                  @click="triggerFileUpload"
+                >
+                  <Loader2 v-if="isUploading" :size="16" class="animate-spin" />
+                  <Paperclip v-else :size="16" />
+                </Button>
+                <input
+                  ref="fileInputRef"
+                  type="file"
+                  multiple
+                  class="hidden"
+                  data-testid="composer-file-input"
+                  @change="handleFileInput"
+                />
+              </div>
+              <VoiceInputControl
+                v-if="workspaceId && !isScheduledTask"
+                :workspace-id="workspaceId"
+                :context-key="`${sessionId ?? ''}:${resetKey ?? ''}:${localHarnessId}`"
+                :disabled="disabled || sending"
+                @result="insertDictation"
+                @busy="voiceBusy = $event"
+              />
+              <Button
+                v-if="steering && hasText && !voiceBusy"
+                type="button"
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                :disabled="!canStop"
+                :title="stopTitle"
+                :aria-label="stopTitle"
+                :aria-busy="stopping"
+                data-testid="composer-stop"
+                @click="emit('stop')"
+              >
+                <Loader2 v-if="stopping" :size="14" class="animate-spin" />
+                <Square v-else :size="14" />
+              </Button>
+              <Button
+                v-if="!isScheduledTask && !voiceBusy"
+                :disabled="!primaryEnabled"
+                size="icon"
+                class="h-8 w-8 shrink-0 rounded-full transition-all"
+                :class="
+                  primaryEnabled
+                    ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                    : 'bg-muted text-muted-foreground'
+                "
+                :title="primaryTitle"
+                :aria-label="primaryTitle"
+                :aria-busy="primaryIsStop && stopping"
+                :data-testid="primaryIsStop ? 'composer-stop' : 'composer-send'"
+                @click="primaryIsStop ? emit('stop') : handleSend()"
+              >
+                <Loader2 v-if="primaryIsStop && stopping" :size="14" class="animate-spin" />
+                <Square v-else-if="primaryIsStop" :size="14" />
+                <Send v-else :size="16" />
+              </Button>
+            </div>
           </div>
-          <Button
-            v-if="stoppable"
-            :disabled="!canStop"
-            size="icon"
-            class="h-8 w-8 shrink-0 rounded-full transition-all"
-            :class="
-              canStop
-                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                : 'bg-muted text-muted-foreground'
-            "
-            title="Stop current run"
-            data-testid="composer-stop"
-            @click="emit('stop')"
-          >
-            <Square :size="14" />
-          </Button>
-          <Button
-            v-else
-            :disabled="!canSend"
-            size="icon"
-            class="h-8 w-8 shrink-0 rounded-full transition-all"
-            :class="
-              canSend
-                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                : 'bg-muted text-muted-foreground'
-            "
-            title="Send"
-            data-testid="composer-send"
-            @click="handleSend"
-          >
-            <Send :size="16" />
-          </Button>
         </div>
-      </div>
-    </div>
+      </PopoverAnchor>
+      <PopoverContent
+        v-if="suggestionOpen"
+        side="top"
+        align="start"
+        :side-offset="6"
+        :avoid-collisions="false"
+        :disable-autofocus="true"
+        :disable-outside-pointer-events="false"
+        :style="{ maxHeight: `${suggestionMaxHeight}px` }"
+        class="z-[100] min-h-0 w-[var(--reka-popover-trigger-width)] max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border border-border bg-card p-0 shadow-lg"
+        @placed="clampSuggestionIntoViewport"
+        data-testid="composer-suggestions-portal"
+        @open-auto-focus.prevent
+        @close-auto-focus.prevent
+        @escape-key-down.prevent="closeComposerQuery"
+      >
+        <HarnessMentionSheet
+          :label="composerKind === 'skill' ? 'Skill suggestions' : 'Mention suggestions'"
+          :listbox-id="activeListboxId"
+          :candidates="mentionCandidates"
+          :active-index="mentionIndex"
+          @select="requestMentionSelect"
+          @hover="mentionIndex = $event"
+        />
+      </PopoverContent>
+    </Popover>
     <p v-if="busyMessage" class="mt-2 text-center text-xs text-amber-600 dark:text-amber-400">
       {{ busyMessage }}
     </p>

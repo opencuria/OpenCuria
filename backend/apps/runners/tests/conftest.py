@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -16,10 +17,26 @@ from common.utils import generate_api_token, hash_token
 
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
+from apps.runners.services.infra.harness_gateway import get_harness_gateway
 
 # Allow sync ORM calls from async test functions (Django safety check).
 # In production code, we use sync_to_async / async-safe patterns.
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+
+def has_busy_agent(workspace_id: uuid.UUID) -> bool:
+    """Busy check the runner service passes to lifecycle admissions."""
+    return get_harness_gateway().has_busy_session(workspace_id)
+
+
+@pytest.fixture
+def frontend(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Observe the production frontend transport without sending Socket.IO events."""
+    emit = AsyncMock()
+    monkeypatch.setattr(
+        "common.realtime.emit_to_frontend", emit
+    )
+    return emit
 
 
 @pytest.fixture
@@ -56,7 +73,6 @@ def runner(db, api_token: str, organization: Organization) -> Runner:
         status=RunnerStatus.ONLINE,
         sid="test-sid-123",
         organization=organization,
-        available_runtimes=["docker", "qemu"],
     )
 
 
@@ -68,7 +84,6 @@ def offline_runner(db, organization: Organization) -> Runner:
         api_token_hash=hash_token("offline-token"),
         status=RunnerStatus.OFFLINE,
         organization=organization,
-        available_runtimes=["docker", "qemu"],
     )
 
 
@@ -81,6 +96,16 @@ def workspace(runner: Runner, user) -> Workspace:
         status=WorkspaceStatus.RUNNING,
         created_by=user,
     )
+
+
+def capture_version_fields(runner: Runner, user, name: str = "capture") -> dict:
+    """Fields that attach a new captured version (v1) to a fresh image line."""
+    from apps.runners.models import CapturedImage
+
+    line = CapturedImage.objects.create(
+        organization=runner.organization, runner=runner, created_by=user, name=name
+    )
+    return {"captured_image": line, "generation": 1}
 
 
 @pytest.fixture

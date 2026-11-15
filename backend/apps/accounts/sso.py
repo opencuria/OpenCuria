@@ -12,8 +12,12 @@ from urllib import error, parse, request
 
 import jwt
 from django.conf import settings
+from django.db import IntegrityError, transaction
 
 from common.exceptions import AuthenticationError
+
+from .models import User
+from .repositories import SsoIdentityRepository, UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +80,11 @@ class KeycloakSsoService:
         """Expose immutable provider config."""
         return self._config
 
-    def exchange_code_for_user(self, *, code: str, redirect_uri: str):
+    def exchange_code_for_user(self, *, code: str, redirect_uri: str) -> User:
         """Exchange OIDC authorization code and return a local user."""
-        id_token = self._exchange_code_for_id_token(code=code, redirect_uri=redirect_uri)
+        id_token = self._exchange_code_for_id_token(
+            code=code, redirect_uri=redirect_uri
+        )
         claims = self._validate_id_token(id_token)
         return self._get_or_create_user(claims)
 
@@ -107,7 +113,9 @@ class KeycloakSsoService:
                 token_payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as exc:
             details = exc.read().decode("utf-8")
-            logger.warning("SSO code exchange failed: status=%s body=%s", exc.code, details)
+            logger.warning(
+                "SSO code exchange failed: status=%s body=%s", exc.code, details
+            )
             raise AuthenticationError("SSO code exchange failed")
         except (error.URLError, TimeoutError) as exc:
             logger.warning("SSO code exchange network error: %s", exc)
@@ -135,33 +143,76 @@ class KeycloakSsoService:
 
         return payload
 
-    @staticmethod
-    def _get_or_create_user(claims: dict[str, Any]):
-        from apps.accounts.models import User
+    def _get_or_create_user(self, claims: dict[str, Any]) -> User:
+        """Resolve the account bound to ``(iss, sub)``, linking it on first use.
 
+        The ``email`` claim is user-editable at many IdPs, so it only selects
+        an account for the first binding, and only when the IdP verified it.
+        """
+        issuer = claims.get("iss") or self.config.issuer
+        subject = claims.get("sub")
+        if not isinstance(subject, str) or not subject:
+            raise AuthenticationError("SSO token did not include a subject claim")
+
+        user = SsoIdentityRepository.get_user(issuer, subject)
+        if user is None:
+            user = self._bind_identity(issuer, subject, claims)
+        if not user.is_active:
+            raise AuthenticationError("Account is disabled")
+
+        updates: dict[str, str] = {}
+        first_name = claims.get("given_name", "")
+        last_name = claims.get("family_name", "")
+        if first_name and user.first_name != first_name:
+            updates["first_name"] = first_name
+        if last_name and user.last_name != last_name:
+            updates["last_name"] = last_name
+        if updates:
+            UserRepository.update_profile(user, **updates)
+        return user
+
+    @staticmethod
+    def _bind_identity(issuer: str, subject: str, claims: dict[str, Any]) -> User:
+        """Bind a new identity to a new or SSO-only account with its email."""
         email = claims.get("email")
         if not email:
             raise AuthenticationError("SSO token did not include an email claim")
+        if claims.get("email_verified") is not True:
+            raise AuthenticationError("SSO account email is not verified")
 
-        defaults = {
-            "username": email,
-            "first_name": claims.get("given_name", ""),
-            "last_name": claims.get("family_name", ""),
-        }
-        user, created = User.objects.get_or_create(email=email, defaults=defaults)
-        if not created:
-            update_fields: list[str] = []
-            first_name = claims.get("given_name", "")
-            last_name = claims.get("family_name", "")
-            if first_name and user.first_name != first_name:
-                user.first_name = first_name
-                update_fields.append("first_name")
-            if last_name and user.last_name != last_name:
-                user.last_name = last_name
-                update_fields.append("last_name")
-            if update_fields:
-                user.save(update_fields=update_fields)
-
-        if not user.is_active:
-            raise AuthenticationError("Account is disabled")
+        try:
+            with transaction.atomic():
+                user = UserRepository.get_by_email(email)
+                if user is None:
+                    user = UserRepository.create_without_password(
+                        email,
+                        first_name=claims.get("given_name", ""),
+                        last_name=claims.get("family_name", ""),
+                    )
+                elif not _may_link_by_email(user) or (
+                    SsoIdentityRepository.exists_for_user(user)
+                ):
+                    raise AuthenticationError(
+                        "An account with this email already exists. "
+                        "Sign in with your password."
+                    )
+                SsoIdentityRepository.create(
+                    user=user, issuer=issuer, subject=subject
+                )
+        except IntegrityError:
+            # A concurrent first login bound the identity or created the account.
+            user = SsoIdentityRepository.get_user(issuer, subject)
+            if user is None:
+                raise AuthenticationError("SSO login failed. Try again.") from None
         return user
+
+
+def _may_link_by_email(user: User) -> bool:
+    """Return whether a verified email may bind an identity to *user*.
+
+    Only accounts without a usable password and without staff rights qualify,
+    i.e. accounts that SSO provisioned itself. Password and staff accounts are
+    never taken over through an email match; admins bind them explicitly.
+    """
+    has_password = bool(user.password) and user.has_usable_password()
+    return not (has_password or user.is_staff or user.is_superuser)

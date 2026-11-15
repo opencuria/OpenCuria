@@ -4,10 +4,25 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatHomeView from './ChatHomeView.vue'
-import { WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
+import { WorkspaceStatus, type Workspace } from '@/types'
+import { clearComposerTransition, isComposerTransitionPending } from '@/lib/composerTransition'
+import { subscribeToWorkspace } from '@/services/socket'
 
 const workspaceStore = {
+  isWorkspaceTransitioning(id: string): boolean {
+    return Boolean(this.workspaces.find((w) => w.id === id)?.active_operation)
+  },
+  canUseWorkspace(id: string): boolean {
+    const w = this.workspaces.find((w) => w.id === id)
+    return Boolean(
+      w?.status === WorkspaceStatus.RUNNING &&
+      w.runner_online &&
+      !this.isWorkspaceTransitioning(id),
+    )
+  },
   workspaces: [] as Workspace[],
+  loaded: true,
+  activeWorkspace: null as Workspace | null,
   fetchWorkspaces: vi.fn().mockResolvedValue(undefined),
   getWorkspaceTransitionLabel: vi.fn().mockReturnValue(null),
 }
@@ -15,8 +30,15 @@ const workspaceStore = {
 const harnessStore = {
   modelInput: '',
   effortInput: '',
+  composerDirty: false,
+  agentConfigs: [] as unknown[],
   activeSessionId: null as string | null,
   createSession: vi.fn(),
+  setComposerModel: vi.fn(),
+  setComposerEffort: vi.fn(),
+  loadAgentConfigs: vi.fn().mockResolvedValue(undefined),
+  agentDefault: vi.fn().mockReturnValue({ model: '', effort: '' }),
+  ensureComposerDefaults: vi.fn(),
 }
 
 const skillStore = {
@@ -44,24 +66,44 @@ vi.mock('@/stores/auth', () => ({
   useAuthStore: () => authStore,
 }))
 
+const fileExplorerStore = {
+  tree: [] as never[],
+  fetchDirectory: vi.fn().mockResolvedValue(undefined),
+  findFiles: vi.fn().mockResolvedValue([]),
+  reset: vi.fn(),
+}
+
+vi.mock('@/stores/fileExplorer', () => ({
+  useFileExplorerStore: () => fileExplorerStore,
+}))
+
 vi.mock('@/services/harness.api', async () => {
   const actual =
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
     getProviderConfig: vi.fn().mockResolvedValue({
-      base_url: '',
-      default_model: '',
       small_model: '',
-      computer_use_model: '',
-      has_api_key: true,
-      api_key_hint: '',
+      small_effort: '',
     }),
   }
 })
 
 vi.mock('@/lib/providerCatalog', () => ({
   loadProviderModelsCached: vi.fn().mockResolvedValue([]),
+}))
+
+vi.mock('@/lib/recentModels', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/recentModels')>('@/lib/recentModels')
+  return {
+    ...actual,
+    loadRecentModels: () => Promise.resolve([]),
+  }
+})
+
+vi.mock('@/services/socket', () => ({
+  onEvent: vi.fn(() => () => {}),
+  subscribeToWorkspace: vi.fn(() => vi.fn()),
 }))
 
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
@@ -71,7 +113,6 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     active_operation: null,
     name: 'Alpha',
-    runtime_type: RuntimeType.DOCKER,
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,
@@ -91,6 +132,7 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     has_active_session: false,
     runner_online: true,
     credential_ids: [],
+    plugin_ids: [],
     credentials_present: false,
     ...overrides,
   }
@@ -110,7 +152,7 @@ function makeRouter() {
   })
 }
 
-async function mountHome() {
+async function mountHome(settle = true) {
   const router = makeRouter()
   await router.push('/')
   await router.isReady()
@@ -120,9 +162,43 @@ async function mountHome() {
       stubs: {
         CreateWorkspaceDialog: { template: '<div />' },
         HarnessChatInput: {
-          template:
-            '<div data-testid="chat-home-composer"><textarea data-testid="composer-textarea" /></div>',
+          name: 'HarnessChatInput',
+          props: ['harnessId'],
+          template: `
+            <div data-testid="chat-home-composer">
+              <textarea data-testid="composer-textarea" />
+              <button data-testid="select-claude" @click="$emit('update:harnessId', 'claude')" />
+              <button data-testid="select-codex" @click="$emit('update:harnessId', 'codex')" />
+              <button
+                data-testid="send-composer-prompt"
+                @click="$emit('send', 'hello', 'build', '', [], '', harnessId)"
+              />
+            </div>
+          `,
+          methods: {
+            chooseMention() {},
+            setPrompt(text: string, options?: { append?: boolean; skillIds?: string[] }) {
+              ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
+                'prefill',
+                text,
+                options,
+              )
+            },
+          },
         },
+        HarnessSheetStack: {
+          props: ['sheets'],
+          template:
+            '<div v-if="(sheets ?? []).length" data-testid="composer-sheet-stack">{{ (sheets ?? []).length }}</div>',
+        },
+        WorkspaceSidePanel: {
+          props: ['workspaceId'],
+          template: '<div data-testid="workspace-side-panel" />',
+        },
+        DesktopSurface: { template: '<div data-testid="desktop-surface-stub" />' },
+        WorkspaceDesktop: { template: '<div />' },
+        EditorTabs: { template: '<div />' },
+        WorkspaceEditor: { template: '<div />' },
         DropdownMenu: { template: '<div><slot /></div>' },
         DropdownMenuTrigger: { template: '<div><slot /></div>' },
         DropdownMenuContent: { template: '<div><slot /></div>' },
@@ -131,35 +207,61 @@ async function mountHome() {
       },
     },
   })
-  await flushPromises()
+  if (settle) {
+    await vi.dynamicImportSettled()
+    await flushPromises()
+  }
   return { wrapper, router }
 }
 
 describe('ChatHomeView', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
-    vi.clearAllMocks()
     localStorage.clear()
+    setActivePinia(createPinia())
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+    clearComposerTransition()
     workspaceStore.workspaces = [makeWorkspace()]
+    workspaceStore.loaded = true
+    workspaceStore.activeWorkspace = null
     harnessStore.activeSessionId = null
     harnessStore.createSession.mockReset()
   })
 
-  it('greets with the email prefix and renders picker, composer and suggestions', async () => {
+  it('does not subscribe or fetch file listings when workspace loading resolves after unmount', async () => {
+    let resolveWorkspaces!: () => void
+    workspaceStore.workspaces = []
+    workspaceStore.fetchWorkspaces.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (resolveWorkspaces = resolve)),
+    )
+    const { wrapper } = await mountHome(false)
+
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledOnce()
+    wrapper.unmount()
+    resolveWorkspaces()
+    await flushPromises()
+
+    expect(vi.mocked(subscribeToWorkspace)).not.toHaveBeenCalled()
+    expect(fileExplorerStore.fetchDirectory).not.toHaveBeenCalled()
+    expect(skillStore.fetchSkills).not.toHaveBeenCalled()
+  })
+
+  it('greets with the email prefix and renders picker and composer without suggestions', async () => {
     const { wrapper } = await mountHome()
 
     expect(wrapper.get('[data-testid="chat-home-greeting"]').text()).toContain('Ada')
     expect(wrapper.find('[data-testid="workspace-picker-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(true)
-    expect(wrapper.findAll('[data-testid="chat-home-suggestion"]')).toHaveLength(4)
-    expect(wrapper.get('svg[aria-label="OpenCuria"]').classes()).toContain('size-16')
+    expect(wrapper.find('[data-testid="chat-home-suggestions"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="chat-home-suggestion"]')).toHaveLength(0)
+    const logo = wrapper.get('svg[aria-label="OpenCuria"]')
+    expect(logo.classes()).toContain('size-16')
+    expect(logo.attributes('data-motion')).toBe('idle')
+    expect(logo.classes()).toContain('oc-logo--idle')
   })
 
   it('prefers the last selected workspace from localStorage', async () => {
-    workspaceStore.workspaces = [
-      makeWorkspace(),
-      makeWorkspace({ id: 'ws-2', name: 'Beta' }),
-    ]
+    workspaceStore.workspaces = [makeWorkspace(), makeWorkspace({ id: 'ws-2', name: 'Beta' })]
     localStorage.setItem('opencuria:last-workspace', 'ws-2')
 
     const { wrapper } = await mountHome()
@@ -167,10 +269,71 @@ describe('ChatHomeView', () => {
     expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
   })
 
-  it('creates a session and navigates to workspace-detail on send', async () => {
+  it('avoids a busy workspace when picking the initial workspace', async () => {
+    workspaceStore.workspaces = [
+      makeWorkspace({ id: 'ws-busy', name: 'Busy', has_active_session: true }),
+      makeWorkspace({ id: 'ws-2', name: 'Beta' }),
+    ]
+
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
+  })
+
+  it('does not restore a stored busy workspace from localStorage', async () => {
+    workspaceStore.workspaces = [
+      makeWorkspace({ id: 'ws-busy', name: 'Busy', has_active_session: true }),
+      makeWorkspace({ id: 'ws-2', name: 'Beta' }),
+    ]
+    localStorage.setItem('opencuria:last-workspace', 'ws-busy')
+
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
+  })
+
+  it.each(['native', 'claude', 'codex'] as const)('starts a %s chat and navigates to workspace-detail', async (harnessId) => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    )
     const { wrapper, router } = await mountHome()
     const pushSpy = vi.spyOn(router, 'push')
     harnessStore.createSession.mockResolvedValue({ id: 'session-1' })
+
+    if (harnessId !== 'native') {
+      await wrapper.get(`[data-testid="select-${harnessId}"]`).trigger('click')
+    }
+    await wrapper.get('[data-testid="send-composer-prompt"]').trigger('click')
+    await flushPromises()
+
+    expect(harnessStore.createSession).toHaveBeenCalledWith(
+      'ws-1',
+      'hello',
+      'build',
+      '',
+      [],
+      '',
+      harnessId,
+    )
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'workspace-detail',
+      params: { id: 'ws-1' },
+      query: { session: 'session-1' },
+    })
+    wrapper.unmount()
+  })
+
+  it('animates the hero out, arms the composer morph and seeds the workspace on send', async () => {
+    const { wrapper, router } = await mountHome()
+    const pushSpy = vi.spyOn(router, 'push')
+    let resolveSession: (value: { id: string }) => void = () => {}
+    harnessStore.createSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSession = resolve
+        }),
+    )
 
     const vm = wrapper.vm as unknown as {
       handleSend: (
@@ -179,12 +342,31 @@ describe('ChatHomeView', () => {
         model: string,
         skillIds: string[],
         effort: string,
+        harnessId?: 'native' | 'claude',
       ) => Promise<void>
     }
-    await vm.handleSend('hello', 'build', '', [], '')
+    const sendPromise = vm.handleSend('hello', 'build', '', [], '')
     await flushPromises()
 
-    expect(harnessStore.createSession).toHaveBeenCalledWith('ws-1', 'hello', 'build', '', [], '')
+    // While the session is created, the hero plays its exit animation.
+    expect(wrapper.get('[data-testid="chat-home-hero"]').classes()).toContain('opacity-0')
+    expect(pushSpy).not.toHaveBeenCalled()
+
+    resolveSession({ id: 'session-1' })
+    await sendPromise
+    await flushPromises()
+
+    expect(harnessStore.createSession).toHaveBeenCalledWith(
+      'ws-1',
+      'hello',
+      'build',
+      '',
+      [],
+      '',
+      'native',
+    )
+    expect(isComposerTransitionPending()).toBe(true)
+    expect(workspaceStore.activeWorkspace?.id).toBe('ws-1')
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'workspace-detail',
       params: { id: 'ws-1' },
@@ -192,11 +374,127 @@ describe('ChatHomeView', () => {
     })
   })
 
+  it('resets the exit animation and does not navigate when the session fails', async () => {
+    const { wrapper, router } = await mountHome()
+    const pushSpy = vi.spyOn(router, 'push')
+    harnessStore.createSession.mockResolvedValue(null)
+
+    const vm = wrapper.vm as unknown as {
+      handleSend: (
+        prompt: string,
+        mode: 'build',
+        model: string,
+        skillIds: string[],
+        effort: string,
+        harnessId?: 'native' | 'claude',
+      ) => Promise<void>
+    }
+    await vm.handleSend('hello', 'build', '', ['skill-1'], '')
+    await flushPromises()
+
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(isComposerTransitionPending()).toBe(false)
+    expect(workspaceStore.activeWorkspace).toBeNull()
+    expect(wrapper.get('[data-testid="chat-home-hero"]').classes()).not.toContain('opacity-0')
+    // The composer cleared itself on send: the draft must come back.
+    expect(wrapper.findComponent({ name: 'HarnessChatInput' }).emitted('prefill')).toEqual([
+      ['hello', { append: true, skillIds: ['skill-1'] }],
+    ])
+  })
+
   it('shows an empty state when no workspaces exist', async () => {
     workspaceStore.workspaces = []
     const { wrapper } = await mountHome()
 
     expect(wrapper.find('[data-testid="chat-home-empty"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-setup"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(false)
+    // Nothing to pick yet: the workspace picker stays out of the way.
+    expect(wrapper.findComponent({ name: 'WorkspacePicker' }).exists()).toBe(false)
+  })
+
+  it('does not flash the setup guide before the first workspace load settles', async () => {
+    workspaceStore.workspaces = []
+    workspaceStore.loaded = false
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.find('[data-testid="chat-home-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="chat-home-empty"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-textarea"]').exists()).toBe(false)
+  })
+
+  it('renders the mention sheet stack above the home composer', async () => {
+    const { wrapper } = await mountHome()
+
+    // No candidates yet: the stack stays hidden (no empty sheet chrome).
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(false)
+    expect(vi.mocked(subscribeToWorkspace)).toHaveBeenCalledWith('ws-1')
+    expect(fileExplorerStore.fetchDirectory).toHaveBeenCalledWith('ws-1', '/workspace')
+    const vm = wrapper.vm as unknown as {
+      handleMentionMirror: (
+        open: boolean,
+        query: string,
+        candidates: Array<{ kind: string; label: string; insert: string }>,
+        index: number,
+      ) => void
+      handleMentionSelect: (candidate: { kind: string; label: string; insert: string }) => void
+    }
+
+    // Mirrored mention candidates produce a mention sheet like the chat panel.
+    vm.handleMentionMirror(true, 'a', [{ kind: 'file', label: 'a.ts', insert: 'file:/a.ts' }], 0)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-sheet-stack"]').text()).toBe('1')
+
+    // Hover syncs the active index into the mirrored state.
+    const vmState = wrapper.vm as unknown as { mentionActiveIndex: number }
+    vm.handleMentionSelect({ kind: 'file', label: 'a.ts', insert: 'file:/a.ts' })
+    await wrapper.vm.$nextTick()
+    expect(vmState.mentionActiveIndex).toBe(0)
+  })
+
+  it('renders only the side panel toggle in the home header', async () => {
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.find('[data-testid="chat-home-header"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="workspace-chat-header-toggle-side-panel"]').exists()).toBe(
+      true,
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-new-chat"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').exists()).toBe(
+      false,
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-more"]').exists()).toBe(false)
+  })
+
+  it('opens the side panel for a running workspace', async () => {
+    const { wrapper } = await mountHome()
+
+    expect(wrapper.find('[data-testid="workspace-side-panel"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="workspace-chat-header-toggle-side-panel"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="workspace-side-panel"]').exists()).toBe(true)
+  })
+
+  it('disables the side panel toggle when no workspace is ready', async () => {
+    workspaceStore.workspaces = []
+    const { wrapper } = await mountHome()
+    const toggle = wrapper.get('[data-testid="workspace-chat-header-toggle-side-panel"]')
+
+    expect(toggle.attributes('disabled')).toBeDefined()
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="workspace-side-panel"]').exists()).toBe(false)
+  })
+
+  it('disables the side panel toggle when the selected workspace is stopped', async () => {
+    workspaceStore.workspaces = [makeWorkspace({ status: WorkspaceStatus.STOPPED })]
+    const { wrapper } = await mountHome()
+
+    expect(
+      wrapper.get('[data-testid="workspace-chat-header-toggle-side-panel"]').attributes('disabled'),
+    ).toBeDefined()
   })
 })

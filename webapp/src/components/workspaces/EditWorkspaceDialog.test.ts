@@ -1,216 +1,308 @@
 import { nextTick } from 'vue'
-import { shallowMount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
+import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
-import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
+import { WorkspaceStatus, type Workspace } from '@/types'
+import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
-const routerPush = vi.fn()
-const fetchCredentials = vi.fn()
-const fetchRunners = vi.fn()
-const updateWorkspace = vi.fn()
-
-const credentialStore = {
-  credentials: [
-    {
-      id: 'cred-1',
-      name: 'GitHub Token',
-      scope: 'personal',
-      service_id: 'service-github',
-      service_name: 'GitHub',
-      service_slug: 'github',
-      credential_type: 'env',
-      env_var_name: 'GITHUB_TOKEN',
-      target_path: '',
-      has_public_key: false,
-      created_by_id: 1,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    },
-    {
-      id: 'cred-2',
-      name: 'GitHub Token (Org)',
-      scope: 'organization',
-      service_id: 'service-github',
-      service_name: 'GitHub',
-      service_slug: 'github',
-      credential_type: 'env',
-      env_var_name: 'GITHUB_TOKEN',
-      target_path: '',
-      has_public_key: false,
-      created_by_id: 1,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    },
-  ],
-  fetchCredentials,
-}
-
-const runnerStore = {
-  runners: [
-    {
-      id: 'runner-1',
-      name: 'Runner',
-      status: 'online',
-      available_runtimes: ['docker', 'qemu'],
-      organization_id: 'org-1',
-      connected_at: null,
-      disconnected_at: null,
-      qemu_min_vcpus: 1,
-      qemu_max_vcpus: 8,
-      qemu_default_vcpus: 2,
-      qemu_min_memory_mb: 1024,
-      qemu_max_memory_mb: 16384,
-      qemu_default_memory_mb: 4096,
-      qemu_min_disk_size_gb: 20,
-      qemu_max_disk_size_gb: 200,
-      qemu_default_disk_size_gb: 50,
-      qemu_max_active_vcpus: null,
-      qemu_max_active_memory_mb: null,
-      qemu_max_active_disk_size_gb: null,
-      created_at: '2026-04-01T10:00:00.000Z',
-      updated_at: '2026-04-01T10:00:00.000Z',
-    },
-  ],
-  fetchRunners,
-  runnerById: (id: string) => runnerStore.runners.find((runner) => runner.id === id),
-}
-
-const workspaceStore = {
-  updateWorkspace,
-}
-
-vi.mock('vue-router', () => ({
-  useRouter: () => ({
-    push: routerPush,
+const mocks = vi.hoisted(() => ({
+  routerPush: vi.fn(),
+  fetchCredentials: vi.fn(),
+  fetchRunners: vi.fn(),
+  updateWorkspace: vi.fn(),
+  fetchWorkspaceDetail: vi.fn(),
+  success: vi.fn(),
+  error: vi.fn(),
+  warning: vi.fn(),
+  auth: { user: { id: 1 }, activeOrganizationId: 'org-1', initialized: true },
+  runner: null as Record<string, unknown> | null,
+}))
+vi.mock('vue-router', () => ({ useRouter: () => ({ push: mocks.routerPush }) }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => mocks.auth }))
+vi.mock('@/stores/credentials', () => ({
+  useCredentialStore: () => ({
+    credentials: [],
+    error: null,
+    loading: false,
+    fetchCredentials: mocks.fetchCredentials,
+    servicesLoaded: true,
+    fetchServices: vi.fn(),
   }),
 }))
-
-vi.mock('@/stores/credentials', () => ({
-  useCredentialStore: () => credentialStore,
-}))
-
 vi.mock('@/stores/workspaces', () => ({
-  useWorkspaceStore: () => workspaceStore,
+  useWorkspaceStore: () => ({
+    isWorkspaceTransitioning: () => false,
+    updateWorkspace: mocks.updateWorkspace,
+    fetchWorkspaceDetail: mocks.fetchWorkspaceDetail,
+  }),
 }))
-
 vi.mock('@/stores/runners', () => ({
-  useRunnerStore: () => runnerStore,
+  useRunnerStore: () => ({
+    runners: [],
+    runnerById: () => mocks.runner,
+    fetchRunners: mocks.fetchRunners,
+  }),
+}))
+vi.mock('@/stores/notifications', () => ({
+  useNotificationStore: () => ({
+    success: mocks.success,
+    error: mocks.error,
+    warning: mocks.warning,
+  }),
+}))
+vi.mock('@/stores/plugins', () => ({
+  usePluginStore: () => ({
+    plugins: [],
+    loading: false,
+    error: null,
+    loadedOrgId: 'org-1',
+    clear: vi.fn(),
+    reload: vi.fn(async () => undefined),
+  }),
+}))
+vi.mock('vue-sonner', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
 
+const selectionStub = {
+  template: '<div data-testid="selection" />',
+  props: ['pluginIds', 'credentialIds'],
+}
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
-    id: overrides.id ?? 'workspace-1',
-    runner_id: overrides.runner_id ?? 'runner-1',
-    status: overrides.status ?? WorkspaceStatus.RUNNING,
-    active_operation: overrides.active_operation ?? null,
-    name: overrides.name ?? 'Workspace',
-    runtime_type: overrides.runtime_type ?? RuntimeType.QEMU,
-    qemu_vcpus: overrides.qemu_vcpus ?? null,
-    qemu_memory_mb: overrides.qemu_memory_mb ?? null,
-    qemu_disk_size_gb: overrides.qemu_disk_size_gb ?? null,
-    desktop_width: overrides.desktop_width ?? 1920,
-    desktop_height: overrides.desktop_height ?? 1080,
-    created_by_id: overrides.created_by_id ?? 1,
-    last_activity_at: overrides.last_activity_at ?? '2026-04-01T10:00:00.000Z',
-    auto_stop_timeout_minutes: overrides.auto_stop_timeout_minutes ?? null,
-    auto_stop_at: overrides.auto_stop_at ?? null,
-    delete_requested_at: overrides.delete_requested_at ?? null,
-    delete_started_at: overrides.delete_started_at ?? null,
-    delete_confirmed_at: overrides.delete_confirmed_at ?? null,
-    delete_last_error: overrides.delete_last_error ?? '',
-    delete_attempt_count: overrides.delete_attempt_count ?? 0,
-    created_at: overrides.created_at ?? '2026-04-01T10:00:00.000Z',
-    updated_at: overrides.updated_at ?? '2026-04-01T10:00:00.000Z',
-    has_active_session: overrides.has_active_session ?? false,
-    runner_online: overrides.runner_online ?? true,
-    credential_ids: overrides.credential_ids ?? ['cred-1'],
-    credentials_present: overrides.credentials_present ?? false,
+    id: 'workspace-1',
+    runner_id: 'runner-1',
+    status: WorkspaceStatus.RUNNING,
+    active_operation: null,
+    name: 'Workspace',
+    qemu_vcpus: null,
+    qemu_memory_mb: null,
+    qemu_disk_size_gb: null,
+    desktop_width: 1920,
+    desktop_height: 1080,
+    created_by_id: 1,
+    last_activity_at: '2026-01-01',
+    auto_stop_timeout_minutes: null,
+    auto_stop_at: null,
+    delete_requested_at: null,
+    delete_started_at: null,
+    delete_confirmed_at: null,
+    delete_last_error: '',
+    delete_attempt_count: 0,
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01',
+    has_active_session: false,
+    runner_online: true,
+    credential_ids: ['cred-1'],
+    plugin_ids: ['plugin-1'],
+    credentials_present: true,
+    ...overrides,
   }
 }
-
-describe('EditWorkspaceDialog', () => {
-  beforeEach(() => {
-    routerPush.mockReset()
-    fetchCredentials.mockReset()
-    fetchRunners.mockReset()
-    updateWorkspace.mockReset()
-    updateWorkspace.mockResolvedValue(true)
-  })
-
-  it('omits unchanged QEMU resources when saving non-resource edits', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
+function mountDialog(
+  workspace = makeWorkspace(),
+  resumeDraftId?: string,
+  options: { focusDisk?: boolean } = {},
+) {
+  setActivePinia(createPinia())
+  const wrapper = mount(EditWorkspaceDialog, {
+    props: { workspace, resumeDraftId, ...options },
+    attachTo: options.focusDisk ? document.body : undefined,
+    global: {
+      stubs: {
+        WorkspacePluginCredentialSelection: selectionStub,
+        Dialog: { template: '<div><slot /></div>' },
+        DialogContent: { template: '<div><slot /></div>' },
+        DialogHeader: { template: '<div><slot /></div>' },
+        DialogTitle: { template: '<div><slot /></div>' },
+        DialogDescription: { template: '<div><slot /></div>' },
+        DialogBody: { template: '<div><slot /></div>' },
+        DialogFooter: { template: '<div><slot /></div>' },
+        DialogTrigger: { template: '<div><slot /></div>' },
       },
-    })
+    },
+  })
+  const vm = wrapper.vm as unknown as {
+    handleOpen: () => Promise<void>
+    handleSubmit: () => Promise<void>
+    handleOpenAutoFocus: (event: Event) => void
+    name: string
+    selectedPluginIds: string[]
+    selectedCredentialIds: string[]
+    qemuMemoryMb: number
+    qemuVcpus: number
+    qemuDiskSizeGb: number
+    desktopWidth: number
+    desktopHeight: number
+    open: boolean
+    pluginSelectionValid: boolean
+  }
+  return { wrapper, vm }
+}
+beforeEach(() => {
+  vi.clearAllMocks()
+  mocks.fetchCredentials.mockResolvedValue(undefined)
+  mocks.fetchRunners.mockResolvedValue(undefined)
+  mocks.fetchWorkspaceDetail.mockResolvedValue(undefined)
+  mocks.updateWorkspace.mockResolvedValue(true)
+  mocks.runner = {
+    qemu_default_vcpus: 2,
+    qemu_default_memory_mb: 4096,
+    qemu_default_disk_size_gb: 50,
+    qemu_min_vcpus: 1,
+    qemu_max_vcpus: 8,
+    qemu_min_memory_mb: 1024,
+    qemu_max_memory_mb: 16384,
+    qemu_min_disk_size_gb: 20,
+    qemu_max_disk_size_gb: 200,
+  }
+})
 
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { name: string }).name = 'Renamed workspace'
+describe('EditWorkspaceDialog single-patch workspace configuration', () => {
+  it.each([
+    ['F061', 'qemuVcpus', 0],
+    ['F062', 'qemuVcpus', 9],
+    ['F063', 'qemuVcpus', 1.5],
+    ['F064', 'qemuVcpus', Number.NaN],
+    ['F065', 'qemuMemoryMb', 512],
+    ['F066', 'qemuMemoryMb', 16385],
+    ['F067', 'qemuMemoryMb', 4096.5],
+    ['F068', 'qemuDiskSizeGb', 19],
+    ['F069', 'qemuDiskSizeGb', 201],
+    ['F070', 'qemuDiskSizeGb', 50.5],
+    ['F071', 'desktopWidth', 1921],
+    ['F072', 'desktopHeight', 1081],
+  ] as const)('%s rejects invalid %s=%s before any PATCH', async (_id, field, value) => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    vm[field] = value
     await nextTick()
-
-    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
-      name: 'Renamed workspace',
-      credential_ids: ['cred-1'],
-    })
+    expect(wrapper.get('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeDefined()
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).not.toHaveBeenCalled()
+    expect(vm.open).toBe(true)
+    wrapper.unmount()
   })
 
-  it('includes only the QEMU resource fields that changed', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
+  it.each([
+    ['F073', 1, 1024, 20, 800, 600],
+    ['F074', 8, 16384, 200, 3840, 2160],
+  ])('%s accepts valid resource limits', async (_id, vcpus, ram, disk, width, height) => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    Object.assign(vm, {
+      qemuVcpus: vcpus,
+      qemuMemoryMb: ram,
+      qemuDiskSizeGb: disk,
+      desktopWidth: width,
+      desktopHeight: height,
     })
-
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { qemuMemoryMb: number }).qemuMemoryMb = 8192
     await nextTick()
-
-    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
-      name: 'Workspace',
-      credential_ids: ['cred-1'],
-      qemu_memory_mb: 8192,
-    })
-  })
-
-  it('replaces the selected credential when another credential from the same service is chosen', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
-    })
-
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { toggleCredential: (id: string) => void }).toggleCredential('cred-2')
-
     expect(
-      (wrapper.vm as typeof wrapper.vm & { selectedCredentialIds: string[] }).selectedCredentialIds,
-    ).toEqual(['cred-2'])
+      wrapper.get('[data-testid="edit-workspace-save"]').attributes('disabled'),
+    ).toBeUndefined()
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
   })
-
-  it('includes changed desktop size when saving', async () => {
-    const wrapper = shallowMount(EditWorkspaceDialog, {
-      props: {
-        workspace: makeWorkspace(),
-      },
-    })
-
-    await (wrapper.vm as typeof wrapper.vm & { handleOpen: () => Promise<void> }).handleOpen()
-    ;(wrapper.vm as typeof wrapper.vm & { desktopWidth: number }).desktopWidth = 1280
-    ;(wrapper.vm as typeof wrapper.vm & { desktopHeight: number }).desktopHeight = 720
+  it('restores persisted plugin IDs and sends one final PATCH containing credentials, plugins and resource fields', async () => {
+    const { vm } = mountDialog()
+    await vm.handleOpen()
+    expect(vm.selectedPluginIds).toEqual(['plugin-1'])
+    vm.pluginSelectionValid = true
+    vm.name = 'Renamed'
+    vm.selectedPluginIds = ['plugin-1', 'plugin-2']
+    vm.selectedCredentialIds = ['cred-2']
+    vm.qemuMemoryMb = 8192
+    vm.desktopWidth = 1280
+    vm.desktopHeight = 720
     await nextTick()
-
-    await (wrapper.vm as typeof wrapper.vm & { handleSubmit: () => Promise<void> }).handleSubmit()
-
-    expect(updateWorkspace).toHaveBeenCalledWith('workspace-1', {
-      name: 'Workspace',
-      credential_ids: ['cred-1'],
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(mocks.updateWorkspace).toHaveBeenCalledWith('workspace-1', {
+      name: 'Renamed',
+      credential_ids: ['cred-2'],
+      plugin_ids: ['plugin-1', 'plugin-2'],
+      qemu_memory_mb: 8192,
       desktop_width: 1280,
       desktop_height: 720,
     })
+    expect(vm.open).toBe(false)
+  })
+
+  it('restores edit fields and selected references after a new component is mounted', async () => {
+    sessionStorage.clear()
+    const saved = saveWorkspaceDraft(
+      {
+        mode: 'edit',
+        workspaceId: 'workspace-1',
+        name: 'Restored edit',
+        credentialIds: ['cred-2'],
+        pluginIds: ['plugin-2'],
+        qemuVcpus: 4,
+        qemuMemoryMb: 8192,
+        qemuDiskSizeGb: 60,
+        desktopWidth: 1600,
+        desktopHeight: 900,
+      },
+      { userId: 1, organizationId: 'org-1' },
+      '/workspaces/workspace-1',
+    )
+    const { vm } = mountDialog(makeWorkspace(), saved.id)
+    await nextTick()
+    expect(vm.open).toBe(true)
+    expect(vm.name).toBe('Restored edit')
+    expect(vm.selectedCredentialIds).toEqual(['cred-2'])
+    expect(vm.selectedPluginIds).toEqual(['plugin-2'])
+    expect(vm.qemuMemoryMb).toBe(8192)
+    expect(vm.desktopWidth).toBe(1600)
+  })
+
+  it('submits no patch while shared selector has unsatisfied required dependencies', async () => {
+    const { wrapper, vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = false
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('focuses the storage size when opened to increase the disk', async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const { wrapper, vm } = mountDialog(makeWorkspace({ qemu_disk_size_gb: 20 }), undefined, {
+      focusDisk: true,
+    })
+    const event = new Event('focus.autoFocusOnMount', { cancelable: true })
+
+    vm.handleOpenAutoFocus(event)
+
+    const input = document.activeElement as HTMLInputElement
+    expect(event.defaultPrevented).toBe(true)
+    expect(input.type).toBe('number')
+    expect(input.value).toBe('20')
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' })
+    wrapper.unmount()
+  })
+
+  it('keeps the default focus when not opened for the disk', () => {
+    const { vm } = mountDialog()
+    const event = new Event('focus.autoFocusOnMount', { cancelable: true })
+    vm.handleOpenAutoFocus(event)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('keeps the edit dialog open when the single backend update fails', async () => {
+    mocks.updateWorkspace.mockResolvedValue(false)
+    const { vm } = mountDialog()
+    await vm.handleOpen()
+    vm.pluginSelectionValid = true
+    vm.name = 'Failed update'
+    await vm.handleSubmit()
+    expect(mocks.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(vm.open).toBe(true)
   })
 })

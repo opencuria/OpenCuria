@@ -1,31 +1,28 @@
 """
-OpenRouter model catalog fetch, normalize, and in-memory cache.
+Provider catalog protocol parsing, fetches and static capabilities.
 
-The browser never talks to OpenRouter directly. The backend proxies
-``GET {base_url}/models`` with the org API key and returns a UI-ready list.
+These functions consume explicit protocol inputs and never authorize accounts
+or resolve stored secrets. Account-aware discovery and caching belong to
+``model_catalog_service``.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-import structlog
 
 from .base import ProviderAuthError, ProviderResponseError, ProviderTimeoutError
+from .bedrock import DEFAULT_REGION, resolve_bedrock_model_id
 from .openrouter import DEFAULT_BASE_URL
 
-log = structlog.get_logger(__name__)
-
 MODELS_PATH = "/models"
-CACHE_TTL_SECONDS = 15 * 60
 FETCH_TIMEOUT_SECONDS = 30.0
 
 # Known OpenRouter effort tokens (plus empty = provider default).
 ALLOWED_REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
 
 
@@ -59,55 +56,7 @@ class ProviderModel:
     supports_tools: bool
     context_length: int = 0
     max_output_tokens: int = 0
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable mapping."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "reasoning_efforts": list(self.reasoning_efforts),
-            "default_effort": self.default_effort,
-            "supports_tools": self.supports_tools,
-            "context_length": self.context_length,
-            "max_output_tokens": self.max_output_tokens,
-        }
-
-
-class ModelsCatalogCache:
-    """Process-local TTL cache keyed by organization id."""
-
-    def __init__(self) -> None:
-        self._entries: dict[str, tuple[float, list[ProviderModel]]] = {}
-
-    def get(self, key: str) -> list[ProviderModel] | None:
-        """Return a cached catalog when present and unexpired."""
-        entry = self._entries.get(key)
-        if entry is None:
-            return None
-        expires_at, models = entry
-        if time.monotonic() >= expires_at:
-            self._entries.pop(key, None)
-            return None
-        return models
-
-    def set(self, key: str, models: list[ProviderModel]) -> None:
-        """Store *models* under *key* with the default TTL."""
-        self._entries[key] = (time.monotonic() + CACHE_TTL_SECONDS, models)
-
-    def invalidate(self, key: str | None = None) -> None:
-        """Drop one cache entry, or the entire cache when *key* is None."""
-        if key is None:
-            self._entries.clear()
-            return
-        self._entries.pop(key, None)
-
-
-_catalog_cache = ModelsCatalogCache()
-
-
-def clear_models_cache(key: str | None = None) -> None:
-    """Invalidate the process-local catalog cache (tests and config saves)."""
-    _catalog_cache.invalidate(key)
+    provider: str = "openrouter"
 
 
 def normalize_reasoning_effort(value: str | None) -> str:
@@ -191,6 +140,7 @@ def normalize_openrouter_model(raw: Any) -> ProviderModel | None:
         supports_tools=supports_tools,
         context_length=context_length,
         max_output_tokens=max_output_tokens,
+        provider="openrouter",
     )
 
 
@@ -273,20 +223,268 @@ def fetch_openrouter_models(
     return normalize_openrouter_catalog(payload)
 
 
-def list_cached_provider_models(
-    *,
-    cache_key: str,
-    api_key: str,
-    base_url: str = DEFAULT_BASE_URL,
-    client: httpx.Client | None = None,
-    force_refresh: bool = False,
-) -> list[ProviderModel]:
-    """Return cached models when fresh, otherwise fetch and store."""
-    if not force_refresh:
-        cached = _catalog_cache.get(cache_key)
-        if cached is not None:
-            return cached
-    models = fetch_openrouter_models(api_key=api_key, base_url=base_url, client=client)
-    _catalog_cache.set(cache_key, models)
-    log.info("provider_models_fetched", cache_key=cache_key, count=len(models))
+_CHATGPT_MODEL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "gpt-5.6-sol",
+        "name": "GPT-5.6 Sol",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-5.6-terra",
+        "name": "GPT-5.6 Terra",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-5.6-luna",
+        "name": "GPT-5.6 Luna",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-6-astra",
+        "name": "GPT-6 Astra",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "gpt-6.1-sol",
+        "name": "GPT-6.1 Sol",
+        "reasoning_efforts": (
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ),
+        "default_effort": "medium",
+        "context_length": 1_050_000,
+        "max_output_tokens": 128_000,
+    },
+)
+
+
+def chatgpt_models() -> list[ProviderModel]:
+    """Return the static ChatGPT OAuth allowlist catalog."""
+    models: list[ProviderModel] = []
+    for spec in _CHATGPT_MODEL_SPECS:
+        model_id = str(spec["id"])
+        models.append(
+            ProviderModel(
+                id=f"chatgpt/{model_id}",
+                name=str(spec["name"]),
+                reasoning_efforts=tuple(spec["reasoning_efforts"]),
+                default_effort=str(spec["default_effort"]),
+                supports_tools=True,
+                context_length=int(spec["context_length"]),
+                max_output_tokens=int(spec["max_output_tokens"]),
+                provider="chatgpt",
+            )
+        )
+    return models
+
+
+_BEDROCK_MODEL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "anthropic.claude-opus-4-6-v1",
+        "name": "Claude Opus 4.6",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 1_000_000,
+        "max_output_tokens": 128_000,
+    },
+    {
+        "id": "anthropic.claude-sonnet-4-5",
+        "name": "Claude Sonnet 4.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 200_000,
+        "max_output_tokens": 64_000,
+    },
+    {
+        "id": "anthropic.claude-opus-4-5",
+        "name": "Claude Opus 4.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 200_000,
+        "max_output_tokens": 64_000,
+    },
+    {
+        "id": "anthropic.claude-haiku-4-5",
+        "name": "Claude Haiku 4.5",
+        "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+        "default_effort": "medium",
+        "supports_tools": True,
+        "context_length": 200_000,
+        "max_output_tokens": 64_000,
+    },
+    {
+        "id": "amazon.nova-pro-v1:0",
+        "name": "Amazon Nova Pro",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 300_000,
+        "max_output_tokens": 5_120,
+    },
+    {
+        "id": "amazon.nova-lite-v1:0",
+        "name": "Amazon Nova Lite",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 300_000,
+        "max_output_tokens": 5_120,
+    },
+    {
+        "id": "amazon.nova-micro-v1:0",
+        "name": "Amazon Nova Micro",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": False,
+        "context_length": 128_000,
+        "max_output_tokens": 5_120,
+    },
+    {
+        "id": "meta.llama3-3-70b-instruct-v1:0",
+        "name": "Meta Llama 3.3 70B Instruct",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 128_000,
+        "max_output_tokens": 2_048,
+    },
+    {
+        "id": "meta.llama3-2-90b-instruct-v1:0",
+        "name": "Meta Llama 3.2 90B Instruct",
+        "reasoning_efforts": (),
+        "default_effort": "",
+        "supports_tools": True,
+        "context_length": 128_000,
+        "max_output_tokens": 2_048,
+    },
+    {
+        "id": "deepseek.r1-v1:0",
+        "name": "DeepSeek R1",
+        "reasoning_efforts": ("low", "medium", "high"),
+        "default_effort": "medium",
+        "supports_tools": False,
+        "context_length": 128_000,
+        "max_output_tokens": 32_768,
+    },
+)
+
+
+def bedrock_models(region: str) -> list[ProviderModel]:
+    """Return the curated Amazon Bedrock catalog for *region*."""
+    resolved_region = region or DEFAULT_REGION
+    models: list[ProviderModel] = []
+    for spec in _BEDROCK_MODEL_SPECS:
+        bare_id = str(spec["id"])
+        resolved_id = resolve_bedrock_model_id(bare_id, resolved_region)
+        models.append(
+            ProviderModel(
+                id=f"amazon-bedrock/{resolved_id}",
+                name=str(spec["name"]),
+                reasoning_efforts=tuple(spec["reasoning_efforts"]),
+                default_effort=str(spec["default_effort"]),
+                supports_tools=bool(spec["supports_tools"]),
+                context_length=int(spec["context_length"]),
+                max_output_tokens=int(spec["max_output_tokens"]),
+                provider="amazon-bedrock",
+            )
+        )
+    return models
+
+
+def openai_compatible_models(model_ids: list[str]) -> list[ProviderModel]:
+    """Return catalog entries for manually configured model ids.
+
+    Endpoints without ``/models`` are listed by hand, so no network
+    fetch happens here. Manually configured models are marked
+    ``supports_tools=False`` with zero limits.
+    """
+    models: list[ProviderModel] = []
+    seen: set[str] = set()
+    for raw in model_ids:
+        bare = str(raw or "").strip()
+        if not bare or bare in seen:
+            continue
+        seen.add(bare)
+        models.append(
+            ProviderModel(
+                id=f"openai-compatible/{bare}",
+                name=bare,
+                reasoning_efforts=(),
+                default_effort="",
+                supports_tools=False,
+                context_length=0,
+                max_output_tokens=0,
+                provider="openai-compatible",
+            )
+        )
     return models

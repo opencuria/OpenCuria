@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # --- QEMU KasmVNC desktop session (XFCE + WhiteSur) ---
-# Keep these two files byte-identical:
-#   backend/apps/runners/scripts/qemu_desktop_session.sh
-#   runner/packer/desktop-session.sh
+# Included in QEMU init scripts generated from app image definitions.
 #
 # Provisions an X11 desktop for KasmVNC: XFCE, WhiteSur theme, Plank dock,
 # Ventura-style wallpaper, rofi launcher, and skippy-xd Exposé. Chrome is a
@@ -13,6 +11,26 @@ echo "=== Installing KasmVNC desktop session support (XFCE + WhiteSur) ==="
 
 export DEBIAN_FRONTEND=noninteractive
 export HOME=/root
+
+# Dependency repair can remove an unconfigured .deb instead of installing it.
+# Prove the required package and commands exist before publishing this image.
+require_installed_package() {
+    local package="$1"
+    if [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null)" != "install ok installed" ]; then
+        echo "Required image package is not fully installed: $package" >&2
+        return 1
+    fi
+}
+
+require_image_commands() {
+    local executable
+    for executable in "$@"; do
+        if ! command -v "$executable" >/dev/null 2>&1; then
+            echo "Missing required image command: $executable" >&2
+            return 1
+        fi
+    done
+}
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -60,6 +78,23 @@ apt-get install -y --no-install-recommends \
     xdotool
 apt-get install -y libasound2t64 || apt-get install -y libasound2
 
+# Native Computer Use: X11 input, AT-SPI observations and clipboard text.
+apt-get install -y --no-install-recommends \
+    python3-xlib python3-pil python3-structlog python3-gi \
+    gir1.2-atspi-2.0 at-spi2-core libatk-adaptor libgail-common xclip wmctrl \
+    libreoffice-calc python3-uno sudo iproute2
+require_image_commands xclip wmctrl xdotool libreoffice gdbus
+/usr/bin/python3 - <<'NATIVE_RUNTIME_CHECK'
+import Xlib
+import PIL
+import structlog
+import gi
+import uno
+
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+NATIVE_RUNTIME_CHECK
+
 # Exposé: Ubuntu 22.04 ships skippy-xd; 24.04 does not.
 if ! apt-get install -y skippy-xd; then
     echo "skippy-xd is not in apt; building from source"
@@ -79,17 +114,27 @@ wget -q -O /tmp/kasmvnc.deb \
     "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb"
 apt-get install -y /tmp/kasmvnc.deb || true
 apt-get install -f -y
+require_installed_package kasmvncserver
+require_image_commands Xvnc vncserver
 rm -f /tmp/kasmvnc.deb
 
 # Real Chrome .deb — Ubuntu Chromium packages route through snapd.
 wget -q -O /tmp/google-chrome.deb \
     https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y
+require_installed_package google-chrome-stable
+require_image_commands google-chrome-stable
+google-chrome-stable --version
 rm -f /tmp/google-chrome.deb
 
 mkdir -p /root/.vnc
 touch /root/.vnc/.de-was-selected
 printf "password\npassword\n" | vncpasswd -u root -w -r 2>/dev/null || true
+# python-Xlib unconditionally opens $XAUTHORITY/~/.Xauthority on connect,
+# even against the auth-less Xvnc (-SecurityTypes None). Bake an empty
+# file into the image so X11 Python clients (native desktop input)
+# connect out of the box; the runner also touches it at every desktop start.
+touch /root/.Xauthority
 
 cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'
 desktop:
@@ -101,6 +146,8 @@ network:
   protocol: http
   interface: 0.0.0.0
   websocket_port: 6901
+  udp:
+    public_ip: 127.0.0.1
   ssl:
     require_ssl: false
     pem_certificate:
@@ -114,7 +161,7 @@ for browser in google-chrome-stable google-chrome chromium chromium-browser /usr
     if [ "${browser#/}" != "$browser" ]; then
         if [ -x "$browser" ]; then
             exec "$browser" --no-sandbox --disable-gpu \
-                --disable-dev-shm-usage --no-first-run
+                --disable-dev-shm-usage --no-first-run --force-renderer-accessibility
         fi
         continue
     fi
@@ -123,7 +170,7 @@ for browser in google-chrome-stable google-chrome chromium chromium-browser /usr
             continue
         fi
         exec "$browser" --no-sandbox --disable-gpu \
-            --disable-dev-shm-usage --no-first-run
+            --disable-dev-shm-usage --no-first-run --force-renderer-accessibility
     fi
 done
 echo "No supported browser binary found for desktop session" >&2
@@ -382,6 +429,7 @@ cat >/root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-keyboard-shortcuts.xml
 XML
 
 cat >/root/.gtkrc-2.0 <<'GTK2'
+gtk-modules="gail:atk-bridge"
 gtk-theme-name="WhiteSur-Light"
 gtk-icon-theme-name="WhiteSur"
 gtk-cursor-theme-name="WhiteSur-cursors"
@@ -539,86 +587,55 @@ do
         >"/root/.config/autostart/${name}.desktop"
 done
 
+# Generated copy of runner/src/services/sessions/desktop_session.sh.
+# The runner refreshes this script on desktop start, including older images.
+cat >/root/.vnc/opencuria-session <<'DESKTOP_SESSION'
+#!/bin/bash
+# Canonical desktop startup, refreshed by the runner for existing images too.
+set -eu
+if [ "${1:-}" != --session-bus ]; then
+    unset SESSION_MANAGER
+    unset DBUS_SESSION_BUS_ADDRESS
+    export DISPLAY=:1
+    export HOME=/root
+    export XDG_CURRENT_DESKTOP=XFCE
+    export XDG_SESSION_DESKTOP=xfce
+    export XDG_SESSION_TYPE=x11
+    export GTK_THEME=WhiteSur-Light
+    export XDG_CONFIG_HOME=/root/.config
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+    mkdir -p "$XDG_RUNTIME_DIR"
+    chmod 700 "$XDG_RUNTIME_DIR"
+    export NO_AT_BRIDGE=0
+    export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+    export QT_ACCESSIBILITY=1
+    # GTK2 needs its loadable modules; GTK3/4 provide their own bridge. Keep an
+    # explicitly customized module setting and all existing theme preferences.
+    if ! grep -q '^[[:space:]]*gtk-modules[[:space:]]*=' /root/.gtkrc-2.0 2>/dev/null; then
+        printf '%s\n' 'gtk-modules="gail:atk-bridge"' >>/root/.gtkrc-2.0
+    fi
+    exec dbus-launch --exit-with-session "$0" --session-bus
+fi
+
+# Set both flags before XFCE can launch user apps. Toolkit environment variables
+# alone do not activate accessibility for every Chrome, Electron or Qt version.
+for property in IsEnabled ScreenReaderEnabled; do
+    gdbus call --session --timeout 5 --dest org.a11y.Bus --object-path /org/a11y/bus \
+        --method org.freedesktop.DBus.Properties.Set \
+        org.a11y.Status "$property" '<true>' >/dev/null
+done
+touch /root/.vnc/.accessibility-ready
+exec startxfce4
+DESKTOP_SESSION
+chmod +x /root/.vnc/opencuria-session
+
 cat >/root/.vnc/xstartup <<'XSTARTUP'
 #!/bin/bash
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export DISPLAY=:1
-export HOME=/root
-export XDG_CURRENT_DESKTOP=XFCE
-export XDG_SESSION_DESKTOP=xfce
-export XDG_SESSION_TYPE=x11
-export GTK_THEME=WhiteSur-Light
-export XDG_CONFIG_HOME=/root/.config
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
-exec dbus-launch --exit-with-session startxfce4
+exec /root/.vnc/opencuria-session
 XSTARTUP
 chmod +x /root/.vnc/xstartup
 
-cat >/usr/local/bin/opencuria-desktop-start <<'DESKSTART'
-#!/bin/bash
-set -e
-export DISPLAY=:1
-export HOME=/root
-/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true
-mkdir -p /root/.vnc
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-
-# Launch Xvnc directly (bypasses KasmVNC perl wrapper which prompts for user input)
-GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
-/usr/bin/Xvnc :1 \
-    -geometry "$GEOMETRY" \
-    -depth 24 \
-    -rfbport 5901 \
-    -SecurityTypes None \
-    -disableBasicAuth \
-    -websocketPort 6901 \
-    -httpd /usr/share/kasmvnc/www \
-    -interface 0.0.0.0 \
-    -AlwaysShared \
-    -AcceptKeyEvents \
-    -AcceptPointerEvents \
-    -SendCutText \
-    -AcceptCutText \
-    -AcceptSetDesktopSize=0 \
-    >>/root/.vnc/server.log 2>&1 &
-
-for _ in $(seq 1 120); do
-    if [ -e /tmp/.X11-unix/X1 ]; then
-        /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &
-        echo "Desktop session started on :1 (ws port 6901)"
-        exit 0
-    fi
-    sleep 0.25
-done
-echo "Desktop session failed to start" >&2
-exit 1
-DESKSTART
-
-cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
-#!/bin/bash
-# Stop Xvnc and the XFCE session (including Plank / skippy-xd).
-for pattern in \
-    '^(/usr/bin/)?Xvnc :1' \
-    '^(/usr/bin/)?Xtigervnc :1' \
-    'xfce4-session' \
-    'xfwm4' \
-    'xfce4-panel' \
-    'xfdesktop' \
-    'plank' \
-    'skippy-xd' \
-    'rofi'
-do
-    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-        kill "$pid" 2>/dev/null || true
-    done
-done
-rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-DESKSTOP
-
-chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
+apt-get clean
 rm -rf /var/lib/apt/lists/*
 
 echo "=== XFCE + WhiteSur desktop session installed ==="

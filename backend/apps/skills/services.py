@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from common.exceptions import AuthenticationError, NotFoundError
 
 from .repositories import SkillRepository
+
+if TYPE_CHECKING:
+    from .models import Skill
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ class SkillService:
     # Create
     # ------------------------------------------------------------------
 
-    def create_personal_skill(self, *, name: str, body: str, user) -> "Skill":
+    def create_personal_skill(self, *, name: str, body: str, user) -> Skill:
         """Create a personal skill owned by the user."""
         name = name.strip()
         body = body.strip()
@@ -47,7 +51,7 @@ class SkillService:
 
     def create_org_skill(
         self, *, name: str, body: str, org_id: uuid.UUID, user
-    ) -> "Skill":
+    ) -> Skill:
         """Create an org-shared skill. Caller must verify admin role."""
         name = name.strip()
         body = body.strip()
@@ -74,7 +78,7 @@ class SkillService:
         user,
         org_id: uuid.UUID,
         is_admin: bool,
-    ) -> "Skill":
+    ) -> Skill:
         """Update a skill. Enforces ownership rules:
         - Personal skills: only the owner may edit.
         - Org skills: only org admins may edit.
@@ -118,10 +122,111 @@ class SkillService:
         logger.info("Skill deleted: %s", skill_id)
 
     # ------------------------------------------------------------------
+    # Session snapshotting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def normalize_ids(skill_ids: list[str] | None) -> list[str]:
+        """Normalize skill ID strings (deduped, trimmed)."""
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for raw in skill_ids or []:
+            value = str(raw).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def resolve_bodies(
+        self,
+        skill_ids: list[str],
+        *,
+        user_id: int,
+        organization_id: uuid.UUID,
+    ) -> list[str]:
+        """Load skill bodies visible to *user_id* in *organization_id*.
+
+        Raises:
+            ValueError: When an ID is invalid or not accessible.
+        """
+        if not skill_ids:
+            return []
+        parsed: list[uuid.UUID] = []
+        for raw in skill_ids:
+            try:
+                parsed.append(uuid.UUID(str(raw).strip()))
+            except ValueError:
+                raise ValueError(f"Invalid skill_id: {raw}")
+        by_id = {
+            skill.id: skill
+            for skill in self.skills.get_visible_by_ids(
+                parsed, user_id=user_id, org_id=organization_id
+            )
+        }
+        bodies: list[str] = []
+        for skill_id in parsed:
+            skill = by_id.get(skill_id)
+            if skill is None:
+                raise ValueError(f"Skill not found or not accessible: {skill_id}")
+            bodies.append(f"## {skill.name}\n{skill.body.strip()}")
+        return bodies
+
+    def filter_available_ids(
+        self,
+        skill_ids: list[str],
+        *,
+        user_id: int,
+        organization_id: uuid.UUID,
+    ) -> list[str]:
+        """Return the normalized *skill_ids* still visible, in order.
+
+        Persisted selections outlive their skills: a skill deleted (or no
+        longer shared) after it was chosen must drop out instead of failing
+        every later run that inherits the selection.
+        """
+        parsed: list[tuple[str, uuid.UUID]] = []
+        for raw in self.normalize_ids(skill_ids):
+            try:
+                skill_id = uuid.UUID(raw)
+            except ValueError:
+                continue
+            parsed.append((raw, skill_id))
+        if not parsed:
+            return []
+        visible = self.skills.get_visible_ids(
+            [skill_id for _, skill_id in parsed],
+            user_id=user_id,
+            org_id=organization_id,
+        )
+        return [raw for raw, skill_id in parsed if skill_id in visible]
+
+    @staticmethod
+    def merge_bodies(
+        explicit: list[str] | None, plugin_bodies: list[str] | None
+    ) -> list[str]:
+        """Merge plugin skill bodies before explicit session skills (deduped).
+
+        Plugin skills come first in stable snapshot order; exact-duplicate
+        bodies are dropped.
+        """
+        merged: list[str] = []
+        seen: set[str] = set()
+        for body in list(plugin_bodies or []) + list(explicit or []):
+            text = str(body or "")
+            if not text.strip() or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+        return merged
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _assert_can_edit(self, skill, *, user, org_id: uuid.UUID, is_admin: bool) -> None:
+    def _assert_can_edit(
+        self, skill, *, user, org_id: uuid.UUID, is_admin: bool
+    ) -> None:
         """Raise an error if the user cannot edit this skill."""
         if skill.user_id is not None:
             # Personal skill — only owner may edit

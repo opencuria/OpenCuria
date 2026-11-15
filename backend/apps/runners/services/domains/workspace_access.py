@@ -1,0 +1,151 @@
+"""Authorize workspace access and desktop viewing."""
+
+from __future__ import annotations
+
+import uuid
+from typing import TYPE_CHECKING
+
+from apps.organizations.services import OrganizationService
+
+from ...exceptions import WorkspaceNotFoundError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
+    from apps.accounts.models import User
+    from apps.organizations.models import Membership
+
+    from ...models import Workspace
+
+
+if TYPE_CHECKING:
+    from ...repositories import WorkspaceRepository
+    from ..domains.runner_lifecycle import RunnerLifecycleService
+
+
+class WorkspaceAccessService:
+    """Workspace authorization rules with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        workspaces: type[WorkspaceRepository],
+        runner_lifecycle: RunnerLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.workspaces = workspaces
+        self.runner_lifecycle = runner_lifecycle
+
+    def get_workspace_for_user(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user,
+        organization_id: uuid.UUID,
+    ) -> Workspace:
+        """Return a workspace only when it belongs to the active org and owner."""
+        workspace = self.runner_lifecycle.get_workspace(workspace_id)
+        if workspace.runner.organization_id != organization_id:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        if workspace.created_by_id != user.id:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        return workspace
+
+    def can_user_access_workspace(self, user_id: int | str, workspace_id: str) -> bool:
+        """Return whether the user is an organization member owning the workspace."""
+        found = self._workspace_membership(user_id, workspace_id)
+        if found is None:
+            return False
+        workspace, membership = found
+        return workspace.created_by_id == membership.user_id
+
+    def is_active_workspace_owner(
+        self, user_id: int, workspace_id: uuid.UUID, *, organization_id: uuid.UUID
+    ) -> bool:
+        """Return whether an active member of the org still owns the workspace.
+
+        Unattended work acting for the owner re-checks this before each step.
+        """
+        return (
+            self.workspaces.is_created_by(
+                workspace_id, user_id=user_id, organization_id=organization_id
+            )
+            and OrganizationService().get_active_membership(user_id, organization_id)
+            is not None
+        )
+
+    def can_user_view_workspace_desktop(
+        self, user_id: int | str, workspace_id: str
+    ) -> bool:
+        """Return whether the user owns the workspace or administers its org."""
+        found = self._workspace_membership(user_id, workspace_id)
+        if found is None:
+            return False
+        workspace, membership = found
+        return self._is_desktop_viewer(
+            workspace, user_id=membership.user_id, role=membership.role
+        )
+
+    def get_workspace_for_desktop_user(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user: User,
+        organization_id: uuid.UUID,
+    ) -> Workspace:
+        """Require org membership and owner/admin access to a desktop workspace.
+
+        Authorization is independent of runner availability: taking control
+        can abort backend computer-use work even when the runner is offline.
+        """
+        organizations = OrganizationService()
+        organizations.require_membership(user, organization_id)
+        role = organizations.get_user_role(user, organization_id)
+        workspace = self.runner_lifecycle.get_workspace(workspace_id)
+        if workspace.runner.organization_id != organization_id or not (
+            self._is_desktop_viewer(workspace, user_id=user.id, role=role)
+        ):
+            raise WorkspaceNotFoundError(str(workspace_id))
+        return workspace
+
+    @staticmethod
+    def _is_desktop_viewer(
+        workspace: Workspace, *, user_id: int, role: str | None
+    ) -> bool:
+        """Apply the owner/admin rule within the workspace's organization."""
+        return role == "admin" or workspace.created_by_id == user_id
+
+    def resolve_desktop_viewer(
+        self, user_id: int | str, workspace_id: str
+    ) -> tuple[User, uuid.UUID]:
+        """Return the viewer user and organization a desktop tunnel renews for.
+
+        Raises WorkspaceNotFoundError when the workspace is gone or the user
+        is no longer a member of its organization.
+        """
+        found = self._workspace_membership(user_id, workspace_id)
+        if found is None:
+            raise WorkspaceNotFoundError(str(workspace_id))
+        workspace, membership = found
+        return membership.user, workspace.runner.organization_id
+
+    def _workspace_membership(
+        self, user_id: int | str, workspace_id: str
+    ) -> tuple[Workspace, Membership] | None:
+        """Return the workspace and the active user's membership in its org.
+
+        Long-lived sockets and desktop cookies re-check this on every use, so
+        deactivating a user ends their live access too.
+        """
+        try:
+            workspace_uuid = uuid.UUID(str(workspace_id))
+            member_id = int(user_id)
+        except (TypeError, ValueError):
+            return None
+        workspace = self.workspaces.get_by_id(workspace_uuid)
+        if workspace is None:
+            return None
+        membership = OrganizationService().get_active_membership(
+            member_id, workspace.runner.organization_id
+        )
+        if membership is None:
+            return None
+        return workspace, membership

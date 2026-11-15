@@ -8,10 +8,10 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.runners import api as runners_api
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import ImageInstance, Runner, Workspace
+from apps.runners.models import Runner, Workspace
+from apps.runners.tests.test_image_versions import make_line
 from common.utils import generate_api_token, hash_token
 
 
@@ -67,7 +67,6 @@ def workspace_access_setup(db):
         status=RunnerStatus.ONLINE,
         sid="workspace-access-runner-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     owner_workspace = Workspace.objects.create(
         runner=runner,
@@ -81,15 +80,7 @@ def workspace_access_setup(db):
         status=WorkspaceStatus.RUNNING,
         created_by=foreign_admin,
     )
-    artifact = ImageInstance.objects.create(
-        runner=runner,
-        origin_workspace=owner_workspace,
-        created_by=owner,
-        name="Owner Snapshot",
-        runner_ref="owner-snapshot-1",
-        status=ImageInstance.Status.READY,
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-    )
+    line, _ = make_line(runner, owner)
     return {
         "org": org,
         "owner": owner,
@@ -97,7 +88,7 @@ def workspace_access_setup(db):
         "foreign_member": foreign_member,
         "owner_workspace": owner_workspace,
         "admin_workspace": admin_workspace,
-        "artifact": artifact,
+        "image": line,
     }
 
 
@@ -117,57 +108,54 @@ def test_admin_only_sees_own_workspaces(workspace_access_setup):
     ]
 
 
-@pytest.mark.django_db
-def test_global_image_artifact_create_requires_workspace_owner(workspace_access_setup):
-    client = _make_client(
-        user=workspace_access_setup["foreign_admin"],
-        org=workspace_access_setup["org"],
-        permissions=[APIKeyPermission.IMAGES_CREATE.value],
-    )
+def test_workspace_image_artifact_api_only_exposes_capture():
+    from config.urls import api
 
-    response = client.post(
-        "/api/v1/image-artifacts/",
-        data=json.dumps(
-            {
-                "workspace_id": str(workspace_access_setup["owner_workspace"].id),
-                "name": "forbidden-snapshot",
-            }
-        ),
-        content_type="application/json",
-    )
-
-    assert response.status_code == 404
+    assert {
+        path: set(operations)
+        for path, operations in api.get_openapi_schema()["paths"].items()
+        if path.startswith("/api/v1/workspaces/") and "/image-artifacts/" in path
+    } == {"/api/v1/workspaces/{workspace_id}/image-artifacts/": {"post"}}
 
 
 @pytest.mark.django_db
-def test_global_image_artifact_create_requires_images_create_permission(
-    workspace_access_setup,
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("actor_key", "can_clone", "expected_status"),
+    [
+        ("owner", True, 202),
+        ("owner", False, 403),
+        ("foreign_admin", True, 404),
+        ("foreign_member", True, 404),
+    ],
+)
+def test_captured_image_clone_access(
+    workspace_access_setup, monkeypatch, actor_key, can_clone, expected_status
 ):
+    from apps.runners.services import get_runner_service
+
+    async def fake_emit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(get_runner_service().runner_transport, "emit_to_runner", fake_emit)
+
     client = _make_client(
-        user=workspace_access_setup["owner"],
+        user=workspace_access_setup[actor_key],
         org=workspace_access_setup["org"],
-        permissions=[],
+        permissions=[APIKeyPermission.IMAGES_CLONE.value] if can_clone else [],
     )
-
-    def _unexpected_service():
-        raise AssertionError("service should not be resolved without images:create")
-
-    monkeypatch.setattr(runners_api, "_get_service", _unexpected_service)
-
+    image = workspace_access_setup["image"]
     response = client.post(
-        "/api/v1/image-artifacts/",
-        data=json.dumps(
-            {
-                "workspace_id": str(workspace_access_setup["owner_workspace"].id),
-                "name": "blocked-snapshot",
-            }
-        ),
+        f"/api/v1/captured-images/{image.id}/workspaces/",
+        data=json.dumps({"name": "owner-clone"}),
         content_type="application/json",
     )
 
-    assert response.status_code == 403
-    assert response.json()["code"] == "permission_denied"
+    assert response.status_code == expected_status, response.content[:500]
+    if expected_status == 202:
+        body = response.json()
+        assert "workspace_id" in body
+        assert "task_id" in body
+        assert body["plugin_ids"] == []
 
 
 @pytest.mark.django_db
@@ -212,28 +200,10 @@ def test_global_image_artifact_create_requires_images_create_permission(
             [APIKeyPermission.WORKSPACES_DELETE.value],
         ),
         (
-            "get",
-            "/api/v1/workspaces/{workspace_id}/image-artifacts/",
-            None,
-            [APIKeyPermission.IMAGES_READ.value],
-        ),
-        (
             "post",
             "/api/v1/workspaces/{workspace_id}/image-artifacts/",
             {"name": "snapshot"},
             [APIKeyPermission.IMAGES_CREATE.value],
-        ),
-        (
-            "delete",
-            "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/",
-            None,
-            [APIKeyPermission.IMAGES_DELETE.value],
-        ),
-        (
-            "post",
-            "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/workspaces/",
-            {"name": "clone"},
-            [APIKeyPermission.IMAGES_CLONE.value],
         ),
     ],
 )
@@ -252,7 +222,6 @@ def test_foreign_workspace_endpoints_return_not_found(
     )
     path = path_template.format(
         workspace_id=workspace_access_setup["owner_workspace"].id,
-        artifact_id=workspace_access_setup["artifact"].id,
     )
 
     request = getattr(client, method)
@@ -287,15 +256,16 @@ def test_take_desktop_control_requires_harness_run(workspace_access_setup):
 @pytest.mark.django_db
 def test_take_desktop_control_aborts_computeruse(workspace_access_setup, monkeypatch):
     """Take-control with terminal + harness:run aborts busy computer-use sessions."""
-    from types import SimpleNamespace
+    from apps.runners.services.infra.harness_gateway import get_harness_gateway
+
+    aborted_id = uuid.uuid4()
+    calls = []
 
     async def fake_abort(workspace_id):
-        return [SimpleNamespace(id=uuid.uuid4())]
+        calls.append(workspace_id)
+        return [aborted_id]
 
-    monkeypatch.setattr(
-        "apps.harness.harness_service.get_harness_service",
-        lambda: SimpleNamespace(abort_busy_computeruse_for_workspace=fake_abort),
-    )
+    monkeypatch.setattr(get_harness_gateway(), "abort_busy_computeruse", fake_abort)
     client = _make_client(
         user=workspace_access_setup["owner"],
         org=workspace_access_setup["org"],
@@ -309,6 +279,134 @@ def test_take_desktop_control_aborts_computeruse(workspace_access_setup, monkeyp
         "/desktop/take-control/"
     )
     assert response.status_code == 200, response.content[:500]
-    body = response.json()
-    assert "aborted_session_ids" in body
-    assert len(body["aborted_session_ids"]) == 1
+    assert response.json() == {"aborted_session_ids": [str(aborted_id)]}
+    assert calls == [workspace_access_setup["owner_workspace"].id]
+
+
+@pytest.mark.django_db
+def test_realtime_access_rules_share_one_membership_lookup(workspace_access_setup):
+    """Owners reach their workspace; org admins additionally reach desktops."""
+    from apps.runners.exceptions import WorkspaceNotFoundError
+    from apps.runners.services import RunnerService
+
+    service = RunnerService(sio_server=None)
+    workspace_id = str(workspace_access_setup["owner_workspace"].id)
+    owner = workspace_access_setup["owner"]
+    admin = workspace_access_setup["foreign_admin"]
+    member = workspace_access_setup["foreign_member"]
+    outsider = get_user_model().objects.create_user(
+        email=f"outsider-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+
+    assert [
+        service.workspace_access.can_user_access_workspace(user.id, workspace_id)
+        for user in (owner, admin, member, outsider)
+    ] == [True, False, False, False]
+    assert [
+        service.workspace_access.can_user_view_workspace_desktop(
+            str(user.id), workspace_id
+        )
+        for user in (owner, admin, member, outsider)
+    ] == [True, True, False, False]
+    assert service.workspace_access.resolve_desktop_viewer(
+        str(admin.id), workspace_id
+    ) == (
+        admin,
+        workspace_access_setup["org"].id,
+    )
+    for user_id, target in (
+        (str(outsider.id), workspace_id),
+        (str(owner.id), str(uuid.uuid4())),
+        ("not-a-user", workspace_id),
+    ):
+        with pytest.raises(WorkspaceNotFoundError):
+            service.workspace_access.resolve_desktop_viewer(user_id, target)
+
+    # Live sockets and desktop cookies stop working once a user is deactivated.
+    get_user_model().objects.filter(pk__in=[owner.pk, admin.pk]).update(
+        is_active=False
+    )
+    assert not service.workspace_access.can_user_access_workspace(
+        owner.id, workspace_id
+    )
+    assert not service.workspace_access.can_user_view_workspace_desktop(
+        str(admin.id), workspace_id
+    )
+    with pytest.raises(WorkspaceNotFoundError):
+        service.workspace_access.resolve_desktop_viewer(str(owner.id), workspace_id)
+
+
+@pytest.mark.django_db
+def test_active_workspace_owner_requires_creator_org_and_active_membership(
+    workspace_access_setup,
+):
+    """Unattended work acts only while an active org member owns the workspace."""
+    from apps.runners.services import RunnerService
+
+    service = RunnerService(sio_server=None)
+    org = workspace_access_setup["org"]
+    owner = workspace_access_setup["owner"]
+    workspace_id = workspace_access_setup["owner_workspace"].id
+    other_org = Organization.objects.create(
+        name="Other", slug=f"other-{uuid.uuid4().hex[:8]}"
+    )
+
+    def owns(user, *, organization=org, workspace=workspace_id):
+        return service.workspace_access.is_active_workspace_owner(
+            user.id, workspace, organization_id=organization.id
+        )
+
+    assert owns(owner)
+    assert not owns(workspace_access_setup["foreign_admin"])
+    assert not owns(owner, organization=other_org)
+    assert not owns(owner, workspace=uuid.uuid4())
+
+    get_user_model().objects.filter(pk=owner.pk).update(is_active=False)
+    assert not owns(owner)
+    get_user_model().objects.filter(pk=owner.pk).update(is_active=True)
+    Membership.objects.filter(user=owner, organization=org).delete()
+    assert not owns(owner)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("actor_key", "status"),
+    [("owner", 200), ("foreign_admin", 200), ("foreign_member", 404)],
+)
+def test_desktop_ticket_follows_desktop_access(
+    workspace_access_setup, actor_key: str, status: int
+):
+    """Only the owner and org admins get a ticket, bound to them and the workspace."""
+    from apps.runners.desktop_tickets import redeem_desktop_ticket
+
+    actor = workspace_access_setup[actor_key]
+    workspace_id = str(workspace_access_setup["owner_workspace"].id)
+    client = _make_client(
+        user=actor,
+        org=workspace_access_setup["org"],
+        permissions=[APIKeyPermission.TERMINAL_ACCESS.value],
+    )
+
+    response = client.post(f"/api/v1/workspaces/{workspace_id}/desktop/ticket/")
+
+    assert response.status_code == status
+    if status == 200:
+        body = response.json()
+        assert body["expires_in"] == 60
+        other_workspace = str(workspace_access_setup["admin_workspace"].id)
+        assert redeem_desktop_ticket(body["ticket"], other_workspace) is None
+        assert redeem_desktop_ticket(body["ticket"], workspace_id) == actor.id
+
+
+@pytest.mark.django_db
+def test_desktop_ticket_requires_terminal_access(workspace_access_setup):
+    client = _make_client(
+        user=workspace_access_setup["owner"],
+        org=workspace_access_setup["org"],
+        permissions=[APIKeyPermission.WORKSPACES_READ.value],
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{workspace_access_setup['owner_workspace'].id}"
+        "/desktop/ticket/"
+    )
+    assert response.status_code == 403

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
-import { parseToolArguments, stringArg, truncatePreview } from '@/lib/toolDisplay'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { parseToolArguments, stringArg, truncatePreview } from '@opencuria/chat-core/toolDisplay'
 
 const props = defineProps<{
   part: HarnessPart
@@ -12,6 +12,12 @@ const url = computed(() => {
   const fromMeta = props.part.meta?.['url']
   if (typeof fromMeta === 'string' && fromMeta) return fromMeta
   return stringArg(parseToolArguments(props.part), 'url')
+})
+
+const format = computed(() => {
+  const fromMeta = props.part.meta?.['format']
+  if (typeof fromMeta === 'string' && fromMeta) return fromMeta
+  return stringArg(parseToolArguments(props.part), 'format')
 })
 
 const preview = computed(() => truncatePreview(props.part.output || ''))
@@ -26,9 +32,10 @@ const preview = computed(() => truncatePreview(props.part.output || ''))
       rel="noopener noreferrer"
       class="block truncate font-mono text-[11px] text-primary hover:underline"
     >{{ url }}</a>
+    <p v-if="format" class="text-[11px] text-muted-foreground">{{ format }}</p>
     <pre
       v-if="preview"
-      class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[11px] text-muted-foreground"
+      class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/40 px-2.5 py-2 font-mono text-[11px] text-muted-foreground"
     >{{ preview }}</pre>
     <p v-else-if="part.state === 'running'" class="text-[11px] text-muted-foreground">Fetching…</p>
   </div>

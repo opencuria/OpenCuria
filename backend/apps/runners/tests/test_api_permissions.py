@@ -50,7 +50,6 @@ def test_legacy_workspace_sessions_endpoint_is_gone(client: Client):
         api_token_hash=hash_token("runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

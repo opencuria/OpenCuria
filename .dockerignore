@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/.venv
+**/__pycache__
+**/.env*
+**/dist
+**/.expo
+mobile/android
+mobile/ios
+.opencuria
+backend
+runner
+
+# Hosting secrets are runtime mounts, never image contents.
+secrets/

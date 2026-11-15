@@ -22,12 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
-from typing import Any
+from dataclasses import replace
+from typing import Any, Protocol
 
 import structlog
-from asgiref.sync import sync_to_async
 
 from .access.base import HARNESS_WORKSPACE_ROOT, WorkspaceAccessor
 from .agents.definitions import (
@@ -44,26 +42,14 @@ from .compaction import (
     build_compaction_prompt,
     ensure_current_user,
     find_previous_summary,
-    is_context_overflow_error,
     is_overflow,
     select,
 )
-from .computeruse_loop import (
-    FRESH_DESKTOP_TEXT,
-    INITIAL_DESKTOP_TEXT,
-    ComputerUseLoopState,
-    append_video_to_output,
-    default_recording_path,
-    sanitize_run_id,
-)
-from .images import hydrate_workspace_images
+from .constants import DEFAULT_MAX_DEPTH
+from .engines import base as engine_contracts
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
-from .permissions.evaluator import (
-    ASK,
-    DEFAULT_GLOBAL_RULES,
-    DENY,
-    PermissionEvaluator,
-)
+from .media.context import AuthorizeRead, hydrate_image_messages, limit_image_messages
+from .permissions.evaluator import PermissionEvaluator
 from .prompts.composer import compose_system_prompt
 from .provider_retry import (
     RETRY_MAX_RETRIES,
@@ -73,23 +59,19 @@ from .provider_retry import (
 from .providers.base import (
     ChatOptions,
     LLMMessage,
-    ProviderAdapter,
     ToolSchema,
     Usage,
 )
-from .tools.base import ToolContext, ToolRegistry, ToolResult
+from .providers.context_errors import is_context_overflow_error
+from .providers.resolver import ResolvedModel
+from .tools.base import ToolContext, ToolRegistry
+from .tools.invocation import (
+    AuthorizedToolDispatcher,
+    _PendingToolCall,
+    _ToolCallOutcome,
+)
 
 log = structlog.get_logger(__name__)
-
-#: Default subagent nesting limit (M5): depth 0 is the top-level turn,
-#: each ``task`` child runs at depth+1. ``task`` is withheld at
-#: ``depth >= max_depth``; ``todowrite`` is withheld from any child.
-DEFAULT_MAX_DEPTH = 1
-
-#: Default step budget when neither RunOptions.max_steps nor the agent
-#: definition sets one. DoS leash for unbounded loops; override per run
-#: via ``RunOptions.max_steps``.
-DEFAULT_MAX_STEPS = 100
 
 #: Max fingerprints kept for the doom-loop guard. The guard only reads
 #: the last 3 entries, so trimming is behavior-preserving.
@@ -107,124 +89,16 @@ LENGTH_TRUNCATION_NOTICE = (
     "\n\n[Notice: the response was truncated due to length limits.]"
 )
 
-#: Shell/background tools whose commands are scanned for absolute
-#: paths outside /workspace (``external_directory`` permission gate).
-EXTERNAL_PATH_TOOLS = frozenset({"bash", "process_start"})
-
 #: How many consecutive identical tool+input calls trigger doom-loop ask.
 DOOM_LOOP_REPEATS = 3
 
-EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
-PermissionCallback = Callable[..., Awaitable[str]]
-QuestionCallback = Callable[..., Awaitable[list[Any]]]
 
+class ModelResolver(Protocol):
+    """Resolve a model ref to an adapter plus bare provider model id."""
 
-#: Max raw-argument characters appended to tool-error messages.
-TOOL_ERROR_ARGS_SNIPPET = 500
-
-
-@dataclass
-class RunOptions:
-    """Per-run settings for :meth:`HarnessRunner.run`."""
-
-    max_steps: int | None = None
-    history: list[LLMMessage] = field(default_factory=list)
-    session_id: str = ""
-    workspace_id: str = ""
-    organization_id: str = ""
-    cwd: str = HARNESS_WORKSPACE_ROOT
-    small_model: str = ""
-    skills: list[str] = field(default_factory=list)
-    permission_timeout: float | None = None
-    question_timeout: float | None = None
-    auto_approve: bool = False
-    on_permission: PermissionCallback | None = None
-    on_question: QuestionCallback | None = None
-    run_subagent: Any | None = None
-    depth: int = 0
-    max_depth: int = DEFAULT_MAX_DEPTH
-    # Per-run cache of once-approved (tool, action) pairs, reset at
-    # the start of every run() call. ``always`` continues to flow
-    # through the allowlist/service; this set only suppresses repeat
-    # ``once`` callbacks for identical calls in one run (never shared
-    # across runs, even when RunOptions is reused).
-    once_approved: set[tuple[str, str]] = field(default_factory=set)
-    context_length: int = 0
-    max_output_tokens: int = 0
-    auto_compact: bool = True
-    current_user_message_id: str = ""
-    last_step_prompt_tokens: int = 0
-    last_step_completion_tokens: int = 0
-    last_step_total_tokens: int = 0
-
-
-@dataclass
-class RunResult:
-    """Outcome of one :meth:`HarnessRunner.run` call."""
-
-    output: str
-    steps: int
-    usage: Usage
-    cost: float
-    finish_reason: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class _PendingToolCall:
-    """One accumulated tool call for the current step."""
-
-    call_id: str
-    name: str
-    arguments: dict[str, Any]
-    raw_arguments: str = ""
-
-
-@dataclass
-class _ToolCallOutcome:
-    """Result of dispatching one tool call in a step."""
-
-    message: LLMMessage
-    result: ToolResult | None = None
-
-
-def _action_for_tool(tool_name: str, args: dict[str, Any]) -> str:
-    """Derive the permission action string for a tool invocation."""
-    key = (tool_name or "").strip().lower()
-    if key == "bash":
-        return str(args.get("command", ""))
-    if key == "process_start":
-        return str(args.get("command", ""))
-    if key in ("read", "edit", "write", "list"):
-        return str(args.get("path", ""))
-    if key in ("glob", "grep"):
-        path = str(args.get("path", "") or "")
-        pattern = str(args.get("pattern", "") or "")
-        return path or pattern
-    if key == "webfetch":
-        return str(args.get("url", ""))
-    if key == "task":
-        return str(args.get("description", ""))
-    return ""
-
-
-def _detect_external_directory(tool_name: str, args: dict[str, Any]) -> bool:
-    """Return True when a shell command touches paths outside /workspace."""
-    key = (tool_name or "").strip().lower()
-    if key not in EXTERNAL_PATH_TOOLS:
-        return False
-    from .tools.shell import detect_external_directory
-
-    return detect_external_directory(str(args.get("command", "") or ""))
-
-
-def _combine_decisions(*decisions: str) -> str:
-    """Combine decisions with deny > ask > allow precedence."""
-    if DENY in decisions:
-        return DENY
-    if ASK in decisions:
-        return ASK
-    return "allow"
+    def __call__(self, model_ref: str) -> ResolvedModel:
+        """Return provider adapter and limits for *model_ref*."""
+        ...
 
 
 def _parse_arguments(raw: Any) -> dict[str, Any]:
@@ -240,85 +114,39 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
     return {}
 
 
-def _with_args(message: str, call: _PendingToolCall) -> str:
-    """Append the raw tool arguments (truncated) to an error message."""
-    raw = (call.raw_arguments or "").strip()
-    if not raw:
-        return message
-    return f"{message} (args: {raw[:TOOL_ERROR_ARGS_SNIPPET]})"
-
-
 def _is_last_step(step: int, max_steps: int | None) -> bool:
     """Return True when *step* is the optional configured last step."""
     return max_steps is not None and step >= max_steps
 
 
-async def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
-    """Best-effort todo list for the ``todo_updated`` event."""
-    try:
-        repository = None
-        if ctx.registry is not None:
-            try:
-                tool = ctx.registry.get("todowrite")
-            except KeyError:
-                tool = None
-            repository = getattr(tool, "_repository", None)
-        if repository is None:
-            from .tools.todos import repository_for_session
-
-            repository = repository_for_session(ctx.session_id)
-        stored = await sync_to_async(repository.list)(ctx.session_id)
-        return [
-            {
-                "content": item.content,
-                "status": item.status,
-                "priority": item.priority,
-                "order": item.order,
-            }
-            for item in stored.items
-        ]
-    except Exception:  # pragma: no cover - event must never break loop
-        return []
-
-
-class HarnessRunner:
+class HarnessRunner(AuthorizedToolDispatcher):
     """Agentic loop: provider + tools + permissions + streaming events."""
 
     def __init__(
         self,
         *,
-        provider: ProviderAdapter,
+        model_resolver: ModelResolver,
         tools: ToolRegistry,
         evaluator: PermissionEvaluator | None = None,
         accessor: WorkspaceAccessor | None = None,
-        emit: EmitCallback | None = None,
+        emit: engine_contracts.EmitCallback | None = None,
         chat_options: ChatOptions | None = None,
     ) -> None:
         """Create a runner.
 
         Args:
-            provider: LLM provider adapter for chat streaming.
+            model_resolver: Callable ``resolve(model_ref) -> ResolvedModel`` used
+                for per-step adapter selection in multi-provider setups.
             tools: Registry of executable tools.
             evaluator: Base (global/org) permission evaluator.
             accessor: Workspace accessor for tools and context files.
             emit: Async callback receiving streaming event dicts.
             chat_options: Optional per-request provider settings.
         """
-        self.provider = provider
-        self.tools = tools
-        if evaluator is None:
-            evaluator = PermissionEvaluator(
-                global_rules=dict(DEFAULT_GLOBAL_RULES)
-            )
-        self.evaluator = evaluator
-        self.accessor = accessor
+        self._resolve_model = model_resolver
+        super().__init__(tools=tools, accessor=accessor, emit=emit, evaluator=evaluator)
+        self._log = log
         self.chat_options = chat_options or ChatOptions()
-        self._emit = emit or self._noop_emit
-
-    @staticmethod
-    async def _noop_emit(event: dict[str, Any]) -> None:
-        """Drop events when no emitter was provided."""
-        return None
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Emit *event* without breaking the loop on emitter errors."""
@@ -328,342 +156,6 @@ class HarnessRunner:
             raise
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("emit_failed", error=str(exc), event_type=event.get("type"))
-
-    def _filtered_schemas(
-        self, agent: AgentDefinition, mode: str, *, depth: int, max_depth: int
-    ) -> list[ToolSchema]:
-        """Return tool schemas excluding permission-denied tools.
-
-        The run *mode* is forwarded to both evaluators so
-        ``mode_rules`` slices apply here as well as in :meth:`_decide`
-        (Phase 3 wiring decision; ``mode_rules=None`` is a no-op).
-
-        Depth filtering (M5): ``task`` is withheld when
-        ``depth >= max_depth`` and ``todowrite`` is withheld from any
-        child run (``depth > 0``), mirroring OpenCode where subagents
-        get no todowrite. Filtering happens before permission checks
-        so nested tools never reach the provider.
-        """
-        agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
-        schemas: list[ToolSchema] = []
-        for tool in self.tools.list():
-            key = tool.permission_key or tool.name
-            tool_key = (tool.name or "").strip().lower()
-            if tool_key == "task" and depth >= max_depth:
-                continue
-            if tool_key == "todowrite" and depth > 0:
-                continue
-            decision = _combine_decisions(
-                self.evaluator.evaluate(key, "", mode=mode),
-                agent_eval.evaluate(key, "", mode=mode),
-            )
-            if decision == DENY:
-                continue
-            schemas.append(
-                ToolSchema(
-                    name=tool.name,
-                    description=tool.description,
-                    parameters=tool.args_schema.model_json_schema(),
-                )
-            )
-        return schemas
-
-    def _decide(
-        self,
-        agent: AgentDefinition,
-        tool_name: str,
-        action: str,
-        mode: str,
-        *,
-        doom_loop: bool = False,
-        external_directory: bool = False,
-    ) -> str:
-        """Combine base and agent permission layers (deny wins).
-
-        The run *mode* is forwarded to both evaluators so per-mode
-        ``mode_rules`` (when configured) participate in the merged
-        decision (Phase 3 wiring decision). The permission *key* (not
-        the tool name) is evaluated: ``write`` and ``list`` share keys
-        with ``edit``/``read`` (see tools), so key-level rules apply
-        to them as well. ``external_directory`` routes through the
-        reserved ``ask``-by-default key so shell commands escaping
-        /workspace always hit the ask gate.
-        """
-        key = self._permission_key(tool_name)
-        agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
-        if doom_loop:
-            return _combine_decisions(
-                self.evaluator.evaluate(
-                    key, action, mode=mode, doom_loop=True
-                ),
-                agent_eval.evaluate(key, action, mode=mode, doom_loop=True),
-            )
-        if external_directory:
-            return _combine_decisions(
-                self.evaluator.evaluate(
-                    key, action, mode=mode, external_directory=True
-                ),
-                agent_eval.evaluate(
-                    key, action, mode=mode, external_directory=True
-                ),
-            )
-        return _combine_decisions(
-            self.evaluator.evaluate(key, action, mode=mode),
-            agent_eval.evaluate(key, action, mode=mode),
-        )
-
-    def _permission_key(self, tool_name: str) -> str:
-        """Return the permission key for *tool_name* (falls back to name)."""
-        try:
-            return self.tools.get(tool_name).permission_key or tool_name
-        except KeyError:
-            return tool_name
-
-    async def _resolve_ask(
-        self,
-        *,
-        tool_name: str,
-        action: str,
-        title: str,
-        call_id: str,
-        step: int,
-        doom_loop: bool,
-        opts: RunOptions,
-    ) -> bool:
-        """Resolve an ``ask`` gate via ``on_permission`` (True = approved).
-
-        Once-approved ``(tool, action)`` pairs cached on
-        ``opts.once_approved`` return True without a callback. A fresh
-        ``once``/``allow``/``yes`` response is cached; ``always`` flows
-        through the allowlist/service untouched. Auto-denies when no
-        callback is configured (unless ``auto_approve``). An optional
-        positive ``permission_timeout`` still auto-denies; otherwise
-        the loop waits until resolve or abort.
-        """
-        key = "doom_loop" if doom_loop else "permission"
-        if (tool_name, action) in opts.once_approved:
-            log.info("permission_once_cached", tool=tool_name, action=action)
-            return True
-        if opts.auto_approve:
-            log.info("permission_auto_approved", tool=tool_name, action=action)
-            return True
-        callback = opts.on_permission
-        if callback is None:
-            log.info("permission_auto_denied_no_callback", tool=tool_name)
-            return False
-        log.info(
-            "permission_ask_pending",
-            tool=tool_name,
-            action=action,
-            session_id=opts.session_id,
-        )
-        pending = callback(
-            tool=tool_name,
-            action=action,
-            title=title,
-            call_id=call_id,
-            key=key,
-        )
-        timeout = opts.permission_timeout
-        try:
-            if timeout is not None and timeout > 0:
-                response = await asyncio.wait_for(pending, timeout=timeout)
-            else:
-                response = await pending
-        except asyncio.TimeoutError:
-            log.warning("permission_timeout_auto_deny", tool=tool_name)
-            return False
-        normalized = str(response or "").strip().lower()
-        approved = normalized in ("once", "always", "allow", "approved", "yes")
-        if approved and normalized != "always":
-            opts.once_approved.add((tool_name, action))
-        return approved
-
-    def _tool_error_outcome(
-        self, call: _PendingToolCall, content: str
-    ) -> _ToolCallOutcome:
-        """Build a tool-role message for a rejected or failed call."""
-        return _ToolCallOutcome(
-            message=LLMMessage(
-                role="tool",
-                content=content,
-                tool_call_id=call.call_id,
-            )
-        )
-
-    async def _dispatch_tool_call(
-        self,
-        *,
-        call: _PendingToolCall,
-        ctx: ToolContext,
-        agent: AgentDefinition,
-        mode: str,
-        step: int,
-        depth: int,
-        max_depth: int,
-        doom_loop: bool,
-        opts: RunOptions,
-    ) -> _ToolCallOutcome:
-        """Permission-gate and execute one tool call (safe to run concurrently)."""
-        action = _action_for_tool(call.name, call.arguments)
-        title = self._tool_title(call.name, call.arguments)
-        tool_key = (call.name or "").strip().lower()
-        if tool_key == "task" and depth >= max_depth:
-            await self._send(
-                {
-                    "type": "tool_error",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "tool": call.name,
-                    "error": (
-                        f"Subagent depth limit reached (depth={depth}, "
-                        f"max_depth={max_depth})"
-                    ),
-                }
-            )
-            return self._tool_error_outcome(
-                call,
-                "Subagent depth limit reached; nested task calls are not allowed.",
-            )
-        if tool_key == "todowrite" and depth > 0:
-            await self._send(
-                {
-                    "type": "tool_error",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "tool": call.name,
-                    "error": "todowrite is not available to subagents.",
-                }
-            )
-            return self._tool_error_outcome(
-                call, "todowrite is not available to subagents."
-            )
-        external = _detect_external_directory(call.name, call.arguments)
-        decision = self._decide(
-            agent,
-            call.name,
-            action,
-            mode,
-            doom_loop=doom_loop,
-            external_directory=external,
-        )
-        log.debug(
-            "permission_decision",
-            tool=call.name,
-            action=action,
-            decision=decision,
-            agent=agent.name,
-            session_id=opts.session_id,
-        )
-        approved = True
-        if decision == DENY:
-            approved = False
-        elif decision == ASK or doom_loop or external:
-            approved = await self._resolve_ask(
-                tool_name=call.name,
-                action=action,
-                title=title,
-                call_id=call.call_id,
-                step=step,
-                doom_loop=doom_loop,
-                opts=opts,
-            )
-        if not approved:
-            if doom_loop:
-                reason = "doom-loop guard denied"
-            elif external:
-                reason = "external directory access denied"
-            else:
-                reason = "denied by permissions"
-            await self._send(
-                {
-                    "type": "tool_error",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "tool": call.name,
-                    "error": f"Permission {reason}: {title}",
-                }
-            )
-            return self._tool_error_outcome(call, f"Permission {reason}: {title}")
-        await self._send(
-            {
-                "type": "tool_started",
-                "step": step,
-                "call_id": call.call_id,
-                "tool": call.name,
-                "title": title,
-                "arguments": call.raw_arguments,
-            }
-        )
-        call_ctx = replace(ctx, call_id=call.call_id)
-        try:
-            result = await self.tools.execute(call.name, call.arguments, call_ctx)
-        except asyncio.CancelledError:
-            raise
-        except KeyError as exc:
-            error = _with_args(f"Unknown tool '{call.name}': {exc}", call)
-            await self._send(
-                {
-                    "type": "tool_error",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "tool": call.name,
-                    "error": error,
-                }
-            )
-            return self._tool_error_outcome(call, error)
-        except Exception as exc:
-            error = _with_args(f"Tool '{call.name}' failed: {exc}", call)
-            await self._send(
-                {
-                    "type": "tool_error",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "tool": call.name,
-                    "error": error,
-                }
-            )
-            return self._tool_error_outcome(call, error)
-        await self._send(
-            {
-                "type": "tool_completed",
-                "step": step,
-                "call_id": call.call_id,
-                "tool": call.name,
-                "output": result.output,
-            }
-        )
-        if result.metadata.get("unified_diff"):
-            await self._send(
-                {
-                    "type": "patch",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "tool": call.name,
-                    "title": f"Patch {result.metadata.get('path', call.name)}",
-                    "path": result.metadata.get("path", ""),
-                    "unified_diff": result.metadata.get("unified_diff", ""),
-                    "old_content": result.metadata.get("old_content", ""),
-                    "new_content": result.metadata.get("new_content", ""),
-                }
-            )
-        if tool_key == "todowrite":
-            await self._send(
-                {
-                    "type": "todo_updated",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "todos": await _todos_payload(call_ctx),
-                }
-            )
-        return _ToolCallOutcome(
-            message=LLMMessage(
-                role="tool",
-                content=result.output,
-                tool_call_id=call.call_id,
-            ),
-            result=result,
-        )
 
     async def _run_step_tools(
         self,
@@ -676,7 +168,7 @@ class HarnessRunner:
         step: int,
         depth: int,
         max_depth: int,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
     ) -> list[_ToolCallOutcome]:
         """Execute *calls* concurrently; return outcomes in original order."""
         doom_flags: list[bool] = []
@@ -709,14 +201,21 @@ class HarnessRunner:
             raw = await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
             for task in tasks:
-                if not task.done():
+                # gather has already cancelled its children. Do not interrupt
+                # their cancellation handlers a second time while they clean up.
+                if not task.done() and not task.cancelling():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         outcomes: list[_ToolCallOutcome] = []
         for call, item in zip(calls, raw):
             if isinstance(item, asyncio.CancelledError):
-                raise item
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise item
+                # gather completed normally: only this tool was interrupted,
+                # not the owning run. Preserve siblings and let the model recover.
+                item = RuntimeError("Tool execution interrupted unexpectedly")
             if isinstance(item, BaseException):
                 log.warning(
                     "tool_dispatch_failed",
@@ -729,6 +228,7 @@ class HarnessRunner:
                         "type": "tool_error",
                         "step": step,
                         "call_id": call.call_id,
+                        "queued_id": call.queued_id,
                         "tool": call.name,
                         "error": str(item),
                     }
@@ -746,8 +246,8 @@ class HarnessRunner:
         agent_name: str,
         model: str,
         mode: str = "build",
-        opts: RunOptions | None = None,
-    ) -> RunResult:
+        opts: engine_contracts.RunOptions | None = None,
+    ) -> engine_contracts.RunResult:
         """Run one agent turn and return the aggregated result.
 
         Args:
@@ -766,7 +266,7 @@ class HarnessRunner:
             ValueError: For invalid modes or empty prompts.
             asyncio.CancelledError: On abort (after emitting ``aborted``).
         """
-        options = opts or RunOptions()
+        options = opts or engine_contracts.RunOptions()
         # Per-run once-approval cache: never shared across runs, even
         # when the caller reuses the same RunOptions object.
         options.once_approved = set()
@@ -778,9 +278,8 @@ class HarnessRunner:
         effective_model = model
         if agent.model_override == SMALL_MODEL and options.small_model:
             effective_model = options.small_model
-        max_steps = options.max_steps or agent.steps or DEFAULT_MAX_STEPS
+        max_steps = options.max_steps or agent.steps
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
-        depth = max(0, options.depth)
         depth = max(0, options.depth)
         if depth > max_depth:
             raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
@@ -809,25 +308,13 @@ class HarnessRunner:
         agent: AgentDefinition,
         model: str,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         cwd: str,
         max_steps: int | None,
         depth: int = 0,
         max_depth: int = DEFAULT_MAX_DEPTH,
-    ) -> RunResult:
+    ) -> engine_contracts.RunResult:
         """Execute the step loop (cancellation handled by :meth:`run`)."""
-        if agent.name == "computeruse":
-            return await self._run_computeruse_inner(
-                prompt=prompt,
-                agent=agent,
-                model=model,
-                mode=mode,
-                opts=opts,
-                cwd=cwd,
-                max_steps=max_steps,
-                depth=depth,
-                max_depth=max_depth,
-            )
         schemas = self._filtered_schemas(agent, mode, depth=depth, max_depth=max_depth)
         composed = await compose_system_prompt(
             agent=agent,
@@ -847,17 +334,26 @@ class HarnessRunner:
                 message_id=opts.current_user_message_id or "",
             ),
         ]
+
+        async def authorize_image(path: str) -> bool:
+            decision = self._decide(agent, "read", path, mode)
+            if decision != "ask":
+                return decision == "allow"
+            return await self._resolve_ask(
+                tool_name="read",
+                action=path,
+                title=f"Read {path}",
+                call_id=f"media-{path}",
+                step=0,
+                doom_loop=False,
+                opts=opts,
+            )
+
+        authorize_read = opts.authorize_file_read or authorize_image
         if self.accessor is not None:
-            last = messages[-1]
-            if last.role == "user" and isinstance(last.content, str):
-                hydrated = await hydrate_workspace_images(last.content, self.accessor)
-                messages[-1] = LLMMessage(
-                    role=last.role,
-                    content=hydrated,
-                    tool_calls=last.tool_calls,
-                    tool_call_id=last.tool_call_id,
-                    message_id=last.message_id,
-                )
+            messages = await hydrate_image_messages(
+                messages, self.accessor, authorize_read=authorize_read
+            )
         ctx = ToolContext(
             session_id=opts.session_id or "session",
             workspace_id=opts.workspace_id or "workspace",
@@ -868,10 +364,7 @@ class HarnessRunner:
             depth=depth,
             max_depth=max_depth,
             model=model,
-            parent_emit=self._emit,
-            provider=self.provider,
             registry=self.tools,
-            evaluator=self.evaluator,
             run_subagent=opts.run_subagent,
             on_question=opts.on_question,
             question_timeout=opts.question_timeout,
@@ -982,7 +475,7 @@ class HarnessRunner:
                     )
             if finish_reason == "content_filter":
                 messages.append(LLMMessage(role="assistant", content=text))
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=f"{text}{CONTENT_FILTER_NOTICE}",
                     steps=step,
                     usage=total_usage,
@@ -991,7 +484,7 @@ class HarnessRunner:
                 )
             if finish_reason == "length":
                 messages.append(LLMMessage(role="assistant", content=text))
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=f"{text}{LENGTH_TRUNCATION_NOTICE}",
                     steps=step,
                     usage=total_usage,
@@ -1001,7 +494,7 @@ class HarnessRunner:
             if is_last:
                 if calls:
                     await self._reject_last_step_tools(calls, step)
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=text,
                     steps=step,
                     usage=total_usage,
@@ -1010,6 +503,27 @@ class HarnessRunner:
                 )
             if not calls:
                 messages.append(LLMMessage(role="assistant", content=text))
+                steered = await self._take_steering(opts, authorize_read=authorize_read)
+                if steered:
+                    # The user spoke while the model was answering: continue
+                    # the turn with their message instead of stopping.
+                    messages.extend(steered)
+                    if is_overflow(
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
+                        total_tokens=usage.total_tokens,
+                        limits=limits,
+                        auto=opts.auto_compact,
+                    ):
+                        messages = await self._maybe_compact_history(
+                            messages=messages,
+                            agent=agent,
+                            model=model,
+                            mode=mode,
+                            opts=opts,
+                            limits=limits,
+                        )
+                    continue
                 if is_overflow(
                     prompt_tokens=usage.prompt_tokens,
                     completion_tokens=usage.completion_tokens,
@@ -1025,7 +539,7 @@ class HarnessRunner:
                         opts=opts,
                         limits=limits,
                     )
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=text,
                     steps=step,
                     usage=total_usage,
@@ -1074,223 +588,34 @@ class HarnessRunner:
                     opts=opts,
                     limits=limits,
                 )
+            # Tool results must stay adjacent to their calls, so a steer joins
+            # the conversation only after every outcome (and any compaction).
+            messages.extend(
+                await self._take_steering(opts, authorize_read=authorize_read)
+            )
 
-    async def _run_computeruse_inner(
+    async def _take_steering(
         self,
+        opts: engine_contracts.RunOptions,
         *,
-        prompt: str,
-        agent: AgentDefinition,
-        model: str,
-        mode: str,
-        opts: RunOptions,
-        cwd: str,
-        max_steps: int | None,
-        depth: int = 0,
-        max_depth: int = DEFAULT_MAX_DEPTH,
-    ) -> RunResult:
-        """Execute the computer-use loop with recording and image compaction."""
-        schemas = self._filtered_schemas(agent, mode, depth=depth, max_depth=max_depth)
-        composed = await compose_system_prompt(
-            agent=agent,
-            mode=mode,
-            tools=schemas,
-            subagents=subagent_descriptions(),
-            accessor=self.accessor,
-            cwd=cwd,
-            skills=list(opts.skills or []),
-        )
-        user_prompt = LLMMessage(role="user", content=prompt)
-        if self.accessor is not None and isinstance(user_prompt.content, str):
-            hydrated = await hydrate_workspace_images(
-                user_prompt.content, self.accessor
-            )
-            user_prompt = LLMMessage(role="user", content=hydrated)
-        cu_state = ComputerUseLoopState(
-            base_messages=[
-                LLMMessage(role="system", content=composed.system),
-                *list(opts.history or []),
-                user_prompt,
-            ]
-        )
-        ctx = ToolContext(
-            session_id=opts.session_id or "session",
-            workspace_id=opts.workspace_id or "workspace",
-            accessor=self.accessor
-            or _MissingAccessor(workspace_id=opts.workspace_id or "workspace"),
-            agent_name=agent.name,
-            directory=cwd,
-            depth=depth,
-            max_depth=max_depth,
-            model=model,
-            parent_emit=self._emit,
-            provider=self.provider,
-            registry=self.tools,
-            evaluator=self.evaluator,
-            run_subagent=opts.run_subagent,
-            on_question=opts.on_question,
-            question_timeout=opts.question_timeout,
-        )
-        run_id = sanitize_run_id(opts.session_id or "session")
-        total_usage = Usage()
-        total_cost = 0.0
-        recent_calls: list[str] = []
-        record_started = False
-        held = False
-        recording_path = default_recording_path(run_id)
-
-        try:
-            await ctx.accessor.desktop_action(
-                "hold",
-                {"kind": "computeruse", "run_id": run_id},
-            )
-            held = True
-            try:
-                start = await ctx.accessor.desktop_action(
-                    "record_start", {"run_id": run_id}
+        authorize_read: AuthorizeRead | None = None,
+    ) -> list[LLMMessage]:
+        """Deliver queued steers and return them as user messages."""
+        if opts.steering is None:
+            return []
+        entries = await opts.steering.take()
+        steered: list[LLMMessage] = []
+        for entry in entries:
+            content: Any = entry.content
+            if self.accessor is not None:
+                hydrated = await hydrate_image_messages(
+                    [LLMMessage(role="user", content=content)],
+                    self.accessor,
+                    authorize_read=authorize_read or opts.authorize_file_read,
                 )
-            except Exception as exc:
-                raise RuntimeError(f"Computer-use record_start failed: {exc}") from exc
-            if not start.get("ok"):
-                raise RuntimeError(f"Computer-use record_start failed: {start!r}")
-            record_started = True
-            recording_path = str(start.get("path") or default_recording_path(run_id))
-            initial = await self.tools.execute("view_screen", {}, ctx)
-            if not initial.image_jpeg:
-                raise RuntimeError(
-                    "Computer-use initial desktop screenshot did not return image data."
-                )
-            cu_state.set_screenshot(INITIAL_DESKTOP_TEXT, initial.image_jpeg)
-
-            step = 0
-            while True:
-                step += 1
-                is_last = _is_last_step(step, max_steps)
-                await self._send({"type": "step_start", "step": step})
-                request_messages, request_schemas, request_opts = (
-                    self._last_step_request(
-                        cu_state.build_provider_messages(), schemas, is_last
-                    )
-                )
-                text, calls, usage, _finish = await self._provider_step(
-                    model=model,
-                    messages=request_messages,
-                    schemas=request_schemas,
-                    step=step,
-                    chat_options=request_opts,
-                )
-                total_usage = total_usage.merge(usage)
-                total_cost = total_usage.cost
-                await self._send(
-                    {
-                        "type": "step_finish",
-                        "step": step,
-                        "tokens": {
-                            "prompt_tokens": usage.prompt_tokens,
-                            "completion_tokens": usage.completion_tokens,
-                            "total_tokens": usage.total_tokens,
-                        },
-                        "cost": usage.cost,
-                    }
-                )
-                if is_last:
-                    if calls:
-                        await self._reject_last_step_tools(calls, step)
-                    return self._computeruse_result(
-                        output=append_video_to_output(text, run_id),
-                        steps=step,
-                        usage=total_usage,
-                        cost=total_cost,
-                        finish_reason="max_steps",
-                        recording_path=recording_path,
-                    )
-                if not calls:
-                    return self._computeruse_result(
-                        output=append_video_to_output(text, run_id),
-                        steps=step,
-                        usage=total_usage,
-                        cost=total_cost,
-                        finish_reason="stop",
-                        recording_path=recording_path,
-                    )
-                if cu_state.round_messages:
-                    cu_state.flush_round_to_ledger()
-                cu_state.round_messages.append(
-                    LLMMessage(
-                        role="assistant",
-                        content=text or None,
-                        tool_calls=[
-                            {
-                                "id": call.call_id,
-                                "name": call.name,
-                                "arguments": call.raw_arguments,
-                            }
-                            for call in calls
-                        ],
-                    )
-                )
-                outcomes = await self._run_step_tools(
-                    calls=calls,
-                    recent_calls=recent_calls,
-                    ctx=ctx,
-                    agent=agent,
-                    mode=mode,
-                    step=step,
-                    depth=depth,
-                    max_depth=max_depth,
-                    opts=opts,
-                )
-                for outcome in outcomes:
-                    cu_state.round_messages.append(outcome.message)
-                    if outcome.result is not None and outcome.result.image_jpeg:
-                        cu_state.set_screenshot(
-                            FRESH_DESKTOP_TEXT, outcome.result.image_jpeg
-                        )
-        finally:
-            if record_started:
-                try:
-                    stop = await ctx.accessor.desktop_action(
-                        "record_stop", {"run_id": run_id}
-                    )
-                    if stop.get("path"):
-                        recording_path = str(stop["path"])
-                except Exception as exc:  # pragma: no cover - best effort
-                    log.warning(
-                        "computeruse_record_stop_failed",
-                        run_id=run_id,
-                        error=str(exc),
-                    )
-            if held:
-                try:
-                    await ctx.accessor.desktop_action(
-                        "release",
-                        {"kind": "computeruse", "run_id": run_id},
-                    )
-                except Exception as exc:  # pragma: no cover - best effort
-                    log.warning(
-                        "computeruse_desktop_release_failed",
-                        run_id=run_id,
-                        error=str(exc),
-                    )
-
-    @staticmethod
-    def _computeruse_result(
-        *,
-        output: str,
-        steps: int,
-        usage: Usage,
-        cost: float,
-        finish_reason: str,
-        recording_path: str,
-    ) -> RunResult:
-        """Build a :class:`RunResult` for a computer-use run."""
-        return RunResult(
-            output=output,
-            steps=steps,
-            usage=usage,
-            cost=cost,
-            finish_reason=finish_reason,
-            metadata={"recording_path": recording_path},
-        )
+                content = hydrated[0].content
+            steered.append(LLMMessage(role="user", content=content))
+        return steered
 
     def _last_step_request(
         self,
@@ -1317,6 +642,7 @@ class HarnessRunner:
                     "type": "tool_error",
                     "step": step,
                     "call_id": call.call_id,
+                    "queued_id": call.queued_id,
                     "tool": call.name,
                     "error": MAX_STEPS_TOOL_ERROR,
                 }
@@ -1331,7 +657,7 @@ class HarnessRunner:
         step: int,
         agent: AgentDefinition,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         is_last_step: bool = False,
     ) -> tuple[str, list[_PendingToolCall], Usage, list[LLMMessage], str]:
         """Run one provider step, compacting and retrying once on overflow errors."""
@@ -1366,14 +692,17 @@ class HarnessRunner:
                 compacted, schemas, is_last_step
             )
             try:
-                text, calls, usage, finish = (
-                    await self._provider_step_with_transient_retry(
-                        model=model,
-                        messages=retry_messages,
-                        schemas=retry_schemas,
-                        step=step,
-                        chat_options=retry_opts,
-                    )
+                (
+                    text,
+                    calls,
+                    usage,
+                    finish,
+                ) = await self._provider_step_with_transient_retry(
+                    model=model,
+                    messages=retry_messages,
+                    schemas=retry_schemas,
+                    step=step,
+                    chat_options=retry_opts,
                 )
             except Exception as retry_exc:
                 if is_context_overflow_error(retry_exc):
@@ -1390,7 +719,7 @@ class HarnessRunner:
         step: int,
         agent: AgentDefinition,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         text: str,
         calls: list[_PendingToolCall],
         usage: Usage,
@@ -1437,7 +766,7 @@ class HarnessRunner:
         step: int,
         chat_options: ChatOptions | None = None,
     ) -> tuple[str, list[_PendingToolCall], Usage, str]:
-        """Run one provider step, retrying transient timeouts and 5xx errors."""
+        """Run one provider step, retrying timeouts, transport drops, and 5xx."""
         attempt = 0
         while True:
             try:
@@ -1451,13 +780,10 @@ class HarnessRunner:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if (
-                    not is_retryable_provider_error(exc)
-                    or attempt >= RETRY_MAX_RETRIES
-                ):
+                if not is_retryable_provider_error(exc) or attempt >= RETRY_MAX_RETRIES:
                     raise
                 attempt += 1
-                delay = retry_delay(attempt)
+                delay = retry_delay(attempt, error=exc)
                 log.warning(
                     "provider_step_retry",
                     attempt=attempt,
@@ -1487,13 +813,88 @@ class HarnessRunner:
         step: int,
         chat_options: ChatOptions | None = None,
     ) -> tuple[str, list[_PendingToolCall], Usage, str]:
-        """Stream one provider step and accumulate text/tool calls/usage."""
-        fragments: dict[int, dict[str, Any]] = {}
+        """Stream one provider step and accumulate text/tool calls/usage.
+
+        Tool fragments are grouped by stream key (OpenCode ``finishAll``
+        equivalent: every slot with a name is finalized at step end).
+        A usable ``index`` (neither missing, ``None`` nor ``""``) is the
+        stream key verbatim — numeric Chat/Bedrock indexes stay numeric,
+        Responses ``item_id`` strings stay strings (never cast to int).
+        Fragments without a usable index are grouped by their call ``id``
+        so arguments of two different call IDs are never concatenated
+        into one string.
+
+        Ordered ``tool_queued`` contract: on
+        the *first fragment* for each slot a ``tool_queued``
+        ``{type, step, call_id, tool, title, arguments}`` event is sent
+        immediately at the observed provider position — never delayed to
+        step end — so the timeline creates the pending tool row before
+        any later text delta. A single provider :class:`Delta` may carry
+        text/reasoning/tool together; deltas are processed in stream
+        order and fragments within one delta in wire order, which is the
+        only representable provider order (the :class:`Delta` shape does
+        not encode intra-delta text-vs-tool precedence).
+
+        ``call_id`` stability: the queued id is the real provider id
+        when the first fragment carries one, otherwise a unique
+        provisional ``call-{step}-{n}`` (or ``call-{step}-{index}`` for
+        indexed slots without an id). When the real id arrives in a
+        later fragment for the same slot the slot is rebound to it; the
+        queued provisional id is carried as ``queued_id`` so persistence
+        can rebind that exact row, and the final call uses the real id.
+
+        Final call order preserves provider positions: numeric stream
+        keys (explicit ordered blocks) sort numerically; all other keys
+        (Responses ``item_id``, synthetic ``call-{step}-{n}`` and
+        ``{index}#{n}`` split keys) keep first-seen observed order
+        instead of lexicographic string sorting.
+        """
+        fragments: dict[Any, dict[str, Any]] = {}
+        id_to_key: dict[str, Any] = {}
+        split_to_key: dict[tuple[str, str], Any] = {}
+        slot_order: dict[Any, int] = {}
+        order_counter = 0
+        next_slot = 0
+        current_key: Any = None
         text_parts: list[str] = []
         usage = Usage()
         finish_reason = ""
-        async for delta in self.provider.chat_stream(
-            model, messages, schemas, chat_options or self.chat_options
+        resolved = self._resolve_model(model)
+
+        def _provisional_call_id(key: Any, slot_id: str) -> str:
+            """Return the stable queued id for a newly opened slot."""
+            if slot_id:
+                return slot_id
+            if isinstance(key, str):
+                return key
+            return f"call-{step}-{key}"
+
+        async def _emit_queued(key: Any) -> None:
+            slot = fragments[key]
+            queued_id = _provisional_call_id(key, str(slot.get("id", "") or ""))
+            slot["queued_id"] = queued_id
+            name = str(slot.get("name", "") or "")
+            raw = str(slot.get("arguments", "") or "")
+            try:
+                title = self._tool_title(name, _parse_arguments(raw))
+            except Exception:  # pragma: no cover - title never breaks loop
+                title = name
+            await self._send(
+                {
+                    "type": "tool_queued",
+                    "step": step,
+                    "call_id": queued_id,
+                    "tool": name,
+                    "title": title,
+                    "arguments": raw,
+                }
+            )
+
+        async for delta in resolved.adapter.chat_stream(
+            resolved.model_id,
+            limit_image_messages(messages),
+            schemas,
+            chat_options or self.chat_options,
         ):
             if delta.usage is not None:
                 usage = usage.merge(delta.usage)
@@ -1517,46 +918,161 @@ class HarnessRunner:
                     }
                 )
             for fragment in delta.tool_calls or ():
-                index = int(fragment.get("index", 0) or 0)
-                slot = fragments.setdefault(
-                    index, {"id": "", "name": "", "arguments": ""}
+                if not isinstance(fragment, dict):
+                    continue
+                # Usable stream key: an explicit ``index`` (numeric Chat /
+                # Bedrock index or Responses ``item_id`` string) used
+                # verbatim — never cast to int. Missing key, ``None`` and
+                # ``""`` all mean "no stream key" (Bedrock emits no index).
+                # ``0``/``False`` are usable keys (never treated as
+                # missing): bools stay verbatim keys like any other index.
+                raw_index = fragment.get("index")
+                has_usable_index = raw_index is not None and (
+                    not isinstance(raw_index, str) or raw_index != ""
                 )
-                if fragment.get("id"):
-                    slot["id"] = fragment["id"]
-                if fragment.get("name"):
-                    slot["name"] = fragment["name"]
+                fragment_id = fragment.get("id") or ""
+                fragment_name = fragment.get("name") or ""
+                if not has_usable_index:
+                    if fragment_id:
+                        # Group by call id: same id continues its slot, a
+                        # new id opens a new slot — never concatenate
+                        # arguments of two different call IDs.
+                        existing = id_to_key.get(fragment_id)
+                        if existing is not None and existing in fragments:
+                            key = existing
+                        else:
+                            key = f"call-{step}-{next_slot}"
+                            next_slot += 1
+                            id_to_key[fragment_id] = key
+                    elif (
+                        fragment_name
+                        and current_key is not None
+                        and current_key in fragments
+                        and str(fragments[current_key].get("id", "") or "")
+                    ):
+                        # After a fully-identified slot, an id-less fragment
+                        # cannot be a continuation — open a fresh slot.
+                        key = f"call-{step}-{next_slot}"
+                        next_slot += 1
+                    elif (
+                        fragment_name
+                        and current_key is not None
+                        and current_key in fragments
+                        and str(fragments[current_key].get("name", "") or "")
+                        and str(fragments[current_key].get("name", "") or "")
+                        != fragment_name
+                    ):
+                        # Id-less fragment starting a *different* tool name:
+                        # new slot instead of gluing two tools into slot 0.
+                        # (Same-name/args-only fragments continue the slot
+                        # so fragmented arguments stay concatenated.)
+                        key = f"call-{step}-{next_slot}"
+                        next_slot += 1
+                    elif current_key is not None and current_key in fragments:
+                        # Fragmented-arguments continuation of the active
+                        # id-less slot.
+                        key = current_key
+                    else:
+                        key = f"call-{step}-{next_slot}"
+                        next_slot += 1
+                else:
+                    key = raw_index
+                    if fragment_id:
+                        known = id_to_key.get(fragment_id)
+                        if known is not None and known in fragments and known != key:
+                            # Same call id already accumulating under a
+                            # different key: keep one slot per call id.
+                            key = known
+                        else:
+                            # Same stream index reused for a new call id
+                            # (provider restarted the slot): never concat
+                            # arguments of two different call IDs — split
+                            # into a side slot.
+                            slot_for_key = fragments.get(key)
+                            slot_id = (
+                                str(slot_for_key.get("id", "") or "")
+                                if slot_for_key
+                                else ""
+                            )
+                            if (
+                                slot_for_key is not None
+                                and slot_id
+                                and slot_id != fragment_id
+                            ):
+                                split_pair = (str(raw_index), fragment_id)
+                                split_key = split_to_key.get(split_pair)
+                                if split_key is None or split_key not in fragments:
+                                    split_key = f"{raw_index}#{next_slot}"
+                                    next_slot += 1
+                                    split_to_key[split_pair] = split_key
+                                    id_to_key[fragment_id] = split_key
+                                key = split_key
+                            else:
+                                id_to_key[fragment_id] = key
+                if key not in fragments:
+                    fragments[key] = {"id": "", "name": "", "arguments": ""}
+                    slot_order[key] = order_counter
+                    order_counter += 1
+                slot = fragments[key]
+                if fragment_id and not slot.get("id"):
+                    slot["id"] = fragment_id
+                if fragment_name and not slot.get("name"):
+                    slot["name"] = fragment_name
                 args = fragment.get("arguments", "")
                 if isinstance(args, dict):
                     args = json.dumps(args)
                 if args:
                     slot["arguments"] += str(args)
+                # tool_queued on *first fragment* for each slot: the slot
+                # just opened (or already existed but has never been
+                # queued, e.g. created before its name arrived). Uses the
+                # provisional id when no real id is known yet; the service
+                # rebinds when the real id arrives later. A
+                # nameless slot cannot emit yet (no tool known).
+                if slot.get("name") and not slot.get("queued_id"):
+                    await _emit_queued(key)
+                current_key = key
         calls: list[_PendingToolCall] = []
-        for index in sorted(fragments):
-            slot = fragments[index]
+        # Preserve provider positions: numeric stream keys (explicit
+        # ordered blocks) sort numerically; every other key keeps
+        # first-seen observed order (never lexicographic string order,
+        # so "item-10" stays after "item-2" when observed that way).
+        numeric_keys = sorted(
+            (
+                key
+                for key in fragments
+                if isinstance(key, int) and not isinstance(key, bool)
+            ),
+        )
+        numeric_set = set(numeric_keys)
+        observed_keys = [
+            key
+            for key, _ in sorted(slot_order.items(), key=lambda item: item[1])
+            if key not in numeric_set
+        ]
+        for key in [*numeric_keys, *observed_keys]:
+            slot = fragments[key]
             name = str(slot.get("name", "") or "")
             if not name:
                 continue
             raw = str(slot.get("arguments", "") or "")
+            slot_id = str(slot.get("id", "") or "")
+            if slot_id:
+                call_id = slot_id
+            else:
+                call_id = str(slot.get("queued_id", "") or "")
+                if not call_id:
+                    call_id = _provisional_call_id(key, "")
             calls.append(
                 _PendingToolCall(
-                    call_id=str(slot.get("id", "") or f"call-{step}-{index}"),
+                    call_id=call_id,
                     name=name,
                     arguments=_parse_arguments(raw),
                     raw_arguments=raw,
+                    queued_id=str(slot.get("queued_id", "") or ""),
                 )
             )
         return "".join(text_parts), calls, usage, finish_reason
-
-    def _tool_title(self, tool_name: str, args: dict[str, Any]) -> str:
-        """Best-effort human title for a tool invocation."""
-        try:
-            tool = self.tools.get(tool_name)
-        except KeyError:
-            return tool_name
-        try:
-            return tool.title(tool.coerce_args(args))
-        except Exception:  # pragma: no cover - title must never break loop
-            return tool_name
 
     async def _maybe_compact_history(
         self,
@@ -1565,7 +1081,7 @@ class HarnessRunner:
         agent: AgentDefinition,
         model: str,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         limits: ModelLimits,
         overflow: bool = False,
     ) -> list[LLMMessage]:
@@ -1584,7 +1100,7 @@ class HarnessRunner:
             return messages
         try:
             child = HarnessRunner(
-                provider=self.provider,
+                model_resolver=self._resolve_model,
                 tools=self.tools,
                 evaluator=self.evaluator,
                 accessor=self.accessor,
@@ -1596,7 +1112,7 @@ class HarnessRunner:
                 "compaction",
                 model,
                 mode,
-                RunOptions(
+                engine_contracts.RunOptions(
                     auto_approve=True,
                     history=[],
                     auto_compact=False,
@@ -1631,13 +1147,6 @@ class HarnessRunner:
 class _MissingAccessor(WorkspaceAccessor):
     """Fallback accessor that fails loudly when no accessor is wired."""
 
-    async def exec_stream(
-        self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None, timeout=None
-    ):  # type: ignore[no-untyped-def]
-        """Raise (no workspace connected)."""
-        raise RuntimeError("No workspace accessor configured")
-        yield  # pragma: no cover - keeps the method an iterator
-
     async def exec_wait(
         self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None, timeout=None
     ):  # type: ignore[no-untyped-def]
@@ -1656,30 +1165,49 @@ class _MissingAccessor(WorkspaceAccessor):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def stat(self, path):  # type: ignore[no-untyped-def]
-        """Raise (no workspace connected)."""
-        raise RuntimeError("No workspace accessor configured")
-
     async def desktop_action(self, action, args=None, timeout=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_start(self, command, workdir="/workspace", env=None, name=""):  # type: ignore[no-untyped-def]
+    async def process_start(  # type: ignore[no-untyped-def]
+        self,
+        command,
+        workdir="/workspace",
+        env=None,
+        name="",
+        *,
+        session_id=None,
+        kind="persistent",
+    ):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_list(self):  # type: ignore[no-untyped-def]
+    async def process_list(self, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_get(self, process_id):  # type: ignore[no-untyped-def]
+    async def process_get(self, process_id, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def process_stop(self, process_id):  # type: ignore[no-untyped-def]
+    async def process_stop(self, process_id, *, session_id=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
+    async def process_restart(self, process_id, *, session_id=None):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
 
-#: Backwards-friendly alias (brief allows ``AgentRunner``).
-AgentRunner = HarnessRunner
+    async def process_delete(self, process_id):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def open_process(  # type: ignore[no-untyped-def]
+        self, command, workdir="/workspace", env=None, timeout=None, *, owner=None
+    ):
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")
+
+    async def open_tcp(self, host, port, tls=False, server_hostname=None, timeout=None):  # type: ignore[no-untyped-def]
+        """Raise (no workspace connected)."""
+        raise RuntimeError("No workspace accessor configured")

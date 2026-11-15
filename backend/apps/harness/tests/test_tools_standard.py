@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 
 import pytest
+from pydantic import ValidationError
 
 from apps.harness.access.base import ExecResult
 from apps.harness.access.runner_accessor import RunnerAccessorError
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.conftest import TINY_PNG, FakeAccessor, make_image
 from apps.harness.tools import (
     BashTool,
     EditTool,
@@ -17,15 +18,17 @@ from apps.harness.tools import (
     ListTool,
     ReadTool,
     TaskTool,
-    TodoWriteTool,
-    WebfetchTool,
     WriteTool,
     default_tool_registry,
 )
 from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.files import ReadArgs
-from apps.harness.tools.shell import truncate_output
-from apps.harness.tools.todos import InMemoryTodoRepository
+from apps.harness.tools.shell import (
+    BASH_DEFAULT_TIMEOUT,
+    BASH_MAX_TIMEOUT,
+    BashArgs,
+    truncate_output,
+)
 
 
 def _ctx(accessor: FakeAccessor) -> ToolContext:
@@ -51,6 +54,8 @@ async def test_default_registry_has_standard_tools_plus_webfetch() -> None:
         "process_list",
         "process_get",
         "process_stop",
+        "process_restart",
+        "process_delete",
     ]
 
 
@@ -81,13 +86,99 @@ async def test_read_rejects_binary() -> None:
         await tool.execute({"path": "/workspace/b.bin"}, _ctx(accessor))
 
 
+async def test_read_image_detected_from_content_not_extension() -> None:
+    """JPEG magic bytes with a .bin name return an image attachment."""
+    import base64
+
+    from apps.harness.media.limits import MAX_MEDIA_INGEST_BYTES
+
+    jpeg = make_image(format="JPEG")
+    accessor = FakeAccessor(files={"/workspace/image.bin": jpeg})
+    result = await ReadTool().execute({"path": "/workspace/image.bin"}, _ctx(accessor))
+    assert result.output == "Image read successfully"
+    assert result.truncated is False
+    assert len(result.attachments) == 1
+    attachment = result.attachments[0]
+    assert attachment["type"] == "file"
+    assert attachment["mime"] == "image/jpeg"
+    assert attachment["filename"] == "image.bin"
+    url = str(attachment["url"])
+    assert url.startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == jpeg
+    assert result.metadata["attachments"] == result.attachments
+    assert result.metadata["mime"] == "image/jpeg"
+    assert MAX_MEDIA_INGEST_BYTES == 20 * 1024 * 1024
+
+
+async def test_read_png_happy_path() -> None:
+    """PNG magic bytes return an image attachment."""
+    import base64
+
+    png = TINY_PNG
+    accessor = FakeAccessor(files={"/workspace/cat.png": png})
+    result = await ReadTool().execute({"path": "/workspace/cat.png"}, _ctx(accessor))
+    assert result.output == "Image read successfully"
+    assert result.truncated is False
+    assert result.attachments[0]["mime"] == "image/png"
+    url = str(result.attachments[0]["url"])
+    assert url.startswith("data:image/png;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == png
+
+
+async def test_read_pdf_happy_path() -> None:
+    """%PDF magic bytes return a PDF attachment."""
+    import base64
+
+    pdf = b"%PDF-1.4\n" + b"x" * 16
+    accessor = FakeAccessor(files={"/workspace/doc.pdf": pdf})
+    result = await ReadTool().execute({"path": "/workspace/doc.pdf"}, _ctx(accessor))
+    assert result.output == "PDF read successfully"
+    assert result.truncated is False
+    assert result.attachments[0]["mime"] == "application/pdf"
+    assert result.attachments[0]["filename"] == "doc.pdf"
+    url = str(result.attachments[0]["url"])
+    assert url.startswith("data:application/pdf;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == pdf
+    assert result.metadata["attachments"] == result.attachments
+
+
+async def test_read_image_over_ingestion_limit_returns_path() -> None:
+    """Oversized images return a usable file reference without an attachment."""
+    from apps.harness.access.file_types import FileContent
+    from apps.harness.media.limits import MAX_MEDIA_INGEST_BYTES
+
+    jpeg = b"\xff\xd8\xff" + b"x" * 8
+
+    class _HugeAccessor(FakeAccessor):
+        async def read_file(  # type: ignore[override]
+            self, path: str, max_size=None
+        ) -> FileContent:
+            full = self.files[path]
+            size = MAX_MEDIA_INGEST_BYTES + 1
+            shown = full[: int(max_size)] if max_size is not None else full
+            return FileContent(content=shown, size=size, truncated=True)
+
+    accessor = _HugeAccessor(files={"/workspace/big.png": jpeg})
+    result = await ReadTool().execute({"path": "/workspace/big.png"}, _ctx(accessor))
+    assert "/workspace/big.png" in result.output
+    assert "Image not loaded" in result.output
+    assert not result.attachments
+
+
+async def test_read_unsupported_image_mime_falls_through_to_text() -> None:
+    """BMP bytes (unsupported) are read as text, not attachments."""
+    tool = ReadTool()
+    accessor = FakeAccessor(files={"/workspace/photo.bmp": b"BM text content"})
+    result = await tool.execute({"path": "/workspace/photo.bmp"}, _ctx(accessor))
+    assert result.attachments == []
+    assert "BM text content" in result.output
+
+
 async def test_read_paginates_large_file_instead_of_rejecting() -> None:
     """Files over the default page size return a continue hint, not an error."""
     tool = ReadTool()
     lines = [f"line-{i}" for i in range(3000)]
-    accessor = FakeAccessor(
-        files={"/workspace/big.py": ("\n".join(lines)).encode()}
-    )
+    accessor = FakeAccessor(files={"/workspace/big.py": ("\n".join(lines)).encode()})
     result = await tool.execute({"path": "/workspace/big.py"}, _ctx(accessor))
     assert "File too large" not in result.output
     assert "Use offset=" in result.output
@@ -120,9 +211,7 @@ async def test_read_caps_page_bytes_with_continue_hint() -> None:
 async def test_read_truncates_long_lines() -> None:
     """Lines longer than 2000 characters are clipped with a marker."""
     tool = ReadTool()
-    accessor = FakeAccessor(
-        files={"/workspace/min.js": ("y" * 5000).encode()}
-    )
+    accessor = FakeAccessor(files={"/workspace/min.js": ("y" * 5000).encode()})
     result = await tool.execute({"path": "/workspace/min.js"}, _ctx(accessor))
     assert "line truncated to 2000 chars" in result.output
     assert "y" * 2500 not in result.output.split("...", 1)[0]
@@ -133,15 +222,14 @@ async def test_read_offset_out_of_range() -> None:
     tool = ReadTool()
     accessor = FakeAccessor(files={"/workspace/a.txt": b"hello\nworld"})
     with pytest.raises(ToolError, match="out of range"):
-        await tool.execute(
-            {"path": "/workspace/a.txt", "offset": 5}, _ctx(accessor)
-        )
+        await tool.execute({"path": "/workspace/a.txt", "offset": 5}, _ctx(accessor))
 
 
-async def test_read_sandbox_violation_rejected(fake_accessor) -> None:
-    """Paths outside /workspace raise ValueError (sandbox)."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await ReadTool().execute({"path": "/etc/passwd"}, _ctx(fake_accessor))
+async def test_read_external_env_file() -> None:
+    """Read can fetch an external secret file via the accessor."""
+    accessor = FakeAccessor(files={"/etc/app.env": b"KEY=value"})
+    result = await ReadTool().execute({"path": "/etc/app.env"}, _ctx(accessor))
+    assert result.output == "0: KEY=value"
 
 
 async def test_read_runner_error_propagates() -> None:
@@ -183,13 +271,28 @@ async def test_write_happy_path(fake_accessor) -> None:
     assert "Wrote" in result.output
 
 
-async def test_write_sandbox_violation_rejected(fake_accessor) -> None:
-    """Write outside /workspace is rejected before any runner call."""
-    with pytest.raises(ValueError, match="under /workspace"):
+async def test_write_external_path(fake_accessor) -> None:
+    """Write resolves traversing relative paths and forwards absolute ones."""
+    await WriteTool().execute(
+        {"path": "../evil.txt", "content": "x"}, _ctx(fake_accessor)
+    )
+    assert fake_accessor.written["/evil.txt"] == b"x"
+
+
+async def test_write_refuses_truncated_existing_file() -> None:
+    """A partial read cannot produce a misleading replacement diff."""
+    from apps.harness.access.file_types import FileContent
+
+    class TruncatedAccessor(FakeAccessor):
+        async def read_file(self, path: str, max_size=None) -> FileContent:
+            return FileContent(content=b"prefix", size=100, truncated=True)
+
+    accessor = TruncatedAccessor(files={"/workspace/large.txt": b"x" * 100})
+    with pytest.raises(ToolError, match="read was truncated"):
         await WriteTool().execute(
-            {"path": "../evil.txt", "content": "x"}, _ctx(fake_accessor)
+            {"path": "large.txt", "content": "replacement"}, _ctx(accessor)
         )
-    assert fake_accessor.written == {}
+    assert accessor.written == {}
 
 
 async def test_write_runner_error_propagates() -> None:
@@ -211,6 +314,23 @@ async def test_edit_happy_path(fake_accessor) -> None:
     )
     assert fake_accessor.files["/workspace/a.txt"] == b"hello\nthere\n"
     assert "1" in result.output
+
+
+async def test_edit_refuses_truncated_existing_file() -> None:
+    """An edit cannot use an incomplete file prefix as its current state."""
+    from apps.harness.access.file_types import FileContent
+
+    class TruncatedAccessor(FakeAccessor):
+        async def read_file(self, path: str, max_size=None) -> FileContent:
+            return FileContent(content=b"old", size=100, truncated=True)
+
+    accessor = TruncatedAccessor(files={"/workspace/large.txt": b"x" * 100})
+    with pytest.raises(ToolError, match="read was truncated"):
+        await EditTool().execute(
+            {"path": "large.txt", "old_string": "old", "new_string": "new"},
+            _ctx(accessor),
+        )
+    assert accessor.written == {}
 
 
 async def test_edit_no_match_fails(fake_accessor) -> None:
@@ -243,13 +363,13 @@ async def test_edit_ambiguous_without_replace_all() -> None:
     assert "3" in result.output
 
 
-async def test_edit_sandbox_violation_rejected(fake_accessor) -> None:
-    """Edit outside /workspace is rejected."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await EditTool().execute(
-            {"path": "/etc/x", "old_string": "a", "new_string": "b"},
-            _ctx(fake_accessor),
-        )
+async def test_edit_external_path() -> None:
+    """Edit changes existing files outside /workspace."""
+    accessor = FakeAccessor(files={"/etc/x": b"a"})
+    await EditTool().execute(
+        {"path": "/etc/x", "old_string": "a", "new_string": "b"}, _ctx(accessor)
+    )
+    assert accessor.written["/etc/x"] == b"b"
 
 
 async def test_bash_happy_path() -> None:
@@ -276,6 +396,24 @@ async def test_bash_timeout_propagates() -> None:
         await BashTool().execute({"command": "sleep 9"}, _ctx(accessor))
 
 
+def test_bash_timeout_defaults_to_three_minutes() -> None:
+    """Omitted timeout uses the 3-minute default."""
+    args = BashArgs(command="echo hi")
+    assert args.timeout == BASH_DEFAULT_TIMEOUT == 180.0
+
+
+def test_bash_timeout_accepts_twenty_minute_max() -> None:
+    """The agent may request the 20-minute ceiling."""
+    args = BashArgs(command="echo hi", timeout=BASH_MAX_TIMEOUT)
+    assert args.timeout == 1200.0
+
+
+def test_bash_timeout_rejects_above_max() -> None:
+    """Timeouts above 20 minutes fail schema validation."""
+    with pytest.raises(ValidationError):
+        BashArgs(command="echo hi", timeout=BASH_MAX_TIMEOUT + 1)
+
+
 async def test_bash_runner_error_propagates() -> None:
     """Runner errors surface as ToolError."""
     accessor = FakeAccessor(error=RunnerAccessorError("exec failed"))
@@ -285,9 +423,7 @@ async def test_bash_runner_error_propagates() -> None:
 
 async def test_bash_allowed_env_passes_through() -> None:
     """Benign env vars reach the accessor unchanged."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     result = await BashTool().execute(
         {"command": "echo hi", "env": {"FOO": "1", "MY_APP_X": "y"}},
         _ctx(accessor),
@@ -297,11 +433,29 @@ async def test_bash_allowed_env_passes_through() -> None:
 
 async def test_bash_empty_env_ok() -> None:
     """Missing/empty env is treated as {} and executes normally."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     result = await BashTool().execute({"command": "echo hi"}, _ctx(accessor))
     assert result.output == "ok"
+
+
+async def test_bash_external_workdir_allowed() -> None:
+    """workdir outside /workspace is forwarded to the accessor."""
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
+    result = await BashTool().execute(
+        {"command": "pwd", "workdir": "/tmp"}, _ctx(accessor)
+    )
+    assert result.output == "ok"
+    assert accessor.exec_calls[0][1] == "/tmp"
+
+
+async def test_bash_invalid_workdir_rejected() -> None:
+    """A workdir with a newline is rejected before exec."""
+    accessor = FakeAccessor()
+    with pytest.raises(ToolError, match="Invalid workdir"):
+        await BashTool().execute(
+            {"command": "pwd", "workdir": "/tmp\n"}, _ctx(accessor)
+        )
+    assert accessor.exec_calls == []
 
 
 @pytest.mark.parametrize(
@@ -309,9 +463,7 @@ async def test_bash_empty_env_ok() -> None:
 )
 async def test_bash_blocked_env_rejected(key: str) -> None:
     """Shell/runtime search-path overrides are blocked with a clear error."""
-    accessor = FakeAccessor(
-        exec_result=ExecResult(exit_code=0, stdout="ok", stderr="")
-    )
+    accessor = FakeAccessor(exec_result=ExecResult(exit_code=0, stdout="ok", stderr=""))
     with pytest.raises(ToolError, match=key.split("_")[0]):
         await BashTool().execute(
             {"command": "echo hi", "env": {key: "evil"}}, _ctx(accessor)
@@ -347,10 +499,13 @@ async def test_glob_happy_path(fake_accessor) -> None:
     assert "/workspace/a.txt" in result.output
 
 
-async def test_glob_sandbox_violation_rejected(fake_accessor) -> None:
-    """Glob outside /workspace is rejected."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await GlobTool().execute({"pattern": "**", "path": "/etc"}, _ctx(fake_accessor))
+async def test_glob_external_path(fake_accessor) -> None:
+    """Glob searches directories outside /workspace."""
+    result = await GlobTool().execute(
+        {"pattern": "**", "path": "/etc"}, _ctx(fake_accessor)
+    )
+    assert result.metadata["path"] == "/etc"
+    assert "rg --files /etc" in fake_accessor.exec_calls[-1][0]
 
 
 async def test_grep_happy_path() -> None:
@@ -360,6 +515,10 @@ async def test_grep_happy_path() -> None:
     )
     result = await GrepTool().execute({"pattern": "hello"}, _ctx(accessor))
     assert "hello" in result.output
+    external = await GrepTool().execute(
+        {"pattern": "KEY", "path": "/etc"}, _ctx(accessor)
+    )
+    assert external.metadata["path"] == "/etc"
 
 
 async def test_grep_runner_error_propagates() -> None:
@@ -376,54 +535,21 @@ async def test_list_happy_path(fake_accessor) -> None:
     assert result.metadata["count"] == 1
 
 
-async def test_list_sandbox_violation_rejected(fake_accessor) -> None:
-    """List outside /workspace is rejected."""
-    with pytest.raises(ValueError, match="under /workspace"):
-        await ListTool().execute({"path": "/etc"}, _ctx(fake_accessor))
-
-
-async def test_todowrite_happy_path(fake_accessor) -> None:
-    """Todos validate and persist behind the repository seam."""
-    repo = InMemoryTodoRepository()
-    tool = TodoWriteTool(repository=repo)
-    result = await tool.execute(
-        {
-            "todos": [
-                {"content": "first", "status": "in_progress"},
-                {"content": "second", "status": "pending"},
-            ]
-        },
-        _ctx(fake_accessor),
-    )
-    assert "[in_progress] first" in result.output
-    stored = repo.list("sess-1")
-    assert [item.content for item in stored.items] == ["first", "second"]
-    assert stored.items[0].order == 0
-
-
-async def test_todowrite_invalid_status_rejected(fake_accessor) -> None:
-    """Unknown statuses raise a ToolError."""
-    tool = TodoWriteTool(repository=InMemoryTodoRepository())
-    with pytest.raises(ToolError, match="Invalid status"):
-        await tool.execute(
-            {"todos": [{"content": "x", "status": "bogus"}]},
-            _ctx(fake_accessor),
-        )
+async def test_list_external_path() -> None:
+    """List returns entries in directories outside /workspace."""
+    accessor = FakeAccessor(files={"/etc/app.env": b"secret"})
+    result = await ListTool().execute({"path": "/etc"}, _ctx(accessor))
+    assert "file app.env" in result.output
 
 
 async def test_task_tool_without_wiring_rejected(fake_accessor) -> None:
-    """TaskTool without provider/registry in ctx fails loudly (no wiring)."""
+    """TaskTool requires the persistent service callback in its context."""
     ctx = _ctx(fake_accessor)
-    with pytest.raises(ToolError, match="not wired"):
-        await TaskTool().execute(
-            {"description": "d", "prompt": "p"}, ctx
-        )
-
-
-async def test_webfetch_rejects_non_https(fake_accessor) -> None:
-    """Only https:// URLs are fetched."""
-    with pytest.raises(ToolError, match="https"):
-        await WebfetchTool().execute({"url": "http://example.com"}, _ctx(fake_accessor))
+    with pytest.raises(ToolError) as raised:
+        await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
+    assert str(raised.value) == (
+        "Subagent execution is not wired (no run_subagent in ToolContext)."
+    )
 
 
 async def test_read_missing_file_is_tool_error(fake_accessor) -> None:

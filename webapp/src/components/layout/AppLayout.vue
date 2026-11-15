@@ -1,25 +1,46 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, provide, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute } from 'vue-router'
-import ChatSidebar from './ChatSidebar.vue'
+import AppSidebar from './AppSidebar.vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import SettingsSheetHost from '@/components/settings/SettingsSheetHost.vue'
+import ScheduledTaskDialogHost from './ScheduledTaskDialogHost.vue'
+import WorkspaceDraftResumeHost from '@/components/workspaces/WorkspaceDraftResumeHost.vue'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Separator } from '@/components/ui/separator'
+import { useAttentionTabTitle } from '@/composables/useAttentionTabTitle'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
+import { useEditorStore } from '@/stores/editor'
+import { sidebarChatTargetKey } from '@/stores/workspaceLayout'
 
 const route = useRoute()
+const conversationStore = useHarnessConversationStore()
+const editorStore = useEditorStore()
+provide(sidebarChatTargetKey, ref<HTMLElement | null>(null))
+const { attentionCount } = storeToRefs(conversationStore)
+useAttentionTabTitle(attentionCount)
+
 const showMobileTopBar = computed(() => !route.meta.hideTopBar)
 // Chat-Home ("/", meta.fullBleed) und Thread (workspace-detail) sind FullBleed;
 // weitere Routen können sich zusätzlich über meta.fullBleed einklinken.
 const isFullBleed = computed(
   () => Boolean(route.meta.fullBleed) || route.name === 'workspace-detail',
 )
+
+function protectUnsavedFiles(event: BeforeUnloadEvent): void {
+  if (!editorStore.hasUnsavedChanges) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+onMounted(() => window.addEventListener('beforeunload', protectUnsavedFiles))
+onUnmounted(() => window.removeEventListener('beforeunload', protectUnsavedFiles))
 </script>
 
 <template>
   <SidebarProvider :class="isFullBleed ? 'h-svh overflow-hidden' : undefined">
-    <ChatSidebar />
-    <SidebarInset :class="isFullBleed ? 'min-h-0 overflow-hidden' : undefined">
+    <AppSidebar />
+    <SidebarInset class="min-w-0" :class="isFullBleed ? 'min-h-0 overflow-hidden' : undefined">
       <header
         v-if="showMobileTopBar"
         class="flex h-14 shrink-0 items-center gap-2 border-b border-border bg-header px-4 lg:hidden"
@@ -42,5 +63,7 @@ const isFullBleed = computed(
     </SidebarInset>
     <!-- Globales Settings-Sheet (Schritt 5): einmal hosten, überall öffnen. -->
     <SettingsSheetHost />
+    <ScheduledTaskDialogHost />
+    <WorkspaceDraftResumeHost />
   </SidebarProvider>
 </template>

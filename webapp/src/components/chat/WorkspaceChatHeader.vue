@@ -1,18 +1,35 @@
 <script setup lang="ts">
 /**
- * WorkspaceChatHeader — minimaler Chat-Header (OpenWebUI-Navbar angelehnt).
+ * WorkspaceChatHeader — minimal chat header (inspired by the OpenWebUI navbar).
  *
- * Kein Balken: transparent, ohne Border. Links steht der Chat-Name groß,
- * darunter Workspace-Name (per Klick/Pencil inline editierbar) plus Status.
- * Rechts: kompakte Panel-Toggles inkl. Background processes, dann `…`-Menü
- * mit Start/Stop, Capture und Delete. Die Chatliste lebt ausschließlich in
- * der globalen Sidebar; Chat-Rename/Delete passiert dort.
+ * No bar: transparent, no border. On the left the chat name is shown large,
+ * below it the workspace name (inline editable via click/pencil) plus status.
+ * The status opens a resource popover; a nearly full disk adds a quiet hint
+ * next to it.
+ * Inside a subagent session the title becomes a breadcrumb (root › … › parent
+ * › current) with a back-arrow to the direct parent. On the right: new chat,
+ * background processes, `…` menu with start/stop, capture and delete, then
+ * the side-panel toggle. The header only spans the chat area — with the side
+ * panel open these buttons always sit to the left of the panel, whose own
+ * tab bar (Git/Desktop/Terminal/Files) takes the full panel width. The chat
+ * list lives exclusively in the global sidebar; chat rename/delete happens
+ * there.
  */
 import { computed, ref, watch } from 'vue'
 import type { WorkspaceDetail } from '@/types'
 import { WorkspaceStatus } from '@/types'
+import {
+  getWorkspaceActionAvailability,
+  isWorkspaceLifecycleBusy,
+} from '@opencuria/chat-core/workspaceLifecycle'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
+import { formatSubagentType } from '@opencuria/chat-core/harnessSubtaskActivity'
+import { versionLabel } from '@opencuria/chat-core/imageVersions'
+import { USAGE_LEVEL_CLASSES } from '@/lib/workspaceDisk'
+import { describeDiskUsage } from '@opencuria/chat-core/workspaceDisk'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,19 +38,22 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { SidebarTrigger } from '@/components/ui/sidebar'
+import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
+import WorkspaceStatusPanel from '@/components/workspaces/WorkspaceStatusPanel.vue'
 import {
+  ArrowLeft,
   Camera,
   Check,
+  ChevronRight,
   Container,
   Ellipsis,
-  FolderTree,
+  HardDrive,
   Loader2,
-  Monitor,
   Pencil,
   Play,
   Plus,
+  RotateCcw,
   Square,
-  TerminalSquare,
   Trash2,
   X,
 } from '@lucide/vue'
@@ -44,14 +64,15 @@ const props = defineProps<{
   transitionLabel: string | null
   autoStopLabel: string | null
   runnerOffline: boolean
-  fileExplorerOpen: boolean
-  terminalOpen: boolean
-  terminalMinimized: boolean
-  desktopOpen: boolean
-  desktopMinimized: boolean
+  sidePanelOpen: boolean
   processesActive: boolean
   runningProcessCount: number
   canPrompt: boolean
+  hasActiveSession?: boolean
+  /** Play a subtle entrance animation (home → chat transition). */
+  animateEntrance?: boolean
+  /** Root → current session chain. Length > 1 means a subagent is open. */
+  chatLineage?: HarnessSession[]
 }>()
 
 const emit = defineEmits<{
@@ -59,33 +80,114 @@ const emit = defineEmits<{
   'start-workspace': []
   'stop-workspace': []
   'save-workspace-name': [name: string]
-  'toggle-files': []
-  'toggle-terminal': []
-  'toggle-desktop': []
+  'toggle-side-panel': []
   'toggle-processes': []
   'capture-image': []
+  'recreate-workspace': []
+  'increase-disk': []
   'delete-workspace': []
+  'open-session': [sessionId: string]
 }>()
+
+const lineage = computed(() => props.chatLineage ?? [])
+const currentSession = computed(() => lineage.value[lineage.value.length - 1] ?? null)
+const parentSession = computed(() =>
+  lineage.value.length >= 2 ? (lineage.value[lineage.value.length - 2] ?? null) : null,
+)
+const parentSessionId = computed(
+  () => parentSession.value?.id ?? currentSession.value?.parent_id ?? null,
+)
+const showBreadcrumb = computed(() => lineage.value.length > 1)
+const backToParentTitle = computed(() => {
+  const title = parentSession.value?.title?.trim()
+  if (title) return `Back to ${title}`
+  return 'Back to parent chat'
+})
+const currentAgentLabel = computed(() => {
+  if (!currentSession.value?.parent_id) return null
+  return formatSubagentType(currentSession.value.agent_name)
+})
+
+type BreadcrumbCrumb =
+  | { kind: 'session'; session: HarnessSession }
+  | { kind: 'overflow'; sessions: HarnessSession[] }
+
+const breadcrumbCrumbs = computed<BreadcrumbCrumb[]>(() => {
+  const ancestors = lineage.value.slice(0, -1)
+  if (ancestors.length <= 2) {
+    return ancestors.map((session) => ({ kind: 'session' as const, session }))
+  }
+  return [
+    { kind: 'session', session: ancestors[0]! },
+    { kind: 'overflow', sessions: ancestors.slice(1, -1) },
+    { kind: 'session', session: ancestors[ancestors.length - 1]! },
+  ]
+})
+
+function sessionTitle(session: HarnessSession): string {
+  return session.title?.trim() || 'Chat'
+}
+
+function crumbKey(crumb: BreadcrumbCrumb): string {
+  return crumb.kind === 'session' ? crumb.session.id : 'overflow'
+}
+
+function openSession(sessionId: string): void {
+  emit('open-session', sessionId)
+}
+
+function handleBackToParent(): void {
+  if (!parentSessionId.value) return
+  openSession(parentSessionId.value)
+}
 
 const editingWorkspace = ref(false)
 const workspaceNameInput = ref('')
 
 const statusDotClass = computed(() => {
   if (props.runnerOffline) return 'bg-muted-foreground/40'
-  if (props.transitionLabel) return 'bg-amber-500'
+  if (props.workspace.intervention_required || props.transitionLabel) return 'bg-amber-500'
+  if ([WorkspaceStatus.FAILED, WorkspaceStatus.DELETE_FAILED].includes(props.workspace.status))
+    return 'bg-destructive'
+  if (props.workspace.status !== WorkspaceStatus.RUNNING) return 'bg-muted-foreground/40'
+  if (props.hasActiveSession) return 'bg-amber-500'
   return 'bg-green-500'
 })
 
+const statusOpen = ref(false)
+/** Only a nearly full disk is surfaced inline; everything else lives in the popover. */
+const diskAlert = computed(() => {
+  if (!props.workspace.disk_usage) return null
+  const disk = describeDiskUsage(props.workspace.disk_usage)
+  return disk.level === 'ok' ? null : disk
+})
+
+function handleIncreaseDisk(): void {
+  if (!actions.value.edit) return
+  statusOpen.value = false
+  emit('increase-disk')
+}
+
+const baseVersionLabel = computed(() => versionLabel(props.workspace.base_image))
 const statusText = computed(() => {
   if (props.runnerOffline) return 'Runner offline'
+  if (props.workspace.intervention_required) return 'Checking state'
   if (props.transitionLabel) return props.transitionLabel
   if (props.autoStopLabel) return props.autoStopLabel
   return props.workspace.status
 })
 
-// Start/Stop (gleiche Logik wie WorkspaceActions): Stop nur bei laufendem
-// Workspace mit online Runner, Start bei gestopptem Workspace.
-const isTransitioning = computed(() => props.transitionLabel !== null)
+// Start/stop (same logic as WorkspaceActions): stop only for a running
+// workspace with an online runner, start for a stopped workspace.
+const isTransitioning = computed(
+  () => props.transitionLabel !== null || isWorkspaceLifecycleBusy(props.workspace),
+)
+const actions = computed(() =>
+  getWorkspaceActionAvailability(
+    { ...props.workspace, runner_online: !props.runnerOffline },
+    isTransitioning.value,
+  ),
+)
 const showStopButton = computed(
   () => !props.runnerOffline && props.workspace.status === WorkspaceStatus.RUNNING,
 )
@@ -94,9 +196,7 @@ const showStartButton = computed(
     !showStopButton.value &&
     (props.runnerOffline || props.workspace.status === WorkspaceStatus.STOPPED),
 )
-const powerDisabled = computed(
-  () => isTransitioning.value || (showStartButton.value && props.runnerOffline),
-)
+const powerDisabled = computed(() => !actions.value.stop && !actions.value.start)
 const powerTitle = computed(() => {
   if (isTransitioning.value) return props.transitionLabel ?? 'Workspace action in progress'
   if (showStopButton.value) return 'Stop workspace'
@@ -105,7 +205,7 @@ const powerTitle = computed(() => {
 })
 
 function startWorkspaceRename(): void {
-  if (props.transitionLabel) return
+  if (!actions.value.edit) return
   workspaceNameInput.value = props.workspace.name
   editingWorkspace.value = true
 }
@@ -116,6 +216,10 @@ function cancelWorkspaceRename(): void {
 }
 
 function saveWorkspaceRename(): void {
+  if (!actions.value.edit) {
+    cancelWorkspaceRename()
+    return
+  }
   const trimmed = workspaceNameInput.value.trim()
   editingWorkspace.value = false
   workspaceNameInput.value = ''
@@ -148,13 +252,81 @@ watch(
   >
     <SidebarTrigger class="shrink-0 text-muted-foreground" />
 
-    <!-- Left: chat name (large) + workspace name/status (small, editable) -->
-    <div class="flex min-w-0 flex-1 flex-col justify-center">
+    <Button
+      v-if="parentSessionId"
+      variant="ghost"
+      size="icon-sm"
+      class="shrink-0"
+      :title="backToParentTitle"
+      :aria-label="backToParentTitle"
+      data-testid="workspace-chat-header-back-to-parent"
+      @click="handleBackToParent"
+    >
+      <ArrowLeft :size="16" />
+    </Button>
+
+    <!-- Left: chat name (large) or subagent breadcrumb + workspace name/status -->
+    <div
+      class="flex min-w-0 flex-1 flex-col justify-center"
+      :class="animateEntrance ? 'chat-header-enter' : ''"
+    >
       <div
-        class="min-w-0 truncate py-0.5 text-left text-[15px] font-normal text-foreground"
-        data-testid="workspace-chat-header-chat-title"
+        class="flex min-w-0 items-center gap-1.5 py-0.5"
+        :data-testid="showBreadcrumb ? 'workspace-chat-header-breadcrumb' : undefined"
       >
-        {{ activeChatTitle || 'New chat' }}
+        <template v-if="showBreadcrumb">
+          <template v-for="crumb in breadcrumbCrumbs" :key="crumbKey(crumb)">
+            <button
+              v-if="crumb.kind === 'session'"
+              type="button"
+              class="min-w-0 max-w-[9rem] shrink truncate text-left text-[15px] font-normal text-muted-foreground transition-colors hover:text-foreground"
+              :title="sessionTitle(crumb.session)"
+              data-testid="workspace-chat-header-breadcrumb-item"
+              :data-session-id="crumb.session.id"
+              @click="openSession(crumb.session.id)"
+            >
+              {{ sessionTitle(crumb.session) }}
+            </button>
+            <DropdownMenu v-else>
+              <DropdownMenuTrigger as-child>
+                <button
+                  type="button"
+                  class="shrink-0 rounded px-1 text-[15px] leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  title="More sessions"
+                  data-testid="workspace-chat-header-breadcrumb-overflow"
+                >
+                  …
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" class="w-56">
+                <DropdownMenuItem
+                  v-for="session in crumb.sessions"
+                  :key="session.id"
+                  class="text-xs"
+                  data-testid="workspace-chat-header-breadcrumb-overflow-item"
+                  :data-session-id="session.id"
+                  @select="openSession(session.id)"
+                >
+                  {{ sessionTitle(session) }}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <ChevronRight :size="14" class="shrink-0 text-muted-foreground/50" aria-hidden="true" />
+          </template>
+        </template>
+        <div
+          class="min-w-0 truncate text-left text-[15px] font-normal text-foreground"
+          data-testid="workspace-chat-header-chat-title"
+        >
+          {{ activeChatTitle || 'New chat' }}
+        </div>
+        <span
+          v-if="currentAgentLabel"
+          class="shrink-0 text-xs font-normal text-muted-foreground"
+          data-testid="workspace-chat-header-agent-type"
+        >
+          {{ currentAgentLabel }}
+        </span>
       </div>
       <div
         class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
@@ -167,6 +339,7 @@ watch(
             maxlength="255"
             placeholder="Workspace name"
             data-testid="workspace-chat-header-name-input"
+            :disabled="!actions.edit"
             @keydown.enter.prevent="saveWorkspaceRename"
             @keydown.esc.prevent="cancelWorkspaceRename"
           />
@@ -176,6 +349,7 @@ watch(
             class="h-6 w-6 shrink-0"
             title="Save workspace name"
             data-testid="workspace-chat-header-name-save"
+            :disabled="!actions.edit"
             @click="saveWorkspaceRename"
           >
             <Check :size="14" />
@@ -192,9 +366,43 @@ watch(
           </Button>
         </template>
         <template v-else>
-          <span class="size-1.5 shrink-0 rounded-full" :class="statusDotClass" aria-hidden="true" />
-          <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
-          <span class="shrink-0 truncate">{{ statusText }}</span>
+          <Popover v-model:open="statusOpen">
+            <PopoverTrigger as-child>
+              <button
+                type="button"
+                class="flex shrink-0 items-center gap-1.5 rounded-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=open]:text-foreground"
+                title="Workspace status"
+                data-testid="workspace-chat-header-status-trigger"
+              >
+                <span
+                  class="size-1.5 shrink-0 rounded-full"
+                  :class="statusDotClass"
+                  aria-hidden="true"
+                />
+                <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
+                <span class="truncate">{{ statusText }}</span>
+                <template v-if="diskAlert">
+                  <span aria-hidden="true">·</span>
+                  <span
+                    class="flex items-center gap-1"
+                    :class="USAGE_LEVEL_CLASSES[diskAlert.level].text"
+                    data-testid="workspace-chat-header-disk-alert"
+                  >
+                    <HardDrive :size="11" aria-hidden="true" />
+                    Disk {{ diskAlert.percent }}% full
+                  </span>
+                </template>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" class="w-80" @open-auto-focus.prevent>
+              <WorkspaceStatusPanel
+                :workspace="workspace"
+                :runner-offline="runnerOffline"
+                :can-edit="actions.edit"
+                @increase-disk="handleIncreaseDisk"
+              />
+            </PopoverContent>
+          </Popover>
           <span class="shrink-0">·</span>
           <button
             type="button"
@@ -202,12 +410,21 @@ watch(
             :class="transitionLabel ? 'cursor-default' : 'cursor-pointer'"
             title="Rename workspace"
             data-testid="workspace-chat-header-name"
+            :disabled="!actions.edit"
             @click="startWorkspaceRename"
           >
             {{ workspace.name }}
           </button>
+          <span
+            v-if="baseVersionLabel"
+            class="hidden shrink-0 truncate sm:inline"
+            :title="`Based on ${baseVersionLabel}`"
+            data-testid="workspace-chat-header-version"
+          >
+            · {{ baseVersionLabel }}
+          </span>
           <button
-            v-if="!transitionLabel"
+            v-if="actions.edit"
             type="button"
             class="hidden shrink-0 rounded p-0.5 text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground focus-visible:opacity-100 sm:block [div:hover>&]:opacity-100"
             title="Rename workspace"
@@ -221,12 +438,17 @@ watch(
     </div>
 
     <!-- Right: compact toggles + processes + overflow menu -->
-    <div class="flex shrink-0 items-center gap-0.5">
+    <div
+      class="flex shrink-0 items-center gap-0.5"
+      :class="animateEntrance ? 'chat-header-enter-stagger' : ''"
+      data-testid="workspace-chat-header-actions"
+    >
       <Button
         variant="ghost"
         size="icon-sm"
         title="New chat"
         data-testid="workspace-chat-header-new-chat"
+        :disabled="isTransitioning"
         @click="emit('new-chat')"
       >
         <Plus :size="16" />
@@ -234,49 +456,9 @@ watch(
       <Button
         variant="ghost"
         size="icon-sm"
-        :title="fileExplorerOpen ? 'Hide files' : 'Open file explorer'"
-        data-testid="workspace-chat-header-toggle-files"
-        @click="emit('toggle-files')"
-      >
-        <FolderTree :size="16" :class="fileExplorerOpen ? 'text-primary' : ''" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        :title="!terminalOpen ? 'Open terminal' : terminalMinimized ? 'Restore terminal' : 'Minimize terminal'"
-        data-testid="workspace-chat-header-toggle-terminal"
-        @click="emit('toggle-terminal')"
-      >
-        <span class="relative inline-flex">
-          <TerminalSquare :size="16" :class="terminalOpen ? 'text-primary' : ''" />
-          <span
-            v-if="terminalOpen && terminalMinimized"
-            class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-            title="Terminal minimized"
-          />
-        </span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        :title="!desktopOpen ? 'Open desktop' : desktopMinimized ? 'Restore desktop' : 'Minimize desktop'"
-        data-testid="workspace-chat-header-toggle-desktop"
-        @click="emit('toggle-desktop')"
-      >
-        <span class="relative inline-flex">
-          <Monitor :size="16" :class="desktopOpen ? 'text-primary' : ''" />
-          <span
-            v-if="desktopOpen && desktopMinimized"
-            class="absolute -bottom-1 -right-1 h-2 w-2 rounded-full bg-primary"
-            title="Desktop minimized"
-          />
-        </span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon-sm"
         title="Background processes"
         data-testid="workspace-chat-header-toggle-processes"
+        :disabled="isTransitioning"
         @click="emit('toggle-processes')"
       >
         <span class="relative inline-flex">
@@ -302,6 +484,7 @@ watch(
             size="icon-sm"
             title="Workspace actions"
             data-testid="workspace-chat-header-more"
+            :disabled="isTransitioning"
           >
             <Ellipsis :size="16" />
           </Button>
@@ -312,7 +495,9 @@ watch(
             class="text-xs"
             :disabled="powerDisabled"
             :title="powerTitle"
-            :data-testid="showStopButton ? 'workspace-chat-header-stop' : 'workspace-chat-header-start'"
+            :data-testid="
+              showStopButton ? 'workspace-chat-header-stop' : 'workspace-chat-header-start'
+            "
             @select="handlePowerClick"
           >
             <Loader2 v-if="isTransitioning" :size="14" class="animate-spin" />
@@ -324,23 +509,83 @@ watch(
           <DropdownMenuItem
             class="text-xs"
             data-testid="workspace-chat-header-capture-image"
-            :disabled="!canPrompt"
+            :disabled="!actions.capture"
             @select="emit('capture-image')"
           >
             <Camera :size="14" />
             Capture image
           </DropdownMenuItem>
           <DropdownMenuItem
+            v-if="workspace.base_image || workspace.pending_base_image"
+            class="text-xs"
+            data-testid="workspace-chat-header-recreate"
+            :disabled="!actions.reset"
+            @select="emit('recreate-workspace')"
+          >
+            <RotateCcw :size="14" />
+            {{ workspace.base_image?.update_available ? 'Reset or update…' : 'Reset workspace…' }}
+          </DropdownMenuItem>
+          <DropdownMenuItem
             class="text-xs"
             variant="destructive"
             data-testid="workspace-chat-header-delete-workspace"
+            :disabled="!actions.remove"
             @select="emit('delete-workspace')"
           >
             <Trash2 :size="14" />
-            Delete workspace
+            {{
+              workspace.status === WorkspaceStatus.DELETE_FAILED
+                ? 'Retry removal'
+                : 'Delete workspace'
+            }}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <SidePanelToggle
+        :open="sidePanelOpen"
+        :disabled="isTransitioning"
+        @toggle="emit('toggle-side-panel')"
+      />
     </div>
   </header>
 </template>
+
+<style scoped>
+@media (prefers-reduced-motion: no-preference) {
+  .chat-header-enter {
+    animation: chat-header-in 200ms ease-out both;
+  }
+
+  .chat-header-enter-stagger > * {
+    animation: chat-header-in 200ms ease-out both;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(1) {
+    animation-delay: 0ms;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(2) {
+    animation-delay: 40ms;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(3) {
+    animation-delay: 80ms;
+  }
+
+  .chat-header-enter-stagger > *:nth-child(4) {
+    animation-delay: 120ms;
+  }
+}
+
+@keyframes chat-header-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+</style>

@@ -1,31 +1,75 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessChatInput from './HarnessChatInput.vue'
+import ComposerRichEditor from './ComposerRichEditor.vue'
+import VoiceInputControl from './VoiceInputControl.vue'
+import HarnessMentionSheet from './HarnessMentionSheet.vue'
+import type { VueWrapper } from '@vue/test-utils'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
-import type { ProviderModel } from '@/lib/harnessModels'
+import type { HarnessEngine, ProviderModel } from '@opencuria/chat-core/harnessModels'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
+import { recordRecentModelUsage, resetRecentModelsCache } from '@/lib/recentModels'
+import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useHarnessStore } from '@/stores/harness'
+import { useAuthStore } from '@/stores/auth'
+import { sendFilesUpload } from '@/services/socket'
+import { CHAT_UPLOAD_DIR } from '@opencuria/chat-core/chatUploads'
+import type { FileEntryRaw } from '@/types'
+
+vi.mock('@/services/socket', async () => {
+  const actual = await vi.importActual<typeof import('@/services/socket')>('@/services/socket')
+  return {
+    ...actual,
+    sendFilesUpload: vi.fn(),
+  }
+})
+
+vi.mock('vue-sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
+    info: vi.fn(),
+  },
+}))
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    getProviderConfig: vi.fn(),
-    listProviderModels: vi.fn(),
+    listEngineModels: vi.fn(),
+    listHarnessEngines: vi.fn(),
+    listAgentConfigs: vi.fn(),
+    listRecentModels: vi.fn().mockResolvedValue([]),
+    saveRecentModel: vi.fn(),
   }
 })
 
-const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
-const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
+const nativeModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
+const claudeModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
+const codexModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
+const listHarnessEnginesMock = vi.mocked(harnessApi.listHarnessEngines)
+const listAgentConfigsMock = vi.mocked(harnessApi.listAgentConfigs)
+
+const nativeEngine: HarnessEngine = {
+  id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true,
+  default_model: null, default_effort: null,
+}
+const claudeEngine: HarnessEngine = {
+  id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true,
+  default_model: 'sonnet', default_effort: 'high',
+}
 
 const catalog: ProviderModel[] = [
   {
-    id: 'model-big',
+    id: 'openrouter/model-big',
     name: 'Big',
+    provider: 'openrouter',
     reasoning_efforts: ['low', 'high'],
     default_effort: 'high',
     supports_tools: true,
@@ -33,8 +77,9 @@ const catalog: ProviderModel[] = [
     max_output_tokens: 32_768,
   },
   {
-    id: 'model-small',
+    id: 'openrouter/model-small',
     name: 'Small',
+    provider: 'openrouter',
     reasoning_efforts: [],
     default_effort: '',
     supports_tools: true,
@@ -47,48 +92,567 @@ const dropdownStubs = {
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
+  DropdownMenuLabel: { template: '<div><slot /></div>' },
+  DropdownMenuSeparator: { template: '<hr />' },
   DropdownMenuItem: { template: '<button type="button"><slot /></button>' },
   DropdownMenuSub: { template: '<div><slot /></div>' },
   DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
   DropdownMenuSubContent: { template: '<div><slot /></div>' },
-  DropdownMenuSeparator: { template: '<hr />' },
 }
 
-function mountInput(props: Record<string, unknown> = {}) {
+function mountInput(props: Record<string, unknown> = {}, attachTo?: Element) {
   return mount(HarnessChatInput, {
     props: { workspaceId: 'ws-1', ...props },
+    ...(attachTo ? { attachTo } : {}),
     global: { stubs: dropdownStubs },
   })
 }
 
+/** Drive the contenteditable exactly as a plain-text browser input. */
+async function setEditorText(wrapper: VueWrapper, text: string): Promise<void> {
+  const selector = wrapper.find('[data-testid="composer-textarea"]').exists()
+    ? '[data-testid="composer-textarea"]'
+    : '[data-testid="task-prompt"]'
+  const el = wrapper.get(selector).element as HTMLElement
+  el.textContent = text
+  const range = document.createRange()
+  range.selectNodeContents(el)
+  range.collapse(false)
+  const selection = window.getSelection()!
+  selection.removeAllRanges()
+  selection.addRange(range)
+  await wrapper.get(selector).trigger('input')
+}
+function editorText(wrapper: VueWrapper): string {
+  return (wrapper.findComponent(ComposerRichEditor).vm as unknown as { value(): string }).value()
+}
+function editorCursor(wrapper: VueWrapper, offset: number): void {
+  const editor = wrapper.findComponent(ComposerRichEditor).vm as unknown as {
+    setCursor(offset: number): void
+  }
+  editor.setCursor(offset)
+}
+
 describe('HarnessChatInput', () => {
+  beforeEach(() => {
+    if (typeof IntersectionObserver === 'undefined') {
+      class TestIntersectionObserver implements IntersectionObserver {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+        takeRecords(): IntersectionObserverEntry[] {
+          return []
+        }
+        root: Element | Document | null = null
+        rootMargin = '0px'
+        thresholds: ReadonlyArray<number> = []
+        constructor(
+          private callback: IntersectionObserverCallback,
+          _options?: IntersectionObserverInit,
+        ) {}
+      }
+      vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+    }
+  })
+
+  afterEach(() => {
+    document.body
+      .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+      .forEach((node) => node.remove())
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     resetProviderCatalogCache()
-    getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'model-big',
-      small_model: 'model-small',
-      computer_use_model: 'model-cu',
-      has_api_key: true,
-      api_key_hint: '',
+    resetAgentConfigsCache()
+    resetRecentModelsCache()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([])
+    listAgentConfigsMock.mockResolvedValue([
+      {
+        agent: 'build',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-big',
+        effort: 'high',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+      {
+        agent: 'plan',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-small',
+        effort: '',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+    ])
+    vi.mocked(harnessApi.listEngineModels).mockImplementation((engine) => {
+      if (engine === 'native') return nativeModelsMock()
+      if (engine === 'claude') return claudeModelsMock()
+      return codexModelsMock()
     })
-    listProviderModelsMock.mockResolvedValue(catalog)
+    nativeModelsMock.mockResolvedValue(catalog)
+    listHarnessEnginesMock.mockResolvedValue([
+      nativeEngine,
+      claudeEngine,
+    ])
+    claudeModelsMock.mockResolvedValue([
+      {
+        id: 'sonnet',
+        name: 'Claude Sonnet',
+        provider: 'claude',
+        reasoning_efforts: ['high'],
+        default_effort: 'high',
+        supports_tools: true,
+        context_length: 200_000,
+        max_output_tokens: 16_000,
+      },
+    ])
   })
 
-  it('loads the OpenRouter catalog into the model picker', async () => {
+  const codexModels: ProviderModel[] = [
+    {
+      ...catalog[0]!,
+      id: 'chatgpt/gpt-6.1-sol',
+      provider: 'chatgpt',
+      name: 'Codex Sol',
+      reasoning_efforts: ['low', 'medium', 'high', 'ultra'],
+      default_effort: 'high',
+    },
+    { ...catalog[0]!, id: 'openrouter/vendor/codex', name: 'Router Codex' },
+  ]
+  function enableCodex(defaultModel = 'chatgpt/gpt-6.1-sol') {
+    listHarnessEnginesMock.mockResolvedValue([
+      nativeEngine,
+      claudeEngine,
+      {
+        id: 'codex',
+        name: 'Codex',
+        modes: ['build', 'plan'],
+        connected: true,
+        default_model: defaultModel,
+        default_effort: 'high',
+      },
+    ])
+    codexModelsMock.mockResolvedValue(codexModels)
+  }
+
+  it.each([
+    ['native', 'plan', 'openrouter/model-big', 'low', 'OpenCuria Plan'],
+    ['claude', 'build', 'sonnet', 'high', 'Claude Agent Build'],
+    ['codex', 'build', 'chatgpt/gpt-6.1-sol', 'ultra', 'Codex Build'],
+    ['codex', 'plan', 'openrouter/vendor/codex', 'low', 'Codex Plan'],
+  ] as const)('restores the last %s %s selection for a new chat', async (
+    harnessId, mode, model, effort, label,
+  ) => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model, effort, harness_id: harnessId, mode, last_used_at: '' },
+    ])
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain(label)
+    await setEditorText(wrapper, 'New chat')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]).toEqual(['New chat', mode, model, [], effort, harnessId])
+    wrapper.unmount()
+  })
+
+  it('restores the saved agent when returning from an existing chat to a new chat', async () => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'build', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ sessionId: 'existing', engineLocked: true })
+    await flushPromises()
+    await wrapper.setProps({ sessionId: null, engineLocked: false, restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Build')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { sessionId: 'existing', engineLocked: true },
+    { variant: 'scheduled-task' },
+  ])('preserves an existing session or task selection: %j', async (props) => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'plan', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ ...props, restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('OpenCuria Build')
+    expect(wrapper.emitted('update:harnessId')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('keeps native defaults when the saved agent is disconnected', async () => {
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'plan', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('OpenCuria Build')
+    expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['openrouter/model-big'])
+    wrapper.unmount()
+  })
+
+  it('does not replace a manual agent selection when saved preferences arrive late', async () => {
+    enableCodex()
+    let resolveRecents!: (rows: harnessApi.RecentModelUsage[]) => void
+    vi.mocked(harnessApi.listRecentModels).mockImplementationOnce(
+      () => new Promise(resolve => { resolveRecents = resolve }),
+    )
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-claude-plan"]').trigger('click')
+    await flushPromises()
+    resolveRecents([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'build', last_used_at: '' },
+    ])
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Claude Agent Plan')
+    wrapper.unmount()
+  })
+
+  it('keeps text entered while the saved agent selection is loading', async () => {
+    enableCodex()
+    let resolveRecents!: (rows: harnessApi.RecentModelUsage[]) => void
+    vi.mocked(harnessApi.listRecentModels).mockImplementationOnce(
+      () => new Promise(resolve => { resolveRecents = resolve }),
+    )
+    const wrapper = mountInput({ restoreLastSelection: true })
+    await flushPromises()
+    await setEditorText(wrapper, 'Keep this draft')
+    resolveRecents([
+      { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', harness_id: 'codex', mode: 'build', last_used_at: '' },
+    ])
+    await flushPromises()
+    expect(editorText(wrapper)).toBe('Keep this draft')
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Build')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]).toEqual([
+      'Keep this draft', 'build', 'chatgpt/gpt-6.1-sol', [], 'ultra', 'codex',
+    ])
+    wrapper.unmount()
+  })
+
+  it('creates a Codex chat with backend defaults through the existing mode/model menus', async () => {
+    enableCodex('openrouter/vendor/codex')
+    const wrapper = mountInput()
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-codex-plan"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.listEngineModels).toHaveBeenCalledWith('codex')
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Plan')
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Router Codex')
+    expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(
+      true,
+    )
+    await setEditorText(wrapper, 'Use Codex')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.slice(-1)[0]).toEqual([
+      'Use Codex',
+      'plan',
+      'openrouter/vendor/codex',
+      [],
+      'high',
+      'codex',
+    ])
+    wrapper.unmount()
+  })
+
+  it('locks an existing Codex chat to its persisted provider, not the editable draft model', async () => {
+    enableCodex()
+    const wrapper = mountInput({
+      harnessId: 'codex',
+      engineLocked: true,
+      sessionModel: 'openrouter/vendor/original',
+      model: 'openrouter/vendor/codex',
+      effort: 'high',
+    })
+    await flushPromises()
+    expect(
+      wrapper.get('[data-testid="composer-mode-native-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.get('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.get('[data-testid="composer-mode-codex-plan"]').attributes('disabled'),
+    ).toBeUndefined()
+    expect(wrapper.find('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(
+      true,
+    )
+    await wrapper.setProps({ model: 'chatgpt/gpt-6.1-sol' })
+    expect(wrapper.find('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses the same Codex defaults in the scheduled-task composer without chat send controls', async () => {
+    enableCodex()
+    const wrapper = mountInput({ variant: 'scheduled-task', prompt: 'Daily review' })
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-codex-build"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['codex'])
+    expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['chatgpt/gpt-6.1-sol'])
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['high'])
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['chat', 'scheduled-task'] as const)(
+    'restores the last available Codex model and effort from the server in a %s composer',
+    async (variant) => {
+      enableCodex()
+      vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+        { model: 'removed/model', effort: 'ultra', last_used_at: '' },
+        { model: 'openrouter/vendor/codex', effort: 'low', last_used_at: '' },
+        { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', last_used_at: '' },
+      ])
+      const wrapper = mountInput({ harnessId: 'codex', variant })
+      await flushPromises()
+      expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['openrouter/vendor/codex'])
+      expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['low'])
+
+      await wrapper.get('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').trigger('click')
+      expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['ultra'])
+      wrapper.unmount()
+    },
+  )
+
+  it('restores the last-used effort when switching back to Codex Build', async () => {
+    enableCodex()
+    const wrapper = mountInput()
+    await flushPromises()
+    recordRecentModelUsage('chatgpt/gpt-6.1-sol', 'ultra')
+    await wrapper.get('[data-testid="composer-mode-codex-build"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['ultra'])
+    await wrapper.get('[data-testid="composer-mode-native-plan"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-codex-build"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['ultra'])
+    wrapper.unmount()
+  })
+
+  it('falls back to a supported effort if a remembered Codex effort is unavailable', async () => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'openrouter/vendor/codex', effort: 'ultra', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ harnessId: 'codex' })
+    await flushPromises()
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['high'])
+    wrapper.unmount()
+  })
+
+  it('refreshes the Codex catalog after account changes without erasing explicit model/effort choices', async () => {
+    enableCodex()
+    const wrapper = mountInput({
+      harnessId: 'codex',
+      model: 'chatgpt/gpt-6.1-sol',
+      effort: 'ultra',
+    })
+    await flushPromises()
+    window.dispatchEvent(new Event(harnessApi.PROVIDER_ACCOUNTS_CHANGED_EVENT))
+    await flushPromises()
+    expect(harnessApi.listEngineModels).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+    expect(wrapper.get('[data-testid="composer-effort-row"]').text()).toContain('Ultra')
+    wrapper.unmount()
+  })
+
+  it('does not replace a new selection when a stale catalog response finishes', async () => {
+    enableCodex()
+    let resolve!: (models: ProviderModel[]) => void
+    vi.mocked(harnessApi.listEngineModels).mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done
+        }),
+    )
+    const wrapper = mountInput({ harnessId: 'codex' })
+    await flushPromises()
+    await wrapper.setProps({ model: 'openrouter/vendor/codex', effort: 'high' })
+    resolve(codexModels)
+    await flushPromises()
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Router Codex')
+    wrapper.unmount()
+  })
+
+  it('ignores an external catalog response belonging to a previous user', async () => {
+    enableCodex()
+    let resolveFirst!: (models: ProviderModel[]) => void
+    vi.mocked(harnessApi.listEngineModels)
+      .mockImplementationOnce(() => new Promise(done => { resolveFirst = done }))
+      .mockResolvedValueOnce([codexModels[1]!])
+    const wrapper = mountInput({ harnessId: 'codex', model: 'openrouter/vendor/codex' })
+    await flushPromises()
+    const auth = useAuthStore()
+    auth.user = { ...auth.user, id: 999 } as NonNullable<typeof auth.user>
+    localStorage.setItem('kern_user', JSON.stringify({ id: 999 }))
+    await flushPromises()
+    resolveFirst([codexModels[0]!])
+    await flushPromises()
+    expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').exists()).toBe(false)
+    wrapper.unmount()
+    localStorage.removeItem('kern_user')
+  })
+
+  it('reports external auth/catalog failure explicitly instead of using native models', async () => {
+    enableCodex()
+    codexModelsMock.mockRejectedValue(new Error('Unauthorized'))
+    const wrapper = mountInput({ harnessId: 'codex', model: 'chatgpt/gpt-6.1-sol' })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-provider-cta"]').text()).toContain(
+      'Codex unavailable',
+    )
+    expect(nativeModelsMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="composer-model-openrouter/model-big"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('loads the provider catalog into the model picker', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
+      expect(nativeModelsMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
-    const html = wrapper.html()
-    expect(html).toContain('Auto')
-    expect(html).toContain('Big')
-    expect(html).toContain('Small')
+    expect(nativeModelsMock).toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('Skills')
     expect(wrapper.text()).not.toContain('Fast')
+  })
+
+  it('offers the four combined harness/mode choices and uses the Claude catalog separately', async () => {
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(wrapper.find('[data-testid="composer-mode-native-build"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-mode-native-plan"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-mode-claude-build"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-mode-claude-plan"]').exists()).toBe(true)
+
+    expect(wrapper.find('[data-testid="composer-mode-codex-build"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="composer-mode-claude-build"]').trigger('click')
+    await vi.waitFor(() =>
+      expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Claude Sonnet'),
+    )
+    expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['claude'])
+    expect(wrapper.find('[data-testid="composer-mode-trigger"]').text()).toContain(
+      'Claude Agent Build',
+    )
+
+    await setEditorText(wrapper, 'Use Claude')
+    await wrapper.find('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.slice(-1)[0]).toEqual([
+      'Use Claude',
+      'build',
+      'sonnet',
+      [],
+      'high',
+      'claude',
+    ])
+  })
+
+  it.each([[], null])('does not invent engine choices when discovery returns %s', async (engines) => {
+    if (engines) listHarnessEnginesMock.mockResolvedValue(engines)
+    else listHarnessEnginesMock.mockRejectedValue(new Error('Unavailable'))
+    const wrapper = mountInput()
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid^="composer-mode-native-"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid^="composer-mode-claude-"]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-testid^="composer-mode-codex-"]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('locks the selected engine in an existing Claude session while keeping its modes available', async () => {
+    const wrapper = mountInput({ harnessId: 'claude', engineLocked: true, model: 'sonnet' })
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-native-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeUndefined()
+    await wrapper.find('[data-testid="composer-mode-claude-plan"]').trigger('click')
+    expect(wrapper.emitted('update:mode')?.[0]).toEqual(['plan'])
+    expect(wrapper.emitted('update:harnessId')).toBeUndefined()
+  })
+
+  it('keeps Claude modes selectable in an existing session after its connection is removed', async () => {
+    listHarnessEnginesMock.mockResolvedValue([
+      nativeEngine,
+      { ...claudeEngine, connected: false },
+    ])
+    const wrapper = mountInput({ harnessId: 'claude', engineLocked: true, model: 'sonnet' })
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-plan"]').attributes('disabled'),
+    ).toBeUndefined()
+  })
+
+  it('disables Claude choices when the engine connection is unavailable', async () => {
+    listHarnessEnginesMock.mockResolvedValue([
+      nativeEngine,
+      { ...claudeEngine, connected: false },
+    ])
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(wrapper.find('[data-testid="claude-provider-settings"]').exists()).toBe(true)
+  })
+
+  it('invalidates cached native models when provider account selection changes', async () => {
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalledTimes(1))
+    nativeModelsMock.mockResolvedValueOnce([
+      { ...catalog[0]!, id: 'openrouter/new-account-model', name: 'New account model' },
+    ])
+    window.dispatchEvent(new Event(harnessApi.PROVIDER_ACCOUNTS_CHANGED_EVENT))
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalledTimes(2))
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-model-openrouter/new-account-model"]').exists(),
+    ).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('refreshes Claude availability when a personal connection changes', async () => {
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalledTimes(1))
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeUndefined()
+
+    listHarnessEnginesMock.mockResolvedValue([
+      nativeEngine,
+      { ...claudeEngine, connected: false },
+    ])
+    window.dispatchEvent(new Event(harnessApi.HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
+    await vi.waitFor(() =>
+      expect(
+        wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+      ).toBeDefined(),
+    )
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeDefined()
   })
 
   it('renders mode pill, context ring, paperclip, and send arrow', async () => {
@@ -102,9 +666,96 @@ describe('HarnessChatInput', () => {
       Node.DOCUMENT_POSITION_FOLLOWING,
     )
     expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="composer-textarea"]').attributes('placeholder')).toContain(
-      '/ for skills',
-    )
+    expect(
+      wrapper.find('[data-testid="composer-textarea"]').attributes('data-placeholder'),
+    ).toContain('/ for skills')
+  })
+
+  it('appends cleaned dictation to an existing draft for review before sending', async () => {
+    const wrapper = mountInput({ sessionId: 'voice-append' })
+    await flushPromises()
+    await setEditorText(wrapper, 'Existing instruction.')
+    wrapper.findComponent(VoiceInputControl).vm.$emit('result', 'Please adjust this button.')
+    await flushPromises()
+    expect(editorText(wrapper)).toBe('Existing instruction.\nPlease adjust this button.')
+    expect(wrapper.emitted('send')).toBeUndefined()
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Existing instruction.\nPlease adjust this button.')
+    wrapper.unmount()
+  })
+
+  it('persists the pointing manifest reference with the dictated draft', async () => {
+    const props = { sessionId: 'voice-pointing' }
+    const wrapper = mountInput(props)
+    await flushPromises()
+    const path = '/workspace/.opencuria/recordings/id/manifest.json'
+    wrapper.findComponent(VoiceInputControl).vm.$emit('result', 'Change the item here.', path)
+    await flushPromises()
+    expect(editorText(wrapper)).toContain('Change the item here.')
+    expect(editorText(wrapper)).toContain(`@file:${path}`)
+    expect(wrapper.emitted('send')).toBeUndefined()
+    wrapper.unmount()
+    const restored = mountInput(props)
+    await flushPromises()
+    expect(editorText(restored)).toContain(`@file:${path}`)
+    restored.unmount()
+  })
+
+  it('replaces the toolbar while dictating and blocks keyboard sending until it settles', async () => {
+    const wrapper = mountInput({ sessionId: 'voice-busy' }, document.body)
+    await flushPromises()
+    await setEditorText(wrapper, 'Wait for dictation.')
+    const control = wrapper.findComponent(VoiceInputControl)
+    control.vm.$emit('busy', true)
+    await flushPromises()
+    for (const id of ['composer-send', 'composer-context-usage'])
+      expect(wrapper.find(`[data-testid="${id}"]`).exists(), id).toBe(false)
+    expect(wrapper.get('[data-testid="composer-attach"]').isVisible()).toBe(false)
+    expect(wrapper.get('[data-testid="composer-toolbar-leading"]').isVisible()).toBe(false)
+    expect(control.isVisible()).toBe(true)
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('send')).toBeUndefined()
+    control.vm.$emit('busy', false)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-toolbar-leading"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Wait for dictation.')
+    wrapper.unmount()
+  })
+
+  it('sends dictation directly when voice input asks for it', async () => {
+    const wrapper = mountInput({ sessionId: 'voice-send' })
+    await flushPromises()
+    await setEditorText(wrapper, 'Context.')
+    const control = wrapper.findComponent(VoiceInputControl)
+    control.vm.$emit('busy', true)
+    await flushPromises()
+    // The result arrives while voice is still busy; the flag clears in the same flush.
+    control.vm.$emit('result', 'Do it now.', undefined, true)
+    control.vm.$emit('busy', false)
+    await flushPromises()
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Context.\nDo it now.')
+    expect(editorText(wrapper)).toBe('')
+    wrapper.unmount()
+  })
+
+  it('does not offer voice capture in the scheduled-task prompt editor', async () => {
+    const wrapper = mountInput({ variant: 'scheduled-task' })
+    await flushPromises()
+    expect(wrapper.findComponent(VoiceInputControl).exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps all composer controls inside a responsive wrapping toolbar', () => {
+    const wrapper = mountInput()
+    const toolbar = wrapper.find('[data-testid="composer-toolbar"]')
+    const leading = wrapper.find('[data-testid="composer-toolbar-leading"]')
+
+    expect(toolbar.classes()).toContain('flex-wrap')
+    expect(leading.classes()).toContain('min-w-0')
+    expect(leading.classes()).toContain('flex-wrap')
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(true)
   })
 
   it('starts as a single line and caps growth at 200px', async () => {
@@ -117,9 +768,9 @@ describe('HarnessChatInput', () => {
 
   it('clamps autosize height at 200px when content overflows', async () => {
     const wrapper = mountInput()
-    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
     Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 500 })
-    await wrapper.find('textarea').setValue('line\n'.repeat(20))
+    await setEditorText(wrapper, 'line\n'.repeat(20))
     await wrapper.vm.$nextTick()
     expect(el.style.height).toBe('200px')
     expect(el.style.overflowY).toBe('auto')
@@ -127,56 +778,97 @@ describe('HarnessChatInput', () => {
 
   it('resets to one line after send', async () => {
     const wrapper = mountInput()
-    const el = wrapper.find('textarea').element as HTMLTextAreaElement
+    const el = wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement
     Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 80 })
-    await wrapper.find('textarea').setValue('hello world')
+    await setEditorText(wrapper, 'hello world')
     await wrapper.vm.$nextTick()
     expect(el.style.height).toBe('80px')
-    await wrapper.find('textarea').trigger('keydown', { key: 'Enter' })
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
     await wrapper.vm.$nextTick()
     expect(el.style.height).toBe('')
     expect(el.style.overflowY).toBe('')
   })
 
-  it('opens the provider tab via event (no router navigation) when provider config is missing', async () => {
-    getProviderConfigMock.mockRejectedValue(new Error('not found'))
+  it('renders inline badges and removes only the selected mention via its icon X', async () => {
     const wrapper = mountInput()
-    await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
-    })
+    const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
+    vm.setPrompt('Review @file:/workspace/src/shell.py with @agent:plan please')
     await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('shell.py')
+    expect(wrapper.get('[data-testid="composer-file-badge"]').attributes('title')).toBe(
+      '/workspace/src/shell.py',
+    )
+    expect(wrapper.get('[data-testid="composer-agent-badge"]').text()).toContain('plan')
+    expect(editorText(wrapper)).toBe('Review @file:/workspace/src/shell.py with @agent:plan please')
+    await wrapper
+      .get('[data-testid="composer-file-badge"] [data-testid="composer-badge-remove"]')
+      .trigger('click')
+    expect(editorText(wrapper)).toBe('Review with @agent:plan please')
+    expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="composer-textarea"]').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Review with @agent:plan please')
+  })
+
+  it('keeps Shift+Enter as a single newline when editing before a badge', async () => {
+    const wrapper = mountInput({}, document.body)
+    const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
+    vm.setPrompt('before @file:/workspace/a.py after')
+    await wrapper.vm.$nextTick()
+    ;(wrapper.get('[data-testid="composer-textarea"]').element as HTMLElement).focus()
+    editorCursor(wrapper, 0)
+    await wrapper
+      .get('[data-testid="composer-textarea"]')
+      .trigger('keydown', { key: 'Enter', shiftKey: true })
+    expect(editorText(wrapper)).toBe('\nbefore @file:/workspace/a.py after')
+    wrapper.unmount()
+    expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('a.py')
+    expect(wrapper.emitted('send')).toBeUndefined()
+  })
+
+  it('shows image thumbnail above inline badge and removes both with thumbnail X', async () => {
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as { setPrompt(text: string): void }
+    vm.setPrompt('See @file:/workspace/a.png now')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-testid="composer-file-badge"]').text()).toContain('a.png')
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="mention-images"] .relative').classes()).toContain('w-20')
+    await wrapper.get('[data-testid="mention-image-remove"]').trigger('click')
+    expect(editorText(wrapper)).toBe('See now')
+    expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+  })
+
+  it('leaves unsafe or incomplete tokens as editable plain text', async () => {
+    const wrapper = mountInput()
+    await setEditorText(wrapper, 'See @file:/workspace/../secret.png and @file:')
+    expect(wrapper.find('[data-testid="composer-file-badge"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
+  })
+
+  it('shows settings CTA when the model catalog has no available models', async () => {
+    nativeModelsMock.mockResolvedValue([])
+    const wrapper = mountInput()
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true),
+    )
     const events: Array<{ tab?: string }> = []
-    const listener = (e: Event) =>
-      events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
+    const listener = (e: Event) => events.push((e as CustomEvent<{ tab?: string }>).detail ?? {})
     window.addEventListener(OPEN_SETTINGS_EVENT, listener)
     try {
-      const cta = wrapper.find('[data-testid="composer-provider-cta"]')
-      expect(cta.exists()).toBe(true)
-      expect(cta.element.tagName).toBe('BUTTON')
-      expect(cta.text()).toContain('Configure OpenRouter in Org Settings')
-      await cta.trigger('click')
+      await wrapper.get('[data-testid="composer-provider-cta"]').trigger('click')
       expect(events).toEqual([{ tab: 'provider' }])
     } finally {
       window.removeEventListener(OPEN_SETTINGS_EVENT, listener)
     }
   })
 
-  it('shows org settings CTA when provider config has no API key', async () => {
-    getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'model-big',
-      small_model: 'model-small',
-      computer_use_model: 'model-cu',
-      has_api_key: false,
-      api_key_hint: '',
-    })
+  it('loads models and agent defaults without fetching provider settings', async () => {
     const wrapper = mountInput()
-    await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
-    })
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true)
-    expect(listProviderModelsMock).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalled())
+    await vi.waitFor(() => expect(listAgentConfigsMock).toHaveBeenCalled())
+    expect(nativeModelsMock).toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('toggles plan/build with Shift+Tab', async () => {
@@ -189,8 +881,8 @@ describe('HarnessChatInput', () => {
 
   it('sends prompt, mode, model, skill ids, and effort', async () => {
     const wrapper = mountInput({ mode: 'plan' })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('hello world')
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, 'hello world')
     await textarea.trigger('keydown', { key: 'Enter' })
     const sends = wrapper.emitted('send') ?? []
     expect(sends.length).toBeGreaterThan(0)
@@ -199,6 +891,375 @@ describe('HarnessChatInput', () => {
     expect(typeof sends[0]![2]).toBe('string')
     expect(sends[0]![3]).toEqual([])
     expect(typeof sends[0]![4]).toBe('string')
+  })
+
+  describe('draft persistence', () => {
+    beforeEach(() => sessionStorage.clear())
+
+    it.each([
+      { sessionId: null, stoppable: false },
+      { sessionId: 'session-1', stoppable: false },
+      { sessionId: 'session-1', stoppable: true },
+    ])('preserves unsent text but clears sent text across remounts (%j)', async (props) => {
+      const wrapper = mountInput(props)
+      await setEditorText(wrapper, 'Send this once')
+      wrapper.unmount()
+
+      const restored = mountInput(props)
+      await flushPromises()
+      expect(editorText(restored)).toBe('Send this once')
+      await restored.get('[data-testid="composer-send"]').trigger('click')
+      expect(restored.emitted('send')?.[0]?.[0]).toBe('Send this once')
+      expect(sessionStorage.getItem(`chat-input-ws-1-${props.sessionId ?? 'default'}`)).toBeNull()
+      restored.unmount()
+
+      const remounted = mountInput(props)
+      await flushPromises()
+      expect(editorText(remounted)).toBe('')
+      remounted.unmount()
+    })
+
+    it.each([
+      ['native', 'codex'],
+      ['codex', 'claude'],
+      ['claude', 'native'],
+    ] as const)('does not resurrect sent text after switching from %s to %s', async (from, to) => {
+      enableCodex()
+      sessionStorage.setItem('chat-input-ws-2-default', 'Unrelated draft')
+      const wrapper = mountInput({ harnessId: from })
+      await flushPromises()
+      await setEditorText(wrapper, 'Initial draft')
+      await wrapper.get(`[data-testid="composer-mode-${to}-build"]`).trigger('click')
+      expect(editorText(wrapper)).toBe('Initial draft')
+      wrapper.unmount()
+
+      const restored = mountInput({ harnessId: to })
+      await flushPromises()
+      expect(editorText(restored)).toBe('Initial draft')
+      await setEditorText(restored, 'Initial draft, edited')
+      await restored.get('[data-testid="composer-send"]').trigger('click')
+      expect(restored.emitted('send')?.[0]?.[0]).toBe('Initial draft, edited')
+      restored.unmount()
+
+      for (const harnessId of [from, to]) {
+        const remounted = mountInput({ harnessId })
+        await flushPromises()
+        expect(editorText(remounted)).toBe('')
+        remounted.unmount()
+      }
+      expect(sessionStorage.getItem('chat-input-ws-2-default')).toBe('Unrelated draft')
+    })
+  })
+
+  it('uses controlled scheduled-task state without chat cache/default side effects or send controls', async () => {
+    const harness = useHarnessStore()
+    harness.agentConfigs = [
+      {
+        agent: 'build',
+        mode: 'primary',
+        description: '',
+        model: 'default/model',
+        effort: 'high',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+    ]
+    harness.composerDirty = false
+    sessionStorage.setItem('chat-input-ws-1-default', 'old chat draft')
+    const wrapper = mountInput({
+      variant: 'scheduled-task',
+      prompt: 'task prompt',
+      mode: 'build',
+      model: '',
+      effort: '',
+      skillIds: [],
+      skillOptions: [],
+      filesAvailable: false,
+    })
+    await vi.waitFor(() => {
+      expect(nativeModelsMock).toHaveBeenCalled()
+      expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading')
+    })
+    expect(listAgentConfigsMock).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="task-prompt"]').attributes('aria-label')).toBe(
+      'Scheduled task prompt',
+    )
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-context-usage"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Agent default')
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+    expect(harness.composerDirty).toBe(false)
+
+    await setEditorText(wrapper, 'edited task prompt')
+    expect(wrapper.emitted('update:prompt')?.slice(-1)[0]).toEqual(['edited task prompt'])
+    expect(sessionStorage.getItem('chat-input-ws-1-default')).toBe('old chat draft')
+    wrapper.unmount()
+    expect(sessionStorage.getItem('chat-input-ws-1-default')).toBe('old chat draft')
+  })
+
+  it('preserves selected skill ids when the skill/model catalog temporarily hides them', async () => {
+    const auth = useAuthStore()
+    const skills = [
+      {
+        id: 'skill-hidden',
+        name: 'Hidden later',
+        body: 'Keep this selection',
+        scope: 'personal' as const,
+        created_by_email: null,
+        created_at: '2026-03-29T10:00:00.000Z',
+        updated_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+    const wrapper = mountInput({
+      variant: 'scheduled-task',
+      prompt: 'keep this prompt',
+      model: 'catalog/model-a',
+      skillIds: ['skill-hidden'],
+      skillOptions: skills,
+      filesAvailable: false,
+    })
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(true)
+    await wrapper.setProps({ skillOptions: [], model: 'catalog/model-b' })
+    nativeModelsMock.mockResolvedValueOnce([])
+    resetProviderCatalogCache()
+    auth.activeOrganizationId = 'org-catalog-refresh'
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalledTimes(2))
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(false)
+    expect(wrapper.emitted('update:skillIds')).toBeUndefined()
+    await wrapper.setProps({ skillOptions: skills })
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(true)
+    expect(wrapper.emitted('update:prompt')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('shares scheduled-task skill/agent autocomplete without sending and keeps Enter as newline', async () => {
+    const skills = [
+      {
+        id: 'skill-1',
+        name: 'Lint rules',
+        body: 'Always lint',
+        scope: 'personal' as const,
+        created_by_email: null,
+        created_at: '2026-03-29T10:00:00.000Z',
+        updated_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+    const wrapper = mountInput(
+      {
+        variant: 'scheduled-task',
+        prompt: '',
+        skillIds: [],
+        skillOptions: skills,
+        filesAvailable: false,
+      },
+      document.body,
+    )
+    const editor = wrapper.get('[data-testid="task-prompt"]')
+    await setEditorText(wrapper, '/Lin')
+    editorCursor(wrapper, 4)
+    await editor.trigger('input')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="composer-skill-option"]')).not.toBeNull(),
+    )
+    const skillSheet = wrapper.findComponent(HarnessMentionSheet)
+    expect(skillSheet.exists()).toBe(true)
+    await skillSheet.get('[data-testid="composer-skill-option"]').trigger('mousedown')
+    expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([['skill-1']])
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-1"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="composer-mode-claude-plan"]').trigger('click')
+    expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['claude'])
+    expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([['skill-1']])
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-1"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="composer-skill-remove-skill-1"]').trigger('click')
+    expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([[]])
+
+    await setEditorText(wrapper, '@agent:bu')
+    editorCursor(wrapper, 9)
+    await editor.trigger('input')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="composer-mention-option"]')).not.toBeNull(),
+    )
+    await editor.trigger('keydown', { key: 'Enter' })
+    expect(
+      (wrapper.findComponent(ComposerRichEditor).vm as unknown as { value(): string }).value(),
+    ).toContain('@agent:build ')
+
+    const newlineEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(newlineEnter)
+    expect(newlineEnter.defaultPrevented).toBe(false)
+    const ctrlEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(ctrlEnter)
+    expect(ctrlEnter.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('send')).toBeUndefined()
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    wrapper.unmount()
+    document.body
+      .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+      .forEach((node) => node.remove())
+  })
+
+  it('keeps IME Enter and the first Escape inside scheduled-task suggestions', async () => {
+    const wrapper = mountInput(
+      {
+        variant: 'scheduled-task',
+        prompt: '',
+        skillIds: [],
+        skillOptions: [
+          {
+            id: 'skill-1',
+            name: 'Lint rules',
+            body: 'Always lint',
+            scope: 'personal',
+            created_by_email: null,
+            created_at: '2026-03-29T10:00:00.000Z',
+            updated_at: '2026-03-29T10:00:00.000Z',
+          },
+        ],
+        filesAvailable: false,
+      },
+      document.body,
+    )
+    const editor = wrapper.get('[data-testid="task-prompt"]')
+    const ancestorKeydown = vi.fn()
+    document.body.addEventListener('keydown', ancestorKeydown)
+
+    await setEditorText(wrapper, '/Lin')
+    editorCursor(wrapper, 4)
+    await editor.trigger('input')
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-testid="composer-skill-option"]')).toBeTruthy(),
+    )
+    expect(
+      document
+        .querySelector('[data-testid="composer-suggestions-portal"]')
+        ?.closest('[data-testid="composer-card"]'),
+    ).toBeNull()
+
+    const composingEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(composingEnter)
+    expect(composingEnter.defaultPrevented).toBe(false)
+    expect(wrapper.emitted('update:skillIds')).toBeUndefined()
+    ancestorKeydown.mockClear()
+
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    editor.element.dispatchEvent(escape)
+    await wrapper.vm.$nextTick()
+    expect(escape.defaultPrevented).toBe(true)
+    expect(ancestorKeydown).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-testid="composer-suggestions-portal"]')).toBeNull()
+
+    editor.element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    )
+    expect(ancestorKeydown).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    document.body.removeEventListener('keydown', ancestorKeydown)
+  })
+
+  it('keeps scheduled suggestions visible when the anchor has no room above it', async () => {
+    const skill = {
+      id: 'viewport-skill',
+      name: 'Viewport skill',
+      body: 'Skill body',
+      scope: 'personal' as const,
+      created_by_email: null,
+      created_at: '2026-03-29T10:00:00.000Z',
+      updated_at: '2026-03-29T10:00:00.000Z',
+    }
+    const wrapper = mountInput(
+      { variant: 'scheduled-task', skillOptions: [skill], filesAvailable: false },
+      document.body,
+    )
+    const anchor = wrapper.get('[data-testid="composer-card"]').element
+    vi.spyOn(anchor, 'getBoundingClientRect').mockReturnValue(new DOMRect(12, 2, 360, 180))
+    const editor = wrapper.get('[data-testid="task-prompt"]')
+    await setEditorText(wrapper, '/View')
+    editorCursor(wrapper, 5)
+    await editor.trigger('input')
+
+    let popup: HTMLElement | undefined
+    await vi.waitFor(() => {
+      popup =
+        document.querySelector<HTMLElement>('[data-testid="composer-suggestions-portal"]') ??
+        undefined
+      expect(popup).toBeTruthy()
+      expect(popup!.style.maxHeight).not.toBe('0px')
+      expect(Number.parseFloat(popup!.style.maxHeight)).toBeGreaterThanOrEqual(32)
+      expect(popup!.querySelector('[role="option"][aria-selected="true"]')).toBeTruthy()
+    })
+
+    expect(anchor.getBoundingClientRect().top).toBe(2)
+    expect(popup?.style.translate).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('renders exactly one selected skill chip in chat and scheduled-task composers', async () => {
+    const skill = {
+      id: 'skill-1',
+      name: 'Lint rules',
+      body: 'Always lint',
+      scope: 'personal' as const,
+      created_by_email: null,
+      created_at: '2026-03-29T10:00:00.000Z',
+      updated_at: '2026-03-29T10:00:00.000Z',
+    }
+
+    for (const variant of ['chat', 'scheduled-task'] as const) {
+      const wrapper = mountInput(
+        {
+          variant,
+          skillOptions: [skill],
+          filesAvailable: false,
+        },
+        document.body,
+      )
+      const testId = `[data-testid="composer-skill-chip-${skill.id}"]`
+      const editor = wrapper.get(
+        variant === 'chat' ? '[data-testid="composer-textarea"]' : '[data-testid="task-prompt"]',
+      )
+      await setEditorText(wrapper, '/Lin')
+      editorCursor(wrapper, 4)
+      await editor.trigger('input')
+      let option: Element | null = null
+      await vi.waitFor(() => {
+        const found =
+          variant === 'chat'
+            ? wrapper.find('[role="option"]').element
+            : document.querySelector('[data-testid="composer-skill-option"]')
+        expect(found).toBeTruthy()
+        option = found ?? null
+      })
+      option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.findAll(testId)).toHaveLength(1)
+      expect(wrapper.find(testId).text()).toContain(skill.name)
+      wrapper.unmount()
+      document
+        .querySelectorAll('[data-testid="composer-suggestions-portal"]')
+        .forEach((node) => node.remove())
+    }
   })
 
   it('attaches a skill from the slash picker and includes it on send', async () => {
@@ -216,18 +1277,19 @@ describe('HarnessChatInput', () => {
       ],
     })
     await vi.waitFor(() => {
-      expect(getProviderConfigMock).toHaveBeenCalled()
+      expect(nativeModelsMock).toHaveBeenCalled()
     })
 
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('/Lin')
-    textarea.element.setSelectionRange(4, 4)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '/Lin')
+    editorCursor(wrapper, 4)
     await textarea.trigger('input')
     expect(wrapper.find('[role="listbox"]').text()).toContain('Lint rules')
     await textarea.trigger('keydown', { key: 'Enter' })
     expect(wrapper.text()).toContain('Lint rules')
+    expect(wrapper.findAll('[data-testid="composer-skill-chip-skill-1"]')).toHaveLength(1)
 
-    await textarea.setValue('use skills')
+    await setEditorText(wrapper, 'use skills')
     await textarea.trigger('keydown', { key: 'Enter' })
     const sends = wrapper.emitted('send') ?? []
     expect(sends.length).toBeGreaterThan(0)
@@ -239,9 +1301,9 @@ describe('HarnessChatInput', () => {
       mentionControlled: true,
       files: [{ name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 }],
     })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@a')
-    textarea.element.setSelectionRange(2, 2)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@a')
+    editorCursor(wrapper, 2)
     await textarea.trigger('input')
 
     const changes = wrapper.emitted('mention-change') ?? []
@@ -258,9 +1320,9 @@ describe('HarnessChatInput', () => {
       mentionControlled: true,
       files: [{ name: 'a.ts', path: '/workspace/a.ts', type: 'file', size: 1 }],
     })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@a')
-    textarea.element.setSelectionRange(2, 2)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@a')
+    editorCursor(wrapper, 2)
     await textarea.trigger('input')
     await textarea.trigger('keydown', { key: 'Enter' })
 
@@ -272,9 +1334,9 @@ describe('HarnessChatInput', () => {
     const store = useFileExplorerStore()
     const findFiles = vi.spyOn(store, 'findFiles').mockResolvedValue(['/workspace/src/a.ts'])
     const wrapper = mountInput()
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@src')
-    textarea.element.setSelectionRange(4, 4)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@src')
+    editorCursor(wrapper, 4)
     await textarea.trigger('input')
     expect(findFiles).toHaveBeenCalledWith('ws-1', 'src', 50)
   })
@@ -288,9 +1350,9 @@ describe('HarnessChatInput', () => {
         { name: 'b.ts', path: '/workspace/b.ts', type: 'file', size: 1 },
       ],
     })
-    const textarea = wrapper.find('textarea')
-    await textarea.setValue('@')
-    textarea.element.setSelectionRange(1, 1)
+    const textarea = wrapper.get('[data-testid="composer-textarea"]')
+    await setEditorText(wrapper, '@')
+    editorCursor(wrapper, 1)
     await textarea.trigger('input')
     const options = wrapper.findAll('[role="option"]')
     expect(options.length).toBeGreaterThan(1)
@@ -311,10 +1373,13 @@ describe('HarnessChatInput', () => {
   })
 
   it('fills the context ring from catalog limit and used tokens', async () => {
-    const wrapper = mountInput({ contextUsed: 50_000, model: 'model-big' })
-    await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
-    })
+    resetProviderCatalogCache()
+    const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
+        'Loading',
+      ),
+    )
     const rings = wrapper.findAll('[data-testid="composer-context-usage"] circle')
     expect(rings).toHaveLength(2)
     const circumference = 2 * Math.PI * 6
@@ -326,10 +1391,13 @@ describe('HarnessChatInput', () => {
   })
 
   it('emits context metrics when used tokens or catalog limit change', async () => {
-    const wrapper = mountInput({ contextUsed: 50_000, model: 'model-big' })
-    await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
-    })
+    resetProviderCatalogCache()
+    const wrapper = mountInput({ contextUsed: 50_000, model: 'openrouter/model-big' })
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
+        'Loading',
+      ),
+    )
     const metrics = wrapper.emitted('context-metrics') ?? []
     expect(metrics.length).toBeGreaterThan(0)
     const last = metrics[metrics.length - 1]![0] as {
@@ -340,6 +1408,22 @@ describe('HarnessChatInput', () => {
     expect(last.used).toBe(50_000)
     expect(last.limit).toBe(200_000)
     expect(last.percent).toBe(25)
+  })
+
+  it('uses the Codex runtime limit when the model catalog has no context length', async () => {
+    const wrapper = mountInput({
+      harnessId: 'codex',
+      model: 'chatgpt/gpt-6.1-sol',
+      contextUsed: 51_680,
+      contextLimit: 258_400,
+    })
+    expect(wrapper.get('[data-testid="composer-context-usage"]').attributes('aria-label'))
+      .toBe('Context usage 20%')
+    await wrapper.setProps({ contextUsed: 77_520 })
+    const metrics = wrapper.emitted('context-metrics') ?? []
+    expect(metrics[metrics.length - 1]?.[0]).toEqual({
+      used: 77_520, limit: 258_400, percent: 30,
+    })
   })
 
   it('keeps rounded corners and an accent focus ring when a sheet is attached', () => {
@@ -353,6 +1437,18 @@ describe('HarnessChatInput', () => {
     expect(card.classes()).not.toContain('border-t-0')
   })
 
+  it('renders only the stop control when stopOnly is set', async () => {
+    const wrapper = mountInput({ stopOnly: true, stoppable: true })
+    expect(wrapper.find('[data-testid="composer-card"]').exists()).toBe(false)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    const stop = wrapper.find('[data-testid="composer-stop"]')
+    expect(stop.exists()).toBe(true)
+    expect(stop.classes()).toContain('bg-primary')
+    await stop.trigger('click')
+    expect(wrapper.emitted('stop')).toHaveLength(1)
+    expect(nativeModelsMock).not.toHaveBeenCalled()
+  })
+
   it('styles the stop button with primary accent colors when stoppable', () => {
     const wrapper = mountInput({ stoppable: true })
     const stop = wrapper.find('[data-testid="composer-stop"]')
@@ -360,5 +1456,705 @@ describe('HarnessChatInput', () => {
     expect(stop.classes()).toContain('bg-primary')
     expect(stop.classes()).toContain('text-primary-foreground')
     expect(stop.classes()).not.toContain('bg-destructive')
+  })
+
+  it.each([false, true])('shows pending stop feedback (stopOnly: %s)', async (stopOnly) => {
+    const wrapper = mountInput({ stoppable: true, stopping: true, stopOnly })
+    const stop = wrapper.get('[data-testid="composer-stop"]')
+    expect(stop.attributes('disabled')).toBeDefined()
+    expect(stop.attributes('aria-label')).toBe('Stopping…')
+    expect(stop.attributes('aria-busy')).toBe('true')
+    expect(stop.find('.animate-spin').exists()).toBe(true)
+    await stop.trigger('click')
+    expect(wrapper.emitted('stop')).toBeUndefined()
+  })
+
+  it('blocks steering while stopping and preserves the draft', async () => {
+    const wrapper = mountInput({ stoppable: true })
+    await setEditorText(wrapper, 'keep this draft')
+    await wrapper.setProps({ stopping: true })
+
+    expect(wrapper.get('[data-testid="composer-stop"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeDefined()
+    expect(editorText(wrapper)).toBe('keep this draft')
+
+    await wrapper.setProps({ stopping: false })
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('opens the native file dialog when the paperclip is clicked', async () => {
+    const wrapper = mountInput()
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    expect(input.exists()).toBe(true)
+    expect((input.element as HTMLInputElement).multiple).toBe(true)
+    const clickSpy = vi
+      .spyOn(input.element as HTMLInputElement, 'click')
+      .mockImplementation(() => {})
+    await wrapper.find('[data-testid="composer-attach"]').trigger('click')
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+    clickSpy.mockRestore()
+  })
+
+  it('disables the paperclip when the workspace is not ready', () => {
+    const wrapper = mountInput({ disabled: true })
+    const attach = wrapper.find('[data-testid="composer-attach"]')
+    expect(attach.attributes('disabled')).toBeDefined()
+  })
+
+  describe('while a run is active (steering)', () => {
+    beforeEach(() => sessionStorage.clear())
+
+    function editor(wrapper: VueWrapper) {
+      return wrapper.get('[data-testid="composer-textarea"]')
+    }
+
+    it('keeps the editor enabled with a steer placeholder and no amber hint', () => {
+      const wrapper = mountInput({ stoppable: true })
+
+      expect(editor(wrapper).attributes('contenteditable')).toBe('true')
+      expect(editor(wrapper).attributes('data-placeholder')).toBe('Steer the agent…')
+      expect(wrapper.text()).not.toContain('Agent is running')
+      expect(wrapper.find('.text-amber-600').exists()).toBe(false)
+    })
+
+    it('uses the regular placeholder when idle', () => {
+      const wrapper = mountInput()
+      expect(editor(wrapper).attributes('data-placeholder')).toBe(
+        'Plan or Build, / for skills, @ for context',
+      )
+    })
+
+    it('locks the pickers that only apply at run start but keeps attach usable', () => {
+      const wrapper = mountInput({ stoppable: true })
+
+      expect(
+        wrapper.get('[data-testid="composer-mode-trigger"]').attributes('disabled'),
+      ).toBeDefined()
+      expect(
+        wrapper.get('[data-testid="composer-model-trigger"]').attributes('disabled'),
+      ).toBeDefined()
+      expect(wrapper.get('[data-testid="composer-attach"]').attributes('disabled')).toBeUndefined()
+    })
+
+    it('shows only Stop while the composer is empty', async () => {
+      const wrapper = mountInput({ stoppable: true })
+
+      expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+      const stops = wrapper.findAll('[data-testid="composer-stop"]')
+      expect(stops).toHaveLength(1)
+      expect(stops[0]!.classes()).toContain('bg-primary')
+      await stops[0]!.trigger('click')
+      expect(wrapper.emitted('stop')).toHaveLength(1)
+      expect(wrapper.emitted('send')).toBeUndefined()
+    })
+
+    it('turns the primary action into Send once there is text, keeping a compact Stop', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      await setEditorText(wrapper, 'Use pnpm instead')
+
+      const send = wrapper.get('[data-testid="composer-send"]')
+      expect(send.classes()).toContain('bg-primary')
+      expect(send.attributes('disabled')).toBeUndefined()
+      expect(send.attributes('title')).toBe('Steer the agent')
+      const stops = wrapper.findAll('[data-testid="composer-stop"]')
+      expect(stops).toHaveLength(1)
+      expect(stops[0]!.classes()).not.toContain('bg-primary')
+
+      await stops[0]!.trigger('click')
+      expect(wrapper.emitted('stop')).toHaveLength(1)
+      expect(editorText(wrapper)).toBe('Use pnpm instead')
+
+      await send.trigger('click')
+      expect(wrapper.emitted('send')?.[0]?.slice(0, 2)).toEqual(['Use pnpm instead', 'build'])
+      expect(editorText(wrapper)).toBe('')
+      // Back to the empty state: the primary action is Stop again.
+      expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+      expect(wrapper.findAll('[data-testid="composer-stop"]')).toHaveLength(1)
+    })
+
+    it('sends on Enter and keeps Shift+Enter for newlines', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      await setEditorText(wrapper, 'steer me')
+
+      await editor(wrapper).trigger('keydown', { key: 'Enter', shiftKey: true })
+      expect(wrapper.emitted('send')).toBeUndefined()
+
+      await editor(wrapper).trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('send')).toHaveLength(1)
+      expect(wrapper.emitted('send')?.[0]?.[0]).toBe('steer me')
+    })
+
+    it('blocks a second send and stop while a request is in flight', async () => {
+      const wrapper = mountInput({ stoppable: true, sending: true })
+      await setEditorText(wrapper, 'steer me')
+
+      expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeDefined()
+      expect(wrapper.get('[data-testid="composer-stop"]').attributes('disabled')).toBeDefined()
+      await editor(wrapper).trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('send')).toBeUndefined()
+    })
+
+    it('does not offer skill suggestions for a steer', async () => {
+      const wrapper = mountInput({
+        stoppable: true,
+        mentionControlled: true,
+        skillOptions: [
+          {
+            id: 'skill-1',
+            name: 'Linear',
+            description: '',
+            content: '',
+            enabled: true,
+            created_at: '',
+            updated_at: '',
+          } as never,
+        ],
+      })
+      await setEditorText(wrapper, '/Lin')
+      editorCursor(wrapper, 4)
+      await editor(wrapper).trigger('input')
+
+      const changes = wrapper.emitted('mention-change') ?? []
+      expect(changes.some(([open]) => open === true)).toBe(false)
+    })
+
+    it('stays fully locked when the workspace cannot take prompts', () => {
+      const wrapper = mountInput({
+        stoppable: true,
+        disabled: true,
+        busyMessage: 'Workspace is not ready for prompts.',
+      })
+
+      expect(editor(wrapper).attributes('contenteditable')).toBe('false')
+      expect(wrapper.text()).toContain('Workspace is not ready for prompts.')
+      expect(wrapper.get('[data-testid="composer-attach"]').attributes('disabled')).toBeDefined()
+    })
+
+    it('restores text without losing a draft: replace by default, append after a blank line', async () => {
+      const wrapper = mountInput({ stoppable: true, sessionId: 'session-1' })
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { append?: boolean; focus?: boolean }): void
+      }
+
+      vm.setPrompt('first')
+      await wrapper.vm.$nextTick()
+      expect(editorText(wrapper)).toBe('first')
+
+      vm.setPrompt('second', { append: true })
+      await wrapper.vm.$nextTick()
+      expect(editorText(wrapper)).toBe('first\n\nsecond')
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBe('first\n\nsecond')
+
+      vm.setPrompt('replaced')
+      await wrapper.vm.$nextTick()
+      expect(editorText(wrapper)).toBe('replaced')
+    })
+
+    it('restores a sent draft with its skills after the parent reports a failed send', async () => {
+      const wrapper = mountInput({
+        sessionId: 'session-1',
+        skillOptions: [
+          {
+            id: 'skill-1',
+            name: 'Linear',
+            body: '',
+            scope: 'personal',
+            created_by_email: null,
+            created_at: '',
+            updated_at: '',
+          },
+        ],
+      })
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { append?: boolean; skillIds?: string[] }): void
+      }
+      vm.setPrompt('Refactor auth', { skillIds: ['skill-1'] })
+      await wrapper.vm.$nextTick()
+      await editor(wrapper).trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Refactor auth')
+      expect(editorText(wrapper)).toBe('')
+      expect(wrapper.find('[data-testid="composer-skill-chip-skill-1"]').exists()).toBe(false)
+
+      vm.setPrompt('Refactor auth', { append: true, skillIds: ['skill-1'] })
+      await wrapper.vm.$nextTick()
+
+      expect(editorText(wrapper)).toBe('Refactor auth')
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBe('Refactor auth')
+      expect(wrapper.findAll('[data-testid="composer-skill-chip-skill-1"]')).toHaveLength(1)
+    })
+
+    it('appending onto an empty composer just sets the text', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { append?: boolean }): void
+      }
+
+      vm.setPrompt('restored', { append: true })
+      await wrapper.vm.$nextTick()
+
+      expect(editorText(wrapper)).toBe('restored')
+    })
+
+    it('keeps the per-session draft while the run is active', async () => {
+      const wrapper = mountInput({ stoppable: true, sessionId: 'session-1' })
+      await setEditorText(wrapper, 'half-typed steer')
+
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBe('half-typed steer')
+      wrapper.unmount()
+      const remounted = mountInput({ stoppable: true, sessionId: 'session-1' })
+      await flushPromises()
+      expect(editorText(remounted)).toBe('half-typed steer')
+    })
+  })
+})
+
+/** Build a FileList-like with real File objects (jsdom has File but no DataTransfer). */
+function makeFileList(files: File[]): FileList {
+  const list = {
+    length: files.length,
+    item: (index: number) => files[index] ?? null,
+  } as unknown as FileList & { [index: number]: File }
+  for (let i = 0; i < files.length; i++) {
+    list[i] = files[i]!
+  }
+  return list as FileList
+}
+
+describe('HarnessChatInput chat upload', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    sessionStorage.clear()
+    vi.clearAllMocks()
+    vi.useRealTimers()
+    resetProviderCatalogCache()
+    resetAgentConfigsCache()
+    resetRecentModelsCache()
+    listAgentConfigsMock.mockResolvedValue([
+      {
+        agent: 'build',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-big',
+        effort: 'high',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+      {
+        agent: 'plan',
+        mode: 'primary',
+        description: '',
+        model: 'openrouter/model-small',
+        effort: '',
+        inherit_model: false,
+        effort_strategy: 'fixed',
+      },
+    ])
+    nativeModelsMock.mockResolvedValue(catalog)
+  })
+
+  /** Resolve the tracked upload the way a backend `files:upload_result` would. */
+  function succeedUpload(requestId: string, path = CHAT_UPLOAD_DIR): void {
+    useFileExplorerStore().handleUploadResult(requestId, path, 'success', 'ws-1')
+  }
+
+  /** Serve fresh workspace listings: root → `.opencuria` → upload dir. */
+  function mockUploadDirListing(uploaded: FileEntryRaw[] = []) {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    return vi.spyOn(store, 'fetchDirectoryEntries').mockImplementation(async (_ws, path) => {
+      if (path === '/workspace')
+        return [{ name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 }]
+      if (path === '/workspace/.opencuria')
+        return [{ name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 }]
+      return uploaded
+    })
+  }
+
+  function uploadRequest(index = 0) {
+    const calls = vi.mocked(sendFilesUpload).mock.calls
+    return {
+      requestId: calls[index]![1] as string,
+      path: calls[index]![2] as string,
+      filename: calls[index]![3] as string,
+    }
+  }
+
+  it('uploads a picked file and inserts an @file: token', async () => {
+    mockUploadDirListing()
+    const file = new File(['hello'], 'my notes.txt', { type: 'text/plain' })
+    resetProviderCatalogCache()
+    const wrapper = mountInput()
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([file]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).not.toContain(
+        'Loading',
+      ),
+    )
+
+    const { requestId, path, filename } = uploadRequest()
+    expect(path).toBe(CHAT_UPLOAD_DIR)
+    expect(filename).toBe('my_notes.txt')
+    succeedUpload(requestId)
+    await vi.waitFor(() => {
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/my_notes.txt `)
+    })
+  })
+
+  it('deduplicates against existing upload-dir files instead of overwriting', async () => {
+    const store = useFileExplorerStore()
+    // A stale explorer tree (e.g. another client uploaded since) must not
+    // decide the name; the fresh listing does.
+    store.setTree('/workspace', [
+      { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
+    ])
+    store.setTree('/workspace/.opencuria', [
+      { name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 },
+    ])
+    store.setTree(CHAT_UPLOAD_DIR, [
+      { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
+    ])
+    mockUploadDirListing([
+      { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
+      { name: 'a_1.txt', path: `${CHAT_UPLOAD_DIR}/a_1.txt`, type: 'file', size: 1 },
+    ])
+    const wrapper = mountInput()
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([new File(['x'], 'a.txt', { type: 'text/plain' })]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+
+    const { requestId, filename } = uploadRequest()
+    expect(filename).toBe('a_2.txt')
+    succeedUpload(requestId)
+    await vi.waitFor(() => {
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/a_2.txt `)
+    })
+  })
+
+  it('deduplicates against the workspace upload dir when the explorer never loaded it', async () => {
+    const store = useFileExplorerStore()
+    // Typical tree: the hidden `.opencuria` folder is listed but collapsed,
+    // so a nested upload-dir listing has no tree node to attach to.
+    store.setTree('/workspace', [
+      { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
+    ])
+    const uploaded: FileEntryRaw[] = [
+      { name: 'image.png', path: `${CHAT_UPLOAD_DIR}/image.png`, type: 'file', size: 1 },
+    ]
+    mockUploadDirListing(uploaded)
+    // Mirror the real tree update, which drops listings without a parent node.
+    vi.spyOn(store, 'fetchDirectory').mockImplementation(async (_ws, path) => {
+      if (path === CHAT_UPLOAD_DIR) store.setTree(path, uploaded)
+    })
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
+
+    const upload = vm.uploadChatFiles([new File(['new'], 'image.png', { type: 'image/png' })])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+
+    expect(uploadRequest().filename).toBe('image_1.png')
+    succeedUpload(uploadRequest().requestId)
+    await upload
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/image_1.png `)
+  })
+
+  it('uploads dropped files on the composer card', async () => {
+    mockUploadDirListing()
+    const wrapper = mountInput()
+    const card = wrapper.find('[data-testid="composer-card"]')
+
+    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: makeFileList([file]), types: ['Files'] },
+    })
+    card.element.dispatchEvent(event)
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+
+    const { requestId } = uploadRequest()
+    expect(vi.mocked(sendFilesUpload).mock.calls[0]![2]).toBe(CHAT_UPLOAD_DIR)
+    succeedUpload(requestId)
+    await vi.waitFor(() => {
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/drop.txt `)
+    })
+  })
+
+  it('uploads a doubly-handled drop only once (composer card + parent zone)', async () => {
+    const store = useFileExplorerStore()
+    mockUploadDirListing()
+    // Keep the tracked upload pending so the second batch runs strictly
+    // while the first is still in flight (reproduces the double drop).
+    const pending: Array<(data: unknown) => void> = []
+    const trackSpy = vi.spyOn(store, 'trackAndUpload').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          const wrapped = (data: unknown) => {
+            const ok =
+              data !== null && typeof data === 'object' && (data as { ok?: boolean }).ok === true
+            if (ok) resolve()
+          }
+          pending.push(wrapped)
+        }),
+    )
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as {
+      uploadChatFiles: (files: File[] | FileList) => Promise<void>
+    }
+
+    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
+    const files = makeFileList([file])
+    // Simulate the drop bubbling: the composer card handler runs first,
+    // then — before it finishes — the parent panel/home forwarder calls
+    // `uploadChatFiles` again with the same files.
+    const first = vm.uploadChatFiles(files)
+    await vi.waitFor(() => {
+      expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    })
+    const second = vm.uploadChatFiles(files)
+    // Let the serialized second batch start before resolving the upload.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    pending.forEach((done) => done({ ok: true }))
+    await Promise.all([first, second])
+    // The second batch was serialized behind the first and skips the
+    // already-tracked upload, so the file is sent exactly once.
+    expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1)
+    expect(trackSpy).toHaveBeenCalledTimes(1)
+
+    await vi.waitFor(() => {
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/drop.txt `)
+    })
+    const value = editorText(wrapper) as string
+    expect(value.match(/@file:/g)).toHaveLength(1)
+  })
+
+  it('ignores drops while the workspace is not ready', async () => {
+    const wrapper = mountInput({ disabled: true })
+    const card = wrapper.find('[data-testid="composer-card"]')
+    const file = new File(['hi'], 'drop.txt', { type: 'text/plain' })
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files: makeFileList([file]), types: ['Files'] },
+    })
+    card.element.dispatchEvent(event)
+    await wrapper.vm.$nextTick()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(editorText(wrapper)).toBe('')
+  })
+
+  it('skips >10 MiB files before arrayBuffer() with a visible toast and no send', async () => {
+    mockUploadDirListing()
+    const wrapper = mountInput()
+    const big = new File(['x'], 'big.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(big, 'size', { value: 10 * 1024 * 1024 + 1 })
+    const arrayBufferSpy = vi.spyOn(big, 'arrayBuffer')
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([big]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(arrayBufferSpy).not.toHaveBeenCalled()
+    })
+    // The size guard runs before any tracked upload; the only send would be
+    // the best-effort upload-dir prefetch (mocked), never an upload itself.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(editorText(wrapper)).toBe('')
+    const { toast } = await import('vue-sonner')
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+      'Upload failed',
+      expect.objectContaining({ description: expect.stringContaining('10 MB') }),
+    )
+  })
+
+  it('a synchronous sendFilesUpload throw fails visibly without inserting a token', async () => {
+    const store = useFileExplorerStore()
+    mockUploadDirListing()
+    vi.mocked(sendFilesUpload).mockImplementationOnce(() => {
+      throw new Error('Upload exceeds the 10 MB limit.')
+    })
+    const failSpy = vi.spyOn(store, 'failUpload')
+    const wrapper = mountInput()
+
+    const input = wrapper.find('[data-testid="composer-file-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: makeFileList([new File(['hi'], 'a.txt', { type: 'text/plain' })]),
+    })
+    await input.trigger('change')
+    await vi.waitFor(() => {
+      expect(failSpy).toHaveBeenCalledTimes(1)
+    })
+    expect(failSpy.mock.calls[0]![1]).toContain('10 MB')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(editorText(wrapper)).toBe('')
+  })
+
+  it('deduplicates scheduled uploads against its selected workspace, not the shared tree', async () => {
+    const store = useFileExplorerStore()
+    store.setTree('/workspace', [
+      { name: 'unrelated.txt', path: '/workspace/unrelated.txt', type: 'file', size: 1 },
+    ])
+    const listSpy = vi
+      .spyOn(store, 'fetchDirectoryEntries')
+      .mockImplementation(async (_ws, path) => {
+        if (path === '/workspace')
+          return [{ name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 }]
+        if (path === '/workspace/.opencuria')
+          return [{ name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 }]
+        return [{ name: 'task.txt', path: `${CHAT_UPLOAD_DIR}/task.txt`, type: 'file', size: 1 }]
+      })
+    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
+    const upload = vm.uploadChatFiles([new File(['hi'], 'task.txt')])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(sendFilesUpload).mock.calls[0]![3]).toBe('task_1.txt')
+    expect(listSpy.mock.calls.map((call) => call[1])).toEqual([
+      '/workspace',
+      '/workspace/.opencuria',
+      CHAT_UPLOAD_DIR,
+    ])
+    expect(store.tree.map((entry) => entry.name)).toEqual(['unrelated.txt'])
+    succeedUpload(uploadRequest().requestId)
+    await upload
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/task_1.txt `)
+    wrapper.unmount()
+  })
+
+  it('aborts a scheduled upload when selected-workspace filename listing fails', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue(null)
+    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
+    await vm.uploadChatFiles([new File(['hi'], 'task.txt')])
+    expect(vi.mocked(sendFilesUpload)).not.toHaveBeenCalled()
+    expect(editorText(wrapper)).toBe('')
+    const { toast } = await import('vue-sonner')
+    expect(vi.mocked(toast.error)).toHaveBeenCalledWith(
+      'Upload failed',
+      expect.objectContaining({ description: expect.stringContaining('Could not check') }),
+    )
+    wrapper.unmount()
+  })
+
+  it('cancels its pending scheduled upload when the workspace changes', async () => {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue([])
+    const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+    const vm = wrapper.vm as unknown as {
+      uploadChatFiles: (files: File[]) => Promise<void>
+    }
+    const upload = vm.uploadChatFiles([new File(['hi'], 'task.txt')])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+    const requestId = uploadRequest().requestId
+    let anotherChatCompleted = false
+    const anotherChatUpload = store
+      .trackAndUpload('ws-1', 'other-chat-upload', CHAT_UPLOAD_DIR, 'other.txt', 'eA==', false)
+      .then(
+        () => {
+          anotherChatCompleted = true
+        },
+        () => {
+          anotherChatCompleted = true
+        },
+      )
+    expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([true])
+
+    await wrapper.setProps({ workspaceId: 'ws-2' })
+    await upload
+    expect(anotherChatCompleted).toBe(false)
+    expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([false])
+    expect(editorText(wrapper)).toBe('')
+    expect(wrapper.emitted('update:prompt')).toBeUndefined()
+
+    const { toast } = await import('vue-sonner')
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalledWith(
+      'Upload failed',
+      expect.objectContaining({ description: expect.stringContaining('timed out') }),
+    )
+    store.handleUploadResult(requestId, CHAT_UPLOAD_DIR, 'success', 'ws-1')
+    expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+    store.handleUploadResult('other-chat-upload', CHAT_UPLOAD_DIR, 'success', 'ws-1')
+    await anotherChatUpload
+    expect(anotherChatCompleted).toBe(true)
+    await wrapper.setProps({ workspaceId: 'ws-1' })
+    const retry = vm.uploadChatFiles([new File(['hi'], 'retry.txt')])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(2))
+    const retryId = uploadRequest(1).requestId
+    succeedUpload(retryId)
+    await retry
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/retry.txt `)
+    wrapper.unmount()
+  })
+
+  it.each(['reset', 'unmount'] as const)(
+    'cancels its owned upload on scheduled-task %s without changing another transfer',
+    async (lifecycle) => {
+      const store = useFileExplorerStore()
+      vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+      vi.spyOn(store, 'fetchDirectoryEntries').mockResolvedValue([])
+      const wrapper = mountInput({ variant: 'scheduled-task', filesAvailable: true })
+      const vm = wrapper.vm as unknown as {
+        uploadChatFiles: (files: File[]) => Promise<void>
+      }
+      const upload = vm.uploadChatFiles([new File(['hi'], `${lifecycle}.txt`)])
+      await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+      const requestId = uploadRequest().requestId
+      let otherCompleted = false
+      const otherUpload = store
+        .trackAndUpload('ws-1', `other-${lifecycle}`, CHAT_UPLOAD_DIR, 'other.txt', 'eA==')
+        .then(() => {
+          otherCompleted = true
+        })
+
+      if (lifecycle === 'reset') await wrapper.setProps({ resetKey: 1 })
+      else wrapper.unmount()
+      await upload
+      expect(otherCompleted).toBe(false)
+      if (lifecycle === 'reset') {
+        expect(wrapper.emitted('uploading')?.slice(-1)[0]).toEqual([false])
+        expect(editorText(wrapper)).toBe('')
+      }
+
+      store.handleUploadResult(requestId, CHAT_UPLOAD_DIR, 'success', 'ws-1')
+      expect(wrapper.emitted('update:prompt')).toBeUndefined()
+      store.handleUploadResult(`other-${lifecycle}`, CHAT_UPLOAD_DIR, 'success', 'ws-1')
+      await otherUpload
+      expect(otherCompleted).toBe(true)
+      const { toast } = await import('vue-sonner')
+      expect(vi.mocked(toast.error)).not.toHaveBeenCalled()
+      if (lifecycle === 'reset') wrapper.unmount()
+    },
+  )
+
+  it('highlights the composer card while an external file drag is active', async () => {
+    const wrapper = mountInput({ uploadDrag: { active: true, uploading: false } })
+    const card = wrapper.find('[data-testid="composer-card"]')
+    expect(card.classes()).toContain('border-primary')
+    expect(card.classes()).toContain('ring-2')
+    await wrapper.setProps({ uploadDrag: { active: false, uploading: false } })
+    expect(card.classes()).toContain('border-border')
   })
 })

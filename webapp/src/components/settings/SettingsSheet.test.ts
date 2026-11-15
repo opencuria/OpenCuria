@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 import SettingsSheet from './SettingsSheet.vue'
-import { OPEN_SETTINGS_EVENT } from './settingsTabs'
+import { CLOSE_SETTINGS_EVENT, OPEN_SETTINGS_EVENT, SETTINGS_CLOSED_EVENT } from './settingsTabs'
 import * as harnessApi from '@/services/harness.api'
+import * as providerCatalog from '@/lib/providerCatalog'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -12,8 +14,8 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     getProviderConfig: vi.fn(),
+    getSubagentConfig: vi.fn(async () => ({ max_depth: 2 })),
     saveProviderConfig: vi.fn(),
-    deleteProviderConfig: vi.fn(),
   }
 })
 
@@ -37,6 +39,7 @@ vi.mock('@/services/organizations.api', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
+  getApiClient: () => ({ request: vi.fn(async () => []), get: vi.fn(async () => []) }),
   get: vi.fn(async () => []),
   post: vi.fn(async () => ({})),
   patch: vi.fn(async () => ({})),
@@ -69,6 +72,22 @@ vi.mock('@/stores/skills', () => ({
   useSkillStore: () => skillStoreMock,
 }))
 
+vi.mock('@/stores/plugins', () => ({
+  usePluginStore: () => ({
+    plugins: [],
+    globalPlugins: [],
+    orgPlugins: [],
+    orgEnabledPlugins: [],
+    loading: false,
+    error: null,
+    reload: vi.fn(),
+    fetchPlugins: vi.fn(),
+    createPlugin: vi.fn(),
+    updatePlugin: vi.fn(),
+    deletePlugin: vi.fn(),
+    toggleActivation: vi.fn(),
+  }),
+}))
 vi.mock('@/stores/credentials', () => ({
   useCredentialStore: () => ({
     credentials: [],
@@ -93,12 +112,10 @@ vi.mock('@/stores/apiKeys', () => ({
 
 vi.mock('@/stores/images', () => ({
   useImageStore: () => ({
-    images: [],
+    capturedImages: [],
     loading: false,
     error: null,
-    fetchImages: vi.fn(),
-    deleteImageArtifact: vi.fn(),
-    renameImageArtifact: vi.fn(),
+    fetchCapturedImages: vi.fn(),
   }),
 }))
 
@@ -116,26 +133,25 @@ vi.mock('@/services/workspaces.api', () => ({
   listRunnerImageBuilds: vi.fn(async () => []),
   createImageDefinition: vi.fn(),
   updateImageDefinition: vi.fn(),
-  deleteImageDefinition: vi.fn(),
   activateImageDefinition: vi.fn(),
   duplicateImageDefinition: vi.fn(),
   createRunnerImageBuild: vi.fn(),
   updateRunnerImageBuild: vi.fn(),
-  deleteRunnerImageBuild: vi.fn(),
   getRunnerImageBuildLog: vi.fn(),
-}))
-
-vi.mock('@/lib/runtimeSupport', () => ({
-  filterRunnersByRuntime: () => [],
 }))
 
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
 
 function mountSheet() {
   setActivePinia(createPinia())
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', component: { template: '<div />' } }],
+  })
   const wrapper = mount(SettingsSheet, {
     attachTo: document.body,
     global: {
+      plugins: [router],
       stubs: {
         Dialog: { template: '<div><slot /></div>' },
         DialogContent: { template: '<div><slot /></div>' },
@@ -144,11 +160,28 @@ function mountSheet() {
         // create-*/edit-Dialoge rendern DialogTrigger ohne DialogRoot (gestubbt)
         DialogTrigger: { template: '<div><slot /></div>' },
         ScrollArea: { template: '<div><slot /></div>' },
+        RunnersPanel: {
+          name: 'RunnersPanel',
+          props: ['runnerId', 'contextVersion'],
+          emits: ['detail-change'],
+          template: '<div />',
+        },
+        PluginsPanel: {
+          name: 'PluginsPanel',
+          props: ['initialPluginId', 'contextVersion'],
+          emits: ['detail-change'],
+          template: '<div />',
+        },
       },
     },
   })
   mountedWrappers.push(wrapper)
   return wrapper
+}
+
+async function settleAsyncComponents(): Promise<void> {
+  await vi.dynamicImportSettled()
+  await flushPromises()
 }
 
 // Gestoppte Instanzen abmelden, damit `opencuria:open-settings`-Listener
@@ -161,16 +194,28 @@ afterEach(() => {
 
 describe('SettingsSheet', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.clearAllMocks()
     authMock.isAdmin = true
+    vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue([])
     getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
-      default_model: 'model-big',
       small_model: 'model-small',
-      computer_use_model: 'model-cu',
-      has_api_key: true,
-      api_key_hint: '••••cdef',
+      small_effort: '',
     })
+  })
+
+  it('loads only the active settings panel and retains the global event listener', async () => {
+    const wrapper = mountSheet()
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'general' } }))
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(false)
+
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
   })
 
   it('renders all nav items for admins', () => {
@@ -178,83 +223,184 @@ describe('SettingsSheet', () => {
     for (const tab of [
       'general',
       'provider',
+      'agents',
       'skills',
       'credentials',
+      'plugins',
       'api-keys',
       'images',
       'runners',
-      'organization',
+      'credential-services',
+      'image-definitions',
     ]) {
       expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
     }
   })
 
-  it('hides the runners nav item for non-admins', () => {
+  it('has no organization push configuration tab for admins', () => {
+    authMock.isAdmin = true
+    const wrapper = mountSheet()
+    expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
+  })
+
+  it('shows members only the tabs they can change something in', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
-    expect(wrapper.find('[data-testid="settings-nav-runners"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="settings-nav-general"]').exists()).toBe(true)
+    for (const tab of ['general', 'agents', 'runners', 'credential-services', 'image-definitions'])
+      expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(false)
+    for (const tab of ['provider', 'skills', 'credentials', 'plugins', 'api-keys', 'images'])
+      expect(wrapper.find(`[data-testid="settings-nav-${tab}"]`).exists()).toBe(true)
+    expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
+    authMock.isAdmin = true
+  })
+
+  it('never renders admin-only content for members, even through the tab model', async () => {
+    authMock.isAdmin = false
+    const wrapper = mountSheet()
+    await wrapper.setProps({ open: true, tab: 'general' })
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
+    for (const tab of ['agents', 'credential-services', 'image-definitions'] as const) {
+      await wrapper.setProps({ tab })
+      await settleAsyncComponents()
+      expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+    }
     authMock.isAdmin = true
   })
 
   it('switches content on tab click', async () => {
     const wrapper = mountSheet()
-    await flushPromises()
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'general' } }))
+    await settleAsyncComponents()
 
-    // Default: Allgemein (Workspace-Policy)
-    expect(wrapper.text()).toContain('Automatic Workspace Stop')
+    // Default: General (workspace policy)
+    expect(wrapper.text()).toContain('Workspace Policy')
 
     await wrapper.find('[data-testid="settings-nav-provider"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.text()).toContain('OpenRouter Provider')
+    await settleAsyncComponents()
+    expect(wrapper.text()).toContain('Providers')
   })
 
   it('opens via opencuria:open-settings event with the given tab', async () => {
     const wrapper = mountSheet()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
 
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
-    await flushPromises()
+    await settleAsyncComponents()
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe(
-      'Provider & Modelle',
-    )
-    expect(wrapper.text()).toContain('OpenRouter Provider')
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
+    expect(wrapper.text()).toContain('Providers')
   })
 
-  it('maps legacy org-settings tabs onto sheet tabs', async () => {
-    const wrapper = mountSheet()
-
-    window.dispatchEvent(
-      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'workspace-policies' } }),
-    )
+  it('announces closing so views can reload what Settings may have changed', async () => {
+    const closed = vi.fn()
+    window.addEventListener(SETTINGS_CLOSED_EVENT, closed)
+    mountSheet()
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners' } }))
+    await settleAsyncComponents()
+    expect(closed).not.toHaveBeenCalled()
+    window.dispatchEvent(new Event(CLOSE_SETTINGS_EVENT))
     await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
-
-    window.dispatchEvent(
-      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'credential-services' } }),
-    )
-    await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Organization')
+    expect(closed).toHaveBeenCalledTimes(1)
+    window.removeEventListener(SETTINGS_CLOSED_EVENT, closed)
   })
 
-  it('falls back to general for unknown tabs and hides runners for non-admins', async () => {
+  it('opens admin-only and unknown tabs as the first member tab for non-admins', async () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
 
-    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners' } }))
-    await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
+    for (const tab of ['runners', 'general', 'image-definitions', 'nope']) {
+      window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab } }))
+      await flushPromises()
+      await wrapper.vm.$nextTick()
+      expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe(
+        'Provider & Models',
+      )
+    }
+    authMock.isAdmin = true
+  })
 
+  it('falls back to general for unknown tabs for admins', async () => {
+    const wrapper = mountSheet()
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'nope' } }))
     await flushPromises()
     await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Allgemein')
-    authMock.isAdmin = true
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
+  })
+
+  it('opens the plugins tab via event', async () => {
+    const wrapper = mountSheet()
+
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'plugins' } }))
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Plugins')
+  })
+
+  it('widens runner detail and resets context on tab switch and close', async () => {
+    const wrapper = mountSheet()
+    const openRunner = () =>
+      window.dispatchEvent(
+        new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners', runnerId: 'r' } }),
+      )
+    openRunner()
+    await settleAsyncComponents()
+    const panel = () => wrapper.get('[role="tabpanel"]')
+    const runners = () => wrapper.findComponent({ name: 'RunnersPanel' })
+    expect(panel().classes()).toContain('max-w-3xl')
+    const version = runners().props('contextVersion')
+    runners().vm.$emit('detail-change', true)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-none')
+    runners().vm.$emit('detail-change', false)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-3xl')
+    openRunner()
+    await settleAsyncComponents()
+    expect(runners().props('contextVersion')).toBeGreaterThan(version)
+    runners().vm.$emit('detail-change', true)
+    await wrapper.find('[data-testid="settings-nav-general"]').trigger('click')
+    expect(panel().classes()).toContain('max-w-3xl')
+    await wrapper.find('[data-testid="settings-nav-runners"]').trigger('click')
+    expect(runners().props('runnerId')).toBeUndefined()
+    openRunner()
+    await settleAsyncComponents()
+    runners().vm.$emit('detail-change', true)
+    window.dispatchEvent(new Event('opencuria:close-settings'))
+    await flushPromises()
+    expect(panel().classes()).toContain('max-w-3xl')
+    expect(runners().exists()).toBe(false)
+    expect(wrapper.get('[data-testid="settings-sheet"]').classes()).toContain('min-w-0')
+    expect(wrapper.get('nav').classes()).toContain('min-w-0')
+  })
+
+  it('widens plugin detail and ignores a late close from the previous panel', async () => {
+    const wrapper = mountSheet()
+    window.dispatchEvent(
+      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners', runnerId: 'r' } }),
+    )
+    await settleAsyncComponents()
+    const panel = () => wrapper.get('[role="tabpanel"]')
+    const runners = wrapper.findComponent({ name: 'RunnersPanel' })
+    runners.vm.$emit('detail-change', true)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-none')
+
+    window.dispatchEvent(
+      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'plugins', pluginId: 'p-1' } }),
+    )
+    await settleAsyncComponents()
+    expect(panel().classes()).toContain('max-w-3xl')
+    wrapper.findComponent({ name: 'PluginsPanel' }).vm.$emit('detail-change', true)
+    runners.vm.$emit('detail-change', false)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-none')
+    wrapper.findComponent({ name: 'PluginsPanel' }).vm.$emit('detail-change', false)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-3xl')
   })
 
   it('pins the 80rem dialog width with the Tailwind v4 important modifier', () => {

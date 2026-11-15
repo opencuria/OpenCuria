@@ -1,7 +1,11 @@
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap');
+
 @import '@fontsource-variable/noto-sans';
 @import 'tailwindcss';
 @import 'tw-animate-css';
-@import 'shadcn-vue/tailwind.css';
+@import './ui.css';
+@import 'vue-sonner/style.css';
 
 @custom-variant dark (&:is(.dark *));
 @plugin '@tailwindcss/typography';
@@ -39,6 +43,15 @@
   --chart-3: oklch(0.444 0.011 73.639);
   --chart-4: oklch(0.374 0.01 67.558);
   --chart-5: oklch(0.268 0.007 34.298);
+  --git-branch-1: #534ab7;
+  --git-branch-2: #b45309;
+  --git-branch-3: #1d4ed8;
+  --git-branch-4: #be185d;
+  --git-branch-5: #0f766e;
+  --git-branch-6: #b91c1c;
+  --git-branch-7: #4d7c0f;
+  --git-branch-8: #7e22ce;
+  --git-branch-active-foreground: #ffffff;
   --radius: 0.625rem;
   --sidebar: #f4f4f5;
   --sidebar-foreground: #18181b;
@@ -48,9 +61,12 @@
   --sidebar-accent-foreground: #433a93;
   --sidebar-border: #e4e4e7;
   --sidebar-ring: #534ab7;
-  /* Floating UI (dropdowns, selects, tooltips) must sit above the desktop overlay.
-     Dialogs/sheets stay at z-50; the lightbox (9999) and toasts stay above floating. */
-  --z-desktop: 110;
+  /* Desktop modal sits under its fixed iframe surface so the stream paints
+     inside that dialog. Other dialogs/sheets stay at z-50, above the surface.
+     Floating UI (dropdowns, selects, tooltips) sits above dialogs; the
+     lightbox (9999) and toasts stay above floating. */
+  --z-desktop-modal: 40;
+  --z-desktop-surface: 45;
   --z-floating: 120;
 }
 
@@ -87,6 +103,15 @@
   --chart-3: oklch(0.444 0.011 73.639);
   --chart-4: oklch(0.374 0.01 67.558);
   --chart-5: oklch(0.268 0.007 34.298);
+  --git-branch-1: #8b85e8;
+  --git-branch-2: #fbbf24;
+  --git-branch-3: #60a5fa;
+  --git-branch-4: #f472b6;
+  --git-branch-5: #2dd4bf;
+  --git-branch-6: #f87171;
+  --git-branch-7: #a3e635;
+  --git-branch-8: #c084fc;
+  --git-branch-active-foreground: #18181b;
   --sidebar: #17171a;
   --sidebar-foreground: #fafafa;
   --sidebar-primary: #534ab7;
@@ -197,6 +222,12 @@
   min-width: 100%;
 }
 
+/* Markdown is wrapped in an extra div for v-html, so typography's
+   `.prose > :first-child { margin-top: 0 }` never reaches the first <p>. */
+.prose-output > :first-child > :first-child {
+  margin-top: 0;
+}
+
 .prose :not(pre) > code::before,
 .prose :not(pre) > code::after {
   content: '' !important;
@@ -239,12 +270,39 @@
   color: var(--muted-foreground);
 }
 
+.prose-on-primary,
+.prose-on-primary h1,
+.prose-on-primary h2,
+.prose-on-primary h3,
+.prose-on-primary h4,
+.prose-on-primary h5,
+.prose-on-primary h6,
+.prose-on-primary strong,
+.prose-on-primary thead th {
+  color: var(--primary-foreground);
+}
+
+.prose-on-primary a {
+  color: var(--primary-foreground);
+}
+
+.prose-on-primary :not(pre) > code {
+  color: var(--primary-foreground);
+  background: color-mix(in oklch, var(--primary-foreground) 18%, transparent);
+  border-color: color-mix(in oklch, var(--primary-foreground) 28%, transparent);
+}
+
+.prose-on-primary blockquote {
+  border-left-color: color-mix(in oklch, var(--primary-foreground) 40%, transparent);
+  color: color-mix(in oklch, var(--primary-foreground) 80%, transparent);
+}
+
 ::selection {
   background: color-mix(in oklch, var(--primary) 20%, transparent);
   color: var(--foreground);
 }
 
-@keyframes harness-thinking-shimmer {
+@keyframes harness-shimmer {
   0% {
     background-position: 100% 50%;
   }
@@ -253,8 +311,10 @@
   }
 }
 
-.harness-thinking {
+/* Left-to-right text shimmer for live activity (thinking, running tools). */
+.harness-shimmer {
   width: fit-content;
+  max-width: 100%;
   background-image: linear-gradient(
     90deg,
     var(--muted-foreground) 0%,
@@ -267,15 +327,24 @@
   background-clip: text;
   -webkit-background-clip: text;
   color: transparent;
-  animation: harness-thinking-shimmer 1.4s linear infinite;
+  animation: harness-shimmer 1.4s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .harness-thinking {
+  .harness-shimmer {
     animation: none;
     background-image: none;
     color: var(--muted-foreground);
     -webkit-background-clip: unset;
     background-clip: unset;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
   }
 }

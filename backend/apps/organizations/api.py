@@ -29,32 +29,6 @@ def _get_service() -> OrganizationService:
     return OrganizationService()
 
 
-@org_router.get(
-    "/",
-    response={200: list[OrganizationOut], 403: dict},
-    summary="List user's organizations",
-)
-def list_organizations(request: HttpRequest):
-    """Return all organizations the current user belongs to."""
-    if not check_api_key_permission(request, APIKeyPermission.ORGANIZATIONS_READ):
-        return 403, {"detail": "API key lacks permission: organizations:read", "code": "permission_denied"}
-    service = _get_service()
-    org_list = service.list_user_organizations(request.user)
-    return [
-        OrganizationOut(
-            id=o["id"],
-            name=o["name"],
-            slug=o["slug"],
-            role=o["role"],
-            workspace_auto_stop_timeout_minutes=o.get(
-                "workspace_auto_stop_timeout_minutes"
-            ),
-            created_at=o["created_at"],
-        )
-        for o in org_list
-    ]
-
-
 @org_router.post(
     "/",
     response={201: OrganizationOut, 403: dict, 409: dict},
@@ -79,6 +53,7 @@ def create_organization(request: HttpRequest, payload: OrganizationCreateIn):
         slug=org.slug,
         role="admin",
         workspace_auto_stop_timeout_minutes=org.workspace_auto_stop_timeout_minutes,
+        image_versions_to_keep=org.image_versions_to_keep,
         created_at=org.created_at,
     )
 
@@ -105,6 +80,7 @@ def get_organization(request: HttpRequest, org_id: uuid.UUID):
         slug=org.slug,
         role=role,
         workspace_auto_stop_timeout_minutes=org.workspace_auto_stop_timeout_minutes,
+        image_versions_to_keep=org.image_versions_to_keep,
         created_at=org.created_at,
     )
 
@@ -128,10 +104,13 @@ def update_workspace_policy(
 
     service = _get_service()
     try:
+        changes = payload.dict(exclude_unset=True)
+        if changes.get("image_versions_to_keep", 0) is None:
+            changes.pop("image_versions_to_keep")
         org = service.update_workspace_policy(
             org_id=org_id,
             user=request.user,
-            workspace_auto_stop_timeout_minutes=payload.workspace_auto_stop_timeout_minutes,
+            **changes,
         )
         role = service.get_user_role(request.user, org_id) or "member"
     except NotFoundError as e:
@@ -147,5 +126,6 @@ def update_workspace_policy(
         slug=org.slug,
         role=role,
         workspace_auto_stop_timeout_minutes=org.workspace_auto_stop_timeout_minutes,
+        image_versions_to_keep=org.image_versions_to_keep,
         created_at=org.created_at,
     )

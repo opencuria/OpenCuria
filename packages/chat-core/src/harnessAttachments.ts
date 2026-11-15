@@ -1,0 +1,129 @@
+/**
+ * Tool image/PDF attachments persisted in `HarnessPart.meta.attachments`.
+ *
+ * Mirrors `backend/apps/harness/media/attachments.py::stored_tool_attachments`:
+ * the backend stores at most `TOOL_ATTACHMENT_MAX_COUNT` entries shaped as
+ * `{type: "file", mime, path: "/workspace/.opencuria/tool-media/..."}`; the
+ * bytes live in the workspace and load like any workspace image. Parts stored
+ * earlier carry an inline `url: "data:..."` instead. All readers here are
+ * defensive: broken `meta` never throws and invalid entries are dropped.
+ */
+
+import type { HarnessPart } from "./harness";
+import { resolveWorkspaceMediaPath } from "./workspaceFileRefs";
+
+/** File attachment persisted in `HarnessPart.meta.attachments`. */
+export interface ToolAttachment {
+  type: string;
+  mime: string;
+  /** Workspace media file (current format); load it from the workspace. */
+  path?: string;
+  /** Inline `data:` URL of parts stored before workspace media. */
+  url?: string;
+  /** Original filename (backend `media/attachments.py` persists it, may be `""`). */
+  filename?: string;
+}
+
+/** Backend cap (`TOOL_ATTACHMENT_MAX_COUNT` in `media/limits.py`): max 2 entries. */
+export const TOOL_ATTACHMENT_MAX_COUNT = 2;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read sanitized attachments from `part.meta.attachments`.
+ *
+ * Keeps only `{type: "file", mime: non-empty}` entries with a canonical
+ * `/workspace/...` `path` or a `data:` `url`, and returns defensive copies
+ * capped at `TOOL_ATTACHMENT_MAX_COUNT`.
+ * A non-empty string `filename` is carried over defensively (omitted
+ * otherwise so downstream code can fall back to the tool path).
+ */
+export function toolAttachments(part: HarnessPart): ToolAttachment[] {
+  if (!isRecord(part) || !isRecord(part.meta)) return [];
+  return sanitizeAttachmentList(part.meta["attachments"]);
+}
+
+function sanitizeAttachmentEntry(
+  entry: Record<string, unknown>,
+): ToolAttachment | null {
+  if (entry["type"] !== "file") return null;
+  const mime = entry["mime"];
+  if (typeof mime !== "string" || !mime.trim()) return null;
+  const path = entry["path"];
+  const url = entry["url"];
+  let clean: ToolAttachment;
+  if (typeof path === "string" && resolveWorkspaceMediaPath(path) === path) {
+    clean = { type: "file", mime: mime.trim(), path };
+  } else if (typeof url === "string" && url.startsWith("data:")) {
+    clean = { type: "file", mime: mime.trim(), url };
+  } else {
+    return null;
+  }
+  const filename = entry["filename"];
+  if (typeof filename === "string" && filename.trim()) {
+    clean.filename = filename.trim();
+  }
+  return clean;
+}
+
+function sanitizeAttachmentList(raw: unknown): ToolAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const kept: ToolAttachment[] = [];
+  for (const entry of raw) {
+    if (kept.length >= TOOL_ATTACHMENT_MAX_COUNT) break;
+    if (!isRecord(entry)) continue;
+    const clean = sanitizeAttachmentEntry(entry);
+    if (clean) kept.push(clean);
+  }
+  return kept;
+}
+
+/** True when the attachment is an image (`image/*` MIME, case-insensitive). */
+export function isImageAttachment(
+  attachment: Pick<ToolAttachment, "mime"> | null | undefined,
+): boolean {
+  if (!attachment || typeof attachment.mime !== "string") return false;
+  return attachment.mime.trim().toLowerCase().startsWith("image/");
+}
+
+/** True when the attachment is a PDF (`application/pdf`, case-insensitive). */
+export function isPdfAttachment(
+  attachment: Pick<ToolAttachment, "mime"> | null | undefined,
+): boolean {
+  if (!attachment || typeof attachment.mime !== "string") return false;
+  return attachment.mime.trim().toLowerCase() === "application/pdf";
+}
+
+/**
+ * Estimate the binary byte size of a `data:` URL (base64 payload after `,`).
+ * Returns `null` when the size cannot be determined defensively.
+ */
+export function attachmentByteSize(url: string): number | null {
+  if (typeof url !== "string" || !url.startsWith("data:")) return null;
+  const comma = url.indexOf(",");
+  if (comma < 0 || comma + 1 >= url.length) return null;
+  const clean = url.slice(comma + 1).replace(/\s/g, "");
+  if (!clean) return 0;
+  let padding = 0;
+  if (clean.endsWith("==")) padding = 2;
+  else if (clean.endsWith("=")) padding = 1;
+  return Math.max(0, Math.floor((clean.length * 3) / 4) - padding);
+}
+
+/** Format bytes like the file viewer (`B` / `KB` / `MB`). */
+export function formatAttachmentSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Human-readable size label for a `data:` URL, or `null` when unknown. */
+export function attachmentSizeLabel(url: string): string | null {
+  const bytes = attachmentByteSize(url);
+  if (bytes == null) return null;
+  const label = formatAttachmentSize(bytes);
+  return label || null;
+}

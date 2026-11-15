@@ -4,7 +4,32 @@ App-specific exceptions for the runners app.
 
 from __future__ import annotations
 
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import ConflictError, NotFoundError, ServiceError
+
+
+class AdminRoleRequiredError(ServiceError):
+    """Raised when an organization-scoped mutation needs the admin role."""
+
+    def __init__(self) -> None:
+        super().__init__(message="Admin role required", code="forbidden")
+
+
+class ImageRecipeNotFoundError(NotFoundError):
+    """Raised when a recipe, its runner build or a runner is not visible.
+
+    The message names only the resource so callers cannot probe other
+    organizations' recipes by ID.
+    """
+
+    def __init__(self, resource: str) -> None:
+        super().__init__(resource=resource)
+
+
+class ImageRecipeValidationError(ServiceError):
+    """Raised when an image recipe request carries invalid input."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message=message, code="validation_error")
 
 
 class RunnerNotFoundError(NotFoundError):
@@ -19,6 +44,17 @@ class RunnerOfflineError(ConflictError):
 
     def __init__(self, runner_id: str) -> None:
         super().__init__(message=f"Runner '{runner_id}' is offline")
+
+
+class RunnerTimeoutError(ConflictError):
+    """Raised when a runner RPC reply does not arrive before the budget."""
+
+    def __init__(self, operation: str, timeout: float) -> None:
+        super().__init__(
+            message=f"Runner did not respond to {operation!r} within {timeout:.0f}s"
+        )
+        self.operation = operation
+        self.timeout = timeout
 
 
 class WorkspaceNotFoundError(NotFoundError):
@@ -55,3 +91,7 @@ class NoAvailableRunnerError(ConflictError):
         super().__init__(
             message=f"No online runner available for agent type '{agent_type}'"
         )
+
+
+class HarnessActionError(RuntimeError):
+    """Raised by the harness gateway when a runner-side action fails."""

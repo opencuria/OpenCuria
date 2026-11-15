@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRunnerStore } from '@/stores/runners'
-import { Copy, Check } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { Input } from '@/components/ui/input'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -18,7 +20,6 @@ const runnerStore = useRunnerStore()
 const open = ref(false)
 const name = ref('')
 const createdToken = ref<string | null>(null)
-const copied = ref(false)
 const submitting = ref(false)
 
 async function handleSubmit(): Promise<void> {
@@ -31,19 +32,11 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
-function handleCopyToken(): void {
-  if (!createdToken.value) return
-  navigator.clipboard.writeText(createdToken.value)
-  copied.value = true
-  setTimeout(() => (copied.value = false), 2000)
-}
-
 function handleClose(): void {
   open.value = false
   setTimeout(() => {
     name.value = ''
     createdToken.value = null
-    copied.value = false
   }, 200)
 }
 </script>
@@ -51,7 +44,7 @@ function handleClose(): void {
 <template>
   <Dialog :open="open" @update:open="(v) => (v ? (open = true) : handleClose())">
     <DialogTrigger as-child>
-      <Button @click="open = true">
+      <Button size="sm" @click="open = true">
         Register Runner
       </Button>
     </DialogTrigger>
@@ -64,7 +57,8 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form v-if="!createdToken" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form v-if="!createdToken" id="create-runner-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
           <Input
@@ -73,39 +67,38 @@ function handleClose(): void {
           />
           <p class="text-xs text-muted-foreground mt-1">Optional. A friendly name for this runner.</p>
         </div>
-
-        <div class="flex justify-end gap-2">
-          <Button variant="outline" type="button" @click="handleClose">
-            Cancel
-          </Button>
-          <Button type="submit" :disabled="submitting">
-            {{ submitting ? 'Registering…' : 'Register' }}
-          </Button>
-        </div>
       </form>
 
       <div v-else class="flex flex-col gap-4">
-        <div class="p-4 rounded-[var(--radius-md)] bg-amber-500/10 border border-amber-500/30">
-          <p class="text-sm font-medium text-foreground mb-2">⚠️ Save this API token now</p>
-          <p class="text-xs text-muted-foreground mb-3">
+        <div class="rounded-md border border-warning/40 bg-warning-muted p-4">
+          <p class="mb-2 text-sm font-medium text-foreground">Save this API token now</p>
+          <p class="mb-3 text-xs text-muted-foreground">
             This token will not be shown again. Store it securely.
           </p>
           <div class="flex items-center gap-2">
             <code
-              class="flex-1 text-xs bg-card px-3 py-2 rounded-[var(--radius-sm)] border border-border font-mono break-all select-all"
+              class="flex-1 break-all rounded-md border border-border bg-card px-3 py-2 font-mono text-xs select-all"
             >
               {{ createdToken }}
             </code>
-            <Button variant="outline" size="icon-sm" @click="handleCopyToken">
-              <component :is="copied ? Check : Copy" :size="14" />
-            </Button>
+            <CopyButton :text="createdToken" label="runner token" variant="outline" />
           </div>
         </div>
 
-        <div class="flex justify-end">
-          <Button @click="handleClose">Done</Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter v-if="!createdToken">
+        <Button variant="outline" type="button" @click="handleClose">
+          Cancel
+        </Button>
+        <Button type="submit" form="create-runner-form" :disabled="submitting">
+          {{ submitting ? 'Registering…' : 'Register' }}
+        </Button>
+      </DialogFooter>
+      <DialogFooter v-else>
+        <Button @click="handleClose">Done</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

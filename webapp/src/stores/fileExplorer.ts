@@ -1,68 +1,63 @@
 /**
  * File explorer store — manages the file explorer panel state,
- * tree structure, and file viewing.
+ * tree structure, uploads, and downloads. Files open in the editor store.
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import type { FileNode, FileEntryRaw } from '@/types'
-import {
-  sendFilesList,
-  sendFilesFind,
-  sendFilesRead,
-  sendFilesDownload,
-} from '@/services/socket'
+import { listWorkspaceFiles, findWorkspaceFiles, downloadWorkspaceFile } from '@/services/socket'
+import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
+import { useSidePanelStore } from '@/stores/sidePanel'
+import { useEditorStore } from '@/stores/editor'
 
-let requestCounter = 0
+/** Delay before a download object URL is revoked (lets the click dispatch). */
+const DOWNLOAD_REVOKE_DELAY_MS = 1000
 
-function nextRequestId(): string {
-  return `files-${++requestCounter}-${Date.now()}`
-}
+/** Keep terminal upload ids briefly so duplicate/late socket results stay silent. */
+const UPLOAD_TERMINAL_TTL_MS = 30_000
+/** Bound terminal upload bookkeeping if a result stream is unusually busy. */
+const MAX_TERMINAL_UPLOAD_IDS = 500
+
+/** How long an upload request may stay pending. */
+const REQUEST_TIMEOUT_MS = 30_000
 
 export const useFileExplorerStore = defineStore('fileExplorer', () => {
   // -- state ----------------------------------------------------------------
 
-  const isOpen = ref(false)
-  const panelWidth = ref(300)
   const tree = ref<FileNode[]>([])
   const expandedPaths = ref<Set<string>>(new Set())
   const selectedPath = ref<string | null>(null)
   const loadingPaths = ref<Set<string>>(new Set())
 
-  const viewingFile = ref<{
-    path: string
-    content: string
-    rawBase64: string
-    size: number
-    truncated: boolean
-    isBinary: boolean
-    mediaType: 'text' | 'image' | 'pdf' | 'binary'
-    mimeType: string
-  } | null>(null)
-  const isLoadingContent = ref(false)
-
   // Pending request callbacks: request_id → resolver
   const pendingRequests = ref<Map<string, (data: unknown) => void>>(new Map())
-  const pendingFindRequests = ref<Map<string, (paths: string[]) => void>>(new Map())
+  const pendingUploadRefreshPolicy = new Map<string, boolean>()
+  const pendingUploadRequests = new Map<string, { workspaceId: string; path: string }>()
+  const terminalUploadRequestIds = new Map<string, ReturnType<typeof setTimeout>>()
 
-  // -- getters --------------------------------------------------------------
+  const fileControllers = new Set<AbortController>()
+  const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  const isViewingFile = computed(() => viewingFile.value !== null)
+  function clearPendingTimer(requestId: string): void {
+    const timer = pendingTimers.get(requestId)
+    if (timer) {
+      clearTimeout(timer)
+      pendingTimers.delete(requestId)
+    }
+  }
+
+  function armPendingTimer(requestId: string, onFire: () => void, ms = REQUEST_TIMEOUT_MS): void {
+    clearPendingTimer(requestId)
+    const timer = setTimeout(() => {
+      pendingTimers.delete(requestId)
+      onFire()
+    }, ms)
+    pendingTimers.set(requestId, timer)
+  }
 
   // -- actions --------------------------------------------------------------
-
-  function open(): void {
-    isOpen.value = true
-  }
-
-  function close(): void {
-    isOpen.value = false
-  }
-
-  function toggle(): void {
-    isOpen.value = !isOpen.value
-  }
 
   function setTree(path: string, entries: FileEntryRaw[]): void {
     const nodes: FileNode[] = entries.map((e) => ({
@@ -82,11 +77,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     }
   }
 
-  function setChildNodes(
-    nodes: FileNode[],
-    parentPath: string,
-    children: FileNode[],
-  ): void {
+  function setChildNodes(nodes: FileNode[], parentPath: string, children: FileNode[]): void {
     for (const node of nodes) {
       if (node.path === parentPath) {
         node.children = children
@@ -113,10 +104,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     return null
   }
 
-  async function ensureDirectoryLoaded(
-    workspaceId: string,
-    path: string,
-  ): Promise<void> {
+  async function ensureDirectoryLoaded(workspaceId: string, path: string): Promise<void> {
     const node = findNode(tree.value, path)
     if (path !== '/workspace' && (!node || node.type !== 'directory')) {
       return
@@ -127,21 +115,19 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     await fetchDirectory(workspaceId, path)
   }
 
+  /** Open an already-resolved filesystem path (not a URL). */
   async function openPath(
     workspaceId: string,
-    rawPath: string,
+    path: string,
     options: { revealInExplorer?: boolean } = {},
   ): Promise<void> {
     const { revealInExplorer = true } = options
-    const path = decodeURIComponent(rawPath.trim()).replace(/[?#].*$/, '')
-    if (!path.startsWith('/workspace')) {
+    if (path !== '/workspace' && !path.startsWith('/workspace/')) {
       return
     }
 
     if (revealInExplorer) {
-      open()
-    } else {
-      close()
+      useSidePanelStore().open('files')
     }
 
     const segments = path.split('/').filter(Boolean)
@@ -162,8 +148,6 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     if (targetNode?.type === 'directory') {
       expandedPaths.value.add(path)
       selectedPath.value = path
-      viewingFile.value = null
-      isLoadingContent.value = false
       await ensureDirectoryLoaded(workspaceId, path)
       return
     }
@@ -171,10 +155,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     selectFile(path, workspaceId)
   }
 
-  function toggleExpand(
-    path: string,
-    workspaceId: string,
-  ): void {
+  function toggleExpand(path: string, workspaceId: string): void {
     if (expandedPaths.value.has(path)) {
       expandedPaths.value.delete(path)
     } else {
@@ -186,157 +167,96 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   function selectFile(path: string, workspaceId: string): void {
     selectedPath.value = path
-    fetchFileContent(workspaceId, path)
-  }
-
-  const IMAGE_EXTENSIONS: Record<string, string> = {
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    gif: 'image/gif',
-    webp: 'image/webp',
-    svg: 'image/svg+xml',
-    bmp: 'image/bmp',
-    ico: 'image/x-icon',
-    tiff: 'image/tiff',
-    tif: 'image/tiff',
-    avif: 'image/avif',
-  }
-
-  function getFileExtension(path: string): string {
-    const name = path.split('/').pop() ?? ''
-    const dotIndex = name.lastIndexOf('.')
-    return dotIndex >= 0 ? name.slice(dotIndex + 1).toLowerCase() : ''
-  }
-
-  function setFileContent(
-    path: string,
-    content: string,
-    size: number,
-    truncated: boolean,
-  ): void {
-    const ext = getFileExtension(path)
-    const imageMime = IMAGE_EXTENSIONS[ext]
-
-    // Determine media type from file extension first
-    if (imageMime) {
-      viewingFile.value = {
-        path,
-        content: '',
-        rawBase64: content,
-        size,
-        truncated: false,
-        isBinary: true,
-        mediaType: 'image',
-        mimeType: imageMime,
-      }
-      isLoadingContent.value = false
-      return
-    }
-
-    if (ext === 'pdf') {
-      viewingFile.value = {
-        path,
-        content: '',
-        rawBase64: content,
-        size,
-        truncated: false,
-        isBinary: true,
-        mediaType: 'pdf',
-        mimeType: 'application/pdf',
-      }
-      isLoadingContent.value = false
-      return
-    }
-
-    // Try to detect binary content and properly decode UTF-8
-    let decoded: string
-    let isBinary = false
-    try {
-      const bytes = Uint8Array.from(atob(content), (c) => c.charCodeAt(0))
-      // Check for null bytes — a simple binary heuristic
-      if (bytes.includes(0)) {
-        isBinary = true
-        decoded = ''
-      } else {
-        decoded = new TextDecoder('utf-8').decode(bytes)
-      }
-    } catch {
-      isBinary = true
-      decoded = ''
-    }
-
-    viewingFile.value = {
-      path,
-      content: decoded,
-      rawBase64: content,
-      size,
-      truncated,
-      isBinary,
-      mediaType: isBinary ? 'binary' : 'text',
-      mimeType: 'text/plain',
-    }
-    isLoadingContent.value = false
-  }
-
-  function closeFileViewer(): void {
-    viewingFile.value = null
-    selectedPath.value = null
-    isLoadingContent.value = false
+    void useEditorStore().openFile(workspaceId, path)
   }
 
   function reset(): void {
-    isOpen.value = false
+    for (const controller of fileControllers) controller.abort()
+    fileControllers.clear()
+    selectedPath.value = null
     tree.value = []
     expandedPaths.value = new Set()
-    selectedPath.value = null
-    viewingFile.value = null
-    isLoadingContent.value = false
     loadingPaths.value = new Set()
     pendingRequests.value.clear()
-    pendingFindRequests.value.clear()
+    pendingUploadRefreshPolicy.clear()
+    pendingUploadRequests.clear()
+    for (const timer of terminalUploadRequestIds.values()) clearTimeout(timer)
+    terminalUploadRequestIds.clear()
+    for (const timer of pendingTimers.values()) clearTimeout(timer)
+    pendingTimers.clear()
   }
 
   // -- socket request helpers -----------------------------------------------
 
+  async function requestDirectory(
+    workspaceId: string,
+    path: string,
+    updateTree: boolean,
+    signal?: AbortSignal,
+  ): Promise<FileEntryRaw[] | null> {
+    const controller = new AbortController()
+    fileControllers.add(controller)
+    const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    const loading = loadingPaths.value
+    if (updateTree) loading.add(path)
+    try {
+      const result = await listWorkspaceFiles(workspaceId, path, requestSignal)
+      if (requestSignal.aborted) return null
+      if (updateTree) setTree(path, result.entries)
+      return result.entries
+    } catch {
+      return null
+    } finally {
+      fileControllers.delete(controller)
+      if (updateTree) loading.delete(path)
+    }
+  }
+
   function fetchDirectory(workspaceId: string, path: string): Promise<void> {
-    loadingPaths.value.add(path)
-    const requestId = nextRequestId()
-    return new Promise<void>((resolve) => {
-      pendingRequests.value.set(requestId, () => {
-        loadingPaths.value.delete(path)
-        resolve()
-      })
-      sendFilesList(workspaceId, requestId, path)
-    })
+    return requestDirectory(workspaceId, path, true).then(() => undefined)
   }
 
-  function findFiles(workspaceId: string, query: string, limit = 50): Promise<string[]> {
-    const requestId = nextRequestId()
-    return new Promise((resolve) => {
-      pendingFindRequests.value.set(requestId, (paths) => {
-        resolve(paths)
-      })
-      if (!sendFilesFind(workspaceId, requestId, query, limit)) {
-        pendingFindRequests.value.delete(requestId)
-        resolve([])
+  /** Fetch a directory listing without changing the shared explorer tree. */
+  function fetchDirectoryEntries(
+    workspaceId: string,
+    path: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FileEntryRaw[] | null> {
+    return requestDirectory(workspaceId, path, false, options.signal)
+  }
+
+  async function findFiles(workspaceId: string, query: string, limit = 50): Promise<string[]> {
+    const controller = new AbortController()
+    fileControllers.add(controller)
+    try {
+      const result = await findWorkspaceFiles(workspaceId, query, limit, controller.signal)
+      return controller.signal.aborted ? [] : result.paths
+    } catch {
+      return []
+    } finally {
+      fileControllers.delete(controller)
+    }
+  }
+
+  async function downloadFile(workspaceId: string, path: string): Promise<void> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
+    const controller = new AbortController()
+    fileControllers.add(controller)
+    try {
+      const result = await downloadWorkspaceFile(workspaceId, path, controller.signal)
+      if (!controller.signal.aborted) {
+        triggerBrowserDownload(result.content, result.filename, result.is_archive)
       }
-    })
-  }
-
-  function fetchFileContent(workspaceId: string, path: string): void {
-    isLoadingContent.value = true
-    const requestId = nextRequestId()
-    pendingRequests.value.set(requestId, () => {
-      // cleanup handled by setFileContent
-    })
-    sendFilesRead(workspaceId, requestId, path)
-  }
-
-  function downloadFile(workspaceId: string, path: string): void {
-    const requestId = nextRequestId()
-    pendingRequests.value.set(requestId, () => {})
-    sendFilesDownload(workspaceId, requestId, path)
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        useNotificationStore().error(
+          'Download failed',
+          error instanceof Error ? error.message : 'Download failed. Please retry.',
+        )
+      }
+    } finally {
+      fileControllers.delete(controller)
+    }
   }
 
   function refreshDirectory(workspaceId: string, path: string): void {
@@ -352,58 +272,32 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   // -- event handlers (called from WorkspaceDetailView) ---------------------
 
-  function handleListResult(
-    requestId: string,
-    path: string,
-    entries: FileEntryRaw[],
-    error?: string,
-  ): void {
-    const callback = pendingRequests.value.get(requestId)
-    if (callback) {
-      callback(null)
-      pendingRequests.value.delete(requestId)
-    }
-    loadingPaths.value.delete(path)
-
-    if (error) {
-      console.warn('[fileExplorer] list error:', error)
-      return
-    }
-
-    setTree(path, entries)
+  function shouldRefreshUploadResult(requestId: string): boolean {
+    return pendingUploadRefreshPolicy.get(requestId) ?? true
   }
 
-  function handleFindResult(requestId: string, paths: string[], error?: string): void {
-    const callback = pendingFindRequests.value.get(requestId)
-    if (!callback) return
-    pendingFindRequests.value.delete(requestId)
-    callback(error ? [] : paths)
+  function isTerminalUpload(requestId: string): boolean {
+    return terminalUploadRequestIds.has(requestId)
   }
 
-  function handleContentResult(
-    requestId: string,
-    path: string,
-    content: string,
-    size: number,
-    truncated: boolean,
-    error?: string,
-  ): void {
-    // Ignore results we didn't request (e.g. from workspaceImages store)
-    if (!pendingRequests.value.has(requestId)) return
+  function markUploadTerminal(requestId: string): void {
+    const previousTimer = terminalUploadRequestIds.get(requestId)
+    if (previousTimer) clearTimeout(previousTimer)
+    const timer = setTimeout(
+      () => terminalUploadRequestIds.delete(requestId),
+      UPLOAD_TERMINAL_TTL_MS,
+    )
+    terminalUploadRequestIds.delete(requestId)
+    terminalUploadRequestIds.set(requestId, timer)
 
-    const callback = pendingRequests.value.get(requestId)
-    if (callback) {
-      callback(null)
-      pendingRequests.value.delete(requestId)
+    // Keep the cache bounded even if many uploads complete inside the TTL.
+    while (terminalUploadRequestIds.size > MAX_TERMINAL_UPLOAD_IDS) {
+      const oldestId = terminalUploadRequestIds.keys().next().value
+      if (oldestId === undefined) break
+      const oldestTimer = terminalUploadRequestIds.get(oldestId)
+      if (oldestTimer) clearTimeout(oldestTimer)
+      terminalUploadRequestIds.delete(oldestId)
     }
-
-    if (error) {
-      isLoadingContent.value = false
-      console.warn('[fileExplorer] content error:', error)
-      return
-    }
-
-    setFileContent(path, content, size, truncated)
   }
 
   function handleUploadResult(
@@ -412,28 +306,54 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     status: string,
     workspaceId: string,
     error?: string,
-  ): void {
-    const callback = pendingRequests.value.get(requestId)
-    if (callback) {
-      callback(null)
-      pendingRequests.value.delete(requestId)
-    }
+    refreshExplorerOverride?: boolean,
+  ): boolean {
+    // Results are broadcast to each mounted workspace listener. Retain a
+    // terminal id until expiry instead of consuming it on the first duplicate.
+    if (isTerminalUpload(requestId)) return false
 
+    const request = pendingUploadRequests.get(requestId)
+    if (!request) {
+      // Upload results belong to this client only when we registered them.
+      return false
+    }
+    // Fail closed if another workspace or path accidentally reuses an id.
+    if (request.workspaceId !== workspaceId || request.path !== path) return false
+
+    const callback = pendingRequests.value.get(requestId)
+    const refreshExplorer =
+      refreshExplorerOverride ?? pendingUploadRefreshPolicy.get(requestId) ?? true
+    pendingUploadRequests.delete(requestId)
+    pendingUploadRefreshPolicy.delete(requestId)
+    markUploadTerminal(requestId)
+    if (callback) {
+      pendingRequests.value.delete(requestId)
+      clearPendingTimer(requestId)
+      callback(
+        error || status === 'error'
+          ? { ok: false, error: error ?? 'The file could not be uploaded.' }
+          : { ok: true },
+      )
+    } else {
+      clearPendingTimer(requestId)
+    }
     if (error || status === 'error') {
-      console.warn('[fileExplorer] upload error:', error)
       const notify = useNotificationStore()
       notify.error('Upload failed', error ?? 'The file could not be uploaded.')
-      return
+      return true
     }
 
-    // Refresh the parent directory
-    refreshDirectory(workspaceId, path)
+    // Refresh unless an isolated scheduled-task upload owns this result.
+    if (refreshExplorer) refreshDirectory(workspaceId, path)
+    return true
   }
 
   /**
    * Register a pending upload and return a Promise that resolves when the
-   * `files:upload_result` is received for the given requestId.
-   * This lets callers await upload completion for UI feedback.
+   * `files:upload_result` succeeds for the given requestId.
+   * Rejects on error and times out after 30 s so uploads never hang.
+   * The pending callback receives `{ ok: true }` on success or
+   * `{ ok: false, error }` on failure so resolve/reject stay explicit.
    */
   function trackAndUpload(
     _workspaceId: string,
@@ -441,79 +361,119 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     _path: string,
     _filename: string,
     _content: string,
+    refreshExplorer = true,
   ): Promise<void> {
-    return new Promise<void>((resolve) => {
-      pendingRequests.value.set(requestId, () => resolve())
+    if (isTerminalUpload(requestId))
+      return Promise.reject(new Error('Upload request already finished.'))
+    pendingUploadRefreshPolicy.set(requestId, refreshExplorer)
+    pendingUploadRequests.set(requestId, { workspaceId: _workspaceId, path: _path })
+    return new Promise<void>((resolve, reject) => {
+      pendingRequests.value.set(requestId, (data: unknown) => {
+        pendingUploadRefreshPolicy.delete(requestId)
+        pendingUploadRequests.delete(requestId)
+        clearPendingTimer(requestId)
+        const ok =
+          data !== null && typeof data === 'object' && (data as { ok?: boolean }).ok === true
+        if (ok) {
+          resolve()
+        } else {
+          const message =
+            data !== null &&
+            typeof data === 'object' &&
+            typeof (data as { error?: unknown }).error === 'string'
+              ? ((data as { error: string }).error ?? 'The file could not be uploaded.')
+              : 'The file could not be uploaded.'
+          reject(new Error(message))
+        }
+      })
+      armPendingTimer(requestId, () => {
+        pendingRequests.value.delete(requestId)
+        pendingUploadRefreshPolicy.delete(requestId)
+        pendingUploadRequests.delete(requestId)
+        markUploadTerminal(requestId)
+        const message = 'Upload timed out. Please retry.'
+        useNotificationStore().error('Upload failed', message)
+        reject(new Error(message))
+      })
     })
   }
 
-  function handleDownloadResult(
-    requestId: string,
-    content: string,
-    filename: string,
-    isArchive: boolean,
-    error?: string,
-  ): void {
+  /**
+   * Cancel a tracked upload without a notification (e.g. its owning composer
+   * was reset or unmounted). Late results are ignored so cancellation stays
+   * silent and cannot refresh the shared explorer tree.
+   */
+  function cancelUpload(requestId: string): void {
     const callback = pendingRequests.value.get(requestId)
-    if (callback) {
-      callback(null)
-      pendingRequests.value.delete(requestId)
-    }
+    if (!callback) return
+    pendingRequests.value.delete(requestId)
+    pendingUploadRefreshPolicy.delete(requestId)
+    pendingUploadRequests.delete(requestId)
+    clearPendingTimer(requestId)
+    markUploadTerminal(requestId)
+    callback({ ok: false, error: 'Upload cancelled.' })
+  }
 
-    if (error) {
-      console.warn('[fileExplorer] download error:', error)
-      return
-    }
+  /**
+   * Fail a tracked upload immediately (e.g. synchronous send error).
+   * Runs the pending callback with `{ ok: false }` so the trackAndUpload
+   * promise rejects at once instead of hanging until the 30 s timeout,
+   * and surfaces a visible error. No-op for unknown request ids.
+   */
+  function failUpload(requestId: string, message: string): void {
+    const callback = pendingRequests.value.get(requestId)
+    if (!callback || !pendingUploadRequests.has(requestId) || isTerminalUpload(requestId)) return
+    clearPendingTimer(requestId)
+    pendingUploadRefreshPolicy.delete(requestId)
+    pendingUploadRequests.delete(requestId)
+    pendingRequests.value.delete(requestId)
+    markUploadTerminal(requestId)
+    callback({ ok: false, error: message })
+    useNotificationStore().error('Upload failed', message)
+  }
 
-    // Trigger browser download
-    const raw = atob(content)
-    const bytes = new Uint8Array(raw.length)
-    for (let i = 0; i < raw.length; i++) {
-      bytes[i] = raw.charCodeAt(i)
-    }
+  /** Save the validated shared-client payload and release its browser URL. */
+  function triggerBrowserDownload(content: string, filename: string, isArchive: boolean): void {
+    const raw = atob(content.replace(/\s+/g, ''))
+    const bytes = Uint8Array.from(raw, (character) => character.charCodeAt(0))
     const mimeType = isArchive ? 'application/gzip' : 'application/octet-stream'
-    const blob = new Blob([bytes], { type: mimeType })
+    const blob = new Blob([bytes.buffer], { type: mimeType })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    URL.revokeObjectURL(url)
+    let anchor: HTMLAnchorElement | null = null
+    try {
+      anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      document.body.appendChild(anchor)
+      anchor.click()
+    } finally {
+      anchor?.remove()
+      setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_REVOKE_DELAY_MS)
+    }
   }
 
   return {
     // state
-    isOpen,
-    panelWidth,
     tree,
     expandedPaths,
     selectedPath,
-    viewingFile,
-    isLoadingContent,
     loadingPaths,
-    // getters
-    isViewingFile,
     // actions
-    open,
-    close,
-    toggle,
     setTree,
     toggleExpand,
     selectFile,
     openPath,
-    setFileContent,
-    closeFileViewer,
     reset,
     fetchDirectory,
+    fetchDirectoryEntries,
     findFiles,
     downloadFile,
     refreshAll,
     trackAndUpload,
+    cancelUpload,
+    failUpload,
     // event handlers
-    handleListResult,
-    handleFindResult,
-    handleContentResult,
+    shouldRefreshUploadResult,
     handleUploadResult,
-    handleDownloadResult,
   }
 })

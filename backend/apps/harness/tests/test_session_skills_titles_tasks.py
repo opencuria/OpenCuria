@@ -1,0 +1,870 @@
+"""Session skills, session CRUD, title agent and child task sessions."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+
+import pytest
+from django.contrib.auth import get_user_model
+from django.test import Client
+
+import apps.harness.api as harness_api
+from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness.conversation_service import ConversationService
+from apps.harness.harness_service import HarnessService
+from apps.harness.models import HarnessSession
+from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.permissions.service import PermissionService
+from apps.harness.providers.base import Delta, ProviderAdapter, Usage
+from apps.harness.repositories import HarnessSessionRepository
+from apps.harness.tests.helpers import attach_run_context
+from apps.organizations.models import Membership, MembershipRole, Organization
+from apps.runners.enums import RunnerStatus, WorkspaceStatus
+from apps.runners.models import Runner, Workspace
+from apps.skills.models import Skill
+from common.utils import generate_api_token, hash_token
+
+
+class FakeProvider(ProviderAdapter):
+    """Immediate text answer, no network."""
+
+    name = "fake"
+
+    def __init__(self, text: str = "api-answer") -> None:
+        self._text = text
+
+    async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+        """Yield one text delta with usage."""
+        yield Delta(text=self._text, usage=Usage(1, 1, 2))
+
+
+def _client(*, user, org, permissions: list[str]) -> Client:
+    token = generate_api_token()
+    APIKey.objects.create(
+        user=user,
+        name=f"p3-{uuid.uuid4().hex[:6]}",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=permissions,
+    )
+    return Client(
+        HTTP_X_API_KEY=token,
+        HTTP_X_ORGANIZATION_ID=str(org.id),
+    )
+
+
+async def _drop_emit(event: str, data: dict) -> None:
+    return None
+
+
+READ = [APIKeyPermission.HARNESS_READ.value]
+RUN = [APIKeyPermission.HARNESS_RUN.value]
+
+
+@pytest.fixture
+def session_setup(db):
+    """Org, users, workspace, and skills for session tests."""
+    user_model = get_user_model()
+    org = Organization.objects.create(
+        name=f"P3 {uuid.uuid4().hex[:6]}",
+        slug=f"p3-{uuid.uuid4().hex[:10]}",
+    )
+    owner = user_model.objects.create_user(
+        email=f"p3-owner-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+    stranger = user_model.objects.create_user(
+        email=f"p3-stranger-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+    Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
+    Membership.objects.create(
+        user=stranger, organization=org, role=MembershipRole.MEMBER
+    )
+    runner = Runner.objects.create(
+        name="p3-runner",
+        api_token_hash=hash_token(f"p3-{uuid.uuid4().hex}"),
+        status=RunnerStatus.ONLINE,
+        sid=f"p3-{uuid.uuid4().hex[:8]}",
+        organization=org,
+    )
+    owned = Workspace.objects.create(
+        runner=runner,
+        name="Owned",
+        status=WorkspaceStatus.RUNNING,
+        created_by=owner,
+    )
+    foreign = Workspace.objects.create(
+        runner=runner,
+        name="Foreign",
+        status=WorkspaceStatus.RUNNING,
+        created_by=stranger,
+    )
+    org_skill = Skill.objects.create(
+        name="Org Skill",
+        body="Always use type hints.",
+        organization=org,
+        created_by=owner,
+    )
+    personal_skill = Skill.objects.create(
+        name="Personal",
+        body="Prefer pytest.",
+        user=owner,
+        created_by=owner,
+    )
+    foreign_skill = Skill.objects.create(
+        name="Foreign",
+        body="secret",
+        user=stranger,
+        created_by=stranger,
+    )
+    return {
+        "org": org,
+        "owner": owner,
+        "stranger": stranger,
+        "owned": owned,
+        "foreign": foreign,
+        "org_skill": org_skill,
+        "personal_skill": personal_skill,
+        "foreign_skill": foreign_skill,
+    }
+
+
+@pytest.fixture
+def fake_harness_service(monkeypatch):
+    """Harness service with fake provider for API tests."""
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_drop_emit,
+        provider_factory=lambda _org: FakeProvider(),
+    )
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    return service
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_session_invalid_skill_is_400(session_setup, fake_harness_service):
+    """POST with an inaccessible skill_id returns 400."""
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
+        data=json.dumps(
+            {
+                "prompt": "hello",
+                "skill_ids": [str(session_setup["foreign_skill"].id)],
+            }
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_session_returns_skill_ids_in_body(session_setup, fake_harness_service):
+    """POST with skill_ids echoes them in the 201 response."""
+    skill_id = str(session_setup["org_skill"].id)
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "hello", "skill_ids": [skill_id]}),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    body = response.json()
+    assert body["skill_ids"] == [skill_id]
+    assert body["parent_id"] is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_timeline_returns_per_message_skill_ids(session_setup, fake_harness_service):
+    """Timeline echoes the per-turn skill snapshot on each user message."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    org_skill_id = str(session_setup["org_skill"].id)
+    personal_skill_id = str(session_setup["personal_skill"].id)
+    owner = session_setup["owner"]
+    org = session_setup["org"]
+    client = _client(user=owner, org=org, permissions=RUN)
+    response = client.post(
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "first", "skill_ids": [org_skill_id]}),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    session_id = response.json()["id"]
+    session = ConversationService().get_session(session_id)
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    assert [row.role for row in messages] == ["user", "assistant"]
+    assert list(messages[0].skill_ids or []) == [org_skill_id]
+    assert list(messages[1].skill_ids or []) == []
+
+    read_client = _client(user=owner, org=org, permissions=READ)
+    timeline_response = read_client.get(
+        f"/api/v1/harness/sessions/{session_id}/timeline"
+    )
+    assert timeline_response.status_code == 200, timeline_response.content[:500]
+    payload = timeline_response.json()
+    by_role = {row["role"]: row for row in payload["messages"]}
+    assert by_role["user"]["skill_ids"] == [org_skill_id]
+    assert by_role["assistant"]["skill_ids"] == []
+
+    # A second turn with different skills snapshots per message.
+    followup = client.post(
+        f"/api/v1/harness/sessions/{session_id}/message",
+        data=json.dumps({"prompt": "second", "skill_ids": [personal_skill_id]}),
+        content_type="application/json",
+    )
+    assert followup.status_code == 202, followup.content[:500]
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    users = [row for row in messages if row.role == "user"]
+    assert [list(row.skill_ids or []) for row in users] == [
+        [org_skill_id],
+        [personal_skill_id],
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_followup_drops_deleted_skill_from_inherited_selection(
+    session_setup, fake_harness_service
+):
+    """A skill deleted after selection must not reject every later prompt."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    org_skill_id = str(session_setup["org_skill"].id)
+    personal_skill_id = str(session_setup["personal_skill"].id)
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
+        data=json.dumps(
+            {"prompt": "first", "skill_ids": [org_skill_id, personal_skill_id]}
+        ),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    session_id = created.json()["id"]
+    session_setup["personal_skill"].delete()
+
+    followup = client.post(
+        f"/api/v1/harness/sessions/{session_id}/message",
+        data=json.dumps({"prompt": "second", "skill_ids": []}),
+        content_type="application/json",
+    )
+    assert followup.status_code == 202, followup.content[:500]
+    assert followup.json()["skill_ids"] == [org_skill_id]
+    users = [
+        row
+        for row in HarnessMessageRepository.list_for_session(session_id)
+        if row.role == "user"
+    ]
+    assert list(users[-1].skill_ids or []) == [org_skill_id]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_edit_drops_deleted_skill_from_inherited_selection(
+    session_setup, fake_harness_service
+):
+    """Editing a message reruns without skills deleted since selection."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    org_skill_id = str(session_setup["org_skill"].id)
+    selection = [org_skill_id, str(session_setup["personal_skill"].id)]
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
+        prompt="first",
+        skill_ids=selection,
+        user_id=session_setup["owner"].id,
+    )
+    first = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="first", skill_ids=selection
+    )
+    HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="answer"
+    )
+    session_setup["personal_skill"].delete()
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/messages/{first.id}/edit",
+        data=json.dumps({"prompt": "first edited"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 202, response.content[:500]
+    session.refresh_from_db()
+    assert list(session.skill_ids) == [org_skill_id]
+    users = [
+        row
+        for row in HarnessMessageRepository.list_for_session(session.id)
+        if row.role == "user"
+    ]
+    assert [row.content for row in users] == ["first edited"]
+    assert list(users[0].skill_ids or []) == [org_skill_id]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("requested", ["deleted", "foreign_skill"])
+def test_followup_still_rejects_explicit_unavailable_skill(
+    session_setup, fake_harness_service, requested
+):
+    """Only the inherited selection is pruned; explicit requests stay strict."""
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{session_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "first"}),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    if requested == "deleted":
+        skill_id = str(session_setup["personal_skill"].id)
+        session_setup["personal_skill"].delete()
+    else:
+        skill_id = str(session_setup[requested].id)
+
+    followup = client.post(
+        f"/api/v1/harness/sessions/{created.json()['id']}/message",
+        data=json.dumps({"prompt": "second", "skill_ids": [skill_id]}),
+        content_type="application/json",
+    )
+    assert followup.status_code == 400, followup.content[:500]
+    assert followup.json()["detail"] == (
+        f"Skill not found or not accessible: {skill_id}"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_fork_copies_per_message_skill_ids(session_setup, fake_harness_service):
+    """Fork keeps the per-message skill snapshot of the copied prefix."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    skill_id = str(session_setup["org_skill"].id)
+    owner = session_setup["owner"]
+    org = session_setup["org"]
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["owned"].id,
+        organization_id=org.id,
+        prompt="forked",
+        skill_ids=[skill_id],
+        user_id=owner.id,
+    )
+    await fake_harness_service.start_run(
+        session,
+        "forked",
+        organization_id=org.id,
+        workspace_id=str(session_setup["owned"].id),
+        user_id=owner.id,
+        skill_ids=[skill_id],
+    )
+    source = HarnessMessageRepository.list_for_session(session.id)
+    assert [row.role for row in source] == ["user", "assistant"]
+    await fake_harness_service.abort_run(session.id)
+    forked = await ConversationService().fork_session(session.id)
+    copied = HarnessMessageRepository.list_for_session(forked.id)
+    assert [row.role for row in copied] == ["user", "assistant"]
+    assert list(copied[0].skill_ids or []) == [skill_id]
+    assert list(copied[1].skill_ids or []) == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_patch_session_title_happy(session_setup, fake_harness_service, monkeypatch):
+    """PATCH session title succeeds without resolving the live run orchestrator."""
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
+        prompt="rename me",
+    )
+
+    def unexpected_execution() -> None:
+        pytest.fail("Renaming a saved session must not resolve agent execution")
+
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_execution)
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}",
+        data=json.dumps({"title": "Renamed chat"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 200
+    assert response.json()["title"] == "Renamed chat"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_patch_session_foreign_workspace_is_404(session_setup, fake_harness_service):
+    """Cannot rename another owner's session."""
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["foreign"].id,
+        organization_id=session_setup["org"].id,
+        prompt="foreign",
+    )
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}",
+        data=json.dumps({"title": "Nope"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_patch_session_needs_run_permission(session_setup, fake_harness_service):
+    """Read-only API keys cannot rename sessions."""
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
+        prompt="perm",
+    )
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=READ
+    )
+    response = client.patch(
+        f"/api/v1/harness/sessions/{session.id}",
+        data=json.dumps({"title": "Nope"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db(transaction=True)
+def test_delete_session_returns_204(session_setup, fake_harness_service):
+    """DELETE removes the session after aborting any active run."""
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
+        prompt="delete me",
+    )
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=RUN
+    )
+    response = client.delete(f"/api/v1/harness/sessions/{session.id}")
+    assert response.status_code == 204
+    assert not HarnessSession.objects.filter(id=session.id).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_delete_session_needs_run_not_read(session_setup, fake_harness_service):
+    """harness:read alone cannot delete sessions."""
+    session = fake_harness_service.create_session(
+        workspace_id=session_setup["owned"].id,
+        organization_id=session_setup["org"].id,
+        prompt="keep",
+    )
+    client = _client(
+        user=session_setup["owner"], org=session_setup["org"], permissions=READ
+    )
+    response = client.delete(f"/api/v1/harness/sessions/{session.id}")
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_title_agent_updates_session_title(
+    harness_workspace, monkeypatch
+) -> None:
+    """Root session title is updated asynchronously by the title agent."""
+    title_provider = FakeProvider("Short Generated Title Here")
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_drop_emit,
+        provider_factory=lambda _org: title_provider,
+    )
+    from apps.harness.services import ProviderConfigService
+
+    ProviderConfigService().save_config(
+        organization_id=harness_workspace.runner.organization_id,
+        small_model="small-model",
+    )
+    prompt = "Please help me build a feature"
+    from apps.harness.session_metadata_service import title_from_prompt
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title=title_from_prompt(prompt),
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    await service.start_run(
+        session,
+        prompt,
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+        user_id=harness_workspace.created_by_id,
+    )
+    await service.run_registry.get_task(str(session.id))
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        refreshed = HarnessSessionRepository.get_by_id(session.id)
+        if refreshed and refreshed.title == "Short Generated Title Here":
+            break
+    else:
+        refreshed = HarnessSessionRepository.get_by_id(session.id)
+    assert refreshed is not None
+    assert refreshed.title == "Short Generated Title Here"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_title_agent_does_not_overwrite_user_rename(harness_workspace) -> None:
+    """Title generation skips when the user already renamed the session."""
+    title_provider = FakeProvider("Generated Title Should Not Win")
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_drop_emit,
+        provider_factory=lambda _org: title_provider,
+    )
+    from apps.harness.services import ProviderConfigService
+
+    ProviderConfigService().save_config(
+        organization_id=harness_workspace.runner.organization_id,
+        small_model="small-model",
+    )
+    prompt = "Please help me build a feature"
+    session = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt=prompt,
+    )
+    service.session_settings.update_title(session.id, "User Renamed Early")
+    await service.metadata.generate_title(
+        session_id=session.id,
+        prompt=prompt,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    refreshed = HarnessSessionRepository.get_by_id(session.id)
+    assert refreshed is not None
+    assert refreshed.title == "User Renamed Early"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_child_session_created_for_task_tool(harness_workspace) -> None:
+    """Task subagent runner creates a child session with parent_id set."""
+    emitted: list[dict] = []
+
+    async def _emit(event: str, data: dict) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+        provider_factory=lambda _org: FakeProvider("child output"),
+    )
+    from apps.harness.services import ProviderConfigService
+    from apps.harness.tools.subagents import TaskArgs
+
+    ProviderConfigService().save_config(
+        organization_id=harness_workspace.runner.organization_id,
+        small_model="small-model",
+    )
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    parent_assistant = service.messages.create(
+        session_id=parent.id, role="assistant", content=""
+    )
+    attach_run_context(service, parent, parent_assistant)
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "big-model",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    args = TaskArgs(
+        description="research", prompt="look around", subagent_type="general"
+    )
+    result = await service._run_subagent_tool(
+        parent=parent,
+        args=args,
+        ctx=ctx,
+        subtask_id="sub-abc",
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    assert "child output" in result.output
+    children = list(HarnessSession.objects.filter(parent_id=parent.id))
+    assert len(children) == 1
+    child = children[0]
+    assert child.parent_id == parent.id
+    assert f'<task id="{child.id}" state="completed">' in result.output
+    assert result.metadata["task_id"] == str(child.id)
+    assert result.metadata["child_session_id"] == str(child.id)
+    assert result.metadata["resumed"] is False
+    started = [
+        item for item in emitted if item.get("event") == "harness.subtask_started"
+    ]
+    assert started
+    assert started[0]["child_session_id"] == str(child.id)
+    assert started[0]["model"] == child.model
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_task_resume_reprompts_same_child_session(harness_workspace) -> None:
+    """Resume via task_id reuses the child session and keeps its history."""
+    from apps.harness.tools.subagents import TaskArgs
+
+    emitted: list[dict] = []
+
+    async def _emit(event: str, data: dict) -> None:
+        emitted.append({"event": event, **data})
+
+    prompts: list[str] = []
+
+    class _ScriptedProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]  # noqa: E501
+            """Record the child history depth, then answer."""
+            prompts.append(str(messages[-1].content or ""))
+            history_users = [
+                message
+                for message in messages
+                if message.role == "user"
+                and "follow-up" not in str(message.content or "")
+            ]
+            yield Delta(
+                text=f"answer-{len(prompts)} (saw {len(history_users)} prior)",
+                usage=Usage(1, 1, 2),
+            )
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_emit,
+        provider_factory=lambda _org: _ScriptedProvider("unused"),
+    )
+    org_id = harness_workspace.runner.organization_id
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    parent_assistant = service.messages.create(
+        session_id=parent.id, role="assistant", content=""
+    )
+    attach_run_context(service, parent, parent_assistant)
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "big-model",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    first = await service._run_subagent_tool(
+        parent=parent,
+        args=TaskArgs(
+            description="research", prompt="first question", subagent_type="general"
+        ),
+        ctx=ctx,
+        subtask_id="sub-first",
+        organization_id=org_id,
+    )
+    child_id = first.metadata["child_session_id"]
+    assert f'<task id="{child_id}"' in first.output
+    # Resume with a mismatched subagent_type: stored child agent wins.
+    second = await service._run_subagent_tool(
+        parent=parent,
+        args=TaskArgs(
+            description="follow-up",
+            prompt="follow-up question",
+            subagent_type="explore",
+            task_id=child_id,
+        ),
+        ctx=ctx,
+        subtask_id="sub-second",
+        organization_id=org_id,
+    )
+    assert second.metadata["child_session_id"] == child_id
+    assert second.metadata["task_id"] == child_id
+    assert second.metadata["resumed"] is True
+    assert second.metadata["agent"] == "general"
+    assert f'<task id="{child_id}"' in second.output
+    children = list(HarnessSession.objects.filter(parent_id=parent.id))
+    assert [str(item.id) for item in children] == [child_id]
+    assert prompts == ["first question", "follow-up question"]
+    user_rows = list(
+        HarnessSession.objects.get(id=child_id).messages.order_by("created_at")
+    )
+    assert [row.content for row in user_rows if row.role == "user"] == [
+        "first question",
+        "follow-up question",
+    ]
+    started_ids = [
+        item["child_session_id"]
+        for item in emitted
+        if item.get("event") == "harness.subtask_started"
+    ]
+    assert started_ids == [child_id, child_id]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_task_resume_rejects_foreign_and_busy_child(harness_workspace) -> None:
+    """Foreign task_id values error; busy children cannot be resumed."""
+    from apps.harness.tools.base import ToolError
+    from apps.harness.tools.subagents import TaskArgs
+
+    service = HarnessService(
+        permissions=PermissionService(
+            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
+        ),
+        emit=_drop_emit,
+        provider_factory=lambda _org: FakeProvider("child output"),
+    )
+    org_id = harness_workspace.runner.organization_id
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="parent",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    other = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="other",
+        agent_name="build",
+        mode="build",
+        model="big-model",
+    )
+    foreign = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="foreign child",
+        agent_name="general",
+        mode="build",
+        model="big-model",
+        parent_id=other.id,
+    )
+    for owner in (parent, other):
+        assistant = service.messages.create(
+            session_id=owner.id, role="assistant", content=""
+        )
+        attach_run_context(service, owner, assistant)
+    ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "big-model",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    with pytest.raises(ToolError, match="does not belong"):
+        await service._run_subagent_tool(
+            parent=parent,
+            args=TaskArgs(
+                description="d",
+                prompt="p",
+                subagent_type="general",
+                task_id=str(foreign.id),
+            ),
+            ctx=ctx,
+            subtask_id="sub-foreign",
+            organization_id=org_id,
+        )
+    own = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        title="own child",
+        agent_name="general",
+        mode="build",
+        model="big-model",
+        parent_id=parent.id,
+    )
+    service.run_registry.start_execution(
+        str(own.id), asyncio.get_running_loop().create_future()
+    )
+    try:
+        with pytest.raises(ToolError, match="still running"):
+            await service._run_subagent_tool(
+                parent=parent,
+                args=TaskArgs(
+                    description="d",
+                    prompt="p",
+                    subagent_type="general",
+                    task_id=str(own.id),
+                ),
+                ctx=ctx,
+                subtask_id="sub-busy",
+                organization_id=org_id,
+            )
+    finally:
+        pending = service.run_registry.get_task(str(own.id))
+        service.run_registry.release_task(str(own.id))
+        if pending is not None and not pending.done():
+            pending.cancel()
+    # Unknown task_id falls back to a fresh child (OpenCode parity).
+    fresh = await service._run_subagent_tool(
+        parent=parent,
+        args=TaskArgs(
+            description="d",
+            prompt="p",
+            subagent_type="general",
+            task_id=str(uuid.uuid4()),
+        ),
+        ctx=ctx,
+        subtask_id="sub-fresh",
+        organization_id=org_id,
+    )
+    assert fresh.metadata["resumed"] is False
+    assert fresh.metadata["child_session_id"] != str(own.id)
+    # Child errors surface the resumable task_id (OpenCode parity): an
+    # empty model with no fallback leaves no routable model.
+    parent.model = ""
+    parent.save(update_fields=["model", "updated_at"])
+    no_model_ctx = type(
+        "Ctx",
+        (),
+        {
+            "session_id": str(parent.id),
+            "workspace_id": str(harness_workspace.id),
+            "model": "",
+            "depth": 0,
+            "max_depth": 1,
+        },
+    )()
+    with pytest.raises(ToolError, match=r"No model available"):
+        await service._run_subagent_tool(
+            parent=parent,
+            args=TaskArgs(description="d", prompt="p", subagent_type="general"),
+            ctx=no_model_ctx,
+            subtask_id="sub-boom",
+            organization_id=org_id,
+        )
+    assert HarnessSession.objects.filter(parent_id=parent.id).count() >= 2

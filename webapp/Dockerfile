@@ -15,11 +15,16 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci
+COPY package.json package-lock.json ./
+COPY webapp/package.json webapp/package.json
+COPY mobile/package.json mobile/package.json
+COPY packages/chat-core/package.json packages/chat-core/package.json
+COPY packages/client/package.json packages/client/package.json
+RUN npm ci --workspace webapp --workspace @opencuria/chat-core --workspace @opencuria/client --include-workspace-root --ignore-scripts
 
-COPY . .
-RUN npm run build-only
+COPY packages ./packages
+COPY webapp ./webapp
+RUN npm run build-only --workspace webapp
 
 # --- Serve stage ---
 FROM nginx:alpine
@@ -28,13 +33,13 @@ FROM nginx:alpine
 RUN rm /etc/nginx/conf.d/default.conf
 
 # Copy custom nginx config
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY webapp/nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy entrypoint that generates runtime config
-COPY entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
+COPY webapp/entrypoint.sh /docker-entrypoint.d/40-runtime-config.sh
 RUN chmod +x /docker-entrypoint.d/40-runtime-config.sh
 
 # Copy built app
-COPY --from=build /app/dist /usr/share/nginx/html
+COPY --from=build /app/webapp/dist /usr/share/nginx/html
 
 EXPOSE 80

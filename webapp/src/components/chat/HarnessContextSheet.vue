@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { formatTokenCount } from '@/lib/sessionContextUsage'
-import type { ContextSheetState } from '@/lib/composerSheets'
+import type { ContextSheetState } from '@opencuria/chat-core/composerSheets'
 
 const props = defineProps<{
   context: ContextSheetState

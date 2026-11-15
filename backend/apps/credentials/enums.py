@@ -8,8 +8,16 @@ from django.db import models
 
 
 class CredentialType(models.TextChoices):
-    """How a credential is injected into a workspace."""
+    """Where a credential is stored and how it may be used."""
 
     ENV = "env", "Environment Variable"
     FILE = "file", "Credential File"
     SSH_KEY = "ssh_key", "SSH Key"
+    MCP_OAUTH = "mcp_oauth", "MCP OAuth (server-side only)"
+    PROVIDER_SECRET = "provider_secret", "Internal provider secret (server-side only)"
+
+
+#: Types the backend uses itself; runners never write them into a workspace.
+SERVER_SIDE_CREDENTIAL_TYPES = frozenset(
+    {CredentialType.MCP_OAUTH, CredentialType.PROVIDER_SECRET}
+)

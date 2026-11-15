@@ -1,7 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AppLayout from '@/components/layout/AppLayout.vue'
 import { useAuthStore } from '@/stores/auth'
-import { resolveSettingsTab } from '@/components/settings/settingsTabs'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -12,10 +10,6 @@ const router = createRouter({
       name: 'login',
       component: () => import('@/views/LoginView.vue'),
       meta: { guest: true },
-    },
-    {
-      path: '/register',
-      redirect: '/login',
     },
     {
       path: '/sso/callback',
@@ -33,7 +27,7 @@ const router = createRouter({
     // ---- Authenticated routes (inside AppLayout) ----
     {
       path: '/',
-      component: AppLayout,
+      component: () => import('@/components/layout/AppLayout.vue'),
       meta: { requiresAuth: true, requiresOrg: true },
       children: [
         {
@@ -43,61 +37,23 @@ const router = createRouter({
           meta: { title: 'New Chat', fullBleed: true },
         },
         {
-          path: 'runners',
-          name: 'runners',
-          redirect: { path: '/', query: { settings: 'runners' } },
-          meta: { title: 'Runners' },
-        },
-        {
           path: 'workspaces',
           name: 'workspaces',
           component: () => import('@/views/WorkspacesView.vue'),
           meta: { title: 'Workspaces' },
         },
         {
+          // `?task=<id>` (legacy links) opens that task's settings on the page.
+          path: 'scheduled-tasks',
+          name: 'scheduled-tasks',
+          component: () => import('@/views/ScheduledTasksView.vue'),
+          meta: { title: 'Scheduled tasks', fullBleed: true },
+        },
+        {
           path: 'workspaces/:id',
           name: 'workspace-detail',
           component: () => import('@/views/WorkspaceDetailView.vue'),
           meta: { title: 'Workspace', hideTopBar: true, fullBleed: true },
-        },
-        {
-          path: 'images',
-          name: 'images',
-          redirect: { path: '/', query: { settings: 'images' } },
-          meta: { title: 'Captured Images' },
-        },
-        {
-          path: 'skills',
-          name: 'skills',
-          redirect: { path: '/', query: { settings: 'skills' } },
-          meta: { title: 'Skills' },
-        },
-        {
-          path: 'credentials',
-          name: 'credentials',
-          redirect: { path: '/', query: { settings: 'credentials' } },
-          meta: { title: 'Credentials' },
-        },
-        {
-          path: 'api-keys',
-          name: 'api-keys',
-          redirect: { path: '/', query: { settings: 'api-keys' } },
-          meta: { title: 'API Keys' },
-        },
-        {
-          path: 'org-settings',
-          name: 'org-settings',
-          redirect: (to) => ({
-            path: '/',
-            query: { settings: resolveSettingsTab(to.query.tab) },
-          }),
-          meta: { title: 'Organization Settings' },
-        },
-        {
-          path: 'docs/:slug(.*)*',
-          name: 'docs-detail',
-          component: () => import('@/views/DocsView.vue'),
-          meta: { title: 'Docs', fullBleed: true },
         },
       ],
     },
@@ -116,7 +72,11 @@ router.beforeEach(async (to) => {
   const isGuestOnly = to.meta.guest === true
 
   // Users with existing organizations should never see create-organization page
-  if (to.name === 'create-organization' && authStore.isAuthenticated && authStore.hasOrganizations) {
+  if (
+    to.name === 'create-organization' &&
+    authStore.isAuthenticated &&
+    authStore.hasOrganizations
+  ) {
     return '/'
   }
 

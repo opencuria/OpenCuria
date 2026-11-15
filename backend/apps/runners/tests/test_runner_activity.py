@@ -1,0 +1,369 @@
+"""Runner attention reflects unresolved workflows, not historical task failures."""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from django.utils import timezone
+
+from apps.accounts.models import User
+from apps.organizations.models import Membership
+from apps.runners.models import (
+    CaptureRequest,
+    ImageDeletionRequest,
+    ImageInstance,
+    LifecycleCommand,
+    Runner,
+    Task,
+    Workspace,
+    WorkspaceRecreateRequest,
+)
+from apps.runners.services.disposition import DispositionService
+from apps.runners.services.storage import StorageService
+from apps.runners.storage_schemas import RunnerStorageOut
+from common.exceptions import AuthenticationError
+
+pytestmark = pytest.mark.django_db
+
+
+@pytest.mark.parametrize(
+    ("evidence", "actions", "message"),
+    [
+        ({"status": "running"}, [], "still running"),
+        ({"status": "unknown"}, [], "could not verify"),
+        (
+            {"status": "terminal"},
+            ["acknowledge_interrupted"],
+            "keep existing resources",
+        ),
+        ({"status": "terminal"}, ["reconcile", "retry"], "operation failed"),
+        (
+            {"result": {"error": "SSH reconnect failed"}},
+            [],
+            "workspace is not reachable",
+        ),
+    ],
+)
+def test_review_explains_the_actual_next_step(
+    evidence: dict, actions: list[str], message: str
+) -> None:
+    assert message in DispositionService.review_message(evidence, actions)
+
+
+def test_rest_exposes_grouped_activity(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    """Runner storage exposes grouped activities without private task payloads."""
+    from apps.accounts.models import APIKeyPermission
+    from apps.runners.tests.test_workspace_access_controls import _make_client
+
+    command(workspace, "intervention")
+    detail(user, runner)
+    client = _make_client(
+        user=user,
+        org=runner.organization,
+        permissions=[APIKeyPermission.RUNNERS_READ],
+    )
+    response = client.get(f"/api/v1/runners/{runner.id}/storage/")
+    assert response.status_code == 200
+    assert response.json()["activities"][0]["state"] == "active"
+    assert "must-not-be-returned" not in response.content.decode()
+
+
+def command(workspace: Workspace, phase: str, status: str = "failed") -> Task:
+    """Seed execution facts without performing a runtime action."""
+    task = Task.objects.create(
+        workspace=workspace,
+        runner=workspace.runner,
+        type="stop_workspace",
+        status=status,
+        error="Unknown outcome" if status == "failed" else "",
+    )
+    LifecycleCommand.objects.create(
+        task=task,
+        phase=phase,
+        target=str(workspace.id),
+        deadline_at=timezone.now(),
+        payload={"files": {"private": "must-not-be-returned"}},
+    )
+    if phase == "intervention":
+        workspace.current_task = task
+        workspace.save(update_fields=["current_task"])
+    return task
+
+
+def detail(user: User, runner: Runner) -> dict:
+    """Use the authorized runner storage service."""
+    Membership.objects.get_or_create(
+        user=user,
+        organization=runner.organization,
+        defaults={"role": "admin"},
+    )
+    return StorageService().detail(user, runner.organization_id, runner.id)
+
+
+def test_automatic_recovery_and_closed_capture_are_separate_from_attention(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    workspace.name = "OpenCuria 3"
+    workspace.save(update_fields=["name"])
+    closed = command(workspace, "disposed")
+    image = ImageInstance.objects.create(
+        runner=runner,
+        name="OpenCuria",
+        status="failed",
+        origin_type="workspace_capture",
+        is_legacy=True,
+    )
+    CaptureRequest.objects.create(
+        workspace=workspace,
+        image=image,
+        child=closed,
+        phase="failed",
+        resume_suppressed=True,
+        diagnostic="Interrupted child acknowledged",
+    )
+    blender = Workspace.objects.create(
+        runner=runner,
+        created_by=user,
+        name="Blender",
+        status="running",
+    )
+    unresolved = command(blender, "intervention")
+    result = detail(user, runner)
+    attention = [a for a in result["activities"] if a["state"] == "attention"]
+    history = [a for a in result["activities"] if a["state"] == "history"]
+    assert not attention
+    active = [a for a in result["activities"] if a["state"] == "active"]
+    assert len(active) == 1
+    assert active[0]["target_name"] == "Blender"
+    assert active[0]["outcome"] == "recovering"
+    assert "automatically" in active[0]["summary"]
+    assert active[0]["operation_ids"] == [str(unresolved.id)]
+    assert len(history) == 1
+    assert history[0]["target_name"] == "OpenCuria 3"
+    assert history[0]["outcome"] == "resolved"
+    assert history[0]["operation_ids"] == []
+    # Presentation must never release the real fence or rewrite execution results.
+    blender.refresh_from_db()
+    closed.refresh_from_db()
+    assert blender.current_task_id == unresolved.id
+    assert closed.status == "failed"
+    serialized = RunnerStorageOut.model_validate(result).model_dump_json()
+    assert "must-not-be-returned" not in serialized
+    assert "recreate_requests" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("phase", "status", "state", "outcome"),
+    [
+        ("disposed", "failed", "history", "resolved"),
+        ("result", "failed", "history", "failed"),
+        ("intervention", "failed", "active", "recovering"),
+        ("delivery", "pending", "active", "in_progress"),
+    ],
+)
+def test_execution_failure_is_separate_from_unresolved_outcome(
+    runner: Runner,
+    workspace: Workspace,
+    user: User,
+    phase: str,
+    status: str,
+    state: str,
+    outcome: str,
+) -> None:
+    command(workspace, phase, status)
+    activity = detail(user, runner)["activities"][0]
+    assert activity["state"] == state
+    assert activity["outcome"] == outcome
+
+
+def test_failed_capture_with_retained_child_stays_visible_and_counted_once(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    task = command(workspace, "intervention")
+    image = ImageInstance.objects.create(
+        runner=runner,
+        name="Capture",
+        status="failed",
+        origin_type="workspace_capture",
+        is_legacy=True,
+    )
+    CaptureRequest.objects.create(
+        workspace=workspace,
+        image=image,
+        phase="failed",
+        child=task,
+        resume_suppressed=True,
+    )
+    activities = detail(user, runner)["activities"]
+    assert len(activities) == 1
+    assert activities[0]["kind"] == "capture"
+    assert activities[0]["state"] == "active"
+    assert activities[0]["operation_ids"] == [str(task.id)]
+
+
+def test_capture_replacement_is_part_of_the_same_workflow(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    """Saving and applying an image must not appear as unrelated activities."""
+    completed = command(workspace, "result", "completed")
+    image = ImageInstance.objects.create(
+        runner=runner,
+        name="Capture",
+        status="ready",
+        origin_type="workspace_capture",
+        is_legacy=True,
+    )
+    capture = CaptureRequest.objects.create(
+        workspace=workspace,
+        image=image,
+        phase="completed",
+        child=completed,
+    )
+    blocked = command(workspace, "intervention")
+    WorkspaceRecreateRequest.objects.create(
+        workspace=workspace,
+        reason="capture",
+        child=blocked,
+        phase="intervention",
+    )
+    activities = detail(user, runner)["activities"]
+    assert len(activities) == 1
+    assert activities[0]["id"] == str(capture.id)
+    assert activities[0]["state"] == "active"
+    assert activities[0]["operation_ids"] == [str(blocked.id)]
+
+
+def test_deletion_approval_and_child_are_one_open_activity(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    task = command(workspace, "intervention")
+    deletion = ImageDeletionRequest.objects.create(
+        organization=runner.organization,
+        requested_by=user,
+        target_type="image",
+        target_id=uuid.uuid4(),
+        phase="intervention",
+        children={"workspace": str(task.id)},
+        approval={
+            "images": [],
+            "workspaces": [
+                {
+                    "id": str(workspace.id),
+                    "name": workspace.name,
+                    "runner_id": str(runner.id),
+                }
+            ],
+        },
+    )
+    activities = detail(user, runner)["activities"]
+    assert len(activities) == 1
+    assert activities[0]["id"] == str(deletion.id)
+    assert activities[0]["state"] == "active"
+    deletion.phase = "cancelled"
+    deletion.save(update_fields=["phase"])
+    LifecycleCommand.objects.filter(task=task).update(phase="disposed")
+    activities = detail(user, runner)["activities"]
+    assert activities[0]["state"] == "history"
+    assert activities[0]["outcome"] == "cancelled"
+
+
+def test_activity_does_not_leak_to_members_or_another_runner(
+    runner: Runner, workspace: Workspace, user: User, offline_runner: Runner
+) -> None:
+    command(workspace, "intervention")
+    membership = Membership.objects.create(
+        user=user,
+        organization=runner.organization,
+        role="member",
+    )
+    with pytest.raises(AuthenticationError):
+        StorageService().detail(user, runner.organization_id, runner.id)
+    membership.role = "admin"
+    membership.save(update_fields=["role"])
+    assert (
+        StorageService().detail(
+            user,
+            runner.organization_id,
+            offline_runner.id,
+        )["activities"]
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("phase", "state", "outcome"),
+    [
+        ("failed", "history", "failed"),
+        ("reconfirmation_required", "attention", "blocked"),
+        ("attention_required", "attention", "blocked"),
+    ],
+)
+def test_only_changed_approval_or_proven_inconsistency_needs_attention(
+    runner, user, phase, state, outcome
+):
+    """Exhausted safe retries are an ordinary retryable failure in history."""
+    ImageDeletionRequest.objects.create(
+        organization=runner.organization,
+        requested_by=user,
+        target_type="image",
+        target_id=uuid.uuid4(),
+        phase=phase,
+        approval={
+            "images": [{"id": "image", "name": "Image", "runner_id": str(runner.id)}],
+            "workspaces": [],
+        },
+    )
+    activity = detail(user, runner)["activities"][0]
+    assert activity["state"] == state
+    assert activity["outcome"] == outcome
+
+
+def test_storage_names_workspaces_for_their_owner_only(
+    runner: Runner, workspace: Workspace, user: User
+) -> None:
+    """Admins see other users' workspaces by owner label, never by name."""
+    admin = User.objects.create_user(
+        email=f"storage-admin-{uuid.uuid4().hex[:6]}@example.com",
+        password="secret",
+        first_name="Ada",
+        last_name="Admin",
+    )
+    Membership.objects.create(user=user, organization=runner.organization)
+    image = ImageInstance.objects.create(
+        runner=runner,
+        name="Base",
+        created_by=admin,
+        is_legacy=True,
+        runner_ref="/images/base",
+    )
+    workspace.name = "secret-project"
+    workspace.base_image_instance = image
+    workspace.save(update_fields=["name", "base_image_instance"])
+    own = Workspace.objects.create(
+        runner=runner,
+        created_by=admin,
+        name="admin-box",
+        status="running",
+        base_image_instance=image,
+    )
+    command(workspace, "intervention")
+    command(own, "intervention")
+    CaptureRequest.objects.create(
+        workspace=workspace, image=image, phase="failed", diagnostic=""
+    )
+
+    result = RunnerStorageOut(**detail(admin, runner)).model_dump(mode="json")
+
+    payload = str(result)
+    assert "secret-project" not in payload
+    [generation] = result["generations"]
+    names = {ws["id"]: ws["name"] for ws in generation["dependencies"]}
+    assert names == {str(workspace.id): "", str(own.id): "admin-box"}
+    targets = {activity["target_name"] for activity in result["activities"]}
+    owner = f"Workspace · User {user.pk}"
+    assert {"admin-box", owner} <= targets
+    operations = {op["task__workspace__name"] for op in result["operations"]}
+    assert operations == {None, "admin-box"}

@@ -1,8 +1,8 @@
 """Lightweight dataclasses for in-memory workspace state.
 
-The runner no longer uses a local database. All workspace state is
-derived from the runtime (Docker daemon, libvirt, …) and cached
-in memory via these dataclasses.
+Physical workspace state is derived from libvirt and cached through these
+dataclasses. Durable operation outcomes, delivery fences and credential
+checkpoints are stored separately in the runner's SQLite journal.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ class WorkspaceInfo:
     workspace_id: uuid.UUID
     instance_id: str
     status: str  # "running", "exited", "creating", etc.
-    runtime_type: str = "docker"  # "docker" or "qemu"
+    credentials_present: bool | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -32,8 +32,13 @@ class DesktopSession:
     """In-memory representation of an active KasmVNC desktop session.
 
     The Xvnc process is shared. Independent leases decide whether it
-    stays up: a viewer hold (manual VNC) and zero or more computer-use
-    ``run_id`` holds. The process is stopped only when both are empty.
+    stays up: viewer, computer-use, and MCP owners are projected from the
+    durable lease store. The process stops only when no holders remain.
+
+    ``generation`` identifies the Xvnc process incarnation: it is 0 for
+    unknown/recovered sessions and increments on every fresh Xvnc
+    start. Callers compare it by identity to detect stale restarts
+    (recovery/cold start) versus idempotent reuse of the same process.
     """
 
     workspace_id: uuid.UUID
@@ -43,13 +48,6 @@ class DesktopSession:
     viewer_held: bool = False
     computeruse_run_ids: set[str] = field(default_factory=set)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-@dataclass
-class DesktopReleaseResult:
-    """Outcome of releasing a desktop lease or force-stopping the process."""
-
-    stopped: bool
-    process_alive: bool
-    viewer_held: bool
-    computer_use_active: bool
+    generation: int = 0
+    mcp_active: bool = False
+    holder_count: int = 0

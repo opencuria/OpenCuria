@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The widget picker's preview: a group of app icons with their names. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@android:id/background"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="@drawable/opencuria_apps_widget_background"
+  android:clipToOutline="true"
+  android:orientation="vertical"
+  android:padding="@dimen/opencuria_apps_widget_padding">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_weight="1"
+    android:orientation="horizontal">
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#3F51B5" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#43A047" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#FB8C00" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#E91E63" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+  </LinearLayout>
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_weight="1"
+    android:orientation="horizontal">
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#1E88E5" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#8E24AA" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#00897B" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+
+    <LinearLayout
+      android:layout_width="0dp"
+      android:layout_height="match_parent"
+      android:layout_weight="1"
+      android:gravity="center"
+      android:orientation="vertical">
+
+      <ImageView
+        android:layout_width="44dp"
+        android:layout_height="44dp"
+        android:src="@drawable/opencuria_apps_widget_preview_icon"
+        android:tint="#FFB300" />
+
+      <ImageView
+        android:layout_width="32dp"
+        android:layout_height="6dp"
+        android:layout_marginTop="8dp"
+        android:src="@drawable/opencuria_apps_widget_preview_label" />
+    </LinearLayout>
+  </LinearLayout>
+</LinearLayout>

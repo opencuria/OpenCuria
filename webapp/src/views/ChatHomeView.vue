@@ -1,68 +1,183 @@
 <script setup lang="ts">
 /**
- * ChatHomeView — zentrierter Home-Screen (Route `/`, name `home`).
+ * ChatHomeView — centered home screen (route `/`, name `home`).
  *
- * OpenWebUI-Placeholder-Layout: Greeting + WorkspacePicker-Pill +
- * wiederverwendeter HarnessChatInput + Suggestion-Chips.
- * Kein Polling: ChatSidebar übernimmt Live-Updates; hier reicht ein
- * einmaliges fetchWorkspaces()/fetchSkills() beim Mount.
+ * OpenWebUI-style placeholder layout: greeting + WorkspacePicker pill +
+ * reused HarnessChatInput. Top right shows only the side-panel toggle
+ * (no new chat / processes / overflow menu).
+ * No polling: ChatSidebar handles live updates; a single
+ * fetchWorkspaces()/fetchSkills() on mount is enough here.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Container, Plus } from '@lucide/vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
+import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
+import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
-import { Button } from '@/components/ui/button'
-import type { HarnessSessionMode } from '@/types/harness'
+import WorkspaceSetupCard from '@/components/workspaces/WorkspaceSetupCard.vue'
+import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
+import { buildComposerSheets } from '@opencuria/chat-core/composerSheets'
+import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
+import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
 import { WorkspaceStatus } from '@/types'
 import { useAuthStore } from '@/stores/auth'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
+import { useSidePanelStore } from '@/stores/sidePanel'
 import { useSkillStore } from '@/stores/skills'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { subscribeToWorkspace } from '@/services/socket'
+
+const WorkspaceToolsSplit = defineAsyncComponent(
+  () => import('@/components/workspaces/WorkspaceToolsSplit.vue'),
+)
 
 const LAST_WORKSPACE_KEY = 'opencuria:last-workspace'
 
 const router = useRouter()
 const authStore = useAuthStore()
+const fileExplorer = useFileExplorerStore()
 const harnessStore = useHarnessStore()
+const sidePanelStore = useSidePanelStore()
 const skillStore = useSkillStore()
 const workspaceStore = useWorkspaceStore()
 
 const selectedWorkspaceId = ref<string | null>(null)
 const sending = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
+const composerHarnessId = ref<HarnessId>('native')
 const createOpen = ref(false)
+/** Drives the exit animation of the greeting block while sending. */
+const leaving = ref(false)
+const composerWrapRef = ref<HTMLElement | null>(null)
+const homeChatInputRef = ref<{
+  chooseMention: (candidate: MentionCandidate) => void
+  setPrompt: (text: string, options?: { append?: boolean; skillIds?: string[] }) => void
+  uploadChatFiles: (files: File[] | FileList) => Promise<void>
+} | null>(null)
 
-interface HomeSuggestion {
-  title: string
-  subtitle: string
-  prompt: string
+/**
+ * Mention/slash mirror from the home input, rendered as the topmost
+ * sheet — same component and look as the workspace chat panel.
+ */
+const mentionActive = ref(false)
+const mentionActiveIndex = ref(0)
+const mentionCandidates = ref<MentionCandidate[]>([])
+
+const composerSheets = computed(() =>
+  buildComposerSheets({
+    mention:
+      mentionActive.value && mentionCandidates.value.length > 0
+        ? { candidates: mentionCandidates.value, activeIndex: mentionActiveIndex.value }
+        : null,
+  }),
+)
+
+function handleMentionMirror(
+  open: boolean,
+  query: string,
+  candidates: MentionCandidate[],
+  index: number,
+): void {
+  void query
+  mentionCandidates.value = open ? candidates : []
+  mentionActiveIndex.value = open ? index : 0
+  mentionActive.value = open && candidates.length > 0
 }
 
-const suggestions: HomeSuggestion[] = [
-  {
-    title: 'Neues Projekt starten',
-    subtitle: 'Idee beschreiben, Struktur vorschlagen lassen',
-    prompt: 'Hilf mir, ein neues Projekt zu starten: ',
-  },
-  {
-    title: 'Code erklären lassen',
-    subtitle: 'Unbekannte Datei oder Funktion verstehen',
-    prompt: 'Erkläre mir folgenden Code: ',
-  },
-  {
-    title: 'Bug fixen',
-    subtitle: 'Fehlerbild schildern, Ursache finden',
-    prompt: 'Hilf mir, diesen Fehler zu beheben: ',
-  },
-  {
-    title: 'Dokumentation schreiben',
-    subtitle: 'README oder Kommentare entwerfen',
-    prompt: 'Schreibe eine Dokumentation für: ',
-  },
-]
+function handleMentionSelect(candidate: MentionCandidate): void {
+  homeChatInputRef.value?.chooseMention(candidate)
+}
+
+function handleMentionHover(index: number): void {
+  mentionActiveIndex.value = index
+}
+
+/** Seed the explorer tree so `@` file search works like in the chat. */
+let releaseHomeWorkspace: (() => void) | null = null
+let disposed = false
+
+function cleanupHomeSocket(): void {
+  releaseHomeWorkspace?.()
+  releaseHomeWorkspace = null
+}
+
+function setupHomeFileSearch(workspaceId: string | null): void {
+  if (disposed || !workspaceId) return
+  cleanupHomeSocket()
+  releaseHomeWorkspace = subscribeToWorkspace(workspaceId)
+  // The split side-panel (when open) and composer share the root listing.
+  // Avoid overlapping socket requests while retaining an initial root load.
+  if (!fileExplorer.loadingPaths?.has('/workspace')) {
+    void fileExplorer.fetchDirectory(workspaceId, '/workspace')
+  }
+}
+
+/**
+ * Home-composer drop zone: same behaviour as the workspace chat panel —
+ * files dropped anywhere over the home column upload into
+ * `/workspace/.opencuria/user-uploaded` and insert an `@file:` token.
+ * Subtle composer highlight only (no overlay); ignored while no workspace
+ * is ready for prompts.
+ */
+const homeDragCounter = ref(0)
+const homeDragActive = ref(false)
+const homeUploadDragState = computed(() => ({
+  active: homeDragActive.value,
+  uploading: false,
+}))
+
+function resetHomeDrag(): void {
+  homeDragCounter.value = 0
+  homeDragActive.value = false
+}
+
+function onHomeDragEnter(event: DragEvent): void {
+  if (!canPrompt.value || !isFileDrag(event)) return
+  event.preventDefault()
+  homeDragCounter.value += 1
+  homeDragActive.value = true
+}
+
+function onHomeDragLeave(event: DragEvent): void {
+  if (!homeDragActive.value) return
+  event.preventDefault()
+  homeDragCounter.value -= 1
+  if (homeDragCounter.value <= 0) resetHomeDrag()
+}
+
+function onHomeDragOver(event: DragEvent): void {
+  if (!canPrompt.value || !isFileDrag(event)) return
+  event.preventDefault()
+}
+
+function onHomeDrop(event: DragEvent): void {
+  // Same dedup guard as the workspace chat panel: the composer card handles
+  // its own drops (stopPropagation + preventDefault), so a handled event
+  // reaching us must not upload a second time.
+  if (event.defaultPrevented) return
+  const wasActive = homeDragActive.value
+  resetHomeDrag()
+  if (!canPrompt.value) return
+  if (!wasActive && !isFileDrag(event)) return
+  event.preventDefault()
+  const files = getDroppedFiles(event)
+  if (files.length === 0) return
+  void homeChatInputRef.value?.uploadChatFiles(files)
+}
+
+function isWorkspaceAvailable(workspace: {
+  id: string
+  status: WorkspaceStatus
+  runner_online: boolean
+  active_operation: string | null
+  has_active_session: boolean
+}): boolean {
+  return workspaceStore.canUseWorkspace(workspace.id) && !workspace.has_active_session
+}
 
 const greetingName = computed(() => {
   const email = authStore.user?.email ?? ''
@@ -74,36 +189,41 @@ const readyWorkspace = computed(() => {
   const workspace = workspaceStore.workspaces.find(
     (entry) => entry.id === selectedWorkspaceId.value,
   )
-  if (
-    workspace &&
-    workspace.status === WorkspaceStatus.RUNNING &&
-    workspace.runner_online &&
-    !workspace.active_operation
-  ) {
+  if (workspace && workspaceStore.canUseWorkspace(workspace.id)) {
     return workspace
   }
   return null
 })
 
 const hasWorkspaces = computed(() => workspaceStore.workspaces.length > 0)
+/** First-run guide, only once the list is known to be empty (no flash on reload). */
+const showSetup = computed(() => workspaceStore.loaded && !hasWorkspaces.value)
 
 const busyMessage = computed(() => {
   if (!hasWorkspaces.value) return ''
-  if (!selectedWorkspaceId.value) return 'Wähle einen laufenden Workspace'
+  if (!selectedWorkspaceId.value) return 'Select a running workspace'
   const workspace = workspaceStore.workspaces.find(
     (entry) => entry.id === selectedWorkspaceId.value,
   )
-  if (!workspace) return 'Wähle einen laufenden Workspace'
+  if (!workspace) return 'Select a running workspace'
+  if (workspaceStore.isWorkspaceTransitioning(workspace.id))
+    return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? 'Workspace is busy…'
   if (workspace.status !== WorkspaceStatus.RUNNING || !workspace.runner_online) {
-    return 'Workspace ist nicht bereit — Runner offline oder gestoppt'
+    return 'Workspace is not ready — runner offline or stopped'
   }
   if (workspace.active_operation) {
-    return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? 'Workspace ist beschäftigt…'
+    return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? 'Workspace is busy…'
   }
   return ''
 })
 
 const inputDisabled = computed(() => sending.value || !readyWorkspace.value)
+const canPrompt = computed(() => readyWorkspace.value !== null)
+
+function handleToggleSidePanel(): void {
+  if (!canPrompt.value) return
+  sidePanelStore.toggle()
+}
 
 function pickInitialWorkspace(): void {
   const workspaces = workspaceStore.workspaces
@@ -112,8 +232,16 @@ function pickInitialWorkspace(): void {
     return
   }
   const stored = localStorage.getItem(LAST_WORKSPACE_KEY)
-  if (stored && workspaces.some((entry) => entry.id === stored)) {
-    selectedWorkspaceId.value = stored
+  if (stored) {
+    const storedWorkspace = workspaces.find((entry) => entry.id === stored)
+    if (storedWorkspace && isWorkspaceAvailable(storedWorkspace)) {
+      selectedWorkspaceId.value = stored
+      return
+    }
+  }
+  const firstAvailable = workspaces.find((entry) => isWorkspaceAvailable(entry))
+  if (firstAvailable) {
+    selectedWorkspaceId.value = firstAvailable.id
     return
   }
   const firstReady = workspaces.find(
@@ -149,10 +277,14 @@ async function handleSend(
   model: string,
   skillIds: string[],
   effort: string,
+  harnessId: HarnessId = 'native',
 ): Promise<void> {
   const workspace = readyWorkspace.value
   if (!workspace || sending.value) return
   sending.value = true
+  const animate = !prefersReducedMotion()
+  const sendStartedAt = performance.now()
+  if (animate) leaving.value = true
   try {
     const session = await harnessStore.createSession(
       workspace.id,
@@ -161,132 +293,177 @@ async function handleSend(
       model,
       skillIds,
       effort,
+      harnessId,
     )
     const sessionId = session?.id ?? harnessStore.activeSessionId
-    if (sessionId) {
-      await router.push({
-        name: 'workspace-detail',
-        params: { id: workspace.id },
-        query: { session: sessionId },
-      })
+    if (!sessionId) {
+      leaving.value = false
+      // The composer already cleared itself; give the draft back.
+      homeChatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
+      return
     }
+    if (animate) {
+      // Hand the composer rect to the chat view so it can FLIP-morph the
+      // composer from this centered position to the bottom of the chat.
+      const card =
+        composerWrapRef.value?.querySelector('[data-testid="composer-card"]') ??
+        composerWrapRef.value
+      const rect = card?.getBoundingClientRect()
+      if (rect) armComposerTransition(rect)
+      // Let the exit animation finish before unmounting (the network wait
+      // usually covers it already).
+      const remaining = HOME_EXIT_MS - (performance.now() - sendStartedAt)
+      if (remaining > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remaining))
+      }
+    }
+    // Seed the detail view so it renders immediately (no loading spinner);
+    // the polling refresh merges fresh fields into it.
+    workspaceStore.activeWorkspace = workspace
+    await router.push({
+      name: 'workspace-detail',
+      params: { id: workspace.id },
+      query: { session: sessionId },
+    })
   } finally {
     sending.value = false
   }
-}
-
-function handleSuggestion(suggestion: HomeSuggestion): void {
-  void handleSend(
-    suggestion.prompt,
-    composerMode.value,
-    harnessStore.modelInput,
-    [],
-    harnessStore.effortInput,
-  )
 }
 
 onMounted(async () => {
   if (workspaceStore.workspaces.length === 0) {
     await workspaceStore.fetchWorkspaces()
   }
+  if (disposed) return
   pickInitialWorkspace()
   void skillStore.fetchSkills()
+  setupHomeFileSearch(selectedWorkspaceId.value)
 })
+
+onUnmounted(() => {
+  disposed = true
+  cleanupHomeSocket()
+})
+
+watch(
+  () => selectedWorkspaceId.value,
+  (next, prev) => {
+    if (next === prev) return
+    cleanupHomeSocket()
+    setupHomeFileSearch(next)
+  },
+)
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="chat-home">
-    <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
-      <div class="mb-4 flex justify-center">
-        <OpenCuriaLogo icon-only alt="OpenCuria" class="size-16" />
-      </div>
-
-      <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
-        <template v-if="greetingName">Wie kann ich helfen, {{ greetingName }}?</template>
-        <template v-else>Wie kann ich helfen?</template>
-      </h1>
-
-      <div class="mt-4 flex justify-center">
-        <WorkspacePicker
-          :model-value="selectedWorkspaceId"
-          @update:model-value="handleSelectionChange"
-        />
-      </div>
-
-      <div
-        v-if="!hasWorkspaces"
-        class="mx-auto mt-6 flex max-w-md flex-col items-center gap-3 rounded-lg border border-border bg-card px-6 py-8"
-        data-testid="chat-home-empty"
+  <WorkspaceToolsSplit :workspace-id="selectedWorkspaceId ?? ''" :can-prompt="canPrompt">
+    <template #header>
+      <header
+        class="flex shrink-0 items-center justify-end px-1.5 pb-1 pt-2 sm:px-2.5"
+        data-testid="chat-home-header"
       >
-        <Container :size="20" class="text-muted-foreground" aria-hidden="true" />
-        <p class="text-sm text-muted-foreground">
-          Noch kein Workspace vorhanden. Erstelle einen Workspace, um zu starten.
-        </p>
-        <Button size="sm" data-testid="chat-home-create" @click="createOpen = true">
-          <Plus :size="14" aria-hidden="true" />
-          Workspace erstellen
-        </Button>
-        <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreatedWorkspace">
-          <span class="hidden" aria-hidden="true" />
-        </CreateWorkspaceDialog>
-      </div>
-
-      <div v-else class="mt-6">
-        <HarnessChatInput
-          :workspace-id="selectedWorkspaceId ?? undefined"
-          :session-id="null"
-          :mode="composerMode"
-          :model="harnessStore.modelInput"
-          :effort="harnessStore.effortInput"
-          :skill-options="skillStore.skills"
-          :disabled="inputDisabled"
-          :sending="sending"
-          :busy-message="busyMessage"
-          class="text-left"
-          data-testid="chat-home-composer"
-          @update:mode="composerMode = $event"
-          @update:model="harnessStore.modelInput = $event"
-          @update:effort="harnessStore.effortInput = $event"
-          @send="handleSend"
+        <SidePanelToggle
+          :open="sidePanelStore.isOpen"
+          :disabled="!canPrompt"
+          @toggle="handleToggleSidePanel"
         />
+      </header>
+    </template>
 
+    <div
+      class="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      data-testid="chat-home"
+      @dragenter="onHomeDragEnter"
+      @dragleave="onHomeDragLeave"
+      @dragover="onHomeDragOver"
+      @drop="onHomeDrop"
+    >
+      <div class="m-auto w-full max-w-3xl px-4 py-16 text-center sm:py-24">
         <div
-          class="mt-4 grid grid-cols-1 gap-2 text-left sm:grid-cols-2"
-          data-testid="chat-home-suggestions"
+          class="transition-all duration-200 ease-in"
+          :class="leaving ? '-translate-y-2 opacity-0' : 'translate-y-0 opacity-100'"
+          data-testid="chat-home-hero"
         >
-          <button
-            v-for="(suggestion, idx) in suggestions"
-            :key="suggestion.title"
-            type="button"
-            :style="{ animationDelay: `${idx * 45}ms` }"
-            :disabled="inputDisabled"
-            :aria-label="`${suggestion.title} — ${suggestion.subtitle}`"
-            data-testid="chat-home-suggestion"
-            class="animate-[harness-fade-up_0.35s_ease-out_both] rounded-lg border border-border bg-card px-3 py-2.5 text-left transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-            @click="handleSuggestion(suggestion)"
+          <div class="mb-4 flex justify-center">
+            <OpenCuriaLogo icon-only motion="idle" alt="OpenCuria" class="size-16" />
+          </div>
+
+          <h1 class="text-2xl font-medium text-foreground" data-testid="chat-home-greeting">
+            <template v-if="greetingName">How can I help, {{ greetingName }}?</template>
+            <template v-else>How can I help?</template>
+          </h1>
+
+          <!-- Nothing to pick without workspaces; keep its space during the first load. -->
+          <div
+            v-if="!showSetup"
+            class="mt-4 flex justify-center"
+            :class="{ invisible: !workspaceStore.loaded }"
           >
-            <span class="block truncate text-sm font-medium text-foreground">
-              {{ suggestion.title }}
-            </span>
-            <span class="block truncate text-xs text-muted-foreground">
-              {{ suggestion.subtitle }}
-            </span>
-          </button>
+            <WorkspacePicker
+              :model-value="selectedWorkspaceId"
+              @update:model-value="handleSelectionChange"
+            />
+          </div>
+        </div>
+
+        <!-- Same footprint as the composer, so its arrival does not shift the page. -->
+        <div
+          v-if="!workspaceStore.loaded && !hasWorkspaces"
+          class="mt-6 px-3 pt-3 pb-2 sm:px-4 sm:pt-4"
+          aria-label="Loading workspaces"
+          data-testid="chat-home-loading"
+        >
+          <div class="h-[7.5rem] animate-pulse rounded-3xl bg-muted/50" />
+        </div>
+
+        <div v-else-if="showSetup" class="mt-8" data-testid="chat-home-empty">
+          <WorkspaceSetupCard @create="createOpen = true" />
+          <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreatedWorkspace">
+            <span class="hidden" aria-hidden="true" />
+          </CreateWorkspaceDialog>
+        </div>
+
+        <div v-else ref="composerWrapRef" class="mt-6">
+          <div class="flex min-w-0 flex-1 flex-col text-left">
+            <HarnessSheetStack
+              :sheets="composerSheets"
+              @mention-select="handleMentionSelect"
+              @mention-hover="handleMentionHover"
+            />
+            <HarnessChatInput
+              ref="homeChatInputRef"
+              :workspace-id="selectedWorkspaceId ?? undefined"
+              :session-id="null"
+              restore-last-selection
+              :mode="composerMode"
+              :harness-id="composerHarnessId"
+              :model="harnessStore.modelInput"
+              :effort="harnessStore.effortInput"
+              :files="fileExplorer.tree"
+              :skill-options="skillStore.skills"
+              :disabled="inputDisabled"
+              :sending="sending"
+              :busy-message="busyMessage"
+              :upload-drag="homeUploadDragState"
+              :attached="composerSheets.length > 0"
+              mention-controlled
+              :mention-active-index="mentionActiveIndex"
+              class="text-left"
+              data-testid="chat-home-composer"
+              @update:mode="composerMode = $event"
+              @update:harness-id="composerHarnessId = $event"
+              @update:model="harnessStore.setComposerModel($event)"
+              @update:effort="harnessStore.setComposerEffort($event)"
+              @send="handleSend"
+              @mention-change="
+                (open, query, candidates, index) =>
+                  handleMentionMirror(open, query, candidates, index)
+              "
+              @mention-select="handleMentionSelect"
+            />
+          </div>
         </div>
       </div>
     </div>
-  </div>
+  </WorkspaceToolsSplit>
 </template>
-
-<style scoped>
-@keyframes harness-fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-</style>

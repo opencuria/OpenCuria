@@ -5,7 +5,7 @@
 import { computed, nextTick, ref, watch, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  BookOpen,
+  CircleAlert,
   Layers,
   MessageSquare,
   Plus,
@@ -22,13 +22,14 @@ import {
 import { Input } from '@/components/ui/input'
 import {
   conversationTitle,
+  extractActionRequired,
   extractActiveConversations,
   selectSidebarWorkspaces,
   countableWorkspaces,
-} from '@/lib/conversationGroups'
+} from '@opencuria/chat-core/conversationGroups'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
 import type { Workspace } from '@/types'
 
 const props = withDefaults(
@@ -48,6 +49,7 @@ interface PaletteItem {
   label: string
   description?: string
   icon: Component
+  attention?: boolean
   run: () => void
 }
 
@@ -61,8 +63,8 @@ const activeIndex = ref(0)
 const actionItems: PaletteItem[] = [
   {
     id: 'action-new-chat',
-    group: 'Aktionen',
-    label: 'Neuer Chat',
+    group: 'Actions',
+    label: 'New chat',
     icon: Plus,
     run: () => {
       closeAndRun(() => {
@@ -72,8 +74,8 @@ const actionItems: PaletteItem[] = [
   },
   {
     id: 'action-workspaces',
-    group: 'Aktionen',
-    label: 'Workspaces verwalten',
+    group: 'Actions',
+    label: 'Manage workspaces',
     icon: Layers,
     run: () => {
       closeAndRun(() => {
@@ -83,23 +85,12 @@ const actionItems: PaletteItem[] = [
   },
   {
     id: 'action-settings',
-    group: 'Aktionen',
-    label: 'Einstellungen',
+    group: 'Actions',
+    label: 'Settings',
     icon: Settings,
     run: () => {
       closeAndRun(() => {
         window.dispatchEvent(new CustomEvent('opencuria:open-settings'))
-      })
-    },
-  },
-  {
-    id: 'action-docs',
-    group: 'Aktionen',
-    label: 'Docs',
-    icon: BookOpen,
-    run: () => {
-      closeAndRun(() => {
-        void router.push('/docs')
       })
     },
   },
@@ -127,12 +118,14 @@ function openWorkspace(workspace: Workspace): void {
 }
 
 function chatItem(conversation: HarnessConversation, group: string): PaletteItem {
+  const attention = Boolean(conversation.needs_attention)
   return {
     id: `chat-${conversation.session_id}`,
     group,
     label: conversationTitle(conversation),
     description: conversation.workspace_name,
-    icon: MessageSquare,
+    icon: attention ? CircleAlert : MessageSquare,
+    attention,
     run: () => openConversation(conversation),
   }
 }
@@ -153,16 +146,22 @@ const items = computed<PaletteItem[]>(() => {
   const workspaces = countableWorkspaces(workspaceStore.workspaces)
 
   if (!q) {
+    const actionRequired = extractActionRequired(conversations)
+    const actionRequiredIds = new Set(actionRequired.map((row) => row.session_id))
     const active = extractActiveConversations(conversations)
-    const activeIds = new Set(active.map((row) => row.session_id))
+    const featuredIds = new Set([
+      ...actionRequiredIds,
+      ...active.map((row) => row.session_id),
+    ])
     const recent = conversations
-      .filter((row) => !activeIds.has(row.session_id))
+      .filter((row) => !featuredIds.has(row.session_id))
       .slice(0, 8)
     const sidebarWorkspaces = selectSidebarWorkspaces(workspaces, conversations, 5)
     return [
       ...actionItems,
-      ...active.map((row) => chatItem(row, 'Aktiv')),
-      ...recent.map((row) => chatItem(row, 'Zuletzt verwendet')),
+      ...actionRequired.map((row) => chatItem(row, 'Action required')),
+      ...active.map((row) => chatItem(row, 'Active')),
+      ...recent.map((row) => chatItem(row, 'Recently used')),
       ...sidebarWorkspaces.map(workspaceItem),
     ]
   }
@@ -182,7 +181,7 @@ const items = computed<PaletteItem[]>(() => {
   return [
     ...chats.map((row) => chatItem(row, 'Chats')),
     ...matchedWorkspaces.map(workspaceItem),
-    ...matchedActions.map((item) => ({ ...item, group: 'Aktionen' })),
+    ...matchedActions.map((item) => ({ ...item, group: 'Actions' })),
   ]
 })
 
@@ -261,11 +260,15 @@ function itemIndex(item: PaletteItem): number {
 
 <template>
   <Dialog :open="props.open" @update:open="setOpen">
-    <DialogContent class="max-w-xl p-0" :show-close-button="false">
+    <DialogContent
+      class="gap-0 p-0 sm:max-w-2xl"
+      data-testid="command-palette"
+      :show-close-button="false"
+    >
       <DialogHeader class="sr-only">
-        <DialogTitle>Suchen</DialogTitle>
+        <DialogTitle>Search</DialogTitle>
         <DialogDescription>
-          Suche über Chats, Workspaces und Aktionen. Enter führt die Auswahl aus.
+          Search chats, workspaces, and actions. Press Enter to open the selection.
         </DialogDescription>
       </DialogHeader>
 
@@ -274,9 +277,9 @@ function itemIndex(item: PaletteItem): number {
         <Input
           v-model="query"
           data-testid="command-palette-input"
-          placeholder="Chats, Workspaces, Aktionen…"
+          placeholder="Chats, workspaces, actions…"
           class="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
-          aria-label="Befehlspalette durchsuchen"
+          aria-label="Search command palette"
           @keydown="handleKeydown"
         />
         <kbd
@@ -289,10 +292,10 @@ function itemIndex(item: PaletteItem): number {
       <div
         class="max-h-[50vh] overflow-y-auto p-1.5"
         role="listbox"
-        aria-label="Suchergebnisse"
+        aria-label="Search results"
         data-testid="command-palette-results"
       >
-        <div v-for="group in groups" :key="group.heading" class="mb-1">
+        <div v-for="group in groups" :key="group.heading" class="mb-1 last:mb-0">
           <div class="px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground">
             {{ group.heading }}
           </div>
@@ -308,7 +311,11 @@ function itemIndex(item: PaletteItem): number {
             @click="item.run()"
             @mousemove="activeIndex = itemIndex(item)"
           >
-            <component :is="item.icon" class="size-4 shrink-0 text-muted-foreground" />
+            <component
+              :is="item.icon"
+              class="size-4 shrink-0"
+              :class="item.attention ? 'text-amber-500' : 'text-muted-foreground'"
+            />
             <div class="min-w-0 flex-1">
               <div class="truncate text-[13px] font-medium text-foreground">
                 {{ item.label }}
@@ -320,6 +327,13 @@ function itemIndex(item: PaletteItem): number {
                 {{ item.description }}
               </div>
             </div>
+            <span
+              v-if="item.attention"
+              data-testid="palette-attention-badge"
+              class="shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300"
+            >
+              Action
+            </span>
           </button>
         </div>
 
@@ -327,8 +341,8 @@ function itemIndex(item: PaletteItem): number {
           v-if="items.length === 0"
           class="flex flex-col items-center gap-1 py-8 text-muted-foreground"
         >
-          <span class="text-sm">Keine Treffer</span>
-          <span class="text-xs">Anderen Suchbegriff versuchen</span>
+          <span class="text-sm">No results</span>
+          <span class="text-xs">Try a different search term</span>
         </div>
       </div>
 
@@ -338,10 +352,10 @@ function itemIndex(item: PaletteItem): number {
         <span>
           <kbd class="rounded border border-border px-1">↑</kbd>
           <kbd class="rounded border border-border px-1">↓</kbd>
-          navigieren
+          navigate
         </span>
-        <span><kbd class="rounded border border-border px-1">↵</kbd> öffnen</span>
-        <span><kbd class="rounded border border-border px-1">esc</kbd> schließen</span>
+        <span><kbd class="rounded border border-border px-1">↵</kbd> open</span>
+        <span><kbd class="rounded border border-border px-1">esc</kbd> close</span>
       </div>
     </DialogContent>
   </Dialog>

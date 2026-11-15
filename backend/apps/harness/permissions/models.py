@@ -78,6 +78,12 @@ class PermissionRequest(models.Model):
     class Meta:
         db_table = "harness_permission_request"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["session_id", "status", "created_at"],
+                name="harness_perm_session_state_idx",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"PermissionRequest({self.tool}:{self.pattern}={self.status})"

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import tracemalloc
+
+import pytest
 from pydantic import BaseModel, Field
 
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 from apps.harness.tools.files import READ_DEFAULT_LIMIT, READ_MAX_BYTES
 from apps.harness.tools.shell import BASH_MAX_BYTES, GLOB_MAX_RESULTS, GREP_MAX_RESULTS
-from apps.harness.tools.truncate import MAX_BYTES, MAX_LINES, truncate_tool_output
+from apps.harness.tools.truncate import (
+    MAX_BYTES,
+    MAX_LINES,
+    TruncateDirection,
+    truncate_tool_output,
+)
 
 
 def test_truncate_constants_match_opencode() -> None:
@@ -144,3 +152,130 @@ def test_truncate_head_oversized_second_line_byte_clip() -> None:
     preview = result.content.split("\n\n...", 1)[0]
     assert len(preview.encode("utf-8")) <= MAX_BYTES
     assert preview.startswith("a" * 100)
+
+
+@pytest.mark.parametrize(
+    ("text", "max_lines", "max_bytes", "head", "tail"),
+    [
+        ("a\nb", 2, 3, "a\nb", "a\nb"),
+        (
+            "a\nb\n",
+            2,
+            20,
+            "a\nb\n\n...1 lines truncated...",
+            "...1 lines truncated...\n\nb\n",
+        ),
+        (
+            "a\nbbbb",
+            1,
+            3,
+            "a\n\n...1 lines truncated...",
+            "...3 bytes truncated...\n\nbbb",
+        ),
+        (
+            "a\nbb",
+            10,
+            3,
+            "a\n\n...3 bytes truncated...",
+            "...2 bytes truncated...\n\nbb",
+        ),
+        (
+            "\n\n\n",
+            2,
+            20,
+            "\n\n\n...2 lines truncated...",
+            "...2 lines truncated...\n\n\n",
+        ),
+        (
+            "a\r\nb\r\nc",
+            2,
+            20,
+            "a\r\nb\r\n\n...1 lines truncated...",
+            "...1 lines truncated...\n\nb\r\nc",
+        ),
+        (
+            "🚀éab",
+            10,
+            5,
+            "🚀\n\n...4 bytes truncated...",
+            "...4 bytes truncated...\n\néab",
+        ),
+        (
+            "é\n日本\nfin",
+            10,
+            8,
+            "é\n\n...11 bytes truncated...",
+            "...10 bytes truncated...\n\nfin",
+        ),
+        ("a\nb", 0, 3, "a\n\n...2 bytes truncated...", "...2 bytes truncated...\n\nb"),
+        (
+            "ab\ncd",
+            2,
+            0,
+            "\n\n...5 bytes truncated...",
+            "...3 bytes truncated...\n\ncd",
+        ),
+        (
+            "abc\ndef",
+            2,
+            -1,
+            "ab\n\n...5 bytes truncated...",
+            "...5 bytes truncated...\n\nef",
+        ),
+    ],
+)
+@pytest.mark.parametrize("direction", ["head", "tail"])
+def test_truncate_preserves_boundaries_and_markers(
+    text: str,
+    max_lines: int,
+    max_bytes: int,
+    head: str,
+    tail: str,
+    direction: TruncateDirection,
+) -> None:
+    """Byte/line precedence, empty lines and UTF-8 clipping stay observable."""
+    result = truncate_tool_output(
+        text, max_lines=max_lines, max_bytes=max_bytes, direction=direction
+    )
+    assert result.content == (head if direction == "head" else tail)
+    assert result.truncated == (text != result.content)
+
+
+@pytest.mark.parametrize("direction", ["head", "tail"])
+@pytest.mark.parametrize("line", ["document line: complete\n", "café 日本 🚀\n", "x"])
+def test_truncate_temporary_allocations_stay_bounded(
+    line: str, direction: TruncateDirection
+) -> None:
+    """Multi-megabyte input must not allocate a full split/UTF-8 copy."""
+    text = line * (4 * 1024 * 1024 // len(line))
+    tracemalloc.start()
+    try:
+        result = truncate_tool_output(text, direction=direction)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.truncated
+    assert peak < 1024 * 1024
+
+
+@pytest.mark.parametrize("direction", ["head", "tail"])
+def test_truncate_counts_utf8_across_large_input(
+    direction: TruncateDirection,
+) -> None:
+    """Multibyte characters straddling counting chunks retain exact byte totals."""
+    text = "é" * 65535 + "🚀"
+    result = truncate_tool_output(text, max_bytes=8, direction=direction)
+    removed = len(text.encode("utf-8")) - 8
+    expected = (
+        f"{'é' * 4}\n\n...{removed} bytes truncated..."
+        if direction == "head"
+        else f"...{removed} bytes truncated...\n\néé🚀"
+    )
+    assert result.content == expected
+    assert result.truncated
+
+
+def test_truncate_rejects_invalid_utf8_even_outside_preview() -> None:
+    """Clipping must not hide an encoding failure in the discarded suffix."""
+    with pytest.raises(UnicodeEncodeError):
+        truncate_tool_output("a" * 65536 + "\ud800", max_bytes=1)

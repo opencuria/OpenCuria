@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessSheetStack from './HarnessSheetStack.vue'
-import type { ComposerSheet } from '@/lib/composerSheets'
-import type { HarnessTodo } from '@/types/harness'
+import type { ComposerSheet } from '@opencuria/chat-core/composerSheets'
+import type { HarnessTodo } from '@opencuria/chat-core/harness'
 
 vi.mock('@/components/chat/HarnessMentionSheet.vue', () => ({
   default: {
@@ -46,6 +46,15 @@ vi.mock('@/components/chat/HarnessNoticeSheet.vue', () => ({
   default: {
     props: ['notice'],
     template: '<div data-testid="notice-stub">{{ notice.text }}:{{ notice.tone }}</div>',
+  },
+}))
+
+vi.mock('@/components/chat/HarnessQueueSheet.vue', () => ({
+  default: {
+    props: ['steers'],
+    emits: ['withdraw'],
+    template:
+      '<button data-testid="queue-stub" @click="$emit(\'withdraw\', steers[0].id)">{{ steers.length }}</button>',
   },
 }))
 
@@ -241,5 +250,26 @@ describe('HarnessSheetStack', () => {
     const processes = wrapper.findComponent({ name: 'HarnessProcessSheet' })
     processes.vm.$emit('close')
     expect(wrapper.emitted('close-processes')).toEqual([[]])
+  })
+
+  it('renders the queue sheet and forwards withdraw requests', async () => {
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [
+          {
+            kind: 'queue',
+            queue: [{ id: 'steer-1', content: 'Use pnpm', created_at: '2026-10-16T10:00:00Z' }],
+          },
+          { kind: 'todos', todos: [makeTodo('t1')] },
+        ],
+      },
+    })
+
+    expect(wrapper.get('[data-testid="composer-sheet-top"]').attributes('data-sheet-kind')).toBe(
+      'queue',
+    )
+    expect(wrapper.find('[data-testid="todo-stub"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="queue-stub"]').trigger('click')
+    expect(wrapper.emitted('withdraw-steer')).toEqual([['steer-1']])
   })
 })

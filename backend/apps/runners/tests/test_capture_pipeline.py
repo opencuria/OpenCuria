@@ -1,0 +1,491 @@
+"""Durable explicit stop/capture/replace (or resume) child progression."""
+
+from apps.runners.services.infra.frontend_bus import FrontendBusService
+
+
+import pytest
+
+from apps.runners.models import (
+    CaptureRequest,
+    LifecycleCommand,
+    WorkspaceRecreateRequest,
+)
+from apps.runners.operations import OperationRepository
+from apps.runners.services.capture import CaptureService
+from apps.runners.services.operation_results import apply_result
+from apps.runners.services.runner_diagnostics import FAILED
+from apps.runners.tests.conftest import capture_version_fields, has_busy_agent
+from apps.runners.tests.test_services import service as service
+from apps.runners.tests.test_services import sio_mock as sio_mock
+from common.exceptions import ConflictError
+
+pytestmark = pytest.mark.django_db
+
+
+def result(service, runner, task, event, **extra):
+    row = LifecycleCommand.objects.get(task=task)
+    data = OperationRepository.envelope(
+        row, {"task_id": str(task.id), "workspace_id": str(task.workspace_id), **extra}
+    )
+    return apply_result(service, str(runner.id), event, data)
+
+
+def test_automatic_stop_capture_resume(service, runner, workspace):
+    workspace.credentials_present = True
+    workspace.save()
+    _, stop = CaptureService.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
+    req = CaptureRequest.objects.get(workspace=workspace)
+    assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
+    CaptureService.tick()
+    req.refresh_from_db()
+    assert req.phase == "capture"
+    assert LifecycleCommand.objects.get(task=req.child).payload[
+        "image_instance_id"
+    ] == str(req.image_id)
+    assert result(
+        service,
+        runner,
+        req.child,
+        "image_artifact:created",
+        image_artifact_id="/capture.qcow2",
+        name="capture",
+        size_bytes=123,
+    )
+    CaptureService.tick()
+    req.refresh_from_db()
+    assert req.phase == "completed"
+    assert req.image.status == "ready"
+    recreate = WorkspaceRecreateRequest.objects.get(workspace=workspace)
+    workspace.refresh_from_db()
+    assert recreate.reason == "capture" and recreate.phase == "remove"
+    assert recreate.final_running is True
+    assert recreate.child.type == "remove_workspace"
+    assert workspace.pending_base_image_instance_id == req.image_id
+    assert workspace.active_operation == "capturing_image"
+
+
+def test_unknown_capture_fences_and_suppressed_resume(
+    service, runner, stopped_workspace
+):
+    ws = stopped_workspace
+    ws.save()
+    _, task = CaptureService.allocate(ws.id, "capture", has_busy_agent=has_busy_agent)
+    OperationRepository.intervene(task, "Unknown capture deadline")
+    CaptureService.tick()
+    req = CaptureRequest.objects.get(workspace=ws)
+    ws.refresh_from_db()
+    assert req.phase == "capture" and ws.current_task_id == task.id
+    assert "Unknown" in req.diagnostic
+
+
+def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
+    service, runner, workspace
+):
+    workspace.save()
+    _, stop = CaptureService.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
+    assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
+    CaptureService.tick()
+    req = CaptureRequest.objects.get(workspace=workspace)
+    assert result(
+        service, runner, req.child, "image_artifact:failed", error="safe refusal"
+    )
+    CaptureService.tick()
+    req.refresh_from_db()
+    assert req.phase == "resume"
+    assert req.image.status == "failed"
+
+
+def test_journal_interruption_failure_retains_fence(service, runner, stopped_workspace):
+    ws = stopped_workspace
+    ws.save()
+    _, task = CaptureService.allocate(ws.id, "capture", has_busy_agent=has_busy_agent)
+    assert not result(
+        service,
+        runner,
+        task,
+        "image_artifact:failed",
+        error="Operation interrupted",
+        outcome_known=False,
+        execution_finished=True,
+    )
+    CaptureService.tick()
+    ws.refresh_from_db()
+    assert ws.current_task_id == task.id
+    assert LifecycleCommand.objects.get(task=task).phase == "intervention"
+
+
+def test_retirement_after_clean_stop_preserves_restart_approval(
+    service, runner, workspace
+):
+    from apps.runners.models import ImageInstance
+
+    base = ImageInstance.objects.create(
+        runner=runner,
+        name="base",
+        status="ready",
+        **capture_version_fields(runner, workspace.created_by, "base"),
+    )
+    workspace.base_image_instance = base
+    workspace.save()
+    _, stop = CaptureService.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
+    assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
+    base.status = "retired"
+    base.save()
+    CaptureService.tick()
+    req = CaptureRequest.objects.get(workspace=workspace)
+    assert req.phase == "resume"
+    assert req.image.status == "failed"
+    assert req.child.type == "resume_workspace"
+
+
+def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
+    service, runner, workspace
+):
+    workspace.save()
+    _, stop = CaptureService.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
+    for _ in range(2):
+        assert not result(
+            service,
+            runner,
+            stop,
+            "workspace:error",
+            error="Handler failed",
+            execution_finished=True,
+            outcome_known=False,
+        )
+        workspace.refresh_from_db()
+        assert workspace.current_task_id == stop.id
+        assert LifecycleCommand.objects.get(task=stop).phase == "intervention"
+        with pytest.raises(ConflictError):
+            CaptureService.allocate(
+                workspace.id, "overlap", has_busy_agent=has_busy_agent
+            )
+    CaptureService.tick()
+    assert CaptureRequest.objects.get(workspace=workspace).phase == "stop"
+
+
+def test_capture_resume_child_retains_exact_qemu_resources(
+    service, runner, workspace, monkeypatch
+):
+    from apps.credentials.services import CredentialSvc
+
+    def unresolvable(self, ws):
+        raise RuntimeError("credential revoked")
+
+    monkeypatch.setattr(CredentialSvc, "resolve_workspace_credentials", unresolvable)
+    workspace.qemu_vcpus = 1
+    workspace.qemu_memory_mb = 1024
+    workspace.qemu_disk_size_gb = 20
+    workspace.save()
+    _, stop = CaptureService.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
+    assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
+    CaptureService.tick()
+    req = CaptureRequest.objects.get(workspace=workspace)
+    assert result(
+        service,
+        runner,
+        req.child,
+        "image_artifact:created",
+        image_artifact_id="/capture.qcow2",
+        name="capture",
+        size_bytes=123,
+    )
+    CaptureService.tick()
+    req.refresh_from_db()
+    payload = OperationRepository.delivery_payload(
+        LifecycleCommand.objects.get(task=req.child)
+    )
+    assert req.phase == "resume"
+    assert [
+        payload[k] for k in ("qemu_vcpus", "qemu_memory_mb", "qemu_disk_size_gb")
+    ] == [1, 1024, 20]
+    assert result(
+        service, runner, req.child, "workspace:resumed", credentials_present=False
+    )
+    CaptureService.tick()
+    req.refresh_from_db()
+    workspace.refresh_from_db()
+    assert req.phase == "completed"
+    assert "stays on its previous version" in req.diagnostic
+    assert workspace.current_task_id is None and workspace.status == "running"
+    assert not WorkspaceRecreateRequest.objects.filter(workspace=workspace).exists()
+
+
+def test_full_success_holds_parent_until_recovery(
+    service,
+    sio_mock,
+    runner,
+    workspace,
+    monkeypatch,
+    django_capture_on_commit_callbacks,
+):
+    import uuid
+    from unittest.mock import Mock
+
+    from asgiref.sync import async_to_sync
+
+    from apps.runners.models import ImageInstance, Task
+    from apps.runners.repositories import TaskRepository, WorkspaceRepository
+    from apps.runners.services.recovery import RecoveryService
+
+    workspace.credentials_present = True
+    workspace.save()
+    frontend = Mock()
+    monkeypatch.setattr(FrontendBusService, "forward_to_frontend", frontend)
+    with django_capture_on_commit_callbacks(execute=True):
+        _, stop = async_to_sync(service.image_lifecycle.create_image_artifact)(
+            workspace.id, "capture"
+        )
+    request = CaptureRequest.objects.get(workspace=workspace)
+    assert request.prior_running and request.phase == "stop"
+    assert request.child_id == stop.id
+    for phase, event, extra, status in [
+        ("stop", "workspace:stopped", {"credentials_present": False}, "stopped"),
+        (
+            "capture",
+            "image_artifact:created",
+            {
+                "image_artifact_id": "/capture.qcow2",
+                "name": "capture",
+                "size_bytes": 123,
+            },
+            "stopped",
+        ),
+        ("remove", "workspace:removed", {"result": "deleted"}, "creating"),
+        (
+            "create",
+            "workspace:created",
+            {"status": "running", "credentials_present": False},
+            "running",
+        ),
+    ]:
+        if phase in {"remove", "create"}:
+            request = WorkspaceRecreateRequest.objects.get(workspace=workspace)
+        request.refresh_from_db()
+        assert request.phase == phase
+        workspace.refresh_from_db()
+        assert workspace.current_task_id == request.child_id
+        assert workspace.active_operation == "capturing_image"
+        with django_capture_on_commit_callbacks(execute=True):
+            assert result(service, runner, request.child, event, **extra)
+        workspace.refresh_from_db()
+        request.child.refresh_from_db()
+        assert request.child.status == "completed"
+        assert workspace.status == status
+        assert workspace.current_task_id is None
+        assert workspace.active_operation == "capturing_image"
+        WorkspaceRepository.update_active_operation(workspace, None)
+        assert workspace.active_operation == "capturing_image"
+        before = {
+            f.attname: getattr(workspace, f.attname)
+            for f in workspace._meta.concrete_fields
+        }
+        counts = (
+            Task.objects.count(),
+            ImageInstance.objects.count(),
+            CaptureRequest.objects.count(),
+            LifecycleCommand.objects.count(),
+        )
+        for method, kwargs in [
+            (service.workspace_lifecycle.stop_workspace, {}),
+            (service.workspace_lifecycle.remove_workspace, {}),
+            (service.workspace_lifecycle.resume_workspace, {}),
+            (service.workspace_lifecycle.update_workspace, {"qemu_vcpus": 2}),
+            (service.workspace_lifecycle.update_workspace, {"credential_ids": []}),
+            (service.image_lifecycle.create_image_artifact, {"name": "overlap"}),
+        ]:
+            with pytest.raises(ConflictError):
+                async_to_sync(method)(workspace.id, **kwargs)
+        for kind in [
+            "stop_workspace",
+            "remove_workspace",
+            "resume_workspace",
+            "update_workspace",
+            "create_image_artifact",
+            "create_workspace",
+            "create_workspace_from_image_artifact",
+        ]:
+            with pytest.raises(ConflictError):
+                TaskRepository.create(
+                    task_id=uuid.uuid4(),
+                    runner=runner,
+                    task_type=kind,
+                    workspace=workspace,
+                )
+        workspace.refresh_from_db()
+        assert {
+            f.attname: getattr(workspace, f.attname)
+            for f in workspace._meta.concrete_fields
+        } == before
+        assert counts == (
+            Task.objects.count(),
+            ImageInstance.objects.count(),
+            CaptureRequest.objects.count(),
+            LifecycleCommand.objects.count(),
+        )
+        request.refresh_from_db()
+        assert not getattr(request, "resume_suppressed", False)
+        operations = [
+            c.args[1]["active_operation"]
+            for c in frontend.call_args_list
+            if c.args[0] == "workspace:operation_changed"
+        ]
+        assert operations and set(operations) == {"capturing_image"}
+        with django_capture_on_commit_callbacks(execute=True):
+            async_to_sync(RecoveryService().tick)(sio_mock)
+    request.refresh_from_db()
+    workspace.refresh_from_db()
+    capture = CaptureRequest.objects.get(workspace=workspace)
+    assert request.phase == "completed" and not request.diagnostic
+    assert capture.phase == "completed" and capture.image.status == "ready"
+    assert workspace.status == "running" and workspace.current_task_id is None
+    assert workspace.active_operation is None
+    assert workspace.base_image_instance_id == capture.image_id
+    assert workspace.pending_base_image_instance_id is None
+    operations = [
+        c.args[1]["active_operation"]
+        for c in frontend.call_args_list
+        if c.args[0] == "workspace:operation_changed"
+    ]
+    assert operations[-1] is None and operations.count(None) == 1
+    assert Task.objects.filter(workspace=workspace).count() == 4
+
+
+def test_stopped_capture_final_clear_without_resume(service, runner, stopped_workspace):
+    from apps.runners.models import Task
+
+    ws = stopped_workspace
+    ws.save()
+    _, child = CaptureService.allocate(ws.id, "capture", has_busy_agent=has_busy_agent)
+    request = CaptureRequest.objects.get(workspace=ws)
+    assert not request.prior_running and request.phase == "capture"
+    assert result(
+        service,
+        runner,
+        child,
+        "image_artifact:created",
+        image_artifact_id="/capture.qcow2",
+        name="capture",
+        size_bytes=123,
+    )
+    ws.refresh_from_db()
+    assert ws.current_task_id is None and ws.active_operation == "capturing_image"
+    assert CaptureService.tick() == []
+    request.refresh_from_db()
+    assert request.phase == "completed"
+    recreate = WorkspaceRecreateRequest.objects.get(workspace=ws)
+    assert recreate.final_running is False and recreate.phase == "remove"
+    ws.refresh_from_db()
+    assert ws.active_operation == "capturing_image"
+    assert Task.objects.filter(workspace=ws).count() == 2
+
+
+@pytest.mark.parametrize(
+    "capture_failed,restart_failed",
+    [
+        (True, False),
+        (True, True),
+    ],
+)
+def test_safe_failure_final_diagnostics_and_recovery_event(
+    service,
+    sio_mock,
+    runner,
+    workspace,
+    monkeypatch,
+    django_capture_on_commit_callbacks,
+    capture_failed,
+    restart_failed,
+):
+    from unittest.mock import Mock
+
+    from asgiref.sync import async_to_sync
+
+    from apps.runners.services.recovery import RecoveryService
+
+    workspace.save()
+    _, stop = CaptureService.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
+    assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
+    assert CaptureService.tick() == []
+    request = CaptureRequest.objects.get(workspace=workspace)
+    assert result(
+        service,
+        runner,
+        request.child,
+        "image_artifact:failed" if capture_failed else "image_artifact:created",
+        **(
+            # Runners send sanitized text plus a code; users see the code's text.
+            {
+                "error": "Operation failed; execution finished",
+                "diagnostic_code": "insufficient_storage",
+            }
+            if capture_failed
+            else {
+                "image_artifact_id": "/capture.qcow2",
+                "name": "capture",
+                "size_bytes": 123,
+            }
+        ),
+    )
+    assert CaptureService.tick() == []
+    request.refresh_from_db()
+    assert request.phase == "resume"
+    if capture_failed:
+        assert "out of disk space" in request.diagnostic
+    assert result(
+        service,
+        runner,
+        request.child,
+        "workspace:error" if restart_failed else "workspace:resumed",
+        **(
+            {"error": "start failed"}
+            if restart_failed
+            else {"credentials_present": False}
+        ),
+    )
+    workspace.refresh_from_db()
+    assert workspace.current_task_id is None
+    assert workspace.active_operation == "capturing_image"
+    frontend = Mock()
+    monkeypatch.setattr(FrontendBusService, 'forward_to_frontend', frontend)
+    with django_capture_on_commit_callbacks(execute=True):
+        async_to_sync(RecoveryService().tick)(sio_mock)
+    request.refresh_from_db()
+    workspace.refresh_from_db()
+    assert request.phase == ("failed" if capture_failed else "completed")
+    assert request.image.status == ("failed" if capture_failed else "ready")
+    assert (
+        "restart failed" if restart_failed else "out of disk space"
+    ) in request.diagnostic
+    if not capture_failed:
+        assert request.image.runner_ref == "/capture.qcow2"
+    assert workspace.current_task_id is None and workspace.active_operation is None
+    assert workspace.status == ("stopped" if restart_failed else "running")
+    frontend.assert_any_call(
+        "workspace:operation_changed",
+        {
+            "workspace_id": str(workspace.id),
+            "active_operation": None,
+            "intervention_required": False,
+            # A failed restart stays explained after its fence is released.
+            "lifecycle_diagnostic": FAILED if restart_failed else "",
+        },
+        str(workspace.id),
+    )
+    frontend.assert_any_call(
+        "workspace:error",
+        {"workspace_id": str(workspace.id), "error": request.diagnostic},
+        str(workspace.id),
+    )

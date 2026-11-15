@@ -7,32 +7,33 @@ correlates responses by ``request_id``.
 
 Protocol (backend -> runner)::
 
-    harness:exec_stream {request_id, workspace_id, command, workdir,
-                         env, timeout}
     harness:exec_wait   {request_id, workspace_id, command, workdir,
                          env, timeout}
     harness:read_file   {request_id, workspace_id, path, max_size}
-    harness:write_file  {request_id, workspace_id, path, content, mode}
+    harness:write_file_start  {request_id, workspace_id, path, mode,
+                               total_chunks} (zero for empty files)
+    harness:write_file_chunk  {request_id, workspace_id, path, index,
+                               total_chunks, content}
+    harness:write_file_finish {request_id, workspace_id, path}
     harness:list        {request_id, workspace_id, path}
-    harness:stat           {request_id, workspace_id, path}
     harness:desktop_action {request_id, workspace_id, action, args}
     harness:cancel         {request_id, workspace_id}
 
 Protocol (runner -> backend)::
 
-    harness:exec_chunk       {request_id, workspace_id, stream, data}
-    harness:exec_done        {request_id, workspace_id, exit_code}
-                             or {request_id, workspace_id, error}
     harness:exec_wait_result {request_id, workspace_id, exit_code,
                               stdout, stderr} or {..., error}
     harness:read_file_result {request_id, workspace_id, content, size,
                               truncated, mime} or {..., error}
+    harness:read_file_chunk  {request_id, workspace_id, path, index,
+                              total_chunks, content} (256 KiB base64 slices,
+                              followed by a metadata-only
+                              harness:read_file_result with
+                              ``chunked=True`` and empty content)
     harness:write_file_result {request_id, workspace_id, ok}
                               or {..., error}
     harness:list_result      {request_id, workspace_id, entries}
                              or {..., error}
-    harness:stat_result           {request_id, workspace_id, path, is_dir,
-                                   size, mime} or {..., error}
     harness:desktop_action_result {request_id, workspace_id, ok?, ...}
                                   or {..., error}
 
@@ -56,24 +57,59 @@ from apps.runners.exceptions import (
     RunnerOfflineError,
     WorkspaceNotFoundError,
 )
+from apps.runners.services import get_runner_service
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
+from common import stream_diagnostics
 from common.exceptions import ConflictError
 
 from .base import (
-    DirEntry,
-    ExecChunk,
     ExecResult,
-    FileContent,
-    FileStat,
+    ProcessProfile,
+    StreamClosedError,
     WorkspaceAccessor,
-    guess_mime_type,
+    WorkspaceByteStream,
+    sanitize_exec_workdir,
     sanitize_harness_path,
 )
+from .file_types import DirEntry, FileContent, guess_mime_type
 
 log = structlog.get_logger(__name__)
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 DEFAULT_TIMEOUT = 60.0
+
+#: Base64 characters per chunk event on the harness file channel. Mirrors the
+#: runner constant (``runner/src/chunking.py`` ``CHUNK_B64_SIZE``) and the
+#: shared client constant (``packages/chat-core/src/fileChunks.ts``
+#: ``FILE_CHUNK_B64_SIZE``).
+HARNESS_CHUNK_B64_SIZE = 256 * 1024
+
+#: Max buffered base64 chars for one chunked harness read. 100 MiB of raw
+#: bytes encode to ~139.81 M base64 chars; cap slightly above so valid
+#: reads up to the runner's absolute read cap fit, but unbounded streams
+#: fail closed. Requests pass their negotiated ``max_size`` (runner
+#: default 5 MiB when omitted); explicit values may go up to 100 MiB.
+HARNESS_READ_MAX_CHARS = 141 * 1024 * 1024
+
+#: Max chunks for one chunked harness read. 100 MiB of raw bytes encode
+#: to ~534 chunks at 256 KiB base64; the cap leaves headroom for padding
+#: while rejecting unbounded ``total_chunks`` announcements.
+HARNESS_READ_MAX_CHUNKS = 560
+
+#: Max decoded bytes for a chunked harness write. Matches the runner's
+#: ``FILE_UPLOAD_MAX_SIZE`` (10 MiB) so the backend never buffers more.
+HARNESS_WRITE_MAX_BYTES = 10 * 1024 * 1024
+
+#: Max raw bytes for one chunked harness read. Matches the runner's
+#: absolute read cap so the backend never buffers more than the runner
+#: can legitimately send.
+HARNESS_READ_MAX_BYTES = 100 * 1024 * 1024
+
+#: Default read budget (raw bytes) when the caller passes max_size=None.
+#: Mirrors the runner's FILE_READ_DEFAULT_MAX_SIZE (5 MiB) — NOT the
+#: absolute 100 MiB cap. Explicit max_size may still go up to 100 MiB.
+HARNESS_READ_DEFAULT_BYTES = 5 * 1024 * 1024
 
 
 class RunnerAccessorError(RuntimeError):
@@ -85,30 +121,11 @@ class RunnerAccessorError(RuntimeError):
 _ACCESSORS_BY_REQUEST: dict[str, RunnerWorkspaceAccessor] = {}
 
 
-def route_harness_chunk(data: dict[str, Any]) -> bool:
-    """Deliver a ``harness:exec_chunk`` payload to its accessor."""
-    accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))
-    if accessor is None:
-        log.warning(
-            "harness_chunk_unknown_request",
-            request_id=data.get("request_id", ""),
-        )
-        return False
-    accessor._deliver_chunk(data)
-    return True
-
-
-def route_harness_done(data: dict[str, Any]) -> bool:
-    """Deliver a ``harness:exec_done`` payload to its accessor."""
-    accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))
-    if accessor is None:
-        log.warning(
-            "harness_done_unknown_request",
-            request_id=data.get("request_id", ""),
-        )
-        return False
-    accessor._deliver_done(data)
-    return True
+def owns_runner_reply(event: str, data: dict[str, Any]) -> bool:
+    """Return whether this execution process owns a reply's live correlation."""
+    if event in {"workspace:stream_output", "workspace:stream_closed"}:
+        return str(data.get("connection_id", "")) in _ACCESSORS_BY_STREAM
+    return str(data.get("request_id", "")) in _ACCESSORS_BY_REQUEST
 
 
 def route_harness_result(data: dict[str, Any]) -> bool:
@@ -120,8 +137,66 @@ def route_harness_result(data: dict[str, Any]) -> bool:
             request_id=data.get("request_id", ""),
         )
         return False
-    accessor._deliver_result(data)
-    return True
+    return accessor._deliver_result(data)
+
+
+def route_harness_file_chunk(data: dict[str, Any]) -> bool:
+    """Deliver a ``harness:read_file_chunk`` payload to its accessor."""
+    accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))
+    if accessor is None:
+        log.warning(
+            "harness_file_chunk_unknown_request",
+            request_id=data.get("request_id", ""),
+        )
+        return False
+    return accessor._deliver_file_chunk(data)
+
+
+#: Runner -> backend stream events route by connection_id instead of
+#: request_id.  The owning accessor is resolved through the byte-stream
+#: registry (connection ids are globally unique per backend process).
+_ACCESSORS_BY_STREAM: dict[str, RunnerWorkspaceAccessor] = {}
+
+
+def route_stream_output(data: dict[str, Any]) -> bool:
+    """Deliver a ``workspace:stream_output`` chunk to its byte stream."""
+    accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
+    if accessor is None:
+        log.warning(
+            "stream_output_unknown_connection",
+            connection_id=data.get("connection_id", ""),
+        )
+        return False
+    return accessor._deliver_stream_output(data)
+
+
+async def wait_stream_capacity(data: dict[str, Any]) -> None:
+    """Hold an accepted ``workspace:stream_output`` ACK while its consumer lags.
+
+    Streams owned by another process, or already closed, return at once.
+    """
+    accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
+    if accessor is not None:
+        await accessor._wait_stream_capacity(str(data.get("connection_id", "")))
+
+
+def route_stream_closed(data: dict[str, Any]) -> bool:
+    """Deliver a ``workspace:stream_closed`` notice to its byte stream."""
+    accessor = _ACCESSORS_BY_STREAM.get(str(data.get("connection_id", "")))
+    if accessor is None:
+        log.warning(
+            "stream_closed_unknown_connection",
+            connection_id=data.get("connection_id", ""),
+        )
+        return False
+    return accessor._deliver_stream_closed(data)
+
+
+def fail_streams(matches_workspace: Callable[[str], bool], error: str) -> None:
+    """Fail every open byte stream whose workspace id matches the predicate."""
+    for accessor in list(_ACCESSORS_BY_STREAM.values()):
+        if matches_workspace(str(accessor.workspace_id)):
+            accessor.fail_all_streams(error)
 
 
 def _normalize_command(command: list[str] | str) -> list[str] | str:
@@ -141,6 +216,8 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     ended_at = getattr(process, "ended_at", None)
     started_at = getattr(process, "started_at", None)
     updated_at = getattr(process, "updated_at", None)
+    run_count = getattr(process, "run_count", None)
+    session_id = getattr(process, "session_id", None)
     return {
         "process_id": str(getattr(process, "id", "")),
         "workspace_id": str(getattr(process, "workspace_id", "")),
@@ -151,18 +228,163 @@ def _serialize_process(process: Any) -> dict[str, Any]:
         "log_path": getattr(process, "log_path", "") or "",
         "status": str(getattr(process, "status", "") or ""),
         "exit_code": getattr(process, "exit_code", None),
+        "run_count": int(run_count) if run_count is not None else None,
+        "kind": str(getattr(process, "kind", "") or "persistent"),
+        "session_id": str(session_id) if session_id else None,
         "started_at": started_at.isoformat() if started_at else None,
         "ended_at": ended_at.isoformat() if ended_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
     }
 
 
-def _parse_process_uuid(process_id: str) -> uuid.UUID:
-    """Parse *process_id* into a UUID or raise ValueError."""
+#: Bounded per-stream queue depth (chunks of at most 64KiB each).
+STREAM_QUEUE_DEPTH = 64
+
+#: Queued chunks from which output ACKs wait for the consumer. The runner
+#: sends the next chunk only after an ACK, so a slow consumer (e.g. a phone
+#: downloading through the app gateway) slows the stream down instead of
+#: overflowing its queue.
+STREAM_PAUSE_DEPTH = STREAM_QUEUE_DEPTH // 2
+
+#: Longest an output ACK waits for the consumer; below the runner's ACK
+#: timeout so a stalled consumer still ends in the queue-overflow path.
+STREAM_PACE_TIMEOUT = 10.0
+
+#: ACK timeout for stream control events (start/input/close).
+STREAM_CALL_TIMEOUT = 15.0
+
+_TCP_HOST_RE = None  # compiled lazily in _validate_tcp_host
+
+
+def _validate_tcp_host(host: str) -> str:
+    """Validate a workspace-local TCP host (fail-closed, no shell use)."""
+    import ipaddress as _ip
+    import re as _re
+
+    cleaned = (host or "").strip()
+    if not cleaned or len(cleaned) > 255 or "\x00" in cleaned or "\n" in cleaned:
+        raise ValueError(f"Invalid host: {host!r}")
+    if cleaned in ("localhost", "127.0.0.1", "::1"):
+        return cleaned
     try:
-        return uuid.UUID(str(process_id))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise ValueError(f"Invalid process_id: {process_id}") from exc
+        _ip.ip_address(cleaned)
+        return cleaned
+    except ValueError:
+        pass
+    if not _re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}[A-Za-z0-9])?", cleaned):
+        raise ValueError(f"Invalid host: {host!r}")
+    return cleaned
+
+
+def _validate_tcp_port(port: object) -> int:
+    """Validate a workspace-local TCP port (1..65535)."""
+    try:
+        number = int(port)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid port: {port!r}") from exc
+    if isinstance(port, bool) or not 1 <= number <= 65535:
+        raise ValueError(f"Invalid port: {port!r}")
+    return number
+
+
+class _StreamState:
+    """Bookkeeping for one open :class:`RunnerByteStream`."""
+
+    __slots__ = (
+        "connection_id",
+        "queue",
+        "closed",
+        "close_error",
+        "close_event",
+        "exit_code",
+        "stderr_buf",
+        "stderr_total",
+        "opened_at",
+        "stdout_bytes",
+        "managed",
+        "drained",
+    )
+
+    def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
+        self.connection_id = connection_id
+        self.queue = queue
+        self.closed = False
+        self.close_error: str | None = None
+        self.close_event = asyncio.Event()
+        self.exit_code: int | None = None
+        # Set while the consumer keeps up (fewer than STREAM_PAUSE_DEPTH
+        # queued chunks) or the stream is closed; output ACKs wait for it.
+        self.drained = asyncio.Event()
+        self.drained.set()
+        # Bounded stderr capture (newest bytes win) for failure
+        # diagnosis. Only the sanitized excerpt ever reaches logs —
+        # see ``get_stream_stderr_excerpt``.
+        self.stderr_buf = bytearray()
+        self.stderr_total = 0
+        self.opened_at = 0.0
+        self.stdout_bytes = 0
+        self.managed = False
+
+    def append_stderr(self, data: bytes) -> None:
+        """Buffer bounded stderr bytes (newest win; unbounded total kept)."""
+        raw = bytes(data or b"")
+        if not raw:
+            return
+        self.stderr_total += len(raw)
+        self.stderr_buf.extend(raw)
+        overflow = len(self.stderr_buf) - stream_diagnostics.MAX_STDERR_BUFFER_BYTES
+        if overflow > 0:
+            del self.stderr_buf[:overflow]
+
+    def stderr_excerpt(self) -> str:
+        """Return the sanitized stderr excerpt (secret-free, bounded)."""
+        return stream_diagnostics.sanitize_stderr_excerpt(bytes(self.stderr_buf))
+
+    def update_drained(self) -> None:
+        """Track whether the consumer keeps up (call on the owning loop)."""
+        if self.closed or self.queue.qsize() < STREAM_PAUSE_DEPTH:
+            self.drained.set()
+        else:
+            self.drained.clear()
+
+
+class RunnerByteStream(WorkspaceByteStream):
+    """Runner-backed byte stream (one ``workspace:stream_*`` connection)."""
+
+    def __init__(
+        self,
+        accessor: RunnerWorkspaceAccessor,
+        workspace_id: str,
+        connection_id: str,
+    ) -> None:
+        super().__init__(workspace_id, connection_id)
+        self._accessor = accessor
+        self._closed_locally = False
+        self._close_lock = asyncio.Lock()
+
+    async def receive(self) -> bytes:
+        """Return the next stdout chunk; ``b""`` marks clean EOF."""
+        return await self._accessor._stream_receive(self.connection_id)
+
+    async def send(self, data: bytes) -> None:
+        """Write raw bytes to the stream stdin (bounded chunks)."""
+        await self._accessor._stream_send(self.connection_id, data)
+
+    async def send_eof(self) -> None:
+        """Half-close the stream stdin (graceful EOF)."""
+        await self._accessor._stream_send_eof(self.connection_id)
+
+    async def aclose(self) -> None:
+        """Close the stream (idempotent; remote close follows)."""
+        async with self._close_lock:
+            if self._closed_locally:
+                return
+            await self._accessor._stream_close(self.connection_id)
+            self._closed_locally = True
+
+    async def wait_closed(self) -> int | None:
+        """Wait for the remote close; return exit code when known."""
+        return await self._accessor._stream_wait_closed(self.connection_id)
 
 
 class RunnerWorkspaceAccessor(WorkspaceAccessor):
@@ -180,13 +402,24 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         emit: EmitFn,
         default_timeout: float = DEFAULT_TIMEOUT,
         desktop_geometry: Callable[[], Awaitable[tuple[int, int]]] | None = None,
+        call: Callable[[str, dict[str, Any], float | None], Awaitable[dict[str, Any]]]
+        | None = None,
+        on_stderr: Callable[[str, bytes], None] | None = None,
     ) -> None:
         super().__init__(workspace_id)
         self._emit = emit
         self._default_timeout = default_timeout
         self._desktop_geometry = desktop_geometry
+        # Stream control requires Socket.IO ACKs; file/exec RPCs use emit.
+        self._call = call
+        self._on_stderr = on_stderr
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Byte-stream state: connection_id -> _StreamState (bounded queues).
+        self._byte_streams: dict[str, _StreamState] = {}
+        # Bounded reassembly for chunked harness reads (request_id -> state).
+        # Entries expire via the read timeout and are dropped on
+        # timeout/error/cancel so partial transfers never linger.
+        self._file_chunks: dict[str, dict[str, Any]] = {}
         try:
             self._loop: asyncio.AbstractEventLoop | None = (
                 asyncio.get_running_loop()
@@ -216,39 +449,97 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
     # -- reply routing (called from Socket.IO handlers) -------------------
 
-    def _deliver_result(self, data: dict[str, Any]) -> None:
+    def _deliver_result(self, data: dict[str, Any]) -> bool:
         """Resolve the pending unary request future for *data*."""
         request_id = str(data.get("request_id", ""))
         future = self._pending.get(request_id)
         if future is None or future.done():
             log.warning("harness_result_no_pending", request_id=request_id)
-            return
+            return False
         self._schedule(_resolve_future, future, data)
+        return True
 
-    def _deliver_chunk(self, data: dict[str, Any]) -> None:
-        """Push a stream chunk into the queue for *data*."""
-        request_id = str(data.get("request_id", ""))
-        queue = self._streams.get(request_id)
-        if queue is None:
-            log.warning("harness_chunk_no_stream", request_id=request_id)
-            return
-        self._schedule(
-            queue.put_nowait,
-            {
-                "type": "chunk",
-                "stream": str(data.get("stream", "stdout")),
-                "data": str(data.get("data", "")),
-            },
-        )
+    def _deliver_file_chunk(self, data: dict[str, Any]) -> bool:
+        """Buffer one ``harness:read_file_chunk`` slice for *data*.
 
-    def _deliver_done(self, data: dict[str, Any]) -> None:
-        """Push the terminal stream message into the queue for *data*."""
+        The first chunk pins a strictly validated ``total_chunks``
+        (1..``HARNESS_READ_MAX_CHUNKS``); every chunk must repeat the
+        same total, workspace, and path. Per-chunk and total size caps
+        are fail-closed: any violation drops the whole transfer and
+        fails the pending read future with a small error instead of
+        buffering unbounded data.
+        """
         request_id = str(data.get("request_id", ""))
-        queue = self._streams.get(request_id)
-        if queue is None:
-            log.warning("harness_done_no_stream", request_id=request_id)
-            return
-        self._schedule(queue.put_nowait, {"type": "done", "payload": data})
+        future = self._pending.get(request_id)
+        state = self._file_chunks.get(request_id)
+        if future is None or future.done() or state is None:
+            log.warning("harness_file_chunk_no_pending", request_id=request_id)
+            return False
+
+        def _store() -> None:
+            try:
+                try:
+                    index = int(data.get("index", -1))
+                    total = int(data.get("total_chunks", -1))
+                except (TypeError, ValueError) as exc:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid chunk index"
+                    ) from exc
+                if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid total_chunks"
+                    )
+                pinned = state.get("total_chunks") or 0
+                if not pinned:
+                    # First chunk pins the announced total.
+                    state["total_chunks"] = total
+                    pinned = total
+                elif total != pinned:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk total mismatch"
+                    )
+                if str(data.get("workspace_id", "")) != str(
+                    state.get("workspace_id", "")
+                ):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: workspace mismatch"
+                    )
+                if str(data.get("path", "")) != str(state.get("path", "")):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: path mismatch"
+                    )
+                if index < 0 or index >= pinned:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk index out of range"
+                    )
+                if index in state["chunks"]:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: duplicate chunk"
+                    )
+                clean = "".join(str(data.get("content", "")).split())
+                if not clean:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: empty chunk"
+                    )
+                if len(clean) > HARNESS_CHUNK_B64_SIZE:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk too large"
+                    )
+                max_chars = int(
+                    state.get("max_chars", HARNESS_READ_MAX_CHARS)
+                )
+                if state["buffered"] + len(clean) > max_chars:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: transfer too large"
+                    )
+                state["chunks"][index] = clean
+                state["buffered"] += len(clean)
+            except Exception as exc:
+                self._file_chunks.pop(request_id, None)
+                _resolve_future_exception(future, exc)
+
+        self._schedule(_store)
+        return True
 
     # -- internals --------------------------------------------------------
 
@@ -256,21 +547,17 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         self,
         request_id: str,
         *,
-        future: asyncio.Future[dict[str, Any]] | None = None,
-        queue: asyncio.Queue[dict[str, Any]] | None = None,
+        future: asyncio.Future[dict[str, Any]],
     ) -> None:
         """Track an in-flight request for reply routing."""
         _ACCESSORS_BY_REQUEST[request_id] = self
-        if future is not None:
-            self._pending[request_id] = future
-        if queue is not None:
-            self._streams[request_id] = queue
+        self._pending[request_id] = future
 
     def _unregister(self, request_id: str) -> None:
         """Drop all routing state for *request_id*."""
         _ACCESSORS_BY_REQUEST.pop(request_id, None)
         self._pending.pop(request_id, None)
-        self._streams.pop(request_id, None)
+        self._file_chunks.pop(request_id, None)
 
     def _resolve_timeout(self, timeout: float | None) -> float:
         """Return the effective timeout for a call."""
@@ -331,68 +618,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
     # -- WorkspaceAccessor API --------------------------------------------
 
-    async def exec_stream(
-        self,
-        command: list[str] | str,
-        workdir: str = "/workspace",
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ):  # type: ignore[override]
-        """Stream command output; final chunk carries the exit code."""
-        safe_workdir = sanitize_harness_path(workdir)
-        normalized = _normalize_command(command)
-        timeout_s = self._resolve_timeout(timeout)
-        request_id = uuid.uuid4().hex
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._register(request_id, queue=queue)
-        await self._emit(
-            "harness:exec_stream",
-            {
-                "request_id": request_id,
-                "workspace_id": self.workspace_id,
-                "command": normalized,
-                "workdir": safe_workdir,
-                "env": dict(env or {}),
-                "timeout": timeout_s,
-            },
-        )
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        finished = False
-        try:
-            while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        "Harness request 'harness:exec_stream' timed out "
-                        f"after {timeout_s:.1f}s"
-                    )
-                try:
-                    item = await asyncio.wait_for(queue.get(), remaining)
-                except TimeoutError as exc:
-                    raise TimeoutError(
-                        "Harness request 'harness:exec_stream' timed out "
-                        f"after {timeout_s:.1f}s"
-                    ) from exc
-                if item.get("type") == "chunk":
-                    yield ExecChunk(
-                        stream=item["stream"],
-                        data=item.get("data", ""),
-                    )
-                else:
-                    payload = item.get("payload", {})
-                    self._raise_for_error(payload, "harness:exec_stream")
-                    finished = True
-                    yield ExecChunk(
-                        stream="",
-                        exit_code=int(payload.get("exit_code", 0)),
-                        done=True,
-                    )
-                    return
-        finally:
-            self._unregister(request_id)
-            if not finished:
-                await self._emit_cancel(request_id)
-
     async def exec_wait(
         self,
         command: list[str] | str,
@@ -401,7 +626,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ) -> ExecResult:
         """Execute a command and return the buffered result."""
-        safe_workdir = sanitize_harness_path(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir)
         normalized = _normalize_command(command)
         timeout_s = self._resolve_timeout(timeout)
         request_id = uuid.uuid4().hex
@@ -430,12 +655,19 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         path: str,
         max_size: int | None = None,
     ) -> FileContent:
-        """Read a file from the sandboxed workspace."""
+        """Read a file from the workspace VM.
+
+        The public contract is unchanged: returns complete bytes up to
+        *max_size*. The runner sends large payloads as ordered
+        ``harness:read_file_chunk`` slices plus a metadata-only final
+        result; small payloads still arrive inline for backward
+        compatibility. Incomplete or invalid chunk streams fail closed
+        and clean up routing state.
+        """
         safe_path = sanitize_harness_path(path)
         request_id = uuid.uuid4().hex
-        result = await self._await_result(
+        result = await self._await_chunked_read_result(
             request_id,
-            "harness:read_file",
             {
                 "request_id": request_id,
                 "workspace_id": self.workspace_id,
@@ -445,13 +677,66 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             None,
         )
         self._raise_for_error(result, "harness:read_file")
-        raw_content = str(result.get("content", ""))
+        raw_content = "".join(str(result.get("content", "")).split())
         try:
-            content = base64.b64decode(raw_content) if raw_content else b""
+            content = (
+                base64.b64decode(raw_content, validate=True)
+                if raw_content
+                else b""
+            )
         except Exception as exc:
             raise RunnerAccessorError(
                 "harness:read_file failed: invalid base64 payload"
             ) from exc
+        # Plausibility against runner metadata: size must be a finite
+        # non-negative int within the effective cap; decoded bytes must
+        # equal size for complete reads, or be a non-empty prefix of size
+        # for truncated reads (empty files are only valid non-truncated).
+        try:
+            effective_limit = (
+                int(max_size)
+                if max_size is not None
+                else HARNESS_READ_DEFAULT_BYTES
+            )
+        except (TypeError, ValueError):
+            effective_limit = HARNESS_READ_DEFAULT_BYTES
+        if (
+            effective_limit <= 0
+            or effective_limit > HARNESS_READ_MAX_BYTES
+        ):
+            effective_limit = HARNESS_READ_DEFAULT_BYTES
+        try:
+            reported_size = int(result.get("size", len(content)))
+        except (TypeError, ValueError) as exc:
+            raise RunnerAccessorError(
+                "harness:read_file failed: invalid size metadata"
+            ) from exc
+        if isinstance(result.get("size"), bool):
+            raise RunnerAccessorError(
+                "harness:read_file failed: invalid size metadata"
+            )
+        if reported_size < 0 or reported_size > HARNESS_READ_MAX_BYTES:
+            raise RunnerAccessorError(
+                "harness:read_file failed: size out of range"
+            )
+        if len(content) > effective_limit:
+            raise RunnerAccessorError(
+                "harness:read_file failed: payload exceeds requested max_size"
+            )
+        truncated = bool(result.get("truncated", False))
+        if truncated:
+            if reported_size == 0 or len(content) == 0:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: truncated payload must be non-empty"
+                )
+            if len(content) > reported_size:
+                raise RunnerAccessorError(
+                    "harness:read_file failed: size mismatch"
+                )
+        elif len(content) != reported_size:
+            raise RunnerAccessorError(
+                "harness:read_file failed: size mismatch"
+            )
         mime = str(
             result.get("mime") or result.get("mime_type") or guess_mime_type(
                 safe_path
@@ -459,10 +744,123 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         )
         return FileContent(
             content=content,
-            size=int(result.get("size", len(content))),
-            truncated=bool(result.get("truncated", False)),
+            size=reported_size,
+            truncated=truncated,
             mime=mime,
         )
+
+    async def _await_chunked_read_result(
+        self,
+        request_id: str,
+        payload: dict[str, Any],
+        timeout: float | None,
+    ) -> dict[str, Any]:
+        """Emit ``harness:read_file`` and reassemble chunked replies.
+
+        Registers a bounded chunk buffer for *request_id*, waits for the
+        final ``harness:read_file_result``, then joins ``total_chunks``
+        slices in order (or uses the inline ``content`` when the runner
+        sent a small backward-compatible payload).
+        """
+        timeout_s = self._resolve_timeout(timeout)
+        future: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._register(request_id, future=future)
+        # Pin transfer identity up front; the first chunk pins the
+        # announced total. max_chars follows the negotiated read cap:
+        # the runner default of 5 MiB applies when max_size is omitted;
+        # an explicit max_size may go up to the absolute 100 MiB cap.
+        try:
+            read_limit = (
+                int(payload.get("max_size"))
+                if payload.get("max_size") is not None
+                else HARNESS_READ_DEFAULT_BYTES
+            )
+        except (TypeError, ValueError):
+            read_limit = HARNESS_READ_DEFAULT_BYTES
+        if read_limit <= 0 or read_limit > HARNESS_READ_MAX_BYTES:
+            read_limit = HARNESS_READ_DEFAULT_BYTES
+        max_chars = (read_limit + 2) // 3 * 4 + 4
+        self._file_chunks[request_id] = {
+            "total_chunks": 0,
+            "chunks": {},
+            "buffered": 0,
+            "meta": {},
+            "workspace_id": str(payload.get("workspace_id", "")),
+            "path": str(payload.get("path", "")),
+            "max_chars": max_chars,
+        }
+        completed = False
+        try:
+            await self._emit("harness:read_file", payload)
+            result = await asyncio.wait_for(future, timeout_s)
+            completed = True
+            state = self._file_chunks.get(request_id, {})
+            chunks: dict[int, str] = state.get("chunks", {})
+            if result.get("error"):
+                return result
+            if result.get("chunked"):
+                try:
+                    total = int(result.get("total_chunks", 0))
+                except (TypeError, ValueError) as exc:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid total_chunks"
+                    ) from exc
+                if total <= 0 or total > HARNESS_READ_MAX_CHUNKS:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: invalid total_chunks"
+                    )
+                # The final metadata must match the pinned chunk stream.
+                pinned = int(state.get("total_chunks", 0) or 0)
+                if pinned and pinned != total:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: chunk total mismatch"
+                    )
+                if not pinned:
+                    state["total_chunks"] = total
+                if str(result.get("workspace_id", "")) != str(
+                    state.get("workspace_id", "")
+                ):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: workspace mismatch"
+                    )
+                if str(result.get("path", "")) != str(state.get("path", "")):
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: path mismatch"
+                    )
+                missing = [i for i in range(total) if i not in chunks]
+                if missing:
+                    raise RunnerAccessorError(
+                        "harness:read_file failed: incomplete transfer "
+                        f"(missing {len(missing)} of {total} chunks)"
+                    )
+                joined = "".join(chunks[i] for i in range(total))
+                merged = dict(result)
+                merged["content"] = joined
+                # The runner announces total_chunks with metadata; keep it.
+                return merged
+            # Backward-compatible small inline payload.
+            return result
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Harness request 'harness:read_file' timed out "
+                f"after {timeout_s:.1f}s"
+            ) from exc
+        finally:
+            self._unregister(request_id)
+            if not completed:
+                future.cancel()
+                await self._emit_cancel(request_id)
+
+    @staticmethod
+    def _chunk_b64_slices(payload_b64: str) -> list[str]:
+        """Split whitespace-free base64 into 256 KiB slices (4-char aligned)."""
+        clean = "".join(payload_b64.split())
+        size = HARNESS_CHUNK_B64_SIZE - (HARNESS_CHUNK_B64_SIZE % 4)
+        if not clean:
+            return []
+        return [clean[i : i + size] for i in range(0, len(clean), size)]
 
     async def write_file(
         self,
@@ -470,27 +868,78 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         content: bytes,
         mode: int = 0o644,
     ) -> None:
-        """Write a file atomically into the sandboxed workspace."""
+        """Write a file atomically into the workspace VM.
+
+        All writes use start/chunk/finish with bounded base64 slices.
+        Empty files announce zero chunks and finish without a chunk event.
+        """
         safe_path = sanitize_harness_path(path)
         if not isinstance(content, (bytes, bytearray)):
             raise ValueError("content must be bytes")
+        # Exact raw cap: len(content) decides, no base64 slack involved.
+        # Exactly 10 MiB is allowed, 10 MiB + 1 byte is rejected.
+        if len(content) > HARNESS_WRITE_MAX_BYTES:
+            raise ValueError(
+                "content exceeds maximum size of "
+                f"{HARNESS_WRITE_MAX_BYTES} bytes"
+            )
+        payload_b64 = base64.b64encode(bytes(content)).decode("ascii")
         request_id = uuid.uuid4().hex
-        result = await self._await_result(
-            request_id,
-            "harness:write_file",
-            {
-                "request_id": request_id,
-                "workspace_id": self.workspace_id,
-                "path": safe_path,
-                "content": base64.b64encode(bytes(content)).decode("ascii"),
-                "mode": mode,
-            },
-            None,
+        slices = self._chunk_b64_slices(payload_b64)
+        total = len(slices)
+        completion: asyncio.Future[dict[str, Any]] = (
+            asyncio.get_running_loop().create_future()
         )
-        self._raise_for_error(result, "harness:write_file")
+        self._register(request_id, future=completion)
+        completed = False
+        try:
+            await self._emit(
+                "harness:write_file_start",
+                {
+                    "request_id": request_id,
+                    "workspace_id": self.workspace_id,
+                    "path": safe_path,
+                    "mode": mode,
+                    "total_chunks": total,
+                },
+            )
+            for index, piece in enumerate(slices):
+                await self._emit(
+                    "harness:write_file_chunk",
+                    {
+                        "request_id": request_id,
+                        "workspace_id": self.workspace_id,
+                        "path": safe_path,
+                        "index": index,
+                        "total_chunks": total,
+                        "content": piece,
+                    },
+                )
+            await self._emit(
+                "harness:write_file_finish",
+                {
+                    "request_id": request_id,
+                    "workspace_id": self.workspace_id,
+                    "path": safe_path,
+                },
+            )
+            timeout_s = self._resolve_timeout(None)
+            result = await asyncio.wait_for(completion, timeout_s)
+            completed = True
+            self._raise_for_error(result, "harness file write")
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Harness file write timed out "
+                f"after {self._resolve_timeout(None):.1f}s"
+            ) from exc
+        finally:
+            self._unregister(request_id)
+            if not completed:
+                completion.cancel()
+                await self._emit_cancel(request_id)
 
     async def list_dir(self, path: str) -> list[DirEntry]:
-        """List directory entries inside the sandboxed workspace."""
+        """List directory entries in the workspace VM."""
         safe_path = sanitize_harness_path(path)
         request_id = uuid.uuid4().hex
         result = await self._await_result(
@@ -522,33 +971,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             )
         return entries
 
-    async def stat(self, path: str) -> FileStat:
-        """Stat a path inside the sandboxed workspace."""
-        safe_path = sanitize_harness_path(path)
-        request_id = uuid.uuid4().hex
-        result = await self._await_result(
-            request_id,
-            "harness:stat",
-            {
-                "request_id": request_id,
-                "workspace_id": self.workspace_id,
-                "path": safe_path,
-            },
-            None,
-        )
-        self._raise_for_error(result, "harness:stat")
-        mime = str(
-            result.get("mime") or result.get("mime_type") or guess_mime_type(
-                safe_path
-            )
-        )
-        return FileStat(
-            path=str(result.get("path", safe_path)),
-            is_dir=bool(result.get("is_dir", False)),
-            size=int(result.get("size", 0) or 0),
-            mime=mime,
-        )
-
     async def desktop_action(
         self,
         action: str,
@@ -557,7 +979,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     ) -> dict[str, Any]:
         """Run a desktop automation action in the workspace."""
         payload_args = dict(args or {})
-        if action in {"ensure", "hold"} and self._desktop_geometry is not None:
+        if action == "hold" and self._desktop_geometry is not None:
             width, height = await self._desktop_geometry()
             payload_args.setdefault("desktop_width", width)
             payload_args.setdefault("desktop_height", height)
@@ -579,9 +1001,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     # -- Background processes (direct RunnerService calls) ----------------
 
     def _runner_service(self) -> Any:
-        """Return the process-wide RunnerService (lazy import, no cycle)."""
-        from apps.runners.sio_server import get_runner_service
-
+        """Return the process-wide RunnerService."""
         return get_runner_service()
 
     def _workspace_uuid(self) -> uuid.UUID:
@@ -599,54 +1019,786 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         name: str = "",
+        *,
+        session_id: str | None = None,
+        kind: str = "persistent",
     ) -> dict[str, Any]:
-        """Start a detached background process via RunnerService."""
+        """Start a detached background process via RunnerService.
+
+        ``kind="temp"`` starts a session-scoped row that the harness
+        cleanup hook stops when the owning run finishes (requires
+        ``session_id``); otherwise a workspace-global persistent row.
+        """
         if not (command or "").strip():
             raise ValueError("command must not be empty")
-        safe_workdir = sanitize_harness_path(workdir or "/workspace")
+        safe_workdir = sanitize_exec_workdir(workdir or "/workspace")
         service = self._runner_service()
         try:
-            process = await service.start_process(
+            process = await service.process_manager.start_process(
                 self._workspace_uuid(),
                 command.strip(),
                 workdir=safe_workdir,
                 env=dict(env or {}),
                 name=name or "",
+                session_id=session_id,
+                kind=kind,
             )
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_start failed: {exc}") from exc
         return _serialize_process(process)
 
-    async def process_list(self) -> list[dict[str, Any]]:
-        """List background processes via RunnerService (live-merged)."""
+    async def process_list(
+        self, *, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List background processes via RunnerService (live-merged).
+
+        ``session_id`` scopes temp rows to the owning agent session —
+        an agent only sees its own temps plus all persistent rows.
+        """
         service = self._runner_service()
         try:
-            processes = await service.list_processes(self._workspace_uuid())
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            processes = await service.process_manager.list_processes(
+                self._workspace_uuid(), session_id=session_id
+            )
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_list failed: {exc}") from exc
         return [_serialize_process(process) for process in processes]
 
-    async def process_get(self, process_id: str) -> dict[str, Any]:
-        """Return one background process via RunnerService."""
-        parsed = _parse_process_uuid(process_id)
+    async def process_get(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Return one background process via RunnerService (UUID or name).
+
+        Temp rows only resolve within their owning session.
+        """
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.get_process(self._workspace_uuid(), parsed)
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+            process = await service.process_manager.get_process(
+                self._workspace_uuid(), key, session_id=session_id
+            )
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_get failed: {exc}") from exc
         return _serialize_process(process)
 
-    async def process_stop(self, process_id: str) -> dict[str, Any]:
-        """Stop a background process via RunnerService."""
-        parsed = _parse_process_uuid(process_id)
+    async def process_stop(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Stop a background process via RunnerService (UUID or name).
+
+        Temp rows only resolve within their owning session.
+        """
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
         service = self._runner_service()
         try:
-            process = await service.stop_process(
-                self._workspace_uuid(), parsed
+            process = await service.process_manager.stop_process(
+                self._workspace_uuid(), key, session_id=session_id
             )
-        except (RunnerOfflineError, ConflictError, WorkspaceNotFoundError) as exc:
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
             raise RunnerAccessorError(f"process_stop failed: {exc}") from exc
         return _serialize_process(process)
+
+    async def process_restart(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Restart a background process via RunnerService (UUID or name).
+
+        Temp rows only restart from within their owning session.
+        """
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
+        service = self._runner_service()
+        try:
+            process = await service.process_manager.restart_process(
+                self._workspace_uuid(), key, session_id=session_id
+            )
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
+            raise RunnerAccessorError(
+                f"process_restart failed: {exc}"
+            ) from exc
+        return _serialize_process(process)
+
+    async def process_delete(self, process_id: str) -> dict[str, Any]:
+        """Delete a background process via RunnerService (UUID or name)."""
+        key = (process_id or "").strip()
+        if not key:
+            raise ValueError("process_id must not be empty")
+        service = self._runner_service()
+        try:
+            deleted_id = await service.process_manager.delete_process(
+                self._workspace_uuid(), key
+            )
+        except (
+            RunnerOfflineError,
+            ConflictError,
+            WorkspaceNotFoundError,
+            ValueError,
+        ) as exc:
+            raise RunnerAccessorError(f"process_delete failed: {exc}") from exc
+        return {"process_id": str(deleted_id), "deleted": True}
+
+    # -- Generic byte streams (workspace:stream_* transport) ---------------
+
+    async def _stream_call(
+        self,
+        event: str,
+        payload: dict[str, Any],
+        timeout: float | None,
+    ) -> dict[str, Any]:
+        """Send a stream control event and wait for the runner ACK."""
+        if self._call is None:
+            raise RunnerAccessorError(
+                f"{event} failed: no acknowledgement transport configured"
+            )
+        timeout_s = self._resolve_timeout(timeout)
+        try:
+            result = await asyncio.wait_for(
+                self._call(event, payload, timeout_s), timeout_s
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Harness request '{event}' timed out after {timeout_s:.1f}s"
+            ) from exc
+        if not isinstance(result, dict):
+            raise RunnerAccessorError(f"{event} failed: invalid acknowledgement")
+        return result
+
+    def _register_byte_stream(self, connection_id: str) -> _StreamState:
+        """Register bounded queue state for one open byte stream."""
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
+            maxsize=STREAM_QUEUE_DEPTH
+        )
+        state = _StreamState(connection_id, queue)
+        state.opened_at = asyncio.get_running_loop().time()
+        self._byte_streams[connection_id] = state
+        _ACCESSORS_BY_STREAM[connection_id] = self
+        return state
+
+    def get_stream_stderr_excerpt(self, connection_id: str = "") -> str:
+        """Return the sanitized stderr excerpt for *connection_id* (or last).
+
+        Secret-free and bounded (see
+        :func:`common.stream_diagnostics.sanitize_stderr_excerpt`):
+        safe to attach to logs and skip notes. With no id, the most
+        recently registered stream wins; unknown ids yield ``""``.
+        """
+        state: _StreamState | None = None
+        if connection_id:
+            state = self._byte_streams.get(str(connection_id))
+        elif self._byte_streams:
+            state = next(reversed(list(self._byte_streams.values())))
+        if state is None:
+            return ""
+        try:
+            return state.stderr_excerpt()
+        except Exception:  # pragma: no cover - logs must never break
+            return ""
+
+    def get_stream_diagnostics(self, connection_id: str = "") -> dict[str, Any]:
+        """Return secret-free lifecycle counters for one stream (or last).
+
+        ``stderr_excerpt`` is the sanitized tail (bounded); counters
+        (bytes, age, exit) tell "spawned but silent" apart from "died
+        loudly" without touching payload content.
+        """
+        state: _StreamState | None = None
+        if connection_id:
+            state = self._byte_streams.get(str(connection_id))
+        elif self._byte_streams:
+            state = next(reversed(list(self._byte_streams.values())))
+        if state is None:
+            return {}
+        try:
+            now = asyncio.get_running_loop().time()
+        except RuntimeError:  # pragma: no cover - no running loop
+            now = state.opened_at
+        return {
+            "connection_id": state.connection_id,
+            "closed": state.closed,
+            "close_error": state.close_error,
+            "exit_code": state.exit_code,
+            "stdout_bytes": state.stdout_bytes,
+            "stderr_bytes": state.stderr_total,
+            "stderr_buffered": len(state.stderr_buf),
+            "age_s": round(max(0.0, now - (state.opened_at or now)), 2),
+            "stderr_excerpt": self.get_stream_stderr_excerpt(
+                state.connection_id
+            ),
+        }
+
+    def _unregister_byte_stream(self, connection_id: str) -> None:
+        """Drop all routing state for one byte stream."""
+        self._byte_streams.pop(connection_id, None)
+        if _ACCESSORS_BY_STREAM.get(connection_id) is self:
+            _ACCESSORS_BY_STREAM.pop(connection_id, None)
+
+    def _deliver_stream_output(self, data: dict[str, Any]) -> bool:
+        """Enqueue one ``workspace:stream_output`` chunk (bounded).
+
+        Returns ``True`` (accepted) when the chunk was validated and
+        queued; ``False`` for unknown/closed/mismatched/invalid streams —
+        the runner treats a negative ACK as a signal to close its side.
+        """
+        connection_id = str(data.get("connection_id", ""))
+        state = self._byte_streams.get(connection_id)
+        if state is None or state.closed:
+            log.warning(
+                "stream_output_no_stream", connection_id=connection_id
+            )
+            return False
+        if str(data.get("workspace_id", "")) != self.workspace_id:
+            log.warning(
+                "stream_output_workspace_mismatch",
+                connection_id=connection_id,
+            )
+            return False
+        stream = str(data.get("stream", "stdout"))
+        if stream not in ("stdout", "stderr"):
+            log.warning(
+                "stream_output_bad_stream", connection_id=connection_id
+            )
+            return False
+        raw = "".join(str(data.get("data", "")).split())
+        if not raw:
+            log.warning(
+                "stream_output_empty", connection_id=connection_id
+            )
+            return False
+        try:
+            decoded_len = len(base64.b64decode(raw, validate=True))
+        except Exception:
+            log.warning(
+                "stream_output_bad_base64", connection_id=connection_id
+            )
+            return False
+        if decoded_len > WorkspaceByteStream.MAX_CHUNK_SIZE:
+            log.warning(
+                "stream_output_oversize", connection_id=connection_id
+            )
+            return False
+
+        def _put() -> None:
+            if state.closed:
+                return
+            try:
+                # Count stdout bytes at enqueue time (secret-free size
+                # only; content never leaves the queue into logs).
+                if stream == "stdout":
+                    state.stdout_bytes += decoded_len
+                else:
+                    # Stderr is captured per stream (bounded, newest
+                    # win): it stays out of the MCP stdout framing and
+                    # is only ever surfaced as a sanitized excerpt.
+                    try:
+                        state.append_stderr(
+                            base64.b64decode(raw, validate=True)
+                        )
+                    except Exception:  # pragma: no cover - validated above
+                        pass
+                state.queue.put_nowait(
+                    {"type": "chunk", "stream": stream, "data": raw}
+                )
+                state.update_drained()
+            except asyncio.QueueFull:
+                # Overflow: mark the failure AND best-effort remote close
+                # so no process keeps running without a consumer — but
+                # keep the error visible: the waiting consumer still gets
+                # StreamClosedError (close_error is never cleared).
+                state.closed = True
+                state.close_error = "stream queue overflow"
+                state.close_event.set()
+                state.drained.set()
+                # Drain one slot for the terminal marker so a
+                # blocked receiver wakes up instead of hanging.
+                with contextlib.suppress(Exception):
+                    try:
+                        state.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    state.queue.put_nowait({"type": "closed"})
+                log.warning(
+                    "stream_output_queue_full",
+                    connection_id=connection_id,
+                )
+                self._request_remote_close(connection_id)
+
+        self._schedule(_put)
+        return True
+
+    async def _wait_stream_capacity(self, connection_id: str) -> None:
+        """Wait (bounded) until the stream's consumer has drained its queue.
+
+        Called before an output chunk is ACKed: the runner holds the next
+        chunk until then, so backpressure reaches the workspace process.
+        """
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            return
+
+        async def wait() -> None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(state.drained.wait(), STREAM_PACE_TIMEOUT)
+
+        loop = self._loop
+        if loop is None or not loop.is_running() or loop is asyncio.get_running_loop():
+            await wait()
+            return
+        await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(wait(), loop))
+
+    def _request_remote_close(self, connection_id: str) -> None:
+        """Best-effort remote close without touching consumer state.
+
+        Fire-and-forget ``workspace:stream_close`` (shielded, no ACK
+        wait): the local ``close_error`` is preserved so the waiting
+        consumer still observes the original failure instead of a
+        silent EOF.
+        """
+
+        async def _close() -> None:
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    self._emit(
+                        "workspace:stream_close",
+                        {
+                            "connection_id": connection_id,
+                            "workspace_id": self.workspace_id,
+                        },
+                    )
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(_close())
+        elif self._loop is not None and self._loop.is_running():
+            with contextlib.suppress(RuntimeError):
+                asyncio.run_coroutine_threadsafe(
+                    _close(), self._loop
+                )
+
+    def _deliver_stream_closed(self, data: dict[str, Any]) -> bool:
+        """Resolve one byte stream with the runner close notice."""
+        connection_id = str(data.get("connection_id", ""))
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            log.warning(
+                "stream_closed_no_stream", connection_id=connection_id
+            )
+            return False
+        if str(data.get("workspace_id", "")) != self.workspace_id:
+            log.warning(
+                "stream_closed_workspace_mismatch",
+                connection_id=connection_id,
+            )
+            return False
+
+        def _close() -> None:
+            state.closed = True
+            error = data.get("error")
+            if error:
+                state.close_error = str(error)
+            else:
+                try:
+                    code = data.get("exit_code")
+                    state.exit_code = (
+                        int(code) if code is not None else None
+                    )
+                except (TypeError, ValueError):
+                    state.exit_code = None
+            state.close_event.set()
+            state.drained.set()
+            try:
+                state.queue.put_nowait({"type": "closed"})
+            except asyncio.QueueFull:
+                pass
+            # One structured line per stream close: exit code /
+            # close error plus lifecycle counters. This is the line
+            # that answers "did the server die, and when" — stderr
+            # content itself stays in the sanitized excerpt only.
+            log.info(
+                "stream_closed",
+                connection_id=connection_id,
+                workspace_id=self.workspace_id,
+                exit_code=state.exit_code,
+                close_error=state.close_error,
+                stdout_bytes=state.stdout_bytes,
+                stderr_bytes=state.stderr_total,
+                age_s=round(
+                    max(
+                        0.0,
+                        asyncio.get_running_loop().time()
+                        - (state.opened_at or 0.0),
+                    ),
+                    2,
+                )
+                if state.opened_at
+                else 0.0,
+            )
+
+        self._schedule(_close)
+        return True
+
+    def fail_all_streams(self, error: str) -> None:
+        """Fail every open byte stream (runner disconnect path)."""
+
+        def _fail() -> None:
+            for state in list(self._byte_streams.values()):
+                state.closed = True
+                state.close_error = error
+                state.close_event.set()
+                state.drained.set()
+                with contextlib.suppress(asyncio.QueueFull):
+                    state.queue.put_nowait({"type": "closed"})
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if self._loop is not None and running is not self._loop:
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(_fail)
+                return
+        _fail()
+
+    async def _stream_receive(self, connection_id: str) -> bytes:
+        """Return the next stdout chunk for *connection_id* (``b""`` = EOF).
+
+        No idle timeout: MCP connections may stay idle for a long time.
+        Startup/request timeouts are enforced by the later MCP layer, not
+        here.  Cancellation still propagates (and the caller closes the
+        stream remotely via :meth:`RunnerByteStream.aclose`).
+        """
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            raise StreamClosedError(f"stream {connection_id!r} is not open")
+        while True:
+            item = await state.queue.get()
+            state.update_drained()
+            kind = item.get("type")
+            if kind == "closed":
+                if state.close_error:
+                    raise StreamClosedError(
+                        f"stream {connection_id!r} closed: "
+                        f"{state.close_error}"
+                    )
+                return b""
+            if item.get("stream") == "stderr":
+                if self._on_stderr is not None:
+                    try:
+                        raw = "".join(
+                            str(item.get("data", "")).split()
+                        )
+                        self._on_stderr(
+                            connection_id,
+                            base64.b64decode(raw, validate=True),
+                        )
+                    except Exception:
+                        log.warning(
+                            "stream_stderr_callback_failed",
+                            connection_id=connection_id,
+                        )
+                else:
+                    log.debug(
+                        "stream_stderr_dropped",
+                        connection_id=connection_id,
+                    )
+                continue
+            try:
+                return base64.b64decode(
+                    "".join(str(item.get("data", "")).split()),
+                    validate=True,
+                )
+            except Exception as exc:
+                raise StreamClosedError(
+                    f"stream {connection_id!r}: invalid chunk"
+                ) from exc
+
+    async def _stream_send(self, connection_id: str, data: bytes) -> None:
+        """Write bounded bytes to one stream (ACK each input event)."""
+        state = self._byte_streams.get(connection_id)
+        if state is None or state.closed:
+            raise StreamClosedError(f"stream {connection_id!r} is not open")
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise ValueError("data must be non-empty bytes")
+        if len(data) > WorkspaceByteStream.MAX_CHUNK_SIZE:
+            raise ValueError(
+                "stream write exceeds "
+                f"{WorkspaceByteStream.MAX_CHUNK_SIZE} byte chunk limit"
+            )
+        payload = {
+            "connection_id": connection_id,
+            "workspace_id": self.workspace_id,
+            "data": base64.b64encode(bytes(data)).decode("ascii"),
+        }
+        try:
+            result = await self._stream_call(
+                "workspace:stream_input", payload, None
+            )
+        except StreamClosedError:
+            raise
+        except (TimeoutError, RunnerAccessorError) as exc:
+            raise StreamClosedError(
+                f"stream {connection_id!r} send failed: {exc}"
+            ) from exc
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise StreamClosedError(
+                f"stream {connection_id!r} send rejected: "
+                f"{result.get('error', 'unknown error')}"
+            )
+
+    async def _stream_send_eof(self, connection_id: str) -> None:
+        """Half-close one stream stdin (graceful EOF, best effort)."""
+        state = self._byte_streams.get(connection_id)
+        if state is None or state.closed:
+            return
+        with contextlib.suppress(Exception):
+            await asyncio.shield(
+                self._stream_call(
+                    "workspace:stream_close",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": self.workspace_id,
+                        "eof": True,
+                    },
+                    None,
+                )
+            )
+
+    async def _stream_close(self, connection_id: str) -> None:
+        """Join remote cleanup; retain managed identity on unverified closure."""
+        from ..desktop_leases import cleanup_rpc
+
+        state = self._byte_streams.get(connection_id)
+        managed = bool(state is not None and state.managed)
+        try:
+            result = await cleanup_rpc(
+                self._stream_call(
+                    "workspace:stream_close",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": self.workspace_id,
+                    },
+                    None,
+                )
+            )
+            if managed and (
+                not isinstance(result, dict)
+                or result.get("ok") is not True
+                or result.get("closed") is not True
+            ):
+                raise StreamClosedError("Managed process closure was not confirmed")
+        except Exception:
+            if managed:
+                raise
+        else:
+            self._unregister_byte_stream(connection_id)
+            return
+        self._unregister_byte_stream(connection_id)
+
+    async def _stream_wait_closed(self, connection_id: str) -> int | None:
+        """Wait for the runner close notice (exit code when known).
+
+        No default timeout: waits until the runner closes the stream,
+        the stream fails, or the waiter is cancelled (cancel still
+        triggers a remote close via the stream's ``aclose``).
+        """
+        state = self._byte_streams.get(connection_id)
+        if state is None:
+            return None
+        await state.close_event.wait()
+        if state.close_error:
+            raise StreamClosedError(
+                f"stream {connection_id!r} closed: {state.close_error}"
+            )
+        return state.exit_code
+
+    async def _open_byte_stream(
+        self,
+        start_payload: dict[str, Any],
+        timeout: float | None,
+    ) -> RunnerByteStream:
+        """Register state, ACK the open, and return the byte stream.
+
+        On any open failure (runner timeout/reject) the local state is
+        rolled back *and* a best-effort remote close is sent so a slow
+        runner that accepted the spawn late does not leak the process.
+        """
+        connection_id = str(start_payload.get("connection_id", ""))
+        if not connection_id:
+            raise ValueError("connection_id must not be empty")
+        if connection_id in self._byte_streams:
+            raise ValueError(f"Duplicate connection_id: {connection_id!r}")
+        state = self._register_byte_stream(connection_id)
+        state.managed = start_payload.get("owner") is not None
+        try:
+            result = await self._stream_call(
+                "workspace:stream_start", start_payload, timeout
+            )
+        except BaseException:
+            # Startup deadlines and user aborts cancel the open task.
+            # Release routing state and close any late runner spawn just
+            # as for an ordinary open failure.
+            self._request_remote_close(connection_id)
+            self._unregister_byte_stream(connection_id)
+            raise
+        if not isinstance(result, dict) or result.get("ok") is False:
+            self._request_remote_close(connection_id)
+            self._unregister_byte_stream(connection_id)
+            error = (
+                result.get("error", "unknown error")
+                if isinstance(result, dict)
+                else "unknown error"
+            )
+            raise StreamClosedError(
+                f"stream {connection_id!r} open rejected: {error}"
+            )
+        _ = state
+        return RunnerByteStream(self, self.workspace_id, connection_id)
+
+    async def ensure_runtime_artifact(
+        self, artifact_id: str, version: str
+    ) -> dict[str, Any]:
+        """Provision an allowlisted runner artifact, with correlated ownership."""
+        if not artifact_id or not version or len(artifact_id) > 64 or len(version) > 64:
+            raise ValueError("Invalid runtime artifact identity")
+        request_id = uuid.uuid4().hex
+        result = await self._await_result(
+            request_id,
+            "workspace:artifact_ensure",
+            {
+                "workspace_id": self.workspace_id,
+                "request_id": request_id,
+                "artifact_id": artifact_id,
+                "version": version,
+            },
+            600.0,
+        )
+        self._raise_for_error(result, "workspace:artifact_ensure")
+        if result.get("ok") is not True or result.get("version") != version:
+            raise RunnerAccessorError("Runtime artifact provisioning was not confirmed")
+        return result
+
+    async def open_process(
+        self,
+        command: list[str],
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        *,
+        owner: dict[str, str] | None = None,
+        process_profile: ProcessProfile | None = None,
+    ) -> WorkspaceByteStream:
+        """Open stdio with independent runner ownership and isolation profile."""
+        if process_profile is not None:
+            if process_profile not in ("agent", "helper"):
+                raise ValueError("Invalid process profile")
+            if owner is None:
+                raise ValueError("Process profiles require a managed owner")
+            if process_profile == "helper" and env:
+                raise ValueError("Helper processes require an empty environment")
+        safe_workdir = sanitize_exec_workdir(workdir)
+        if not isinstance(command, list) or not command:
+            raise ValueError("command must be a non-empty argv list")
+        argv = [str(part) for part in command]
+        if any(not part or "\x00" in part for part in argv):
+            raise ValueError("Invalid command argv entry")
+        connection_id = uuid.uuid4().hex
+        log.info(
+            "stream_open",
+            connection_id=connection_id,
+            workspace_id=self.workspace_id,
+            kind="process",
+            # argv[0] only: full args may embed flags/paths that echo
+            # secrets in some setups; the runner logs nothing either.
+            command=argv[0],
+            workdir=safe_workdir,
+        )
+        try:
+            return await self._open_byte_stream(
+                {
+                    "connection_id": connection_id,
+                    "workspace_id": self.workspace_id,
+                    "kind": "process",
+                    "command": argv,
+                    "workdir": safe_workdir,
+                    "env": dict(env or {}),
+                    **({"owner": dict(owner)} if owner is not None else {}),
+                    **(
+                        {"process_profile": process_profile}
+                        if process_profile is not None
+                        else {}
+                    ),
+                },
+                timeout,
+            )
+        except Exception as exc:
+            log.warning(
+                "stream_open_failed",
+                connection_id=connection_id,
+                workspace_id=self.workspace_id,
+                kind="process",
+                command=argv[0],
+                error=f"{type(exc).__name__}: {exc}".strip()[:300],
+            )
+            raise
+
+    async def open_tcp(
+        self,
+        host: str,
+        port: int,
+        tls: bool = False,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> WorkspaceByteStream:
+        """Open a workspace-local TCP stream (DNS+connect in workspace)."""
+        clean_host = _validate_tcp_host(host)
+        clean_port = _validate_tcp_port(port)
+        connection_id = uuid.uuid4().hex
+        return await self._open_byte_stream(
+            {
+                "connection_id": connection_id,
+                "workspace_id": self.workspace_id,
+                "kind": "tcp",
+                "host": clean_host,
+                "port": clean_port,
+                "tls": bool(tls),
+                "server_hostname": (server_hostname or "").strip()
+                or clean_host,
+            },
+            timeout,
+        )
 
 
 def _resolve_future(
@@ -657,17 +1809,28 @@ def _resolve_future(
         future.set_result(data)
 
 
+def _resolve_future_exception(
+    future: asyncio.Future[dict[str, Any]], exc: BaseException
+) -> None:
+    """Fail *future* with *exc* if it is still waiting."""
+    if not future.done():
+        future.set_exception(exc)
+
+
 async def create_harness_accessor(
     service: Any,
     workspace_id: str,
     *,
     default_timeout: float = DEFAULT_TIMEOUT,
+    allow_lease_cleanup: bool = False,
 ) -> RunnerWorkspaceAccessor:
     """Build a runner-backed accessor for *workspace_id*.
 
     Args:
         service: The runners ``RunnerService`` used to emit events.
         workspace_id: Workspace UUID string owned by an online runner.
+        allow_lease_cleanup: Let only lease release bypass interaction admission,
+            so recovery can clean failed or lifecycle-fenced workspaces.
 
     Raises:
         WorkspaceNotFoundError: If the workspace does not exist.
@@ -682,20 +1845,21 @@ async def create_harness_accessor(
         WorkspaceNotFoundError,
     )
 
-    workspace = await sync_to_async(service.workspaces.get_by_id)(
-        _uuid.UUID(workspace_id)
-    )
+    workspace_uuid = _uuid.UUID(workspace_id)
+    # Each call re-reads the live runner session and the interaction fence in
+    # one query: SIDs rotate on reconnect and lifecycle fences start at any time.
+    interaction_target = sync_to_async(WorkspaceAdmissionService().interaction_target)
+
+    workspace = await interaction_target(workspace_uuid, fenced=not allow_lease_cleanup)
     if workspace is None:
         raise WorkspaceNotFoundError(workspace_id)
     runner = workspace.runner
     if not runner.is_online or not runner.sid:
         raise RunnerOfflineError(str(runner.id))
 
-    async def _emit(event: str, payload: dict[str, Any]) -> None:
-        """Emit *event* to the workspace's current runner SID."""
-        current = await sync_to_async(service.workspaces.get_by_id)(
-            _uuid.UUID(workspace_id)
-        )
+    async def _live_runner(event: str, *, fenced: bool = True) -> Any:
+        """Return the workspace's current online runner for one call."""
+        current = await interaction_target(workspace_uuid, fenced=fenced)
         if current is None:
             raise RunnerAccessorError(
                 f"{event} failed: workspace {workspace_id} not found"
@@ -705,8 +1869,20 @@ async def create_harness_accessor(
             raise RunnerAccessorError(
                 f"{event} failed: runner {live_runner.id} is offline"
             )
+        return live_runner
+
+    async def _emit(event: str, payload: dict[str, Any]) -> None:
+        """Emit *event* to the workspace's current runner SID."""
+        cleanup_release = (
+            allow_lease_cleanup
+            and event == "harness:desktop_action"
+            and payload.get("action") == "release"
+        )
+        live_runner = await _live_runner(event, fenced=not cleanup_release)
         try:
-            await service.emit_harness_event(live_runner, event, payload)
+            await service.runner_transport.emit_harness_event(
+                live_runner, event, payload
+            )
         except RunnerOfflineError as exc:
             raise RunnerAccessorError(f"{event} failed: {exc}") from exc
 
@@ -717,16 +1893,39 @@ async def create_harness_accessor(
 
     async def _desktop_geometry() -> tuple[int, int]:
         """Return the workspace's configured desktop framebuffer size."""
-        current = await sync_to_async(service.workspaces.get_by_id)(
-            _uuid.UUID(workspace_id)
-        )
+        current = await interaction_target(workspace_uuid)
         if current is None:
             return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
         return int(current.desktop_width), int(current.desktop_height)
+
+    async def _call(
+        event: str, payload: dict[str, Any], timeout: float | None = None
+    ) -> dict[str, Any]:
+        """ACKed call to the workspace's current runner (stream control)."""
+        live_runner = await _live_runner(event)
+        try:
+            return await service.stream_transport.call_stream_event(
+                live_runner,
+                event,
+                payload,
+                timeout=timeout if timeout is not None else STREAM_CALL_TIMEOUT,
+            )
+        except RunnerOfflineError as exc:
+            raise RunnerAccessorError(f"{event} failed: {exc}") from exc
+
+    def _on_stderr(connection_id: str, data: bytes) -> None:
+        """Record relay stderr volume (never content — may hold secrets)."""
+        log.info(
+            "stream_stderr",
+            connection_id=connection_id,
+            byte_count=len(data),
+        )
 
     return RunnerWorkspaceAccessor(
         workspace_id,
         emit=_emit,
         default_timeout=default_timeout,
         desktop_geometry=_desktop_geometry,
+        call=_call,
+        on_stderr=_on_stderr,
     )

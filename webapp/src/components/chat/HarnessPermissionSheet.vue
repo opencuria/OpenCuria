@@ -3,8 +3,11 @@ import { computed, ref, watch } from 'vue'
 import { ChevronDown, ChevronUp, ShieldAlert } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { gateSourceLabel } from '@/lib/harnessSubtaskActivity'
-import type { HarnessPermissionRequest, HarnessPermissionResponse } from '@/types/harness'
+import { gateSourceLabel } from '@opencuria/chat-core/harnessSubtaskActivity'
+import type {
+  HarnessPermissionRequest,
+  HarnessPermissionResponse,
+} from '@opencuria/chat-core/harness'
 
 const props = defineProps<{
   requests: HarnessPermissionRequest[]

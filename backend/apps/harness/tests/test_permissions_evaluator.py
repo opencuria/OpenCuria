@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.permissions.evaluator import PermissionEvaluator, combine_decisions
 
 
 def test_default_is_allow() -> None:
@@ -14,10 +14,10 @@ def test_default_is_allow() -> None:
     assert evaluator.evaluate("bash", "ls") == "allow"
 
 
-def test_reserved_defaults_are_ask() -> None:
-    """external_directory and doom_loop default to ask."""
+def test_reserved_defaults() -> None:
+    """doom_loop defaults to ask; external_directory falls through to allow."""
     evaluator = PermissionEvaluator()
-    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "ask"
+    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "allow"
     assert evaluator.evaluate("bash", "ls", doom_loop=True) == "ask"
 
 
@@ -109,12 +109,26 @@ def test_unknown_mode_ignored() -> None:
 
 
 def test_reserved_keys_overridable() -> None:
-    """Explicit rules can override the ask default for reserved keys."""
+    """Explicit rules can override reserved-key defaults."""
     evaluator = PermissionEvaluator(
-        global_rules={"doom_loop": "deny", "external_directory": "allow"}
+        global_rules={"doom_loop": "deny", "external_directory": "ask"}
     )
     assert evaluator.evaluate("bash", "x", doom_loop=True) == "deny"
-    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "allow"
+    assert evaluator.evaluate("read", "/tmp/x", external_directory=True) == "ask"
+
+
+def test_external_directory_does_not_bypass_tool_deny() -> None:
+    """Fall-through still applies bash deny rules (e.g. explore)."""
+    evaluator = PermissionEvaluator(
+        agent_rules={"bash": {"*": "allow", "rm *": "deny"}}
+    )
+    assert (
+        evaluator.evaluate("bash", "rm /etc/passwd", external_directory=True) == "deny"
+    )
+    assert (
+        evaluator.evaluate("bash", "cat /etc/passwd", external_directory=True)
+        == "allow"
+    )
 
 
 @pytest.mark.parametrize("decision", ["allow", "ask", "deny"])
@@ -124,21 +138,54 @@ def test_all_decisions_reachable(decision: str) -> None:
     assert evaluator.evaluate("bash", "ls") == decision
 
 
-def test_default_global_rules_env_parity() -> None:
-    """DEFAULT_GLOBAL_RULES asks for .env, allows example and normal."""
+def test_default_global_rules_do_not_gate_env() -> None:
+    """Built-in rules allow env reads; explicit granular rules still match."""
     from apps.harness.permissions.evaluator import DEFAULT_GLOBAL_RULES
 
     evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
-    assert evaluator.evaluate("read", "/workspace/.env") == "ask"
-    assert evaluator.evaluate("read", "/workspace/app.env.local") == "ask"
-    assert evaluator.evaluate("read", "/workspace/.env.example") == "allow"
-    assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
+    assert evaluator.evaluate("read", "/workspace/.env") == "allow"
+    assert evaluator.evaluate("read", "/etc/app.env.local") == "allow"
+    assert evaluator.evaluate("read", ".env") == "allow"
+    custom = PermissionEvaluator(global_rules={"read": {"*.env": "ask"}})
+    assert custom.evaluate("read", "/workspace/.env") == "ask"
+    assert custom.evaluate("read", ".env") == "ask"
 
 
-def test_granular_basename_matching_without_path_prefix() -> None:
-    """Basename-scoped patterns fire on bare filenames too (edge path)."""
-    from apps.harness.permissions.evaluator import DEFAULT_GLOBAL_RULES
+@pytest.mark.parametrize(
+    ("decisions", "expected"),
+    [
+        ((), "allow"),
+        (("allow", "allow"), "allow"),
+        (("allow", "ask"), "ask"),
+        (("ask", "deny", "allow"), "deny"),
+    ],
+)
+def test_combine_decisions_keeps_the_strictest(
+    decisions: tuple[str, ...], expected: str
+) -> None:
+    """Combined decisions follow deny > ask > allow precedence."""
+    assert combine_decisions(*decisions) == expected
 
-    evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
-    assert evaluator.evaluate("read", ".env") == "ask"
-    assert evaluator.evaluate("read", "") == "allow"
+
+def test_agent_policy_never_relaxes_the_base_policy() -> None:
+    """An agent allow cannot lift a base ask, unlike an in-evaluator layer."""
+    base = PermissionEvaluator(global_rules={"*": "ask", "read": "allow"})
+    policy = base.for_agent({"bash": "allow", "edit": "deny"})
+    assert policy.evaluate("bash", "ls") == "ask"
+    assert policy.evaluate("edit", "f") == "deny"
+    assert policy.evaluate("read", "f") == "allow"
+    layered = PermissionEvaluator(
+        global_rules={"*": "ask"}, agent_rules={"bash": "allow"}
+    )
+    assert layered.evaluate("bash", "ls") == "allow"
+
+
+def test_agent_policy_forwards_mode_and_reserved_keys() -> None:
+    """Mode slices and reserved keys apply in both combined policies."""
+    base = PermissionEvaluator(mode_rules={"plan": {"bash": "ask"}})
+    policy = base.for_agent({"external_directory": "deny"})
+    assert policy.evaluate("bash", "ls") == "allow"
+    assert policy.evaluate("bash", "ls", mode="plan") == "ask"
+    assert policy.evaluate("bash", "cat /etc/x", external_directory=True) == "deny"
+    assert policy.evaluate("bash", "ls", doom_loop=True) == "ask"
+    assert base.for_agent(None).evaluate("bash", "ls") == "allow"

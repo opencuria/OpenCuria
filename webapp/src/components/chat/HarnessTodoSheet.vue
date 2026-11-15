@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { CircleCheck, CircleDashed, CircleX, ChevronDown, ListTodo, Loader2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import type { HarnessTodo } from '@/types/harness'
+import type { HarnessTodo } from '@opencuria/chat-core/harness'
 
 const props = defineProps<{
   todos: HarnessTodo[]

@@ -9,13 +9,16 @@ from data access and makes services easy to test with mock repositories.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
-from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Value
-from django.db.models.functions import Coalesce
+from django.db import connection, transaction
+from django.db.models import Count, F, OuterRef, Q, QuerySet, Subquery, Value
+from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
+from .disk_usage import WorkspaceDiskUsage
 from .enums import (
     RunnerStatus,
     TaskStatus,
@@ -23,16 +26,19 @@ from .enums import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .image_assignment_repository import ImageAssignmentRepository
+from .locking import lock_runner
 from .models import (
+    CapturedImage,
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     RunnerSystemMetrics,
     Task,
     Workspace,
-    WorkspaceProcess,
 )
+from .workspace_operation_repository import WorkspaceOperationRepository
 
 # ---------------------------------------------------------------------------
 # Runner Repository
@@ -51,6 +57,22 @@ class RunnerRepository:
     def get_by_token_hash(token_hash: str) -> Runner | None:
         """Fetch a runner by its hashed API token."""
         return Runner.objects.filter(api_token_hash=token_hash).first()
+
+    @staticmethod
+    def get_online_by_sid(sid: str) -> Runner | None:
+        """Fetch the online runner on this session, or None when it is stale."""
+        try:
+            return Runner.objects.get(sid=sid, status=RunnerStatus.ONLINE)
+        except Runner.DoesNotExist:
+            return None
+
+    @staticmethod
+    def has_session(runner_id: str, sid: str, *, online_only: bool = True) -> bool:
+        """Return whether *sid* is the runner's current Socket.IO session."""
+        query = Runner.objects.filter(pk=runner_id, sid=sid)
+        if online_only:
+            query = query.filter(status=RunnerStatus.ONLINE)
+        return query.exists()
 
     @staticmethod
     def list_all() -> QuerySet[Runner]:
@@ -81,19 +103,21 @@ class RunnerRepository:
         runner: Runner,
         *,
         sid: str,
-        available_runtimes: list[str] | None = None,
     ) -> Runner:
         """Mark a runner as online with its Socket.IO session ID."""
         runner.status = RunnerStatus.ONLINE
         runner.sid = sid
-        if available_runtimes is not None:
-            runner.available_runtimes = available_runtimes
+        runner.last_heartbeat_at = timezone.now()
         runner.connected_at = timezone.now()
         runner.disconnected_at = None
         runner.save(
             update_fields=[
-                "status", "sid", "available_runtimes",
-                "connected_at", "disconnected_at", "updated_at",
+                "status",
+                "sid",
+                "last_heartbeat_at",
+                "connected_at",
+                "disconnected_at",
+                "updated_at",
             ]
         )
         return runner
@@ -104,9 +128,7 @@ class RunnerRepository:
         runner.status = RunnerStatus.OFFLINE
         runner.sid = ""
         runner.disconnected_at = timezone.now()
-        runner.save(
-            update_fields=["status", "sid", "disconnected_at", "updated_at"]
-        )
+        runner.save(update_fields=["status", "sid", "disconnected_at", "updated_at"])
         return runner
 
     @staticmethod
@@ -118,7 +140,13 @@ class RunnerRepository:
     def update_heartbeat(runner: Runner) -> Runner:
         """Update the last heartbeat timestamp for a runner."""
         runner.last_heartbeat_at = timezone.now()
-        runner.save(update_fields=["last_heartbeat_at", "updated_at"])
+        # Fence against reconnect/disconnect racing the authenticated handler.
+        Runner.objects.filter(pk=runner.pk, sid=runner.sid).exclude(sid="").update(
+            last_heartbeat_at=runner.last_heartbeat_at,
+            status=RunnerStatus.ONLINE,
+            disconnected_at=None,
+            updated_at=timezone.now(),
+        )
         return runner
 
     @staticmethod
@@ -167,21 +195,21 @@ class RunnerSystemMetricsRepository:
         )
 
     @staticmethod
-    def get_history(runner_id: uuid.UUID, since: datetime) -> QuerySet[RunnerSystemMetrics]:
+    def get_history(
+        runner_id: uuid.UUID, since: datetime
+    ) -> QuerySet[RunnerSystemMetrics]:
         """Return all metrics since a given timestamp."""
-        return (
-            RunnerSystemMetrics.objects.filter(
-                runner_id=runner_id,
-                timestamp__gte=since,
-            )
-            .order_by("timestamp")
-        )
+        return RunnerSystemMetrics.objects.filter(
+            runner_id=runner_id,
+            timestamp__gte=since,
+        ).order_by("timestamp")
 
     @staticmethod
     def purge_old(runner_id: uuid.UUID, keep_hours: int = 24) -> int:
         """Delete metrics older than *keep_hours* hours. Returns count deleted."""
-        from django.utils import timezone as tz
         from datetime import timedelta
+
+        from django.utils import timezone as tz
 
         cutoff = tz.now() - timedelta(hours=keep_hours)
         deleted, _ = RunnerSystemMetrics.objects.filter(
@@ -194,25 +222,36 @@ class RunnerSystemMetricsRepository:
 # Workspace Repository
 # ---------------------------------------------------------------------------
 
-def _active_harness_exists():
-    """Return an Exists() annotation for busy harness sessions."""
-    from django.apps import apps as django_apps
 
-    HarnessSession = django_apps.get_model("harness", "HarnessSession")
-    return Exists(
-        HarnessSession.objects.filter(workspace=OuterRef("pk"), status="busy")
-    )
+class WorkspaceLaunchState(NamedTuple):
+    """Committed lifecycle facts checked before unattended work starts.
+
+    Every field keeps its default when the workspace no longer exists.
+    """
+
+    status: str | None = None
+    active_operation: str | None = None
+    runner_status: str | None = None
+    owner_is_active: bool = False
+    current_task_id: uuid.UUID | None = None
 
 
 class WorkspaceRepository:
     """Data access for Workspace records."""
 
     @staticmethod
-    def get_by_id(workspace_id: uuid.UUID) -> Workspace | None:
-        """Fetch a workspace by its ID."""
+    def get_by_id(workspace_id: uuid.UUID, *, lock: bool = False) -> Workspace | None:
+        """Fetch a workspace by ID, optionally acquiring a row lock."""
+        queryset = Workspace.objects.filter(id=workspace_id)
+        if lock:
+            # Keep the workspace row locked without locking nullable related
+            # rows pulled in by select_related (e.g. created_by).
+            if connection.features.has_select_for_update_of:
+                queryset = queryset.select_for_update(of=("self",))
+            else:
+                queryset = queryset.select_for_update()
         return (
-            Workspace.objects.filter(id=workspace_id)
-            .select_related(
+            queryset.select_related(
                 "runner",
                 "runner__organization",
                 "created_by",
@@ -220,7 +259,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
             .first()
         )
 
@@ -238,18 +276,41 @@ class WorkspaceRepository:
         )
 
     @staticmethod
+    def get_launch_state(workspace_id: uuid.UUID) -> WorkspaceLaunchState:
+        """Return the committed lifecycle facts in one lightweight read."""
+        row = (
+            Workspace.objects.filter(id=workspace_id)
+            .values_list(
+                "status",
+                "active_operation",
+                "runner__status",
+                "created_by__is_active",
+                "current_task_id",
+            )
+            .first()
+        )
+        return WorkspaceLaunchState(*row) if row else WorkspaceLaunchState()
+
+    @staticmethod
+    def is_created_by(
+        workspace_id: uuid.UUID, *, user_id: int, organization_id: uuid.UUID
+    ) -> bool:
+        """Return whether *user_id* created the workspace in *organization_id*."""
+        return Workspace.objects.filter(
+            id=workspace_id,
+            runner__organization_id=organization_id,
+            created_by_id=user_id,
+        ).exists()
+
+    @staticmethod
     def list_all() -> QuerySet[Workspace]:
         """Return all workspaces."""
-        return (
-            Workspace.objects.select_related(
-                "runner",
-                "runner__organization",
-                "base_image_instance",
-                "base_image_instance__origin_definition",
-            )
-            .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
-        )
+        return Workspace.objects.select_related(
+            "runner",
+            "runner__organization",
+            "base_image_instance",
+            "base_image_instance__origin_definition",
+        ).prefetch_related("credentials__service")
 
     @staticmethod
     def list_by_runner(runner_id: uuid.UUID) -> QuerySet[Workspace]:
@@ -263,8 +324,32 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
         )
+
+    @staticmethod
+    def list_for_scope(
+        *,
+        runner_id: uuid.UUID | None = None,
+        organization_id: uuid.UUID | None = None,
+        user: Any = None,
+        exclude_statuses: tuple[str, ...] = (),
+    ) -> list[Workspace]:
+        """Read workspaces with optional owner/status filters, newest first.
+
+        Runner scope takes precedence over organization scope. Materialize
+        the complete query here so callers do not need queryset operations.
+        """
+        if runner_id:
+            query = WorkspaceRepository.list_by_runner(runner_id)
+        elif organization_id:
+            query = WorkspaceRepository.list_by_organization(organization_id)
+        else:
+            query = WorkspaceRepository.list_all()
+        if user is not None:
+            query = query.filter(created_by=user)
+        if exclude_statuses:
+            query = query.exclude(status__in=exclude_statuses)
+        return list(query)
 
     @staticmethod
     def create(
@@ -272,13 +357,13 @@ class WorkspaceRepository:
         workspace_id: uuid.UUID,
         runner: Runner,
         name: str,
-        runtime_type: str = "docker",
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
         desktop_width: int | None = None,
         desktop_height: int | None = None,
         base_image_instance=None,
+        repos: list[str] | None = None,
         created_by=None,
     ) -> Workspace:
         """Create a new workspace record."""
@@ -288,7 +373,6 @@ class WorkspaceRepository:
             id=workspace_id,
             runner=runner,
             name=name,
-            runtime_type=runtime_type,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
@@ -299,6 +383,7 @@ class WorkspaceRepository:
                 DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height
             ),
             base_image_instance=base_image_instance,
+            repos=list(repos or []),
             status=WorkspaceStatus.CREATING,
             active_operation=WorkspaceOperation.CREATING,
             created_by=created_by,
@@ -308,14 +393,65 @@ class WorkspaceRepository:
         return workspace
 
     @staticmethod
+    def list_attached_credentials(workspace_id: uuid.UUID) -> list[Any]:
+        """Return workspace credential rows with their service metadata."""
+        workspace = Workspace.objects.filter(id=workspace_id).first()
+        if workspace is None:
+            return []
+        return list(workspace.credentials.all().select_related("service"))
+
+    @staticmethod
     def set_credentials(workspace: Workspace, credentials: list) -> Workspace:
-        """Replace the credentials attached to a workspace."""
+        """Replace the attachment relation without claiming on-disk state."""
         workspace.credentials.set(credentials)
         workspace.save(update_fields=["updated_at"])
         cache = getattr(workspace, "_prefetched_objects_cache", None)
         if cache is not None:
             cache.pop("credentials", None)
         return workspace
+
+    @staticmethod
+    def replace_configuration(
+        workspace: Workspace,
+        *,
+        name: str | None,
+        credentials: list | None,
+        qemu_values: tuple | None = None,
+        desktop_values: tuple | None = None,
+    ) -> None:
+        """Write workspace-owned configuration after service validation."""
+        if name is not None:
+            workspace.name = name
+            workspace.save(update_fields=["name", "updated_at"])
+        if credentials is not None:
+            workspace.credentials.set(credentials)
+        if qemu_values is not None:
+            (
+                workspace.qemu_vcpus,
+                workspace.qemu_memory_mb,
+                workspace.qemu_disk_size_gb,
+            ) = qemu_values
+            workspace.save(
+                update_fields=[
+                    "qemu_vcpus",
+                    "qemu_memory_mb",
+                    "qemu_disk_size_gb",
+                    "updated_at",
+                ]
+            )
+        if desktop_values is not None:
+            workspace.desktop_width, workspace.desktop_height = desktop_values
+            workspace.save(
+                update_fields=["desktop_width", "desktop_height", "updated_at"]
+            )
+
+    @staticmethod
+    def mark_configuration_updated(workspace: Workspace) -> None:
+        """Touch configuration metadata and invalidate cached credential relations."""
+        workspace.save(update_fields=["updated_at"])
+        cache = getattr(workspace, "_prefetched_objects_cache", None)
+        if cache is not None:
+            cache.pop("credentials", None)
 
     @staticmethod
     def touch_activity(
@@ -342,7 +478,17 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
+        )
+
+    @staticmethod
+    def list_ids_for_credential(
+        credential_id: uuid.UUID,
+    ) -> list[uuid.UUID]:
+        """Return workspace IDs with *credential_id* attached (org-agnostic)."""
+        return list(
+            Workspace.objects.filter(credentials__id=credential_id).values_list(
+                "id", flat=True
+            )
         )
 
     @staticmethod
@@ -357,7 +503,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
         )
 
     @staticmethod
@@ -369,6 +514,62 @@ class WorkspaceRepository:
         workspace.status = status
         workspace.save(update_fields=["status", "updated_at"])
         return workspace
+
+    @staticmethod
+    def reconcile_heartbeat_status(
+        workspace: Workspace, status: str, *, runner_sid: str
+    ) -> bool:
+        """Apply an observation only while its workspace snapshot is still idle.
+
+        Lifecycle results and deletion can commit after the heartbeat's list
+        query. Compare both state and version so that even a stop/resume cycle
+        returning to the same status cannot be overwritten by that old scan.
+        """
+        now = timezone.now()
+        changed = Workspace.objects.filter(
+            pk=workspace.id,
+            status=workspace.status,
+            updated_at=workspace.updated_at,
+            current_task_id__isnull=True,
+            active_operation__isnull=True,
+            runner_id__in=Runner.objects.filter(
+                pk=workspace.runner_id, sid=runner_sid
+            ).values("pk"),
+        ).update(status=status, updated_at=now)
+        if changed:
+            workspace.status = status
+            workspace.updated_at = now
+        return bool(changed)
+
+    @staticmethod
+    def list_provisioned_ids(workspace_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return workspaces whose latest create or remove was a completed create.
+
+        A failed create, reset or removal can leave a partial guest behind, so
+        only a successful latest provisioning makes an observed guest usable.
+        """
+        if not workspace_ids:
+            return set()
+        creates = [
+            TaskType.CREATE_WORKSPACE,
+            TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
+        ]
+        latest = Task.objects.filter(
+            workspace_id=OuterRef("pk"),
+            type__in=[*creates, TaskType.REMOVE_WORKSPACE],
+        ).order_by("-created_at", "-id")
+        return set(
+            Workspace.objects.filter(pk__in=workspace_ids)
+            .annotate(
+                provisioning_type=Subquery(latest.values("type")[:1]),
+                provisioning_status=Subquery(latest.values("status")[:1]),
+            )
+            .filter(
+                provisioning_type__in=creates,
+                provisioning_status=TaskStatus.COMPLETED,
+            )
+            .values_list("pk", flat=True)
+        )
 
     @staticmethod
     def update_credentials_present(
@@ -386,9 +587,78 @@ class WorkspaceRepository:
         active_operation: WorkspaceOperation | None,
     ) -> Workspace:
         """Update the currently active blocking operation for a workspace."""
-        workspace.active_operation = active_operation
+        workspace.active_operation = WorkspaceOperationRepository.project(
+            workspace.id, active_operation
+        )
         workspace.save(update_fields=["active_operation", "updated_at"])
         return workspace
+
+    @staticmethod
+    def claim_auto_stop(
+        workspace_id: uuid.UUID,
+        *,
+        idle_before: datetime,
+        expected_timeout_minutes: int,
+        has_busy_agent: Callable[[uuid.UUID], bool],
+    ) -> Workspace | None:
+        """Atomically claim an idle workspace for an inactivity stop.
+
+        The service supplies the policy-derived cutoff and the harness busy
+        check. Under the same row lock used by scheduled admission, verify the
+        workspace is still running/idle and the configured timeout has not
+        changed, then claim STOPPING. Returning None means state changed
+        before the claim.
+        """
+        with transaction.atomic():
+            identity = (
+                Workspace.objects.filter(pk=workspace_id).values("runner_id").first()
+            )
+            if identity is None:
+                return None
+            lock_runner(identity["runner_id"])
+            workspace = (
+                Workspace.objects.select_for_update().filter(id=workspace_id).first()
+            )
+            if workspace is None:
+                return None
+            timeout = (
+                Workspace.objects.filter(id=workspace_id)
+                .values_list(
+                    "runner__organization__workspace_auto_stop_timeout_minutes",
+                    flat=True,
+                )
+                .first()
+            )
+            runner_status = (
+                Workspace.objects.filter(id=workspace_id)
+                .values_list("runner__status", flat=True)
+                .first()
+            )
+            has_busy_session = has_busy_agent(workspace_id)
+            if (
+                workspace.status != WorkspaceStatus.RUNNING
+                or workspace.active_operation is not None
+                or workspace.current_task_id is not None
+                or has_busy_session
+                or runner_status != RunnerStatus.ONLINE
+                or workspace.last_activity_at is None
+                or workspace.last_activity_at > idle_before
+                or timeout != expected_timeout_minutes
+                or timeout is None
+                or timeout <= 0
+            ):
+                return None
+            workspace.active_operation = WorkspaceOperation.STOPPING
+            workspace.save(update_fields=["active_operation", "updated_at"])
+            return WorkspaceRepository.get_by_id(workspace_id)
+
+    @staticmethod
+    def clear_auto_stop_claim(workspace_id: uuid.UUID) -> None:
+        """Clear an auto-stop claim after task creation/dispatch failure."""
+        Workspace.objects.filter(
+            id=workspace_id,
+            active_operation=WorkspaceOperation.STOPPING,
+        ).update(active_operation=None, updated_at=timezone.now())
 
     @staticmethod
     def update_name(workspace: Workspace, name: str) -> Workspace:
@@ -409,8 +679,45 @@ class WorkspaceRepository:
         workspace.qemu_vcpus = qemu_vcpus
         workspace.qemu_memory_mb = qemu_memory_mb
         workspace.qemu_disk_size_gb = qemu_disk_size_gb
-        workspace.save(update_fields=["qemu_vcpus", "qemu_memory_mb", "qemu_disk_size_gb", "updated_at"])
+        workspace.save(
+            update_fields=[
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
         return workspace
+
+    @staticmethod
+    def update_disk_usage(
+        runner_id: uuid.UUID,
+        usages: Mapping[uuid.UUID, WorkspaceDiskUsage],
+    ) -> list[uuid.UUID]:
+        """Persist observed filesystem usage for workspaces of *runner_id*.
+
+        Reports for workspaces owned by other runners are ignored. Returns
+        the IDs of the updated workspaces.
+        """
+        workspaces = list(
+            Workspace.objects.filter(runner_id=runner_id, id__in=usages).only("id")
+        )
+        for workspace in workspaces:
+            usage = usages[workspace.id]
+            workspace.disk_used_bytes = usage.used_bytes
+            workspace.disk_free_bytes = usage.free_bytes
+            workspace.disk_total_bytes = usage.total_bytes
+            workspace.disk_usage_observed_at = usage.observed_at
+        Workspace.objects.bulk_update(
+            workspaces,
+            [
+                "disk_used_bytes",
+                "disk_free_bytes",
+                "disk_total_bytes",
+                "disk_usage_observed_at",
+            ],
+        )
+        return [workspace.id for workspace in workspaces]
 
     @staticmethod
     def update_desktop_geometry(
@@ -430,8 +737,118 @@ class WorkspaceRepository:
         """Return active QEMU workspaces for a runner."""
         return Workspace.objects.filter(
             runner_id=runner_id,
-            runtime_type="qemu",
             status=WorkspaceStatus.RUNNING,
+        )
+
+    @staticmethod
+    def list_reserved_qemu_by_runner(
+        runner_id: uuid.UUID, *, include_retained_disk: bool = False
+    ) -> list[Workspace]:
+        """Read active capacity and reservations, including ambiguous outcomes.
+
+        Parent workflows retain their reservation between children. Runtime
+        observations distinguish an absent failed guest from preserved resources.
+        Stopped guests release compute but retain their physical disk reservation.
+        """
+        from .models import CaptureRequest, LifecycleCommand, WorkspaceRecreateRequest
+
+        captures = CaptureRequest.objects.exclude(
+            phase__in=["completed", "failed"]
+        ).values("workspace_id")
+        recreates = WorkspaceRecreateRequest.objects.exclude(
+            phase__in=["completed", "failed"]
+        ).values("workspace_id")
+        retained = [WorkspaceStatus.FAILED, WorkspaceStatus.DELETE_FAILED]
+        if include_retained_disk:
+            retained.extend(
+                [
+                    WorkspaceStatus.STOPPED,
+                    WorkspaceStatus.PENDING_DELETION,
+                    WorkspaceStatus.DELETING,
+                ]
+            )
+        rows = list(
+            Workspace.objects.filter(runner_id=runner_id)
+            .filter(
+                Q(
+                    status__in=[
+                        WorkspaceStatus.RUNNING,
+                        WorkspaceStatus.CREATING,
+                        *retained,
+                    ]
+                )
+                | Q(current_task_id__isnull=False)
+                | Q(pk__in=captures)
+                | Q(pk__in=recreates)
+            )
+            .exclude(status=WorkspaceStatus.DELETED)
+            .annotate(
+                capacity_observation=Subquery(
+                    LifecycleCommand.objects.filter(
+                        task__workspace_id=OuterRef("pk"),
+                    )
+                    .order_by("-task__created_at", "-task_id")
+                    .values("payload___observed_workspace_status")[:1]
+                ),
+                capacity_payload=Subquery(
+                    WorkspaceRepository._resource_commands()
+                    .filter(task__workspace_id=OuterRef("pk"))
+                    .values("payload")[:1]
+                ),
+                capacity_status=Subquery(
+                    WorkspaceRepository._resource_commands()
+                    .filter(task__workspace_id=OuterRef("pk"))
+                    .values("task__status")[:1]
+                ),
+            )
+            .only(
+                "id",
+                "status",
+                "current_task_id",
+                "active_operation",
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+            )
+        )
+        return [
+            row
+            for row in rows
+            if row.status not in {WorkspaceStatus.FAILED, WorkspaceStatus.DELETE_FAILED}
+            or row.current_task_id
+            or row.active_operation
+            or row.capacity_observation
+            not in (
+                {"absent"} if include_retained_disk else {"absent", "stopped", "exited"}
+            )
+        ]
+
+    @staticmethod
+    def _resource_commands() -> QuerySet:
+        """Read sizing changes that reserve or confirm actual guest resources."""
+        from .models import LifecycleCommand
+
+        return LifecycleCommand.objects.filter(
+            Q(task__type=TaskType.UPDATE_WORKSPACE)
+            | Q(
+                task__type__in=[
+                    TaskType.CREATE_WORKSPACE,
+                    TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
+                    TaskType.RESUME_WORKSPACE,
+                ],
+                task__status=TaskStatus.COMPLETED,
+            )
+        ).order_by("-task__created_at", "-task_id")
+
+    @staticmethod
+    def last_resource_command(workspace_id: uuid.UUID) -> dict:
+        """Read the latest sizing reservation or confirmed startup for a guest."""
+        return (
+            WorkspaceRepository._resource_commands()
+            .filter(task__workspace_id=workspace_id)
+            .values("payload", "task__status")
+            .first()
+            or {}
         )
 
     @staticmethod
@@ -439,11 +856,12 @@ class WorkspaceRepository:
         image_instance_id: uuid.UUID,
     ) -> QuerySet[Workspace]:
         """Return workspaces that still depend on an image instance."""
-        return Workspace.objects.filter(base_image_instance_id=image_instance_id).exclude(
+        return Workspace.objects.filter(
+            base_image_instance_id=image_instance_id
+        ).exclude(
             status__in=[
                 WorkspaceStatus.PENDING_DELETION,
                 WorkspaceStatus.DELETING,
-                WorkspaceStatus.REMOVED,
                 WorkspaceStatus.DELETED,
             ]
         )
@@ -465,7 +883,7 @@ class WorkspaceRepository:
         now = timezone.now()
         Workspace.objects.filter(id=workspace_id).update(
             status=WorkspaceStatus.DELETING,
-            active_operation=None,
+            active_operation=WorkspaceOperation.REMOVING,
             delete_requested_at=Coalesce("delete_requested_at", Value(now)),
             delete_started_at=now,
             delete_last_error="",
@@ -492,133 +910,6 @@ class WorkspaceRepository:
 
 
 # ---------------------------------------------------------------------------
-class WorkspaceProcessRepository:
-    """Data access for WorkspaceProcess records."""
-
-    @staticmethod
-    def create(
-        *,
-        process_id: uuid.UUID,
-        workspace: Workspace,
-        command: str,
-        workdir: str = "/workspace",
-        name: str = "",
-        created_by=None,
-        session_id: uuid.UUID | None = None,
-    ) -> WorkspaceProcess:
-        """Create a new process record in running state."""
-        from .enums import ProcessStatus
-
-        return WorkspaceProcess.objects.create(
-            id=process_id,
-            workspace=workspace,
-            command=command,
-            workdir=workdir or "/workspace",
-            name=name or "",
-            status=ProcessStatus.RUNNING,
-            created_by=created_by,
-            session_id=session_id,
-        )
-
-    @staticmethod
-    def get_by_id(process_id: uuid.UUID) -> WorkspaceProcess | None:
-        """Fetch a process by its ID."""
-        return (
-            WorkspaceProcess.objects.filter(id=process_id)
-            .select_related("workspace", "workspace__runner", "created_by")
-            .first()
-        )
-
-    @staticmethod
-    def get_for_workspace(
-        process_id: uuid.UUID,
-        workspace_id: uuid.UUID,
-    ) -> WorkspaceProcess | None:
-        """Fetch a process scoped to a workspace (None when foreign)."""
-        return (
-            WorkspaceProcess.objects.filter(
-                id=process_id, workspace_id=workspace_id
-            )
-            .select_related("workspace", "workspace__runner", "created_by")
-            .first()
-        )
-
-    @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[WorkspaceProcess]:
-        """Return all processes for a workspace, newest first."""
-        return WorkspaceProcess.objects.filter(
-            workspace_id=workspace_id
-        ).select_related("created_by")
-
-    @staticmethod
-    def list_running_by_workspace(
-        workspace_id: uuid.UUID,
-    ) -> QuerySet[WorkspaceProcess]:
-        """Return processes still marked running for a workspace."""
-        from .enums import ProcessStatus
-
-        return WorkspaceProcess.objects.filter(
-            workspace_id=workspace_id,
-            status=ProcessStatus.RUNNING,
-        )
-
-    @staticmethod
-    def update_status(
-        process_id: uuid.UUID,
-        *,
-        status: str,
-        exit_code: int | None = None,
-        pid: int | None = None,
-        log_path: str | None = None,
-        ended_at=None,
-    ) -> int:
-        """Update lifecycle fields of a process. Returns rows updated."""
-        fields: dict[str, Any] = {"status": status}
-        if exit_code is not None:
-            fields["exit_code"] = exit_code
-        if pid is not None:
-            fields["pid"] = pid
-        if log_path is not None:
-            fields["log_path"] = log_path
-        if ended_at is not None:
-            fields["ended_at"] = ended_at
-        return WorkspaceProcess.objects.filter(id=process_id).update(**fields)
-
-    @staticmethod
-    def mark_finished(
-        process_id: uuid.UUID,
-        *,
-        status: str,
-        exit_code: int | None = None,
-    ) -> int:
-        """Mark a process finished with an end timestamp."""
-        return WorkspaceProcess.objects.filter(id=process_id).update(
-            status=status,
-            exit_code=exit_code,
-            ended_at=timezone.now(),
-        )
-
-    @staticmethod
-    def mark_processes_killed(
-        workspace_id: uuid.UUID,
-        *,
-        status: str,
-    ) -> int:
-        """Mark all running processes of a workspace killed/finished."""
-        from .enums import ProcessStatus
-
-        return WorkspaceProcess.objects.filter(
-            workspace_id=workspace_id,
-            status=ProcessStatus.RUNNING,
-        ).update(status=status, ended_at=timezone.now())
-
-    @staticmethod
-    def delete(process_id: uuid.UUID) -> int:
-        """Delete a process record. Returns rows deleted."""
-        deleted, _ = WorkspaceProcess.objects.filter(id=process_id).delete()
-        return deleted
-
-
 # ---------------------------------------------------------------------------
 class TaskRepository:
     """Data access for Task records."""
@@ -639,39 +930,105 @@ class TaskRepository:
         runner: Runner,
         task_type: TaskType,
         workspace: Workspace | None = None,
+        operation_payload: dict | None = None,
+        capture_request_id: uuid.UUID | None = None,
+        recreate_request_id: uuid.UUID | None = None,
     ) -> Task:
         """Create a new task record."""
-        return Task.objects.create(
-            id=task_id,
-            runner=runner,
-            workspace=workspace,
-            type=task_type,
-            status=TaskStatus.PENDING,
-        )
+        from .operations import OperationRepository
+
+        with transaction.atomic():
+            lock_runner(runner.id)
+            if workspace is not None:
+                workspace = Workspace.objects.select_for_update().get(pk=workspace.id)
+                from common.exceptions import ConflictError
+
+                if (
+                    capture_request_id is None
+                    and WorkspaceOperationRepository.capture_active(workspace.id)
+                ):
+                    raise ConflictError("Workspace is capturing image")
+                if (
+                    recreate_request_id is None
+                    and WorkspaceOperationRepository.recreate_active(workspace.id)
+                ):
+                    raise ConflictError("Workspace is being reset")
+            task = Task.objects.create(
+                id=task_id,
+                runner=runner,
+                workspace=workspace,
+                type=task_type,
+                status=TaskStatus.PENDING,
+            )
+            OperationRepository.allocate(
+                task,
+                capture_request_id=capture_request_id,
+                recreate_request_id=recreate_request_id,
+            )
+            if operation_payload is not None or task_type in {
+                TaskType.STOP_WORKSPACE,
+                TaskType.RESUME_WORKSPACE,
+                TaskType.UPDATE_WORKSPACE,
+                TaskType.REMOVE_WORKSPACE,
+            }:
+                payload = {"task_id": str(task.id)}
+                if workspace is not None:
+                    payload.update(
+                        workspace_id=str(workspace.id),
+                        qemu_vcpus=workspace.qemu_vcpus,
+                        qemu_memory_mb=workspace.qemu_memory_mb,
+                        qemu_disk_size_gb=workspace.qemu_disk_size_gb,
+                    )
+                payload.update(operation_payload or {})
+                payload["task_id"] = str(task.id)
+                OperationRepository.prepare(
+                    str(task.id), "task:" + str(task_type), payload
+                )
+                task.refresh_from_db()
+            return task
 
     @staticmethod
     def mark_in_progress(task: Task) -> Task:
         """Mark a task as in progress."""
-        task.status = TaskStatus.IN_PROGRESS
-        task.save(update_fields=["status"])
+        Task.objects.filter(id=task.id, status=TaskStatus.PENDING).update(
+            status=TaskStatus.IN_PROGRESS
+        )
+        task.refresh_from_db()
         return task
+
+    @staticmethod
+    def release_workspace(task: Task) -> None:
+        """Release a child identity, never its enclosing capture/recreate request."""
+        WorkspaceOperationRepository.release_workspace(task)
 
     @staticmethod
     def complete(task: Task) -> Task:
         """Mark a task as completed."""
-        task.status = TaskStatus.COMPLETED
-        task.completed_at = timezone.now()
-        task.save(update_fields=["status", "completed_at"])
-        return task
+        with transaction.atomic():
+            lock_runner(task.runner_id)
+            if task.workspace_id:
+                Workspace.objects.select_for_update().get(pk=task.workspace_id)
+            Task.objects.select_for_update().get(pk=task.id)
+            task.status = TaskStatus.COMPLETED
+            task.completed_at = timezone.now()
+            task.save(update_fields=["status", "completed_at"])
+            TaskRepository.release_workspace(task)
+            return task
 
     @staticmethod
     def fail(task: Task, error: str) -> Task:
         """Mark a task as failed with an error message."""
-        task.status = TaskStatus.FAILED
-        task.error = error
-        task.completed_at = timezone.now()
-        task.save(update_fields=["status", "error", "completed_at"])
-        return task
+        with transaction.atomic():
+            lock_runner(task.runner_id)
+            if task.workspace_id:
+                Workspace.objects.select_for_update().get(pk=task.workspace_id)
+            Task.objects.select_for_update().get(pk=task.id)
+            task.status = TaskStatus.FAILED
+            task.error = error
+            task.completed_at = timezone.now()
+            task.save(update_fields=["status", "error", "completed_at"])
+            TaskRepository.release_workspace(task)
+            return task
 
 
 # ---------------------------------------------------------------------------
@@ -679,146 +1036,36 @@ class ImageInstanceRepository:
     """Data access for ImageInstance records."""
 
     @staticmethod
-    def create(
-        *,
-        runner: Runner,
-        runtime_type: str,
-        origin_type: str,
-        runner_ref: str,
-        name: str,
-        size_bytes: int = 0,
-        origin_definition: ImageDefinition | None = None,
-        origin_workspace: Workspace | None = None,
-        build_job: ImageBuildJob | None = None,
-        created_by=None,
-        credentials: list | None = None,
-    ) -> "ImageInstance":
-        """Create a new image instance record (immediately ready)."""
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type=runtime_type,
-            origin_type=origin_type,
-            origin_definition=origin_definition,
-            origin_workspace=origin_workspace,
-            runner_ref=runner_ref,
-            name=name,
-            size_bytes=size_bytes,
-            status=ImageInstance.Status.READY,
-            build_job=build_job,
-            created_by=created_by,
-        )
-        if credentials:
-            image.credentials.set(credentials)
-        return image
+    def populate_disk_floor(image: ImageInstance) -> ImageInstance:
+        """Recover a virtual disk bound from mapped complete inventory.
 
-    @staticmethod
-    def create_pending(
-        *,
-        runner: Runner,
-        runtime_type: str,
-        origin_type: str,
-        name: str,
-        creating_task_id: str,
-        origin_definition: ImageDefinition | None = None,
-        origin_workspace: Workspace | None = None,
-        build_job: ImageBuildJob | None = None,
-        created_by=None,
-        credentials: list | None = None,
-    ) -> "ImageInstance":
-        """Create an image instance before capture/build finishes."""
-        status = (
-            ImageInstance.Status.BUILDING
-            if origin_type == ImageInstance.OriginType.DEFINITION_BUILD
-            else ImageInstance.Status.CAPTURING
-        )
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type=runtime_type,
-            origin_type=origin_type,
-            origin_definition=origin_definition,
-            origin_workspace=origin_workspace,
-            runner_ref="",
-            name=name,
-            size_bytes=0,
-            build_job=build_job,
-            created_by=created_by,
-            status=status,
-            creating_task_id=creating_task_id,
-        )
-        if credentials:
-            image.credentials.set(credentials)
-        return image
-
-    @staticmethod
-    def get_by_task_id(task_id: str) -> "ImageInstance | None":
-        """Find the image instance associated with a create or delete task."""
-        return (
-            ImageInstance.objects.filter(
-                Q(creating_task_id=task_id) | Q(deleting_task_id=task_id)
-            )
-            .select_related(
-                "runner",
-                "origin_workspace",
-                "origin_workspace__runner",
-                "created_by",
-                "origin_definition",
-                "build_job",
-                "build_job__runner",
-                "build_job__image_definition",
-            )
-            .first()
-        )
-
-    @staticmethod
-    def mark_ready(
-        image_id, *, runner_ref: str, size_bytes: int
-    ) -> None:
-        """Update a creating image instance to ready once the runner reports success."""
-        ImageInstance.objects.filter(id=image_id).update(
-            status=ImageInstance.Status.READY,
-            runner_ref=runner_ref,
-            size_bytes=size_bytes,
-            creating_task_id=None,
-        )
-
-    @staticmethod
-    def mark_failed(image_id) -> None:
-        """Mark an image instance as failed."""
-        ImageInstance.objects.filter(id=image_id).update(
-            status=ImageInstance.Status.FAILED,
-        )
-
-    @staticmethod
-    def mark_failed_by_task_id(task_id: str) -> None:
-        """Mark any creating image instance associated with task_id as failed."""
-        ImageInstance.objects.filter(
-            creating_task_id=task_id,
-            status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
-        ).update(status=ImageInstance.Status.FAILED)
-
-    @staticmethod
-    def timeout_stale(*, timeout_hours: int = 1) -> int:
-        """Mark stale creating image instances as failed.
-
-        Returns the number of image instances that were timed out.
+        The caller holds the runner/image locks. Physical allocation is not a
+        virtual size: only known, managed resources associated by inventory's
+        identity validation can supply this bound.
         """
-        from datetime import timedelta
+        from django.db.models import Max
 
-        cutoff = timezone.now() - timedelta(hours=timeout_hours)
-        count = ImageInstance.objects.filter(
-            status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
-            created_at__lt=cutoff,
-        ).update(status=ImageInstance.Status.FAILED)
-        return count
+        from .models import InventoryResource
+
+        virtual = (
+            InventoryResource.objects.filter(
+                image=image,
+                managed=True,
+                runtime__complete=True,
+                runtime__snapshot__complete=True,
+                virtual_bytes__gt=0,
+            )
+            .exclude(state="unknown")
+            .aggregate(virtual=Max("virtual_bytes"))["virtual"]
+        )
+        minimum = (virtual + (1 << 30) - 1) // (1 << 30) if virtual else 0
+        if minimum > (image.min_disk_size_gb or 0):
+            image.min_disk_size_gb = minimum
+            image.save(update_fields=["min_disk_size_gb", "updated_at"])
+        return image
 
     @staticmethod
-    def update_name(image_id: uuid.UUID, name: str) -> bool:
-        """Rename an image instance. Returns True if updated."""
-        count = ImageInstance.objects.filter(id=image_id).update(name=name)
-        return count > 0
-
-    @staticmethod
-    def get_by_id(image_id: uuid.UUID) -> "ImageInstance | None":
+    def get_by_id(image_id: uuid.UUID) -> ImageInstance | None:
         """Fetch an image instance by ID, including source and runner info."""
         return (
             ImageInstance.objects.filter(id=image_id)
@@ -838,10 +1085,10 @@ class ImageInstanceRepository:
     @staticmethod
     def get_by_build_job_id(
         build_job_id: uuid.UUID,
-    ) -> "ImageInstance | None":
+    ) -> ImageInstance | None:
         """Fetch a built image instance by its runner build relation."""
         return (
-            ImageInstance.objects.filter(build_job_id=build_job_id)
+            ImageInstance.objects.filter(current_assignments__id=build_job_id)
             .select_related(
                 "runner",
                 "origin_workspace",
@@ -856,78 +1103,12 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> "QuerySet[ImageInstance]":
-        """Return all image instances captured from a workspace."""
-        return ImageInstance.objects.filter(
-            origin_workspace_id=workspace_id
-        ).exclude(
-            status=ImageInstance.Status.DELETED
-        ).select_related(
-            "runner",
-            "origin_workspace",
-            "origin_workspace__runner",
-            "created_by",
-            "origin_definition",
-            "build_job",
-            "build_job__runner",
-            "build_job__image_definition",
-        )
-
-    @staticmethod
-    def list_by_user(user) -> "QuerySet[ImageInstance]":
-        """Return all visible image instances created by a specific user."""
-        return ImageInstance.objects.filter(
-            created_by=user
-        ).exclude(
-            status=ImageInstance.Status.DELETED
-        ).select_related(
-            "runner",
-            "origin_workspace",
-            "origin_workspace__runner",
-            "created_by",
-            "origin_definition",
-            "build_job",
-            "build_job__runner",
-            "build_job__image_definition",
-        )
-
-    @staticmethod
-    def mark_retired(image_id: uuid.UUID) -> None:
-        """Mark an image instance retired so it cannot be used for new workspaces."""
-        ImageInstance.objects.filter(id=image_id).exclude(
-            status=ImageInstance.Status.DELETED
-        ).update(status=ImageInstance.Status.RETIRED)
-
-    @staticmethod
     def mark_ready_from_retired(image_id: uuid.UUID) -> None:
         """Mark a retired image instance ready again without changing its ref."""
         ImageInstance.objects.filter(
             id=image_id,
             status=ImageInstance.Status.RETIRED,
         ).update(status=ImageInstance.Status.READY)
-
-    @staticmethod
-    def mark_deleting(image_id: uuid.UUID, *, deleting_task_id: str | None) -> None:
-        """Mark an image instance as pending deletion."""
-        now = timezone.now()
-        ImageInstance.objects.filter(id=image_id).update(
-            status=ImageInstance.Status.DELETING,
-            deleting_task_id=deleting_task_id,
-            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
-            delete_started_at=now,
-            delete_last_error="",
-            delete_attempt_count=F("delete_attempt_count") + 1,
-        )
-
-    @staticmethod
-    def mark_pending_deletion(image_id: uuid.UUID) -> None:
-        """Mark an image instance as pending deletion (runner offline)."""
-        requested_at = timezone.now()
-        ImageInstance.objects.filter(id=image_id).update(
-            status=ImageInstance.Status.PENDING_DELETION,
-            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
-            delete_last_error="",
-        )
 
     @staticmethod
     def mark_deleted(image_id: uuid.UUID) -> None:
@@ -944,21 +1125,7 @@ class ImageInstanceRepository:
         """Mark an image instance deletion as failed."""
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.DELETE_FAILED,
-            deleting_task_id=None,
             delete_last_error=error,
-        )
-
-    @staticmethod
-    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageInstance]:
-        """Return image instances that still need runner-side deletion."""
-        return ImageInstance.objects.filter(
-            runner_id=runner_id,
-            status__in=[ImageInstance.Status.DELETING, ImageInstance.Status.PENDING_DELETION],
-        ).exclude(runner_ref="").select_related(
-            "runner",
-            "origin_definition",
-            "origin_workspace",
-            "build_job",
         )
 
 
@@ -966,16 +1133,46 @@ class ImageDefinitionRepository:
     """Data access for image definition records."""
 
     @staticmethod
+    def create(**fields):
+        return ImageDefinition.objects.create(**fields)
+
+    @staticmethod
+    def update_recipe(definition_id, values):
+        """Serialize edits with generation rendering/allocation; never auto-build."""
+        from common.exceptions import ConflictError
+
+        with transaction.atomic():
+            definition = ImageDefinition.objects.select_for_update().get(
+                id=definition_id
+            )
+            if definition.status not in {"active", "deactivated"}:
+                raise ConflictError("Image definition is being removed")
+            for field, value in values.items():
+                if value is not None:
+                    setattr(definition, field, value)
+            definition.save()
+            return definition
+
+    @staticmethod
+    def copy_name(base_name, org_id):
+        base = ((base_name or "").strip() or "image")[:255]
+        candidate = base
+        index = 1
+        while ImageDefinition.objects.filter(
+            organization_id=org_id, name=candidate
+        ).exists():
+            suffix = " (Copy)" if index == 1 else f" (Copy {index})"
+            candidate = base[: 255 - len(suffix)] + suffix
+            index += 1
+        return candidate
+
+    @staticmethod
     def list_by_org(organization_id: uuid.UUID) -> QuerySet[ImageDefinition]:
         return ImageDefinitionRepository.annotate_build_summaries(
             ImageDefinition.objects.filter(
                 Q(organization__isnull=True) | Q(organization_id=organization_id)
-            ).exclude(
-                status=ImageDefinition.Status.DELETED
-            )
-        ).order_by(
-            "name", "-updated_at", "-created_at"
-        )
+            ).exclude(status=ImageDefinition.Status.DELETED)
+        ).order_by("name", "-updated_at", "-created_at")
 
     @staticmethod
     def annotate_build_summaries(
@@ -1027,11 +1224,15 @@ class ImageDefinitionRepository:
                 "removing": int(getattr(definition, "summary_removing", 0) or 0),
             }
 
-        statuses = ImageBuildJob.objects.filter(
-            image_definition_id=definition.id,
-        ).exclude(
-            status=ImageBuildJob.Status.DELETED,
-        ).values_list("status", flat=True)
+        statuses = (
+            ImageBuildJob.objects.filter(
+                image_definition_id=definition.id,
+            )
+            .exclude(
+                status=ImageBuildJob.Status.DELETED,
+            )
+            .values_list("status", flat=True)
+        )
         counts = {
             "active": 0,
             "building": 0,
@@ -1068,68 +1269,41 @@ class ImageDefinitionRepository:
         organization_id: uuid.UUID,
     ) -> ImageDefinition | None:
         """Fetch a visible image definition scoped to an organization."""
-        return ImageDefinition.objects.filter(
-            id=image_definition_id,
-        ).filter(
-            Q(organization__isnull=True) | Q(organization_id=organization_id)
-        ).first()
-
-    @staticmethod
-    def deactivate(definition_id: uuid.UUID) -> None:
-        """Deactivate definition: immediately no longer selectable for new workspaces."""
-        ImageDefinition.objects.filter(id=definition_id).update(
-            is_active=False,
-            status=ImageDefinition.Status.DEACTIVATED,
-            deactivated_at=timezone.now(),
+        return (
+            ImageDefinition.objects.filter(
+                id=image_definition_id,
+            )
+            .filter(Q(organization__isnull=True) | Q(organization_id=organization_id))
+            .first()
         )
 
     @staticmethod
     def activate(definition_id: uuid.UUID) -> None:
-        """Re-activate a deactivated or restore a failed-delete definition."""
+        """Re-activate only when no durable deletion request still owns retirement."""
+        from common.exceptions import ConflictError
+
+        from .models import ImageDeletionRequest
+
+        if (
+            ImageDeletionRequest.objects.filter(
+                target_type="definition", target_id=definition_id
+            )
+            .exclude(phase__in=["completed", "cancelled"])
+            .exists()
+        ):
+            raise ConflictError(
+                "Cancel or resolve deletion before restoring definition"
+            )
         ImageDefinition.objects.filter(id=definition_id).update(
-            is_active=True,
             status=ImageDefinition.Status.ACTIVE,
             deactivated_at=None,
             delete_last_error="",
         )
 
     @staticmethod
-    def mark_pending_deletion(definition_id: uuid.UUID) -> None:
-        """Mark definition pending deletion (waiting for build deletes)."""
-        requested_at = timezone.now()
-        ImageDefinition.objects.filter(id=definition_id).update(
-            is_active=False,
-            status=ImageDefinition.Status.PENDING_DELETION,
-            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
-            delete_last_error="",
-        )
-
-    @staticmethod
-    def mark_deleting(definition_id: uuid.UUID) -> None:
-        """Mark definition as actively deleting its builds."""
-        now = timezone.now()
-        ImageDefinition.objects.filter(id=definition_id).update(
-            status=ImageDefinition.Status.DELETING,
-            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
-            delete_started_at=now,
-            delete_last_error="",
-            delete_attempt_count=F("delete_attempt_count") + 1,
-        )
-
-    @staticmethod
-    def mark_deleted(definition_id: uuid.UUID) -> None:
-        """Mark definition as fully deleted after all builds are confirmed deleted."""
-        ImageDefinition.objects.filter(id=definition_id).update(
-            status=ImageDefinition.Status.DELETED,
-            delete_confirmed_at=timezone.now(),
-            deleted_at=timezone.now(),
-        )
-
-    @staticmethod
     def mark_delete_failed(definition_id: uuid.UUID, *, error: str = "") -> None:
         """Mark definition deletion as failed."""
         ImageDefinition.objects.filter(id=definition_id).update(
-            is_active=False,
             status=ImageDefinition.Status.DELETE_FAILED,
             delete_last_error=error,
         )
@@ -1139,24 +1313,69 @@ class ImageBuildJobRepository:
     """Data access for runner image build records."""
 
     @staticmethod
+    def activate(job_id):
+        job = ImageBuildJob.objects.get(pk=job_id)
+        from common.exceptions import ConflictError
+
+        if job.status in ["pending_deletion", "deleting", "deleted", "delete_failed"]:
+            raise ConflictError("Image assignment is being removed")
+        ImageBuildJob.objects.filter(id=job_id).update(
+            status="active", deactivated_at=None
+        )
+        return ImageBuildJobRepository.get_by_id(job_id)
+
+    @staticmethod
+    def ensure_inactive(definition, runner):
+        """Create or deactivate an assignment without requesting a build."""
+        from common.exceptions import ConflictError
+
+        with transaction.atomic():
+            lock_runner(runner.id)
+            job, _ = ImageBuildJob.objects.get_or_create(
+                image_definition=definition, runner=runner
+            )
+            job = ImageBuildJob.objects.select_for_update().get(pk=job.id)
+            if job.status in [
+                "pending_deletion",
+                "deleting",
+                "deleted",
+                "delete_failed",
+            ]:
+                raise ConflictError("Image assignment is being removed")
+            job.status = "deactivated"
+            job.save(update_fields=["status", "updated_at"])
+            return job
+
+    @staticmethod
     def list_for_definition(
         image_definition_id: uuid.UUID,
         organization_id: uuid.UUID | None = None,
     ) -> QuerySet[ImageBuildJob]:
-        """List runner image builds, optionally scoped to an organization."""
+        """List runner image builds, optionally scoped to an organization.
+
+        The ``build_log`` column is deferred: list/poll responses carry
+        status + metadata only (see ``ImageBuildJobListOut``). The full log
+        is served on demand via the dedicated ``/log/`` endpoint. This keeps
+        the 3s frontend polling from re-reading megabytes of log text.
+        """
         queryset = ImageBuildJob.objects.filter(
             image_definition_id=image_definition_id
         ).exclude(status=ImageBuildJob.Status.DELETED)
         if organization_id is not None:
-            queryset = queryset.filter(
+            queryset = queryset.filter(runner__organization_id=organization_id).filter(
                 Q(image_definition__organization_id=organization_id)
                 | Q(image_definition__organization__isnull=True)
             )
-        return queryset.select_related(
-            "runner",
-            "image_definition",
-            "build_task",
-            "image_instance",
+        return (
+            queryset.select_related(
+                "runner",
+                "image_definition",
+                "build_task",
+                "current_generation",
+                "pending_generation",
+            )
+            .defer("build_log")
+            .annotate(build_log_size=Length("build_log"))
         )
 
     @staticmethod
@@ -1171,7 +1390,7 @@ class ImageBuildJobRepository:
             runner_id=runner_id,
         )
         if organization_id is not None:
-            queryset = queryset.filter(
+            queryset = queryset.filter(runner__organization_id=organization_id).filter(
                 Q(image_definition__organization_id=organization_id)
                 | Q(image_definition__organization__isnull=True)
             )
@@ -1179,20 +1398,24 @@ class ImageBuildJobRepository:
             "runner",
             "image_definition",
             "build_task",
-            "image_instance",
+            "current_generation",
+            "pending_generation",
         ).first()
 
     @staticmethod
     def get_by_id(build_job_id: uuid.UUID) -> ImageBuildJob | None:
         """Fetch one runner image build by primary key."""
-        return ImageBuildJob.objects.filter(
-            id=build_job_id
-        ).select_related(
-            "runner",
-            "image_definition",
-            "build_task",
-            "image_instance",
-        ).first()
+        return (
+            ImageBuildJob.objects.filter(id=build_job_id)
+            .select_related(
+                "runner",
+                "image_definition",
+                "build_task",
+                "current_generation",
+                "pending_generation",
+            )
+            .first()
+        )
 
     @staticmethod
     def get_for_org(
@@ -1208,145 +1431,414 @@ class ImageBuildJobRepository:
         )
 
     @staticmethod
-    def delete_for_org(
-        image_definition_id: uuid.UUID,
-        runner_id: uuid.UUID,
-        organization_id: uuid.UUID,
-    ) -> int:
-        """Delete a runner image build scoped to an organization."""
-        deleted, _ = ImageBuildJob.objects.filter(
-            image_definition_id=image_definition_id,
-            runner_id=runner_id,
-        ).filter(
-            Q(image_definition__organization_id=organization_id)
-            | Q(image_definition__organization__isnull=True)
-        ).delete()
-        return deleted
-
-    @staticmethod
-    def mark_pending_deletion(build_job_id: uuid.UUID) -> None:
-        """Mark build job as pending deletion (runner offline)."""
-        requested_at = timezone.now()
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.PENDING_DELETION,
-            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
-            delete_last_error="",
-        )
-
-    @staticmethod
-    def mark_deleting(build_job_id: uuid.UUID, *, deleting_task_id: str) -> None:
-        """Mark build job as actively deleting on runner."""
-        now = timezone.now()
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.DELETING,
-            deleting_task_id=deleting_task_id,
-            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
-            delete_started_at=now,
-            delete_last_error="",
-            delete_attempt_count=F("delete_attempt_count") + 1,
-        )
-
-    @staticmethod
-    def mark_deleted(build_job_id: uuid.UUID) -> None:
-        """Mark build job as fully deleted after runner confirmation."""
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.DELETED,
-            deleting_task_id=None,
-            delete_confirmed_at=timezone.now(),
-        )
-
-    @staticmethod
     def mark_delete_failed(build_job_id: uuid.UUID, *, error: str = "") -> None:
         """Mark build job deletion as failed."""
         ImageBuildJob.objects.filter(id=build_job_id).update(
             status=ImageBuildJob.Status.DELETE_FAILED,
-            deleting_task_id=None,
             delete_last_error=error,
         )
 
     @staticmethod
-    def mark_failed(build_job_id: uuid.UUID, *, error: str = "") -> None:
-        """Mark a hung or failed build job as failed."""
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.FAILED,
-            delete_last_error=error or "",
-        )
-
-    @staticmethod
-    def list_stale_builds(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
-        """Return build jobs stuck in pending/building past the cutoff."""
-        return ImageBuildJob.objects.filter(
-            status__in=[
-                ImageBuildJob.Status.PENDING,
-                ImageBuildJob.Status.BUILDING,
-            ],
-            updated_at__lt=cutoff,
-        ).select_related("image_instance", "image_definition")
-
-    @staticmethod
-    def list_stale_deletes(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
-        """Return build jobs stuck in deletion past the cutoff."""
-        return ImageBuildJob.objects.filter(
-            status__in=[
-                ImageBuildJob.Status.PENDING_DELETION,
-                ImageBuildJob.Status.DELETING,
-            ],
-        ).filter(
-            Q(delete_requested_at__lt=cutoff)
-            | Q(delete_requested_at__isnull=True, updated_at__lt=cutoff)
-        ).select_related("image_instance", "image_definition")
-
-    @staticmethod
-    def list_in_progress_deletes_for_definition(
+    def has_in_progress_deletes_for_definition(
         definition_id: uuid.UUID,
-    ) -> QuerySet[ImageBuildJob]:
-        """Return child jobs still waiting on runner-side deletion."""
+    ) -> bool:
+        """Return whether any child job still awaits runner-side deletion."""
         return ImageBuildJob.objects.filter(
             image_definition_id=definition_id,
             status__in=[
                 ImageBuildJob.Status.PENDING_DELETION,
                 ImageBuildJob.Status.DELETING,
             ],
+        ).exists()
+
+
+class ImageGenerationRepository:
+    """Atomic generation allocation and task-bound monotonic completion."""
+
+    RECIPE_FIELDS = (
+        "base_distro",
+        "packages",
+        "env_vars",
+        "custom_init_script",
+    )
+
+    @staticmethod
+    def request(
+        *, definition, runner, rendered_input: dict, created_by=None, message: str = ""
+    ):
+        """Allocate a fresh generation without touching any previous image."""
+        import hashlib
+        import json
+
+        from django.db.models import Max
+
+        from common.exceptions import ConflictError
+
+        from .models import ImageRevision
+
+        expected_recipe = {
+            key: getattr(definition, key)
+            for key in ImageGenerationRepository.RECIPE_FIELDS
+        }
+        with transaction.atomic():
+            lock_runner(runner.id)
+            definition = ImageDefinition.objects.select_for_update().get(
+                id=definition.id
+            )
+            if expected_recipe != {
+                key: getattr(definition, key)
+                for key in ImageGenerationRepository.RECIPE_FIELDS
+            }:
+                raise ConflictError("Recipe changed while rendering; retry the build")
+            if definition.status not in {"active", "deactivated"}:
+                raise ConflictError("Image definition is being removed")
+            job, _ = ImageBuildJob.objects.get_or_create(
+                image_definition=definition, runner=runner
+            )
+            job = ImageBuildJob.objects.select_for_update().get(id=job.id)
+            if job.status in {
+                "pending_deletion",
+                "deleting",
+                "deleted",
+                "delete_failed",
+            }:
+                raise ConflictError("Image assignment is being removed")
+            recipe = {
+                key: getattr(definition, key)
+                for key in ImageGenerationRepository.RECIPE_FIELDS
+            }
+            snapshot = {"recipe": recipe, "rendered_input": rendered_input}
+            digest = hashlib.sha256(
+                json.dumps(snapshot, sort_keys=True).encode()
+            ).hexdigest()
+            revision, _ = ImageRevision.objects.get_or_create(
+                definition=definition,
+                digest=digest,
+                defaults={"recipe": recipe, "rendered_input": rendered_input},
+            )
+            number = (job.generations.aggregate(n=Max("generation"))["n"] or 0) + 1
+            task = TaskRepository.create(
+                task_id=uuid.uuid4(), runner=runner, task_type=TaskType.BUILD_IMAGE
+            )
+            image_id = uuid.uuid4()
+            runner_ref = f"/var/lib/opencuria/base-images/{image_id}.qcow2"
+            image = ImageInstance.objects.create(
+                id=image_id,
+                runner=runner,
+                origin_type="definition_build",
+                origin_definition=definition,
+                build_job=job,
+                revision=revision,
+                generation=number,
+                creating_task=task,
+                created_by=created_by,
+                name=f"{definition.name} ({runner.name})",
+                runner_ref=runner_ref,
+                message=(message or "").strip()[:500],
+                status="building",
+            )
+            job.pending_generation = image
+            job.build_task = task
+            job.build_log = ""
+            # Availability belongs to current; rebuild failure never removes it.
+            if not job.current_generation_id or (
+                job.status == "failed" and job.current_generation.status != "ready"
+            ):
+                job.status = "pending"
+            job.save()
+            from .operations import OperationRepository
+
+            payload = {
+                **rendered_input,
+                "task_id": str(task.id),
+                "build_job_id": str(job.id),
+                "image_instance_id": str(image.id),
+            }
+            payload["image_path"] = runner_ref
+            OperationRepository.prepare(str(task.id), "task:build_image", payload)
+            return ImageBuildJobRepository.get_by_id(job.id), image, task
+
+    @staticmethod
+    def finish(
+        *,
+        task_id: str,
+        build_job_id: str,
+        runner_id: str | None,
+        runner_ref: str = "",
+        error: str | None = None,
+        min_disk_size_gb: int | None = None,
+    ) -> bool:
+        """Accept only the exact live creation task and immutable runner target."""
+        try:
+            task_id, build_job_id = (
+                uuid.UUID(str(task_id)),
+                uuid.UUID(str(build_job_id)),
+            )
+        except (ValueError, TypeError):
+            return False
+        with transaction.atomic():
+            identity = Task.objects.filter(id=task_id).values("runner_id").first()
+            if identity is None:
+                return False
+            lock_runner(identity["runner_id"])
+            job = (
+                ImageBuildJob.objects.select_for_update()
+                .filter(id=build_job_id)
+                .first()
+            )
+            task = Task.objects.filter(id=task_id).first()
+            image = (
+                ImageInstance.objects.select_for_update()
+                .filter(build_job_id=build_job_id, creating_task_id=task_id)
+                .first()
+            )
+            if task:
+                task = Task.objects.select_for_update().get(pk=task.id)
+            if not job or not task or not image:
+                return False
+            if (
+                task.type != TaskType.BUILD_IMAGE
+                or task.runner_id != job.runner_id
+                or image.runner_id != job.runner_id
+                or (runner_id is not None and str(job.runner_id) != str(runner_id))
+                or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+                or image.status
+                not in [
+                    ImageInstance.Status.BUILDING,
+                    ImageInstance.Status.PENDING_DELETION,
+                ]
+            ):
+                return False
+            if error is None and (not runner_ref or runner_ref != image.runner_ref):
+                return False
+            if min_disk_size_gb is not None and (
+                type(min_disk_size_gb) is not int or min_disk_size_gb <= 0
+            ):
+                return False
+            retiring = image.status == "pending_deletion"
+            image.status = (
+                "pending_deletion"
+                if retiring
+                else ("ready" if error is None else "failed")
+            )
+            if error is None and min_disk_size_gb is not None:
+                image.min_disk_size_gb = max(
+                    image.min_disk_size_gb or 0, min_disk_size_gb
+                )
+            image.save(update_fields=["status", "min_disk_size_gb", "updated_at"])
+            if error is None:
+                TaskRepository.complete(task)
+            else:
+                TaskRepository.fail(task, error)
+            ImageGenerationRepository.reconcile_assignment(job)
+            return True
+
+    @staticmethod
+    def reconcile_assignment(job: ImageBuildJob) -> None:
+        """Apply the shared task-bound assignment projection."""
+        ImageAssignmentRepository.reconcile(job)
+
+    @staticmethod
+    def validate_selection(image_id: uuid.UUID) -> ImageInstance:
+        """Lock and revalidate a selection in the workspace creation transaction."""
+        from common.exceptions import ConflictError
+
+        image = ImageInstance.objects.get(id=image_id)
+        # Match allocation, retirement and callbacks: runner precedes graph rows.
+        lock_runner(image.runner_id)
+        if image.build_job_id:
+            definition_id = ImageBuildJob.objects.values_list(
+                "image_definition_id", flat=True
+            ).get(id=image.build_job_id)
+            ImageDefinition.objects.select_for_update().get(id=definition_id)
+            ImageBuildJob.objects.select_for_update().get(id=image.build_job_id)
+        image = ImageInstance.objects.select_for_update().get(id=image_id)
+        ImageInstanceRepository.populate_disk_floor(image)
+        if image.status != "ready" or not image.runner_ref:
+            raise ConflictError("Selected image is no longer ready")
+        if image.build_job_id:
+            job = ImageBuildJob.objects.select_for_update().get(id=image.build_job_id)
+            definition = ImageDefinition.objects.select_for_update().get(
+                id=job.image_definition_id
+            )
+            if (
+                job.current_generation_id != image.id
+                or job.status != "active"
+                or definition.status != "active"
+            ):
+                raise ConflictError("Selected image is no longer current")
+        if image.captured_image_id:
+            from .image_lines import ImageLineRepository
+
+            CapturedImage.objects.select_for_update().get(id=image.captured_image_id)
+            latest = ImageLineRepository.latest_for(image)
+            if latest is None or latest.id != image.id:
+                raise ConflictError(
+                    "Only the latest image version can be used for new workspaces"
+                )
+        return image
+
+    @staticmethod
+    def progress(*, build_job_id, task_id, runner_id, line, max_chars):
+        """Progress is bound to the latest live attempt, never a completed job."""
+        from django.db.models.functions import Concat, Right
+
+        try:
+            job_id, task_id = uuid.UUID(str(build_job_id)), uuid.UUID(str(task_id))
+        except (ValueError, TypeError):
+            return
+        cleaned = (line or "").replace("\x00", "").rstrip("\n")[:8000] + "\n"
+        queryset = ImageBuildJob.objects.filter(
+            id=job_id,
+            build_task_id=task_id,
+            pending_generation__creating_task_id=task_id,
+            pending_generation__status="building",
+            build_task__status__in=["pending", "in_progress"],
+        )
+        if runner_id is not None:
+            queryset = queryset.filter(runner_id=runner_id)
+        queryset.update(
+            build_log=Right(Concat("build_log", Value(cleaned)), max_chars),
+            updated_at=timezone.now(),
         )
 
     @staticmethod
-    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageBuildJob]:
-        """Return build jobs that need runner-side deletion."""
-        return ImageBuildJob.objects.filter(
-            runner_id=runner_id,
-            status__in=[
-                ImageBuildJob.Status.PENDING_DELETION,
-                ImageBuildJob.Status.DELETING,
-            ],
-        ).select_related("runner", "image_definition", "image_instance")
+    def capture_result(
+        *,
+        task_id,
+        workspace_id,
+        runner_id,
+        runner_ref="",
+        size_bytes=None,
+        error=None,
+        min_disk_size_gb=None,
+    ) -> bool:
+        """Serialize capture callbacks against deletion and terminal task state."""
+        try:
+            task_id = uuid.UUID(str(task_id))
+        except (TypeError, ValueError):
+            return False
+        with transaction.atomic():
+            identity = (
+                Task.objects.filter(id=task_id)
+                .values("runner_id", "workspace_id")
+                .first()
+            )
+            if identity is None:
+                return None
+            lock_runner(identity["runner_id"])
+            if identity["workspace_id"]:
+                Workspace.objects.select_for_update().get(pk=identity["workspace_id"])
+            task = Task.objects.filter(id=task_id).first()
+            image = (
+                ImageInstance.objects.select_for_update()
+                .filter(creating_task_id=task_id, origin_type="workspace_capture")
+                .first()
+            )
+            if task:
+                task = Task.objects.select_for_update().get(pk=task.id)
+            if (
+                not task
+                or not image
+                or task.type != TaskType.CREATE_IMAGE_ARTIFACT
+                or str(task.workspace_id) != str(workspace_id)
+                or task.runner_id != image.runner_id
+                or (runner_id is not None and str(task.runner_id) != str(runner_id))
+                or task.status not in {"pending", "in_progress"}
+                or image.status not in ["capturing", "pending_deletion"]
+            ):
+                return False
+            if error is None:
+                if not runner_ref or (size_bytes is not None and size_bytes < 0):
+                    return False
+                if min_disk_size_gb is not None and (
+                    type(min_disk_size_gb) is not int or min_disk_size_gb <= 0
+                ):
+                    return False
+                image.runner_ref = runner_ref
+                image.size_bytes = size_bytes
+                if min_disk_size_gb is not None:
+                    image.min_disk_size_gb = max(
+                        image.min_disk_size_gb or 0, min_disk_size_gb
+                    )
+                    Workspace.objects.filter(pk=task.workspace_id).filter(
+                        Q(qemu_disk_size_gb__lt=min_disk_size_gb)
+                        | Q(qemu_disk_size_gb__isnull=True)
+                    ).update(
+                        qemu_disk_size_gb=min_disk_size_gb, updated_at=timezone.now()
+                    )
+                image.status = (
+                    "pending_deletion"
+                    if image.status == "pending_deletion"
+                    else "ready"
+                )
+                image.save(
+                    update_fields=[
+                        "runner_ref",
+                        "size_bytes",
+                        "status",
+                        "min_disk_size_gb",
+                    ]
+                )
+                TaskRepository.complete(task)
+            else:
+                image.status = (
+                    "pending_deletion"
+                    if image.status == "pending_deletion"
+                    else "failed"
+                )
+                image.save(update_fields=["status"])
+                TaskRepository.fail(task, error)
+            if task.workspace:
+                WorkspaceRepository.update_active_operation(task.workspace, None)
+            return True
 
     @staticmethod
-    def list_non_deleted_for_definition(
-        definition_id: uuid.UUID,
-    ) -> QuerySet[ImageBuildJob]:
-        """Return all build jobs for a definition that aren't deleted."""
-        return ImageBuildJob.objects.filter(
-            image_definition_id=definition_id,
-        ).exclude(status=ImageBuildJob.Status.DELETED)
-
-    @staticmethod
-    def has_dependent_workspaces(build_job_id: uuid.UUID) -> tuple[bool, int]:
-        """Check if any non-deleted workspaces depend on this build's image instance."""
-        from .models import ImageInstance as II
-        instances = II.objects.filter(
-            build_job_id=build_job_id,
-        ).exclude(status__in=[II.Status.DELETED])
-        count = 0
-        for instance in instances:
-            ws_count = Workspace.objects.filter(
-                base_image_instance=instance,
-            ).exclude(
-                status__in=[
-                    WorkspaceStatus.PENDING_DELETION,
-                    WorkspaceStatus.DELETING,
-                    WorkspaceStatus.REMOVED,
-                    WorkspaceStatus.DELETED,
-                ],
-            ).count()
-            count += ws_count
-        return count > 0, count
+    def delete_result(
+        *, task_id, runner_id, image_id="", runner_ref="", error=None
+    ) -> ImageInstance | None:
+        """Never correlate deletion by naked runner ref or a creation task."""
+        try:
+            task_id = uuid.UUID(str(task_id))
+        except (TypeError, ValueError):
+            return None
+        with transaction.atomic():
+            identity = (
+                Task.objects.filter(id=task_id)
+                .values("runner_id", "workspace_id")
+                .first()
+            )
+            if identity is None:
+                return None
+            lock_runner(identity["runner_id"])
+            if identity["workspace_id"]:
+                Workspace.objects.select_for_update().get(pk=identity["workspace_id"])
+            task = Task.objects.filter(id=task_id).first()
+            image = (
+                ImageInstance.objects.select_for_update()
+                .filter(
+                    deleting_task_id=task_id,
+                    status__in=["deleting", "pending_deletion"],
+                )
+                .first()
+            )
+            if task:
+                task = Task.objects.select_for_update().get(pk=task.id)
+            if (
+                not task
+                or not image
+                or task.type != TaskType.DELETE_IMAGE
+                or task.runner_id != image.runner_id
+                or task.status not in {"pending", "in_progress"}
+                or (runner_id is not None and str(task.runner_id) != str(runner_id))
+                or (image_id and str(image.id) != str(image_id))
+                or (runner_ref and runner_ref != image.runner_ref)
+            ):
+                return None
+            if error is None:
+                ImageInstanceRepository.mark_deleted(image.id)
+                TaskRepository.complete(task)
+            else:
+                ImageInstanceRepository.mark_delete_failed(image.id, error=error)
+                TaskRepository.fail(task, error)
+            return image

@@ -1,0 +1,583 @@
+"""Tests for runner workspace stream handlers."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import tempfile
+import unittest
+import uuid
+from unittest.mock import AsyncMock
+
+from src.config import RunnerSettings
+from tests.command_support import make_interface as WebSocketInterface
+from src.models import WorkspaceInfo
+from src.service import WorkspaceService
+
+
+class FakeStreamRuntime:
+    def __init__(self) -> None:
+        self.spawned: list[dict] = []
+
+    async def spawn_process(self, instance_id, command, workdir=None, env=None):
+        from src.runtime.base import ProcessHandle
+
+        self.spawned.append({"command": list(command)})
+        return ProcessHandle(instance_id=instance_id, handle=object())
+
+    async def process_read(self, handle, stream="stdout", size=65536):
+        return b""
+
+    async def process_write(self, handle, data: bytes) -> None:
+        handle.metadata.setdefault("written", []).append(bytes(data))
+
+    async def process_write_eof(self, handle) -> None:
+        handle.metadata["eof"] = True
+
+    async def process_wait(self, handle) -> int:
+        return 0
+
+    async def process_close(self, handle) -> None:
+        handle.closed = True
+
+
+def _setup():
+    runtime = FakeStreamRuntime()
+    service = WorkspaceService(
+        runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+    )
+    ws_id = uuid.uuid4()
+    service.registry._cache[ws_id] = WorkspaceInfo(
+        workspace_id=ws_id,
+        instance_id="instance-1",
+        status="running",
+    )
+    interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
+    interface._sio.emit = AsyncMock()
+    interface._sio.call = AsyncMock(return_value={"ok": True})
+    handlers = interface._sio.handlers["/"]
+    return service, runtime, ws_id, interface, handlers
+
+
+class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_ack_preserves_unverified_and_error_results(self) -> None:
+        svc, _rt, ws_id, interface, handlers = _setup()
+        svc.streams.stream_close = AsyncMock(return_value={"closed": False})
+        payload = {"workspace_id": str(ws_id), "connection_id": "close-test"}
+        result = await handlers["workspace:stream_close"](payload)
+        self.assertEqual(result, {**payload, "ok": True, "closed": False})
+        svc.streams.stream_close.side_effect = RuntimeError("unverified")
+        result = await handlers["workspace:stream_close"](payload)
+        self.assertEqual(result, {
+            **payload, "ok": False, "closed": False, "error": "unverified",
+        })
+        interface._sio.emit.assert_not_awaited()
+
+    async def test_natural_eof_does_not_confirm_unverified_termination(self) -> None:
+        svc, _rt, ws_id, interface, handlers = _setup()
+        svc.streams.stream_close = AsyncMock(return_value={"closed": False})
+        await handlers["workspace:stream_start"]({
+            "workspace_id": str(ws_id), "connection_id": "eof-unverified",
+            "kind": "process", "command": ["true"],
+        })
+        task = interface._running_tasks.get("stream:eof-unverified")
+        if task:
+            await task
+        notices = [call.args[1] for call in interface._sio.emit.await_args_list
+                   if call.args[0] == "workspace:stream_closed"]
+        self.assertTrue(notices)
+        self.assertFalse(notices[-1]["closed"])
+        self.assertIn("unverified", notices[-1]["error"])
+
+    async def test_start_process_returns_ack(self) -> None:
+        _svc, _rt, ws_id, interface, handlers = _setup()
+        result = await handlers["workspace:stream_start"](
+            {
+                "connection_id": "c1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["my-mcp", "--stdio"],
+                "workdir": "/workspace",
+                "env": {"A": "b"},
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["connection_id"], "c1")
+        interface._sio.emit.assert_not_awaited()
+
+    async def test_helper_profile_reaches_stream_manager(self) -> None:
+        svc, _rt, ws_id, interface, handlers = _setup()
+        svc.streams.stream_start_process = AsyncMock()
+        payload = {
+            "connection_id": "helper-profile",
+            "workspace_id": str(ws_id),
+            "kind": "process",
+            "command": ["python3"],
+            "env": {},
+            "owner": {"lease_id": "lease", "epoch": "epoch"},
+            "process_profile": "helper",
+        }
+        result = await handlers["workspace:stream_start"](payload)
+        self.assertTrue(result["ok"])
+        svc.streams.stream_start_process.assert_awaited_once_with(
+            ws_id,
+            payload["connection_id"],
+            payload["command"],
+            workdir="/workspace",
+            env={},
+            owner=payload["owner"],
+            process_profile="helper",
+        )
+        await interface._running_tasks["stream:helper-profile"]
+
+    async def test_start_duplicate_id_rejected(self) -> None:
+        _svc, _rt, ws_id, _if, handlers = _setup()
+        payload = {
+            "connection_id": "dup",
+            "workspace_id": str(ws_id),
+            "kind": "process",
+            "command": ["sleep", "1"],
+        }
+        first = await handlers["workspace:stream_start"](payload)
+        self.assertTrue(first["ok"])
+        second = await handlers["workspace:stream_start"](payload)
+        self.assertFalse(second["ok"])
+        self.assertIn("Duplicate", second["error"])
+
+    async def test_start_unknown_kind_rejected(self) -> None:
+        _svc, _rt, ws_id, _if, handlers = _setup()
+        result = await handlers["workspace:stream_start"](
+            {
+                "connection_id": "k1",
+                "workspace_id": str(ws_id),
+                "kind": "mcp",
+            }
+        )
+        self.assertFalse(result["ok"])
+
+    async def test_input_validates_base64_and_workspace(self) -> None:
+        _svc, _rt, ws_id, _if, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "i1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["cat"],
+            }
+        )
+        good = base64.b64encode(b"hello").decode()
+        result = await handlers["workspace:stream_input"](
+            {
+                "connection_id": "i1",
+                "workspace_id": str(ws_id),
+                "data": good,
+            }
+        )
+        self.assertTrue(result["ok"])
+        bad = await handlers["workspace:stream_input"](
+            {
+                "connection_id": "i1",
+                "workspace_id": str(ws_id),
+                "data": "!!!not-base64!!!",
+            }
+        )
+        self.assertFalse(bad["ok"])
+        mismatch = await handlers["workspace:stream_input"](
+            {
+                "connection_id": "i1",
+                "workspace_id": str(uuid.uuid4()),
+                "data": good,
+            }
+        )
+        self.assertFalse(mismatch["ok"])
+        oversize = base64.b64encode(b"x" * (64 * 1024 + 1)).decode()
+        too_big = await handlers["workspace:stream_input"](
+            {
+                "connection_id": "i1",
+                "workspace_id": str(ws_id),
+                "data": oversize,
+            }
+        )
+        self.assertFalse(too_big["ok"])
+
+    async def test_close_eof_half_close(self) -> None:
+        _svc, _rt, ws_id, _if, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "e1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["cat"],
+            }
+        )
+        result = await handlers["workspace:stream_close"](
+            {
+                "connection_id": "e1",
+                "workspace_id": str(ws_id),
+                "eof": True,
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result.get("eof"))
+
+    async def test_output_uses_ack_call_and_closed_event(self) -> None:
+        _svc, _rt, ws_id, interface, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "o1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["cat"],
+            }
+        )
+        # Pump task runs in background; give it a chance to hit EOF and
+        # emit workspace:stream_closed.
+        pump = interface._running_tasks.get("stream:o1")
+        self.assertIsNotNone(pump)
+        await asyncio.wait_for(pump, timeout=5)
+        calls = [
+            c.args[0]
+            for c in interface._sio.emit.await_args_list
+            if c.args[0] == "workspace:stream_closed"
+        ]
+        self.assertTrue(calls)
+        closed_payload = interface._sio.emit.await_args_list[-1].args[1]
+        self.assertEqual(closed_payload["connection_id"], "o1")
+
+    async def test_disconnect_preserves_streams(self) -> None:
+        _svc, _rt, ws_id, _interface, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "d1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["sleep", "5"],
+            }
+        )
+        self.assertIn("d1", _svc.streams._streams)
+        await handlers["disconnect"]()
+        self.assertIn("d1", _svc.streams._streams)
+        await _svc.streams.close_all_streams(reason="test_shutdown")
+
+    async def test_cancelled_pump_emits_plain_close_no_error(self) -> None:
+        """Cancelled pump task cleans up silently (no spurious error)."""
+        _svc, _rt, ws_id, interface, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "c1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["sleep", "30"],
+            }
+        )
+        pump = interface._running_tasks.get("stream:c1")
+        self.assertIsNotNone(pump)
+        assert pump is not None
+        # Full close path via the real handler: it pops + cancels the
+        # pump, then closes the session. The close handler itself
+        # returns ok (it never emits stream_closed — the pump does that
+        # on natural EOF or genuine errors only). A cancelled pump must
+        # NOT emit "stream output ACK timed out".
+        result = await handlers["workspace:stream_close"](
+            {"connection_id": "c1", "workspace_id": str(ws_id)}
+        )
+        self.assertTrue(result.get("ok"))
+        errors = [
+            c.args[1]
+            for c in interface._sio.emit.await_args_list
+            if c.args[0] == "workspace:stream_closed"
+            and isinstance(c.args[1], dict)
+            and "error" in c.args[1]
+        ]
+        self.assertEqual(errors, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class StreamPumpConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stderr_only_process_does_not_block(self) -> None:
+        """A stderr-only process must still deliver output (no stdout block)."""
+        import base64 as _b64
+
+        _svc, _rt, ws_id, interface, handlers = _setup()
+
+        # Fake runtime: stdout is EOF immediately, stderr has data.
+        async def _read(handle, stream="stdout", size=65536):
+            if stream == "stderr":
+                pending = handle.metadata.setdefault("stderr_pending", [b"err-line"])
+                if pending:
+                    return pending.pop(0)
+                return b""
+            return b""
+
+        _rt.process_read = _read  # type: ignore[method-assign]
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "so1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["noisy-stderr"],
+            }
+        )
+        pump = interface._running_tasks.get("stream:so1")
+        self.assertIsNotNone(pump)
+        await asyncio.wait_for(pump, timeout=10)
+        # Output chunks go through sio.call (ACK/backpressure); the final
+        # close notice goes through sio.emit.
+        stderr_calls = [
+            c
+            for c in interface._sio.call.await_args_list
+            if c.args[0] == "workspace:stream_output"
+            and c.args[1].get("stream") == "stderr"
+        ]
+        self.assertTrue(stderr_calls, "stderr-only output was never emitted")
+        payload = stderr_calls[0].args[1]
+        self.assertEqual(_b64.b64decode(payload["data"]), b"err-line")
+
+    async def test_eof_half_close_keeps_pump_alive(self) -> None:
+        """workspace:stream_close eof=True must NOT cancel the output pump."""
+        _svc, _rt, ws_id, interface, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "eo1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["cat"],
+            }
+        )
+        pump_before = interface._running_tasks.get("stream:eo1")
+        self.assertIsNotNone(pump_before)
+        result = await handlers["workspace:stream_close"](
+            {
+                "connection_id": "eo1",
+                "workspace_id": str(ws_id),
+                "eof": True,
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result.get("eof"))
+        # Pump still registered and not done: full close cancels, EOF doesn't.
+        pump_after = interface._running_tasks.get("stream:eo1")
+        self.assertIs(pump_before, pump_after)
+        self.assertFalse(pump_after.done())
+        # Session still live (only stdin was half-closed).
+        self.assertIn("eo1", _svc.streams._streams)
+        pump_after.cancel()
+        with __import__("contextlib").suppress(asyncio.CancelledError):
+            await pump_after
+
+    async def test_natural_eof_removes_session_no_double_cancel(self) -> None:
+        """Natural EOF reads exit code then removes/closes the session."""
+        _svc, _rt, ws_id, interface, handlers = _setup()
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "ne1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["true"],
+            }
+        )
+        pump = interface._running_tasks.get("stream:ne1")
+        self.assertIsNotNone(pump)
+        await asyncio.wait_for(pump, timeout=10)
+        # Session removed and closed exactly once; task key popped.
+        self.assertNotIn("ne1", _svc.streams._streams)
+        self.assertNotIn("stream:ne1", interface._running_tasks)
+        closed_payloads = [
+            c.args[1]
+            for c in interface._sio.emit.await_args_list
+            if c.args[0] == "workspace:stream_closed"
+        ]
+        self.assertTrue(closed_payloads)
+        self.assertEqual(closed_payloads[-1]["connection_id"], "ne1")
+
+    async def test_output_nack_closes_runner_side(self) -> None:
+        """Backend {ok:false} ACK must fail the pump and close the session."""
+        _svc, _rt, ws_id, interface, handlers = _setup()
+
+        async def _read(handle, stream="stdout", size=65536):
+            pending = handle.metadata.setdefault("nack_pending", [b"data"])
+            if pending and stream == "stdout":
+                return pending.pop(0)
+            return b""
+
+        _rt.process_read = _read  # type: ignore[method-assign]
+        interface._sio.call = AsyncMock(return_value={"ok": False})
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": "na1",
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["yes"],
+            }
+        )
+        pump = interface._running_tasks.get("stream:na1")
+        self.assertIsNotNone(pump)
+        await asyncio.wait_for(pump, timeout=10)
+        self.assertNotIn("na1", _svc.streams._streams)
+        errors = [
+            c.args[1]
+            for c in interface._sio.emit.await_args_list
+            if c.args[0] == "workspace:stream_closed"
+            and c.args[1].get("error")
+        ]
+        self.assertTrue(errors)
+
+    async def test_qemu_stderr_only_and_kill_fake(self) -> None:
+        """QEMU split streams: stderr-only read works; close kills once."""
+        from unittest.mock import MagicMock
+
+        from src.runtime.base import ProcessHandle as _PH
+        from src.runtime.qemu_runtime import QemuRuntime
+
+        runtime = object.__new__(QemuRuntime)
+
+        class FakeReader:
+            def __init__(self, chunks: list[bytes]) -> None:
+                self._chunks = list(chunks)
+
+            def at_eof(self) -> bool:
+                return not self._chunks
+
+            async def read(self, _n: int) -> bytes:
+                if self._chunks:
+                    return self._chunks.pop(0)
+                return b""
+
+        fake_process = MagicMock()
+        fake_process.stdout = FakeReader([])
+        fake_process.stderr = FakeReader([b"only-err"])
+        fake_process.stdin = MagicMock()
+        fake_process.wait_closed = AsyncMock()
+        fake_process.close = MagicMock()
+        fake_process.exit_status = 3
+        runtime._kill_stream_tree = AsyncMock()  # type: ignore[method-assign]
+        handle = _PH(instance_id="inst-9", handle=fake_process)
+        handle.metadata.update(
+            {"pidfile": "/tmp/p-kill", "pending_stdout": b"",
+             "pending_stderr": b""}
+        )
+        # stderr-only: stdout EOF immediately, stderr delivers.
+        self.assertEqual(await runtime.process_read(handle, "stdout"), b"")
+        self.assertEqual(await runtime.process_read(handle, "stderr"), b"only-err")
+        # Close: single wait-then-kill-then-close, no double wait hang.
+        await runtime.process_close(handle)
+        runtime._kill_stream_tree.assert_awaited_once_with(
+            "inst-9", "/tmp/p-kill"
+        )
+        fake_process.close.assert_called_once()
+        self.assertTrue(handle.closed)
+        # Idempotent second close: no second kill.
+        await runtime.process_close(handle)
+        runtime._kill_stream_tree.assert_awaited_once()
+
+
+class StreamPumpCoalescingTests(unittest.IsolatedAsyncioTestCase):
+    """Chunks queued behind a pending ACK share one backend round trip."""
+
+    async def _run_pump(
+        self, interface, handlers, ws_id, connection_id: str
+    ) -> list[tuple[str, bytes]]:
+        await handlers["workspace:stream_start"](
+            {
+                "connection_id": connection_id,
+                "workspace_id": str(ws_id),
+                "kind": "process",
+                "command": ["agent-cli"],
+            }
+        )
+        pump = interface._running_tasks.get(f"stream:{connection_id}")
+        self.assertIsNotNone(pump)
+        await asyncio.wait_for(pump, timeout=10)
+        return [
+            (c.args[1]["stream"], base64.b64decode(c.args[1]["data"]))
+            for c in interface._sio.call.await_args_list
+            if c.args[0] == "workspace:stream_output"
+        ]
+
+    @staticmethod
+    def _gate_first_ack(interface, released: asyncio.Event) -> None:
+        """Hold the first ACK until *released*, then ACK immediately."""
+
+        async def _call(event, payload, timeout=None):
+            await released.wait()
+            return {"ok": True}
+
+        interface._sio.call = AsyncMock(side_effect=_call)
+
+    async def test_backlog_is_sent_in_one_round_trip(self) -> None:
+        _svc, rt, ws_id, interface, handlers = _setup()
+        lines = [b'{"type":"stream_event","n":%d}\n' % n for n in range(100)]
+        stdout_done = asyncio.Event()
+
+        async def _read(handle, stream="stdout", size=65536):
+            if stream == "stdout":
+                pending = handle.metadata.setdefault("lines", list(lines))
+                if pending:
+                    return pending.pop(0)
+                stdout_done.set()
+            return b""
+
+        rt.process_read = _read  # type: ignore[method-assign]
+        self._gate_first_ack(interface, stdout_done)
+
+        emitted = await self._run_pump(interface, handlers, ws_id, "co1")
+
+        # One ACK may already be in flight; everything queued behind it
+        # leaves together instead of costing 99 more round trips.
+        self.assertLessEqual(len(emitted), 2)
+        self.assertEqual({stream for stream, _ in emitted}, {"stdout"})
+        self.assertEqual(b"".join(data for _, data in emitted), b"".join(lines))
+
+    async def test_coalescing_keeps_chunk_limit_and_stream_order(self) -> None:
+        _svc, rt, ws_id, interface, handlers = _setup()
+        big = 40 * 1024
+        stdout_chunks = [b"a1", b"a2", b"b" * big, b"c" * big, b"d1"]
+        stdout_progress = asyncio.Event()
+        stderr_queued = asyncio.Event()
+        stdout_done = asyncio.Event()
+
+        async def _read(handle, stream="stdout", size=65536):
+            if stream == "stderr":
+                reads = handle.metadata.setdefault("stderr_reads", 0)
+                handle.metadata["stderr_reads"] = reads + 1
+                if reads == 0:
+                    # Arrive strictly after a1/a2 and before the big chunks.
+                    await stdout_progress.wait()
+                    return b"err"
+                stderr_queued.set()
+                return b""
+            reads = handle.metadata.setdefault("stdout_reads", 0)
+            handle.metadata["stdout_reads"] = reads + 1
+            if reads == 2:
+                stdout_progress.set()
+                await stderr_queued.wait()
+            if reads < len(stdout_chunks):
+                return stdout_chunks[reads]
+            stdout_done.set()
+            return b""
+
+        rt.process_read = _read  # type: ignore[method-assign]
+        self._gate_first_ack(interface, stdout_done)
+
+        emitted = await self._run_pump(interface, handlers, ws_id, "co2")
+
+        for _stream, data in emitted:
+            self.assertLessEqual(len(data), 64 * 1024)
+        self.assertEqual(
+            b"".join(data for stream, data in emitted if stream == "stdout"),
+            b"".join(stdout_chunks),
+        )
+        streams = [stream for stream, _ in emitted]
+        self.assertEqual(streams.count("stderr"), 1)
+        err_at = streams.index("stderr")
+        before = b"".join(data for _, data in emitted[:err_at])
+        self.assertEqual(before, b"a1a2")
+        # The two 40 KiB chunks cannot share one 64 KiB emit; the small
+        # tail queued behind the second one rides along with it.
+        self.assertEqual(
+            [data for _, data in emitted[err_at + 1 :]],
+            [b"b" * big, b"c" * big + b"d1"],
+        )

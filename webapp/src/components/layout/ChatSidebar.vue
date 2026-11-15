@@ -1,17 +1,17 @@
 <script setup lang="ts">
 /**
  * ChatSidebar — chat-first navigation: brand, new chat, command palette,
- * active sessions, time-grouped conversations, compact workspaces, account.
+ * inbox, workspace-grouped conversations, scheduled tasks, account.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Layers, Plus, Search } from '@lucide/vue'
+import { CalendarClock as CalendarClockIcon, Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
-import ActiveConversationsSection from './sidebar/ActiveConversationsSection.vue'
-import ConversationTimeList from './sidebar/ConversationTimeList.vue'
+import InboxSection from './sidebar/InboxSection.vue'
+import ConversationWorkspaceList from './sidebar/ConversationWorkspaceList.vue'
 import SidebarBrandHeader from './sidebar/SidebarBrandHeader.vue'
 import SidebarUserFooter from './sidebar/SidebarUserFooter.vue'
-import WorkspaceSection from './sidebar/WorkspaceSection.vue'
+import ScheduledTasksSection from './sidebar/ScheduledTasksSection.vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -31,53 +31,68 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { usePolling } from '@/composables/usePolling'
+import { useSidebarWorkspaceCollapse } from '@/composables/useSidebarWorkspaceCollapse'
+import { storeToRefs } from 'pinia'
 import {
   countableWorkspaces,
   conversationTitle,
-  extractActiveConversations,
-  selectSidebarWorkspaces,
-} from '@/lib/conversationGroups'
+  extractInboxConversations,
+  isConversationWorkspaceEligible,
+} from '@opencuria/chat-core/conversationGroups'
 import { useAuthStore } from '@/stores/auth'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useHarnessStore } from '@/stores/harness'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import {
   connect as connectSocket,
   disconnect as disconnectSocket,
   onEvent,
+  onReconnect,
   subscribeToWorkspace,
-  unsubscribeFromWorkspace,
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
+
+// Mounted on first use: the dialog loads runners and images when it mounts.
+const CreateWorkspaceDialog = defineAsyncComponent(
+  () => import('@/components/workspaces/CreateWorkspaceDialog.vue'),
+)
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const workspaceStore = useWorkspaceStore()
+const scheduledTaskStore = useScheduledTaskStore()
+const { tasks: scheduledTasks } = storeToRefs(scheduledTaskStore)
 const conversationStore = useHarnessConversationStore()
 const harnessStore = useHarnessStore()
 const { isMobile, setOpenMobile } = useSidebar()
 
 const searchOpen = ref(false)
+const createWorkspaceOpen = ref(false)
+const createWorkspaceMounted = ref(false)
+const visibleConversationCounts = ref<Record<string, number>>({})
 const deleteTarget = ref<HarnessConversation | null>(null)
-
-const activeConversations = computed(() =>
-  extractActiveConversations(conversationStore.conversations),
+const { collapsedWorkspaceIds, setCollapsed } = useSidebarWorkspaceCollapse(() =>
+  authStore.user?.id && authStore.activeOrganizationId
+    ? `${authStore.user.id}:${authStore.activeOrganizationId}`
+    : '',
+)
+const runningWorkspaceIds = computed(
+  () =>
+    new Set(
+      workspaceStore.workspaces
+        .filter((workspace) => workspace.status === WorkspaceStatus.RUNNING)
+        .map((workspace) => workspace.id),
+    ),
 )
 
-const timeListConversations = computed(() => {
-  const activeIds = new Set(activeConversations.value.map((row) => row.session_id))
-  return conversationStore.conversations.filter((row) => !activeIds.has(row.session_id))
-})
-
-const sidebarWorkspaces = computed(() =>
-  selectSidebarWorkspaces(workspaceStore.workspaces, conversationStore.conversations),
+const inboxConversations = computed(() =>
+  extractInboxConversations(conversationStore.conversations, runningWorkspaceIds.value),
 )
 
-const workspaceTotal = computed(
-  () => countableWorkspaces(workspaceStore.workspaces).length,
-)
+const workspaceTotal = computed(() => countableWorkspaces(workspaceStore.workspaces).length)
 
 const activeSessionId = computed(() => {
   const query = route.query.session
@@ -86,6 +101,7 @@ const activeSessionId = computed(() => {
 })
 
 const activeWorkspaceId = computed(() => {
+  if (route.name !== 'workspace-detail') return null
   const id = route.params.id
   return typeof id === 'string' ? id : null
 })
@@ -118,12 +134,41 @@ function handleOpenWorkspaces(): void {
   void router.push('/workspaces')
 }
 
+function handleOpenScheduledTasks(): void {
+  closeMobileSidebar()
+  void router.push('/scheduled-tasks')
+}
+
+/** Let the mobile drawer finish closing so the dialog owns focus. */
+async function handleNewWorkspace(): Promise<void> {
+  if (isMobile.value) {
+    setOpenMobile(false)
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    )
+  }
+  createWorkspaceMounted.value = true
+  createWorkspaceOpen.value = true
+}
+
+function handleCreatedWorkspace(workspaceId: string | null): void {
+  if (workspaceId) handleOpenWorkspace(workspaceId)
+}
+
 function handleMarkAllRead(): void {
-  const unread = conversationStore.conversations.filter((row) => row.unread)
+  const visibleWorkspaceIds = new Set(
+    workspaceStore.workspaces
+      .filter((workspace) => isConversationWorkspaceEligible(workspace, activeWorkspaceId.value))
+      .map((workspace) => workspace.id),
+  )
+  const unread = conversationStore.conversations.filter(
+    (row) => row.unread && visibleWorkspaceIds.has(row.workspace_id),
+  )
   void Promise.all(unread.map((row) => conversationStore.markAsRead(row.session_id)))
 }
 
 async function handleRename(conversation: HarnessConversation, title: string): Promise<void> {
+  if (workspaceStore.isWorkspaceTransitioning(conversation.workspace_id)) return
   await harnessStore.renameSession(conversation.session_id, title)
   await conversationStore.fetchConversations()
 }
@@ -132,12 +177,17 @@ function handleMarkRead(conversation: HarnessConversation): void {
   void conversationStore.markAsRead(conversation.session_id)
 }
 
+function handleMarkUnread(conversation: HarnessConversation): void {
+  void conversationStore.markAsUnread(conversation.session_id)
+}
+
 function requestDelete(conversation: HarnessConversation): void {
+  if (workspaceStore.isWorkspaceTransitioning(conversation.workspace_id)) return
   deleteTarget.value = conversation
 }
 
 async function confirmDelete(): Promise<void> {
-  if (!deleteTarget.value) return
+  if (!deleteTarget.value || workspaceStore.isWorkspaceTransitioning(deleteTarget.value.workspace_id)) return
   const sessionId = deleteTarget.value.session_id
   deleteTarget.value = null
   await harnessStore.removeSession(sessionId)
@@ -162,26 +212,44 @@ function handleOpenSettings(): void {
   window.dispatchEvent(new CustomEvent('opencuria:open-settings'))
 }
 
-const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 10000)
-const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 15000)
+const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWorkspaces(), 30000)
+const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 60000)
 
 const cleanupFns: (() => void)[] = []
-const subscribedWorkspaceIds: string[] = []
+const workspaceSubscriptions = new Map<string, () => void>()
 
 function subscribeVisibleWorkspaces(): void {
   const ids = new Set<string>([
     ...workspaceStore.workspaces.map((workspace) => workspace.id),
     ...conversationStore.uniqueWorkspaceIds,
   ])
+  for (const [workspaceId, release] of workspaceSubscriptions) {
+    if (ids.has(workspaceId)) continue
+    release()
+    workspaceSubscriptions.delete(workspaceId)
+  }
   for (const workspaceId of ids) {
-    if (subscribedWorkspaceIds.includes(workspaceId)) continue
-    subscribeToWorkspace(workspaceId)
-    subscribedWorkspaceIds.push(workspaceId)
+    if (workspaceSubscriptions.has(workspaceId)) continue
+    workspaceSubscriptions.set(workspaceId, subscribeToWorkspace(workspaceId))
   }
 }
 
 function setupSocketListeners(): void {
   subscribeVisibleWorkspaces()
+
+  // Mutations and completed runs emit an invalidation once, rather than
+  // requiring a continuous conversations poll while the socket is healthy.
+  cleanupFns.push(
+    onEvent('harness.conversations_changed', () => {
+      conversationStore.scheduleAttentionRefresh()
+    }),
+  )
+  cleanupFns.push(
+    onReconnect(() => {
+      void workspaceStore.fetchWorkspaces()
+      void conversationStore.fetchConversations()
+    }),
+  )
 
   cleanupFns.push(
     onEvent('harness.session_status', (data) => {
@@ -198,8 +266,24 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
-    onEvent('harness.part_updated', (data) => {
-      conversationStore.touchConversation(data.session_id)
+    onEvent('harness.permission_required', (data) => {
+      const sessionId = data.root_session_id || data.session_id
+      if (data.decision) {
+        conversationStore.clearAttention(sessionId)
+        return
+      }
+      conversationStore.setAttention(sessionId, 'permission')
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('harness.question_required', (data) => {
+      const sessionId = data.root_session_id || data.session_id
+      if (data.status && data.status !== 'pending') {
+        conversationStore.clearAttention(sessionId)
+        return
+      }
+      conversationStore.setAttention(sessionId, 'question')
     }),
   )
 
@@ -218,6 +302,8 @@ function setupSocketListeners(): void {
       workspaceStore.updateWorkspaceOperation(
         data.workspace_id,
         data.active_operation as WorkspaceOperation | null,
+        data.intervention_required,
+        data.lifecycle_diagnostic,
       )
     }),
   )
@@ -225,6 +311,12 @@ function setupSocketListeners(): void {
   cleanupFns.push(
     onEvent('workspace:error', (data) => {
       workspaceStore.handleWorkspaceError(data.workspace_id, data.error)
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('workspace:disk_usage_changed', (data) => {
+      workspaceStore.updateWorkspaceDiskUsage(data.workspace_id, data.disk_usage)
     }),
   )
 
@@ -242,10 +334,8 @@ function setupSocketListeners(): void {
 }
 
 function cleanupSocket(): void {
-  for (const workspaceId of subscribedWorkspaceIds) {
-    unsubscribeFromWorkspace(workspaceId)
-  }
-  subscribedWorkspaceIds.length = 0
+  for (const release of workspaceSubscriptions.values()) release()
+  workspaceSubscriptions.clear()
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
 }
@@ -257,13 +347,12 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown)
-  startWorkspacePolling()
-  await workspaceStore.fetchWorkspaces()
-  await conversationStore.fetchConversations()
-  startConvPolling()
   setupSocketListeners()
+  // `start()` performs the initial requests; don't issue a second eager fetch.
+  startWorkspacePolling()
+  startConvPolling()
 })
 
 onUnmounted(() => {
@@ -272,25 +361,23 @@ onUnmounted(() => {
 })
 
 watch(
-  () => conversationStore.uniqueWorkspaceIds,
-  () => {
-    subscribeVisibleWorkspaces()
-  },
+  [
+    () => workspaceStore.workspaces.map((workspace) => workspace.id),
+    () => conversationStore.uniqueWorkspaceIds,
+  ],
+  () => subscribeVisibleWorkspaces(),
 )
 </script>
 
 <template>
   <Sidebar collapsible="icon">
     <SidebarHeader>
-      <SidebarBrandHeader
-        @home="closeMobileSidebar"
-        @switch-organization="switchOrganization"
-      />
+      <SidebarBrandHeader @home="closeMobileSidebar" @switch-organization="switchOrganization" />
 
       <div class="px-2 pt-1 group-data-[collapsible=icon]:hidden">
         <Button class="w-full rounded-xl" size="sm" @click="handleNewChat">
           <Plus class="size-4" />
-          Neuer Chat
+          New chat
         </Button>
         <button
           type="button"
@@ -298,83 +385,110 @@ watch(
           @click="searchOpen = true"
         >
           <Search class="size-4 shrink-0" />
-          <span class="flex-1 truncate">Suchen</span>
+          <span class="flex-1 truncate">Search</span>
           <kbd class="rounded border border-border bg-background px-1 text-[10px]">⌘K</kbd>
         </button>
       </div>
 
       <div class="hidden flex-col items-center gap-1 pt-1 group-data-[collapsible=icon]:flex">
-        <SidebarMenuButton tooltip="Neuer Chat" @click="handleNewChat">
+        <SidebarMenuButton tooltip="New chat" @click="handleNewChat">
           <Plus />
         </SidebarMenuButton>
-        <SidebarMenuButton tooltip="Suchen (⌘K)" @click="searchOpen = true">
+        <SidebarMenuButton tooltip="Search (⌘K)" @click="searchOpen = true">
           <Search />
         </SidebarMenuButton>
         <SidebarMenuButton tooltip="Workspaces" @click="handleOpenWorkspaces">
           <Layers />
+        </SidebarMenuButton>
+        <SidebarMenuButton
+          tooltip="Scheduled tasks"
+          data-testid="collapsed-scheduled-tasks"
+          @click="handleOpenScheduledTasks"
+        >
+          <CalendarClockIcon />
         </SidebarMenuButton>
       </div>
     </SidebarHeader>
 
     <SidebarContent class="group-data-[collapsible=icon]:hidden">
       <div class="flex flex-col gap-3 pb-2">
-        <ActiveConversationsSection
-          :conversations="activeConversations"
+        <InboxSection
+          :conversations="inboxConversations"
           :active-session-id="activeSessionId"
           @select="handleSelectConversation"
           @rename="handleRename"
           @delete="requestDelete"
           @mark-read="handleMarkRead"
-          @mark-all-read="handleMarkAllRead"
+          @mark-unread="handleMarkUnread"
         />
 
-        <ConversationTimeList
-          v-if="conversationStore.conversations.length === 0 || timeListConversations.length > 0"
-          :conversations="timeListConversations"
-          :active-session-id="activeSessionId"
-          :empty="conversationStore.conversations.length === 0"
-          @select="handleSelectConversation"
-          @rename="handleRename"
-          @delete="requestDelete"
-          @mark-read="handleMarkRead"
-        />
-
-        <WorkspaceSection
-          :workspaces="sidebarWorkspaces"
+        <ConversationWorkspaceList
+          v-model:visible-counts="visibleConversationCounts"
+          :collapsed-workspace-ids="collapsedWorkspaceIds"
+          @set-collapsed="setCollapsed"
+          :workspaces="workspaceStore.workspaces"
+          :conversations="conversationStore.conversations"
           :total-count="workspaceTotal"
+          :loading="!workspaceStore.loaded"
+          :active-session-id="activeSessionId"
           :active-workspace-id="activeWorkspaceId"
+          @select="handleSelectConversation"
+          @rename="handleRename"
+          @delete="requestDelete"
+          @mark-read="handleMarkRead"
+          @mark-unread="handleMarkUnread"
+          @mark-all-read="handleMarkAllRead"
           @open="handleOpenWorkspace"
           @open-all="handleOpenWorkspaces"
           @create="handleOpenWorkspaces"
+          @new-workspace="handleNewWorkspace"
         />
+
+        <ScheduledTasksSection :tasks="scheduledTasks" @open-all="handleOpenScheduledTasks" />
       </div>
     </SidebarContent>
 
     <SidebarFooter>
-      <SidebarUserFooter
-        @settings="handleOpenSettings"
-        @logout="handleLogout"
-        @navigate="closeMobileSidebar"
-      />
+      <SidebarUserFooter @settings="handleOpenSettings" @logout="handleLogout" />
     </SidebarFooter>
 
-    <SidebarRail />
+    <slot v-if="$slots.rail" name="rail" />
+    <SidebarRail v-else />
   </Sidebar>
 
   <CommandPalette v-model:open="searchOpen" />
 
-  <Dialog :open="deleteTarget !== null" @update:open="(open) => { if (!open) deleteTarget = null }">
+  <CreateWorkspaceDialog
+    v-if="createWorkspaceMounted"
+    v-model:open="createWorkspaceOpen"
+    @created="handleCreatedWorkspace"
+  >
+    <span class="hidden" aria-hidden="true" />
+  </CreateWorkspaceDialog>
+
+  <Dialog
+    :open="deleteTarget !== null"
+    @update:open="
+      (open) => {
+        if (!open) deleteTarget = null
+      }
+    "
+  >
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>Chat löschen?</DialogTitle>
+        <DialogTitle>Delete chat?</DialogTitle>
         <DialogDescription>
-          „{{ deleteTarget ? conversationTitle(deleteTarget) : '' }}“ wird dauerhaft gelöscht.
-          Ein laufender Lauf wird abgebrochen.
+          "{{ deleteTarget ? conversationTitle(deleteTarget) : '' }}" will be permanently deleted. A
+          running session will be cancelled.
         </DialogDescription>
       </DialogHeader>
       <DialogFooter>
-        <Button variant="outline" @click="deleteTarget = null">Abbrechen</Button>
-        <Button variant="destructive" @click="confirmDelete">Löschen</Button>
+        <Button variant="outline" @click="deleteTarget = null">Cancel</Button>
+        <Button
+          variant="destructive"
+          :disabled="Boolean(deleteTarget && workspaceStore.isWorkspaceTransitioning(deleteTarget.workspace_id))"
+          @click="confirmDelete"
+        >Delete</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

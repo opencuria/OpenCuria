@@ -23,6 +23,8 @@ class CredentialServiceOut(Schema):
     env_var_name: str
     target_path: str
     label: str
+    organization_id: uuid.UUID | None = None
+    oauth_server_url: str = ""
 
 
 class CredentialServiceCreateIn(Schema):
@@ -35,6 +37,7 @@ class CredentialServiceCreateIn(Schema):
     env_var_name: str = ""
     target_path: str = ""
     label: str = ""
+    oauth_server_url: str = ""
 
 
 # --- Credential ---
@@ -69,9 +72,13 @@ class CredentialOut(Schema):
     env_var_name: str
     target_path: str
     has_public_key: bool
-    created_by_id: int
+    created_by_id: int | None = None
     created_at: datetime
     updated_at: datetime
+    oauth_connected: bool = False
+    oauth_status: str = ""
+    oauth_reconnect_required: bool = False
+    oauth_expires_at: datetime | None = None
 
 
 class PublicKeyOut(Schema):
@@ -91,6 +98,8 @@ class CredentialServiceWithActivationOut(Schema):
     env_var_name: str
     target_path: str
     label: str
+    organization_id: uuid.UUID | None = None
+    oauth_server_url: str = ""
     is_active: bool = False
 
 

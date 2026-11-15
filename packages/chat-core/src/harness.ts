@@ -1,0 +1,416 @@
+/**
+ * Harness block-model types for the frontend chat.
+ *
+ * Mirrors `backend/apps/harness/models.py` (HarnessSession, HarnessMessage,
+ * HarnessPart, Todo, PermissionRequest) and the frontend socket payloads
+ * emitted by `HarnessService` (`harness.part_updated`,
+ * `harness.permission_required`, `harness.session_status`,
+ * `harness.session_summary`, `harness.todo_updated`,
+ * `harness.subtask_started/finished`).
+ */
+
+// --- Block model -----------------------------------------------------------
+
+/** Persisted part types (`HarnessPartType` in the backend). */
+export type HarnessPartType =
+  | "text"
+  | "reasoning"
+  | "tool"
+  | "step-start"
+  | "step-finish"
+  | "subtask"
+  | "patch"
+  | "compaction"
+  | "steer";
+
+/** Lifecycle states of a part (`HarnessPartState` in the backend). */
+export type HarnessPartState = "pending" | "running" | "completed" | "error";
+
+/** One streamed block (text/tool/step/subtask) of an assistant message. */
+export interface HarnessPart {
+  id: string;
+  message_id?: string;
+  session_id: string;
+  type: HarnessPartType;
+  state: HarnessPartState;
+  call_id?: string;
+  /** Tool name for tool parts (kept in `input.tool` by the backend). */
+  tool?: string;
+  title: string;
+  input?: Record<string, unknown>;
+  output: string;
+  meta?: Record<string, unknown>;
+  /** Lightweight timeline projection used before detail is requested. */
+  display?: HarnessPartDisplay;
+  /** False when heavy fields are intentionally omitted from the timeline. */
+  detail_loaded?: boolean;
+  /** Per-message chronological order (0-based, gap-tolerant). */
+  position?: number;
+}
+
+export interface HarnessDiffPreviewLine {
+  type: "add" | "del" | "context";
+  oldNo: number | null;
+  newNo: number | null;
+  content: string;
+}
+
+export interface HarnessQuestionPreviewRow {
+  header?: string;
+  question: string;
+  answer?: string;
+  options?: Array<{ label: string; description?: string }>;
+  multiple?: boolean;
+}
+
+/** Safe bounded summary fields supplied by the lightweight timeline API. */
+export interface HarnessPartDisplay {
+  tool?: string;
+  summary?: string;
+  path?: string;
+  preview?: HarnessDiffPreviewLine[];
+  additions?: number;
+  deletions?: number;
+  question_rows?: HarnessQuestionPreviewRow[];
+  subtask_id?: string;
+  child_session_id?: string;
+  agent?: string;
+  status?: string;
+  step?: number;
+  auto?: boolean;
+  overflow?: boolean;
+  [key: string]: unknown;
+}
+
+/** One user prompt or assistant answer inside a harness session. */
+export interface HarnessMessage {
+  id: string;
+  session_id: string;
+  harness_id?: HarnessId;
+  role: "user" | "assistant";
+  content: string;
+  model?: string;
+  reasoning_effort?: string;
+  /** Skill UUIDs active for this user turn (persisted per message). */
+  skill_ids?: string[];
+  cost?: number;
+  tokens?: Record<string, number>;
+  finish?: string;
+  error?: string;
+  /** ISO timestamp when the user dismissed the stopped/failed notice. */
+  notice_dismissed_at?: string | null;
+  parts: HarnessPart[];
+  /** Per-session chronological order (0-based, gap-tolerant). */
+  position?: number;
+  /** Alias for `position` on REST snapshots (backend `message_position`). */
+  message_position?: number;
+  created_at?: string;
+  completed_at?: string | null;
+}
+
+/** Harness engine selected for a conversation. */
+export type HarnessId = "native" | "claude" | "codex";
+
+/** Execution mode of a harness session. */
+export type HarnessSessionMode = "plan" | "build";
+
+/** Lifecycle state of a harness session. */
+export type HarnessSessionStatus = "busy" | "idle";
+
+/** Pending user-gate kind on a conversation (permission / question). */
+export type HarnessAttentionKind = "permission" | "question" | "both" | "";
+
+/** One persistent agent conversation bound to a workspace. */
+export interface HarnessSession {
+  id: string;
+  workspace_id: string;
+  parent_id?: string | null;
+  /** Fixed execution engine for the session; legacy sessions default to native. */
+  harness_id?: HarnessId;
+  connection_id?: string | null;
+  title: string;
+  /** Brief recap of the user's conversation goal (empty while busy). */
+  summary?: string;
+  mode: HarnessSessionMode;
+  agent_name: string;
+  model: string;
+  reasoning_effort?: string;
+  status: HarnessSessionStatus;
+  skill_ids?: string[];
+  unread?: boolean;
+  manual_unread?: boolean;
+  needs_attention?: boolean;
+  attention_kind?: HarnessAttentionKind;
+  cost: number;
+  tokens: Record<string, number>;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** One persistent todo entry of a harness session. */
+export interface HarnessTodo {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  priority: string;
+  order: number;
+}
+
+/** A pending tool-permission gate surfaced to the user. */
+export interface HarnessPermissionRequest {
+  request_id: string;
+  session_id: string;
+  workspace_id: string;
+  tool: string;
+  /** The matched action/pattern preview (e.g. the shell command). */
+  pattern: string;
+  title: string;
+  call_id?: string;
+  status?: "pending" | "approved" | "rejected";
+  /** Agent that issued the gate (child subagents include explore/general/…). */
+  agent_name?: string;
+}
+
+/** Permission resolution choice (M6 `HarnessPermissionResolveIn`). */
+export type HarnessPermissionResponse = "once" | "always" | "reject";
+
+export interface HarnessQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface HarnessQuestionItem {
+  header?: string;
+  question: string;
+  options?: HarnessQuestionOption[];
+  multiple?: boolean;
+}
+
+/** A pending question gate surfaced to the user mid-run. */
+export interface HarnessQuestionRequest {
+  request_id: string;
+  session_id: string;
+  workspace_id: string;
+  questions: HarnessQuestionItem[];
+  call_id?: string;
+  status?: "pending" | "answered" | "rejected" | "timed_out";
+  /** Agent that issued the gate (child subagents include explore/general/…). */
+  agent_name?: string;
+}
+
+// --- REST payloads (M6 `backend/apps/harness/api.py`) ----------------------
+
+export interface HarnessSessionCreateIn {
+  prompt: string;
+  agent_name?: string;
+  mode?: HarnessSessionMode;
+  model?: string;
+  reasoning_effort?: string;
+  skill_ids?: string[];
+  harness_id?: HarnessId;
+}
+
+export interface HarnessSessionPatchIn {
+  title: string;
+}
+
+export interface HarnessMessageIn {
+  prompt: string;
+  mode?: HarnessSessionMode | "";
+  model?: string;
+  reasoning_effort?: string;
+  skill_ids?: string[];
+}
+
+/** Fork payload (`HarnessForkIn` in the backend). Omit message_id for full-session fork. */
+export interface HarnessForkIn {
+  /** Include this assistant answer; omit to copy the entire session. */
+  message_id?: string;
+}
+
+/** Edit payload (`HarnessMessageEditIn` in the backend): rerun from a user message. */
+export interface HarnessMessageEditIn {
+  prompt: string;
+  mode?: HarnessSessionMode | "";
+  model?: string;
+  reasoning_effort?: string;
+  skill_ids?: string[];
+}
+
+export interface HarnessPartsOut {
+  session: HarnessSession;
+  messages: HarnessMessage[];
+}
+
+/**
+ * A user message sent while the agent runs ("steering"). Queued entries are
+ * delivered into the running turn at the next step boundary; delivered ones
+ * become a `steer` part inside the assistant message.
+ */
+export interface HarnessSteer {
+  id: string;
+  content: string;
+  created_at: string;
+}
+
+/** Org-wide harness conversation row for the dashboard feed. */
+export interface HarnessConversation {
+  session_id: string;
+  harness_id?: HarnessId;
+  workspace_id: string;
+  workspace_name: string;
+  title: string;
+  status: HarnessSessionStatus;
+  mode: HarnessSessionMode;
+  agent_name: string;
+  model: string;
+  reasoning_effort?: string;
+  unread: boolean;
+  manual_unread?: boolean;
+  needs_attention?: boolean;
+  attention_kind?: HarnessAttentionKind;
+  updated_at: string;
+  last_message_at: string;
+}
+
+// --- Socket event payloads (M6 `HarnessService` emit shapes) ----------------
+
+/** Delta map inside `harness.part_updated` (exactly one key per emit). */
+export interface HarnessPartDelta {
+  text?: string;
+  reasoning?: string;
+  step_start?: number;
+  step_finish?: number;
+  cost?: number;
+  tokens?: Record<string, number>;
+  /** Current context occupancy and effective limit reported by the runtime. */
+  context?: Record<string, number>;
+  tool_started?: string;
+  tool_completed?: string;
+  tool_error?: string;
+  title?: string;
+  call_id?: string;
+  patch?: string;
+  compaction?: boolean;
+  /** Delivered steer text (a user message injected into the running turn). */
+  steer?: string;
+  /** Id of the delivered queue entry (`meta.steer_id` on the `steer` part). */
+  steer_id?: string;
+  /** Explicit tool lifecycle state supplied by the backend. */
+  state?: HarnessPartState;
+  /** Bounded, safe compact display projection for completed/error parts. */
+  display?: HarnessPartDisplay;
+}
+
+export interface HarnessPartUpdatedEvent {
+  workspace_id: string;
+  session_id: string;
+  /** Backend assistant shell id — the deterministic per-turn routing key. */
+  message_id: string;
+  delta: HarnessPartDelta;
+  step?: number;
+  /** Absent on notices without a persisted part (for example provider retries). */
+  part_id?: string | null;
+  part_position?: number;
+}
+
+export interface HarnessPermissionRequiredEvent {
+  workspace_id: string;
+  session_id: string;
+  root_session_id?: string;
+  request_id?: string;
+  tool: string;
+  pattern: string;
+  title: string;
+  call_id?: string;
+  decision?: string;
+  remember?: string;
+  agent_name?: string;
+}
+
+export interface HarnessPermissionResolvedEvent {
+  workspace_id: string;
+  session_id: string;
+  root_session_id?: string;
+  request_id: string;
+  decision: string;
+  remember: string;
+}
+
+export interface HarnessQuestionRequiredEvent {
+  workspace_id: string;
+  session_id: string;
+  root_session_id?: string;
+  request_id: string;
+  questions: HarnessQuestionItem[];
+  call_id?: string;
+  status?: string;
+  agent_name?: string;
+}
+
+export interface HarnessQuestionResolvedEvent {
+  workspace_id: string;
+  session_id: string;
+  root_session_id?: string;
+  request_id: string;
+  status: string;
+}
+
+export interface HarnessSessionStatusEvent {
+  workspace_id: string;
+  session_id: string;
+  status: HarnessSessionStatus;
+  /** Backend assistant shell id for this run (per-turn routing anchor). */
+  message_id?: string;
+  /** User message id that opened this run (follow-up correlation). */
+  user_message_id?: string;
+  model?: string;
+  reasoning_effort?: string;
+}
+
+export interface HarnessSessionSummaryEvent {
+  workspace_id: string;
+  session_id: string;
+  summary: string;
+}
+
+/** Full snapshot of the queued (not yet delivered) steers of a session. */
+export interface HarnessSteerQueueEvent {
+  workspace_id: string;
+  session_id: string;
+  steers: HarnessSteer[];
+}
+
+export interface HarnessTodoUpdatedEvent {
+  workspace_id: string;
+  session_id: string;
+  todos: HarnessTodo[];
+  step?: number;
+}
+
+export interface HarnessSubtaskStartedEvent {
+  workspace_id: string;
+  session_id: string;
+  /** Backend assistant shell id — routes to the right turn. */
+  message_id: string;
+  subtask_id: string;
+  agent: string;
+  description: string;
+  part_id: string;
+  part_position?: number;
+  child_session_id?: string;
+  model?: string;
+  reasoning_effort?: string;
+}
+
+export interface HarnessSubtaskFinishedEvent {
+  workspace_id: string;
+  session_id: string;
+  /** Backend assistant shell id — routes to the right turn. */
+  message_id: string;
+  subtask_id: string;
+  agent?: string;
+  status: string;
+  summary: string;
+  child_session_id?: string;
+}

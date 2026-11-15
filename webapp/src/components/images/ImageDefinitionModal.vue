@@ -1,15 +1,23 @@
 <script setup lang="ts">
+/**
+ * Create or edit an image recipe: name, base image and packages up front,
+ * environment and init script under Advanced. Saves only on submit.
+ */
 import { computed, ref, watch } from 'vue'
+import { ChevronDown } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -17,229 +25,193 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import type { ImageDefinition } from '@/types'
+import { Textarea } from '@/components/ui/textarea'
+import type { ImageDefinition, ImageDefinitionInput } from '@/types'
+import {
+  BASE_DISTRO_PRESETS,
+  envVarsTextValid,
+  formBaseDistro,
+  imageDefinitionForm,
+  imageDefinitionPayload,
+  isBaseDistroSupported,
+  isImageDefinitionFormValid,
+  type ImageDefinitionForm,
+} from '@opencuria/chat-core/imageDefinitionLifecycle'
 
 const props = withDefaults(
   defineProps<{
     open: boolean
     imageDefinition?: ImageDefinition | null
+    saving?: boolean
+    error?: string | null
   }>(),
   {
     imageDefinition: null,
+    saving: false,
+    error: null,
   },
 )
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
-  saved: [payload: Partial<ImageDefinition>]
+  saved: [payload: ImageDefinitionInput]
 }>()
 
-const name = ref('')
-const description = ref('')
-const activeTab = ref<'definition' | 'advanced'>('definition')
-const runtimeType = ref<'docker' | 'qemu'>('docker')
-const baseDistroPreset = ref('ubuntu:22.04')
-const customBaseDistro = ref('')
-const packages = ref('')
-const envVars = ref('')
-const customDockerfile = ref('')
-const customInitScript = ref('')
+const form = ref<ImageDefinitionForm>(imageDefinitionForm())
+const advancedOpen = ref(false)
 
-const runtimeOptions = [
-  { value: 'docker', label: 'Docker' },
-  { value: 'qemu', label: 'QEMU' },
-]
-
-const dockerDistroOptions = [
-  { value: 'ubuntu:22.04', label: 'ubuntu:22.04' },
-  { value: 'ubuntu:24.04', label: 'ubuntu:24.04' },
-  { value: 'debian:12', label: 'debian:12' },
-  { value: 'fedora:40', label: 'fedora:40' },
-  { value: 'alpine:3.19', label: 'alpine:3.19' },
-  { value: '__custom__', label: 'Custom...' },
-]
-
-const qemuDistroOptions = [
-  { value: 'ubuntu:22.04', label: 'ubuntu:22.04' },
-  { value: 'ubuntu:24.04', label: 'ubuntu:24.04' },
-  { value: '__custom__', label: 'Custom...' },
-]
-
-const distroOptions = computed(() =>
-  runtimeType.value === 'qemu' ? qemuDistroOptions : dockerDistroOptions,
+const isValid = computed(() => isImageDefinitionFormValid(form.value))
+const envValid = computed(() => envVarsTextValid(form.value.envVars))
+const customDistroInvalid = computed(
+  () =>
+    form.value.baseDistroPreset === 'custom' &&
+    form.value.customBaseDistro.trim() !== '' &&
+    !isBaseDistroSupported(formBaseDistro(form.value)),
 )
 
 watch(
   () => props.open,
   (open) => {
     if (!open) return
-    const src = props.imageDefinition
-    activeTab.value = 'definition'
-    name.value = src?.name || ''
-    description.value = src?.description || ''
-    runtimeType.value = (src?.runtime_type as 'docker' | 'qemu') || 'docker'
-    const currentBase = src?.base_distro || 'ubuntu:22.04'
-    const known = [...dockerDistroOptions, ...qemuDistroOptions].find((opt) => opt.value === currentBase)
-    baseDistroPreset.value = known ? currentBase : '__custom__'
-    customBaseDistro.value = known ? '' : currentBase
-    packages.value = (src?.packages || []).join(', ')
-    envVars.value = Object.entries(src?.env_vars || {})
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n')
-    customDockerfile.value = src?.custom_dockerfile || ''
-    customInitScript.value = src?.custom_init_script || ''
+    form.value = imageDefinitionForm(props.imageDefinition)
+    // Never hide settings a recipe already uses.
+    advancedOpen.value = Boolean(form.value.envVars || form.value.customInitScript)
   },
+  { immediate: true },
 )
 
-const title = computed(() => (props.imageDefinition ? 'Edit Image Definition' : 'Create Image Definition'))
-const baseDistro = computed(() =>
-  baseDistroPreset.value === '__custom__' ? customBaseDistro.value.trim() : baseDistroPreset.value,
-)
-const isValid = computed(() => !!name.value.trim() && !!baseDistro.value.trim())
-
-function parseEnvVars(raw: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed) continue
-    const idx = trimmed.indexOf('=')
-    if (idx <= 0) continue
-    out[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim()
-  }
-  return out
+/** "Ubuntu 24.04" for "ubuntu:24.04". */
+function distroLabel(value: string): string {
+  return value.replace(/^ubuntu:/, 'Ubuntu ')
 }
 
 function handleSave(): void {
-  if (!isValid.value) return
-  emit('saved', {
-    name: name.value.trim(),
-    description: description.value.trim(),
-    runtime_type: runtimeType.value,
-    base_distro: baseDistro.value.trim(),
-    packages: packages.value
-      .split(',')
-      .map((v) => v.trim())
-      .filter(Boolean),
-    env_vars: parseEnvVars(envVars.value),
-    custom_dockerfile: customDockerfile.value,
-    custom_init_script: customInitScript.value,
-  })
+  if (isValid.value && !props.saving) emit('saved', imageDefinitionPayload(form.value))
+}
+
+function setOpen(value: boolean): void {
+  if (!props.saving) emit('update:open', value)
 }
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="(v) => emit('update:open', v)"
-  >
-    <DialogContent>
+  <Dialog :open="open" @update:open="setOpen">
+    <DialogContent class="sm:max-w-lg">
       <DialogHeader>
-        <DialogTitle>{{ title }}</DialogTitle>
-        <DialogDescription>
-          Define base distro, packages and advanced build customization.
+        <DialogTitle>{{
+          imageDefinition ? 'Edit Image Definition' : 'New Image Definition'
+        }}</DialogTitle>
+        <DialogDescription class="sr-only">
+          Name, base image and packages of the image recipe.
         </DialogDescription>
       </DialogHeader>
 
-      <form class="space-y-4" @submit.prevent="handleSave">
-        <div class="rounded-md border border-border bg-muted/50 p-1">
-          <div class="grid grid-cols-2 gap-1">
-            <Button type="button" size="sm" :variant="activeTab === 'definition' ? 'secondary' : 'ghost'" @click="activeTab = 'definition'">
-              Definition
-            </Button>
-            <Button type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
-              Advanced / Custom Build
-            </Button>
-          </div>
-        </div>
-
-        <template v-if="activeTab === 'definition'">
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-            <Input v-model="name" placeholder="Python Dev Environment" />
-          </div>
-
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Description</label>
-            <Textarea v-model="description" :rows="2" />
-          </div>
-
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label class="text-sm font-medium text-foreground mb-1.5 block">Runtime Type</label>
-              <Select v-model="runtimeType">
-                <SelectTrigger>
-                  <SelectValue placeholder="Select runtime" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="opt in runtimeOptions"
-                    :key="opt.value"
-                    :value="opt.value"
-                  >
-                    {{ opt.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+      <DialogBody>
+        <p v-if="error" class="mb-4 text-sm text-destructive" role="alert">{{ error }}</p>
+        <form id="image-definition-form" @submit.prevent="handleSave">
+          <fieldset :disabled="saving" class="min-w-0 space-y-4">
+            <div class="space-y-1.5">
+              <Label for="image-definition-name">Name</Label>
+              <Input id="image-definition-name" v-model="form.name" placeholder="Python dev" />
             </div>
-            <div>
-              <label class="text-sm font-medium text-foreground mb-1.5 block">Base Distro</label>
-              <Select v-model="baseDistroPreset">
-                <SelectTrigger>
-                  <SelectValue placeholder="Select distro" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="opt in distroOptions"
-                    :key="opt.value"
-                    :value="opt.value"
-                  >
-                    {{ opt.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+
+            <div class="space-y-1.5">
+              <Label for="image-definition-description">Description</Label>
+              <Input
+                id="image-definition-description"
+                v-model="form.description"
+                placeholder="Optional"
+              />
             </div>
-          </div>
 
-          <p v-if="runtimeType === 'qemu'" class="text-xs text-muted-foreground -mt-1">
-            QEMU image builds currently support Ubuntu cloud images only.
-          </p>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div class="space-y-1.5">
+                <Label for="image-definition-base">Base image</Label>
+                <Select v-model="form.baseDistroPreset">
+                  <SelectTrigger id="image-definition-base" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="preset in BASE_DISTRO_PRESETS" :key="preset" :value="preset">
+                      {{ distroLabel(preset) }}
+                    </SelectItem>
+                    <SelectItem value="custom">Other…</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div v-if="form.baseDistroPreset === 'custom'" class="space-y-1.5">
+                <Label for="image-definition-custom-base">Ubuntu version</Label>
+                <Input
+                  id="image-definition-custom-base"
+                  v-model="form.customBaseDistro"
+                  class="font-mono"
+                  placeholder="ubuntu:25.04"
+                  :aria-invalid="customDistroInvalid || undefined"
+                />
+                <p v-if="customDistroInvalid" class="text-xs text-destructive">
+                  Use ubuntu:&lt;version&gt;.
+                </p>
+              </div>
+            </div>
 
-          <div v-if="baseDistroPreset === '__custom__'">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Base Distro</label>
-            <Input v-model="customBaseDistro" placeholder="e.g. ubuntu:22.04" />
-          </div>
+            <div class="space-y-1.5">
+              <Label for="image-definition-packages">Packages</Label>
+              <Input
+                id="image-definition-packages"
+                v-model="form.packages"
+                placeholder="python3, nodejs, ffmpeg"
+              />
+            </div>
 
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Pre-installed Packages</label>
-            <Input v-model="packages" placeholder="python3, nodejs, ffmpeg" />
-          </div>
+            <Collapsible v-model:open="advancedOpen">
+              <CollapsibleTrigger
+                class="inline-flex items-center gap-1 rounded-sm text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                data-testid="image-definition-advanced"
+              >
+                Advanced
+                <ChevronDown
+                  class="size-4 transition-transform"
+                  :class="{ 'rotate-180': advancedOpen }"
+                  aria-hidden="true"
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent class="space-y-4 pt-4">
+                <div class="space-y-1.5">
+                  <Label for="image-definition-env">Environment variables</Label>
+                  <Textarea
+                    id="image-definition-env"
+                    v-model="form.envVars"
+                    :rows="3"
+                    class="font-mono"
+                    placeholder="KEY=value"
+                    :aria-invalid="!envValid || undefined"
+                  />
+                  <p v-if="!envValid" class="text-xs text-destructive">One KEY=value per line.</p>
+                </div>
+                <div class="space-y-1.5">
+                  <Label for="image-definition-script">Init script</Label>
+                  <Textarea
+                    id="image-definition-script"
+                    v-model="form.customInitScript"
+                    :rows="6"
+                    class="font-mono"
+                    placeholder="#!/bin/bash"
+                  />
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          </fieldset>
+        </form>
+      </DialogBody>
 
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Baked Environment Variables</label>
-            <Textarea v-model="envVars" :rows="4" placeholder="NODE_ENV=production" />
-          </div>
-        </template>
-
-        <template v-else>
-          <p class="text-xs text-muted-foreground">
-            The base distro and packages above are applied first. Use this section for advanced customization.
-          </p>
-          <div v-if="runtimeType === 'docker'">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Dockerfile</label>
-            <Textarea v-model="customDockerfile" :rows="8" placeholder="RUN pip install numpy torch" />
-          </div>
-
-          <div v-else>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Init Script</label>
-            <Textarea v-model="customInitScript" :rows="8" placeholder="#!/bin/bash\napt-get install -y ffmpeg" />
-          </div>
-        </template>
-
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="emit('update:open', false)">Cancel</Button>
-          <Button type="submit" :disabled="!isValid">Save</Button>
-        </div>
-      </form>
+      <DialogFooter>
+        <Button variant="outline" type="button" :disabled="saving" @click="setOpen(false)">
+          Cancel
+        </Button>
+        <Button type="submit" form="image-definition-form" :disabled="saving || !isValid">
+          {{ saving ? 'Saving…' : imageDefinition ? 'Save' : 'Create' }}
+        </Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

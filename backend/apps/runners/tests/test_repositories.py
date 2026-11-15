@@ -10,13 +10,16 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
-from common.utils import hash_token
-
 from apps.accounts.models import User
 from apps.organizations.models import Organization
 from apps.runners.enums import RunnerStatus, TaskStatus, TaskType, WorkspaceStatus
 from apps.runners.models import Runner, Task, Workspace
-from apps.runners.repositories import RunnerRepository, TaskRepository, WorkspaceRepository
+from apps.runners.repositories import (
+    RunnerRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
+from common.utils import hash_token
 
 
 @pytest.mark.django_db
@@ -69,6 +72,24 @@ class TestWorkspaceRepository:
         """Ownership lookup returns the runner UUID, or None if missing."""
         assert WorkspaceRepository.get_runner_id(workspace.id) == runner.id
         assert WorkspaceRepository.get_runner_id(uuid.uuid4()) is None
+
+    @pytest.mark.django_db(transaction=True)
+    def test_locked_get_by_id_locks_workspace_with_nullable_related_rows(
+        self, workspace
+    ):
+        """Locking the workspace must not try to lock nullable related rows."""
+        from django.db import connection, transaction
+
+        if not connection.features.has_select_for_update:
+            pytest.skip("Row locking is unsupported by this database")
+
+        with transaction.atomic():
+            locked = WorkspaceRepository.get_by_id(workspace.id, lock=True)
+
+        assert locked is not None
+        assert locked.pk == workspace.pk
+        assert locked.runner_id == workspace.runner_id
+        assert locked.created_by_id == workspace.created_by_id
 
 
 @pytest.mark.django_db

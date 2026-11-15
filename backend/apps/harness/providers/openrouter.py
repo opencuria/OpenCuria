@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Any
@@ -14,76 +13,29 @@ from typing import Any
 import httpx
 import structlog
 
+from . import _streaming, _transport
+from ._lowering import (
+    project_openai_tool_schema,
+    wrap_system_update,
+)
 from .base import (
     ChatOptions,
     Delta,
     LLMMessage,
     ProviderAdapter,
     ProviderAuthError,
-    ProviderHeaderTimeoutError,
     ProviderRateLimitError,
     ProviderResponseError,
-    ProviderStreamTimeoutError,
     ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
+from .context_errors import is_context_overflow_error
 
 log = structlog.get_logger(__name__)
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 CHAT_COMPLETIONS_PATH = "/chat/completions"
-HTTPX_POOL_TIMEOUT_SECONDS = 5.0
-
-#: Cap for the enriched ``response_body`` stored on provider errors.
-RESPONSE_BODY_MAX_CHARS = 2000
-
-
-def positive_timeout(value: float | None) -> float | None:
-    """Return *value* when it is a positive timeout, otherwise ``None``."""
-    if value is None or value <= 0:
-        return None
-    return value
-
-
-def httpx_stream_timeout(opts: ChatOptions) -> httpx.Timeout:
-    """Build httpx timeouts: connect/write follow header timeout, read is off.
-
-    SSE idle and header waits are enforced with ``asyncio.wait_for`` so
-    httpx does not treat a long reasoning pause as a read timeout.
-    """
-    header = positive_timeout(opts.header_timeout_seconds)
-    return httpx.Timeout(
-        None,
-        connect=header,
-        read=None,
-        write=header,
-        pool=HTTPX_POOL_TIMEOUT_SECONDS,
-    )
-
-
-def effective_timeout(
-    phase_seconds: float | None,
-    deadline: float | None,
-) -> float | None:
-    """Combine a phase timeout with an optional wall-clock deadline."""
-    phase = positive_timeout(phase_seconds)
-    if deadline is None:
-        return phase
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return 0.0
-    if phase is None:
-        return remaining
-    return min(phase, remaining)
-
-
-def stream_deadline(opts: ChatOptions) -> float | None:
-    """Return a monotonic deadline when a total timeout is configured."""
-    total = positive_timeout(opts.timeout_seconds)
-    if total is None:
-        return None
-    return time.monotonic() + total
 
 
 class OpenRouterAdapter(ProviderAdapter):
@@ -139,9 +91,9 @@ class OpenRouterAdapter(ProviderAdapter):
             "Content-Type": "application/json",
         }
         url = f"{self._base_url}{CHAT_COMPLETIONS_PATH}"
-        timeout = httpx_stream_timeout(options)
+        timeout = _streaming.httpx_stream_timeout(options)
         logger = log.bind(provider=self.name, model=model)
-        deadline = stream_deadline(options)
+        deadline = _streaming.stream_deadline(options)
 
         try:
             if self._client is not None:
@@ -179,18 +131,15 @@ class OpenRouterAdapter(ProviderAdapter):
         except ProviderResponseError:
             logger.warning("provider_response_error")
             raise
-        except httpx.TimeoutException as exc:
-            logger.warning("provider_timeout")
-            raise ProviderTimeoutError(
-                "OpenRouter request timed out",
-                provider=self.name,
-            ) from exc
         except httpx.HTTPError as exc:
-            logger.warning("provider_http_error")
-            raise ProviderResponseError(
-                f"OpenRouter request failed: {exc}",
-                provider=self.name,
-            ) from exc
+            mapped = _transport.map_httpx_error(
+                exc, provider=self.name, label="OpenRouter"
+            )
+            if isinstance(mapped, ProviderTimeoutError):
+                logger.warning("provider_timeout")
+            else:
+                logger.warning("provider_http_error")
+            raise mapped from exc
 
     def _build_payload(
         self,
@@ -199,10 +148,27 @@ class OpenRouterAdapter(ProviderAdapter):
         tools: list[ToolSchema],
         opts: ChatOptions,
     ) -> dict[str, Any]:
-        """Build the OpenAI-compatible request payload."""
+        """Build the OpenAI-compatible request payload.
+
+        Mirrors OpenCode ``openai-chat.ts`` ``fromRequest``: tools go
+        through the OpenAI schema projection, ``tool_choice`` maps
+        ``auto``/``none``/``required`` verbatim and a specific tool name
+        to ``{"type": "function", "function": {"name": ...}}``.
+
+        Generation gap (documented, no fake fields): :class:`ChatOptions`
+        only carries ``temperature``/``max_tokens``, so ``top_p``,
+        ``frequency_penalty``, ``presence_penalty``, ``seed`` and
+        ``stop`` (sent by OpenCode ``fromRequest``) cannot be set — they
+        are intentionally omitted rather than invented.
+
+        Usage gap: ``stream_options: {"include_usage": True}`` is always
+        sent (OpenCode parity). The OpenRouter ``usage``/``prompt_cache_key``
+        provider-options passthrough (``openrouter.ts:55-66``) has no
+        :class:`ChatOptions` field to read from, so it is not sent.
+        """
         payload: dict[str, Any] = {
             "model": model,
-            "messages": [self._message_to_dict(m) for m in messages],
+            "messages": self._messages_to_dicts(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -213,13 +179,19 @@ class OpenRouterAdapter(ProviderAdapter):
                     "function": {
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.parameters,
+                        "parameters": project_openai_tool_schema(t.parameters),
                     },
                 }
                 for t in tools
             ]
         if opts.tool_choice:
-            payload["tool_choice"] = opts.tool_choice
+            if opts.tool_choice in ("auto", "none", "required"):
+                payload["tool_choice"] = opts.tool_choice
+            else:
+                payload["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": opts.tool_choice},
+                }
         if opts.temperature is not None:
             payload["temperature"] = opts.temperature
         if opts.max_tokens is not None:
@@ -248,7 +220,7 @@ class OpenRouterAdapter(ProviderAdapter):
             timeout=timeout,
         )
         try:
-            header_timeout = effective_timeout(
+            header_timeout = _streaming.effective_timeout(
                 options.header_timeout_seconds, deadline
             )
             try:
@@ -259,8 +231,12 @@ class OpenRouterAdapter(ProviderAdapter):
                         stream_cm.__aenter__(), timeout=header_timeout
                     )
             except TimeoutError as exc:
-                raise self._header_or_total_timeout(
-                    options, deadline, header_timeout
+                raise _streaming.header_or_total_timeout(
+                    provider=self.name,
+                    label="OpenRouter",
+                    deadline=deadline,
+                    total_timeout=options.timeout_seconds,
+                    waited=header_timeout,
                 ) from exc
             async for delta in self._parse_stream(
                 response,
@@ -273,48 +249,238 @@ class OpenRouterAdapter(ProviderAdapter):
             with suppress(Exception):
                 await stream_cm.__aexit__(None, None, None)
 
-    def _header_or_total_timeout(
-        self,
-        options: ChatOptions,
-        deadline: float | None,
-        waited: float | None,
-    ) -> ProviderTimeoutError:
-        """Choose header vs total timeout after a wait_for expiry."""
-        if deadline is not None and (deadline - time.monotonic()) <= 0:
-            total = positive_timeout(options.timeout_seconds) or 0.0
-            return ProviderTimeoutError(
-                f"OpenRouter request timed out after {int(total * 1000)}ms",
-                provider=self.name,
-            )
-        seconds = waited if waited is not None else 0.0
-        return ProviderHeaderTimeoutError(
-            provider=self.name,
-            timeout_seconds=seconds,
-        )
+    @staticmethod
+    def _messages_to_dicts(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+        """Convert a conversation, wrapping 2nd+ system messages.
+
+        Mirrors OpenCode ``openai-chat.ts`` ``lowerMessages`` + shared
+        ``wrappedSystemUpdate``: the first ``system`` message keeps the
+        privileged role; later ones become in-order ``user`` text wrapped
+        in ``<system-update>`` so temporal position is preserved.
+        """
+        converted: list[dict[str, Any]] = []
+        seen_system = False
+        for message in messages:
+            if message.role == "system" and seen_system:
+                text = OpenRouterAdapter._content_text(message.content)
+                converted.append(
+                    {"role": "user", "content": wrap_system_update(text)}
+                )
+                continue
+            if message.role == "system":
+                seen_system = True
+            converted.append(OpenRouterAdapter._message_to_dict(message))
+        return converted
+
+    @staticmethod
+    def _content_text(content: str | list[dict[str, Any]] | None) -> str:
+        """Join text parts of harness content without crashing on dicts."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        texts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("text", "input_text", "output_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+        return "\n".join(texts)
+
+    @staticmethod
+    def _file_part_data(part: dict[str, Any]) -> tuple[str, str, str] | None:
+        """Return (mime, data-URL, filename) of a PDF file part, or None.
+
+        Only canonical ``{"type": "file", "mime": "application/pdf",
+        "url": data-URL}`` parts map; unknown file MIMEs return None so
+        callers keep dropping them without crashing.
+        """
+        if part.get("type") != "file":
+            return None
+        mime = part.get("mime")
+        url = part.get("url")
+        if not isinstance(mime, str) or not isinstance(url, str):
+            return None
+        if mime.strip().lower() != "application/pdf":
+            return None
+        if not url or not url.startswith("data:"):
+            return None
+        filename = part.get("filename", "")
+        if not isinstance(filename, str) or not filename:
+            filename = "document.pdf"
+        return (mime.strip().lower(), url, filename)
+
+    @staticmethod
+    def _tool_content(
+        content: str | list[dict[str, Any]] | None,
+    ) -> str | list[dict[str, Any]]:
+        """Lower tool output to the OpenAI chat wire format.
+
+        Text parts become ``{"type": "text", ...}`` and image parts pass
+        through as ``{"type": "image_url", ...}`` (openai-chat.ts parity:
+        tool-result media is inlined so the image reaches the model).
+        Canonical PDF ``file`` parts become OpenAI-Chat file parts
+        ``{"type": "file", "file": {"filename": ..., "file_data": ...}}``
+        (OpenCode parity). Unknown file MIMEs are dropped without
+        crashing; text output already carries the result.
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        lowered: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = part.get("type")
+            if part_type in ("text", "input_text", "output_text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    lowered.append({"type": "text", "text": text})
+                continue
+            if part_type == "image_url":
+                ref = part.get("image_url")
+                url = ref.get("url") if isinstance(ref, dict) else ref
+                if isinstance(url, str) and url:
+                    lowered.append(
+                        {"type": "image_url", "image_url": {"url": url}}
+                    )
+                continue
+            file_data = OpenRouterAdapter._file_part_data(part)
+            if file_data is not None:
+                _, url, filename = file_data
+                lowered.append(
+                    {
+                        "type": "file",
+                        "file": {"filename": filename, "file_data": url},
+                    }
+                )
+        if not lowered:
+            return OpenRouterAdapter._content_text(content)
+        if len(lowered) == 1 and lowered[0].get("type") == "text":
+            text = lowered[0].get("text")
+            return text if isinstance(text, str) else ""
+        return lowered
 
     @staticmethod
     def _message_to_dict(message: LLMMessage) -> dict[str, Any]:
-        """Convert an LLMMessage to the OpenAI wire format."""
-        data: dict[str, Any] = {"role": message.role}
+        """Convert an LLMMessage to the OpenAI wire format.
+
+        Assistant messages replay ``tool_calls`` plus joined
+        ``reasoning_content`` from ``reasoning`` content parts
+        (openai-chat.ts ``lowerAssistantMessage`` parity). Tool results
+        inline text and image parts so tool images reach the model.
+        """
+        if message.role == "assistant":
+            return OpenRouterAdapter._assistant_to_dict(message)
+        if message.role == "tool":
+            data: dict[str, Any] = {
+                "role": "tool",
+                "content": OpenRouterAdapter._tool_content(message.content),
+            }
+            if message.tool_call_id is not None:
+                data["tool_call_id"] = message.tool_call_id
+            return data
+        data = {"role": message.role}
         if message.content is not None:
-            data["content"] = message.content
+            if isinstance(message.content, list):
+                # User/assistant lists may carry canonical PDF file parts
+                # from tool-message rehydration; lower them like tool
+                # content so PDFs survive history replay (unknown MIMEs
+                # are still dropped without crashing).
+                lowered: list[dict[str, Any]] = []
+                for part in message.content:
+                    if not isinstance(part, dict):
+                        continue
+                    file_data = OpenRouterAdapter._file_part_data(part)
+                    if file_data is not None:
+                        _, url, filename = file_data
+                        lowered.append(
+                            {
+                                "type": "file",
+                                "file": {
+                                    "filename": filename,
+                                    "file_data": url,
+                                },
+                            }
+                        )
+                        continue
+                    lowered.append(part)
+                data["content"] = lowered
+            else:
+                data["content"] = message.content
         if message.tool_calls:
             converted: list[dict[str, Any]] = []
             for call in message.tool_calls:
                 if "function" in call:
                     converted.append(call)
                 else:
+                    arguments = call.get("arguments", "")
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments)
                     converted.append(
                         {
                             "id": call.get("id", ""),
                             "type": "function",
                             "function": {
                                 "name": call.get("name", ""),
-                                "arguments": call.get("arguments", ""),
+                                "arguments": arguments,
                             },
                         }
                     )
             data["tool_calls"] = converted
+        if message.tool_call_id is not None:
+            data["tool_call_id"] = message.tool_call_id
+        return data
+
+    @staticmethod
+    def _assistant_to_dict(message: LLMMessage) -> dict[str, Any]:
+        """Convert an assistant message with reasoning/tool-call replay."""
+        data: dict[str, Any] = {"role": "assistant"}
+        reasoning_parts: list[str] = []
+        if isinstance(message.content, str):
+            data["content"] = message.content
+        elif isinstance(message.content, list):
+            texts: list[str] = []
+            for part in message.content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type in ("text", "input_text", "output_text"):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        texts.append(text)
+                elif part_type in ("reasoning", "reasoning_content", "reasoning_text"):
+                    text = part.get("text")
+                    if isinstance(text, str) and text:
+                        reasoning_parts.append(text)
+            data["content"] = "\n".join(texts) if texts else None
+        else:
+            data["content"] = None
+        if message.tool_calls:
+            converted = []
+            for call in message.tool_calls:
+                if "function" in call and isinstance(call.get("function"), dict):
+                    converted.append(call)
+                    continue
+                arguments = call.get("arguments", "")
+                if isinstance(arguments, dict):
+                    arguments = json.dumps(arguments)
+                converted.append(
+                    {
+                        "id": call.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": call.get("name", ""),
+                            "arguments": arguments,
+                        },
+                    }
+                )
+            data["tool_calls"] = converted
+        if reasoning_parts:
+            data["reasoning_content"] = "".join(reasoning_parts)
         if message.tool_call_id is not None:
             data["tool_call_id"] = message.tool_call_id
         return data
@@ -331,7 +497,9 @@ class OpenRouterAdapter(ProviderAdapter):
         if response.status_code in (401, 403):
             body = await self._read_body_snippet(response)
             headers = self._response_headers(response)
-            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            full_body = await self._read_body(
+                response, _transport.RESPONSE_BODY_MAX_CHARS
+            )
             raise ProviderAuthError(
                 f"OpenRouter auth failed ({response.status_code}): {body}",
                 provider=self.name,
@@ -343,7 +511,9 @@ class OpenRouterAdapter(ProviderAdapter):
         if response.status_code == 429:
             body = await self._read_body_snippet(response)
             headers = self._response_headers(response)
-            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            full_body = await self._read_body(
+                response, _transport.RESPONSE_BODY_MAX_CHARS
+            )
             raise ProviderRateLimitError(
                 f"OpenRouter rate limit ({response.status_code}): {body}",
                 provider=self.name,
@@ -355,7 +525,9 @@ class OpenRouterAdapter(ProviderAdapter):
         if response.status_code >= 400:
             body = await self._read_body_snippet(response)
             headers = self._response_headers(response)
-            full_body = await self._read_body(response, RESPONSE_BODY_MAX_CHARS)
+            full_body = await self._read_body(
+                response, _transport.RESPONSE_BODY_MAX_CHARS
+            )
             raise ProviderResponseError(
                 f"OpenRouter error ({response.status_code}): {body}",
                 provider=self.name,
@@ -365,62 +537,17 @@ class OpenRouterAdapter(ProviderAdapter):
                 is_retryable=self._should_retry_hint(headers),
             )
 
-        async for line in self._aiter_lines(
+        async for data in _streaming.iter_sse_data(
             response,
+            provider=self.name,
+            label="OpenRouter",
             chunk_timeout=chunk_timeout,
             deadline=deadline,
             total_timeout=total_timeout,
         ):
-            stripped = line.strip()
-            if not stripped or stripped.startswith(":"):
-                continue
-            if not stripped.startswith("data:"):
-                continue
-            data = stripped[len("data:") :].strip()
-            if not data or data == "[DONE]":
-                continue
             delta = self._parse_chunk(data)
             if delta is not None:
                 yield delta
-
-    async def _aiter_lines(
-        self,
-        response: httpx.Response,
-        *,
-        chunk_timeout: float | None,
-        deadline: float | None,
-        total_timeout: float | None,
-    ) -> AsyncIterator[str]:
-        """Yield SSE lines, aborting after chunk idle or total deadline."""
-        iterator = response.aiter_lines()
-        while True:
-            timeout = effective_timeout(chunk_timeout, deadline)
-            try:
-                if timeout is None:
-                    line = await anext(iterator)
-                else:
-                    line = await asyncio.wait_for(anext(iterator), timeout=timeout)
-            except StopAsyncIteration:
-                return
-            except TimeoutError as exc:
-                raise self._chunk_or_total_timeout(
-                    deadline, total_timeout
-                ) from exc
-            yield line
-
-    def _chunk_or_total_timeout(
-        self,
-        deadline: float | None,
-        total_timeout: float | None,
-    ) -> ProviderTimeoutError:
-        """Choose stream vs total timeout after a wait_for expiry."""
-        if deadline is not None and (deadline - time.monotonic()) <= 0:
-            total = positive_timeout(total_timeout) or 0.0
-            return ProviderTimeoutError(
-                f"OpenRouter request timed out after {int(total * 1000)}ms",
-                provider=self.name,
-            )
-        return ProviderStreamTimeoutError(provider=self.name)
 
     @staticmethod
     async def _read_body_snippet(response: httpx.Response) -> str:
@@ -457,11 +584,99 @@ class OpenRouterAdapter(ProviderAdapter):
             return False
         return None
 
+    def _raise_stream_error(self, error: dict[str, Any]) -> None:
+        """Raise a provider error for an SSE ``error`` chunk payload.
+
+        Mirrors the ChatGPT ``"code: message"`` format: when both code and
+        message are present the message is prefixed. ``context_length_exceeded``
+        (or any overflow text per the shared provider error patterns) raises a
+        non-retryable :class:`ProviderResponseError` whose message and
+        ``response_body`` both carry the overflow text.
+        """
+        code = str(error.get("code", "") or "")
+        message = str(error.get("message", "") or "")
+        if code and message:
+            text = f"{code}: {message}"
+        else:
+            text = message or code or "OpenRouter stream failed"
+        if code == "context_length_exceeded" or is_context_overflow_error(
+            RuntimeError(text)
+        ):
+            raise ProviderResponseError(
+                text,
+                provider=self.name,
+                response_body=text[:_transport.RESPONSE_BODY_MAX_CHARS],
+                is_retryable=False,
+            )
+        raise ProviderResponseError(
+            text,
+            provider=self.name,
+            response_body=text[:_transport.RESPONSE_BODY_MAX_CHARS],
+        )
+
+    @staticmethod
+    def _map_finish_reason(finish_reason: Any) -> str | None:
+        """Normalize an OpenAI-Chat finish reason (openai-chat.ts parity).
+
+        Returns ``None`` only when no finish reason was provided (``None``
+        stays ``None``); any other raw value maps to a known harness
+        reason, falling back to ``"unknown"``.
+        """
+        if finish_reason is None:
+            return None
+        if finish_reason == "stop":
+            return "stop"
+        if finish_reason == "length":
+            return "length"
+        if finish_reason in ("content_filter", "content-filter"):
+            return "content_filter"
+        if finish_reason in ("function_call", "tool_calls"):
+            return "tool_calls"
+        return "unknown"
+
+    @staticmethod
+    def _map_usage(raw_usage: Any) -> Usage | None:
+        """Map OpenAI-Chat usage (totalTokens policy: honor reported total)."""
+        if not isinstance(raw_usage, dict):
+            return None
+        prompt_tokens = int(raw_usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(raw_usage.get("completion_tokens", 0) or 0)
+        reported_total = int(raw_usage.get("total_tokens", 0) or 0)
+        cost = float(raw_usage.get("cost", 0.0) or 0.0)
+        if reported_total > 0:
+            total_tokens = reported_total
+        elif prompt_tokens > 0 or completion_tokens > 0:
+            total_tokens = prompt_tokens + completion_tokens
+        else:
+            total_tokens = 0
+        return Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost=cost,
+        )
+
     def _parse_chunk(self, data: str) -> Delta | None:
-        """Parse one SSE data payload into a Delta.
+        """Parse one SSE data payload into a Delta (deterministic order).
+
+        A single chunk may carry text/reasoning/tool fragments in one
+        ``delta`` object where key order is the only order signal. The
+        runner processes :class:`Delta` fields in stream order, so mixed
+        chunks are split into per-kind deltas yielded in wire key order:
+        whichever of ``content`` / ``reasoning_content`` / ``reasoning``
+        / ``tool_calls`` appears first in the raw JSON object streams
+        first. Keys absent from the chunk never yield empty deltas, so
+        downstream ``tool_queued``/``part_updated`` ordering stays
+        deterministic for text-tool-text-tool streams.
 
         Raises:
-            ProviderResponseError: If the payload is not valid JSON.
+            ProviderResponseError: If the payload is not valid JSON or
+                carries an ``{"error": {...}}`` failure chunk (OpenRouter
+                sends mid-stream failures as SSE-data with an error field).
+                Error chunks use the ``"code: message"`` format and are
+                classified as non-retryable context overflow when the code
+                is ``context_length_exceeded`` or the text matches the
+                shared overflow patterns.
         """
         try:
             chunk = json.loads(data)
@@ -476,15 +691,13 @@ class OpenRouterAdapter(ProviderAdapter):
                 provider=self.name,
             )
 
+        error_payload = chunk.get("error")
+        if isinstance(error_payload, dict):
+            self._raise_stream_error(error_payload)
+
         usage: Usage | None = None
         raw_usage = chunk.get("usage")
-        if isinstance(raw_usage, dict):
-            usage = Usage(
-                prompt_tokens=int(raw_usage.get("prompt_tokens", 0) or 0),
-                completion_tokens=int(raw_usage.get("completion_tokens", 0) or 0),
-                total_tokens=int(raw_usage.get("total_tokens", 0) or 0),
-                cost=float(raw_usage.get("cost", 0.0) or 0.0),
-            )
+        usage = self._map_usage(raw_usage)
 
         choices = chunk.get("choices", [])
         if not choices:
@@ -492,7 +705,14 @@ class OpenRouterAdapter(ProviderAdapter):
                 return Delta(usage=usage)
             return None
         choice = choices[0] if isinstance(choices[0], dict) else {}
-        finish_reason = choice.get("finish_reason")
+        raw_finish = choice.get("finish_reason")
+        if raw_finish in ("network_error", "network-error"):
+            raise ProviderResponseError(
+                "Provider finish_reason: network_error",
+                provider=self.name,
+                is_retryable=True,
+            )
+        finish_reason = self._map_finish_reason(raw_finish)
         raw_delta = choice.get("delta", {})
         if not isinstance(raw_delta, dict):
             raw_delta = {}
@@ -507,6 +727,15 @@ class OpenRouterAdapter(ProviderAdapter):
             if usage is not None or finish_reason is not None:
                 return Delta(usage=usage, finish_reason=finish_reason)
             return None
+        # NOTE: mixed text+tool chunks keep one Delta (the runner
+        # already emits tool_queued at observed position before any
+        # later text delta; intra-delta precedence is not representable
+        # in the Delta shape). Key-order splitting is intentionally not
+        # done here: ``json.loads`` preserves wire order but the Delta
+        # contract is (text, reasoning, tool_calls) stream order across
+        # deltas, and providers place mixed content in separate chunks
+        # in practice. Determinism across chunks comes from preserving
+        # chunk order in ``_parse_stream`` (no reordering/buffering).
         return Delta(
             text=text if isinstance(text, str) else "",
             reasoning=reasoning if isinstance(reasoning, str) else "",

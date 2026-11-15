@@ -1,48 +1,24 @@
-# .
+# Webapp
 
-This template should help get you started developing with Vue 3 in Vite.
+Vue 3 + Vite dashboard for workspaces, chat, credentials and images. Use only the
+shadcn-vue components in `src/components/ui/`.
 
-## Recommended IDE Setup
-
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
-
-## Recommended Browser Setup
-
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
-
-## Type Support for `.vue` Imports in TS
-
-TypeScript cannot handle type information for `.vue` imports by default, so we replace the `tsc` CLI with `vue-tsc` for type checking. In editors, we need [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) to make the TypeScript language service aware of `.vue` types.
-
-## Customize configuration
-
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
+Install dependencies once with `npm ci` at the repository root, then:
 
 ```sh
-npm install
+npm run dev:web             # from the repository root
+npm run build -w webapp     # type-check and production build
+npm run lint -w webapp
+npm run test -w webapp
 ```
 
-### Compile and Hot-Reload for Development
+The Vue DevTools overlay is opt-in (`VITE_VUE_DEVTOOLS=true npm run dev:web`):
+attached DevTools make Pinia deep-watch every store, which slows busy chats.
 
-```sh
-npm run dev
-```
+## Clipboard
 
-### Type-Check, Compile and Minify for Production
-
-```sh
-npm run build
-```
-
-### Lint with [ESLint](https://eslint.org/)
-
-```sh
-npm run lint
-```
+Use `CopyButton` for buttons and `copyToClipboard` for menu actions. Call it
+directly in the click or key handler, before unrelated awaits; for text loaded
+asynchronously pass a producer (`() => Promise<string>`) so Safari keeps the user
+gesture. The desktop viewer handles Cmd/Ctrl+C/V itself through the workspace
+clipboard endpoint.

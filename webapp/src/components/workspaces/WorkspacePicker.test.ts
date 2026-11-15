@@ -7,6 +7,17 @@ import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 
 const workspaceStore = {
+  isWorkspaceTransitioning(id: string): boolean {
+    return Boolean(this.workspaces.find((w) => w.id === id)?.active_operation)
+  },
+  canUseWorkspace(id: string): boolean {
+    const w = this.workspaces.find((w) => w.id === id)
+    return Boolean(
+      w?.status === WorkspaceStatus.RUNNING &&
+      w.runner_online &&
+      !this.isWorkspaceTransitioning(id),
+    )
+  },
   workspaces: [] as Workspace[],
   fetchWorkspaces: vi.fn(),
   getWorkspaceTransitionLabel: vi.fn().mockReturnValue('Starting…'),
@@ -42,7 +53,6 @@ function runningWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     runner_online: true,
     active_operation: null,
-    runtime_type: 'docker',
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,
@@ -61,6 +71,7 @@ function runningWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     updated_at: '2026-03-29T10:00:00.000Z',
     has_active_session: false,
     credential_ids: [],
+    plugin_ids: [],
     credentials_present: false,
     ...overrides,
   }
@@ -91,10 +102,7 @@ describe('WorkspacePicker', () => {
   })
 
   it('emits update:modelValue when an option is clicked', async () => {
-    workspaceStore.workspaces = [
-      runningWorkspace(),
-      runningWorkspace({ id: 'ws-2', name: 'Beta' }),
-    ]
+    workspaceStore.workspaces = [runningWorkspace(), runningWorkspace({ id: 'ws-2', name: 'Beta' })]
     const wrapper = mountPicker({ modelValue: 'ws-1' })
 
     const option = wrapper
@@ -104,5 +112,24 @@ describe('WorkspacePicker', () => {
     await option!.trigger('click')
 
     expect(wrapper.emitted('update:modelValue')).toEqual([['ws-2']])
+  })
+
+  it('shows an amber dot and Busy label for a workspace with an active session', () => {
+    workspaceStore.workspaces = [runningWorkspace({ has_active_session: true })]
+    const wrapper = mountPicker({ modelValue: 'ws-1' })
+
+    const trigger = wrapper.get('[data-testid="workspace-picker-trigger"]')
+    const triggerDot = trigger.find('span[aria-hidden="true"]')
+    expect(triggerDot.classes()).toContain('bg-amber-500')
+    expect(wrapper.text()).toContain('Busy')
+  })
+
+  it('shows a green dot for a ready idle workspace', () => {
+    workspaceStore.workspaces = [runningWorkspace()]
+    const wrapper = mountPicker({ modelValue: 'ws-1' })
+
+    const trigger = wrapper.get('[data-testid="workspace-picker-trigger"]')
+    const triggerDot = trigger.find('span[aria-hidden="true"]')
+    expect(triggerDot.classes()).toContain('bg-green-500')
   })
 })

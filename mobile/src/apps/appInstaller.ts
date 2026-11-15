@@ -1,0 +1,427 @@
+import type { AppFileRequest, AppManifest } from "@opencuria/client";
+import type { AppLaunchRequest } from "./appRuntime";
+import {
+  filePath,
+  joinUri,
+  temporaryUri,
+  type AppFileSystem,
+} from "./appStorage";
+
+/**
+ * An app installed on this device. Installed apps stay usable offline; the
+ * registry keeps one entry per app with the version that is installed.
+ */
+export interface InstalledApp {
+  appId: string;
+  /** Server, organization and user the app was published to. */
+  scope: string;
+  name: string;
+  slug: string;
+  versionId: string;
+  versionNumber: number;
+  versionName: string;
+  sdkVersion: string;
+  /** When the installed version was published. */
+  publishedAt: string;
+  installedAt: string;
+  /** When the installed version was installed (the first install or an update). */
+  updatedAt?: string;
+  /** When the app was last opened on this device; missing until then. */
+  openedAt?: string;
+  hasIcon: boolean;
+}
+
+/** Progress of an install, in bytes of files still to download. */
+export interface InstallProgress {
+  done: number;
+  total: number;
+}
+
+export interface InstallOptions {
+  scope: string;
+  /** Authenticated request for a file of this version. */
+  fileRequest: (sha256: string) => AppFileRequest;
+  onProgress?: (progress: InstallProgress) => void;
+}
+
+interface Registry {
+  version: 2;
+  apps: InstalledApp[];
+}
+
+const REGISTRY = "registry.json";
+const BUNDLE = "index.bundle";
+const MANIFEST = "manifest.json";
+const ICON = "icon.png";
+const PARALLEL_DOWNLOADS = 4;
+const ORIENTATIONS = new Set(["portrait", "landscape"]);
+
+/** Where an app's files live below the installer root. */
+export function appLayout(root: string, appId: string) {
+  const app = joinUri(root, appId);
+  return {
+    app,
+    data: joinUri(app, "data"),
+    assets: joinUri(app, "assets"),
+    icon: joinUri(app, ICON),
+    versions: joinUri(app, "versions"),
+    version: (versionId: string) => joinUri(app, "versions", versionId),
+    bundle: (versionId: string) => joinUri(app, "versions", versionId, BUNDLE),
+    manifest: (versionId: string) =>
+      joinUri(app, "versions", versionId, MANIFEST),
+    asset: (key: string, extension: string) =>
+      joinUri(app, "assets", extension ? `${key}.${extension}` : key),
+  };
+}
+
+function parseRegistry(text: string): Registry | null {
+  try {
+    const parsed = JSON.parse(text) as {
+      version?: number;
+      apps?: InstalledApp[];
+    } | null;
+    if (!parsed || !Array.isArray(parsed.apps)) return null;
+    if (parsed.version === 2) return { version: 2, apps: parsed.apps };
+    // Version 1 did not track use; its apps count as opened, not as new.
+    return {
+      version: 2,
+      apps: parsed.apps.map((app) => ({
+        ...app,
+        updatedAt: app.updatedAt ?? app.installedAt,
+        openedAt: app.openedAt ?? app.installedAt,
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Only server-issued identifiers may become path segments. */
+function assertSegment(value: string, label: string): void {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(value))
+    throw new Error(`Invalid ${label} in the app manifest.`);
+}
+
+function assertManifest(manifest: AppManifest): void {
+  assertSegment(manifest.app_id, "app id");
+  assertSegment(manifest.version_id, "version id");
+  for (const asset of manifest.assets) {
+    assertSegment(asset.key, "asset");
+    if (!/^[A-Za-z0-9]{0,16}$/.test(asset.extension))
+      throw new Error("Invalid asset type in the app manifest.");
+  }
+}
+
+interface Download {
+  sha256: string;
+  md5: string;
+  size: number;
+  target: string;
+}
+
+/**
+ * The manifest `expo-updates` would have launched: `expo-constants` reads the
+ * app's Expo config from `extra.expoClient`.
+ */
+export function updatesManifest(
+  manifest: AppManifest,
+  bundleUri: string,
+): Record<string, unknown> {
+  return {
+    id: manifest.version_id,
+    createdAt: manifest.created_at,
+    runtimeVersion: manifest.sdk_version,
+    launchAsset: {
+      key: "bundle",
+      contentType: "application/javascript",
+      url: bundleUri,
+    },
+    assets: [],
+    metadata: {},
+    extra: {
+      expoClient: manifest.expo_config,
+      scopeKey: `@opencuria/${manifest.slug}`,
+    },
+  };
+}
+
+/**
+ * Installs, updates and removes apps agents published, and prepares their
+ * launch. Files are downloaded to a temporary name, verified by size and MD5
+ * and only then moved into place; the registry switches to a new version
+ * once all of its files are present, so a failed update keeps the old one.
+ */
+export class AppInstaller {
+  private registryCache: Promise<Registry> | null = null;
+  private queue: Promise<unknown> = Promise.resolve();
+  private readonly listeners = new Set<() => void>();
+
+  constructor(
+    private readonly fs: AppFileSystem,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  /** Installed apps of every account, most recently installed first. */
+  async installed(): Promise<InstalledApp[]> {
+    const registry = await this.registry();
+    return [...registry.apps].sort((a, b) =>
+      b.installedAt.localeCompare(a.installedAt),
+    );
+  }
+
+  /** Called after every change to the installed apps; returns the unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  /** Remember that an app was opened; unknown apps are ignored. */
+  markOpened(appId: string): Promise<void> {
+    return this.serialized(async () => {
+      const registry = await this.registry();
+      if (!registry.apps.some((app) => app.appId === appId)) return;
+      const openedAt = this.now().toISOString();
+      await this.saveRegistry({
+        ...registry,
+        apps: registry.apps.map((app) =>
+          app.appId === appId ? { ...app, openedAt } : app,
+        ),
+      });
+    });
+  }
+
+  /** Install a version, or update an installed app to it. */
+  install(
+    manifest: AppManifest,
+    options: InstallOptions,
+  ): Promise<InstalledApp> {
+    return this.serialized(() => this.installNow(manifest, options));
+  }
+
+  /** Remove an app with its data from this device. */
+  uninstall(appId: string): Promise<void> {
+    return this.serialized(async () => {
+      assertSegment(appId, "app id");
+      const registry = await this.registry();
+      this.fs.remove(appLayout(this.fs.root, appId).app);
+      await this.saveRegistry({
+        ...registry,
+        apps: registry.apps.filter((app) => app.appId !== appId),
+      });
+    });
+  }
+
+  /** URI of an installed app's icon, if it has one. */
+  iconUri(app: InstalledApp): string | null {
+    return app.hasIcon ? appLayout(this.fs.root, app.appId).icon : null;
+  }
+
+  /** What the native runtime needs to open an installed app. */
+  async launchRequest(app: InstalledApp): Promise<AppLaunchRequest> {
+    const layout = appLayout(this.fs.root, app.appId);
+    const manifest = JSON.parse(
+      await this.fs.readText(layout.manifest(app.versionId)),
+    ) as AppManifest;
+    const bundle = layout.bundle(app.versionId);
+    if (!this.fs.exists(bundle))
+      throw new Error(`${app.name} is incomplete; install it again.`);
+    this.fs.makeDirectory(layout.data);
+    const config = manifest.expo_config;
+    const orientation = String(config.orientation ?? "");
+    const background = config.backgroundColor;
+    return {
+      appId: app.appId,
+      versionId: app.versionId,
+      name: app.name,
+      bundlePath: filePath(bundle),
+      installDir: filePath(layout.app),
+      dataDir: filePath(layout.data),
+      manifest: updatesManifest(manifest, bundle),
+      localAssets: Object.fromEntries(
+        manifest.assets.map((asset) => [
+          asset.key,
+          layout.asset(asset.key, asset.extension),
+        ]),
+      ),
+      orientation: ORIENTATIONS.has(orientation)
+        ? (orientation as "portrait" | "landscape")
+        : "default",
+      ...(typeof background === "string" && background
+        ? { backgroundColor: background }
+        : {}),
+      ...(app.hasIcon && this.fs.exists(layout.icon)
+        ? { iconPath: filePath(layout.icon) }
+        : {}),
+    };
+  }
+
+  private serialized<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(task, task);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  private registry(): Promise<Registry> {
+    // A failed read is not cached: saving over it would forget every app.
+    this.registryCache ??= this.loadRegistry().catch((cause: unknown) => {
+      this.registryCache = null;
+      throw cause;
+    });
+    return this.registryCache;
+  }
+
+  private async loadRegistry(): Promise<Registry> {
+    const uri = joinUri(this.fs.root, REGISTRY);
+    // A replacement interrupted after the old file was removed leaves the
+    // complete new registry in the temporary file (see `writeText`).
+    for (const candidate of [uri, temporaryUri(uri)]) {
+      if (!this.fs.exists(candidate)) continue;
+      const registry = parseRegistry(await this.fs.readText(candidate));
+      if (registry) return registry;
+    }
+    return { version: 2, apps: [] };
+  }
+
+  private async saveRegistry(registry: Registry): Promise<void> {
+    this.fs.makeDirectory(this.fs.root);
+    this.fs.writeText(joinUri(this.fs.root, REGISTRY), JSON.stringify(registry));
+    this.registryCache = Promise.resolve(registry);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        /* A failing listener must not fail the install. */
+      }
+    }
+  }
+
+  private async installNow(
+    manifest: AppManifest,
+    options: InstallOptions,
+  ): Promise<InstalledApp> {
+    assertManifest(manifest);
+    const layout = appLayout(this.fs.root, manifest.app_id);
+    const versionDir = layout.version(manifest.version_id);
+    for (const dir of [layout.app, layout.assets, layout.versions, versionDir])
+      this.fs.makeDirectory(dir);
+
+    const downloads: Download[] = [
+      { ...manifest.bundle, target: layout.bundle(manifest.version_id) },
+      ...manifest.assets.map((asset) => ({
+        ...asset,
+        target: layout.asset(asset.key, asset.extension),
+      })),
+      ...(manifest.icon ? [{ ...manifest.icon, target: layout.icon }] : []),
+    ].filter((file) => !this.isComplete(file));
+    const total = downloads.reduce((sum, file) => sum + file.size, 0);
+    let done = 0;
+    options.onProgress?.({ done, total });
+    await this.downloadAll(downloads, options, (bytes) => {
+      done += bytes;
+      options.onProgress?.({ done, total });
+    });
+    this.fs.writeText(layout.manifest(manifest.version_id), JSON.stringify(manifest));
+
+    const registry = await this.registry();
+    const previous = registry.apps.find((app) => app.appId === manifest.app_id);
+    const now = this.now().toISOString();
+    const installed: InstalledApp = {
+      appId: manifest.app_id,
+      scope: options.scope,
+      name: manifest.name,
+      slug: manifest.slug,
+      versionId: manifest.version_id,
+      versionNumber: manifest.number,
+      versionName: manifest.version_name,
+      sdkVersion: manifest.sdk_version,
+      publishedAt: manifest.created_at,
+      installedAt: previous?.installedAt ?? now,
+      updatedAt: now,
+      ...(previous?.openedAt ? { openedAt: previous.openedAt } : {}),
+      hasIcon: Boolean(manifest.icon) && this.fs.exists(layout.icon),
+    };
+    await this.saveRegistry({
+      ...registry,
+      apps: [
+        installed,
+        ...registry.apps.filter((app) => app.appId !== manifest.app_id),
+      ],
+    });
+    this.removeStaleFiles(manifest);
+    return installed;
+  }
+
+  /** A file already in place with the expected size and hash. */
+  private isComplete(file: Download): boolean {
+    return (
+      this.fs.exists(file.target) &&
+      this.fs.size(file.target) === file.size &&
+      this.fs.md5(file.target) === file.md5
+    );
+  }
+
+  /**
+   * Download in a few parallel workers. The first failure stops the others
+   * from starting files and is thrown once they finished, so no download
+   * (or progress report) outlives the install that started it.
+   */
+  private async downloadAll(
+    files: Download[],
+    options: InstallOptions,
+    onFile: (bytes: number) => void,
+  ): Promise<void> {
+    const pending = [...files];
+    const failures: unknown[] = [];
+    const worker = async () => {
+      while (!failures.length) {
+        const file = pending.shift();
+        if (!file) return;
+        try {
+          await this.downloadOne(file, options);
+        } catch (cause) {
+          failures.push(cause);
+          return;
+        }
+        if (!failures.length) onFile(file.size);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(PARALLEL_DOWNLOADS, files.length) }, worker),
+    );
+    if (failures.length) throw failures[0];
+  }
+
+  private async downloadOne(file: Download, options: InstallOptions) {
+    const partial = `${file.target}.part`;
+    const request = options.fileRequest(file.sha256);
+    try {
+      await this.fs.download(request.url, request.headers, partial);
+      if (
+        this.fs.size(partial) !== file.size ||
+        this.fs.md5(partial) !== file.md5
+      )
+        throw new Error("A downloaded file was damaged; try again.");
+      this.fs.move(partial, file.target);
+    } finally {
+      this.fs.remove(partial);
+    }
+  }
+
+  /** Drop other versions and assets the installed version no longer uses. */
+  private removeStaleFiles(manifest: AppManifest): void {
+    const layout = appLayout(this.fs.root, manifest.app_id);
+    for (const name of this.fs.list(layout.versions))
+      if (name !== manifest.version_id)
+        this.fs.remove(joinUri(layout.versions, name));
+    const keep = new Set(
+      manifest.assets.map((asset) =>
+        asset.extension ? `${asset.key}.${asset.extension}` : asset.key,
+      ),
+    );
+    for (const name of this.fs.list(layout.assets))
+      if (!keep.has(name)) this.fs.remove(joinUri(layout.assets, name));
+    if (!manifest.icon) this.fs.remove(layout.icon);
+  }
+}

@@ -1,20 +1,21 @@
 <!--
-  WorkspacePolicyTab — Extrahierter "Allgemein"-Kern aus OrgSettingsView (Schritt 5).
-
-  Enthält nur die Workspace-Policy-Section (Auto-Stop); der Page-Header und die
-  Tab-Leiste bleiben in der View. Wird vom Settings-Sheet (Tab "Allgemein")
-  und weiterhin von OrgSettingsView wiederverwendet.
+  WorkspacePolicyTab — General settings: automatic workspace stop and image version retention.
+  Admin-only: SettingsSheet never shows it to members.
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { getOrganization, updateOrganizationWorkspacePolicy } from '@/services/organizations.api'
 import { useAuthStore } from '@/stores/auth'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import type { Organization } from '@/types'
-import { formatMinutesAsDuration } from '@/lib/utils'
+import SettingsSection from './SettingsSection.vue'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from './AutosaveStatus.vue'
+import type { Organization } from '@opencuria/client'
+import { formatMinutesAsDuration } from '@opencuria/chat-core/workspaceLifecycle'
 
 const authStore = useAuthStore()
 const activeOrganizationId = computed(() => authStore.activeOrganizationId)
@@ -22,9 +23,10 @@ const activeOrganizationId = computed(() => authStore.activeOrganizationId)
 const loading = ref(true)
 const error = ref<string | null>(null)
 const organizationSettings = ref<Organization | null>(null)
-const policySaving = ref(false)
 const autoStopEnabled = ref(false)
-const autoStopTimeoutMinutes = ref<number>(240)
+const autoStopTimeoutMinutes = ref<string | number>(240)
+const imageVersionsToKeep = ref<string | number>(2)
+const MAX_IMAGE_VERSIONS_TO_KEEP = 20
 
 const workspacePolicyPresetOptions = [
   { value: 30, label: '30 min' },
@@ -36,25 +38,72 @@ const workspacePolicyPresetOptions = [
 
 const workspacePolicySummary = computed(() =>
   autoStopEnabled.value
-    ? `Inactive workspaces stop after ${formatMinutesAsDuration(autoStopTimeoutMinutes.value)}.`
+    ? `Inactive workspaces stop after ${formatMinutesAsDuration(Number(autoStopTimeoutMinutes.value))}.`
     : 'Inactive workspaces keep running until someone stops them.',
 )
 
+const policy = computed(() => ({
+  workspace_auto_stop_timeout_minutes: autoStopEnabled.value
+    ? Number(autoStopTimeoutMinutes.value)
+    : null,
+  image_versions_to_keep: Number(imageVersionsToKeep.value),
+}))
+const validationError = computed(() => {
+  if (
+    autoStopEnabled.value &&
+    (!String(autoStopTimeoutMinutes.value).trim() ||
+      !Number.isSafeInteger(Number(autoStopTimeoutMinutes.value)) ||
+      Number(autoStopTimeoutMinutes.value) < 1 ||
+      Number(autoStopTimeoutMinutes.value) > 10080)
+  )
+    return 'Enter a whole number of minutes between 1 and 10080.'
+  if (
+    !String(imageVersionsToKeep.value).trim() ||
+    !Number.isInteger(Number(imageVersionsToKeep.value)) ||
+    Number(imageVersionsToKeep.value) < 1 ||
+    Number(imageVersionsToKeep.value) > MAX_IMAGE_VERSIONS_TO_KEEP
+  )
+    return 'Enter an image version count between 1 and 20.'
+  return ''
+})
+const autosave = useAutosave({
+  source: () => [autoStopEnabled.value, autoStopTimeoutMinutes.value, imageVersionsToKeep.value],
+  dirty: () =>
+    policy.value.workspace_auto_stop_timeout_minutes !==
+      organizationSettings.value?.workspace_auto_stop_timeout_minutes ||
+    policy.value.image_versions_to_keep !==
+      (organizationSettings.value?.image_versions_to_keep ?? 2),
+  enabled: () => !loading.value && !!organizationSettings.value && !error.value,
+  valid: () => !validationError.value,
+  errorMessage: 'Failed to update workspace policy',
+  save: async (isCurrent) => {
+    const updated = await updateOrganizationWorkspacePolicy(activeOrganizationId.value!, {
+      ...policy.value,
+    })
+    if (isCurrent()) organizationSettings.value = updated
+  },
+})
+
 async function loadData(): Promise<void> {
+  const organizationId = activeOrganizationId.value
   loading.value = true
   error.value = null
   try {
     if (!activeOrganizationId.value) {
       throw new Error('No active organization selected')
     }
-    organizationSettings.value = await getOrganization(activeOrganizationId.value)
+    const next = await getOrganization(organizationId!)
+    if (organizationId !== activeOrganizationId.value) return
+    organizationSettings.value = next
     autoStopEnabled.value = organizationSettings.value.workspace_auto_stop_timeout_minutes != null
     autoStopTimeoutMinutes.value =
       organizationSettings.value.workspace_auto_stop_timeout_minutes ?? 240
+    imageVersionsToKeep.value = organizationSettings.value.image_versions_to_keep ?? 2
   } catch (e: unknown) {
+    if (organizationId !== activeOrganizationId.value) return
     error.value = (e as Error).message || 'Failed to load settings'
   } finally {
-    loading.value = false
+    if (organizationId === activeOrganizationId.value) loading.value = false
   }
 }
 
@@ -65,143 +114,94 @@ onMounted(() => {
 watch(activeOrganizationId, () => {
   void loadData()
 })
-
-async function saveWorkspacePolicy(): Promise<void> {
-  if (!activeOrganizationId.value || policySaving.value) return
-  if (
-    autoStopEnabled.value &&
-    (!Number.isFinite(autoStopTimeoutMinutes.value) || autoStopTimeoutMinutes.value < 1)
-  ) {
-    error.value = 'Auto-stop timeout must be at least 1 minute.'
-    return
-  }
-
-  policySaving.value = true
-  error.value = null
-  try {
-    const updated = await updateOrganizationWorkspacePolicy(activeOrganizationId.value, {
-      workspace_auto_stop_timeout_minutes: autoStopEnabled.value
-        ? Math.round(autoStopTimeoutMinutes.value)
-        : null,
-    })
-    organizationSettings.value = updated
-    autoStopEnabled.value = updated.workspace_auto_stop_timeout_minutes != null
-    autoStopTimeoutMinutes.value =
-      updated.workspace_auto_stop_timeout_minutes ?? autoStopTimeoutMinutes.value
-  } catch (e) {
-    error.value = (e as Error).message || 'Failed to update workspace policy'
-  } finally {
-    policySaving.value = false
-  }
-}
 </script>
 
 <template>
-  <div class="space-y-4">
-    <p class="text-sm text-muted-foreground">
-      Configure automatic workspace stop for the active organization
-      <template v-if="organizationSettings">({{ organizationSettings.name }})</template>.
-    </p>
-
+  <div class="space-y-6">
     <div v-if="loading" class="flex justify-center py-12">
       <LoadingSpinner :size="24" />
     </div>
 
     <div
       v-else-if="error"
-      class="rounded-md border border-error/30 bg-error-muted px-4 py-3 text-sm text-error"
+      class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
     >
       {{ error }}
     </div>
 
-    <div v-else class="rounded-lg border border-border bg-card p-5">
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <h3 class="text-base font-semibold text-foreground">Automatic Workspace Stop</h3>
-          <p class="mt-1 text-sm text-muted-foreground">
-            Running workspaces stop automatically after the configured period without prompts,
-            terminal input, or file interactions.
-          </p>
-        </div>
-        <Badge variant="secondary">
-          {{ autoStopEnabled ? 'Enabled' : 'Disabled' }}
-        </Badge>
-      </div>
-
-      <div class="mt-5 space-y-4">
-        <label
-          class="flex items-center justify-between gap-4 rounded-md border border-border px-4 py-3"
-        >
-          <div>
+    <SettingsSection
+      v-else
+      title="Workspace Policy"
+      :description="
+        organizationSettings
+          ? `Applies to all workspaces and images in ${organizationSettings.name}. Inactivity means no prompts, terminal input, or file interactions.`
+          : 'Applies to all workspaces and images. Inactivity means no prompts, terminal input, or file interactions.'
+      "
+    >
+      <div class="overflow-hidden rounded-lg border border-border bg-card">
+        <div class="flex items-center justify-between gap-4 px-4 py-4">
+          <label for="workspace-auto-stop" class="min-w-0 flex-1 cursor-pointer space-y-1">
             <div class="text-sm font-medium text-foreground">
-              Automatically stop inactive workspaces
+              Stop inactive workspaces
             </div>
-            <div class="text-xs text-muted-foreground mt-0.5">
-              This policy applies to every workspace in the active organization.
-            </div>
-          </div>
-          <input v-model="autoStopEnabled" type="checkbox" class="h-4 w-4 accent-primary" />
-        </label>
-
-        <div v-if="autoStopEnabled" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_220px]">
-          <div class="space-y-3">
-            <label class="block">
-              <span class="text-sm font-medium text-foreground">Inactivity Timeout (minutes)</span>
-              <Input
-                :model-value="String(autoStopTimeoutMinutes)"
-                type="number"
-                min="1"
-                step="1"
-                class="mt-1.5"
-                @update:model-value="autoStopTimeoutMinutes = Math.max(1, Number($event) || 1)"
-              />
-            </label>
-            <div class="flex flex-wrap gap-2">
-              <Button
-                v-for="preset in workspacePolicyPresetOptions"
-                :key="preset.value"
-                size="sm"
-                variant="outline"
-                @click="autoStopTimeoutMinutes = preset.value"
-              >
-                {{ preset.label }}
-              </Button>
-            </div>
-          </div>
-
-          <div class="rounded-md border border-border bg-muted/10 px-4 py-3">
-            <div class="text-xs uppercase tracking-[0.16em] text-muted-foreground">
-              Policy Summary
-            </div>
-            <div class="mt-2 text-sm text-foreground">{{ workspacePolicySummary }}</div>
-            <div class="mt-2 text-xs text-muted-foreground">
-              Active prompt sessions prevent auto-stop until they finish.
-            </div>
-          </div>
+            <p class="text-sm text-muted-foreground">{{ workspacePolicySummary }}</p>
+          </label>
+          <Switch id="workspace-auto-stop" v-model="autoStopEnabled" />
         </div>
 
-        <div
-          v-else
-          class="rounded-md border border-border bg-muted/10 px-4 py-3 text-sm text-muted-foreground"
-        >
-          Auto-stop is disabled. Workspaces remain running until users stop them manually.
-        </div>
-
-        <div class="flex items-center justify-between gap-3">
-          <p class="text-xs text-muted-foreground">
-            Last saved:
-            {{
-              organizationSettings?.workspace_auto_stop_timeout_minutes != null
-                ? formatMinutesAsDuration(organizationSettings.workspace_auto_stop_timeout_minutes)
-                : 'Disabled'
-            }}
+        <div v-if="autoStopEnabled" class="space-y-3 border-t border-border px-4 py-4">
+          <div class="space-y-2">
+            <Label for="auto-stop-minutes">Inactivity timeout (minutes)</Label>
+            <Input
+              id="auto-stop-minutes"
+              :model-value="String(autoStopTimeoutMinutes)"
+              type="number"
+              min="1"
+              max="10080"
+              step="1"
+              @update:model-value="autoStopTimeoutMinutes = $event"
+            />
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <Button
+              v-for="preset in workspacePolicyPresetOptions"
+              :key="preset.value"
+              size="sm"
+              variant="outline"
+              type="button"
+              @click="autoStopTimeoutMinutes = preset.value"
+            >
+              {{ preset.label }}
+            </Button>
+          </div>
+          <p class="text-sm text-muted-foreground">
+            Active prompt sessions prevent auto-stop until they finish.
           </p>
-          <Button size="sm" :disabled="policySaving" @click="saveWorkspacePolicy">
-            <LoadingSpinner v-if="policySaving" :size="12" />
-            <span v-else>Save Policy</span>
-          </Button>
+        </div>
+
+        <div class="flex items-center justify-between gap-4 border-t border-border px-4 py-4">
+          <label for="image-versions-to-keep" class="min-w-0 flex-1 space-y-1">
+            <div class="text-sm font-medium text-foreground">Image versions to keep</div>
+            <p class="text-sm text-muted-foreground">
+              Older versions are deleted automatically once no workspace uses them.
+            </p>
+          </label>
+          <Input
+            id="image-versions-to-keep"
+            class="w-20"
+            data-testid="image-versions-to-keep"
+            :model-value="String(imageVersionsToKeep)"
+            type="number"
+            min="1"
+            :max="MAX_IMAGE_VERSIONS_TO_KEEP"
+            step="1"
+            @update:model-value="imageVersionsToKeep = $event"
+          />
         </div>
       </div>
-    </div>
+
+      <p v-if="validationError" class="text-xs text-destructive" role="alert">{{ validationError }}</p>
+      <AutosaveStatus :state="autosave" data-testid="workspace-policy-status" />
+    </SettingsSection>
   </div>
 </template>

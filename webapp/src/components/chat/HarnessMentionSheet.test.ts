@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 import HarnessMentionSheet from './HarnessMentionSheet.vue'
-import type { MentionCandidate } from '@/lib/harnessMentions'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 
 function fileCandidate(index: number): MentionCandidate {
   return {
@@ -28,6 +28,13 @@ describe('HarnessMentionSheet', () => {
     expect(scrollIntoView).toHaveBeenCalled()
     const active = wrapper.find('[aria-selected="true"]')
     expect(active.attributes('data-mention-index')).toBe('9')
+  })
+
+  it('accepts a caller-provided label for skill suggestions', () => {
+    const wrapper = mount(HarnessMentionSheet, {
+      props: { candidates: [], activeIndex: 0, label: 'Skill suggestions' },
+    })
+    expect(wrapper.get('[role="listbox"]').attributes('aria-label')).toBe('Skill suggestions')
   })
 
   it('ignores hover while the pointer stays still', async () => {

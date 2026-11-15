@@ -15,63 +15,90 @@ Split into separate routers to avoid URL path conflicts:
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
 from django.http import HttpRequest
-from django.db.models import Q
-from django.utils import timezone
-from ninja import Router
+from ninja import Body, Router, Schema
+from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.credentials.services import CredentialSvc
 from apps.organizations.services import OrganizationService
+from apps.plugins.services import PluginService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
-from common.utils import generate_api_token, hash_token
+from common.request_context import get_organization_id
+from common.schemas import ErrorOut
 
-from .enums import RunnerStatus as RS, WorkspaceStatus
-from .exceptions import RunnerOfflineError
-from .repositories import RunnerRepository, RunnerSystemMetricsRepository
+from .desktop_tickets import DESKTOP_TICKET_MAX_AGE_SECONDS
+from .exceptions import (
+    AdminRoleRequiredError,
+    ImageRecipeNotFoundError,
+    ImageRecipeValidationError,
+    RunnerOfflineError,
+)
+from .git_presenters import git_error_to_response
+from .git_validation import validate_commit_hash
+from .image_presenters import (
+    captured_image_to_out,
+    image_artifacts_to_out,
+)
 from .schemas import (
-    ErrorOut,
+    CapturedImageOut,
+    CapturedImageUpdateIn,
+    DesktopClipboardReadIn,
+    DesktopClipboardReadOut,
+    DesktopClipboardWriteIn,
+    DesktopRenewOut,
+    DesktopStartOut,
+    DesktopStatusOut,
+    DesktopStopOut,
+    DesktopTakeControlOut,
+    DesktopTicketOut,
+    DesktopViewerIntentIn,
+    EditorFileWriteIn,
+    GitHistoryQuery,
+    GitOperationIn,
+    GitRepoQuery,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
-    ImageArtifactOut,
-    ImageArtifactUpdateIn,
+    ImageBuildJobCreateIn,
+    ImageBuildJobListOut,
+    ImageBuildJobOut,
+    ImageBuildJobUpdateIn,
+    ImageDefinitionBuildSummaryOut,
     ImageDefinitionCreateIn,
     ImageDefinitionDuplicateIn,
-    ImageDefinitionBuildSummaryOut,
     ImageDefinitionOut,
     ImageDefinitionUpdateIn,
+    ProcessOut,
     RunnerCreateIn,
     RunnerCreateOut,
     RunnerOut,
-    RunnerUpdateIn,
     RunnerSystemMetricsOut,
-    ImageBuildJobCreateIn,
-    ImageBuildJobOut,
-    ImageBuildJobUpdateIn,
-    ProcessOut,
-    ProcessStartIn,
+    RunnerUpdateIn,
     TaskOut,
     TerminalStartIn,
-    WorkspaceFromImageArtifactIn,
-    WorkspaceFromImageArtifactOut,
     TerminalStartOut,
-    DesktopStartOut,
-    DesktopStopOut,
-    DesktopStatusOut,
-    DesktopTakeControlOut,
-    DesktopClipboardWriteIn,
-    DesktopClipboardReadOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
+    WorkspaceFromImageArtifactIn,
+    WorkspaceFromImageArtifactOut,
     WorkspaceOut,
+    WorkspaceRecreateIn,
+    WorkspaceRecreateOut,
     WorkspaceUpdateIn,
     WorkspaceUpdateOut,
 )
+from .services import get_runner_service
+from .services.image_definitions import ImageDefinitionService
+from .services.process_controls import (
+    ProcessControlService,
+    TemporaryProcessControlError,
+)
+from .services.workspace_reads import WorkspaceReadService
+from .storage_schemas import RunnerStorageOut
 
 
 def _perm_denied(permission: APIKeyPermission):
@@ -82,162 +109,20 @@ def _perm_denied(permission: APIKeyPermission):
     )
 
 
-def _workspace_credential_ids(workspace) -> list[uuid.UUID]:
-    """Return attached credential IDs for a workspace."""
-    return [credential.id for credential in workspace.credentials.all()]
-
-
-def _workspace_base_image_name(workspace) -> str | None:
-    """Return a user-facing base image name for a workspace when available."""
-    image = getattr(workspace, "base_image_instance", None)
-    if image is None:
-        return None
-    origin_definition = getattr(image, "origin_definition", None)
-    if origin_definition and getattr(origin_definition, "name", ""):
-        return origin_definition.name
-    if getattr(image, "name", ""):
-        return image.name
-    return None
-
-
-def _workspace_to_out(workspace) -> WorkspaceOut:
-    """Map a Workspace ORM instance to WorkspaceOut."""
-    # Determine runner online status — prefer cached attribute injected by the
-    # queryset annotation, fall back to FK traversal.
-    runner_online: bool = False
-    if hasattr(workspace, "runner_is_online"):
-        runner_online = bool(workspace.runner_is_online)
-    elif hasattr(workspace, "runner") and workspace.runner is not None:
-        from .enums import RunnerStatus as RS
-
-        runner_online = workspace.runner.status == RS.ONLINE
-
-    auto_stop_timeout_minutes = None
-    auto_stop_at = None
-    if (
-        hasattr(workspace, "runner")
-        and workspace.runner is not None
-        and getattr(workspace.runner, "organization", None) is not None
-    ):
-        auto_stop_timeout_minutes = (
-            workspace.runner.organization.workspace_auto_stop_timeout_minutes
-        )
-    if (
-        auto_stop_timeout_minutes
-        and workspace.status == WorkspaceStatus.RUNNING
-        and workspace.last_activity_at is not None
-    ):
-        auto_stop_at = workspace.last_activity_at + timedelta(
-            minutes=auto_stop_timeout_minutes
-        )
-
-    return WorkspaceOut(
-        id=workspace.id,
-        runner_id=workspace.runner_id,
-        status=workspace.status,
-        active_operation=workspace.active_operation,
-        name=workspace.name,
-        runtime_type=workspace.runtime_type,
-        qemu_vcpus=workspace.qemu_vcpus,
-        qemu_memory_mb=workspace.qemu_memory_mb,
-        qemu_disk_size_gb=workspace.qemu_disk_size_gb,
-        desktop_width=workspace.desktop_width,
-        desktop_height=workspace.desktop_height,
-        created_by_id=workspace.created_by_id,
-        last_activity_at=workspace.last_activity_at,
-        auto_stop_timeout_minutes=auto_stop_timeout_minutes,
-        auto_stop_at=auto_stop_at,
-        delete_requested_at=getattr(workspace, "delete_requested_at", None),
-        delete_started_at=getattr(workspace, "delete_started_at", None),
-        delete_confirmed_at=getattr(workspace, "delete_confirmed_at", None),
-        delete_last_error=getattr(workspace, "delete_last_error", "") or "",
-        delete_attempt_count=getattr(workspace, "delete_attempt_count", 0) or 0,
-        created_at=workspace.created_at,
-        updated_at=workspace.updated_at,
-        has_active_session=bool(
-            getattr(workspace, "has_active_harness_session", False)
-        ),
-        runner_online=runner_online,
-        credential_ids=_workspace_credential_ids(workspace),
-        credentials_present=bool(getattr(workspace, "credentials_present", False)),
-        base_image_name=_workspace_base_image_name(workspace),
-    )
-
-
 def _get_service():
-    """Get the RunnerService singleton (lazy import to avoid circular deps)."""
-    from .sio_server import get_runner_service
-
+    """Get the RunnerService singleton."""
     return get_runner_service()
-
-
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract the organization ID from the X-Organization-Id header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
 
 
 def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
 
-def _org_image_definition_copy_name(base_name: str, org_id: uuid.UUID) -> str:
-    """Return a unique image definition copy name scoped to an organization."""
-    from .models import ImageDefinition
-
-    base = (base_name or "").strip() or "image"
-    if len(base) > 255:
-        base = base[:255]
-
-    candidate = base
-    if not ImageDefinition.objects.filter(
-        organization_id=org_id, name=candidate
-    ).exists():
-        return candidate
-
-    suffix = " (Copy)"
-    candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-    if not ImageDefinition.objects.filter(
-        organization_id=org_id, name=candidate
-    ).exists():
-        return candidate
-
-    index = 2
-    while True:
-        suffix = f" (Copy {index})"
-        candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-        if not ImageDefinition.objects.filter(
-            organization_id=org_id, name=candidate
-        ).exists():
-            return candidate
-        index += 1
-
-
-def _validate_image_definition_runtime(runtime_type: str, base_distro: str):
-    """Validate runtime-specific image definition constraints."""
-    if (runtime_type or "").strip().lower() == "qemu":
-        if not (base_distro or "").strip().lower().startswith("ubuntu:"):
-            return 409, ErrorOut(
-                detail=(
-                    "QEMU image definitions currently require an ubuntu:<version> "
-                    "base distro"
-                ),
-                code="unsupported_base_distro",
-            )
-    return None
-
-
-async def _get_org_admin_flag_async(request: HttpRequest, org_id: uuid.UUID) -> bool:
-    """Validate membership and return whether the user is an org admin."""
-    org_service = _get_org_service()
-    await sync_to_async(org_service.require_membership)(request.user, org_id)
-    role = await sync_to_async(org_service.get_user_role)(request.user, org_id)
-    return role == "admin"
+def _visible_vm_metrics(vm_metrics: dict | None, visible: set[str] | None):
+    """Keep the per-VM metrics of *visible* workspaces (``None`` keeps all)."""
+    if vm_metrics is None or visible is None:
+        return vm_metrics
+    return {key: value for key, value in vm_metrics.items() if key in visible}
 
 
 async def _require_org_membership_async(
@@ -248,20 +133,13 @@ async def _require_org_membership_async(
     await sync_to_async(org_service.require_membership)(request.user, org_id)
 
 
-def _is_org_admin(user, org_id: uuid.UUID) -> bool:
-    """Return whether user is organization admin (membership required)."""
-    org_service = _get_org_service()
-    org_service.require_membership(user, org_id)
-    return org_service.get_user_role(user, org_id) == "admin"
-
-
 def _get_owned_workspace(
     request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID
 ):
     """Return a workspace only when it belongs to the active org and owner."""
     service = _get_service()
     try:
-        return service.get_workspace_for_user(
+        return service.workspace_access.get_workspace_for_user(
             workspace_id,
             user=request.user,
             organization_id=org_id,
@@ -279,59 +157,6 @@ async def _get_owned_workspace_async(
     return await sync_to_async(_get_owned_workspace)(request, org_id, workspace_id)
 
 
-async def _get_owned_workspace_artifact_async(
-    request: HttpRequest,
-    org_id: uuid.UUID,
-    workspace_id: uuid.UUID,
-    image_artifact_id: uuid.UUID,
-):
-    """Return a workspace-scoped image artifact only for the workspace owner."""
-    service = _get_service()
-    workspace = await _get_owned_workspace_async(request, org_id, workspace_id)
-    artifact = await sync_to_async(service.image_artifacts.get_by_id)(image_artifact_id)
-    if artifact is None:
-        raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    if artifact.source_workspace_id != workspace.id:
-        raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    if artifact.created_by_id != request.user.id:
-        raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    return workspace, artifact
-
-
-def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
-    """Return a visible image definition for an organization."""
-    from .models import ImageDefinition
-
-    return (
-        ImageDefinition.objects.filter(id=definition_id)
-        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
-        .first()
-    )
-
-
-def _get_build_job_for_org(
-    org_id: uuid.UUID,
-    definition_id: uuid.UUID,
-    runner_id: uuid.UUID,
-):
-    """Return a runner image build scoped to an organization."""
-    from .models import ImageBuildJob
-
-    return (
-        ImageBuildJob.objects.filter(
-            image_definition_id=definition_id,
-            runner_id=runner_id,
-            runner__organization_id=org_id,
-        )
-        .filter(
-            Q(image_definition__organization_id=org_id)
-            | Q(image_definition__organization__isnull=True)
-        )
-        .select_related("image_definition", "runner", "build_task", "image_instance")
-        .first()
-    )
-
-
 # ===========================================================================
 # Runner Router — /api/v1/runners/
 # ===========================================================================
@@ -346,12 +171,12 @@ def list_runners(request: HttpRequest):
     """Return all runners for the user's active organization."""
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    return 200, service.list_runners(organization_id=org_id)
+    return 200, service.runner_lifecycle.list_runners(organization_id=org_id)
 
 
 @runner_router.post(
@@ -365,7 +190,7 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     """
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_CREATE):
         return _perm_denied(APIKeyPermission.RUNNERS_CREATE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
 
     try:
@@ -373,13 +198,8 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     except AuthenticationError as e:
         return 403, ErrorOut(detail=e.message, code=e.code)
 
-    token = generate_api_token()
-    token_hash = hash_token(token)
-
-    runner = RunnerRepository.create(
-        name=payload.name,
-        api_token_hash=token_hash,
-        organization=org,
+    runner, token = _get_service().runner_lifecycle.create_runner(
+        name=payload.name, organization=org
     )
 
     return 201, RunnerCreateOut(
@@ -387,28 +207,6 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
         name=runner.name,
         api_token=token,
     )
-
-
-@runner_router.get(
-    "/{runner_id}/", response={200: RunnerOut, 403: ErrorOut, 404: ErrorOut}
-)
-def get_runner(request: HttpRequest, runner_id: uuid.UUID):
-    """Return a runner by ID. User must be a member of the runner's organization."""
-    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
-        return _perm_denied(APIKeyPermission.RUNNERS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    try:
-        runner = service.get_runner(runner_id)
-        # Verify runner belongs to the user's active org
-        if runner.organization_id != org_id:
-            raise NotFoundError("Runner", str(runner_id))
-        return 200, runner
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 @runner_router.patch(
@@ -424,7 +222,7 @@ def get_runner(request: HttpRequest, runner_id: uuid.UUID):
 )
 def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpdateIn):
     """Update per-runner QEMU resource defaults and limits (admin only)."""
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     try:
         org_service.require_admin(request.user, org_id)
@@ -433,11 +231,13 @@ def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpd
 
     service = _get_service()
     try:
-        runner = service.get_runner(runner_id)
+        runner = service.runner_lifecycle.get_runner(runner_id)
         if runner.organization_id != org_id:
             raise NotFoundError("Runner", str(runner_id))
         updated_fields = payload.model_dump(exclude_unset=True)
-        updated = service.update_runner_qemu_settings(runner_id, **updated_fields)
+        updated = service.runner_lifecycle.update_runner_qemu_settings(
+            runner_id, **updated_fields
+        )
         return 200, updated
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -456,17 +256,21 @@ def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpd
 )
 def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     """Return the most recently recorded system metrics snapshot for a runner."""
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
-    runner = RunnerRepository.get_by_id(runner_id)
+    service = _get_service()
+    runner = service.runner_lifecycle.get_runner_or_none(runner_id)
     if runner is None or runner.organization_id != org_id:
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
-    metrics = RunnerSystemMetricsRepository.get_latest(runner_id)
+    metrics = service.runner_lifecycle.get_latest_runner_metrics(runner_id)
     if metrics is None:
         return 404, ErrorOut(detail="No metrics available yet", code="not_found")
+    visible = service.runner_lifecycle.visible_vm_metric_ids(
+        runner_id, organization_id=org_id, user=request.user
+    )
 
     return 200, RunnerSystemMetricsOut(
         runner_id=metrics.runner_id,
@@ -476,7 +280,7 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
         ram_total_bytes=metrics.ram_total_bytes,
         disk_used_bytes=metrics.disk_used_bytes,
         disk_total_bytes=metrics.disk_total_bytes,
-        vm_metrics=metrics.vm_metrics,
+        vm_metrics=_visible_vm_metrics(metrics.vm_metrics, visible),
     )
 
 
@@ -489,16 +293,19 @@ def get_runner_metrics_history(
     request: HttpRequest, runner_id: uuid.UUID, hours: int = 24
 ):
     """Return historical system metrics for a runner (default: last 24h)."""
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
-    runner = RunnerRepository.get_by_id(runner_id)
+    service = _get_service()
+    runner = service.runner_lifecycle.get_runner_or_none(runner_id)
     if runner is None or runner.organization_id != org_id:
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
-    since = timezone.now() - timedelta(hours=hours)
-    metrics = RunnerSystemMetricsRepository.get_history(runner_id, since)
+    metrics = service.runner_lifecycle.list_runner_metrics(runner_id, hours=hours)
+    visible = service.runner_lifecycle.visible_vm_metric_ids(
+        runner_id, organization_id=org_id, user=request.user
+    )
 
     return 200, [
         RunnerSystemMetricsOut(
@@ -509,7 +316,7 @@ def get_runner_metrics_history(
             ram_total_bytes=m.ram_total_bytes,
             disk_used_bytes=m.disk_used_bytes,
             disk_total_bytes=m.disk_total_bytes,
-            vm_metrics=m.vm_metrics,
+            vm_metrics=_visible_vm_metrics(m.vm_metrics, visible),
         )
         for m in metrics
     ]
@@ -531,17 +338,18 @@ def list_workspaces(request: HttpRequest, runner_id: uuid.UUID | None = None):
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    workspaces = service.list_workspaces(
+    workspaces = service.runner_lifecycle.list_workspaces(
         runner_id=runner_id,
         organization_id=org_id,
         user=request.user,
     )
-    return 200, [_workspace_to_out(workspace) for workspace in workspaces]
+    reads = WorkspaceReadService()
+    return 200, [WorkspaceOut(**data) for data in reads.describe_many(workspaces)]
 
 
 @workspace_router.post(
@@ -553,7 +361,16 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
     """Create a workspace — dispatches async task to a runner."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_CREATE):
         return _perm_denied(APIKeyPermission.WORKSPACES_CREATE)
-    org_id = _get_org_id(request)
+    if payload.plugin_ids and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
+    if "credential_ids" in payload.model_fields_set and not check_api_key_permission(
+        request, APIKeyPermission.CREDENTIALS_READ
+    ):
+        return _perm_denied(APIKeyPermission.CREDENTIALS_READ)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
@@ -562,41 +379,38 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
                 detail="An image artifact must be selected to create a workspace",
                 code="image_artifact_required",
             )
-        # Resolve credential IDs to env_vars, files and ssh_keys
-        credential_svc = CredentialSvc()
-        resolved = await sync_to_async(credential_svc.resolve_credentials)(
-            payload.credential_ids,
-            org_id=org_id,
-            user=request.user,
-        )
-
-        workspace, task = await service.create_workspace(
+        workspace, task = await service.workspace_lifecycle.create_workspace(
             name=payload.name,
             repos=payload.repos,
-            runtime_type=payload.runtime_type,
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
             desktop_width=payload.desktop_width,
             desktop_height=payload.desktop_height,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
+            credential_ids=payload.credential_ids,
             runner_id=payload.runner_id,
             image_artifact_id=payload.image_artifact_id,
             user=request.user,
             organization_id=org_id,
+            plugin_ids=payload.plugin_ids,
         )
+        plugin_ids = await sync_to_async(
+            PluginService().list_workspace_plugin_ids_many
+        )([workspace.id])
         return 202, WorkspaceCreateOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
+            plugin_ids=plugin_ids[workspace.id],
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="invalid_credentials")
     except RuntimeError as e:
         return 409, ErrorOut(detail=str(e), code="runner_call_failed")
 
@@ -609,46 +423,12 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Return workspace details."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
-        from .enums import RunnerStatus as RS
-
-        return 200, WorkspaceOut(
-            id=workspace.id,
-            runner_id=workspace.runner_id,
-            status=workspace.status,
-            active_operation=workspace.active_operation,
-            name=workspace.name,
-            runtime_type=workspace.runtime_type,
-            qemu_vcpus=workspace.qemu_vcpus,
-            qemu_memory_mb=workspace.qemu_memory_mb,
-            qemu_disk_size_gb=workspace.qemu_disk_size_gb,
-            created_by_id=workspace.created_by_id,
-            last_activity_at=workspace.last_activity_at,
-            auto_stop_timeout_minutes=workspace.runner.organization.workspace_auto_stop_timeout_minutes,
-            auto_stop_at=(
-                workspace.last_activity_at
-                + timedelta(
-                    minutes=workspace.runner.organization.workspace_auto_stop_timeout_minutes
-                )
-                if (
-                    workspace.status == WorkspaceStatus.RUNNING
-                    and workspace.last_activity_at is not None
-                    and workspace.runner.organization.workspace_auto_stop_timeout_minutes
-                )
-                else None
-            ),
-            created_at=workspace.created_at,
-            updated_at=workspace.updated_at,
-            has_active_session=False,
-            runner_online=workspace.runner.status == RS.ONLINE,
-            credential_ids=_workspace_credential_ids(workspace),
-            credentials_present=bool(workspace.credentials_present),
-            base_image_name=_workspace_base_image_name(workspace),
-        )
+        return 200, WorkspaceOut(**WorkspaceReadService().describe(workspace))
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -663,10 +443,10 @@ async def start_terminal(
     workspace_id: uuid.UUID,
     payload: TerminalStartIn = None,
 ):
-    """Start an interactive PTY terminal in a workspace container."""
+    """Start an interactive PTY terminal in a workspace VM."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -675,7 +455,13 @@ async def start_terminal(
 
         cols = payload.cols if payload else 80
         rows = payload.rows if payload else 24
-        task = await service.start_terminal(workspace_id, cols=cols, rows=rows)
+        task = await service.interactive_sessions.start_terminal(
+            workspace_id,
+            cols=cols,
+            rows=rows,
+            user_id=request.user.id,
+            client_id=payload.client_id if payload else None,
+        )
         return 202, TerminalStartOut(task_id=task.id)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -691,27 +477,45 @@ async def start_terminal(
 async def start_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopViewerIntentIn,
 ):
-    """Start a KasmVNC desktop session in a workspace container."""
+    """Start a KasmVNC desktop session in a workspace VM."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
-
+    org_id = get_organization_id(request)
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        task = await service.start_desktop(workspace_id)
+        task = await service.interactive_sessions.start_desktop(
+            workspace_id, user=request.user, organization_id=org_id,
+            viewer_client_id=payload.viewer_client_id,
+            intent_revision=payload.intent_revision)
         return 202, DesktopStartOut(task_id=task.id)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/ticket/",
+    response={200: DesktopTicketOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Issue a desktop viewer ticket",
+)
+async def issue_desktop_ticket(request: HttpRequest, workspace_id: uuid.UUID):
+    """Return a short-lived, single-use ticket for the desktop viewer URL."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    try:
+        ticket = await _get_service().interactive_sessions.issue_desktop_ticket(
+            workspace_id,
+            user=request.user,
+            organization_id=get_organization_id(request),
+        )
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    return 200, DesktopTicketOut(
+        ticket=ticket, expires_in=DESKTOP_TICKET_MAX_AGE_SECONDS
+    )
 
 
 @workspace_router.post(
@@ -722,22 +526,18 @@ async def start_desktop(
 async def stop_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopViewerIntentIn,
 ):
     """Release the viewer lease. The display stays up if computer-use holds it."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
-
+    org_id = get_organization_id(request)
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        task = await service.stop_desktop(workspace_id)
+        task = await service.interactive_sessions.stop_desktop(
+            workspace_id, user=request.user, organization_id=org_id,
+            viewer_client_id=payload.viewer_client_id,
+            intent_revision=payload.intent_revision)
         return 202, DesktopStopOut(task_id=task.id)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -746,8 +546,32 @@ async def stop_desktop(
 
 
 @workspace_router.post(
+    "/{workspace_id}/desktop/renew/",
+    response={200: DesktopRenewOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Renew existing viewer intent",
+)
+async def renew_desktop(request: HttpRequest, workspace_id: uuid.UUID,
+                        payload: DesktopViewerIntentIn):
+    """Renew only the authenticated tab's existing held lease."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    try:
+        result = await _get_service().interactive_sessions.renew_desktop(
+            workspace_id,
+            user=request.user,
+            organization_id=get_organization_id(request),
+            viewer_client_id=payload.viewer_client_id,
+            intent_revision=payload.intent_revision)
+        return 200, DesktopRenewOut(**result)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
     "/{workspace_id}/desktop/take-control/",
-    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Take desktop control from computer-use",
 )
 async def take_desktop_control(
@@ -759,64 +583,45 @@ async def take_desktop_control(
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        from apps.harness.harness_service import get_harness_service
-
-        harness = get_harness_service()
-        aborted = await harness.abort_busy_computeruse_for_workspace(workspace_id)
-        return 200, DesktopTakeControlOut(
-            aborted_session_ids=[session.id for session in aborted]
+        aborted_ids = await service.interactive_sessions.take_desktop_control(
+            workspace_id, user=request.user, organization_id=org_id
         )
+        return 200, DesktopTakeControlOut(aborted_session_ids=aborted_ids)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.get(
     "/{workspace_id}/desktop/status/",
-    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Get desktop session status",
 )
 async def desktop_status(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    viewer_client_id: uuid.UUID | None = None,
 ):
     """Check whether a desktop session is active for the workspace."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
-
+    org_id = get_organization_id(request)
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
-        is_active = desktop_info is not None
-        proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
-        viewer_held = bool((desktop_info or {}).get("viewer"))
-        computer_use_active = bool((desktop_info or {}).get("computer_use"))
-        return 200, DesktopStatusOut(
-            active=is_active,
-            proxy_url=proxy_url,
-            viewer_held=viewer_held,
-            computer_use_active=computer_use_active,
-        )
+        result = await service.interactive_sessions.viewer_desktop_status(
+            workspace_id, user=request.user, organization_id=org_id,
+            viewer_client_id=viewer_client_id)
+        return 200, DesktopStatusOut(**result)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.post(
@@ -838,19 +643,17 @@ async def desktop_clipboard_write(
     """Write plain text from the browser into the VM desktop clipboard."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        await service.write_desktop_clipboard(workspace_id, payload.text)
-        text = await service.read_desktop_clipboard(workspace_id)
+        await service.interactive_sessions.write_desktop_clipboard(
+            workspace_id, payload.text, user=request.user, organization_id=org_id
+        )
+        text = await service.interactive_sessions.read_desktop_clipboard(
+            workspace_id, user=request.user, organization_id=org_id
+        )
         return 200, DesktopClipboardReadOut(text=text)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -873,27 +676,41 @@ async def desktop_clipboard_write(
 async def desktop_clipboard_read(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopClipboardReadIn | None = Body(None),
 ):
     """Read plain text from the VM desktop clipboard for local copy."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
 
     service = _get_service()
+    options = payload or DesktopClipboardReadIn()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        text = await service.read_desktop_clipboard(workspace_id)
+        if options.copy_selection:
+            text = await service.interactive_sessions.read_desktop_clipboard(
+                workspace_id,
+                user=request.user,
+                organization_id=org_id,
+                copy_selection=True,
+                shift=options.shift,
+            )
+        else:
+            text = await service.interactive_sessions.read_desktop_clipboard(
+                workspace_id, user=request.user, organization_id=org_id
+            )
         return 200, DesktopClipboardReadOut(text=text)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+    except (RuntimeError, TimeoutError, SocketIOTimeoutError):
+        if not options.copy_selection:
+            raise
+        return 409, ErrorOut(
+            detail="Unable to copy the desktop selection. Try again.",
+            code="conflict",
+        )
 
 
 @workspace_router.patch(
@@ -913,45 +730,53 @@ async def update_workspace(
     """Update mutable workspace metadata."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
         return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
-    org_id = _get_org_id(request)
+    if payload.plugin_ids is not None and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
+    if payload.credential_ids is not None and not check_api_key_permission(
+        request, APIKeyPermission.CREDENTIALS_READ
+    ):
+        return _perm_denied(APIKeyPermission.CREDENTIALS_READ)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        resolved_credentials = None
-        if payload.credential_ids is not None:
-            credential_svc = CredentialSvc()
-            resolved_credentials = await sync_to_async(
-                credential_svc.resolve_credentials
-            )(
-                payload.credential_ids,
-                org_id=org_id,
-                user=request.user,
-            )
-
-        workspace = await service.update_workspace(
+        workspace = await service.workspace_lifecycle.update_workspace(
             workspace_id,
             name=payload.name,
-            credentials=(
-                resolved_credentials.credentials
-                if resolved_credentials is not None
-                else None
-            ),
-            resolved_credentials=resolved_credentials,
+            credential_ids=payload.credential_ids,
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
             desktop_width=payload.desktop_width,
             desktop_height=payload.desktop_height,
+            plugin_ids=payload.plugin_ids,
+            user=request.user,
+            organization_id=org_id,
         )
+        persisted_plugin_ids = await sync_to_async(
+            PluginService().list_workspace_plugin_ids_many
+        )([workspace.id])
+        credential_ids = await sync_to_async(
+            CredentialSvc().workspace_credential_ids_many
+        )([workspace.id])
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
             name=workspace.name,
             updated_at=workspace.updated_at,
             active_operation=workspace.active_operation,
-            credential_ids=_workspace_credential_ids(workspace),
+            intervention_required=workspace.intervention_required,
+            lifecycle_diagnostic=workspace.lifecycle_diagnostic,
+            credential_ids=credential_ids[workspace.id],
+            plugin_ids=persisted_plugin_ids[workspace.id],
+            credential_sync_status=getattr(
+                workspace, "credential_sync_status", "not_required"
+            ),
+            credential_sync_detail=getattr(workspace, "credential_sync_detail", None),
             credentials_present=bool(workspace.credentials_present),
             qemu_vcpus=workspace.qemu_vcpus,
             qemu_memory_mb=workspace.qemu_memory_mb,
@@ -962,7 +787,9 @@ async def update_workspace(
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 400, ErrorOut(detail=str(e), code="validation_error")
 
@@ -976,14 +803,14 @@ async def stop_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Stop a running workspace."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_STOP):
         return _perm_denied(APIKeyPermission.WORKSPACES_STOP)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        task = await service.stop_workspace(workspace_id)
+        task = await service.workspace_lifecycle.stop_workspace(workspace_id)
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -1000,14 +827,14 @@ async def resume_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Resume a stopped workspace."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_RESUME):
         return _perm_denied(APIKeyPermission.WORKSPACES_RESUME)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        task = await service.resume_workspace(workspace_id)
+        task = await service.workspace_lifecycle.resume_workspace(workspace_id)
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -1024,17 +851,57 @@ async def remove_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Remove a workspace and its container."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_DELETE):
         return _perm_denied(APIKeyPermission.WORKSPACES_DELETE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        task = await service.remove_workspace(workspace_id)
+        task = await service.workspace_lifecycle.remove_workspace(workspace_id)
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/recreate/",
+    response={202: WorkspaceRecreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Reset or update a workspace (all workspace-only data is lost)",
+)
+async def recreate_workspace(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspaceRecreateIn
+):
+    """Recreate the workspace on its own version (reset) or the latest (update).
+
+    The workspace keeps its id, chats, credentials, plugins and schedules.
+    Requires the delete permission because workspace data is destroyed.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_DELETE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_DELETE)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        workspace, task = await service.workspace_lifecycle.recreate_workspace(
+            workspace_id,
+            payload.image_id,
+            user=request.user,
+            organization_id=org_id,
+        )
+        return 202, WorkspaceRecreateOut(
+            workspace_id=workspace.id,
+            task_id=task.id,
+            active_operation=workspace.active_operation,
+        )
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except RunnerOfflineError as e:
+        return 409, ErrorOut(detail=str(e), code="runner_offline")
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
 
@@ -1056,6 +923,8 @@ def _process_to_out(process) -> ProcessOut:
         log_path=process.log_path or "",
         status=process.status,
         exit_code=process.exit_code,
+        run_count=int(getattr(process, "run_count", 0) or 0),
+        kind=str(getattr(process, "kind", "") or "persistent"),
         started_at=process.started_at,
         ended_at=process.ended_at,
         updated_at=process.updated_at,
@@ -1067,87 +936,30 @@ def _process_to_out(process) -> ProcessOut:
     response={200: list[ProcessOut], 403: ErrorOut, 404: ErrorOut},
     summary="List background processes",
 )
-async def list_processes(request: HttpRequest, workspace_id: uuid.UUID):
-    """List background processes of a workspace (DB + live merge)."""
+async def list_processes(
+    request: HttpRequest, workspace_id: uuid.UUID, live: bool = False
+):
+    """List background processes, using heartbeat-reconciled DB state by default.
+
+    The runner heartbeat updates process state every 15 seconds, so a normal
+    listing may reflect state up to one heartbeat interval ago. Pass
+    ``?live=true`` to force a runner reconciliation (for explicit refreshes).
+    Users see all persistent processes plus running temp processes; finished
+    temps stay in the DB but are hidden here.
+    """
     if not check_api_key_permission(
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
     ):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
-    service = _get_service()
+    service = ProcessControlService(_get_service())
     try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        processes = await service.list_processes(workspace_id)
-        return 200, [_process_to_out(process) for process in processes]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.post(
-    "/{workspace_id}/processes/",
-    response={
-        201: ProcessOut,
-        400: ErrorOut,
-        403: ErrorOut,
-        404: ErrorOut,
-        409: ErrorOut,
-    },
-    summary="Start a background process",
-)
-async def start_process(
-    request: HttpRequest, workspace_id: uuid.UUID, payload: ProcessStartIn
-):
-    """Start a detached background process in a workspace."""
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
-    ):
-        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        process = await service.start_process(
-            workspace_id,
-            payload.command,
-            workdir=payload.workdir,
-            env=dict(payload.env or {}),
-            name=payload.name or "",
-            user=request.user,
+        processes = await service.list_processes(
+            workspace_id, user=request.user, organization_id=org_id, live=live
         )
-        return 201, _process_to_out(process)
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 400, ErrorOut(detail=str(e), code="validation_error")
-
-
-@workspace_router.get(
-    "/{workspace_id}/processes/{process_id}/",
-    response={200: ProcessOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Get a background process",
-)
-async def get_process(
-    request: HttpRequest, workspace_id: uuid.UUID, process_id: uuid.UUID
-):
-    """Return one background process scoped to a workspace."""
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_READ
-    ):
-        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        process = await service.get_process(workspace_id, process_id)
-        return 200, _process_to_out(process)
+        return 200, [_process_to_out(process) for process in processes]
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -1160,28 +972,431 @@ async def get_process(
 async def stop_process(
     request: HttpRequest,
     workspace_id: uuid.UUID,
-    process_id: uuid.UUID,
+    process_id: str,
 ):
-    """Stop a background process (SIGTERM, then SIGKILL after grace)."""
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_RUN
-    ):
+    """Stop a background process (SIGTERM, then SIGKILL after grace).
+
+    ``process_id`` accepts a process UUID or the exact process name.
+    Stopping is the only user action allowed on running temp processes;
+    a stopped temp vanishes from the user list (its DB row is kept).
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
-    service = _get_service()
+    service = ProcessControlService(_get_service())
     try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
         process = await service.stop_process(
             workspace_id,
             process_id,
+            user=request.user,
+            organization_id=org_id,
         )
         return 200, _process_to_out(process)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/processes/{process_id}/restart/",
+    response={
+        200: ProcessOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
+    summary="Restart (same row, new log)",
+)
+async def restart_process(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    process_id: str,
+):
+    """Restart a background process on the same row (stable id, new log).
+
+    Reuses the stored command/workdir; ``process_id`` accepts a process
+    UUID or the exact process name. No request body required.
+    Temporary processes cannot be restarted by users (400) — they live
+    only for their agent session.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = ProcessControlService(_get_service())
+    try:
+        process = await service.restart_process(
+            workspace_id,
+            process_id,
+            user=request.user,
+            organization_id=org_id,
+        )
+        return 200, _process_to_out(process)
+    except TemporaryProcessControlError as e:
+        return 400, ErrorOut(detail=e.message, code=e.code)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+    except ValueError as e:
+        return 400, ErrorOut(detail=str(e), code="validation_error")
+
+
+@workspace_router.delete(
+    "/{workspace_id}/processes/{process_id}/",
+    response={204: None, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Delete a background process",
+)
+async def delete_process(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    process_id: str,
+):
+    """Delete a background process row (stops it first if running).
+
+    ``process_id`` accepts a process UUID or the exact process name.
+    Temporary processes cannot be deleted by users (400) — stop them
+    instead; finished temps vanish from the user list while their DB
+    rows are kept.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
+        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = ProcessControlService(_get_service())
+    try:
+        await service.delete_process(
+            workspace_id, process_id, user=request.user, organization_id=org_id
+        )
+        return 204, None
+    except TemporaryProcessControlError as e:
+        return 400, ErrorOut(detail=e.message, code=e.code)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+# ===========================================================================
+# Git router — /api/v1/workspaces/{workspace_id}/git/ (productive integration)
+# ===========================================================================
+
+
+def _git_result_to_response(result: dict):
+    """Map a runner git result dict to (status, payload) for Ninja.
+
+    All runner payloads pass through intact as plain ``dict`` (the
+    response map uses ``dict``/union for 200/400/409/504, so Ninja never
+    re-validates/strips runner keys). Success (``ok`` truthy) → 200.
+    Runner domain failures (``ok: False``) map by code: ``conflict``
+    → 409 with the runner payload intact (incl. fresh ``snapshot``);
+    ``timeout`` → 504 with ``code``/``message`` intact;
+    ``workspace_unreachable`` (guest transport refused or lost) → 503;
+    everything else → 400 intact.
+    """
+    if not isinstance(result, dict):
+        return 502, ErrorOut(
+            detail="Git operation returned no result", code="runner_call_failed"
+        )
+    if result.get("ok"):
+        return 200, result
+    code = str(result.get("code") or "")
+    if code in {"conflict", "stale_document"}:
+        return 409, result
+    if code == "timeout" or "timeout" in code:
+        return 504, result
+    if code == "workspace_unreachable":
+        return 503, result
+    return 400, result
+
+
+#: Shared response map for the git endpoints. Runner payloads (success
+#: and domain failures) pass through intact as plain ``dict`` so runner
+#: keys (``snapshot``/``stderr``/``code``/``message``) are never stripped
+#: by Ninja re-validation. Statuses that can carry *either* a runner
+#: dict *or* a service-shaped ``ErrorOut`` (400/409/504) use a union so
+#: both shapes validate: runner ``ok:false`` payloads stay intact while
+#: service errors (timeout/offline/busy/validation) keep ``detail``/``code``.
+_GIT_RESPONSES: dict = {
+    200: dict,
+    400: dict | ErrorOut,
+    403: ErrorOut,
+    404: ErrorOut,
+    409: dict | ErrorOut,
+    502: ErrorOut,
+    503: dict,
+    504: dict | ErrorOut,
+}
+
+
+git_router = Router(tags=["workspaces-git"])
+
+
+@workspace_router.get(
+    "/{workspace_id}/files/content/", response=_GIT_RESPONSES,
+    summary="Read complete editor text",
+)
+async def editor_file_content(
+    request: HttpRequest, workspace_id: uuid.UUID, path: str,
+):
+    """Read text through owner-scoped workspace access."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_READ)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await _get_service().file_transfer.editor_file_operation(
+            workspace_id, "read", {"path": path}
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@workspace_router.put(
+    "/{workspace_id}/files/content/", response=_GIT_RESPONSES,
+    summary="Save editor text if its revision still matches",
+)
+async def save_editor_file_content(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: EditorFileWriteIn,
+):
+    """Save complete text through owner-scoped workspace access."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await _get_service().file_transfer.editor_file_operation(
+            workspace_id, "write", payload.model_dump()
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/file-content/", response=_GIT_RESPONSES,
+    summary="Read complete text from an index, worktree, or commit",
+)
+async def git_file_content(
+    request: HttpRequest, workspace_id: uuid.UUID, repo_path: str,
+    path: str, revision: str = "index",
+):
+    """Read an editor diff side with a token for stale-operation protection."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        query = GitRepoQuery(repo_path=repo_path)
+        result = await _get_service().git_operations.run_git_operation(
+            workspace_id, "file_content", repo_path=query.repo_path,
+            args={"path": path, "revision": revision},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/repos/",
+    response=_GIT_RESPONSES,
+    summary="List git repositories under /workspace",
+)
+async def git_repos(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+):
+    """Return the discovered repos (id/name/path/branch/head) for a workspace."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.git_operations.run_git_operation(
+            workspace_id,
+            "list_repos",
+            args={},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/repo/",
+    response=_GIT_RESPONSES,
+    summary="Get per-repo git snapshot",
+)
+async def git_repo(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    repo_path: str,
+):
+    """Return the full status, branches, remotes and recent history of one repo."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitRepoQuery(repo_path=repo_path)
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.git_operations.run_git_operation(
+            workspace_id,
+            "repo_snapshot",
+            repo_path=query.repo_path,
+            args={},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/history/",
+    response=_GIT_RESPONSES,
+    summary="Get paged commit history for one repo",
+)
+async def git_history(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    repo_path: str,
+    history_limit: int = 50,
+    history_skip: int = 0,
+    branch: str | None = None,
+):
+    """Return paged commits (plus has_more cursors) for one repository.
+
+    Query params page the history (1..500 / skip>=0); ``branch``
+    optionally filters to one branch.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitHistoryQuery(
+            repo_path=repo_path,
+            history_limit=history_limit,
+            history_skip=history_skip,
+            branch=branch,
+        )
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        args: dict = {
+            "history_limit": query.history_limit,
+            "history_skip": query.history_skip,
+        }
+        if query.branch is not None:
+            args["branch"] = query.branch
+        result = await service.git_operations.run_git_operation(
+            workspace_id,
+            "repo_history",
+            repo_path=query.repo_path,
+            args=args,
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.get(
+    "/{workspace_id}/git/commits/{commit_hash}/",
+    response=_GIT_RESPONSES,
+    summary="Get commit details",
+)
+async def git_commit_details(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    commit_hash: str,
+    repo_path: str,
+):
+    """Return full details (message, authors, file changes) for one commit."""
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
+    try:
+        query = GitRepoQuery(repo_path=repo_path)
+    except Exception as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    try:
+        commit = validate_commit_hash(commit_hash)
+    except ValueError as exc:
+        return 400, ErrorOut(detail=str(exc), code="validation_error")
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.git_operations.run_git_operation(
+            workspace_id,
+            "commit_details",
+            repo_path=query.repo_path,
+            args={"commit": commit},
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
+
+
+@git_router.post(
+    "/{workspace_id}/git/operation/",
+    response=_GIT_RESPONSES,
+    summary="Run a typed Git mutation",
+)
+async def git_operation(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    payload: GitOperationIn,
+):
+    """Run one Git mutation with ``workspaces:git_write`` permission.
+
+    Commit identity comes from the authenticated account; the schema
+    accepts only declared mutation fields, never ``author_*`` or free args.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_WRITE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_WRITE)
+    org_id = get_organization_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        result = await service.git_operations.run_git_operation(
+            workspace_id,
+            str(payload.operation),
+            repo_path=payload.repo_path,
+            args=payload.model_dump(
+                exclude={"operation", "repo_path"},
+                exclude_unset=True,
+                exclude_none=True,
+            ),
+            user=request.user,
+        )
+        return _git_result_to_response(result)
+    except Exception as exc:
+        return git_error_to_response(exc)
 
 
 # ===========================================================================
@@ -1192,266 +1407,181 @@ workspace_image_artifact_router = Router(tags=["image-artifacts"])
 image_artifact_router = Router(tags=["image-artifacts"])
 
 
-def _image_artifact_to_out(artifact) -> ImageArtifactOut:
-    """Map an ImageArtifact ORM instance to ImageArtifactOut."""
-    runner_build = getattr(artifact, "build_job", None)
-    source_workspace = getattr(artifact, "origin_workspace", None)
-    runtime_type = getattr(source_workspace, "runtime_type", None)
-    source_runner_id = getattr(source_workspace, "runner_id", None)
-    source_runner_online = False
-    image_runner = getattr(artifact, "runner", None)
-    if image_runner is not None and source_runner_id is None:
-        source_runner_id = image_runner.id
-        source_runner_online = image_runner.status == RS.ONLINE
-    workspace_runner = getattr(source_workspace, "runner", None)
-    if workspace_runner is not None:
-        source_runner_online = workspace_runner.status == RS.ONLINE
-    source_definition_name = None
-    is_deactivated = False
-    if runner_build is not None:
-        source_runner_id = getattr(runner_build, "runner_id", source_runner_id)
-        runner = getattr(runner_build, "runner", None)
-        if runner is not None:
-            source_runner_online = runner.status == RS.ONLINE
-        image_definition = getattr(runner_build, "image_definition", None)
-        if image_definition is not None:
-            source_definition_name = image_definition.name
-            runtime_type = image_definition.runtime_type
-        is_deactivated = getattr(runner_build, "status", "") == "deactivated"
-    if getattr(artifact, "status", "") == "retired":
-        is_deactivated = True
+class ImageDeletionIn(Schema):
+    target_type: str
+    target_id: uuid.UUID
+    mode: str = "deferred"
+    fingerprint: str = ""
 
-    return ImageArtifactOut(
-        id=artifact.id,
-        source_workspace_id=artifact.origin_workspace_id,
-        runner_artifact_id=artifact.runner_ref,
-        name=artifact.name,
-        size_bytes=artifact.size_bytes,
-        status=artifact.status,
-        artifact_kind=(
-            "built"
-            if getattr(artifact, "origin_type", "") == "definition_build"
-            else "captured"
-        ),
-        build_job_id=artifact.build_job_id,
-        source_definition_name=source_definition_name,
-        source_runner_id=source_runner_id,
-        runtime_type=runtime_type,
-        is_deactivated=is_deactivated,
-        source_runner_online=source_runner_online,
-        delete_requested_at=getattr(artifact, "delete_requested_at", None),
-        delete_confirmed_at=getattr(artifact, "delete_confirmed_at", None),
-        delete_last_error=getattr(artifact, "delete_last_error", "") or "",
-        created_at=artifact.created_at,
-        created_by_id=artifact.created_by_id,
+
+def _deletion_response(request, action, *args):
+    from .services.deletion import DeletionService
+
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
+        return _perm_denied(APIKeyPermission.IMAGES_DELETE)
+    try:
+        return getattr(DeletionService(), action)(
+            request.user, get_organization_id(request), *args
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except ConflictError as exc:
+        return 409, ErrorOut(detail=exc.message, code=exc.code)
+
+
+@image_artifact_router.post(
+    "/deletions/preview/",
+    response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def preview_image_deletion(request: HttpRequest, payload: ImageDeletionIn):
+    """Read-only structural cascade preview; no retirement or tasks."""
+    return _deletion_response(
+        request, "preview", payload.target_type, payload.target_id
+    )
+
+
+@image_artifact_router.post(
+    "/deletions/", response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut}
+)
+def request_image_deletion(request: HttpRequest, payload: ImageDeletionIn):
+    """Retire now and persist deferred or exact fingerprint-approved force intent."""
+    return _deletion_response(
+        request,
+        "request",
+        payload.target_type,
+        payload.target_id,
+        payload.mode,
+        payload.fingerprint,
     )
 
 
 @image_artifact_router.get(
-    "/",
-    response=list[ImageArtifactOut],
-    summary="List image artifacts for the current user",
+    "/deletions/",
+    response={200: list[dict], 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
 )
-def list_image_artifacts(request: HttpRequest):
-    """Return all image artifacts owned by the current user in the active organization."""
+def list_image_deletions(request: HttpRequest):
+    return _deletion_response(request, "list")
+
+
+@image_artifact_router.post(
+    "/deletions/{request_id}/cancel/",
+    response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def cancel_image_deletion(request: HttpRequest, request_id: uuid.UUID):
+    return _deletion_response(request, "cancel", request_id)
+
+
+captured_image_router = Router(tags=["captured-images"])
+
+
+def _captured_image_errors(exc: Exception):
+    if isinstance(exc, NotFoundError):
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    if isinstance(exc, RunnerOfflineError):
+        return 409, ErrorOut(detail=str(exc), code="runner_offline")
+    if isinstance(exc, ConflictError):
+        return 409, ErrorOut(
+            detail=exc.message, code=exc.code, gaps=getattr(exc, "gaps", None)
+        )
+    raise exc
+
+
+@captured_image_router.get(
+    "/",
+    response={200: list[CapturedImageOut], 403: ErrorOut},
+    summary="List the current user's captured images with versions",
+)
+def list_captured_images(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
         return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
+    org_id = get_organization_id(request)
+    _get_org_service().require_membership(request.user, org_id)
+    from .services.image_versions import ImageVersionService
 
-    service = _get_service()
-    service.image_instances.timeout_stale(timeout_hours=1)
-    artifacts = service.list_image_artifacts_for_user(user=request.user)
-    return [_image_artifact_to_out(artifact) for artifact in artifacts]
+    views = ImageVersionService().list_captured_images(request.user, org_id)
+    return 200, [captured_image_to_out(view) for view in views]
 
 
-@image_artifact_router.post(
-    "/",
-    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Create an image artifact from a workspace",
+@captured_image_router.patch(
+    "/{captured_image_id}/",
+    response={200: CapturedImageOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Rename a captured image",
 )
-async def create_image_artifact_global(
-    request: HttpRequest, payload: ImageArtifactCreateIn
+def rename_captured_image(
+    request: HttpRequest, captured_image_id: uuid.UUID, payload: CapturedImageUpdateIn
 ):
-    """Create an image artifact from a workspace using the global endpoint."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
         return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
+    org_id = get_organization_id(request)
+    _get_org_service().require_membership(request.user, org_id)
+    from .services.image_versions import ImageVersionService
 
-    if not payload.workspace_id:
-        return 404, ErrorOut(detail="workspace_id is required", code="validation_error")
-
-    service = _get_service()
     try:
-        await _get_owned_workspace_async(request, org_id, payload.workspace_id)
-        workspace, task = await service.create_image_artifact(
-            workspace_id=payload.workspace_id,
-            name=payload.name,
-            organization_id=org_id,
+        view = ImageVersionService().rename_captured_image(
+            request.user, org_id, captured_image_id, payload.name
         )
-        return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
-    except (NotFoundError, ValueError) as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
+        return 200, captured_image_to_out(view)
+    except (NotFoundError, ConflictError) as exc:
+        return _captured_image_errors(exc)
 
 
-@image_artifact_router.patch(
-    "/{image_artifact_id}/",
-    response={200: ImageArtifactOut, 404: ErrorOut, 403: ErrorOut},
-    summary="Rename an image artifact",
-)
-async def rename_image_artifact(
-    request: HttpRequest,
-    image_artifact_id: uuid.UUID,
-    payload: ImageArtifactUpdateIn,
-):
-    """Rename an image artifact owned by the current user."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
-        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    artifact = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
-    if artifact is None:
-        return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-    if artifact.created_by != request.user:
-        return 403, ErrorOut(
-            detail="Not authorized to rename this image artifact",
-            code="forbidden",
-        )
-
-    await sync_to_async(service.image_instances.update_name)(
-        image_artifact_id, payload.name.strip()
-    )
-    updated = await sync_to_async(service.image_instances.get_by_id)(image_artifact_id)
-    return 200, _image_artifact_to_out(updated)
-
-
-@image_artifact_router.delete(
-    "/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Delete an image artifact",
-)
-async def delete_image_artifact_global(
-    request: HttpRequest, image_artifact_id: uuid.UUID
-):
-    """Delete an image artifact owned by the current user."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
-        return _perm_denied(APIKeyPermission.IMAGES_DELETE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(
-            image_artifact_id
-        )
-        if artifact is None:
-            return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        if artifact.created_by != request.user:
-            return 403, ErrorOut(
-                detail="Not authorized to delete this image artifact",
-                code="forbidden",
-            )
-        await service.delete_image_artifact(image_artifact_id)
-        return 204, None
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-@image_artifact_router.post(
-    "/{image_artifact_id}/workspaces/",
+@captured_image_router.post(
+    "/{captured_image_id}/workspaces/",
     response={
         202: WorkspaceFromImageArtifactOut,
-        404: ErrorOut,
         403: ErrorOut,
+        404: ErrorOut,
         409: ErrorOut,
     },
-    summary="Create a workspace from an image artifact",
+    summary="Create a workspace from the latest version of a captured image",
 )
-async def create_workspace_from_image_artifact_global(
+async def create_workspace_from_captured_image(
     request: HttpRequest,
-    image_artifact_id: uuid.UUID,
+    captured_image_id: uuid.UUID,
     payload: WorkspaceFromImageArtifactIn,
 ):
-    """Create a workspace from an image artifact."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
         return _perm_denied(APIKeyPermission.IMAGES_CLONE)
-    org_id = _get_org_id(request)
+    if payload.plugin_ids and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
+    from .services.image_versions import ImageVersionService
 
     service = _get_service()
     try:
-        artifact = await sync_to_async(service.image_instances.get_by_id)(
-            image_artifact_id
+        latest = await sync_to_async(ImageVersionService().latest_captured_version)(
+            request.user, org_id, captured_image_id
         )
-        if artifact is None:
-            return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        if artifact.created_by != request.user:
-            return 403, ErrorOut(
-                detail="Not authorized to use this image artifact",
-                code="forbidden",
-            )
-        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
-            payload.credential_ids,
-            org_id=org_id,
-            user=request.user,
-        )
-
-        workspace, task = await service.create_workspace_from_image_artifact(
-            image_artifact_id=image_artifact_id,
+        lifecycle = service.workspace_lifecycle
+        workspace, task = await lifecycle.create_workspace_from_image_artifact(
+            image_artifact_id=latest.id,
             name=payload.name,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
+            credential_ids=payload.credential_ids,
             user=request.user,
             organization_id=org_id,
+            plugin_ids=payload.plugin_ids,
         )
+        plugin_ids = await sync_to_async(
+            PluginService().list_workspace_plugin_ids_many
+        )([workspace.id])
         return 202, WorkspaceFromImageArtifactOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
+            plugin_ids=plugin_ids[workspace.id],
         )
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except RunnerOfflineError as e:
-        return 409, ErrorOut(detail=str(e), code="runner_offline")
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-
-
-@workspace_image_artifact_router.get(
-    "/{workspace_id}/image-artifacts/",
-    response={200: list[ImageArtifactOut], 404: ErrorOut},
-    summary="List image artifacts for a workspace",
-)
-def list_workspace_image_artifacts(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return all image artifacts captured from a workspace."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
-        return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-        service = _get_service()
-        artifacts = service.list_image_artifacts_for_workspace(workspace_id)
-        return [_image_artifact_to_out(artifact) for artifact in artifacts]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
+    except (NotFoundError, ConflictError) as exc:
+        return _captured_image_errors(exc)
 
 
 @workspace_image_artifact_router.post(
     "/{workspace_id}/image-artifacts/",
-    response={202: ImageArtifactCreateOut, 404: ErrorOut},
+    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Create an image artifact from a workspace",
 )
 async def create_workspace_image_artifact(
@@ -1460,106 +1590,24 @@ async def create_workspace_image_artifact(
     """Create an image artifact from a workspace."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
         return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
-        workspace, task = await service.create_image_artifact(
+        workspace, task = await service.image_lifecycle.create_image_artifact(
             workspace_id=workspace_id,
             name=payload.name,
             organization_id=org_id,
+            captured_image_id=payload.captured_image_id,
+            message=payload.message,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
-    except (NotFoundError, ValueError) as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-
-
-@workspace_image_artifact_router.delete(
-    "/{workspace_id}/image-artifacts/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 409: ErrorOut},
-    summary="Delete an image artifact",
-)
-async def delete_workspace_image_artifact(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    image_artifact_id: uuid.UUID,
-):
-    """Delete an image artifact."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
-        return _perm_denied(APIKeyPermission.IMAGES_DELETE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_artifact_async(
-            request,
-            org_id,
-            workspace_id,
-            image_artifact_id,
-        )
-        await service.delete_image_artifact(image_artifact_id)
-        return 204, None
-    except (NotFoundError, ValueError) as e:
-        detail = e.message if isinstance(e, NotFoundError) else str(e)
-        return 404, ErrorOut(detail=detail, code="not_found")
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_image_artifact_router.post(
-    "/{workspace_id}/image-artifacts/{image_artifact_id}/workspaces/",
-    response={202: WorkspaceFromImageArtifactOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Create a workspace from an image artifact",
-)
-async def create_workspace_from_workspace_image_artifact(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    image_artifact_id: uuid.UUID,
-    payload: WorkspaceFromImageArtifactIn,
-):
-    """Create a workspace from an image artifact."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
-        return _perm_denied(APIKeyPermission.IMAGES_CLONE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_artifact_async(
-            request,
-            org_id,
-            workspace_id,
-            image_artifact_id,
-        )
-        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
-            payload.credential_ids,
-            org_id=org_id,
-            user=request.user,
-        )
-        workspace, task = await service.create_workspace_from_image_artifact(
-            image_artifact_id=image_artifact_id,
-            name=payload.name,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
-            user=request.user,
-            organization_id=org_id,
-        )
-        return 202, WorkspaceFromImageArtifactOut(
-            workspace_id=workspace.id,
-            task_id=task.id,
-            status=workspace.status,
-        )
+        return 409, ErrorOut(detail=e.message, code="conflict")
     except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except RunnerOfflineError as e:
-        return 409, ErrorOut(detail=str(e), code="runner_offline")
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        return 404, ErrorOut(detail=e.message, code="not_found")
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -1570,11 +1618,36 @@ async def create_workspace_from_workspace_image_artifact(
 
 image_definition_router = Router(tags=["image-definitions"])
 
+#: Service errors an image recipe endpoint maps to an HTTP status.
+_IMAGE_RECIPE_ERRORS = (
+    AdminRoleRequiredError,
+    ImageRecipeNotFoundError,
+    ImageRecipeValidationError,
+    ConflictError,
+)
+
+
+def _image_definitions() -> ImageDefinitionService:
+    return ImageDefinitionService(_get_service())
+
+
+def _image_recipe_error(exc: Exception):
+    """Map an ``_IMAGE_RECIPE_ERRORS`` exception to its REST error response."""
+    if isinstance(exc, AdminRoleRequiredError):
+        status = 403
+    elif isinstance(exc, ImageRecipeNotFoundError):
+        status = 404
+    elif isinstance(exc, ImageRecipeValidationError):
+        status = 400
+    else:
+        status = 409
+    return status, ErrorOut(
+        detail=exc.message, code=exc.code, gaps=getattr(exc, "gaps", None)
+    )
+
 
 def _image_definition_to_out(defn) -> ImageDefinitionOut:
-    from .repositories import ImageDefinitionRepository
-
-    summary = ImageDefinitionRepository.build_summary(defn)
+    summary = ImageDefinitionService.build_summary(defn)
     return ImageDefinitionOut(
         id=defn.id,
         organization_id=defn.organization_id,
@@ -1582,11 +1655,9 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
         name=defn.name,
         description=defn.description,
         is_standard=defn.organization_id is None,
-        runtime_type=defn.runtime_type,
         base_distro=defn.base_distro,
         packages=list(defn.packages or []),
         env_vars=dict(defn.env_vars or {}),
-        custom_dockerfile=defn.custom_dockerfile or "",
         custom_init_script=defn.custom_init_script or "",
         is_active=defn.is_active,
         status=getattr(defn, "status", "active"),
@@ -1613,8 +1684,10 @@ def _build_job_to_out(build) -> ImageBuildJobOut:
         image_definition_id=build.image_definition_id,
         runner_id=build.runner_id,
         image_artifact_id=getattr(artifact, "id", None),
+        current_generation_id=build.current_generation_id,
+        pending_generation_id=build.pending_generation_id,
         status=build.status,
-        build_log=build.build_log,
+        build_log=getattr(build, "build_log", "") or "",
         build_task_id=build.build_task_id,
         built_at=build.built_at,
         deactivated_at=build.deactivated_at,
@@ -1626,6 +1699,39 @@ def _build_job_to_out(build) -> ImageBuildJobOut:
     )
 
 
+def _build_job_to_list_out(build) -> ImageBuildJobListOut:
+    """Convert a (build_log-deferred) build row to the polling-safe schema."""
+    from .services.image_versions import ImageVersionService
+
+    artifact = None
+    try:
+        artifact = getattr(build, "image_instance", None)
+    except (ObjectDoesNotExist, SynchronousOnlyOperation):
+        artifact = None
+
+    return ImageBuildJobListOut(
+        id=build.id,
+        image_definition_id=build.image_definition_id,
+        runner_id=build.runner_id,
+        image_artifact_id=getattr(artifact, "id", None),
+        current_generation_id=build.current_generation_id,
+        pending_generation_id=build.pending_generation_id,
+        status=build.status,
+        build_log_size=int(getattr(build, "build_log_size", 0) or 0),
+        build_task_id=build.build_task_id,
+        built_at=build.built_at,
+        deactivated_at=build.deactivated_at,
+        delete_requested_at=getattr(build, "delete_requested_at", None),
+        delete_confirmed_at=getattr(build, "delete_confirmed_at", None),
+        delete_last_error=getattr(build, "delete_last_error", "") or "",
+        created_at=build.created_at,
+        updated_at=build.updated_at,
+        versions=image_artifacts_to_out(
+            ImageVersionService().definition_versions(build)
+        ),
+    )
+
+
 @image_definition_router.get(
     "/",
     response={200: list[ImageDefinitionOut], 403: ErrorOut},
@@ -1634,13 +1740,10 @@ def _build_job_to_out(build) -> ImageBuildJobOut:
 def list_image_definitions(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    service = _get_service()
-    return 200, [
-        _image_definition_to_out(d) for d in service.list_image_definitions(org_id)
-    ]
+    definitions = _image_definitions().list_visible(
+        request.user, get_organization_id(request)
+    )
+    return 200, [_image_definition_to_out(d) for d in definitions]
 
 
 @image_definition_router.post(
@@ -1651,31 +1754,12 @@ def list_image_definitions(request: HttpRequest):
 def create_image_definition(request: HttpRequest, payload: ImageDefinitionCreateIn):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not _is_org_admin(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from .models import ImageDefinition
-
-    validation_error = _validate_image_definition_runtime(
-        payload.runtime_type,
-        payload.base_distro,
-    )
-    if validation_error is not None:
-        return validation_error
-
-    definition = ImageDefinition.objects.create(
-        organization_id=org_id,
-        created_by=request.user,
-        name=payload.name,
-        description=payload.description,
-        runtime_type=payload.runtime_type,
-        base_distro=payload.base_distro,
-        packages=payload.packages,
-        env_vars=payload.env_vars,
-        custom_dockerfile=payload.custom_dockerfile,
-        custom_init_script=payload.custom_init_script,
-        is_active=payload.is_active,
-    )
+    try:
+        definition = _image_definitions().create(
+            request.user, get_organization_id(request), payload.model_dump()
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 201, _image_definition_to_out(definition)
 
 
@@ -1691,39 +1775,12 @@ def duplicate_image_definition(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    from .models import ImageDefinition
-
-    source = (
-        ImageDefinition.objects.filter(id=definition_id)
-        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
-        .first()
-    )
-    if source is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    if payload.name is not None and not payload.name.strip():
-        return 400, ErrorOut(detail="name cannot be empty", code="validation_error")
-
-    target_name = _org_image_definition_copy_name(payload.name or source.name, org_id)
-    copied = ImageDefinition.objects.create(
-        organization_id=org_id,
-        created_by=request.user,
-        name=target_name,
-        description=source.description,
-        runtime_type=source.runtime_type,
-        base_distro=source.base_distro,
-        packages=list(source.packages or []),
-        env_vars=dict(source.env_vars or {}),
-        custom_dockerfile=source.custom_dockerfile,
-        custom_init_script=source.custom_init_script,
-        is_active=source.is_active,
-    )
+    try:
+        copied = _image_definitions().duplicate(
+            request.user, get_organization_id(request), definition_id, payload.name
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 201, _image_definition_to_out(copied)
 
 
@@ -1737,113 +1794,16 @@ def update_image_definition(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not _is_org_admin(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from .models import ImageDefinition
-
-    definition = ImageDefinition.objects.filter(
-        id=definition_id, organization_id=org_id
-    ).first()
-    if definition is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    validation_error = _validate_image_definition_runtime(
-        payload.runtime_type or definition.runtime_type,
-        payload.base_distro or definition.base_distro,
-    )
-    if validation_error is not None:
-        return validation_error
-
-    for field in [
-        "name",
-        "description",
-        "runtime_type",
-        "base_distro",
-        "packages",
-        "env_vars",
-        "custom_dockerfile",
-        "custom_init_script",
-        "is_active",
-    ]:
-        value = getattr(payload, field, None)
-        if value is not None:
-            setattr(definition, field, value)
-    definition.save()
+    try:
+        definition = _image_definitions().update(
+            request.user,
+            get_organization_id(request),
+            definition_id,
+            payload.model_dump(),
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 200, _image_definition_to_out(definition)
-
-
-@image_definition_router.delete(
-    "/{definition_id}/",
-    response={
-        202: ImageDefinitionOut,
-        204: None,
-        404: ErrorOut,
-        403: ErrorOut,
-        409: ErrorOut,
-    },
-    summary="Delete image definition (orchestrated)",
-)
-async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID):
-    """Orchestrated two-step delete: deactivate then delete all builds.
-
-    Definition is only fully deleted when all runner build deletes are confirmed.
-    """
-    if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    service = _get_service()
-    try:
-        await service.delete_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(
-            definition_id
-        )
-        if definition is None:
-            return 204, None
-        return 202, await sync_to_async(_image_definition_to_out)(definition)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-
-
-@image_definition_router.post(
-    "/{definition_id}/deactivate/",
-    response={200: ImageDefinitionOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Deactivate image definition",
-)
-async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.UUID):
-    """Deactivate a definition — immediately not selectable for new workspaces."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    service = _get_service()
-    try:
-        await service.deactivate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(
-            definition_id
-        )
-        return 200, await sync_to_async(_image_definition_to_out)(definition)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @image_definition_router.post(
@@ -1855,44 +1815,30 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     """Re-activate a deactivated definition."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    service = _get_service()
     try:
-        await service.activate_image_definition(definition_id)
-        definition = await sync_to_async(service.image_definitions.get_by_id)(
-            definition_id
+        definition = await _image_definitions().activate(
+            request.user, get_organization_id(request), definition_id
         )
-        return 200, await sync_to_async(_image_definition_to_out)(definition)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, await sync_to_async(_image_definition_to_out)(definition)
 
 
 @image_definition_router.get(
     "/{definition_id}/runner-builds/",
-    response={200: list[ImageBuildJobOut], 403: ErrorOut, 404: ErrorOut},
+    response={200: list[ImageBuildJobListOut], 403: ErrorOut, 404: ErrorOut},
     summary="List runner builds for image definition",
 )
 def list_image_definition_runner_builds(request: HttpRequest, definition_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    service = _get_service()
-    if _get_image_definition_for_org(org_id, definition_id) is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-    return 200, [
-        _build_job_to_out(b) for b in service.list_build_jobs(definition_id, org_id)
-    ]
+    try:
+        builds = _image_definitions().list_builds(
+            request.user, get_organization_id(request), definition_id
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, [_build_job_to_list_out(b) for b in builds]
 
 
 @image_definition_router.post(
@@ -1907,28 +1853,17 @@ async def create_image_definition_runner_build(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
     ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    org_id = _get_org_id(request)
-    if not await _get_org_admin_flag_async(request, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-    runner = await sync_to_async(RunnerRepository.get_by_id)(payload.runner_id)
-    if runner is None or runner.organization_id != org_id:
-        return 404, ErrorOut(detail="Runner not found", code="not_found")
-
-    service = _get_service()
     try:
-        build = await service.trigger_build_job(
-            image_definition=definition,
-            runner=runner,
+        build = await _image_definitions().create_build(
+            request.user,
+            get_organization_id(request),
+            definition_id,
+            payload.runner_id,
             activate=payload.activate,
-            created_by=request.user,
+            message=payload.message,
         )
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 202, _build_job_to_out(build)
 
 
@@ -1947,90 +1882,18 @@ async def update_image_definition_runner_build(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
     ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    org_id = _get_org_id(request)
-    if not await _get_org_admin_flag_async(request, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from django.utils import timezone
-    from .models import ImageBuildJob
-
-    build = await sync_to_async(_get_build_job_for_org)(
-        org_id,
-        definition_id,
-        runner_id,
-    )
-    if build is None:
-        return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-
-    action = payload.action.strip().lower()
-    service = _get_service()
-    if action == "deactivate":
-        try:
-            service._ensure_definition_mutable(build.image_definition)
-        except ConflictError as e:
-            return 409, ErrorOut(detail=e.message, code=e.code)
-        build.status = ImageBuildJob.Status.DEACTIVATED
-        build.deactivated_at = timezone.now()
-        await sync_to_async(build.save)(
-            update_fields=["status", "deactivated_at", "updated_at"]
-        )
-        return 200, _build_job_to_out(build)
-
-    if action not in {"activate", "rebuild"}:
-        return 409, ErrorOut(
-            detail="action must be one of: deactivate, activate, rebuild",
-            code="conflict",
-        )
-
-    definition = build.image_definition
-    runner = build.runner
     try:
-        if action == "activate":
-            updated = await service.activate_build_job(
-                build,
-                created_by=request.user,
-            )
-        else:
-            updated = await service.trigger_build_job(
-                image_definition=definition,
-                runner=runner,
-                activate=True,
-                created_by=request.user,
-            )
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    return 200, _build_job_to_out(updated)
-
-
-@image_definition_router.delete(
-    "/{definition_id}/runner-builds/{runner_id}/",
-    response={202: dict, 204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Delete runner build and its associated artifact",
-)
-async def delete_image_definition_runner_build(
-    request: HttpRequest, definition_id: uuid.UUID, runner_id: uuid.UUID
-):
-    if not check_api_key_permission(
-        request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
-    ):
-        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    build = await sync_to_async(_get_build_job_for_org)(
-        org_id, definition_id, runner_id
-    )
-    if build is None:
-        return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-
-    service = _get_service()
-    try:
-        await service.delete_build_job(build.id)
-        return 202, {"detail": "Build job deletion initiated"}
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
+        build = await _image_definitions().update_build(
+            request.user,
+            get_organization_id(request),
+            definition_id,
+            runner_id,
+            payload.action,
+            message=payload.message,
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, _build_job_to_out(build)
 
 
 @image_definition_router.get(
@@ -2043,13 +1906,109 @@ def get_image_definition_runner_build_log(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if _get_image_definition_for_org(org_id, definition_id) is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
+    try:
+        build_log = _image_definitions().build_log(
+            request.user, get_organization_id(request), definition_id, runner_id
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, {"build_log": build_log}
 
-    build = _get_build_job_for_org(org_id, definition_id, runner_id)
-    if build is None:
-        return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-    return 200, {"build_log": build.build_log}
+
+@runner_router.get(
+    "/{runner_id}/storage/",
+    response={200: RunnerStorageOut, 403: ErrorOut, 404: ErrorOut},
+)
+def runner_storage(request: HttpRequest, runner_id: uuid.UUID):
+    """Actual cached runner storage graph, including freshness and unknown sizes."""
+    from .services.storage import StorageService
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    try:
+        return StorageService().detail(
+            request.user, get_organization_id(request), runner_id
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+
+
+@runner_router.post(
+    "/{runner_id}/storage/refresh/",
+    response={202: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+async def refresh_runner_storage(request: HttpRequest, runner_id: uuid.UUID):
+    """Explicitly request a full inventory scan; cached GET never dispatches."""
+    from .services.storage import StorageService
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    try:
+        result = await StorageService().refresh(
+            _get_service(), request.user, get_organization_id(request), runner_id
+        )
+        return 202, result
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except RunnerOfflineError as exc:
+        return 409, ErrorOut(detail=str(exc), code="runner_offline")
+
+
+@runner_router.get(
+    "/operations/{operation_id}/", response={200: dict, 403: ErrorOut, 404: ErrorOut}
+)
+async def inspect_lifecycle_operation(request: HttpRequest, operation_id: uuid.UUID):
+    """Read fresh journal evidence, or explicit unknown when offline."""
+    from .services.disposition import DispositionService
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    try:
+        return await DispositionService().inspect(
+            _get_service(), request.user, get_organization_id(request), operation_id
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+
+
+@runner_router.post(
+    "/operations/{operation_id}/{action}/",
+    response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+async def dispose_lifecycle_operation(
+    request: HttpRequest, operation_id: uuid.UUID, action: str
+):
+    """Reconcile, retry safe known failure, or admin acknowledge interruption."""
+    from .services.disposition import DispositionService
+
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    try:
+        if action == "retry":
+            permission = await sync_to_async(DispositionService.retry_permission)(
+                request.user, get_organization_id(request), operation_id
+            )
+            if permission is None or not check_api_key_permission(request, permission):
+                return 403, ErrorOut(
+                    detail="Operation-specific lifecycle scope required",
+                    code="forbidden",
+                )
+        return await DispositionService().act(
+            _get_service(),
+            request.user,
+            get_organization_id(request),
+            operation_id,
+            action,
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except ConflictError as exc:
+        return 409, ErrorOut(detail=exc.message, code=exc.code)

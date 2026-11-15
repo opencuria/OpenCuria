@@ -11,6 +11,7 @@ from apps.harness.agents.definitions import (
     list_agents,
     subagent_descriptions,
 )
+from apps.harness.tools.invocation import AuthorizedToolDispatcher
 
 
 def test_all_agents_defined() -> None:
@@ -22,6 +23,8 @@ def test_all_agents_defined() -> None:
         "explore",
         "computeruse",
         "title",
+        "summary",
+        "commit_message",
         "compaction",
     }
     assert get_agent("build").mode == "primary"
@@ -29,33 +32,45 @@ def test_all_agents_defined() -> None:
     assert get_agent("general").mode == "subagent"
     assert get_agent("explore").mode == "subagent"
     assert get_agent("computeruse").mode == "subagent"
-    assert get_agent("computeruse").steps is None
+    assert get_agent("computeruse").steps == 15
+    assert "Computer Use" in get_agent("computeruse").system_prompt
     assert get_agent("computeruse").permissions == {
-        "*": "allow",
-        "question": "deny",
+        "*": "deny",
+        "mcp_computer-use_cua_repl_js": "allow",
+        "mcp_computer-use_cua_repl_js_reset": "allow",
     }
     assert get_agent("title").mode == "hidden"
+    assert get_agent("summary").mode == "hidden"
     assert get_agent("compaction").mode == "hidden"
 
 
 def test_build_allows_everything() -> None:
     """Build grants allow on the wildcard (deny-tools are not filtered)."""
     assert get_agent("build").permissions == {"*": "allow"}
+    prompt = get_agent("build").system_prompt
+    assert "verify the change for real" in prompt
+    assert "embed it" in prompt
 
 
-def test_plan_edit_asks_and_bash_allows_read_only() -> None:
-    """Plan asks for edits; read-only bash is allowed, mutating asks."""
+def test_plan_edit_asks_and_bash_process_allowed() -> None:
+    """Plan asks for edits; bash and background processes are fully allowed."""
     from apps.harness.permissions.evaluator import PermissionEvaluator
 
-    evaluator = PermissionEvaluator(agent_rules=dict(get_agent("plan").permissions))
+    agent = get_agent("plan")
+    assert agent.permissions == {"*": "allow", "edit": "ask", "write": "ask"}
+    evaluator = PermissionEvaluator(agent_rules=dict(agent.permissions))
     assert evaluator.evaluate("edit", "/workspace/a.py") == "ask"
     assert evaluator.evaluate("write", "/workspace/a.py") == "ask"
     assert evaluator.evaluate("bash", "git status") == "allow"
     assert evaluator.evaluate("bash", "git log --oneline") == "allow"
     assert evaluator.evaluate("bash", "ls -la") == "allow"
     assert evaluator.evaluate("bash", "cat README.md") == "allow"
-    assert evaluator.evaluate("bash", "rm -rf /tmp/x") == "ask"
+    assert evaluator.evaluate("bash", "rm -rf /tmp/x") == "allow"
+    assert evaluator.evaluate("bash", "sudo reboot") == "allow"
+    assert evaluator.evaluate("process", "sleep 60") == "allow"
     assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
+    assert "question tool" in agent.system_prompt
+    assert "open questions" in agent.system_prompt
 
 
 def test_explore_is_read_only() -> None:
@@ -93,51 +108,50 @@ def test_subagent_question_denied_but_build_allowed() -> None:
     from apps.harness.permissions.evaluator import PermissionEvaluator
 
     for name in ("general", "explore", "computeruse"):
-        evaluator = PermissionEvaluator(
-            agent_rules=dict(get_agent(name).permissions)
-        )
+        evaluator = PermissionEvaluator(agent_rules=dict(get_agent(name).permissions))
         assert evaluator.evaluate("question", "") == "deny"
-    build_eval = PermissionEvaluator(
-        agent_rules=dict(get_agent("build").permissions)
-    )
+    build_eval = PermissionEvaluator(agent_rules=dict(get_agent("build").permissions))
     assert build_eval.evaluate("question", "") == "allow"
 
 
-def test_global_read_env_asks() -> None:
-    """Global defaults ask for .env reads (OpenCode parity)."""
-    from apps.harness.permissions.evaluator import (
-        DEFAULT_GLOBAL_RULES,
-        PermissionEvaluator,
-    )
-
-    evaluator = PermissionEvaluator(global_rules=dict(DEFAULT_GLOBAL_RULES))
-    assert evaluator.evaluate("read", "/workspace/.env") == "ask"
-    assert evaluator.evaluate("read", "/workspace/a.env") == "ask"
-    assert evaluator.evaluate("read", "/workspace/.env.example") == "allow"
-    assert evaluator.evaluate("read", "/workspace/a.py") == "allow"
-
-
-def test_global_read_env_survives_build_wildcard() -> None:
-    """Base ask beats agent * allow (deny > ask > allow precedence)."""
-    from apps.harness.agents.definitions import get_agent
-    from apps.harness.runner import HarnessRunner
+def test_global_read_env_is_allowed_for_every_agent() -> None:
+    """All agents can read .env and absolute external paths without approval."""
     from apps.harness.tests.conftest import FakeAccessor
     from apps.harness.tools import default_tool_registry
 
-    from .test_runner_loop import FakeProvider
-
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
     )
-    agent = get_agent("build")
+    for name in ("build", "general", "plan", "explore"):
+        agent = get_agent(name)
+        for path in ("/workspace/.env", "/etc/app.env.local", "/tmp/readme"):
+            assert runner._decide(agent, "read", path, "build") == "allow"
+    for name in ("build", "general"):
+        assert runner._decide(get_agent(name), "write", "/tmp/file", "build") == "allow"
+    assert runner._decide(get_agent("plan"), "write", "/tmp/file", "plan") == "ask"
+    assert runner._decide(get_agent("explore"), "write", "/tmp/file", "build") == "deny"
     assert (
-        runner._decide(agent, "read", "/workspace/.env", "build") == "ask"
+        runner._decide(get_agent("build"), "read", "/tmp/file", "build", doom_loop=True)
+        == "ask"
     )
-    assert (
-        runner._decide(agent, "read", "/workspace/a.py", "build") == "allow"
+
+
+def test_explicit_global_rules_still_apply() -> None:
+    """Custom organization/global rules retain precedence over agent grants."""
+    from apps.harness.permissions.evaluator import PermissionEvaluator
+    from apps.harness.tests.conftest import FakeAccessor
+    from apps.harness.tools import default_tool_registry
+
+    runner = AuthorizedToolDispatcher(
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(
+            global_rules={"read": {"*.env": "ask"}, "edit": "deny"}
+        ),
+        accessor=FakeAccessor(),
     )
+    assert runner._decide(get_agent("build"), "read", "/tmp/.env", "build") == "ask"
+    assert runner._decide(get_agent("general"), "write", "/tmp/x", "build") == "deny"
 
 
 def test_unknown_agent_raises() -> None:
@@ -177,7 +191,9 @@ def test_invalid_mode_rejected() -> None:
 def test_agent_fields_present() -> None:
     """Every agent carries name, mode, description, prompt, color."""
     for agent in AGENT_DEFINITIONS.values():
-        assert agent.name and agent.description and agent.system_prompt
+        assert agent.name and agent.description
+        assert agent.system_prompt or agent.name == "computeruse"
         assert agent.color
-        assert agent.steps is None
+        expected_steps = 15 if agent.name == "computeruse" else None
+        assert agent.steps == expected_steps
         assert agent.model_override is None or agent.model_override == "small"

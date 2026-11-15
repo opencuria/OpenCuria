@@ -2,22 +2,34 @@
 django>=5.1,<6.0
 django-ninja>=1.3,<2.0
 
-# MCP (Model Context Protocol) server
-mcp>=1.0,<2.0
-channels>=4.0,<5.0
-daphne>=4.0,<5.0
+# MCP (Model Context Protocol) plugin client and agent tool bridges
+mcp>=1.23,<2.0
+
+# Complete Claude Agent harness; remote Transport/CLI compatibility is pinned.
+claude-agent-sdk==0.2.180
+uvicorn>=0.35,<1.0
+websockets>=13.0,<18.0
 
 # Socket.IO (Runner WebSocket protocol)
 python-socketio>=5.0,<6.0
 
-# WebSocket proxy (desktop sessions)
+# WebSocket proxy (desktop sessions; wsproto: app backend gateway, imported
+# directly, so explicit)
 aiohttp>=3.9,<4.0
+wsproto>=1.2,<2.0
 
 # HTTP client (LLM provider streaming)
-httpx>=0.27,<1.0
+httpx[http2]>=0.27,<1.0
 
-# Docker SDK (desktop proxy network management)
-docker>=7.0,<8.0
+# MCP tool arg/schema validation (explicit; never rely on transitivity)
+jsonschema>=4,<5
+
+# HTML → Markdown for webfetch (OpenCode Turndown equivalent)
+markdownify>=0.14,<1.0
+beautifulsoup4>=4.9,<5.0
+
+# AWS Bedrock (async Converse Stream + SigV4)
+aioboto3>=13.0,<14.0
 
 # CORS
 django-cors-headers>=4.0,<5.0
@@ -36,18 +48,23 @@ PyJWT>=2.8,<3.0
 # Encryption
 cryptography>=46.0.6,<47.0
 
-# TLS/OpenSSL runtime dependencies
-pyOpenSSL>=26.0.0,<27.0
-
 # Logging
 structlog>=24.0
 
-# Production database & caching
+# Production database
 psycopg2-binary>=2.9,<3.0
-channels-redis>=4.0,<5.0
 
 # Dev & Testing
 pytest>=8.0
 pytest-django>=4.0
 pytest-asyncio>=0.24
 ruff>=0.8
+
+# Shared Socket.IO ASGI/independent lifecycle-worker transport.
+redis>=5.0,<7.0
+
+# Bounded PDF text extraction in an isolated resource-limited subprocess.
+pypdf==6.21.1
+
+# Decode and resize image attachments before they reach any agent harness.
+Pillow>=12.3,<14.0

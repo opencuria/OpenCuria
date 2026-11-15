@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from dataclasses import dataclass
 from typing import Any
 
-from .images import IMAGE_TOKEN_ESTIMATE
+from .media.limits import IMAGE_TOKEN_ESTIMATE
 from .providers.base import LLMMessage
 
 #: Reserved headroom hint for future compaction selection (not used in usable).
@@ -73,47 +72,6 @@ When combining:
 - Move completed work from "Active" to "Completed".
 - If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
 - Update "Objective" and "Next Move" to reflect the current work state."""
-
-_CONTEXT_OVERFLOW_PHRASES = (
-    "context length",
-    "prompt is too long",
-    "maximum context",
-    "too many tokens",
-)
-
-#: Pi/OpenCode parity overflow patterns (case-insensitive regexes).
-CONTEXT_OVERFLOW_PATTERNS = (
-    re.compile(r"prompt is too long", re.I),
-    re.compile(r"request_too_large", re.I),
-    re.compile(r"exceeds (?:the )?context window", re.I),
-    re.compile(r"exceeds (?:the )?(?:model'?s )?maximum context length", re.I),
-    re.compile(r"input token count.*exceeds (?:the )?maximum", re.I),
-    re.compile(r"maximum prompt length", re.I),
-    re.compile(r"reduce (?:the )?length of (?:the )?messages", re.I),
-    re.compile(r"maximum allowed input length", re.I),
-    re.compile(r"longer than (?:the )?(?:model'?s )?context length", re.I),
-    re.compile(r"exceeds (?:the )?(?:available context size|limit)", re.I),
-    re.compile(r"available context size", re.I),
-    re.compile(r"greater than (?:the )?context length", re.I),
-    re.compile(r"context window exceeds limit", re.I),
-    re.compile(r"exceeded model token limit", re.I),
-    re.compile(r"too large for model", re.I),
-    re.compile(r"configured context size", re.I),
-    re.compile(r"model_context_window_exceeded", re.I),
-    re.compile(r"prompt too long", re.I),
-    re.compile(r"range of input length", re.I),
-    re.compile(r"context[_ ]length[_ ]exceeded", re.I),
-    re.compile(r"too many tokens", re.I),
-    re.compile(r"token limit exceeded", re.I),
-    re.compile(r"^4(?:00|13)\s*(?:status code)?\s*\(no body\)", re.I),
-)
-
-#: Non-overflow exclusions checked before overflow patterns (Pi parity).
-NON_OVERFLOW_EXCLUSIONS = (
-    re.compile(r"^(throttling error|service unavailable):", re.I),
-    re.compile(r"rate limit", re.I),
-    re.compile(r"too many requests", re.I),
-)
 
 
 @dataclass(frozen=True)
@@ -178,25 +136,6 @@ def preserve_recent_budget(limits: ModelLimits) -> int:
     )
 
 
-def is_context_overflow_error(exc: BaseException) -> bool:
-    """Return True when *exc* looks like a provider context-length failure.
-
-    Both the message and an enriched ``response_body`` (see
-    ``providers.base``) are classified, so overflow text hidden in the
-    raw body is detected as well.
-    """
-    text = str(exc)
-    body = getattr(exc, "response_body", "")
-    if isinstance(body, str) and body:
-        text = f"{text}\n{body}"
-    if any(pattern.search(text) for pattern in NON_OVERFLOW_EXCLUSIONS):
-        return False
-    if any(pattern.search(text) for pattern in CONTEXT_OVERFLOW_PATTERNS):
-        return True
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in _CONTEXT_OVERFLOW_PHRASES)
-
-
 def _truncate(value: str) -> str:
     """Truncate tool output for compaction serialization."""
     if len(value) <= TOOL_OUTPUT_MAX_CHARS:
@@ -228,18 +167,59 @@ def find_previous_summary(messages: list[LLMMessage]) -> str | None:
     return None
 
 
+def _file_placeholder(part: dict[str, Any]) -> str:
+    """Return a ``[file: <filename>]`` placeholder for a file part."""
+    filename = part.get("filename", "")
+    name = str(filename) if isinstance(filename, str) and filename else "file"
+    return f"[file: {name}]"
+
+
+def _attached_file_placeholder(part: dict[str, Any]) -> str:
+    """Return a ``[Attached file: <filename>]`` placeholder."""
+    filename = part.get("filename", "")
+    name = str(filename) if isinstance(filename, str) and filename else "file"
+    return f"[Attached file: {name}]"
+
+
 def _format_user_content(content: str | list[dict[str, Any]] | None) -> str:
-    """Serialize user content for compaction (images become ``[image]``)."""
+    """Serialize user content for compaction (media becomes placeholders)."""
     if not content:
         return ""
     if isinstance(content, str):
         return content
     parts: list[str] = []
     for part in content:
-        if part.get("type") == "text":
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
             parts.append(str(part.get("text", "")))
-        elif part.get("type") == "image_url":
+        elif part.get("type") in ("image_url", "input_image"):
             parts.append("[image]")
+        elif part.get("type") == "file":
+            parts.append(_file_placeholder(part))
+    return "".join(parts)
+
+
+def _format_tool_content(content: str | list[dict[str, Any]] | None) -> str:
+    """Serialize tool content for compaction (media becomes placeholders).
+
+    Image parts become ``[image]``; canonical PDF ``file`` parts become
+    ``[file: <filename>]``. Base64 payloads are never serialized.
+    """
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
+            parts.append(str(part.get("text", "")))
+        elif part.get("type") in ("image_url", "input_image"):
+            parts.append("[image]")
+        elif part.get("type") == "file":
+            parts.append(_file_placeholder(part))
     return "".join(parts)
 
 
@@ -264,7 +244,7 @@ def serialize(message: LLMMessage) -> str:
             lines.append(f"[Assistant tool call]: {name}({args})")
         return "\n".join(lines)
     if message.role == "tool":
-        output = _truncate(str(message.content or ""))
+        output = _truncate(_format_tool_content(message.content))
         return f"[Tool result]: {output}"
     return ""
 
@@ -275,9 +255,10 @@ def _build_prompt(
     context: list[str],
 ) -> str:
     """Build the compaction user prompt (OpenCode ``buildPrompt``)."""
+    joined = "\n\n".join(context)
     conversation = (
         "Here is the conversation so far:\n\n"
-        f"<conversation>\n{'\n\n'.join(context)}\n</conversation>"
+        f"<conversation>\n{joined}\n</conversation>"
     )
     if not previous_summary:
         return "\n\n".join(
@@ -318,10 +299,16 @@ def _estimate_content_tokens(content: str | list[dict[str, Any]] | None) -> int:
         return max(len(content) // 4, 0)
     total = 0
     for part in content:
-        if part.get("type") == "text":
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("text", "input_text", "output_text"):
             total += len(str(part.get("text", ""))) // 4
-        elif part.get("type") == "image_url":
+        elif part.get("type") in ("image_url", "input_image"):
             total += IMAGE_TOKEN_ESTIMATE
+        elif part.get("type") == "file":
+            filename = part.get("filename", "")
+            name = str(filename) if isinstance(filename, str) else ""
+            total += len(name) // 4
     return total
 
 
@@ -446,18 +433,30 @@ def _last_real_user(messages: list[LLMMessage]) -> LLMMessage | None:
 
 
 def strip_media(message: LLMMessage) -> LLMMessage:
-    """Replace image parts with text placeholders for overflow replay."""
+    """Replace media parts with text placeholders for overflow replay.
+
+    Handles user and tool messages; tool image lists collapse to text
+    so the retry never carries base64. Images become
+    ``[Attached image: file]``; canonical PDF ``file`` parts become
+    ``[Attached file: <filename>]`` (base64 never leaks). The role is
+    preserved (tool stays tool) so replay keeps a valid
+    assistant/tool alternation.
+    """
     content = message.content
     if isinstance(content, list):
         parts: list[str] = []
         for part in content:
-            if part.get("type") == "image_url":
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in ("image_url", "input_image"):
                 parts.append("[Attached image: file]")
-            elif part.get("type") == "text":
+            elif part.get("type") == "file":
+                parts.append(_attached_file_placeholder(part))
+            elif part.get("type") in ("text", "input_text", "output_text"):
                 parts.append(str(part.get("text", "")))
         content = "".join(parts)
     return LLMMessage(
-        role="user",
+        role=message.role,
         content=content if isinstance(content, str) else str(content or ""),
         message_id=message.message_id,
     )

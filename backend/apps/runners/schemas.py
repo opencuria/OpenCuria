@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from ninja import Schema
-from pydantic import field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .desktop import (
     DEFAULT_DESKTOP_HEIGHT,
     DEFAULT_DESKTOP_WIDTH,
     validate_desktop_dimension,
+)
+from .git_validation import (
+    validate_branch,
+    validate_git_args,
+    validate_repo_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -30,7 +35,6 @@ class RunnerOut(Schema):
     id: uuid.UUID
     name: str
     status: str
-    available_runtimes: list[str] = []
     organization_id: uuid.UUID
     connected_at: datetime | None
     disconnected_at: datetime | None
@@ -99,6 +103,30 @@ class RunnerUpdateIn(Schema):
 # ---------------------------------------------------------------------------
 
 
+class ImageVersionRefOut(Schema):
+    """The image version a workspace is (or is being) based on."""
+
+    id: uuid.UUID
+    line_kind: str | None = None
+    line_id: uuid.UUID | None = None
+    name: str
+    version: int | None = None
+    message: str = ""
+    status: str
+    latest_id: uuid.UUID | None = None
+    latest_version: int | None = None
+    update_available: bool = False
+
+
+class WorkspaceDiskUsageOut(Schema):
+    """Last observed filesystem usage inside a workspace."""
+
+    used_bytes: int
+    free_bytes: int
+    total_bytes: int
+    observed_at: datetime
+
+
 class WorkspaceOut(Schema):
     """Response schema for a workspace."""
 
@@ -106,11 +134,13 @@ class WorkspaceOut(Schema):
     runner_id: uuid.UUID
     status: str
     active_operation: str | None = None
+    intervention_required: bool = False
+    lifecycle_diagnostic: str = ""
     name: str
-    runtime_type: str = "docker"
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    disk_usage: WorkspaceDiskUsageOut | None = None
     desktop_width: int = DEFAULT_DESKTOP_WIDTH
     desktop_height: int = DEFAULT_DESKTOP_HEIGHT
     created_by_id: int
@@ -127,8 +157,26 @@ class WorkspaceOut(Schema):
     has_active_session: bool = False
     runner_online: bool = False
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
     credentials_present: bool = False
     base_image_name: str | None = None
+    base_image: ImageVersionRefOut | None = None
+    pending_base_image: ImageVersionRefOut | None = None
+    repos: list[str] = []
+
+
+class WorkspaceRecreateIn(Schema):
+    """Recreate a workspace on its own version (reset) or the latest (update)."""
+
+    image_id: uuid.UUID
+
+
+class WorkspaceRecreateOut(Schema):
+    """Response after a recreate was accepted."""
+
+    workspace_id: uuid.UUID
+    task_id: uuid.UUID
+    active_operation: str | None = None
 
 
 class WorkspaceCreateIn(Schema):
@@ -136,8 +184,8 @@ class WorkspaceCreateIn(Schema):
 
     name: str
     repos: list[str] = []
-    runtime_type: str = "docker"
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
     runner_id: uuid.UUID | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
@@ -162,6 +210,7 @@ class WorkspaceUpdateIn(Schema):
 
     name: str | None = None
     credential_ids: list[uuid.UUID] | None = None
+    plugin_ids: list[uuid.UUID] | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -190,8 +239,13 @@ class WorkspaceUpdateOut(Schema):
     name: str
     updated_at: datetime
     active_operation: str | None = None
+    intervention_required: bool = False
+    lifecycle_diagnostic: str = ""
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
     credentials_present: bool = False
+    credential_sync_status: str = "not_required"
+    credential_sync_detail: str | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -205,6 +259,7 @@ class WorkspaceCreateOut(Schema):
     workspace_id: uuid.UUID
     task_id: uuid.UUID
     status: str
+    plugin_ids: list[uuid.UUID] = []
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +290,14 @@ class TerminalStartIn(Schema):
 
     cols: int = 80
     rows: int = 24
+    client_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Socket.IO connection id of the client that uses the terminal. "
+            "The terminal closes when that connection ends."
+        ),
+    )
 
 
 class TerminalStartOut(Schema):
@@ -246,6 +309,28 @@ class TerminalStartOut(Schema):
 # ---------------------------------------------------------------------------
 # Desktop session schemas
 # ---------------------------------------------------------------------------
+
+
+class DesktopViewerIntentIn(Schema):
+    """A tab-local viewer intent, scoped to the authenticated user."""
+
+    viewer_client_id: uuid.UUID
+    intent_revision: int = Field(gt=0, strict=True)
+
+
+class DesktopRenewOut(Schema):
+    """Own renewable viewer intent only."""
+
+    viewer_lease_state: str
+    revision: int | None = None
+    epoch: str | None = None
+
+
+class DesktopTicketOut(Schema):
+    """Single-use ticket for opening the desktop viewer (``?ticket=``)."""
+
+    ticket: str
+    expires_in: int
 
 
 class DesktopStartOut(Schema):
@@ -267,6 +352,11 @@ class DesktopStatusOut(Schema):
     proxy_url: str | None = None
     viewer_held: bool = False
     computer_use_active: bool = False
+    mcp_active: bool = False
+    holder_count: int = 0
+    viewer_lease_state: str = "unknown"
+    revision: int | None = None
+    epoch: str | None = None
 
 
 class DesktopTakeControlOut(Schema):
@@ -281,6 +371,21 @@ class DesktopClipboardWriteIn(Schema):
     text: str
 
 
+class DesktopClipboardReadIn(Schema):
+    """Optional request options for reading or copying desktop text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    copy_selection: bool = Field(default=False, strict=True)
+    shift: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _shift_requires_selection(self) -> DesktopClipboardReadIn:
+        if self.shift and not self.copy_selection:
+            raise ValueError("shift requires copy_selection")
+        return self
+
+
 class DesktopClipboardReadOut(Schema):
     """Response schema for reading plain text from the VM clipboard."""
 
@@ -290,15 +395,6 @@ class DesktopClipboardReadOut(Schema):
 # ---------------------------------------------------------------------------
 # Background process schemas
 # ---------------------------------------------------------------------------
-
-
-class ProcessStartIn(Schema):
-    """Request schema for starting a background process."""
-
-    command: str
-    workdir: str = "/workspace"
-    env: dict[str, str] = {}
-    name: str = ""
 
 
 class ProcessOut(Schema):
@@ -313,21 +409,11 @@ class ProcessOut(Schema):
     log_path: str = ""
     status: str
     exit_code: int | None = None
+    run_count: int = 0
+    kind: str = "persistent"
     started_at: datetime
     ended_at: datetime | None = None
     updated_at: datetime
-
-
-# ---------------------------------------------------------------------------
-# Error schemas
-# ---------------------------------------------------------------------------
-
-
-class ErrorOut(Schema):
-    """Standard error response."""
-
-    detail: str
-    code: str = "error"
 
 
 # ---------------------------------------------------------------------------
@@ -336,19 +422,26 @@ class ErrorOut(Schema):
 
 
 class ImageArtifactOut(Schema):
-    """Response schema for a concrete image artifact."""
+    """Response schema for a concrete image artifact (one image version).
+
+    ``workspace_count`` is the only usage fact: which workspaces use a
+    version, and their names, stay private to the workspace owners.
+    """
 
     id: uuid.UUID
     source_workspace_id: uuid.UUID | None = None
     runner_artifact_id: str
     name: str
-    size_bytes: int
+    size_bytes: int | None
     status: str
     artifact_kind: str = "captured"
+    revision_id: uuid.UUID | None = None
+    generation: int | None = None
+    is_legacy: bool = False
+    is_current: bool = False
     build_job_id: uuid.UUID | None = None
     source_definition_name: str | None = None
     source_runner_id: uuid.UUID | None = None
-    runtime_type: str | None = None
     is_deactivated: bool = False
     source_runner_online: bool = False
     delete_requested_at: datetime | None = None
@@ -356,19 +449,43 @@ class ImageArtifactOut(Schema):
     delete_last_error: str = ""
     created_at: datetime
     created_by_id: int | None = None
-
-
-class ImageArtifactUpdateIn(Schema):
-    """Request schema for renaming an image artifact."""
-
-    name: str
+    captured_image_id: uuid.UUID | None = None
+    version: int | None = None
+    message: str = ""
+    is_latest: bool = False
+    retention: str | None = None
+    workspace_count: int = 0
 
 
 class ImageArtifactCreateIn(Schema):
-    """Request schema for creating an image artifact."""
+    """Capture a workspace as a new image or as the next version of one."""
+
+    name: str = ""
+    captured_image_id: uuid.UUID | None = None
+    message: str = Field(default="", max_length=500)
+
+
+class CapturedImageOut(Schema):
+    """A versioned captured image (line) with all of its versions."""
+
+    id: uuid.UUID
+    name: str
+    status: str
+    runner_id: uuid.UUID
+    runner_online: bool = False
+    created_by_id: int | None = None
+    created_at: datetime
+    latest_id: uuid.UUID | None = None
+    latest_version: int | None = None
+    total_size_bytes: int = 0
+    workspace_count: int = 0
+    versions: list[ImageArtifactOut] = []
+
+
+class CapturedImageUpdateIn(Schema):
+    """Rename a captured image."""
 
     name: str
-    workspace_id: uuid.UUID | None = None
 
 
 class ImageArtifactCreateOut(Schema):
@@ -383,6 +500,7 @@ class WorkspaceFromImageArtifactIn(Schema):
 
     name: str = ""
     credential_ids: list[uuid.UUID] = []
+    plugin_ids: list[uuid.UUID] = []
 
 
 class WorkspaceFromImageArtifactOut(Schema):
@@ -391,6 +509,7 @@ class WorkspaceFromImageArtifactOut(Schema):
     workspace_id: uuid.UUID
     task_id: uuid.UUID
     status: str
+    plugin_ids: list[uuid.UUID] = []
 
 
 class ImageDefinitionBuildSummaryOut(Schema):
@@ -404,12 +523,20 @@ class ImageDefinitionBuildSummaryOut(Schema):
 
 
 class ImageBuildJobOut(Schema):
-    """Response schema for runner-specific image build status."""
+    """Response schema for runner-specific image build status.
+
+    Includes the full ``build_log`` — used only for single-object create /
+    update responses. List responses use :class:`ImageBuildJobListOut`,
+    which carries ``build_log_size`` instead and keeps the 3s frontend
+    polling cheap.
+    """
 
     id: uuid.UUID
     image_definition_id: uuid.UUID
     runner_id: uuid.UUID
     image_artifact_id: uuid.UUID | None = None
+    current_generation_id: uuid.UUID | None = None
+    pending_generation_id: uuid.UUID | None = None
     status: str
     build_log: str
     build_task_id: uuid.UUID | None = None
@@ -422,17 +549,46 @@ class ImageBuildJobOut(Schema):
     updated_at: datetime
 
 
+class ImageBuildJobListOut(Schema):
+    """Lightweight list schema for runner image builds (polling-safe).
+
+    Same fields as :class:`ImageBuildJobOut` except the full ``build_log``
+    is replaced by ``build_log_size`` (characters). The log itself is
+    fetched on demand via ``GET .../runner-builds/{runner_id}/log/``.
+    """
+
+    id: uuid.UUID
+    image_definition_id: uuid.UUID
+    runner_id: uuid.UUID
+    image_artifact_id: uuid.UUID | None = None
+    current_generation_id: uuid.UUID | None = None
+    pending_generation_id: uuid.UUID | None = None
+    status: str
+    build_log_size: int = 0
+    build_task_id: uuid.UUID | None = None
+    built_at: datetime | None = None
+    deactivated_at: datetime | None = None
+    delete_requested_at: datetime | None = None
+    delete_confirmed_at: datetime | None = None
+    delete_last_error: str = ""
+    created_at: datetime
+    updated_at: datetime
+    versions: list[ImageArtifactOut] = []
+
+
 class ImageBuildJobCreateIn(Schema):
     """Assign runner + trigger build for an image definition."""
 
     runner_id: uuid.UUID
     activate: bool = True
+    message: str = Field(default="", max_length=500)
 
 
 class ImageBuildJobUpdateIn(Schema):
     """Update runner build lifecycle state via actions."""
 
     action: str  # deactivate | activate | rebuild
+    message: str = Field(default="", max_length=500)
 
 
 class ImageDefinitionOut(Schema):
@@ -444,11 +600,9 @@ class ImageDefinitionOut(Schema):
     name: str
     description: str
     is_standard: bool = False
-    runtime_type: str
     base_distro: str
     packages: list[str] = []
     env_vars: dict[str, str] = {}
-    custom_dockerfile: str = ""
     custom_init_script: str = ""
     is_active: bool
     status: str = "active"
@@ -469,11 +623,9 @@ class ImageDefinitionCreateIn(Schema):
 
     name: str
     description: str = ""
-    runtime_type: str = "docker"
     base_distro: str = "ubuntu:22.04"
     packages: list[str] = []
     env_vars: dict[str, str] = {}
-    custom_dockerfile: str = ""
     custom_init_script: str = ""
     is_active: bool = True
 
@@ -483,11 +635,9 @@ class ImageDefinitionUpdateIn(Schema):
 
     name: str | None = None
     description: str | None = None
-    runtime_type: str | None = None
     base_distro: str | None = None
     packages: list[str] | None = None
     env_vars: dict[str, str] | None = None
-    custom_dockerfile: str | None = None
     custom_init_script: str | None = None
     is_active: bool | None = None
 
@@ -496,3 +646,117 @@ class ImageDefinitionDuplicateIn(Schema):
     """Request schema for duplicating an image definition into the org."""
 
     name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Git schemas (productive git integration, whitelisted RPC)
+# ---------------------------------------------------------------------------
+
+#: Git mutations accepted by POST /git/operation/; reads have GET endpoints.
+GitOperation = Literal[
+    "stage_patch",
+    "unstage_patch",
+    "discard_patch",
+    "stage",
+    "unstage",
+    "discard",
+    "commit",
+    "fetch",
+    "pull",
+    "push",
+    "sync",
+    "checkout_branch",
+    "checkout_commit",
+    "checkout_remote_branch",
+    "create_branch",
+    "rename_branch",
+    "delete_branch",
+    "merge_into_current",
+    "merge_current_into",
+    "merge_abort",
+    "stash_apply",
+    "stash_pop",
+    "stash_drop",
+    "stash_branch",
+]
+
+class GitRepoQuery(Schema):
+    """Validated repository path shared by Git reads and mutations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo_path: str = Field(..., max_length=512)
+
+    @field_validator("repo_path")
+    @classmethod
+    def _check_repo_path(cls, value: str) -> str:
+        return validate_repo_path(value)
+
+
+class EditorFileWriteIn(Schema):
+    """Complete text and the revision the editor originally read."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(..., min_length=1, max_length=4096)
+    content: str = Field(..., max_length=5 * 1024 * 1024)
+    expected_revision: str = Field(..., min_length=7, max_length=64)
+
+
+class GitHistoryQuery(GitRepoQuery):
+    """Query params for GET /git/history (paged per-repo commit history)."""
+
+    history_limit: int = Field(default=50, ge=1, le=500)
+    history_skip: int = Field(default=0, ge=0)
+    branch: str | None = Field(default=None, max_length=255)
+
+    @field_validator("branch")
+    @classmethod
+    def _check_branch(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return validate_branch(value)
+
+
+class GitOperationIn(GitRepoQuery):
+    """Typed Git mutation request for POST /git/operation/.
+
+    ``operation`` is a strict whitelist literal; all other fields are
+    explicit and individually length-capped. Unknown keys are rejected
+    (``extra='forbid'``). In particular there is no ``args`` dict and no
+    ``env`` field. Commit identity (``author_*``) is never accepted from
+    the client; the service injects it from ``request.user``. The webapp
+    sends a plain ``message`` (no ``message_b64`` public API).
+    """
+
+    operation: GitOperation
+    path: str | None = Field(default=None, max_length=1024)
+    patch: str | None = Field(default=None, max_length=200 * 1024)
+    expected_index_revision: str | None = Field(default=None, max_length=64)
+    expected_worktree_revision: str | None = Field(default=None, max_length=64)
+    expected_head_revision: str | None = Field(default=None, max_length=64)
+    old_path: str | None = Field(default=None, max_length=1024)
+    paths: list[str] | None = Field(default=None, max_length=256)
+    message: str | None = Field(default=None, max_length=10000)
+    branch: str | None = Field(default=None, max_length=255)
+    commit: str | None = Field(default=None, max_length=64)
+    target: str | None = Field(default=None, max_length=255)
+    new_branch: str | None = Field(default=None, max_length=255)
+    old_branch: str | None = Field(default=None, max_length=255)
+    start_point: str | None = Field(default=None, max_length=255)
+    remote: str | None = Field(default=None, max_length=255)
+    remote_ref: str | None = Field(default=None, max_length=255)
+    local_name: str | None = Field(default=None, max_length=255)
+    checkout: bool | None = None
+    set_upstream: bool | None = None
+    stash: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def _check_operation_fields(self) -> GitOperationIn:
+        """Apply the same operation rules as internal runner dispatch."""
+        args = self.model_dump(
+            exclude={"operation", "repo_path"}, exclude_unset=True, exclude_none=True
+        )
+        for key, value in validate_git_args(self.operation, args).items():
+            setattr(self, key, value)
+        return self

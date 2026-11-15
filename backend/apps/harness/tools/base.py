@@ -1,12 +1,9 @@
-"""Tool ABC, context, registry and hook extension points.
+"""Tool ABC, context and registry.
 
 Every harness tool reaches the workspace exclusively through a
 :class:`~apps.harness.access.base.WorkspaceAccessor` (provided via
 :class:`ToolContext`). Tools never touch the local filesystem, never spawn
 local shells, and never use the ORM directly.
-
-Before/after hooks are an intentionally empty extension point: later
-milestones (plugins, MCP) can attach observers without changing tools.
 """
 
 from __future__ import annotations
@@ -20,6 +17,7 @@ import structlog
 from pydantic import BaseModel
 
 from ..access.base import WorkspaceAccessor
+from ..constants import DEFAULT_MAX_DEPTH
 from ..providers.base import ToolSchema
 from .truncate import truncate_tool_output
 
@@ -29,8 +27,15 @@ log = structlog.get_logger(__name__)
 class ToolError(Exception):
     """Raised when a tool cannot fulfill a validly dispatched call."""
 
-    def __init__(self, message: str, *, tool: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool: str = "",
+        content: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.tool = tool
+        self.content = content
         super().__init__(message)
 
 
@@ -45,12 +50,9 @@ class ToolContext:
     nesting cannot recurse without a bound. ``todowrite`` is additionally
     withheld from any child (``depth > 0``).
 
-    ``model`` carries the parent's effective model for inheritance,
-    ``parent_emit`` forwards child events to the parent emitter,
-    ``provider``/``registry``/``evaluator`` give the ``task`` tool what
-    it needs to spawn a real :class:`HarnessRunner` child (kept as
-    ``Any`` here to avoid a tools<->runner import cycle; populated by
-    the runner, ``None`` for direct unit-test use).
+    ``model`` carries the parent's effective model for inheritance.
+    ``run_subagent`` delegates child execution to the persistent harness
+    service; ``registry`` supplies the active todo service for events.
     """
 
     session_id: str
@@ -59,35 +61,43 @@ class ToolContext:
     agent_name: str = ""
     directory: str = "/workspace"
     depth: int = 0
-    max_depth: int = 1
+    max_depth: int = DEFAULT_MAX_DEPTH
     model: str = ""
-    parent_emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-    provider: Any | None = None
     registry: ToolRegistry | None = None
-    evaluator: Any | None = None
     run_subagent: Any | None = None
     call_id: str = ""
     on_question: Callable[..., Awaitable[list[Any]]] | None = None
     question_timeout: float | None = None
-    computer_use: Any | None = None
+    agent_scope: str = ""
 
 
 @dataclass
 class ToolResult:
-    """Structured result returned by every tool."""
+    """Structured result returned by every tool.
+
+    ``attachments`` carries generic file attachments (OpenCode parity):
+    each entry is ``{"type": "file", "mime": str,
+    "url": "data:<mime>;base64,<payload>", "filename": str}``.
+    ``filename`` is the workspace basename (``""`` fallback) so
+    providers and compaction can name the file without parsing the
+    data URL. Tools that produce attachments should also mirror them
+    into ``metadata["attachments"]`` for ``HarnessPart`` persistence.
+    ``ToolRegistry.execute`` only clips ``output`` and never truncates
+    ``attachments``.
+    """
 
     output: str
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-    image_jpeg: bytes | None = None
-
-
-BeforeHook = Callable[[str, BaseModel, ToolContext], Awaitable[None]]
-AfterHook = Callable[[str, BaseModel, ToolContext, ToolResult], Awaitable[None]]
+    attachments: list[dict[str, Any]] = field(default_factory=list)
+    # Checked provider content preserves MCP block boundaries and ordering.
+    content: list[dict[str, Any]] | None = None
 
 
 class Tool(abc.ABC):
     """Abstract base class for all harness tools."""
+
+    omit_tools_from: tuple[str, ...] = ()
 
     name: str = ""
     description: str = ""
@@ -98,6 +108,15 @@ class Tool(abc.ABC):
     def title(self, args: BaseModel) -> str:
         """Return a short human-readable title for this invocation."""
         return self.name or type(self).__name__
+
+    def parameters_schema(self) -> dict[str, Any]:
+        """Return the JSON schema advertised to the provider.
+
+        Default: the Pydantic v2 ``args_schema``. MCP tools override
+        this with the original MCP ``inputSchema`` (validated at
+        discovery, never a lossy translation).
+        """
+        return self.args_schema.model_json_schema()
 
     def coerce_args(self, args: BaseModel | dict[str, Any]) -> BaseModel:
         """Validate *args* against the tool schema.
@@ -123,17 +142,10 @@ class Tool(abc.ABC):
 
 
 class ToolRegistry:
-    """Registry for harness tools plus before/after hook extension points.
-
-    Hooks are plain async callables. They observe (never mutate) tool
-    invocations; future plugin/MCP support will attach here without any
-    change to the tools themselves.
-    """
+    """Register, validate and execute harness tools."""
 
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
-        self.before_hooks: list[BeforeHook] = []
-        self.after_hooks: list[AfterHook] = []
 
     def register(self, tool: Tool) -> Tool:
         """Register *tool* under its ``name``."""
@@ -168,41 +180,18 @@ class ToolRegistry:
     def schemas(self) -> list[ToolSchema]:
         """Return LLM function-calling schemas for all tools.
 
-        The JSON schema comes straight from each tool's pydantic v2
-        ``args_schema``, so provider payloads stay in sync with validation.
+        The JSON schema comes from each tool's ``parameters_schema()``
+        (MCP tools serve the original MCP ``inputSchema``), so provider
+        payloads stay in sync with validation.
         """
         return [
             ToolSchema(
                 name=tool.name,
                 description=tool.description,
-                parameters=tool.args_schema.model_json_schema(),
+                parameters=tool.parameters_schema(),
             )
             for tool in self._tools.values()
         ]
-
-    def add_before_hook(self, hook: BeforeHook) -> None:
-        """Attach an observer run before each tool execution."""
-        self.before_hooks.append(hook)
-
-    def add_after_hook(self, hook: AfterHook) -> None:
-        """Attach an observer run after each tool execution."""
-        self.after_hooks.append(hook)
-
-    async def run_before(self, name: str, args: BaseModel, ctx: ToolContext) -> None:
-        """Run all before-hooks for a tool invocation."""
-        for hook in self.before_hooks:
-            await hook(name, args, ctx)
-
-    async def run_after(
-        self,
-        name: str,
-        args: BaseModel,
-        ctx: ToolContext,
-        result: ToolResult,
-    ) -> None:
-        """Run all after-hooks for a tool invocation."""
-        for hook in self.after_hooks:
-            await hook(name, args, ctx, result)
 
     async def execute(
         self,
@@ -210,7 +199,7 @@ class ToolRegistry:
         args: BaseModel | dict[str, Any],
         ctx: ToolContext,
     ) -> ToolResult:
-        """Validate *args*, run hooks, and execute the named tool."""
+        """Validate *args*, execute the named tool and bound its output."""
         tool = self.get(name)
         validated = tool.coerce_args(args)
         log.info(
@@ -219,7 +208,6 @@ class ToolRegistry:
             session_id=ctx.session_id,
             agent=ctx.agent_name,
         )
-        await self.run_before(tool.name, validated, ctx)
         result = await tool.execute(validated, ctx)
         direction = getattr(tool, "truncate_direction", "head")
         if direction not in ("head", "tail"):
@@ -229,19 +217,9 @@ class ToolRegistry:
             direction=direction,  # type: ignore[arg-type]
         )
         if clipped.truncated:
-            from .spill import build_spill_hint, spill_full_output, task_available
+            from .spill import preserve_full_output
 
-            spill_path = await spill_full_output(ctx, result.output)
+            full_output = result.output
             result.output = clipped.content
-            result.truncated = True
-            metadata: dict[str, Any] = dict(result.metadata or {})
-            metadata["truncated"] = True
-            if spill_path is not None:
-                metadata["output_path"] = spill_path
-                result.output += build_spill_hint(
-                    spill_path,
-                    task_hint=task_available(ctx),
-                )
-            result.metadata = metadata
-        await self.run_after(tool.name, validated, ctx, result)
+            await preserve_full_output(ctx, result, full_output)
         return result

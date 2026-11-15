@@ -21,11 +21,7 @@ from apps.harness.providers.base import (
     ProviderTimeoutError,
     ToolSchema,
 )
-from apps.harness.providers.openrouter import (
-    OpenRouterAdapter,
-    httpx_stream_timeout,
-    positive_timeout,
-)
+from apps.harness.providers.openrouter import OpenRouterAdapter
 
 
 def _sse_payload(chunks: list[dict]) -> bytes:
@@ -121,22 +117,6 @@ def test_chat_options_timeout_defaults_match_opencode() -> None:
     assert opts.timeout_seconds is None
 
 
-def test_httpx_stream_timeout_disables_read() -> None:
-    """httpx must not apply a read timeout between SSE tokens."""
-    timeout = httpx_stream_timeout(ChatOptions())
-    assert timeout.read is None
-    assert timeout.connect == 300.0
-    assert timeout.write == 300.0
-
-
-def test_positive_timeout_treats_zero_as_disabled() -> None:
-    """Zero and negative timeouts disable that phase, like OpenCode false."""
-    assert positive_timeout(None) is None
-    assert positive_timeout(0) is None
-    assert positive_timeout(-1) is None
-    assert positive_timeout(1.5) == 1.5
-
-
 async def test_chat_stream_happy_path_text_toolcall_reasoning() -> None:
     """Text, reasoning, tool-call and usage deltas stream correctly."""
     payload = _sse_payload(
@@ -207,6 +187,71 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning() -> None:
     assert usages[-1].prompt_tokens == 10
     assert usages[-1].cost == pytest.approx(0.0123)
     assert deltas[-1].finish_reason == "tool_calls"
+
+
+async def test_chat_stream_mixed_chunk_order_deterministic() -> None:
+    """text/tool/text/tool chunks stream in wire order (no reordering)."""
+    payload = _sse_payload(
+        [
+            {"choices": [{"delta": {"content": "t0 "}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-a",
+                                    "function": {
+                                        "name": "read",
+                                        "arguments": '{"path":"a"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [{"delta": {"content": "t1 "}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "call-b",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": '{"command":"ls"}',
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+    adapter = OpenRouterAdapter(api_key="test-key", client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "model-x",
+            [LLMMessage(role="user", content="hi")],
+            [ToolSchema(name="read", description="r")],
+        )
+    ]
+    kinds = [
+        "text" if d.text else ("tool" if d.tool_calls else "other") for d in deltas
+    ]
+    assert kinds[:4] == ["text", "tool", "text", "tool"]
+    assert "".join(d.text for d in deltas) == "t0 t1 "
+    tool_calls = [c for d in deltas for c in d.tool_calls]
+    assert [c["id"] for c in tool_calls] == ["call-a", "call-b"]
 
 
 async def test_chat_stream_auth_error() -> None:
@@ -392,3 +437,356 @@ def test_message_to_dict_preserves_multimodal_content() -> None:
         ChatOptions(),
     )
     assert payload["messages"][0]["content"] == parts
+
+
+def test_map_finish_reason_normalizes_variants() -> None:
+    """Finish reasons normalize incl. hyphenated content-filter."""
+    assert OpenRouterAdapter._map_finish_reason(None) is None
+    assert OpenRouterAdapter._map_finish_reason("stop") == "stop"
+    assert OpenRouterAdapter._map_finish_reason("length") == "length"
+    assert OpenRouterAdapter._map_finish_reason("content_filter") == "content_filter"
+    assert OpenRouterAdapter._map_finish_reason("content-filter") == "content_filter"
+    assert OpenRouterAdapter._map_finish_reason("function_call") == "tool_calls"
+    assert OpenRouterAdapter._map_finish_reason("tool_calls") == "tool_calls"
+    assert OpenRouterAdapter._map_finish_reason("something_new") == "unknown"
+
+
+def test_map_usage_total_fallback_and_cost() -> None:
+    """Reported total wins; else prompt+completion; cost preserved."""
+    usage = OpenRouterAdapter._map_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 0, "cost": 0.5}
+    )
+    assert usage is not None
+    assert usage.total_tokens == 15
+    assert usage.cost == pytest.approx(0.5)
+    usage_reported = OpenRouterAdapter._map_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 99}
+    )
+    assert usage_reported is not None
+    assert usage_reported.total_tokens == 99
+    assert OpenRouterAdapter._map_usage("nope") is None
+
+
+def test_parse_chunk_hyphenated_content_filter() -> None:
+    """A 'content-filter' finish_reason normalizes to 'content_filter'."""
+    adapter = OpenRouterAdapter(api_key="k")
+    delta = adapter._parse_chunk('{"choices": [{"delta": {}, "finish_reason": "content-filter"}]}')
+    assert delta is not None
+    assert delta.finish_reason == "content_filter"
+
+
+def test_parse_chunk_network_error_is_retryable() -> None:
+    """OpenCode network_error finish reasons raise a retryable stream error."""
+    adapter = OpenRouterAdapter(api_key="k")
+    with pytest.raises(ProviderResponseError, match="network_error") as exc_info:
+        adapter._parse_chunk(
+            '{"choices": [{"delta": {}, "finish_reason": "network_error"}]}'
+        )
+    assert exc_info.value.is_retryable is True
+
+
+async def test_chat_stream_read_error_is_retryable() -> None:
+    """Mid-stream httpx.ReadError maps to Connection reset by server."""
+    adapter = OpenRouterAdapter(
+        api_key="k",
+        client=_delayed_client(error=httpx.ReadError("")),
+    )
+    with pytest.raises(
+        ProviderResponseError, match="Connection reset by server"
+    ) as exc_info:
+        async for _ in adapter.chat_stream("m", [], []):
+            pass
+    assert exc_info.value.is_retryable is True
+
+
+def test_parse_chunk_error_chunk_uses_code_message_format() -> None:
+    """SSE error chunks raise 'code: message' and are compaction-visible."""
+    import json
+
+    from apps.harness.providers.context_errors import is_context_overflow_error
+
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = json.dumps(
+        {"error": {"code": "context_length_exceeded", "message": "too many tokens"}}
+    )
+    with pytest.raises(ProviderResponseError) as exc_info:
+        adapter._parse_chunk(payload)
+    error = exc_info.value
+    assert str(error) == "context_length_exceeded: too many tokens"
+    assert error.is_retryable is False
+    assert is_context_overflow_error(error)
+
+
+def test_parse_chunk_generic_error_chunk_raises_response_error() -> None:
+    """Non-overflow SSE error chunks still surface as ProviderResponseError."""
+    import json
+
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = json.dumps({"error": {"code": "server_error", "message": "boom"}})
+    with pytest.raises(ProviderResponseError, match="server_error: boom"):
+        adapter._parse_chunk(payload)
+
+
+async def test_http_overflow_body_is_compaction_visible() -> None:
+    """HTTP error bodies with overflow text are detected by compaction."""
+    from apps.harness.providers.context_errors import is_context_overflow_error
+
+    body = b'{"error": {"message": "This request exceeds the context window"}}'
+    adapter = OpenRouterAdapter(api_key="k", client=_mock_client(body, 400))
+    with pytest.raises(ProviderResponseError) as exc_info:
+        async for _ in adapter.chat_stream("m", [], []):
+            pass
+    assert is_context_overflow_error(exc_info.value)
+
+
+def test_tool_schema_projection_merges_anyof() -> None:
+    """anyOf variants merge into properties with type object + additionalProperties false."""
+    from apps.harness.providers._lowering import project_openai_tool_schema
+
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "object", "properties": {"b": {"type": "number"}}},
+        ]
+    }
+    projected = project_openai_tool_schema(schema)
+    assert projected["type"] == "object"
+    assert set(projected["properties"]) == {"a", "b"}
+    assert projected["additionalProperties"] is False
+
+
+def test_tool_schema_projection_strips_null_variants() -> None:
+    """Null anyOf variants are stripped; single record merges into parent."""
+    from apps.harness.providers._lowering import project_openai_tool_schema
+
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+            {"type": "null"},
+        ]
+    }
+    projected = project_openai_tool_schema(schema)
+    assert projected["type"] == "object"
+    assert set(projected.get("properties", {})) == {"a"}
+
+
+def test_build_payload_tool_choice_mapping() -> None:
+    """auto/none/required pass through; tool names become function choice."""
+    adapter = OpenRouterAdapter(api_key="k")
+    assert (
+        adapter._build_payload("m", [], [], ChatOptions(tool_choice="required"))[
+            "tool_choice"
+        ]
+        == "required"
+    )
+    payload = adapter._build_payload("m", [], [], ChatOptions(tool_choice="read"))
+    assert payload["tool_choice"] == {"type": "function", "function": {"name": "read"}}
+
+
+def test_build_payload_projects_tool_schema() -> None:
+    """Tools are sent through the OpenAI schema projection."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [],
+        [
+            ToolSchema(
+                name="read",
+                description="r",
+                parameters={
+                    "anyOf": [{"properties": {"a": {"type": "string"}}}],
+                },
+            )
+        ],
+        ChatOptions(),
+    )
+    params = payload["tools"][0]["function"]["parameters"]
+    assert params["type"] == "object"
+    assert set(params["properties"]) == {"a"}
+
+
+def test_system_update_wrapped_as_user() -> None:
+    """Second+ system messages become <system-update> user text."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(role="system", content="sys1"),
+            LLMMessage(role="user", content="hi"),
+            LLMMessage(role="system", content="upd <x>"),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0] == {"role": "system", "content": "sys1"}
+    wrapped = payload["messages"][-1]
+    assert wrapped["role"] == "user"
+    assert wrapped["content"].startswith("<system-update>\n")
+    assert "&lt;x&gt;" in wrapped["content"]
+
+
+def test_assistant_reasoning_replay_and_tool_text_join() -> None:
+    """Assistant reasoning parts replay; tool dict content stays multimodal."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="assistant",
+                content=[
+                    {"type": "text", "text": "ans"},
+                    {"type": "reasoning", "text": "think"},
+                ],
+                tool_calls=[{"id": "c1", "name": "read", "arguments": {"p": "a"}}],
+            ),
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "out"},
+                    {"type": "image_url", "image_url": {"url": "data:x"}},
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assistant = payload["messages"][0]
+    assert assistant["content"] == "ans"
+    assert assistant["reasoning_content"] == "think"
+    assert assistant["tool_calls"][0]["function"]["arguments"] == '{"p": "a"}'
+    assert payload["messages"][1] == {
+        "role": "tool",
+        "content": [
+            {"type": "text", "text": "out"},
+            {"type": "image_url", "image_url": {"url": "data:x"}},
+        ],
+        "tool_call_id": "c1",
+    }
+
+
+def test_tool_text_only_list_collapses_to_string() -> None:
+    """Image-less tool lists stay plain strings (backwards compatible)."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[{"type": "text", "text": "out"}],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == "out"
+
+
+def test_tool_image_only_list_keeps_image_part() -> None:
+    """Image-only tool content reaches the model without a text part."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    }
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    ]
+
+
+def test_tool_pdf_file_part_becomes_chat_file_part() -> None:
+    """Canonical PDF file parts lower to OpenAI-Chat file parts."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "PDF read successfully"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    },
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    content = payload["messages"][0]["content"]
+    assert isinstance(content, list)
+    assert {"type": "text", "text": "PDF read successfully"} in content
+    assert {
+        "type": "file",
+        "file": {
+            "filename": "doc.pdf",
+            "file_data": "data:application/pdf;base64,BBBB",
+        },
+    } in content
+
+
+def test_tool_pdf_file_part_without_filename_defaults() -> None:
+    """PDF file parts without filename still lower (default name)."""
+    adapter = OpenRouterAdapter(api_key="k")
+    lowered = adapter._tool_content(
+        [
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": "data:application/pdf;base64,BBBB",
+            }
+        ]
+    )
+    assert lowered == [
+        {
+            "type": "file",
+            "file": {
+                "filename": "document.pdf",
+                "file_data": "data:application/pdf;base64,BBBB",
+            },
+        }
+    ]
+
+
+def test_tool_unknown_file_mime_is_dropped_without_crash() -> None:
+    """Unknown file MIMEs are dropped; text output survives."""
+    adapter = OpenRouterAdapter(api_key="k")
+    payload = adapter._build_payload(
+        "m",
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "done"},
+                    {
+                        "type": "file",
+                        "mime": "application/zip",
+                        "url": "data:application/zip;base64,AAAA",
+                        "filename": "a.zip",
+                    },
+                ],
+                tool_call_id="c1",
+            ),
+        ],
+        [],
+        ChatOptions(),
+    )
+    assert payload["messages"][0]["content"] == "done"

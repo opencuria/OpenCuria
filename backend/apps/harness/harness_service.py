@@ -1,24 +1,8 @@
-"""
-Harness session lifecycle service (M6, additive).
+"""Application facade for saved conversations and composed run services.
 
-``HarnessService`` owns the persistent side of agent runs while
-``HarnessRunner`` (M4/M5) owns the streaming loop. The service:
-
-- creates/gets/lists ``HarnessSession`` rows per workspace,
-- persists a user message + assistant message shell on run start,
-- builds message history from the DB (not from in-memory parameters),
-- starts ``HarnessRunner.run`` as an ``asyncio.Task`` tracked per
-  session (one active run per session; a second start is rejected
-  with :class:`ConflictError`, surfaced as HTTP 409),
-- writes runner events back to ``HarnessMessage``/``HarnessPart`` rows
-  (text deltas appended, tool states transitioned, step-finish with
-  cost/tokens) and forwards them to subscribed frontend clients via
-  ``emit_to_frontend``,
-- aborts runs by cancelling the task and marking message/parts aborted,
-- binds the M3 permission flow: ask gates persist a
-  ``PermissionRequest`` and resolve through ``PermissionService``.
-
-No ORM outside repositories. No real LLM calls (provider injected).
+Preparation, admission, execution, provider scopes, subagents and cancellation
+have independent collaborators. RunRegistry is the single local ownership model;
+repositories remain the authority for cross-process admission and recovery.
 """
 
 from __future__ import annotations
@@ -27,49 +11,69 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
+import anyio
 import structlog
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
 
-from common.exceptions import ConflictError, NotFoundError
+from apps.runners.services import get_runner_service
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
+from apps.runners.services.workspace_plugin_runtime import (
+    WorkspacePluginRuntimeService,
+)
+from apps.skills.services import SkillService
+from common import realtime
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
-from .compaction import CHECKPOINT_PREFIX
-from .images import hydrate_user_messages
+from .conversation_events import ConversationEvents
+from .conversation_service import ConversationService
+from .interaction_service import InteractionService
+from .media.tool_media import ToolMediaStore
 from .models import (
     HarnessMessage,
-    HarnessPart,
+    HarnessRunStatus,
     HarnessSession,
     HarnessSessionStatus,
 )
 from .permissions.service import PermissionService
-from .providers.base import ChatOptions, LLMMessage, ProviderAdapter, Usage
+from .provider_history_service import ProviderHistoryService
+from .providers.base import LLMMessage, ProviderAdapter
+from .providers.model_ref import namespaced_model_id
 from .providers.models_catalog import normalize_reasoning_effort
+from .redaction import redact_text
 from .repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
-    QuestionRequestRepository,
-    TodoRepository,
 )
-from .runner import HarnessRunner, RunOptions
-from .tools import default_tool_registry
+from .run_events import publish_assistant_run_finished, publish_session_activity
+from .run_timeline import (
+    FRONTEND_EVENT_PART,
+    FRONTEND_EVENT_SUBTASK_STARTED,
+    RunTimeline,
+    tail_remainder,
+)
+from .runner import HarnessRunner
+from .session_access_service import SessionAccessService
+from .session_metadata_service import SessionMetadataService, title_from_prompt
+from .session_settings_service import SessionSettingsService
+from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
+from .todos.repositories import TodoRepository
 from .tools.subagents import TaskArgs
-from .tools.todos import TodoWriteTool, repository_for_session
-from .tools.truncate import truncate_tool_output
+
+if TYPE_CHECKING:
+    from .command_service import RemoteHarnessService
 
 log = structlog.get_logger(__name__)
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
-FRONTEND_EVENT_PART = "harness.part_updated"
-FRONTEND_EVENT_PERMISSION = "harness.permission_required"
-FRONTEND_EVENT_QUESTION = "harness.question_required"
+
 FRONTEND_EVENT_STATUS = "harness.session_status"
-FRONTEND_EVENT_TODO = "harness.todo_updated"
-FRONTEND_EVENT_SUBTASK_STARTED = "harness.subtask_started"
-FRONTEND_EVENT_SUBTASK_FINISHED = "harness.subtask_finished"
+FRONTEND_EVENT_STEER_QUEUE = "harness.steer_queue"
 
 
 class HarnessService:
@@ -83,27 +87,252 @@ class HarnessService:
         parts: type[HarnessPartRepository] | None = None,
         todos: type[TodoRepository] | None = None,
         permissions: PermissionService | None = None,
+        skills: SkillService | None = None,
+        workspace_admission: WorkspaceAdmissionService | None = None,
+        plugin_runtime: WorkspacePluginRuntimeService | None = None,
         emit: EmitFn | None = None,
         runner_factory: Callable[..., HarnessRunner] | None = None,
         provider_factory: Callable[[uuid.UUID], ProviderAdapter] | None = None,
         accessor_factory: Callable[[str], Any] | None = None,
+        process_cleanup: Callable[..., Any] | None = None,
+        engine_registry: Any | None = None,
+        engine_connections: Any | None = None,
+        run_service: Any | None = None,
     ) -> None:
-        """Create the service with injectable seams (tests fake them)."""
+        """Create the service with injectable seams (tests fake them).
+
+        ``process_cleanup`` stops session-scoped temp processes when a
+        run finishes (called with ``workspace_id``, ``session_id`` and
+        ``reason``); production wires the runners ``RunnerService``,
+        tests inject a fake.
+        """
         self.sessions = sessions or HarnessSessionRepository
         self.messages = messages or HarnessMessageRepository
         self.parts = parts or HarnessPartRepository
+        self.history = ProviderHistoryService(messages=self.messages, parts=self.parts)
         self.todos = todos or TodoRepository
         self.permissions = permissions or PermissionService()
+        self.skills = skills or SkillService()
+        self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
+        self.plugin_runtime = plugin_runtime or WorkspacePluginRuntimeService()
         self._emit = emit
+        self.conversation_events = ConversationEvents(emit=self._emit_frontend)
+        self.conversations = ConversationService(
+            sessions=self.sessions,
+            messages=self.messages,
+            parts=self.parts,
+            todos=self.todos,
+            events=self.conversation_events,
+            workspace_admission=self.workspace_admission,
+        )
+        self.session_settings = SessionSettingsService(
+            sessions=self.sessions,
+            skills=self.skills,
+            events=self.conversation_events,
+            workspace_admission=self.workspace_admission,
+        )
+        self.interactions = InteractionService(
+            sessions=self.sessions,
+            workspace_admission=self.workspace_admission,
+            permissions=self.permissions,
+            emit=self._emit_frontend,
+            is_running=self.is_running,
+        )
+        self.timeline = RunTimeline(
+            messages=self.messages,
+            parts=self.parts,
+            run_context=lambda session_id: self.run_registry.get_context(session_id),
+            emit=self._emit_frontend,
+            media=ToolMediaStore(accessor_factory),
+        )
         self._runner_factory = runner_factory
         self._provider_factory = provider_factory
         self._accessor_factory = accessor_factory
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._pending_permissions: dict[str, asyncio.Future[str]] = {}
-        self._pending_questions: dict[str, asyncio.Future[list[Any]]] = {}
-        self._event_locks: dict[str, asyncio.Lock] = {}
-        # run context kept in memory: session_id -> dict
-        self._runs: dict[str, dict[str, Any]] = {}
+        from .run_state import RunRegistry
+
+        self.run_registry = RunRegistry()
+        from .background_tasks import BackgroundTaskSupervisor
+
+        self._background = BackgroundTaskSupervisor()
+        self._process_cleanup = process_cleanup
+        self._engine_registry = engine_registry
+        self._engine_connections = engine_connections
+        self._run_service = run_service
+        self._provider_turns = None
+        self._provider_turn_roots: dict[str, dict[str, Any]] = {}
+        self.metadata = SessionMetadataService(
+            sessions=self.sessions,
+            messages=self.messages,
+            provider_factory=provider_factory,
+            emit=self._emit_frontend,
+            conversations_changed=self.conversation_events.emit,
+        )
+
+    def _run_cancellation(self) -> Any:
+        """Compose RunCancellation with the current application ports."""
+        from .run_cancellation import RunCancellation, RunCancellationPorts
+
+        return RunCancellation(
+            RunCancellationPorts(
+                close_steering=self._close_steering,
+                emit_empty_steer_queue=self._emit_empty_steer_queue,
+                ensure_external_attempt_reconciled=self._ensure_external_attempt_reconciled,
+                run_service_for_engine=self._run_service_for_engine,
+                spawn_background=self._spawn_background,
+                conversations=self.conversations,
+                interactions=self.interactions,
+                run_registry=self.run_registry,
+                sessions=self.sessions,
+            )
+        )
+
+    def _provider_turn_lifecycle(self) -> Any:
+        """Compose ProviderTurnLifecycle with the current application ports."""
+        from .provider_turn_lifecycle import (
+            ProviderTurnLifecycle,
+            ProviderTurnLifecyclePorts,
+        )
+
+        return ProviderTurnLifecycle(
+            ProviderTurnLifecyclePorts(
+                cancel_owned_task=self._cancel_owned_task,
+                descendant_keys=self._descendant_keys,
+                owned_run_task=self._owned_run_task,
+                provider_turn_roots=self._provider_turn_roots,
+                provider_turn_service=self._provider_turn_service,
+                interactions=self.interactions,
+                run_registry=self.run_registry,
+            )
+        )
+
+    def _subagent_coordinator(self) -> Any:
+        """Compose SubagentCoordinator with the current application ports."""
+        from .subagent_coordinator import SubagentCoordinator, SubagentCoordinatorPorts
+
+        return SubagentCoordinator(
+            SubagentCoordinatorPorts(
+                agent_configs_map=self._agent_configs_map,
+                catalog_efforts_for_model=self._catalog_efforts_for_model,
+                on_runner_event=self._on_runner_event,
+                parent_stop_in_progress=self._parent_stop_in_progress,
+                provider_turn_context=self._provider_turn_context,
+                create_session=self.create_session,
+                is_running=self.is_running,
+                messages=self.messages,
+                run_registry=self.run_registry,
+                session_settings=self.session_settings,
+                sessions=self.sessions,
+                start_run=self.start_run,
+            )
+        )
+
+    def _engine_registry_for_run(self) -> Any:
+        """Return the configured factory or the default native/Claude adapter."""
+        if self._engine_registry is None:
+            from .engines.service_runtime import default_engine_registry
+
+            self._engine_registry = default_engine_registry()
+        return self._engine_registry
+
+    def _engine_connection_service(self) -> Any:
+        if self._engine_connections is None:
+            from .engines.connections import EngineConnectionService
+
+            self._engine_connections = EngineConnectionService()
+        return self._engine_connections
+
+    def _run_service_for_engine(self) -> Any:
+        if self._run_service is None:
+            from .engines.runs import HarnessRunService
+
+            self._run_service = HarnessRunService()
+        return self._run_service
+
+    def _resolve_engine_auth(
+        self,
+        organization_id: uuid.UUID,
+        user_id: int,
+        connection_id: uuid.UUID | str | None,
+    ) -> Any:
+        """Resolve owned personal authorization without persisting credentials."""
+        return self._engine_connection_service().resolve(
+            organization_id, user_id, connection_id
+        )
+
+    @property
+    def _provider_turn_service(self):
+        """Lazily construct and cache the per-answer domain service."""
+        if self._provider_turns is None:
+            from .provider_turns import ProviderTurnService
+
+            self._provider_turns = ProviderTurnService()
+        return self._provider_turns
+
+    def _capture_provider_account_ids(
+        self, organization_id: uuid.UUID, user_id: int
+    ) -> dict[str, str]:
+        """Capture active selections for the authenticated initiating user."""
+        return self._provider_turn_service.capture_account_ids(organization_id, user_id)
+
+    def _provider_turn_context(self, session: HarnessSession) -> dict[str, Any]:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return self._provider_turn_lifecycle()._provider_turn_context(session)
+
+    async def _register_provider_use(
+        self, turn_id: uuid.UUID | str | None, account_id: uuid.UUID | str | None
+    ) -> None:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._register_provider_use(
+            turn_id, account_id
+        )
+
+    async def _provider_turn_revocation_message(self, session: HarnessSession) -> str:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._provider_turn_revocation_message(
+            session
+        )
+
+    async def _finish_provider_turn(self, context: dict[str, Any]) -> None:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._finish_provider_turn(context)
+
+    async def _finish_provider_hold(
+        self, turn_id: uuid.UUID | str, holder: str
+    ) -> None:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._finish_provider_hold(
+            turn_id, holder
+        )
+
+    async def _maybe_finish_provider_monitor(self, root: dict[str, Any]) -> None:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._maybe_finish_provider_monitor(
+            root
+        )
+
+    def _watch_provider_followup(
+        self, context: dict[str, Any], task: asyncio.Task, holder: str
+    ) -> None:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return self._provider_turn_lifecycle()._watch_provider_followup(
+            context, task, holder
+        )
+
+    async def _monitor_provider_turn(
+        self,
+        *,
+        session: HarnessSession,
+        context: dict[str, Any],
+        event: asyncio.Event,
+        watched_accounts: set[uuid.UUID],
+    ) -> None:
+        """Delegate to the ProviderTurnLifecycle domain boundary."""
+        return await self._provider_turn_lifecycle()._monitor_provider_turn(
+            session=session,
+            context=context,
+            event=event,
+            watched_accounts=watched_accounts,
+        )
 
     # -- session lifecycle ------------------------------------------------
 
@@ -121,12 +350,58 @@ class HarnessService:
         parent_id: uuid.UUID | None = None,
         skill_ids: list[str] | None = None,
         user_id: int | None = None,
+        harness_id: str = "native",
+        connection_id: uuid.UUID | str | None = None,
     ) -> HarnessSession:
         """Create a session row (prompt persisted on run start)."""
+        self.workspace_admission.ensure_interactions_available(workspace_id)
+        if parent_id is not None:
+            parent_session = self.conversations.get_session(parent_id)
+            harness_id = getattr(parent_session, "harness_id", "native") or "native"
+            if (
+                parent_session.workspace_id != workspace_id
+                or parent_session.organization_id != organization_id
+            ):
+                raise ValueError(
+                    "Child sessions must share their parent workspace and organization"
+                )
+            if harness_id in {"claude", "codex"}:
+                created_by_id = getattr(parent_session, "created_by_id", None)
+                if user_id is not None and str(user_id) != str(created_by_id):
+                    raise AuthenticationError(
+                        "External child sessions inherit their owner's scope"
+                    )
+                if created_by_id is None:
+                    raise AuthenticationError(
+                        "External child sessions require an owner"
+                    )
+                user_id = created_by_id
+                connection_id = None
+                if harness_id == "codex":
+                    model = model or parent_session.model
+                    if skill_ids is None:
+                        skill_ids = list(parent_session.skill_ids or [])
+        from .engines.catalog import (
+            DEFAULT_CLAUDE_EFFORT,
+            DEFAULT_CLAUDE_MODEL,
+            ENGINE_IDS,
+            normalize_claude_effort,
+            normalize_claude_model,
+        )
+
+        engine_id = (harness_id or "native").strip().lower()
+        if engine_id not in ENGINE_IDS:
+            raise ValueError(f"Unknown harness engine {harness_id!r}")
         normalized_mode = (mode or "build").strip().lower()
         if normalized_mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         requested = (agent_name or "").strip().lower()
+        if engine_id in {"claude", "codex"} and requested in {
+            "title",
+            "summary",
+            "compaction",
+        }:
+            raise ValueError(f"{engine_id} engine cannot use hidden harness agents")
         # Root sessions: agent_name follows mode (plan|build). Child sessions
         # honor subagent agent_name while keeping parent plan|build mode.
         resolved_agent = normalized_mode
@@ -141,315 +416,500 @@ class HarnessService:
         get_agent(resolved_agent)  # raises KeyError for unknown agents
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
-        normalized_skills = _normalize_skill_ids(skill_ids)
+        normalized_skills = SkillService.normalize_ids(skill_ids)
         if normalized_skills and user_id is not None:
-            resolve_skill_bodies(
+            self.skills.resolve_bodies(
                 normalized_skills,
                 user_id=user_id,
                 organization_id=organization_id,
             )
-        session = self.sessions.create(
-            workspace_id=workspace_id,
-            organization_id=organization_id,
-            title=title or _title_from_prompt(prompt),
-            mode=normalized_mode,
-            agent_name=resolved_agent,
-            model=(model or "").strip(),
-            reasoning_effort=normalize_reasoning_effort(reasoning_effort),
-            parent_id=parent_id,
-            skill_ids=normalized_skills,
-        )
-        log.info("harness_session_created", session_id=str(session.id))
-        return session
+        codex_provider_id = None
+        if engine_id == "codex":
+            from .engines.codex.catalog import codex_provider
+            from .engines.service import EngineCatalogService
 
-    def get_session(self, session_id: uuid.UUID) -> HarnessSession:
-        """Return a session or raise NotFoundError."""
-        session = self.sessions.get_by_id(session_id)
-        if session is None:
-            raise NotFoundError("HarnessSession", str(session_id))
-        return session
-
-    def ensure_user_promptable(self, session: HarnessSession) -> None:
-        """Raise when users must not send follow-up prompts to *session*.
-
-        Subagent child sessions (``parent_id`` set) are launched internally
-        and are not a user-addressable chat. ``start_run`` itself stays
-        allowed so the task tool can start the child run.
-        """
-        if session.parent_id is not None:
-            raise ValueError("Cannot send messages to a subagent session")
-
-    def get_session_for_workspace(
-        self,
-        session_id: uuid.UUID,
-        workspace_id: uuid.UUID,
-    ) -> HarnessSession:
-        """Return a workspace-scoped session or raise NotFoundError."""
-        session = self.sessions.get_for_workspace(session_id, workspace_id)
-        if session is None:
-            raise NotFoundError("HarnessSession", str(session_id))
-        return session
-
-    def set_mode(self, session_id: uuid.UUID, mode: str) -> HarnessSession:
-        """Persist a mode change (plan|build) and align primary agent_name."""
-        normalized = (mode or "").strip().lower()
-        if normalized not in ("plan", "build"):
-            raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
-        session = self.get_session(session_id)
-        return self.sessions.set_mode(session, normalized)
-
-    def set_model(self, session_id: uuid.UUID, model: str) -> HarnessSession:
-        """Persist a model override for subsequent runs."""
-        session = self.get_session(session_id)
-        return self.sessions.set_model(session, (model or "").strip())
-
-    def set_reasoning_effort(
-        self, session_id: uuid.UUID, reasoning_effort: str
-    ) -> HarnessSession:
-        """Persist a reasoning-effort override for subsequent runs."""
-        session = self.get_session(session_id)
-        return self.sessions.set_reasoning_effort(
-            session, normalize_reasoning_effort(reasoning_effort)
-        )
-
-    def update_title(self, session_id: uuid.UUID, title: str) -> HarnessSession:
-        """Rename a session (title only)."""
-        session = self.get_session(session_id)
-        normalized = (title or "").strip()
-        if not normalized:
-            raise ValueError("title must not be empty")
-        return self.sessions.set_title(session, normalized)
-
-    def update_skill_ids(
-        self,
-        session_id: uuid.UUID,
-        skill_ids: list[str],
-        *,
-        user_id: int,
-        organization_id: uuid.UUID,
-    ) -> HarnessSession:
-        """Persist skill selection after validating visibility."""
-        session = self.get_session(session_id)
-        normalized = _normalize_skill_ids(skill_ids)
-        if normalized:
-            resolve_skill_bodies(
-                normalized,
-                user_id=user_id,
-                organization_id=organization_id,
+            if user_id is None:
+                raise AuthenticationError("A user is required for Codex authorization")
+            parent_provider = (
+                codex_provider(parent_session.model, parent_session.engine_state)
+                if parent_id is not None
+                else None
             )
-        return self.sessions.set_skill_ids(session, normalized)
-
-    async def delete_session(self, session_id: uuid.UUID) -> None:
-        """Delete a session, aborting any active run first."""
-        session = await sync_to_async(self.get_session)(session_id)
-        if self.is_running(session.id):
-            await self.abort_run(session.id)
-        await sync_to_async(self.sessions.delete)(session)
-
-    def list_conversations(
-        self,
-        *,
-        organization_id: uuid.UUID,
-        workspace_ids: list[uuid.UUID],
-    ) -> list[dict[str, Any]]:
-        """List root sessions across owned workspaces (conversations feed)."""
-        sessions = self.sessions.list_for_workspaces(workspace_ids)
-        workspace_names: dict[str, str] = {}
-        if sessions:
-            from apps.runners.models import Workspace
-
-            rows = Workspace.objects.filter(
-                id__in={session.workspace_id for session in sessions}
-            ).only("id", "name")
-            workspace_names = {str(row.id): row.name for row in rows}
-        unread_map = self.unread_for_sessions(sessions)
-        return [
-            {
-                "session_id": str(session.id),
-                "workspace_id": str(session.workspace_id),
-                "workspace_name": workspace_names.get(str(session.workspace_id), ""),
-                "title": session.title or "",
-                "status": session.status,
-                "mode": session.mode,
-                "agent_name": session.agent_name,
-                "model": session.model or "",
-                "reasoning_effort": session.reasoning_effort or "",
-                "unread": unread_map.get(session.id, False),
-                "updated_at": session.updated_at.isoformat(),
-            }
-            for session in sessions
-        ]
-
-    def mark_session_read(self, session_id: uuid.UUID) -> HarnessSession:
-        """Persist that the user opened a harness session."""
-        session = self.get_session(session_id)
-        return self.sessions.mark_read(session)
-
-    def unread_for_sessions(
-        self, sessions: list[HarnessSession]
-    ) -> dict[uuid.UUID, bool]:
-        """Return unread flags keyed by session id."""
-        if not sessions:
-            return {}
-        latest_assistant_at = self.messages.latest_assistant_completed_at_by_session(
-            [session.id for session in sessions]
-        )
-        return {
-            session.id: self._is_conversation_unread(
-                session,
-                latest_assistant_at.get(session.id),
+            inherited = self._provider_turn_context(parent_session) if parent_id else {}
+            model, reasoning_effort = EngineCatalogService().validate_codex_config(
+                organization_id,
+                user_id,
+                model,
+                reasoning_effort,
+                provider=parent_provider,
+                account_ids=inherited.get("account_ids"),
             )
-            for session in sessions
+            codex_provider_id = codex_provider(model)
+        normalized_effort = (
+            normalize_claude_effort(reasoning_effort or DEFAULT_CLAUDE_EFFORT)
+            if engine_id == "claude"
+            else reasoning_effort
+            if engine_id == "codex"
+            else normalize_reasoning_effort(reasoning_effort)
+        )
+        normalized_model = (
+            normalize_claude_model(model or DEFAULT_CLAUDE_MODEL)
+            if engine_id == "claude"
+            else (model or "").strip()
+        )
+        if engine_id == "native" and not normalized_effort:
+            # Fall back to the AgentConfig fixed effort of the resolved agent
+            # (inherit-mode leaves "" so the caller decides).
+            try:
+                defaults = HarnessService._agent_defaults(
+                    organization_id, resolved_agent
+                )
+                if not defaults["inherit_model"]:
+                    normalized_effort = normalize_reasoning_effort(defaults["effort"])
+            except Exception:
+                normalized_effort = ""
+        session_kwargs: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "organization_id": organization_id,
+            "title": title or title_from_prompt(prompt),
+            "mode": normalized_mode,
+            "agent_name": resolved_agent,
+            "model": normalized_model,
+            "reasoning_effort": normalized_effort,
+            "parent_id": parent_id,
+            "skill_ids": normalized_skills,
         }
+        if engine_id != "native":
+            if user_id is None:
+                raise AuthenticationError("An engine provider account is required")
+            if engine_id == "codex":
+                if connection_id is not None:
+                    raise ValueError(
+                        "Codex uses the selected provider account, not connection_id"
+                    )
+            else:
+                from .provider_accounts import ProviderAccountService
 
-    def is_session_unread(self, session: HarnessSession) -> bool:
-        """Return whether a single session has unread assistant work."""
-        return self.unread_for_sessions([session]).get(session.id, False)
+                accounts = ProviderAccountService()
+                if connection_id is not None:
+                    account = accounts.get_account(
+                        organization_id, user_id, connection_id
+                    )
+                    if account.provider != "claude-agent":
+                        raise NotFoundError("ProviderAccount", str(connection_id))
+                else:
+                    account = accounts.selected_accounts(organization_id, user_id).get(
+                        "claude-agent"
+                    )
+                if account is None:
+                    raise NotFoundError("ProviderAccount", str(user_id))
+            session_kwargs.update(
+                harness_id=engine_id,
+                created_by_id=user_id,
+                external_session_id="",
+                engine_state={"provider_id": codex_provider_id}
+                if codex_provider_id
+                else {},
+            )
+        if user_id is not None:
+            session_kwargs["created_by_id"] = user_id
+        session = self.sessions.create(**session_kwargs)
+        log.info("harness_session_created", session_id=str(session.id))
+        if session.parent_id is None:
+            self.conversation_events.emit_sync(session.workspace_id)
+        return session
 
     @staticmethod
-    def _is_conversation_unread(
+    def _codex_provider_for_session(session) -> str:
+        """Read the immutable non-secret provider binding."""
+        from .engines.codex.catalog import codex_provider
+
+        return codex_provider(session.model, session.engine_state)
+
+    def _available_session_skill_ids(
+        self,
         session: HarnessSession,
-        latest_assistant_completed_at,
+        *,
+        user_id: int | None,
+        organization_id: uuid.UUID,
+    ) -> list[str]:
+        """Return the session's persisted skills that still resolve.
+
+        Runs inherit the selection, so skills deleted since must not wedge
+        every later prompt of the chat.
+        """
+        stored = SkillService.normalize_ids(list(session.skill_ids or []))
+        if not stored or user_id is None:
+            return stored
+        return self.skills.filter_available_ids(
+            stored, user_id=user_id, organization_id=organization_id
+        )
+
+    async def delete_session(self, session_id: uuid.UUID) -> None:
+        """Delete a session only after external process ownership is settled."""
+        session = await sync_to_async(self.conversations.get_session)(session_id)
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
+            session.workspace_id
+        )
+        if (
+            session.parent_id is not None
+            and getattr(session, "harness_id", "native") == "claude"
+        ):
+            parent = await sync_to_async(self.sessions.get_by_id)(session.parent_id)
+            if (
+                parent is not None
+                and getattr(parent, "harness_id", "native") == "claude"
+            ):
+                if self.is_running(parent.id):
+                    await self.abort_run(parent.id)
+                await self._ensure_external_attempt_reconciled(parent, force=True)
+        if self.is_running(session.id):
+            await self.abort_run(session.id)
+        # A closing attempt with unconfirmed runner cleanup must survive deletion.
+        await self._ensure_external_attempt_reconciled(session, force=True)
+        await sync_to_async(self.sessions.delete)(session)
+        self.run_registry.clear_abort(str(session.id))
+        self._forget_run(str(session.id))
+        if session.parent_id is None:
+            await self.conversation_events.emit(session.workspace_id)
+
+    async def _ensure_external_attempt_reconciled(
+        self, session: HarnessSession, *, force: bool = False
     ) -> bool:
-        """Return True when idle sessions have unread assistant work."""
-        if session.status != HarnessSessionStatus.IDLE:
-            return False
-        if latest_assistant_completed_at is None:
-            return False
-        if session.last_read_at is None:
+        """Reject mutations that could erase a durable external process owner."""
+        if (getattr(session, "harness_id", "native") or "native") == "native":
             return True
-        return latest_assistant_completed_at > session.last_read_at
+        run_service = self._run_service_for_engine()
+        attempt = await sync_to_async(
+            run_service.repository.get_open_for_session, thread_sensitive=True
+        )(session.id)
+        if attempt is None:
+            return True
+        accessor = None
+        if attempt.lease_id is not None:
+            if self._accessor_factory is None:
+                raise ConflictError("Previous engine process cleanup is pending")
+            accessor = self._accessor_factory(str(session.workspace_id))
+            if asyncio.iscoroutine(accessor):
+                accessor = await accessor
+        if force or attempt.status == HarnessRunStatus.CLOSING:
+            await run_service.prepare_session(session.id, accessor)
+            self.reconcile_recovered_run(session.id, attempt.assistant_message_id)
+            return True
+        raise ConflictError("Harness session already has an active run")
+
+    async def edit_user_message(
+        self,
+        session_id: uuid.UUID,
+        *,
+        message_id: uuid.UUID,
+        prompt: str,
+        mode: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        skill_ids: list[str] | None = None,
+        organization_id: uuid.UUID | None = None,
+        workspace_id: str = "",
+        user_id: int | None = None,
+    ) -> HarnessMessage:
+        """Edit a user message, drop the suffix, and rerun with *prompt*."""
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must not be empty")
+        session = await sync_to_async(self.conversations.get_session)(session_id)
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
+            session.workspace_id
+        )
+        SessionAccessService.require_user_promptable(session.parent_id)
+        if self.is_running(session.id):
+            raise ConflictError(
+                f"Harness session '{session.id}' already has an active run"
+            )
+        owner_id = getattr(session, "created_by_id", None)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=owner_id,
+            user_id=user_id,
+            message="Only the session owner may edit an external conversation",
+        )
+        await self._ensure_external_attempt_reconciled(session, force=True)
+        normalized_mode = None
+        normalized_model = None
+        normalized_effort = None
+        if mode is not None and mode.strip():
+            normalized_mode = mode.strip().lower()
+            if normalized_mode not in ("plan", "build"):
+                raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
+        if model is not None and model.strip():
+            normalized_model = model.strip()
+            if getattr(session, "harness_id", "native") == "claude":
+                from .engines.catalog import normalize_claude_model
+
+                normalized_model = normalize_claude_model(normalized_model)
+        if getattr(session, "harness_id", "native") == "codex":
+            normalized_model, normalized_effort = await sync_to_async(
+                self.session_settings.validate_codex_config
+            )(
+                session,
+                normalized_model or session.model,
+                reasoning_effort
+                if reasoning_effort is not None
+                else session.reasoning_effort,
+            )
+        if (
+            getattr(session, "harness_id", "native") != "codex"
+            and reasoning_effort is not None
+            and reasoning_effort.strip()
+        ):
+            if getattr(session, "harness_id", "native") == "claude":
+                from .engines.catalog import normalize_claude_effort
+
+                normalized_effort = normalize_claude_effort(reasoning_effort)
+            else:
+                normalized_effort = normalize_reasoning_effort(reasoning_effort)
+        if getattr(session, "harness_id", "native") == "claude":
+            await sync_to_async(self._resolve_engine_auth)(
+                session.organization_id,
+                owner_id,
+                None,
+            )
+        effective_skill_ids = (
+            SkillService.normalize_ids(skill_ids)
+            if skill_ids is not None
+            else await sync_to_async(self._available_session_skill_ids)(
+                session,
+                user_id=user_id,
+                organization_id=organization_id or session.organization_id,
+            )
+        )
+        claude_session = getattr(session, "harness_id", "native") == "claude"
+        if (
+            claude_session
+            or getattr(session, "harness_id", "native") == "codex"
+            or skill_ids is not None
+        ):
+            if user_id is None and (effective_skill_ids or skill_ids is not None):
+                raise AuthenticationError(
+                    "A user is required to validate selected skills"
+                )
+            effective_skill_bodies: list[str] = []
+            if user_id is not None:
+                resolve_bodies = sync_to_async(self.skills.resolve_bodies)
+                effective_skill_bodies = await resolve_bodies(
+                    effective_skill_ids,
+                    user_id=user_id,
+                    organization_id=organization_id or session.organization_id,
+                )
+            if getattr(session, "harness_id", "native") == "claude":
+                from .engines.claude.runtime_state import validate_claude_skills
+
+                validate_claude_skills(effective_skill_bodies)
+        stored = await sync_to_async(self.messages.list_for_session)(session.id)
+        target = next((row for row in stored if row.id == message_id), None)
+        if target is None:
+            raise NotFoundError("HarnessMessage", str(message_id))
+        if target.role != "user":
+            raise ValueError("Only user messages can be edited")
+        # Validate the candidate options without changing the persisted session.
+        # start_run owns the admission fence and commits the edit only after all
+        # prerequisites (including provider-turn admission) have succeeded.
+        if normalized_mode is not None:
+            session.mode = normalized_mode
+            session.agent_name = normalized_mode
+        if normalized_model is not None:
+            session.model = normalized_model
+        if normalized_effort is not None:
+            session.reasoning_effort = normalized_effort
+        return await self.start_run(
+            session,
+            prompt.strip(),
+            organization_id=organization_id or session.organization_id,
+            workspace_id=workspace_id or str(session.workspace_id),
+            user_id=user_id,
+            skill_ids=skill_ids,
+            _edit_message_id=message_id,
+        )
+
+    async def _commit_message_edit(
+        self,
+        session: HarnessSession,
+        suffix_ids: list[uuid.UUID],
+        *,
+        model: str,
+        reasoning_effort: str,
+    ) -> None:
+        """Replace an admitted edit's suffix before its runner can start."""
+        child_ids = await self._collect_suffix_child_ids(suffix_ids)
+        for child_id in child_ids:
+            aborted_child = await self.abort_run(child_id)
+            await self._ensure_external_attempt_reconciled(aborted_child, force=True)
+        permission_ids, question_ids = await sync_to_async(
+            self.sessions.commit_message_edit
+        )(
+            session,
+            suffix_ids=suffix_ids,
+            child_ids=child_ids,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        self.interactions.cancel_waiters(permission_ids, question_ids)
+        if getattr(session, "harness_id", "native") != "native":
+            session.external_session_id = ""
+            session.engine_state = (
+                {"provider_id": self._codex_provider_for_session(session)}
+                if session.harness_id == "codex"
+                else {}
+            )
+
+    async def _collect_suffix_child_ids(
+        self, suffix_ids: list[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """Return child session ids referenced by subtask parts in suffix."""
+        parts = await sync_to_async(self.parts.list_for_messages)(suffix_ids)
+        child_ids: list[uuid.UUID] = []
+        seen: set[str] = set()
+        for part in parts:
+            if part.type != "subtask":
+                continue
+            raw = str((part.meta or {}).get("child_session_id", "") or "").strip()
+            if not raw or raw in seen:
+                continue
+            seen.add(raw)
+            try:
+                child_ids.append(uuid.UUID(raw))
+            except ValueError:
+                continue
+        return child_ids
+
+    @staticmethod
+    def _agent_configs_map(organization_id: uuid.UUID) -> dict[str, dict[str, Any]]:
+        """Return AgentConfig rows keyed by agent name (best-effort)."""
+        try:
+            from .services import AgentConfigService
+
+            return {
+                str(row.get("agent", "")): row
+                for row in AgentConfigService().list_configs(organization_id)
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _agent_defaults(organization_id: uuid.UUID, agent_name: str) -> dict[str, Any]:
+        """Return AgentConfig defaults for *agent_name* (best-effort).
+
+        Keys: ``model``, ``effort``, ``inherit_model``, ``effort_strategy``.
+        Missing rows fall back to ``""``/inherit for subagents.
+        """
+        agent = (agent_name or "").strip().lower() or "build"
+        try:
+            from .services import AgentConfigService
+
+            for row in AgentConfigService().list_configs(organization_id):
+                if str(row.get("agent", "")) == agent:
+                    return {
+                        "model": str(row.get("model") or "").strip(),
+                        "effort": normalize_reasoning_effort(
+                            str(row.get("effort") or "")
+                        ),
+                        "inherit_model": bool(row.get("inherit_model", False)),
+                        "effort_strategy": str(
+                            row.get("effort_strategy") or "fixed"
+                        ).strip()
+                        or "fixed",
+                    }
+        except Exception:
+            pass
+        return {
+            "model": "",
+            "effort": "",
+            "inherit_model": True,
+            "effort_strategy": "inherit",
+        }
 
     def validate_provider_for_run(
         self,
         organization_id: uuid.UUID,
         session: HarnessSession,
         *,
-        provider: ProviderAdapter | None = None,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
     ) -> str:
         """Ensure provider config and model are present before starting a run.
 
         Returns the resolved model id for this turn. An empty session model
-        (Auto) is filled from the org default without pinning ``session.model``.
+        (Auto) is filled from the agent config.
 
         Raises:
-            NotFoundError: When no ProviderConfig exists for the org.
+            NotFoundError: When no provider connection exists for the model.
             ValueError: When API key or model is missing.
         """
         session_model = (session.model or "").strip()
-        if provider is not None or self._provider_factory is not None:
+        if getattr(session, "harness_id", "native") == "codex":
+            session.model, session.reasoning_effort = (
+                self.session_settings.validate_codex_config(
+                    session,
+                    session_model,
+                    session.reasoning_effort,
+                    user_id=user_id,
+                    account_ids=account_ids,
+                )
+            )
+            return session.model
+        if getattr(session, "harness_id", "native") == "claude":
+            from .engines.catalog import (
+                DEFAULT_CLAUDE_MODEL,
+                normalize_claude_effort,
+                normalize_claude_model,
+            )
+
+            session.model = normalize_claude_model(
+                session_model or DEFAULT_CLAUDE_MODEL
+            )
+            session.reasoning_effort = normalize_claude_effort(
+                session.reasoning_effort or "high"
+            )
+            return session.model
+        if self._provider_factory is not None:
             return session_model
         from .services import ProviderConfigService
 
         config_service = ProviderConfigService()
-        config = config_service.get_config(organization_id)
-        if not config.api_key_encrypted:
-            raise ValueError("Provider API key not configured")
-        model = session_model or (config.default_model or "").strip()
+        agent_name = (session.agent_name or session.mode or "build").strip().lower()
+        agent_defaults = self._agent_defaults(organization_id, agent_name)
+        agent_model = "" if agent_defaults["inherit_model"] else agent_defaults["model"]
+        model = session_model or agent_model
         if not model:
-            raise ValueError("No model configured for harness run")
+            raise NotFoundError("ProviderConnection", str(organization_id))
+        account_user_id = user_id or getattr(session, "created_by_id", None)
+        config_service.provider_connected_for_model(
+            organization_id, model, user_id=account_user_id, account_ids=account_ids
+        )
+        if not (session.reasoning_effort or "").strip():
+            agent_effort = (
+                "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
+            )
+            session.reasoning_effort = normalize_reasoning_effort(agent_effort)
         return model
-
-    def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
-        """Return all sessions of a workspace."""
-        return self.sessions.list_for_workspace(workspace_id)
-
-    def list_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all parts of a session."""
-        self.get_session(session_id)
-        return self.parts.list_for_session(session_id)
-
-    def list_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
-        """Return all messages of a session."""
-        self.get_session(session_id)
-        return self.messages.list_for_session(session_id)
-
-    def list_todos(self, session_id: uuid.UUID) -> list[dict[str, Any]]:
-        """Return persisted todos of a session as plain dicts."""
-        session = self.get_session(session_id)
-        rows = self.todos.list_for_session(session.id)
-        return [
-            {
-                "id": str(row.id),
-                "content": row.content,
-                "status": row.status,
-                "priority": row.priority,
-                "order": row.order,
-            }
-            for row in rows
-        ]
-
-    def list_pending_permissions(
-        self, session_id: uuid.UUID, *, include_descendants: bool = False
-    ) -> list[dict[str, Any]]:
-        """Return pending permission gates for *session_id* as dicts.
-
-        When *include_descendants* is true, also include pending gates of
-        child (and nested) sessions so a parent parts fetch can surface
-        subagent asks.
-        """
-        self.get_session(session_id)
-        session_ids = (
-            self.sessions.list_descendant_ids(session_id)
-            if include_descendants
-            else [session_id]
-        )
-        rows = self.permissions.requests.list_pending_for_sessions(session_ids)
-        names = {
-            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
-        }
-        return [
-            {
-                "request_id": str(row.id),
-                "session_id": str(row.session_id),
-                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
-                "tool": row.tool,
-                "pattern": row.pattern,
-                "title": row.title or "",
-                "call_id": row.call_id or "",
-                "status": "pending",
-                "agent_name": names.get(row.session_id, ""),
-            }
-            for row in rows
-        ]
-
-    def list_pending_questions(
-        self, session_id: uuid.UUID, *, include_descendants: bool = False
-    ) -> list[dict[str, Any]]:
-        """Return pending question gates for *session_id* as dicts.
-
-        When *include_descendants* is true, also include pending gates of
-        child (and nested) sessions.
-        """
-        self.get_session(session_id)
-        session_ids = (
-            self.sessions.list_descendant_ids(session_id)
-            if include_descendants
-            else [session_id]
-        )
-        rows = QuestionRequestRepository.list_pending_for_sessions(session_ids)
-        names = {
-            row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
-        }
-        return [
-            {
-                "request_id": str(row.id),
-                "session_id": str(row.session_id),
-                "workspace_id": str(row.workspace_id) if row.workspace_id else "",
-                "questions": list(row.questions or []),
-                "call_id": row.call_id or "",
-                "status": "pending",
-                "agent_name": names.get(row.session_id, ""),
-            }
-            for row in rows
-        ]
 
     # -- run orchestration --------------------------------------------------
 
     def is_running(self, session_id: uuid.UUID) -> bool:
         """Return True when a run task is active for *session_id*."""
-        task = self._tasks.get(str(session_id))
-        return task is not None and not task.done()
+        key = str(session_id)
+        record = self.run_registry.get(key)
+        return record is not None and record.is_running
+
+    def reserve_run(self, session: HarnessSession, *, scheduled: bool = False) -> bool:
+        """Mark *session* busy under the workspace admission locks and fence (sync).
+
+        Manual roots and children stay concurrent; a scheduled launch requires
+        an idle running workspace without another busy root.
+        """
+        return self.workspace_admission.admit_run(
+            session.workspace_id,
+            scheduled=scheduled,
+            reserve=partial(self.sessions.reserve_run, session.id, scheduled=scheduled),
+        )
 
     async def start_run(
         self,
@@ -457,149 +917,336 @@ class HarnessService:
         prompt: str,
         *,
         organization_id: uuid.UUID | None = None,
-        provider: ProviderAdapter | None = None,
         workspace_id: str = "",
         user_id: int | None = None,
         skill_ids: list[str] | None = None,
+        scheduled: bool = False,
+        account_ids: dict[str, str] | None = None,
+        max_depth: int | None = None,
+        _edit_message_id: uuid.UUID | None = None,
     ) -> HarnessMessage:
-        """Persist user+assistant messages and start the runner task.
+        """Compose the RunAdmission boundary with its explicit ports."""
+        if self._background.closing:
+            raise ConflictError("Agent execution worker is stopping")
+        from .run_admission import RunAdmission, RunAdmissionPorts
+        from .run_preparation import RunPreparation, RunPreparationPorts
 
-        Raises:
-            ConflictError: When a run is already active for the session.
+        preparation = RunPreparation(
+            RunPreparationPorts(
+                accessor_factory=self._accessor_factory,
+                available_session_skill_ids=self._available_session_skill_ids,
+                capture_provider_account_ids=self._capture_provider_account_ids,
+                forget_run=self._forget_run,
+                provider_turn_context=self._provider_turn_context,
+                remember_run=self._remember_run,
+                reconcile_recovered_run=self.reconcile_recovered_run,
+                resolve_engine_auth=self._resolve_engine_auth,
+                run_service_for_engine=self._run_service_for_engine,
+                session_settings=self.session_settings,
+                sessions=self.sessions,
+                skills=self.skills,
+                user_abort_requested=self._user_abort_requested,
+                validate_provider_for_run=self.validate_provider_for_run,
+                workspace_admission=self.workspace_admission,
+            )
+        )
+        ports = RunAdmissionPorts(
+            run_registry=self.run_registry,
+            cancel_owned_task=self._cancel_owned_task,
+            commit_message_edit=self._commit_message_edit,
+            deliver_steers=self._deliver_steers,
+            emit_frontend=self._emit_frontend,
+            execute_run=self._execute_run,
+            finalize_unstarted_run=self._finalize_unstarted_run,
+            finish_provider_hold=self._finish_provider_hold,
+            forget_run=self._forget_run,
+            monitor_provider_turn=self._monitor_provider_turn,
+            on_run_task_done=self._on_run_task_done,
+            provider_turn_roots=self._provider_turn_roots,
+            provider_turn_service=self._provider_turn_service,
+            run_service_for_engine=self._run_service_for_engine,
+            session_status_payload=self._session_status_payload,
+            spawn_background=self._spawn_background,
+            user_abort_requested=self._user_abort_requested,
+            watch_provider_followup=self._watch_provider_followup,
+            history=self.history,
+            messages=self.messages,
+            metadata=self.metadata,
+            reserve_run=self.reserve_run,
+            sessions=self.sessions,
+        )
+        return await RunAdmission(ports, preparation).start(
+            session=session,
+            prompt=prompt,
+            organization_id=organization_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            skill_ids=skill_ids,
+            scheduled=scheduled,
+            account_ids=account_ids,
+            max_depth=max_depth,
+            _edit_message_id=_edit_message_id,
+        )
+
+    def reconcile_recovered_run(
+        self, session_id: uuid.UUID | str, assistant_message_id: uuid.UUID | str
+    ) -> None:
+        """Reconcile local stop/projection state after confirmed durable recovery."""
+        self._run_cancellation().reconcile_recovered_run(
+            session_id, assistant_message_id
+        )
+
+    async def shutdown_runs(self) -> None:
+        """Close worker admission and settle owned runs without user-stop intent."""
+        await self._background.shutdown(self._shutdown_owned_work)
+
+    async def _shutdown_owned_work(self) -> None:
+        """Stop provider producers, join executions, then release their holders."""
+        providers = self._provider_turn_lifecycle()
+        contexts = providers.cancel_background_work()
+        try:
+            await self._run_cancellation().shutdown()
+        finally:
+            await providers.shutdown(contexts)
+
+    async def request_stop(self, session_id: uuid.UUID) -> None:
+        """Fence an older claimed admission before its worker waiter is cancelled.
+
+        The command supervisor calls this before joining startup waiters; normal
+        abort then joins execution and releases the stop intent. Validate the
+        workspace interaction fence before mutating or cancelling local work.
         """
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt must not be empty")
-        key = str(session.id)
-        if self.is_running(session.id):
-            raise ConflictError(
-                f"Harness session '{session.id}' already has an active run"
-            )
-        org_id = organization_id or session.organization_id
-        if skill_ids is not None and user_id is not None:
-            session = await sync_to_async(self.update_skill_ids)(
-                session.id,
-                skill_ids,
-                user_id=user_id,
-                organization_id=org_id,
-            )
-        resolved_model = await sync_to_async(self.validate_provider_for_run)(
-            org_id, session, provider=provider
+        session = await sync_to_async(self.conversations.get_session)(session_id)
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
+            session.workspace_id
         )
-        prior_user_messages = await sync_to_async(
-            lambda: self.messages.model.objects.filter(
-                session_id=session.id, role="user"
-            ).count()
-        )()
-        user_message = await sync_to_async(self.messages.create)(
-            session_id=session.id,
-            role="user",
-            content=prompt.strip(),
-        )
-        assistant = await sync_to_async(self.messages.create)(
-            session_id=session.id,
-            role="assistant",
-            content="",
-            model=resolved_model,
-            reasoning_effort=session.reasoning_effort or "",
-            provider=(provider.name if provider is not None else ""),
-        )
-        await sync_to_async(self.sessions.mark_status)(
-            session, HarnessSessionStatus.BUSY
-        )
-        session.status = HarnessSessionStatus.BUSY
-        history = await self._build_history(session, exclude_message_id=assistant.id)
-        skill_bodies: list[str] = []
-        if session.skill_ids and user_id is not None:
-            skill_bodies = await sync_to_async(resolve_skill_bodies)(
-                list(session.skill_ids or []),
-                user_id=user_id,
-                organization_id=org_id,
-            )
-        run_ctx: dict[str, Any] = {
-            "session_id": key,
-            "workspace_id": workspace_id or str(session.workspace_id),
-            "organization_id": str(org_id),
-            "message_id": str(assistant.id),
-            "user_message_id": str(user_message.id),
-            "text_part_id": None,
-            "reasoning_part_id": None,
-            "tool_parts": {},
-            "step_parts": {},
-            "subtask_parts": {},
-            "skill_bodies": skill_bodies,
-        }
-        self._runs[key] = run_ctx
-        task = self._spawn_background(
-            self._execute_run(
-                session=session,
-                prompt=prompt.strip(),
-                history=history,
-                assistant=assistant,
-                provider=provider,
-                organization_id=org_id,
-            )
-        )
-        self._tasks[key] = task
-        task.add_done_callback(lambda t, k=key: self._on_run_task_done(t, k))
-        if session.parent_id is None and prior_user_messages == 0:
-            self._spawn_background(
-                self._generate_title(
-                    session_id=session.id,
-                    prompt=prompt.strip(),
-                    organization_id=org_id,
-                )
-            )
-        await self._emit_frontend(
-            FRONTEND_EVENT_STATUS,
-            self._session_status_payload(
-                session,
-                "busy",
-                model=resolved_model,
-            ),
-            str(session.workspace_id),
-        )
-        log.info(
-            "harness_run_started",
-            session_id=key,
-            user_message_id=str(user_message.id),
-        )
-        return assistant
+        self.run_registry.request_abort(str(session_id))
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
-        """Cancel the active run task, reject pending user gates, and mark aborted."""
-        session = await sync_to_async(self.get_session)(session_id)
-        children = await sync_to_async(self.sessions.list_children)(session_id)
-        key = str(session.id)
-        task = self._tasks.get(key)
-        if task is None or task.done():
-            # Still ensure idle status (e.g. task already finished).
-            if session.status != HarnessSessionStatus.IDLE:
-                await sync_to_async(self.sessions.mark_status)(
-                    session, HarnessSessionStatus.IDLE
+        """Cancel the active run tree, reject pending user gates, and mark aborted."""
+        session = await sync_to_async(self.conversations.get_session)(session_id)
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
+            session.workspace_id
+        )
+        # Stop means stop: queued steers must not survive as a follow-up run.
+        await self._discard_steers(session)
+        engine_id = getattr(session, "harness_id", "native") or "native"
+        if engine_id != "native" and not self.is_running(session.id):
+            await self._ensure_external_attempt_reconciled(session, force=True)
+            session = await sync_to_async(self.conversations.get_session)(session.id)
+        if session.parent_id is not None:
+            child_context = self.run_registry.get_context(str(session.id))
+            if child_context.get("external_projection"):
+                # The native runtime owns the child internally and has no
+                # separately addressable OpenCuria task handle. Stop the
+                # enclosing root run rather than leaving the subagent alive.
+                parent = await sync_to_async(self.sessions.get_by_id)(session.parent_id)
+                if parent is not None:
+                    return await self._abort_run_tree(parent)
+        return await self._abort_run_tree(session)
+
+    # -- live steering ------------------------------------------------------
+
+    def _steering_channel(self, session_id: uuid.UUID | str) -> SteeringChannel | None:
+        """Return the open steering channel of an active run, if any."""
+        channel = self.run_registry.get_context(str(session_id)).get("steering")
+        return channel if isinstance(channel, SteeringChannel) else None
+
+    def list_pending_steers(self, session_id: uuid.UUID) -> list[SteerEntry]:
+        """Return queued steers a running turn has not picked up yet."""
+        channel = self._steering_channel(session_id)
+        return channel.pending() if channel is not None else []
+
+    async def steer_run(
+        self, session: HarnessSession, prompt: str, *, user_id: int | None = None
+    ) -> SteerEntry:
+        """Queue *prompt* so the active run receives it at its next boundary.
+
+        Raises:
+            ConflictError: ``no_active_run`` when nothing can take the message
+                (idle, stopping, or already settled).
+            ValueError: For empty/oversized prompts and subagent sessions.
+        """
+        SessionAccessService.require_user_promptable(session.parent_id)
+        channel = self._steering_channel(session.id)
+        if (
+            self._background.closing
+            or channel is None
+            or channel.closed
+            or not self.is_running(session.id)
+            or self._user_abort_requested(session)
+        ):
+            raise ConflictError(
+                f"Harness session '{session.id}' has no active run to steer",
+                code=NO_ACTIVE_RUN_CODE,
+            )
+        entry = channel.submit(prompt, user_id=user_id)
+        await self._emit_steer_queue(session)
+        log.info("harness_steer_queued", session_id=str(session.id), steer_id=entry.id)
+        return entry
+
+    async def withdraw_steer(
+        self, session: HarnessSession, steer_id: str
+    ) -> SteerEntry:
+        """Remove a queued steer the run has not consumed yet."""
+        channel = self._steering_channel(session.id)
+        entry = channel.withdraw(steer_id) if channel is not None else None
+        if entry is None:
+            raise NotFoundError("Steer", steer_id)
+        await self._emit_steer_queue(session)
+        return entry
+
+    async def _discard_steers(self, session: HarnessSession) -> None:
+        """Drop queued steers (user stop) and publish the empty queue."""
+        channel = self._steering_channel(session.id)
+        if channel is not None and channel.discard():
+            await self._emit_steer_queue(session)
+
+    async def _emit_steer_queue(self, session: HarnessSession) -> None:
+        """Commit and publish the owner's replaceable reconnect projection."""
+        from .command_repository import SteeringSnapshotRepository
+
+        entries = [entry.to_payload() for entry in self.list_pending_steers(session.id)]
+        await sync_to_async(SteeringSnapshotRepository.set)(session.id, entries)
+        await self._emit_frontend(
+            FRONTEND_EVENT_STEER_QUEUE,
+            {
+                "workspace_id": str(session.workspace_id),
+                "session_id": str(session.id),
+                "steers": entries,
+            },
+            str(session.workspace_id),
+        )
+
+    async def _emit_empty_steer_queue(self, session_id: str, workspace_id: str) -> None:
+        """Clear the saved queue before telling connected clients it is empty."""
+        from .command_repository import SteeringSnapshotRepository
+
+        await sync_to_async(SteeringSnapshotRepository.set)(uuid.UUID(session_id), [])
+        await self._emit_frontend(
+            FRONTEND_EVENT_STEER_QUEUE,
+            {"workspace_id": workspace_id, "session_id": session_id, "steers": []},
+            workspace_id,
+        )
+
+    async def _deliver_steers(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        entries: list[SteerEntry],
+    ) -> None:
+        """Persist steers the engine took as ordered parts of the live turn.
+
+        The part is created where the engine actually received the message so
+        the transcript reads exactly as the model saw it. Running text streams
+        are closed first: the answer continues in a fresh part after it.
+        """
+        workspace_id = str(session.workspace_id)
+        session_id = str(session.id)
+        async with self._event_lock(session_id):
+            await self.timeline.close_stream_parts(session)
+            for entry in entries:
+                part = await sync_to_async(self.parts.create)(
+                    message_id=assistant.id,
+                    type="steer",
+                    state="completed",
+                    call_id=entry.id,
+                    output=entry.content,
+                    meta={"steer_id": entry.id},
                 )
-                session.status = HarnessSessionStatus.IDLE
-        else:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:  # pragma: no cover - abort must not raise
-                log.exception("harness_abort_run_error", session_id=key)
-            # Belt-and-braces: _execute_run's finally already marked idle;
-            # ensure state even if cancellation raced.
-            fresh = await sync_to_async(self.sessions.get_by_id)(session.id)
-            if fresh is not None:
-                session = fresh
-            if session.status != HarnessSessionStatus.IDLE:
-                await sync_to_async(self.sessions.mark_status)(
-                    session, HarnessSessionStatus.IDLE
+                await self._emit_frontend(
+                    FRONTEND_EVENT_PART,
+                    {
+                        "workspace_id": workspace_id,
+                        "session_id": session_id,
+                        "message_id": str(assistant.id),
+                        "delta": {"steer": entry.content, "steer_id": entry.id},
+                        "part_id": str(part.id),
+                    },
+                    workspace_id,
                 )
-                session.status = HarnessSessionStatus.IDLE
-        await self._reject_pending_user_gates(session)
-        for child in children:
-            await self.abort_run(child.id)
-        return session
+        await self._emit_steer_queue(session)
+
+    def _close_steering(self, key: str) -> list[SteerEntry]:
+        """Close the run's channel; return entries nobody consumed."""
+        channel = self.run_registry.get_context(key).pop("steering", None)
+        return channel.close() if isinstance(channel, SteeringChannel) else []
+
+    def _schedule_steer_followup(
+        self, session: HarnessSession, entries: list[SteerEntry]
+    ) -> None:
+        """Turn steers left over after a settled run into the next run."""
+        if not entries or self._background.closing:
+            return
+        self._spawn_background(self._start_steer_followup(session, entries))
+
+    async def _start_steer_followup(
+        self, session: HarnessSession, entries: list[SteerEntry]
+    ) -> None:
+        """Start a normal run with steers that arrived too late to flow in."""
+        try:
+            fresh = await sync_to_async(self.conversations.get_session)(session.id)
+            await self.start_run(
+                fresh,
+                "\n\n".join(entry.content for entry in entries),
+                organization_id=fresh.organization_id,
+                workspace_id=str(fresh.workspace_id),
+                user_id=entries[-1].user_id,
+            )
+        except Exception:
+            log.exception("harness_steer_followup_failed", session_id=str(session.id))
+        finally:
+            await self._emit_steer_queue(session)
+
+    def _remember_run(self, session: HarnessSession) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._remember_run(session)
+
+    def _forget_run(self, key: str) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._forget_run(key)
+
+    def _drop_run_tracking(self, key: str) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._drop_run_tracking(key)
+
+    def _descendant_keys(self, root: str) -> set[str]:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._descendant_keys(root)
+
+    def _owned_run_task(self, key: str) -> asyncio.Task | None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._owned_run_task(key)
+
+    def _startup_admission(self, key: str) -> asyncio.Task | None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._startup_admission(key)
+
+    def _cancel_owned_task(self, key: str) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._cancel_owned_task(key)
+
+    def _arm_abort_keys(self, keys: set[str]) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._arm_abort_keys(keys)
+
+    async def _join_owned_task(self, key: str, task: asyncio.Task) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._join_owned_task(key, task)
+
+    async def _join_abort_tree(self, root: str, closure: set[str]) -> None:
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._join_abort_tree(root, closure)
+
+    async def _settle_abort_tree(
+        self, session: HarnessSession, closure: set[str]
+    ) -> HarnessSession:
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._settle_abort_tree(session, closure)
+
+    async def _abort_run_tree(self, session: HarnessSession) -> HarnessSession:
+        """Delegate to the RunCancellation domain boundary."""
+        return await self._run_cancellation()._abort_run_tree(session)
 
     async def abort_busy_computeruse_for_workspace(
         self, workspace_id: uuid.UUID
@@ -617,253 +1264,28 @@ class HarnessService:
             aborted.append(await self.abort_run(session.id))
         return aborted
 
-    async def resolve_permission(
-        self, *, session: HarnessSession, request_id: uuid.UUID, response: str
-    ) -> dict[str, Any]:
-        """Resolve a permission request via the M3 service + wake the loop."""
-        record = await sync_to_async(self.permissions.requests.get_by_id)(request_id)
-        if record is None or record.status != "pending":
-            raise NotFoundError("PermissionRequest", str(request_id))
-        if str(record.session_id) != str(session.id):
-            raise NotFoundError("PermissionRequest", str(request_id))
-        result = await sync_to_async(self.permissions.resolve)(request_id, response)
-        future = self._pending_permissions.pop(str(request_id), None)
-        if future is not None and not future.done():
-            future.set_result(result.decision)
-        await self._emit_frontend(
-            FRONTEND_EVENT_PERMISSION,
-            {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
-                "request_id": str(request_id),
-                "decision": result.decision,
-                "remember": result.remember,
-            },
-            str(session.workspace_id),
-        )
-        if str(response).strip().lower() == "always":
-            await self._resolve_sibling_permissions(
-                session=session,
-                tool=record.tool,
-                skip_id=request_id,
-                decision=result.decision,
-                remember=result.remember,
-            )
-        return {"decision": result.decision, "remember": result.remember}
-
-    async def resolve_question(
-        self,
-        *,
-        session: HarnessSession,
-        question_id: uuid.UUID,
-        answers: list[Any],
-        reject: bool = False,
-    ) -> dict[str, Any]:
-        """Resolve a question request and resume the waiting tool."""
-        record = await sync_to_async(QuestionRequestRepository.get_by_id)(question_id)
-        if record is None or record.status != "pending":
-            raise NotFoundError("QuestionRequest", str(question_id))
-        if str(record.session_id) != str(session.id):
-            raise NotFoundError("QuestionRequest", str(question_id))
-        status = "rejected" if reject else "answered"
-        await sync_to_async(QuestionRequestRepository.resolve)(
-            record,
-            answers=list(answers or []),
-            status=status,
-        )
-        future = self._pending_questions.pop(str(question_id), None)
-        if future is not None and not future.done():
-            if reject:
-                future.set_exception(ValueError("Question rejected by user"))
-            else:
-                future.set_result(list(answers or []))
-        await self._emit_frontend(
-            FRONTEND_EVENT_QUESTION,
-            {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
-                "request_id": str(question_id),
-                "status": status,
-            },
-            str(session.workspace_id),
-        )
-        return {"request_id": str(question_id), "status": status}
-
     # -- internals ----------------------------------------------------------
-
-    async def _build_history(
-        self,
-        session: HarnessSession,
-        *,
-        exclude_message_id: uuid.UUID | None = None,
-    ) -> list[LLMMessage]:
-        """Build provider history from persisted messages and parts.
-
-        When a completed compaction part exists, only the checkpoint summary
-        plus messages from ``tail_start_id`` onward are sent to the provider
-        (OpenCode ``filterCompacted`` equivalent). Full history stays in the DB.
-        """
-        import json
-
-        stored = await sync_to_async(self.messages.list_for_session)(session.id)
-        if exclude_message_id is not None:
-            stored = [
-                message
-                for message in stored
-                if message.id != exclude_message_id
-            ]
-        compaction = await self._find_latest_compaction(stored)
-        checkpoint_summary = ""
-        compaction_msg_id: uuid.UUID | None = None
-        if compaction is not None:
-            compaction_msg, compaction_part = compaction
-            compaction_msg_id = compaction_msg.id
-            checkpoint_summary = str(compaction_part.output or "").strip()
-            stored = self._slice_messages_for_compaction(stored, compaction)
-        history: list[LLMMessage] = []
-        if checkpoint_summary:
-            history.append(
-                LLMMessage(
-                    role="user",
-                    content=f"{CHECKPOINT_PREFIX}\n{checkpoint_summary}",
-                )
-            )
-        for message in stored:
-            if message.role == "user":
-                history.append(
-                    LLMMessage(
-                        role="user",
-                        content=message.content or "",
-                        message_id=str(message.id),
-                    )
-                )
-                continue
-            if message.role != "assistant":
-                continue
-            parts = await sync_to_async(self.parts.list_for_message)(message.id)
-            tool_parts = [
-                part
-                for part in parts
-                if part.type == "tool"
-                and part.state in ("completed", "error")
-                and part.call_id
-            ]
-            assistant_content = self._assistant_history_content(
-                message,
-                parts,
-                summary=checkpoint_summary if message.id == compaction_msg_id else "",
-            )
-            if not tool_parts:
-                history.append(
-                    LLMMessage(
-                        role="assistant",
-                        content=assistant_content,
-                        message_id=str(message.id),
-                    )
-                )
-                continue
-            tool_calls: list[dict[str, Any]] = []
-            for part in tool_parts:
-                tool_input = dict(part.input or {})
-                tool_name = str(tool_input.get("tool", "") or part.title or "tool")
-                raw_args = tool_input.get("arguments", "")
-                if isinstance(raw_args, dict):
-                    raw_args = json.dumps(raw_args)
-                tool_calls.append(
-                    {
-                        "id": part.call_id,
-                        "name": tool_name,
-                        "arguments": str(raw_args or "{}"),
-                    }
-                )
-            history.append(
-                LLMMessage(
-                    role="assistant",
-                    content=assistant_content,
-                    tool_calls=tool_calls,
-                    message_id=str(message.id),
-                )
-            )
-            for part in tool_parts:
-                clipped = truncate_tool_output(part.output or "")
-                history.append(
-                    LLMMessage(
-                        role="tool",
-                        content=clipped.content,
-                        tool_call_id=part.call_id,
-                    )
-                )
-        return history
-
-    async def _find_latest_compaction(
-        self, messages: list[HarnessMessage]
-    ) -> tuple[HarnessMessage, HarnessPart] | None:
-        """Return the latest completed compaction part among *messages*."""
-        latest: tuple[HarnessMessage, HarnessPart] | None = None
-        for message in messages:
-            if message.role != "assistant":
-                continue
-            parts = await sync_to_async(self.parts.list_for_message)(message.id)
-            for part in parts:
-                if part.type == "compaction" and part.state == "completed":
-                    latest = (message, part)
-        return latest
-
-    @staticmethod
-    def _slice_messages_for_compaction(
-        stored: list[HarnessMessage],
-        compaction: tuple[HarnessMessage, HarnessPart],
-    ) -> list[HarnessMessage]:
-        """Keep tail messages from the latest compaction checkpoint onward."""
-        compaction_msg, part = compaction
-        tail_start_id = str((part.meta or {}).get("tail_start_id", "") or "").strip()
-        if tail_start_id:
-            try:
-                tail_uuid = uuid.UUID(tail_start_id)
-            except ValueError:
-                tail_uuid = None
-            if tail_uuid is not None:
-                for index, message in enumerate(stored):
-                    if message.id == tail_uuid:
-                        return stored[index:]
-        for index, message in enumerate(stored):
-            if message.id == compaction_msg.id:
-                return stored[index:]
-        return stored
-
-    @staticmethod
-    def _assistant_history_content(
-        message: HarnessMessage,
-        parts: list[HarnessPart],
-        *,
-        summary: str = "",
-    ) -> str | None:
-        """Resolve assistant text for provider history (never the compaction summary)."""
-        text_output = "".join(
-            part.output for part in parts if part.type == "text" and part.output
-        )
-        if text_output:
-            return text_output
-        content = (message.content or "").strip()
-        if not content:
-            return None
-        if summary and content == summary.strip():
-            return None
-        return message.content
 
     @staticmethod
     def _resolve_run_model_limits(
-        organization_id: uuid.UUID, model_id: str
+        organization_id: uuid.UUID,
+        model_id: str,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
     ) -> tuple[int, int]:
-        """Return ``(context_length, max_output_tokens)`` from the org catalog."""
+        """Return model limits from the user's selected or frozen accounts."""
         from .services import ProviderConfigService
 
+        service = ProviderConfigService()
         try:
-            models = ProviderConfigService().list_models(organization_id)
+            models = service.list_models(
+                organization_id, user_id=user_id, account_ids=account_ids
+            )
         except Exception:
             return 0, 0
+        namespaced = namespaced_model_id(model_id)
         for model in models:
-            if model.id == model_id:
+            if model.id in {model_id, namespaced}:
                 return model.context_length, model.max_output_tokens
         return 0, 0
 
@@ -872,25 +1294,12 @@ class HarnessService:
         session_id: uuid.UUID, exclude_message_id: uuid.UUID
     ) -> tuple[int, int, int]:
         """Return last-step prompt/completion/total from the prior assistant turn."""
-        prev = (
-            HarnessMessage.objects.filter(
-                session_id=session_id,
-                role="assistant",
-            )
-            .exclude(id=exclude_message_id)
-            .order_by("-created_at")
-            .first()
+        prev = HarnessMessageRepository.get_latest_assistant(
+            session_id, exclude_id=exclude_message_id
         )
         if prev is None:
             return 0, 0, 0
-        part = (
-            HarnessPart.objects.filter(
-                message_id=prev.id,
-                type="step-finish",
-            )
-            .order_by("-created_at")
-            .first()
-        )
+        part = HarnessPartRepository.get_latest_for_message(prev.id, type="step-finish")
         if part is not None:
             meta = dict(part.meta or {})
             tokens = dict(meta.get("tokens") or {})
@@ -916,44 +1325,32 @@ class HarnessService:
         context plus ``ThreadSensitiveContext`` gives the task its own
         ORM thread for the rest of the run.
         """
-        return asyncio.create_task(
-            self._await_in_thread_sensitive_context(coro),
-            context=contextvars.Context(),
-        )
+        entered = False
+
+        async def owned() -> None:
+            nonlocal entered
+            entered = True
+            await self._await_in_thread_sensitive_context(coro)
+
+        task = asyncio.create_task(owned(), context=contextvars.Context())
+
+        def close_unstarted(done: asyncio.Task) -> None:
+            if done.cancelled() and not entered and hasattr(coro, "close"):
+                coro.close()
+
+        task.add_done_callback(close_unstarted)
+        self._background.track(task)
+        return task
 
     def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
-        """Drop the run task and retrieve any leftover exception."""
-        self._tasks.pop(key, None)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            log.error(
-                "harness_background_task_failed",
-                session_id=key,
-                error=str(exc),
-            )
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._on_run_task_done(task, key)
 
     @staticmethod
     async def _await_in_thread_sensitive_context(coro: Awaitable[None]) -> None:
         """Await *coro* with a dedicated thread-sensitive ORM executor."""
         async with ThreadSensitiveContext():
             await coro
-
-    def _tools_for_session(self, session_id: str, agent_name: str = "build"):  # type: ignore[no-untyped-def]
-        """Build the tool registry for a session agent."""
-        from .tools import computeruse_tool_registry, default_tool_registry
-
-        if (agent_name or "").strip().lower() == "computeruse":
-            return computeruse_tool_registry()
-        registry = default_tool_registry()
-        try:
-            registry._tools["todowrite"] = TodoWriteTool(
-                repository=repository_for_session(session_id)
-            )
-        except KeyError:  # pragma: no cover - registry always has todowrite
-            pass
-        return registry
 
     async def _execute_run(
         self,
@@ -962,279 +1359,575 @@ class HarnessService:
         prompt: str,
         history: list[LLMMessage],
         assistant: HarnessMessage,
-        provider: ProviderAdapter | None,
         organization_id: uuid.UUID,
+        depth: int,
+        max_depth: int,
     ) -> None:
-        """Run the loop, persist events, and finalize the assistant message."""
-        from .services import ProviderConfigService
+        """Compose the RunExecution boundary with its explicit ports."""
+        from .run_execution import RunExecution, RunExecutionPorts
 
-        key = str(session.id)
-        active_provider = provider
-        small_model = ""
-        computer_use_model = ""
-        default_model = ""
-        if active_provider is None:
-            if self._provider_factory is not None:
-                active_provider = self._provider_factory(organization_id)
-            else:
-                config_service = ProviderConfigService()
-                config = await sync_to_async(config_service.get_config)(organization_id)
-                active_provider = config_service.adapter_from_config(config)
-                small_model = (config.small_model or "").strip()
-                computer_use_model = (config.computer_use_model or "").strip()
-                default_model = (config.default_model or "").strip()
-                if session.model:
-                    model_default = session.model
-                else:
-                    model_default = config.default_model
-                if not model_default:
-                    raise ValueError("No model configured for harness run")
-                session.model = model_default
-        model = session.model or "default"
-        context_length = 0
-        model_max_output_tokens = 0
-        last_step_prompt_tokens = 0
-        last_step_completion_tokens = 0
-        last_step_total_tokens = 0
-        context_length, model_max_output_tokens = await sync_to_async(
-            self._resolve_run_model_limits
-        )(organization_id, model)
-        last_step_prompt_tokens, last_step_completion_tokens, last_step_total_tokens = (
-            await sync_to_async(self._last_assistant_step_tokens)(
-                session.id, assistant.id
-            )
+        ports = RunExecutionPorts(
+            run_registry=self.run_registry,
+            accessor_factory=self._accessor_factory,
+            cleanup_session_processes=self._cleanup_session_processes,
+            engine_registry_for_run=self._engine_registry_for_run,
+            execute_external_run=self._execute_external_run,
+            finalize_run=self._finalize_run,
+            finish_mcp_recordings=self._finish_mcp_recordings,
+            last_assistant_step_tokens=self._last_assistant_step_tokens,
+            on_runner_event=self._on_runner_event,
+            provider_factory=self._provider_factory,
+            provider_turn_revocation_message=self._provider_turn_revocation_message,
+            provider_turn_service=self._provider_turn_service,
+            record_run_interruption=self._record_run_interruption,
+            resolve_run_model_limits=self._resolve_run_model_limits,
+            run_subagent_tool=self._run_subagent_tool,
+            runner_factory=self._runner_factory,
+            user_abort_requested=self._user_abort_requested,
+            interactions=self.interactions,
+            messages=self.messages,
+            plugin_runtime=self.plugin_runtime,
+            sessions=self.sessions,
+            timeline=self.timeline,
+            agent_configs=self._agent_configs_map,
         )
-        accessor = None
-        if self._accessor_factory is not None:
-            accessor = await self._accessor_factory(str(session.workspace_id))
-        if accessor is not None:
-            history = await hydrate_user_messages(history, accessor)
-        tools = self._tools_for_session(key, session.agent_name or "build")
-        if self._runner_factory is not None:
-            loop_runner = self._runner_factory(
-                provider=active_provider,
-                tools=tools,
-                accessor=accessor,
-                emit=lambda event: self._on_runner_event(session, assistant, event),
+        return await RunExecution(ports).execute(
+            session=session,
+            prompt=prompt,
+            history=history,
+            assistant=assistant,
+            organization_id=organization_id,
+            depth=depth,
+            max_depth=max_depth,
+        )
+
+    async def _finish_mcp_recordings(
+        self, runtime: Any, session: Any, assistant: Any
+    ) -> None:
+        """Retain confirmed recordings after success, failure and interruption."""
+        from .computer_use.recordings import append_video_to_output
+
+        paths = await runtime.finish()
+        if not paths:
+            return
+        await sync_to_async(self.messages.refresh, thread_sensitive=True)(assistant)
+        for path in paths:
+            existing = assistant.content or ""
+            output = append_video_to_output(existing, path)
+            remainder = tail_remainder(existing, output)
+            if remainder:
+                await sync_to_async(self.messages.append_content)(assistant, remainder)
+                await self.timeline.append_tail_text(session, assistant, remainder)
+
+    @staticmethod
+    def _redact_claude_error(error: object, auth: Any | None) -> str:
+        """Redact the resolved per-run secret before logging SDK failures."""
+        value = str(error or "Claude run failed")
+        token = str(getattr(auth, "token", "") or "")
+        if token:
+            value = value.replace(token, "[redacted]")
+        return redact_text(value)[:1000]
+
+    async def _execute_external_run(
+        self,
+        *,
+        engine_id: str,
+        session: HarnessSession,
+        prompt: str,
+        history: list[LLMMessage],
+        assistant: HarnessMessage,
+        organization_id: uuid.UUID,
+        depth: int,
+        max_depth: int,
+    ) -> None:
+        """Delegate external engine lifecycle work to its execution module."""
+        from .engines.execution import ExternalExecutionPorts, execute_external_run
+
+        ports = ExternalExecutionPorts(
+            begin_finalization=lambda: self.run_registry.ensure(
+                str(session.id)
+            ).begin_finalization(),
+            accessor_factory=self._accessor_factory,
+            cancel_owned_task=self._cancel_owned_task,
+            cleanup_session_processes=self._cleanup_session_processes,
+            drop_run_tracking=self._drop_run_tracking,
+            engine_registry_for_run=self._engine_registry_for_run,
+            finalize_external_children=self._finalize_external_children,
+            finalize_owned_claude_error=self._finalize_owned_claude_error,
+            finalize_run=self._finalize_run,
+            finish_mcp_recordings=self._finish_mcp_recordings,
+            on_external_child_event=self._on_external_child_event,
+            on_external_root_event=self._on_external_root_event,
+            provider_turn_revocation_message=self._provider_turn_revocation_message,
+            run_subagent_tool=self._run_subagent_tool,
+            user_abort_requested=self._user_abort_requested,
+            interactions=self.interactions,
+            messages=self.messages,
+            permissions=self.permissions,
+            plugin_runtime=self.plugin_runtime,
+            register_provider_use=self._register_provider_use,
+            resolve_engine_auth=self._resolve_engine_auth,
+        )
+        await execute_external_run(
+            ports,
+            context=self.run_registry.get_context(str(session.id)),
+            engine_id=engine_id,
+            session=session,
+            prompt=prompt,
+            history=history,
+            assistant=assistant,
+            organization_id=organization_id,
+            depth=depth,
+            max_depth=max_depth,
+        )
+
+    async def _finalize_owned_claude_error(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Publish idle bookkeeping after atomic engine finalization."""
+        key = str(session.id)
+        try:
+            with anyio.CancelScope(shield=True):
+                await publish_assistant_run_finished(assistant.id, session_id=key)
+                await self._emit_frontend(
+                    FRONTEND_EVENT_STATUS,
+                    self._session_status_payload(
+                        session,
+                        "idle",
+                        model=assistant.model or "",
+                        assistant=assistant,
+                    ),
+                    str(session.workspace_id),
+                )
+                if session.parent_id is None:
+                    await self.conversation_events.emit(session.workspace_id)
+                    await self._schedule_summary(session, assistant)
+        finally:
+            context = self.run_registry.get_context(key)
+            await self._finish_provider_turn(context)
+            root = self._provider_turn_roots.get(
+                str(context.get("provider_turn_id")), context
+            )
+            await self._maybe_finish_provider_monitor(root)
+            leftovers = self._close_steering(key)
+            followup = bool(leftovers) and not self._user_abort_requested(session)
+            self._drop_run_tracking(key)
+            if followup:
+                self._schedule_steer_followup(session, leftovers)
+
+    async def _on_external_root_event(
+        self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
+    ) -> None:
+        """Project native task notifications to persisted OpenCuria child sessions."""
+        if event.get("type") == "subtask_started":
+            content = str(event.get("description") or "")
+            engine_meta: dict[str, Any] = {}
+            # Older adapters use description as the prompt; an explicit null
+            # instead means upstream did not expose the delegated instructions.
+            if "prompt" in event:
+                prompt = event["prompt"]
+                available = isinstance(prompt, str) and bool(prompt.strip())
+                content = (
+                    prompt
+                    if available
+                    else "The agent did not provide readable task instructions "
+                    "for this subagent."
+                )
+                engine_meta["delegation"] = {
+                    "prompt_available": available,
+                    "agent_path": str(event.get("agent_path") or ""),
+                }
+            raw_agent = str(event.get("agent") or "general").strip().lower()
+            agent = "explore" if raw_agent in {"explore", "explorer"} else "general"
+            child = await sync_to_async(self.sessions.create, thread_sensitive=True)(
+                workspace_id=session.workspace_id,
+                organization_id=session.organization_id,
+                title=str(event.get("description") or agent)[:255],
+                mode=session.mode,
+                agent_name=agent,
+                model=str(event.get("model") or session.model or "sonnet"),
+                reasoning_effort=str(
+                    event.get("reasoning_effort") or session.reasoning_effort or "high"
+                ),
+                parent_id=session.id,
+                skill_ids=list(session.skill_ids or []),
+                harness_id=session.harness_id,
+                created_by_id=getattr(session, "created_by_id", None),
+            )
+            child_user = await sync_to_async(
+                self.messages.create, thread_sensitive=True
+            )(
+                session_id=child.id,
+                role="user",
+                content=content,
+                engine_meta=engine_meta,
+                skill_ids=list(session.skill_ids or []),
+                harness_id=session.harness_id,
+            )
+            child_assistant = await sync_to_async(
+                self.messages.create, thread_sensitive=True
+            )(
+                session_id=child.id,
+                role="assistant",
+                content="",
+                model=child.model,
+                reasoning_effort=child.reasoning_effort or "high",
+                provider=session.harness_id,
+                harness_id=session.harness_id,
+            )
+            child_key = str(child.id)
+            self.run_registry.attach_context(
+                child_key,
+                {
+                    "session_id": child_key,
+                    "message_id": str(child_assistant.id),
+                    "user_message_id": str(child_user.id),
+                    "text_part_id": None,
+                    "reasoning_part_id": None,
+                    "tool_parts": {},
+                    "step_parts": {},
+                    "subtask_parts": {},
+                    "skill_bodies": [],
+                    "external_projection": True,
+                    "external_parent_session_id": str(session.id),
+                    "external_parent_message_id": str(assistant.id),
+                },
+            )
+            await sync_to_async(self.sessions.mark_status)(
+                child, HarnessSessionStatus.BUSY
+            )
+            root_context = self.run_registry.get_context(str(session.id))
+            root_context.setdefault("external_children", {})[
+                str(event.get("subtask_id", ""))
+            ] = {
+                "parent_call_id": str(event.get("parent_tool_use_id", "")),
+                "session": child,
+                "assistant": child_assistant,
+                "agent": agent,
+                "subtask_id": str(event.get("subtask_id", "")),
+            }
+            event = {**event, "agent": agent, "child_session_id": child_key}
+        elif event.get("type") == "subtask_finished":
+            child_ctx = self._external_child_for_event(session, event)
+            if child_ctx is not None:
+                await self._finish_external_child(child_ctx, event)
+                event = {**event, "child_session_id": str(child_ctx["session"].id)}
+        await self._on_runner_event(session, assistant, event)
+
+    def _external_child_for_event(
+        self, session: HarnessSession, event: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Find a projected child by task id or parent tool-use id."""
+        children = self.run_registry.get_context(str(session.id)).get(
+            "external_children", {}
+        )
+        task_id = str(event.get("subtask_id", ""))
+        if task_id in children:
+            return children[task_id]
+        call_id = str(event.get("parent_tool_use_id", ""))
+        return next(
+            (
+                item
+                for item in children.values()
+                if item.get("parent_call_id") == call_id
+            ),
+            None,
+        )
+
+    async def _on_external_child_event(
+        self, root_key: str, parent_call_id: str, event: dict[str, Any]
+    ) -> None:
+        """Persist native-forwarded child events into their own message timeline."""
+        root_context = self.run_registry.get_context(root_key)
+        children = root_context.get("external_children", {})
+        child_ctx = next(
+            (
+                item
+                for item in children.values()
+                if item.get("parent_call_id") == parent_call_id
+            ),
+            None,
+        )
+        if child_ctx is None:
+            return
+        await self._on_runner_event(child_ctx["session"], child_ctx["assistant"], event)
+
+    async def _finish_external_child(
+        self, child_ctx: dict[str, Any], event: dict[str, Any]
+    ) -> None:
+        """Settle a native subagent transcript without duplicating root text."""
+        session = child_ctx["session"]
+        assistant = child_ctx["assistant"]
+        status = str(event.get("status") or "completed")
+        await sync_to_async(self.messages.refresh, thread_sensitive=True)(assistant)
+        if not assistant.content and event.get("summary"):
+            text = str(event["summary"])
+            await sync_to_async(self.messages.append_content)(assistant, text)
+            await self.timeline.append_tail_text(session, assistant, text)
+        await sync_to_async(self.messages.complete)(
+            assistant,
+            finish=(
+                "stop"
+                if status == "completed"
+                else "aborted"
+                if status == "aborted"
+                else "error"
+            ),
+            error=""
+            if status == "completed"
+            else str(event.get("summary") or "Subagent ended"),
+        )
+        if status != "completed":
+            await self.timeline.fail_open_parts(
+                assistant,
+                state="error",
+                output=str(event.get("summary") or "Subagent ended"),
+                session=session,
             )
         else:
-            effort = (session.reasoning_effort or "").strip() or None
-            loop_runner = HarnessRunner(
-                provider=active_provider,
-                tools=tools,
-                accessor=accessor,
-                emit=lambda event: self._on_runner_event(session, assistant, event),
-                chat_options=ChatOptions(reasoning_effort=effort),
-            )
-        opts = RunOptions(
-            history=history,
-            session_id=key,
-            workspace_id=str(session.workspace_id),
-            organization_id=str(organization_id),
-            small_model=small_model,
-            current_user_message_id=str(
-                self._runs.get(key, {}).get("user_message_id", "")
-            ),
-            skills=list(self._runs.get(key, {}).get("skill_bodies", [])),
-            context_length=context_length,
-            max_output_tokens=model_max_output_tokens,
-            last_step_prompt_tokens=last_step_prompt_tokens,
-            last_step_completion_tokens=last_step_completion_tokens,
-            last_step_total_tokens=last_step_total_tokens,
-            on_permission=lambda **kw: self._on_permission(session, assistant, **kw),
-            on_question=lambda **kw: self._on_question(session, assistant, **kw),
-            run_subagent=lambda args, ctx, subtask_id: self._run_subagent_tool(
-                parent=session,
-                args=args,
-                ctx=ctx,
-                subtask_id=subtask_id,
-                organization_id=organization_id,
-                small_model=small_model,
-                computer_use_model=computer_use_model,
-                default_model=default_model,
-            ),
+            await self.timeline.settle_open_stream_parts(assistant)
+        await sync_to_async(self.sessions.mark_status)(
+            session, HarnessSessionStatus.IDLE
         )
-        try:
-            result = await loop_runner.run(
-                prompt, session.agent_name or "build", model, session.mode, opts
-            )
-            # Text deltas were already appended to the assistant message
-            # incrementally (see _persist_part_updated); only the tail
-            # after the last delta still needs persisting.
-            await sync_to_async(assistant.refresh_from_db)()
-            existing = assistant.content or ""
-            tail = result.output or ""
-            if tail and not existing.endswith(tail):
-                remainder = tail
-                if existing and tail.startswith(existing):
-                    remainder = tail[len(existing) :]
-                elif existing and existing.startswith(tail):
-                    remainder = ""
-                if remainder:
-                    await sync_to_async(self.messages.append_content)(
-                        assistant, remainder
-                    )
-            # Message usage is accumulated per step_finish so abort still
-            # keeps completed steps. Session usage is applied once here.
-            await sync_to_async(self.sessions.add_usage)(
-                session,
-                prompt_tokens=result.usage.prompt_tokens,
-                completion_tokens=result.usage.completion_tokens,
-                total_tokens=result.usage.total_tokens,
-                cost=result.cost,
-            )
-            await sync_to_async(self.messages.complete)(
-                assistant, finish=result.finish_reason
-            )
-            await self._settle_open_stream_parts(assistant)
-        except asyncio.CancelledError:
-            await sync_to_async(self.messages.complete)(
-                assistant, finish="aborted", error="aborted by user"
-            )
-            await self._fail_open_parts(assistant, state="error", output="aborted")
-            raise
-        except Exception as exc:
-            await sync_to_async(self.messages.complete)(
-                assistant, finish="error", error=str(exc)
-            )
-            await self._fail_open_parts(assistant, state="error", output=str(exc))
-            log.exception("harness_run_failed", session_id=key)
-        finally:
-            self._runs.pop(key, None)
-            self._tasks.pop(key, None)
-            self._event_locks.pop(key, None)
-            await sync_to_async(self.sessions.mark_status)(
-                session, HarnessSessionStatus.IDLE
-            )
-            await self._emit_frontend(
-                FRONTEND_EVENT_STATUS,
-                self._session_status_payload(
-                    session,
-                    "idle",
-                    model=assistant.model or "",
-                ),
-                str(session.workspace_id),
-            )
+        child_ctx["finished"] = True
+        self._drop_run_tracking(str(session.id))
 
-    async def _settle_open_stream_parts(self, assistant: HarnessMessage) -> None:
-        """Mark leftover running text/reasoning parts completed.
-
-        The runner closes these in-memory on ``step_finish``, but the DB
-        rows stay ``running`` unless we persist the completed state.
-        """
-        open_parts = await sync_to_async(
-            lambda: list(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id,
-                    type__in=("text", "reasoning"),
-                    state__in=("pending", "running"),
-                )
-            )
-        )()
-        for part in open_parts:
-            await sync_to_async(self.parts.mark_state)(part, "completed")
-
-    async def _fail_open_parts(
-        self, assistant: HarnessMessage, *, state: str, output: str
+    async def _finalize_external_children(
+        self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
-        """Mark pending/running parts of *assistant* as failed/aborted.
-
-        Text and reasoning keep their streamed content and are marked
-        completed — aborting a run does not abort a thought that already
-        happened. Tool/subtask parts become *state* and keep any partial
-        output already written.
-        """
-        open_parts = await sync_to_async(
-            lambda: list(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id,
-                    state__in=("pending", "running"),
-                )
-            )
-        )()
-        for part in open_parts:
-            if part.type in ("text", "reasoning"):
-                await sync_to_async(self.parts.mark_state)(part, "completed")
+        """Close any child projections left open by a cancelled native stream."""
+        children = self.run_registry.get_context(str(session.id)).get(
+            "external_children", {}
+        )
+        for child_ctx in children.values():
+            if child_ctx.get("finished"):
                 continue
-            await sync_to_async(self.parts.mark_state)(
-                part, state, output=part.output or output
+            try:
+                await self._finish_external_child(
+                    child_ctx,
+                    {
+                        "status": "aborted"
+                        if self._user_abort_requested(session)
+                        else "error",
+                        "summary": "Parent external run ended",
+                    },
+                )
+            except Exception:
+                log.warning(
+                    "external_child_projection_finalize_failed",
+                    child_session_id=str(child_ctx.get("session").id),
+                )
+
+    def _user_abort_requested(self, session: HarnessSession) -> bool:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._user_abort_requested(session)
+
+    def _parent_stop_in_progress(self, session: HarnessSession) -> bool:
+        """Delegate to the RunCancellation domain boundary."""
+        return self._run_cancellation()._parent_stop_in_progress(session)
+
+    async def _record_run_interruption(
+        self, session: HarnessSession, assistant: HarnessMessage, *, phase: str
+    ) -> None:
+        """Persist interruption provenance even inside a cancelled MCP scope."""
+        key = str(session.id)
+        user_abort = self._user_abort_requested(session)
+        error = "aborted by user" if user_abort else "Run interrupted unexpectedly"
+        with anyio.CancelScope(shield=True):
+            await sync_to_async(self.messages.complete)(
+                assistant, finish="aborted" if user_abort else "error", error=error
+            )
+            await self.timeline.fail_open_parts(
+                assistant, state="error", output=error, session=session
+            )
+        if not user_abort:
+            log.warning(
+                "harness_run_interrupted",
+                session_id=key,
+                parent_session_id=str(session.parent_id or ""),
+                phase=phase,
             )
 
-    async def _on_permission(
-        self, session: HarnessSession, assistant: HarnessMessage, **kwargs: Any
-    ) -> str:
-        """Persist an ask gate as PermissionRequest and wait for resolve."""
-        tool = str(kwargs.get("tool", ""))
-        action = str(kwargs.get("action", ""))
-        title = str(kwargs.get("title", ""))
-        call_id = str(kwargs.get("call_id", ""))
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[str] = loop.create_future()
-        request = await sync_to_async(self.permissions.requests.create)(
-            organization_id=session.organization_id,
-            session_id=session.id,
-            workspace_id=session.workspace_id,
-            tool=tool,
-            pattern=action,
-            title=title,
-            message_id=assistant.id,
-            call_id=call_id,
-        )
-        self._pending_permissions[str(request.id)] = future
-        await self._emit_frontend(
-            FRONTEND_EVENT_PERMISSION,
-            {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
-                "request_id": str(request.id),
-                "tool": tool,
-                "pattern": action,
-                "title": title,
-                "call_id": call_id,
-                "agent_name": session.agent_name or "",
-            },
-            str(session.workspace_id),
-        )
+    async def _finalize_unstarted_run(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Settle an admitted background task cancelled before execution entry."""
+        context = self.run_registry.get_context(str(session.id))
+        ownership = context.get("ownership")
+        if ownership is not None:
+            # Execution never entered, so no runner lease or CLI process could
+            # have been created. Fence the durable attempt and shell together.
+            user_abort = self._user_abort_requested(session)
+            finalized = await ownership.finalize_turn(
+                status=HarnessRunStatus.INTERRUPTED,
+                finish="aborted" if user_abort else "error",
+                error=(
+                    "aborted by user" if user_abort else "Run interrupted unexpectedly"
+                ),
+                assistant_content=assistant.content or "",
+            )
+            if finalized:
+                await self._finalize_run(session, assistant)
+            else:
+                self._drop_run_tracking(str(session.id))
+            return
         try:
-            decision = await future
+            await self._record_run_interruption(session, assistant, phase="startup")
         finally:
-            self._pending_permissions.pop(str(request.id), None)
-        return "once" if decision == "allow" else "reject"
+            await self._finalize_run(session, assistant)
 
-    async def _on_question(
-        self, session: HarnessSession, assistant: HarnessMessage, **kwargs: Any
-    ) -> list[Any]:
-        """Persist a question request and wait for user answers."""
-        questions = list(kwargs.get("questions") or [])
-        call_id = str(kwargs.get("call_id", ""))
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[list[Any]] = loop.create_future()
-        request = await sync_to_async(QuestionRequestRepository.create)(
-            organization_id=session.organization_id,
-            session_id=session.id,
-            workspace_id=session.workspace_id,
-            message_id=assistant.id,
-            call_id=call_id,
-            questions=questions,
-        )
-        self._pending_questions[str(request.id)] = future
-        await self._emit_frontend(
-            FRONTEND_EVENT_QUESTION,
-            {
-                "workspace_id": str(session.workspace_id),
-                "session_id": str(session.id),
-                "request_id": str(request.id),
-                "questions": questions,
-                "call_id": call_id,
-                "status": "pending",
-                "agent_name": session.agent_name or "",
-            },
-            str(session.workspace_id),
-        )
+    async def _finalize_run(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Release tracking and publish idle after the owning run has settled."""
+        key = str(session.id)
+        self.run_registry.ensure(key).begin_finalization()
         try:
-            return await future
+            with anyio.CancelScope(shield=True):
+                await sync_to_async(self.sessions.mark_status)(
+                    session, HarnessSessionStatus.IDLE
+                )
+                # Receiver failures are isolated and logged; they must never
+                # prevent idle emission or tracking cleanup.
+                await publish_assistant_run_finished(assistant.id, session_id=key)
+                if session.parent_id is None:
+                    await self._schedule_summary(session, assistant)
+                context = self.run_registry.get_context(key)
+                await self._finish_provider_turn(context)
+                turn_id = context.get("provider_turn_id")
+                if turn_id:
+                    state = await sync_to_async(self._provider_turn_service.get)(
+                        turn_id
+                    )
+                    if (
+                        state is not None
+                        and state.active
+                        and state.cancel_requested
+                        and not state.holds
+                    ):
+                        await sync_to_async(
+                            self._provider_turn_service.clear_monitor_required
+                        )(turn_id)
+                        state = await sync_to_async(self._provider_turn_service.get)(
+                            turn_id
+                        )
+                    if state is None or not state.active:
+                        root = self._provider_turn_roots.get(str(turn_id), context)
+                        await self._maybe_finish_provider_monitor(root)
+                await self._emit_frontend(
+                    FRONTEND_EVENT_STATUS,
+                    self._session_status_payload(
+                        session,
+                        "idle",
+                        model=assistant.model or "",
+                        assistant=assistant,
+                    ),
+                    str(session.workspace_id),
+                )
+                if session.parent_id is None:
+                    await self.conversation_events.emit(session.workspace_id)
         finally:
-            self._pending_questions.pop(str(request.id), None)
+            leftovers = self._close_steering(key)
+            followup = bool(leftovers) and not self._user_abort_requested(session)
+            self.run_registry.release_context(key)
+            self.run_registry.release_event_lock(key)
+            self.run_registry.clear_abort(key)
+            # Keep task ownership until all persistence/emission awaits have finished.
+            if self.run_registry.get_task(key) is asyncio.current_task():
+                self.run_registry.release_task(key)
+            self._forget_run(key)
+            if followup:
+                self._schedule_steer_followup(session, leftovers)
+
+    async def _cleanup_session_processes(
+        self,
+        *,
+        workspace_id: str,
+        session_id: str,
+        reason: str,
+    ) -> None:
+        """Stop all running temp processes of one finished session.
+
+        Solid by construction, not by subscription:
+
+        - Runs in ``_execute_run.finally`` — the single funnel every run
+          passes through, covering success, error, and abort (user stop
+          cancels the run task, which still lands here; child/subagent
+          runs have their own ``_execute_run`` frame and clean their own
+          session scope). ``delete_session``/edit reruns inherit it via
+          ``abort_run`` + this finally.
+        - Shielded + best-effort (Agent-S ``_run_cleanup_rpc`` pattern):
+          a cancellation arriving during cleanup is remembered and
+          re-raised afterwards instead of aborting the stops mid-way;
+          per-process stop failures are logged and skipped, never
+          raised, so cleanup cannot fail the run or swallow the
+          original abort.
+        - No-op safe: without a cleanup seam (unit tests) or without
+          running temps, this returns immediately. Finished rows are
+          kept in the DB (never deleted here) — the user list only
+          shows running temps, so stopped temps vanish from the UI
+          while their history stays queryable for the agent.
+        """
+        cleanup = self._process_cleanup
+        if cleanup is None:
+            return
+        parsed_workspace: uuid.UUID | None = None
+        parsed_session: uuid.UUID | None = None
+        try:
+            parsed_workspace = uuid.UUID(str(workspace_id))
+            parsed_session = uuid.UUID(str(session_id))
+        except (ValueError, TypeError, AttributeError):
+            log.warning(
+                "harness_process_cleanup_skipped",
+                workspace_id=str(workspace_id),
+                session_id=str(session_id),
+                reason="invalid_id",
+            )
+            return
+
+        async def _run() -> Any:
+            result = cleanup(
+                parsed_workspace,
+                parsed_session,
+                reason=reason,
+            )
+            if asyncio.isfuture(result) or asyncio.iscoroutine(result):
+                return await result
+            return result
+
+        task: asyncio.Task[Any] = asyncio.ensure_future(_run())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                cancelled = cancelled or bool(current and current.cancelling())
+                if task.done():
+                    if task.cancelled():
+                        log.warning(
+                            "harness_process_cleanup_interrupted",
+                            workspace_id=str(workspace_id),
+                            session_id=str(session_id),
+                            reason=reason,
+                        )
+                    break
+                continue
+            except Exception:
+                break
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                log.exception(
+                    "harness_process_cleanup_failed",
+                    workspace_id=str(workspace_id),
+                    session_id=str(session_id),
+                    reason=reason,
+                    error=str(exc),
+                )
+        if cancelled:
+            raise asyncio.CancelledError()
 
     async def _on_runner_event(
         self,
@@ -1242,472 +1935,30 @@ class HarnessService:
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> None:
-        """Persist a runner streaming event and forward it to frontend."""
+        """Persist a runner event; preflight and monitor own account revocation."""
+        advances_run = event.get("type") in {
+            "step_start",
+            "tool_queued",
+            "tool_started",
+            "part_updated",
+        }
+        if advances_run and self._user_abort_requested(session):
+            raise asyncio.CancelledError()
+        context = self._provider_turn_context(session)
+        if context.get("provider_revocation_message"):
+            from .provider_turns import ProviderAccountRevokedError
+
+            raise ProviderAccountRevokedError()
         async with self._event_lock(str(session.id)):
-            await self._persist_runner_event(session, assistant, event)
-
-    async def _persist_runner_event(
-        self,
-        session: HarnessSession,
-        assistant: HarnessMessage,
-        event: dict[str, Any],
-    ) -> None:
-        """Persist a runner streaming event and forward it to frontend."""
-        etype = str(event.get("type", ""))
-        workspace_id = str(session.workspace_id)
-        session_id = str(session.id)
-        if etype == "part_updated":
-            await self._persist_part_updated(session, assistant, event)
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": event.get("delta", {}),
-                    "step": event.get("step"),
-                },
-                workspace_id,
-            )
-        elif etype == "step_start":
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="step-start",
-                state="running",
-                meta={"step": event.get("step")},
-            )
-            self._runs.get(session_id, {}).get("step_parts", {})[
-                str(event.get("step"))
-            ] = str(part.id)
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {"step_start": event.get("step")},
-                    "step": event.get("step"),
-                },
-                workspace_id,
-            )
-        elif etype == "step_finish":
-            tokens = event.get("tokens", {}) or {}
-            usage = Usage(
-                prompt_tokens=int(tokens.get("prompt_tokens", 0)),
-                completion_tokens=int(tokens.get("completion_tokens", 0)),
-                total_tokens=int(tokens.get("total_tokens", 0)),
-                cost=float(event.get("cost", 0.0) or 0.0),
-            )
-            await sync_to_async(self.messages.add_usage)(
-                assistant,
-                prompt_tokens=usage.prompt_tokens,
-                completion_tokens=usage.completion_tokens,
-                total_tokens=usage.total_tokens,
-                cost=float(event.get("cost", 0.0) or 0.0),
-            )
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="step-finish",
-                state="completed",
-                meta={
-                    "step": event.get("step"),
-                    "tokens": tokens,
-                    "cost": event.get("cost", 0.0),
-                },
-            )
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {
-                        "step_finish": event.get("step"),
-                        "cost": event.get("cost", 0.0),
-                        "tokens": tokens,
-                    },
-                    "step": event.get("step"),
-                    "part_id": str(part.id),
-                },
-                workspace_id,
-            )
-        elif etype == "tool_started":
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="tool",
-                state="running",
-                call_id=str(event.get("call_id", "")),
-                title=str(event.get("title", "")),
-                input={
-                    "tool": event.get("tool", ""),
-                    "arguments": event.get("arguments", ""),
-                },
-                meta={"step": event.get("step")},
-            )
-            self._runs.get(session_id, {}).get("tool_parts", {})[
-                str(event.get("call_id", ""))
-            ] = str(part.id)
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {
-                        "tool_started": event.get("tool", ""),
-                        "title": event.get("title", ""),
-                        "call_id": event.get("call_id", ""),
-                        "arguments": event.get("arguments", ""),
-                    },
-                    "step": event.get("step"),
-                    "part_id": str(part.id),
-                },
-                workspace_id,
-            )
-        elif etype == "tool_completed":
-            part = await self._finish_tool_part(assistant, event, state="completed")
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {
-                        "tool_completed": event.get("tool", ""),
-                        "call_id": event.get("call_id", ""),
-                        "output": event.get("output", ""),
-                    },
-                    "step": event.get("step"),
-                    "part_id": str(part.id) if part is not None else None,
-                },
-                workspace_id,
-            )
-        elif etype == "tool_error":
-            part = await self._finish_tool_part(assistant, event, state="error")
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {
-                        "tool_error": event.get("error", ""),
-                        "call_id": event.get("call_id", ""),
-                    },
-                    "step": event.get("step"),
-                    "part_id": str(part.id) if part is not None else None,
-                },
-                workspace_id,
-            )
-        elif etype in ("retry_scheduled", "retry_attempt"):
-            # Lightweight forward without a DB part, mirroring
-            # step_start/step_finish (no persisted part, frontend-only).
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {etype: event.get("attempt")},
-                    "step": event.get("step"),
-                },
-                workspace_id,
-            )
-        elif etype == "todo_updated":
-            await self._emit_frontend(
-                FRONTEND_EVENT_TODO,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "todos": event.get("todos", []),
-                    "step": event.get("step"),
-                },
-                workspace_id,
-            )
-        elif etype == "subtask_started":
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="subtask",
-                state="running",
-                title=str(event.get("description", "")),
-                meta={
-                    "subtask_id": event.get("subtask_id", ""),
-                    "agent": event.get("agent", ""),
-                    "child_session_id": event.get("child_session_id", ""),
-                    "model": event.get("model", ""),
-                    "reasoning_effort": event.get("reasoning_effort", ""),
-                },
-            )
-            self._runs.get(session_id, {}).get("subtask_parts", {})[
-                str(event.get("subtask_id", ""))
-            ] = str(part.id)
-            await self._emit_frontend(
-                FRONTEND_EVENT_SUBTASK_STARTED,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "subtask_id": event.get("subtask_id", ""),
-                    "child_session_id": event.get("child_session_id", ""),
-                    "agent": event.get("agent", ""),
-                    "description": event.get("description", ""),
-                    "part_id": str(part.id),
-                    "model": event.get("model", ""),
-                    "reasoning_effort": event.get("reasoning_effort", ""),
-                },
-                workspace_id,
-            )
-        elif etype == "subtask_finished":
-            await self._finish_subtask_part(session, assistant, event)
-            await self._emit_frontend(
-                FRONTEND_EVENT_SUBTASK_FINISHED,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "subtask_id": event.get("subtask_id", ""),
-                    "child_session_id": event.get("child_session_id", ""),
-                    "status": event.get("status", ""),
-                    "summary": event.get("summary", ""),
-                },
-                workspace_id,
-            )
-        elif etype == "patch":
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="patch",
-                state="completed",
-                call_id=str(event.get("call_id", "")),
-                title=str(event.get("title", "")),
-                output=str(event.get("unified_diff", "") or ""),
-                meta={
-                    "path": event.get("path", ""),
-                    "step": event.get("step"),
-                    "tool": event.get("tool", ""),
-                    "old_content": event.get("old_content", ""),
-                    "new_content": event.get("new_content", ""),
-                },
-            )
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {"patch": event.get("path", "")},
-                    "step": event.get("step"),
-                    "part_id": str(part.id),
-                },
-                workspace_id,
-            )
-        elif etype == "compaction":
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="compaction",
-                state="completed",
-                title="Session compacted",
-                output=str(event.get("summary", "") or ""),
-                meta={
-                    "auto": bool(event.get("auto", True)),
-                    "overflow": bool(event.get("overflow", False)),
-                    "tail_start_id": str(event.get("tail_start_id", "") or ""),
-                },
-            )
-            await self._emit_frontend(
-                FRONTEND_EVENT_PART,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "delta": {"compaction": True},
-                    "part_id": str(part.id),
-                },
-                workspace_id,
-            )
-
-    async def _persist_part_updated(
-        self,
-        session: HarnessSession,
-        assistant: HarnessMessage,
-        event: dict[str, Any],
-    ) -> None:
-        """Append text/reasoning deltas to the running text part."""
-        delta = event.get("delta", {}) or {}
-        text = str(delta.get("text", "") or "")
-        reasoning = str(delta.get("reasoning", "") or "")
-        key = str(session.id)
-        run_ctx = self._runs.get(key, {})
-        if text:
-            part_id = run_ctx.get("text_part_id")
-            if part_id is None:
-                part = await sync_to_async(self.parts.create)(
-                    message_id=assistant.id,
-                    type="text",
-                    state="running",
-                )
-                run_ctx["text_part_id"] = str(part.id)
-                part_id = str(part.id)
-            part = await sync_to_async(self.parts.model.objects.get)(id=part_id)
-            await sync_to_async(self.parts.append_output)(part, text)
-            await sync_to_async(self.messages.append_content)(assistant, text)
-        if reasoning:
-            part_id = run_ctx.get("reasoning_part_id")
-            if part_id is None:
-                part = await sync_to_async(self.parts.create)(
-                    message_id=assistant.id,
-                    type="reasoning",
-                    state="running",
-                )
-                run_ctx["reasoning_part_id"] = str(part.id)
-                part_id = str(part.id)
-            part = await sync_to_async(self.parts.model.objects.get)(id=part_id)
-            await sync_to_async(self.parts.append_output)(part, reasoning)
-
-    async def _finish_tool_part(
-        self, assistant: HarnessMessage, event: dict[str, Any], *, state: str
-    ) -> HarnessPart:
-        """Transition the matching tool part to completed/error."""
-        call_id = str(event.get("call_id", ""))
-        output = str(event.get("output", "") or event.get("error", "") or "")
-        part_id = (
-            self._runs.get(str(assistant.session_id), {})
-            .get("tool_parts", {})
-            .get(call_id)
-        )
-        part = None
-        if part_id is not None:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(id=part_id).first
-            )()
-        if part is None and call_id:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id, call_id=call_id
-                ).first
-            )()
-        if part is None:
-            part = await sync_to_async(self.parts.create)(
-                message_id=assistant.id,
-                type="tool",
-                state="pending",
-                call_id=call_id,
-                title=str(event.get("tool", "")),
-            )
-        await sync_to_async(self.parts.mark_state)(
-            part, state, output=output or part.output
-        )
-        return part
-
-    async def _finish_subtask_part(
-        self,
-        session: HarnessSession,
-        assistant: HarnessMessage,
-        event: dict[str, Any],
-    ) -> None:
-        """Transition the matching subtask part to completed/error."""
-        subtask_id = str(event.get("subtask_id", ""))
-        status = str(event.get("status", ""))
-        part_id = (
-            self._runs.get(str(session.id), {}).get("subtask_parts", {}).get(subtask_id)
-        )
-        part = None
-        if part_id is not None:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(id=part_id).first
-            )()
-        if part is None:
-            return
-        state = "completed" if status == "completed" else "error"
-        await sync_to_async(self.parts.mark_state)(
-            part,
-            state,
-            meta={
-                "subtask_id": subtask_id,
-                "agent": event.get("agent", ""),
-                "status": status,
-                "child_session_id": event.get("child_session_id", ""),
-            },
-        )
+            await self.timeline.record(session, assistant, event)
+        # A dependency can consume Task.cancel() while persisting or emitting.
+        # Keep explicit stop intent authoritative before control returns to the loop.
+        if advances_run and self._user_abort_requested(session):
+            raise asyncio.CancelledError()
 
     def _event_lock(self, session_id: str) -> asyncio.Lock:
         """Return the per-session lock for runner-event persistence."""
-        lock = self._event_locks.get(session_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._event_locks[session_id] = lock
-        return lock
-
-    async def _reject_pending_user_gates(self, session: HarnessSession) -> None:
-        """Reject leftover permission and question gates after abort."""
-        pending_perms = await sync_to_async(
-            self.permissions.requests.list_pending_for_session
-        )(session.id)
-        pending_questions = await sync_to_async(
-            QuestionRequestRepository.list_pending_for_session
-        )(session.id)
-        workspace_id = str(session.workspace_id)
-        session_id = str(session.id)
-        for request in pending_perms:
-            await sync_to_async(self.permissions.requests.mark_resolved)(
-                request, approved=False, remember="once"
-            )
-            future = self._pending_permissions.pop(str(request.id), None)
-            if future is not None and not future.done():
-                future.cancel()
-            await self._emit_frontend(
-                FRONTEND_EVENT_PERMISSION,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "request_id": str(request.id),
-                    "decision": "reject",
-                    "remember": "once",
-                },
-                workspace_id,
-            )
-        for request in pending_questions:
-            await sync_to_async(QuestionRequestRepository.resolve)(
-                request,
-                answers=[],
-                status="rejected",
-            )
-            future = self._pending_questions.pop(str(request.id), None)
-            if future is not None and not future.done():
-                future.cancel()
-            await self._emit_frontend(
-                FRONTEND_EVENT_QUESTION,
-                {
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "request_id": str(request.id),
-                    "status": "rejected",
-                },
-                workspace_id,
-            )
-
-    async def _resolve_sibling_permissions(
-        self,
-        *,
-        session: HarnessSession,
-        tool: str,
-        skip_id: uuid.UUID,
-        decision: str,
-        remember: str,
-    ) -> None:
-        """Approve remaining pending asks for the same tool in this session."""
-        pending = await sync_to_async(
-            self.permissions.requests.list_pending_for_session
-        )(session.id, tool=tool)
-        for sibling in pending:
-            if sibling.id == skip_id:
-                continue
-            await sync_to_async(self.permissions.requests.mark_resolved)(
-                sibling, approved=True, remember="always"
-            )
-            sid = str(sibling.id)
-            future = self._pending_permissions.pop(sid, None)
-            if future is not None and not future.done():
-                future.set_result(decision)
-            await self._emit_frontend(
-                FRONTEND_EVENT_PERMISSION,
-                {
-                    "workspace_id": str(session.workspace_id),
-                    "session_id": str(session.id),
-                    "request_id": sid,
-                    "decision": decision,
-                    "remember": remember,
-                },
-                str(session.workspace_id),
-            )
+        return self.run_registry.event_lock(session_id)
 
     def _session_status_payload(
         self,
@@ -1715,70 +1966,156 @@ class HarnessService:
         status: str,
         *,
         model: str = "",
+        assistant: HarnessMessage | None = None,
+        user_message_id: str = "",
     ) -> dict[str, Any]:
-        """Shape a ``harness.session_status`` frontend payload."""
-        return {
+        """Shape a ``harness.session_status`` frontend payload.
+
+        ``message_id`` is always the *current* assistant message id so the
+        frontend never attaches a fresh turn to an older answer. Callers
+        pass the run's assistant shell explicitly; the ``_runs`` context is
+        the fallback (busy path after refresh, idle path before cleanup).
+        """
+        assistant_id = ""
+        if assistant is not None:
+            assistant_id = str(assistant.id)
+        else:
+            assistant_id = str(
+                self.run_registry.get_context(str(session.id)).get(
+                    "message_id", ""
+                )
+                or ""
+            )
+        if not user_message_id:
+            user_message_id = str(
+                self.run_registry.get_context(str(session.id)).get(
+                    "user_message_id", ""
+                )
+                or ""
+            )
+        payload: dict[str, Any] = {
             "workspace_id": str(session.workspace_id),
             "session_id": str(session.id),
             "status": status,
             "model": (model or session.model or "").strip(),
             "reasoning_effort": session.reasoning_effort or "",
         }
+        if assistant_id:
+            payload["message_id"] = assistant_id
+        if user_message_id:
+            payload["user_message_id"] = user_message_id
+        return payload
 
     async def _emit_frontend(
         self, event: str, data: dict[str, Any], workspace_id: str
     ) -> None:
         """Forward an event to subscribed frontend clients (never breaks)."""
+        await publish_session_activity(event, data)
+        # Cache each part's immutable position: text/reasoning emit many
+        # token deltas, so querying the database on every socket emit would
+        # add an avoidable round trip to the streaming hot path.
+        part_id = data.get("part_id")
+        if part_id and event in (FRONTEND_EVENT_PART, FRONTEND_EVENT_SUBTASK_STARTED):
+            run_ctx = self.run_registry.get_context(str(data.get("session_id", "")))
+            positions = run_ctx.setdefault("part_positions", {})
+            position = positions.get(str(part_id))
+            if position is None:
+                try:
+                    position = await sync_to_async(self.parts.get_position)(part_id)
+                except (ValueError, TypeError):
+                    position = None
+                if position is not None:
+                    positions[str(part_id)] = position
+            if position is not None:
+                data["part_position"] = position
         try:
             if self._emit is not None:
                 await self._emit(event, data)
                 return
-            from apps.runners.sio_server import emit_to_frontend
-
-            await emit_to_frontend(event, data, workspace_id)
+            await realtime.emit_to_frontend(event, data, workspace_id)
         except Exception:  # pragma: no cover - forwarding is best-effort
             log.warning("harness_frontend_emit_failed", event_name=event)
 
-    async def _generate_title(
-        self,
-        *,
-        session_id: uuid.UUID,
-        prompt: str,
-        organization_id: uuid.UUID,
+    async def _schedule_summary(
+        self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
-        """Run the hidden title agent asynchronously (never raises)."""
+        """Reserve the answer snapshot before spawning its summary follower."""
+        if self._background.closing:
+            return
+        context = self.run_registry.get_context(str(session.id))
+        turn_id = context.get("provider_turn_id")
+        if context.get("provider_revocation_message"):
+            return
+        if not await self.metadata.is_enabled(session.organization_id):
+            return
+        holder = f"summary:{uuid.uuid4()}"
+        if turn_id and not await sync_to_async(self._provider_turn_service.add_hold)(
+            turn_id, holder
+        ):
+            return
+        self._spawn_summary(session, assistant, holder=holder)
+
+    def _spawn_summary(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        *,
+        holder: str | None = None,
+    ) -> None:
+        """Generate the user-goal recap with the completed answer's accounts."""
+        context = self.run_registry.get_context(str(session.id))
+        turn_id = context.get("provider_turn_id")
+        reserved = holder is not None
+        holder = holder or f"summary:{uuid.uuid4()}"
+
+        async def generate() -> None:
+            if turn_id and not reserved:
+                if not await sync_to_async(self._provider_turn_service.add_hold)(
+                    turn_id, holder
+                ):
+                    return
+            await self.metadata.generate_summary(
+                session_id=session.id,
+                assistant_id=assistant.id,
+                workspace_id=session.workspace_id,
+                organization_id=session.organization_id,
+                provider_turn_id=turn_id,
+                account_ids=dict(context.get("account_ids") or {}),
+                initiated_by_id=context.get("initiated_by_id"),
+            )
+
+        task = self._spawn_background(generate())
+        if turn_id:
+            self._watch_provider_followup(context, task, holder)
+            task.add_done_callback(
+                lambda _task: self._spawn_background(
+                    self._finish_provider_hold(turn_id, holder)
+                )
+            )
+
+    @staticmethod
+    def _catalog_efforts_for_model(
+        organization_id: uuid.UUID,
+        model_id: str,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
+    ) -> list[str]:
+        """Return catalog reasoning efforts for *model_id* (best-effort)."""
         try:
             from .services import ProviderConfigService
 
-            config_service = ProviderConfigService()
-            config = await sync_to_async(config_service.get_config)(organization_id)
-            small_model = (config.small_model or "").strip()
-            if not small_model:
-                return
-            if self._provider_factory is not None:
-                provider = self._provider_factory(organization_id)
-            else:
-                provider = config_service.adapter_from_config(config)
-            runner = HarnessRunner(provider=provider, tools=default_tool_registry())
-            result = await runner.run(
-                prompt,
-                "title",
-                small_model,
-                "build",
-                RunOptions(auto_approve=True),
+            service = ProviderConfigService()
+            models = service.list_models(
+                organization_id, user_id=user_id, account_ids=account_ids
             )
-            title = _normalize_generated_title(result.output or "")
-            if not title:
-                return
-            session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None:
-                return
-            auto_title = _title_from_prompt(prompt)
-            if (session.title or "").strip() != auto_title:
-                return
-            await sync_to_async(self.sessions.set_title)(session, title)
-        except Exception:  # pragma: no cover - title must never break runs
-            log.warning("harness_title_generation_failed", session_id=str(session_id))
+        except Exception:
+            return []
+        target = (model_id or "").strip()
+        ns = namespaced_model_id(target)
+        for item in models:
+            if item.id in {target, ns}:
+                return list(getattr(item, "reasoning_efforts", None) or [])
+        return []
 
     async def _run_subagent_tool(
         self,
@@ -1788,222 +2125,34 @@ class HarnessService:
         ctx: Any,
         subtask_id: str,
         organization_id: uuid.UUID,
-        small_model: str,
-        computer_use_model: str = "",
-        default_model: str = "",
+        agent_configs: dict[str, dict[str, Any]] | None = None,
     ) -> Any:
-        """Create a child session, run it to completion, return tool output."""
-        from .computeruse_loop import sanitize_run_id, truncate_task_output
-        from .tools.base import ToolError, ToolResult
-        from .tools.subagents import TASK_OUTPUT_MAX_CHARS
-
-        agent = (args.agent or args.subagent_type or "general").strip().lower()
-        if agent == "computeruse":
-            model = (
-                args.model_override
-                or computer_use_model
-                or ctx.model
-                or parent.model
-                or default_model
-                or ""
-            ).strip()
-        else:
-            model = (args.model_override or ctx.model or parent.model or "").strip()
-        if not model:
-            raise ToolError(
-                "No model available for subagent run",
-                tool="task",
-            )
-        parent_ctx = self._runs.get(str(parent.id), {})
-        message_id = parent_ctx.get("message_id")
-        if not message_id:
-            raise ToolError(
-                "Parent assistant message missing for subagent run",
-                tool="task",
-            )
-        parent_assistant = await sync_to_async(self.messages.model.objects.get)(
-            id=message_id
-        )
-        child = await sync_to_async(self.create_session)(
-            workspace_id=parent.workspace_id,
-            organization_id=parent.organization_id,
-            prompt=args.prompt,
-            agent_name=agent,
-            mode=parent.mode,
-            model=model,
-            title=args.description[:255],
-            parent_id=parent.id,
-        )
-        await self._on_runner_event(
-            parent,
-            parent_assistant,
-            {
-                "type": "subtask_started",
-                "subtask_id": subtask_id,
-                "child_session_id": str(child.id),
-                "agent": agent,
-                "description": args.description,
-                "model": child.model or "",
-                "reasoning_effort": child.reasoning_effort or "",
-            },
-        )
-        status = "completed"
-        child_task: asyncio.Task[None] | None = None
-        try:
-            assistant = await self.start_run(
-                child,
-                args.prompt,
-                organization_id=organization_id,
-                workspace_id=str(parent.workspace_id),
-            )
-            child_task = self._tasks.get(str(child.id))
-            if child_task is not None:
-                await child_task
-            assistant = await sync_to_async(self.messages.model.objects.get)(
-                id=assistant.id
-            )
-            output = assistant.content or ""
-            if assistant.finish in ("error", "aborted"):
-                status = "error"
-        except asyncio.CancelledError:
-            tracked = child_task or self._tasks.get(str(child.id))
-            if tracked is not None and not tracked.done():
-                tracked.cancel()
-                try:
-                    await tracked
-                except (asyncio.CancelledError, Exception):
-                    pass
-            raise
-        except Exception as exc:
-            await self._on_runner_event(
-                parent,
-                parent_assistant,
-                {
-                    "type": "subtask_finished",
-                    "subtask_id": subtask_id,
-                    "child_session_id": str(child.id),
-                    "agent": agent,
-                    "status": "error",
-                    "summary": str(exc)[:500],
-                },
-            )
-            raise ToolError(f"Subagent '{agent}' failed: {exc}", tool="task") from exc
-        if agent == "computeruse":
-            display_output, truncated = truncate_task_output(
-                output,
-                sanitize_run_id(str(child.id)),
-                TASK_OUTPUT_MAX_CHARS,
-            )
-        else:
-            truncated = len(output) > TASK_OUTPUT_MAX_CHARS
-            display_output = output
-            if truncated:
-                display_output = (
-                    output[:TASK_OUTPUT_MAX_CHARS]
-                    + f"\n…[truncated {len(output)} chars total]"
-                )
-        await self._on_runner_event(
-            parent,
-            parent_assistant,
-            {
-                "type": "subtask_finished",
-                "subtask_id": subtask_id,
-                "child_session_id": str(child.id),
-                "agent": agent,
-                "status": status,
-                "summary": output[:500],
-            },
-        )
-        return ToolResult(
-            output=display_output,
-            truncated=truncated,
-            metadata={
-                "subtask_id": subtask_id,
-                "child_session_id": str(child.id),
-                "agent": agent,
-                "status": status,
-            },
+        """Delegate to the SubagentCoordinator domain boundary."""
+        return await self._subagent_coordinator()._run_subagent_tool(
+            parent=parent,
+            args=args,
+            ctx=ctx,
+            subtask_id=subtask_id,
+            organization_id=organization_id,
+            agent_configs=agent_configs,
         )
 
-
-def _normalize_skill_ids(skill_ids: list[str] | None) -> list[str]:
-    """Normalize skill ID strings (deduped, trimmed)."""
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for raw in skill_ids or []:
-        value = str(raw).strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        normalized.append(value)
-    return normalized
+    async def _resolve_resume_child(
+        self, parent: HarnessSession, task_id: str | None
+    ) -> HarnessSession | None:
+        """Delegate to the SubagentCoordinator domain boundary."""
+        return await self._subagent_coordinator()._resolve_resume_child(parent, task_id)
 
 
-def resolve_skill_bodies(
-    skill_ids: list[str],
-    *,
-    user_id: int,
-    organization_id: uuid.UUID,
-) -> list[str]:
-    """Load skill bodies visible to *user_id* in *organization_id*.
-
-    Raises:
-        ValueError: When an ID is invalid or not accessible.
-    """
-    from apps.skills.repositories import SkillRepository
-
-    if not skill_ids:
-        return []
-    parsed: list[uuid.UUID] = []
-    for raw in skill_ids:
-        try:
-            parsed.append(uuid.UUID(str(raw).strip()))
-        except ValueError:
-            raise ValueError(f"Invalid skill_id: {raw}")
-    visible = set(
-        SkillRepository.list_for_user_in_org(user_id, organization_id).values_list(
-            "id", flat=True
-        )
-    )
-    by_id = {skill.id: skill for skill in SkillRepository.get_many_by_ids(parsed)}
-    bodies: list[str] = []
-    for skill_id in parsed:
-        if skill_id not in visible:
-            raise ValueError(f"Skill not found or not accessible: {skill_id}")
-        skill = by_id.get(skill_id)
-        if skill is None:
-            raise ValueError(f"Skill not found or not accessible: {skill_id}")
-        bodies.append(f"## {skill.name}\n{skill.body.strip()}")
-    return bodies
-
-
-def _normalize_generated_title(text: str) -> str:
-    """Clamp a generated title to at most eight words and 255 chars."""
-    title = " ".join((text or "").strip().split())
-    words = title.split()
-    if len(words) > 8:
-        title = " ".join(words[:8])
-    return title[:255]
-
-
-def _title_from_prompt(prompt: str) -> str:
-    """Derive a short session title from the first prompt line."""
-    first_line = (prompt or "").strip().splitlines()[0] if prompt.strip() else ""
-    title = first_line.strip()[:80]
-    return title or "Harness session"
-
-
-_default_harness_service: HarnessService | None = None
+_default_harness_service: HarnessService | RemoteHarnessService | None = None
 
 
 def create_default_harness_service() -> HarnessService:
     """Build the production service with runner-backed workspace access.
 
-    REST and MCP both use :func:`get_harness_service` so abort, permissions,
-    and in-flight runs share one task registry.
+    Only the execution process installs this live service. API adapters use
+    the remote facade and persist commands instead of creating local tasks.
     """
-    from apps.runners.sio_server import get_runner_service
-
     from .access.runner_accessor import create_harness_accessor
 
     runner_service = get_runner_service()
@@ -2011,22 +2160,39 @@ def create_default_harness_service() -> HarnessService:
     async def accessor_factory(workspace_id: str) -> Any:
         return await create_harness_accessor(runner_service, workspace_id)
 
-    return HarnessService(accessor_factory=accessor_factory)
+    async def process_cleanup(
+        workspace_id: uuid.UUID, session_id: uuid.UUID, *, reason: str = ""
+    ) -> Any:
+        return await runner_service.process_manager.stop_session_processes(
+            workspace_id, session_id, reason=reason or "run_finished"
+        )
+
+    return HarnessService(
+        accessor_factory=accessor_factory, process_cleanup=process_cleanup
+    )
 
 
-def get_harness_service() -> HarnessService:
-    """Return the process-wide HarnessService singleton."""
+def get_harness_service() -> HarnessService | RemoteHarnessService:
+    """Resolve API command submission or the explicitly installed execution owner."""
     global _default_harness_service
     if _default_harness_service is None:
-        _default_harness_service = create_default_harness_service()
+        from .command_service import RemoteHarnessService
+
+        _default_harness_service = RemoteHarnessService(
+            create_default_harness_service()
+        )
     return _default_harness_service
+
+
+def configure_execution_service(service: HarnessService) -> None:
+    """Install live orchestration only in the independent execution process."""
+    global _default_harness_service
+    if _default_harness_service is not None and _default_harness_service is not service:
+        raise RuntimeError("Harness service already configured in this process")
+    _default_harness_service = service
 
 
 def reset_default_harness_service() -> None:
     """Drop the process singleton (tests)."""
     global _default_harness_service
     _default_harness_service = None
-
-
-#: Backwards-friendly alias used by tests for the double-run conflict.
-HarnessBusyError = ConflictError

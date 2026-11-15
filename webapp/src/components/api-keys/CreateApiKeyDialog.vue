@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useApiKeyStore } from '@/stores/apiKeys'
-import type { APIKeyCreatedOut } from '@/types'
-import { Copy, CheckCheck, AlertTriangle, KeyRound, Shield, ShieldOff } from '@lucide/vue'
+import type { ApiKeyCreated } from '@/types'
+import { AlertTriangle, KeyRound, Shield } from '@lucide/vue'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -22,8 +28,7 @@ const expiresAt = ref('')
 const selectedPermissions = ref<string[]>([])
 const fullAccess = ref(true)
 const submitting = ref(false)
-const createdKey = ref<APIKeyCreatedOut | null>(null)
-const copied = ref(false)
+const createdKey = ref<ApiKeyCreated | null>(null)
 
 onMounted(() => {
   apiKeyStore.fetchAvailablePermissions()
@@ -40,16 +45,18 @@ const permissionGroups = computed(() => {
   return groups
 })
 
-function togglePermission(value: string) {
-  if (selectedPermissions.value.includes(value)) {
-    selectedPermissions.value = selectedPermissions.value.filter((p) => p !== value)
-  } else {
-    selectedPermissions.value = [...selectedPermissions.value, value]
+function setPermission(value: string, checked: boolean | 'indeterminate'): void {
+  if (checked === true) {
+    if (!selectedPermissions.value.includes(value)) {
+      selectedPermissions.value = [...selectedPermissions.value, value]
+    }
+    return
   }
+  selectedPermissions.value = selectedPermissions.value.filter((p) => p !== value)
 }
 
-function toggleFullAccess() {
-  fullAccess.value = !fullAccess.value
+function setFullAccess(checked: boolean | 'indeterminate'): void {
+  fullAccess.value = checked === true
   if (fullAccess.value) {
     selectedPermissions.value = []
   }
@@ -71,13 +78,6 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
-async function copyToken(): Promise<void> {
-  if (!createdKey.value) return
-  await navigator.clipboard.writeText(createdKey.value.key)
-  copied.value = true
-  setTimeout(() => (copied.value = false), 2000)
-}
-
 function handleClose(): void {
   open.value = false
   setTimeout(() => {
@@ -86,7 +86,6 @@ function handleClose(): void {
     selectedPermissions.value = []
     fullAccess.value = true
     createdKey.value = null
-    copied.value = false
   }, 200)
 }
 </script>
@@ -94,8 +93,8 @@ function handleClose(): void {
 <template>
   <Dialog :open="open" @update:open="(v) => (v ? (open = true) : handleClose())">
     <DialogTrigger as-child>
-      <Button @click="open = true">
-        <KeyRound :size="15" class="mr-1.5" />
+      <Button size="sm" @click="open = true">
+        <KeyRound />
         New API Key
       </Button>
     </DialogTrigger>
@@ -108,7 +107,8 @@ function handleClose(): void {
         </DialogDescription>
       </DialogHeader>
 
-      <form v-if="!createdKey" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <DialogBody>
+      <form v-if="!createdKey" id="create-api-key-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
         <div>
           <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
           <Input
@@ -132,47 +132,44 @@ function handleClose(): void {
         </div>
 
         <div>
-          <div class="flex items-center justify-between mb-2">
-            <label class="text-sm font-medium text-foreground">Permissions</label>
-            <button
-              type="button"
-              class="flex items-center gap-1.5 text-xs px-2 py-1 rounded-[var(--radius-sm)] border transition-colors cursor-pointer"
-              :class="fullAccess
-                ? 'border-primary/40 bg-primary/10 text-primary'
-                : 'border-border bg-background text-muted-foreground hover:text-foreground'"
-              @click="toggleFullAccess"
-            >
-              <component :is="fullAccess ? Shield : ShieldOff" :size="12" />
-              {{ fullAccess ? 'Full access' : 'Restricted' }}
-            </button>
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <Label>Permissions</Label>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-muted-foreground">{{ fullAccess ? 'Full access' : 'Restricted' }}</span>
+              <Switch :model-value="fullAccess" @update:model-value="setFullAccess" />
+            </div>
           </div>
 
-          <div v-if="fullAccess" class="rounded-[var(--radius-md)] border border-border bg-background px-3.5 py-3 text-xs text-muted-foreground">
+          <div
+            v-if="fullAccess"
+            class="rounded-md border border-border bg-muted/40 px-3.5 py-3 text-xs text-muted-foreground"
+          >
             This key will have access to all operations. Toggle to restrict permissions.
           </div>
 
-          <div v-else class="space-y-3 max-h-64 overflow-y-auto pr-1">
+          <div v-else class="max-h-64 space-y-3 overflow-y-auto pr-1">
             <template v-for="(perms, group) in permissionGroups" :key="group">
               <div>
-                <p class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1.5">{{ group }}</p>
+                <p class="mb-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">{{ group }}</p>
                 <div class="space-y-1">
                   <label
                     v-for="perm in perms"
                     :key="perm.value"
-                    class="flex items-start gap-2.5 p-2 rounded-[var(--radius-sm)] border cursor-pointer transition-colors"
-                    :class="selectedPermissions.includes(perm.value)
-                      ? 'border-primary/40 bg-primary/5'
-                      : 'border-border bg-background hover:border-border'"
+                    class="flex cursor-pointer items-start gap-2.5 rounded-md border p-2 transition-colors"
+                    :class="
+                      selectedPermissions.includes(perm.value)
+                        ? 'border-primary/40 bg-primary/5'
+                        : 'border-border bg-background hover:border-border'
+                    "
                   >
-                    <input
-                      type="checkbox"
-                      :checked="selectedPermissions.includes(perm.value)"
-                      class="mt-0.5 shrink-0 accent-primary cursor-pointer"
-                      @change="togglePermission(perm.value)"
+                    <Checkbox
+                      class="mt-0.5"
+                      :model-value="selectedPermissions.includes(perm.value)"
+                      @update:model-value="setPermission(perm.value, $event)"
                     />
                     <div class="min-w-0">
-                      <p class="text-xs font-medium text-foreground font-mono">{{ perm.value }}</p>
-                      <p class="text-xs text-muted-foreground mt-0.5">{{ perm.description }}</p>
+                      <p class="font-mono text-xs font-medium text-foreground">{{ perm.value }}</p>
+                      <p class="mt-0.5 text-xs text-muted-foreground">{{ perm.description }}</p>
                     </div>
                   </label>
                 </div>
@@ -181,20 +178,16 @@ function handleClose(): void {
           </div>
         </div>
 
-        <div class="flex justify-end gap-2 pt-2">
-          <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-          <Button type="submit" :disabled="!isValid || submitting">
-            {{ submitting ? 'Creating…' : 'Create Key' }}
-          </Button>
-        </div>
       </form>
 
       <div v-else class="flex flex-col gap-4">
-        <div class="flex items-start gap-2.5 rounded-[var(--radius-md)] border border-amber-500/40 bg-amber-500/10 px-3.5 py-3 text-sm text-amber-600 dark:text-amber-400">
+        <div class="flex items-start gap-2.5 rounded-md border border-warning/40 bg-warning-muted px-3.5 py-3 text-sm text-warning">
           <AlertTriangle :size="16" class="mt-0.5 shrink-0" />
           <div>
             <p class="font-medium">Copy your key now</p>
-            <p class="text-amber-600/80 dark:text-amber-400/80 text-xs mt-0.5">This token will not be shown again. OpenCuria only stores a hash.</p>
+            <p class="mt-0.5 text-xs text-warning/80">
+              This token will not be shown again. OpenCuria only stores a hash.
+            </p>
           </div>
         </div>
 
@@ -202,22 +195,16 @@ function handleClose(): void {
           <label class="text-sm font-medium text-foreground mb-1.5 block">Your API Key</label>
           <div class="flex gap-2">
             <div
-              class="flex-1 min-w-0 rounded-[var(--radius-md)] border border-border bg-background px-3 py-2 font-mono text-xs text-foreground break-all select-all"
+              class="min-w-0 flex-1 break-all rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground select-all"
             >
               {{ createdKey.key }}
             </div>
-            <button
-              class="flex items-center justify-center w-9 h-9 shrink-0 rounded-[var(--radius-md)] border border-border bg-card hover:bg-muted transition-colors cursor-pointer text-muted-foreground hover:text-foreground"
-              :title="copied ? 'Copied!' : 'Copy to clipboard'"
-              @click="copyToken"
-            >
-              <component :is="copied ? CheckCheck : Copy" :size="15" :class="copied ? 'text-emerald-600 dark:text-emerald-400' : ''" />
-            </button>
+            <CopyButton :text="createdKey.key" label="API key" variant="outline" size="icon" />
           </div>
         </div>
 
-        <div class="rounded-[var(--radius-md)] border border-border bg-background px-3.5 py-3 text-xs space-y-1.5">
-          <p class="font-medium text-foreground text-xs flex items-center gap-1.5">
+        <div class="space-y-1.5 rounded-md border border-border bg-background px-3.5 py-3 text-xs">
+          <p class="flex items-center gap-1.5 text-xs font-medium text-foreground">
             <Shield :size="12" class="text-primary" />
             {{ createdKey.permissions.length > 0 ? 'Permissions granted' : 'Full access (no restrictions)' }}
           </p>
@@ -225,24 +212,30 @@ function handleClose(): void {
             <span
               v-for="p in createdKey.permissions"
               :key="p"
-              class="font-mono bg-muted px-1.5 py-0.5 rounded text-muted-foreground"
+              class="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-foreground"
             >{{ p }}</span>
           </div>
         </div>
 
-        <div class="rounded-[var(--radius-md)] border border-border bg-background px-3.5 py-3 text-xs text-muted-foreground space-y-1.5">
-          <p class="font-medium text-foreground text-xs">How to use (REST API)</p>
-          <p><span class="font-mono bg-muted px-1 py-0.5 rounded">Authorization: Bearer {{ createdKey.key_prefix }}…</span></p>
+        <div class="space-y-1.5 rounded-md border border-border bg-background px-3.5 py-3 text-xs text-muted-foreground">
+          <p class="text-xs font-medium text-foreground">How to use (REST API)</p>
+          <p><span class="rounded bg-muted px-1 py-0.5 font-mono">Authorization: Bearer {{ createdKey.key_prefix }}…</span></p>
           <p>or</p>
-          <p><span class="font-mono bg-muted px-1 py-0.5 rounded">X-API-Key: {{ createdKey.key_prefix }}…</span></p>
-          <p class="mt-2 font-medium text-foreground text-xs">MCP endpoint (SSE)</p>
-          <p><span class="font-mono bg-muted px-1 py-0.5 rounded">/mcp/sse</span> — requires <span class="font-mono">mcp:access</span> permission</p>
+          <p><span class="rounded bg-muted px-1 py-0.5 font-mono">X-API-Key: {{ createdKey.key_prefix }}…</span></p>
         </div>
 
-        <div class="flex justify-end pt-1">
-          <Button @click="handleClose">Done</Button>
-        </div>
       </div>
+      </DialogBody>
+
+      <DialogFooter v-if="!createdKey">
+        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="create-api-key-form" :disabled="!isValid || submitting">
+          {{ submitting ? 'Creating…' : 'Create Key' }}
+        </Button>
+      </DialogFooter>
+      <DialogFooter v-else>
+        <Button @click="handleClose">Done</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 </template>

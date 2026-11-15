@@ -1,15 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { ref } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import ImageLightbox from '../ImageLightbox.vue'
 import ToolDetailBash from './ToolDetailBash.vue'
 import ToolDetailDefault from './ToolDetailDefault.vue'
-import ToolDetailQuestion from './ToolDetailQuestion.vue'
 import ToolDetailRead from './ToolDetailRead.vue'
 import ToolDetailSearch from './ToolDetailSearch.vue'
 import ToolDetailTodos from './ToolDetailTodos.vue'
 import ToolDetailWebfetch from './ToolDetailWebfetch.vue'
 import ToolDetailComputerUse from './ToolDetailComputerUse.vue'
+import ToolDetailImageGeneration from './ToolDetailImageGeneration.vue'
+import ToolDetailMemory from './ToolDetailMemory.vue'
+import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -24,6 +28,14 @@ function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
 }
 
 describe('tool detail components', () => {
+  beforeEach(() => {
+    class ResizeObserverStub {
+      observe(): void {}
+      disconnect(): void {}
+      unobserve(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+  })
   it('renders bash command, output, and a failed exit code', () => {
     const wrapper = mount(ToolDetailBash, {
       props: {
@@ -42,7 +54,26 @@ describe('tool detail components', () => {
     expect(wrapper.text()).toContain('boom')
   })
 
-  it('renders a read path and file body', () => {
+  it('shows MCP screenshot attachments in the generic tool detail', async () => {
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const wrapper = mount(ToolDetailDefault, {
+      props: {
+        part: makePart({
+          tool: 'mcp_playwright_playwright_browser_take_screenshot',
+          output: 'Screenshot saved',
+          meta: { attachments: [{ type: 'file', mime: 'image/png', url }] },
+        }),
+      },
+      global: { stubs: { teleport: true } },
+    })
+
+    expect(wrapper.get('[data-testid="tool-detail-default-image"]').attributes('src')).toBe(url)
+    expect(wrapper.text()).toContain('Screenshot saved')
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe(url)
+  })
+
+  it('renders a read path with a colored file icon and the file body', () => {
     const wrapper = mount(ToolDetailRead, {
       props: {
         part: makePart({
@@ -55,6 +86,171 @@ describe('tool detail components', () => {
 
     expect(wrapper.text()).toContain('/workspace/a.ts')
     expect(wrapper.text()).toContain('export const x = 1')
+    const icon = wrapper.get('[data-testid="workspace-file-icon"]')
+    expect(icon.attributes('data-icon')).toBe('typescript')
+  })
+
+  it('renders image attachments as thumbnails that open the lightbox', async () => {
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const wrapper = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'Image read successfully',
+          input: { arguments: '{"path":"/workspace/cat.png"}' },
+          meta: { attachments: [{ type: 'file', mime: 'image/png', url }] },
+        }),
+      },
+      global: {
+        stubs: { teleport: true },
+        provide: { [harnessWorkspaceIdKey as symbol]: ref('workspace-a') },
+      },
+    })
+
+    const img = wrapper.get('[data-testid="tool-detail-read-image"]')
+    expect(img.attributes('src')).toBe(url)
+    expect(img.attributes('data-voice-image-path')).toBe('/workspace/cat.png')
+    expect(img.attributes('data-voice-workspace')).toBe('workspace-a')
+    // Text preview from the backend is kept alongside the thumbnail.
+    expect(wrapper.text()).toContain('Image read successfully')
+
+    await wrapper.get('button').trigger('click')
+    const lightbox = wrapper.findComponent(ImageLightbox)
+    expect(lightbox.exists()).toBe(true)
+    expect(lightbox.props('src')).toBe(url)
+    expect(lightbox.props('path')).toBe('/workspace/cat.png')
+    expect(lightbox.props('workspaceId')).toBe('workspace-a')
+  })
+
+  it.each(['/tmp/cat.png', '/workspace/../cat.png', '/workspace//cat.png'])(
+    'does not link a read attachment to a noncanonical workspace path: %s',
+    async (path) => {
+      const wrapper = mount(ToolDetailRead, {
+        props: {
+          part: makePart({
+            tool: 'read',
+            meta: {
+              path,
+              attachments: [{ type: 'file', mime: 'image/png', url: 'data:image/png;base64,YQ==' }],
+            },
+          }),
+        },
+        global: {
+          stubs: { teleport: true },
+          provide: { [harnessWorkspaceIdKey as symbol]: ref('workspace-a') },
+        },
+      })
+      expect(
+        wrapper.get('img[data-testid="tool-detail-read-image"]').attributes('data-voice-image-path'),
+      ).toBeUndefined()
+      await wrapper.get('button').trigger('click')
+      expect(wrapper.getComponent(ImageLightbox).props('path')).toBeUndefined()
+      expect(wrapper.getComponent(ImageLightbox).props('workspaceId')).toBeUndefined()
+      wrapper.unmount()
+    },
+  )
+
+  it('renders PDF attachments as a download link with the file name', () => {
+    const url = 'data:application/pdf;base64,JVBERi0='
+    const wrapper = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          input: { arguments: '{"path":"/workspace/doc.pdf"}' },
+          meta: { attachments: [{ type: 'file', mime: 'application/pdf', url }] },
+        }),
+      },
+    })
+
+    const link = wrapper.get('[data-testid="tool-detail-read-pdf"]')
+    expect(link.attributes('href')).toBe(url)
+    expect(link.attributes('download')).toBe('doc.pdf')
+    expect(link.text()).toContain('PDF attachment')
+    expect(wrapper.text()).toContain('PDF read successfully')
+    expect(
+      wrapper
+        .get('[data-testid="tool-detail-read-pdf"] [data-testid="workspace-file-icon"]')
+        .attributes('data-icon'),
+    ).toBe('pdf')
+  })
+
+  it('prefers attachment.filename over meta.path and tool args for the PDF name', () => {
+    const url = 'data:application/pdf;base64,JVBERi0='
+    const withFilename = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          input: { arguments: '{"path":"/workspace/args.pdf"}' },
+          meta: {
+            path: '/workspace/meta.pdf',
+            attachments: [{ type: 'file', mime: 'application/pdf', url, filename: 'live.pdf' }],
+          },
+        }),
+      },
+    })
+    expect(withFilename.get('[data-testid="tool-detail-read-pdf"]').attributes('download')).toBe(
+      'live.pdf',
+    )
+
+    const metaOnly = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          input: { arguments: '{"path":"/workspace/args.pdf"}' },
+          meta: {
+            path: '/workspace/meta.pdf',
+            attachments: [{ type: 'file', mime: 'application/pdf', url }],
+          },
+        }),
+      },
+    })
+    expect(metaOnly.get('[data-testid="tool-detail-read-pdf"]').attributes('download')).toBe(
+      'meta.pdf',
+    )
+
+    const fallback = mount(ToolDetailRead, {
+      props: {
+        part: makePart({
+          tool: 'read',
+          output: 'PDF read successfully',
+          meta: { attachments: [{ type: 'file', mime: 'application/pdf', url }] },
+        }),
+      },
+    })
+    expect(fallback.get('[data-testid="tool-detail-read-pdf"]').attributes('download')).toBe(
+      'document.pdf',
+    )
+  })
+
+  it('renders only text when read meta attachments are broken', () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      for (const meta of [
+        undefined,
+        {},
+        { attachments: 'nope' },
+        { attachments: [{ type: 'file', mime: '', url: 'https://example.com/a.png' }] },
+      ]) {
+        const wrapper = mount(ToolDetailRead, {
+          props: {
+            part: makePart({
+              tool: 'read',
+              output: 'file body',
+              input: { arguments: '{"path":"/workspace/a.ts"}' },
+              ...(meta === undefined ? {} : { meta }),
+            }),
+          },
+        })
+        expect(wrapper.find('[data-testid="tool-detail-read-image"]').exists()).toBe(false)
+        expect(wrapper.find('[data-testid="tool-detail-read-pdf"]').exists()).toBe(false)
+        expect(wrapper.text()).toContain('file body')
+      }
+    } finally {
+      consoleSpy.mockRestore()
+    }
   })
 
   it('renders search hits with a count, and an empty result', () => {
@@ -92,22 +288,18 @@ describe('tool detail components', () => {
     expect(wrapper.text()).toContain('<html>ok</html>')
   })
 
-  it('pairs questions with answers and handles missing answers', () => {
-    const wrapper = mount(ToolDetailQuestion, {
+  it('renders a webfetch format from arguments', () => {
+    const wrapper = mount(ToolDetailWebfetch, {
       props: {
         part: makePart({
-          tool: 'question',
-          output: '{"answers":["Build"]}',
-          input: {
-            arguments: JSON.stringify({
-              questions: [{ question: 'Which mode?' }],
-            }),
-          },
+          tool: 'webfetch',
+          output: '# Hello',
+          input: { arguments: '{"url":"https://example.com","format":"markdown"}' },
         }),
       },
     })
-    expect(wrapper.text()).toContain('Which mode?')
-    expect(wrapper.get('[data-testid="tool-detail-question-answer"]').text()).toBe('Build')
+    expect(wrapper.text()).toContain('markdown')
+    expect(wrapper.get('a').attributes('href')).toBe('https://example.com')
   })
 
   it('renders todo rows from output and a cleared list', () => {
@@ -132,15 +324,82 @@ describe('tool detail components', () => {
     const wrapper = mount(ToolDetailComputerUse, {
       props: {
         part: makePart({
-          tool: 'left_click',
+          tool: 'mcp_computer-use_cua_repl_js',
           state: 'error',
           output: 'click failed',
-          input: { arguments: '{"x":10,"y":20}' },
+          input: { arguments: { code: 'await app.click(...)', title: 'Click Save' } },
         }),
       },
     })
-    expect(wrapper.text()).toContain('Left click (10, 20)')
+    expect(wrapper.text()).toContain('Click Save')
     expect(wrapper.text()).toContain('click failed')
+  })
+
+  it('renders generic tool arguments before output', () => {
+    const wrapper = mount(ToolDetailDefault, {
+      props: {
+        part: makePart({
+          tool: 'tool_call',
+          input: { arguments: '{"name":"calculator","arguments":{"expression":"2+2"}}' },
+          output: '{"result":4}',
+        }),
+      },
+    })
+    expect(wrapper.get('[data-testid="tool-detail-default-input"]').text()).toContain('calculator')
+    expect(wrapper.get('[data-testid="tool-detail-default-output"]').text()).toContain('result')
+  })
+
+  it('renders memory citations with safe text paths and line ranges', () => {
+    const wrapper = mount(ToolDetailMemory, {
+      props: {
+        part: makePart({
+          tool: 'memory',
+          input: {
+            arguments:
+              '{"operation":"recall","entries":[{"path":"notes/plan.md","lineStart":4,"lineEnd":8,"note":"requested"}]}',
+          },
+          output:
+            '{"citations":[{"path":"notes/source.md","lineStart":12,"lineEnd":12,"note":"found"}]}',
+        }),
+      },
+    })
+    expect(wrapper.text()).toContain('notes/plan.md')
+    expect(wrapper.text()).toContain('L4–L8')
+    expect(wrapper.text()).toContain('notes/source.md')
+    expect(wrapper.text()).toContain('L12')
+  })
+
+  it('shows generated image prompt, saved path, and sanitized attachment lightbox', async () => {
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const wrapper = mount(ToolDetailImageGeneration, {
+      props: {
+        part: makePart({
+          tool: 'image_generation',
+          input: { arguments: '{"prompt":"a blue bird","transparent_background":true}' },
+          output: '{"savedPath":"/workspace/bird.png","status":"saved"}',
+          meta: {
+            attachments: [
+              { type: 'file', mime: 'image/png', url },
+              { type: 'file', mime: 'image/png', url: 'https://example.com/unsafe.png' },
+            ],
+          },
+        }),
+      },
+      global: {
+        stubs: { teleport: true },
+        provide: { [harnessWorkspaceIdKey as symbol]: ref('workspace-a') },
+      },
+    })
+    expect(wrapper.text()).toContain('a blue bird')
+    expect(wrapper.text()).toContain('/workspace/bird.png')
+    expect(wrapper.findAll('[data-testid="tool-detail-image-generation-image"]')).toHaveLength(1)
+    const image = wrapper.get('[data-testid="tool-detail-image-generation-image"]')
+    expect(image.attributes('data-voice-image-path')).toBe('/workspace/bird.png')
+    expect(image.attributes('data-voice-workspace')).toBe('workspace-a')
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe(url)
+    expect(wrapper.findComponent(ImageLightbox).props('path')).toBe('/workspace/bird.png')
+    expect(wrapper.findComponent(ImageLightbox).props('workspaceId')).toBe('workspace-a')
   })
 
   it('falls back to the default tool name and output', () => {
@@ -150,6 +409,8 @@ describe('tool detail components', () => {
       },
     })
     expect(wrapper.get('[data-testid="tool-detail-default"]').text()).toContain('write')
-    expect(wrapper.text()).toContain('Wrote 12 bytes')
+    expect(wrapper.get('[data-testid="tool-detail-default-output"]').text()).toContain(
+      'Wrote 12 bytes',
+    )
   })
 })

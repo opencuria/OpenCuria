@@ -1,21 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ChevronRight, Loader2 } from '@lucide/vue'
-import type { HarnessPart } from '@/types/harness'
+import { ChevronRight } from '@lucide/vue'
+import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import { useHarnessStore } from '@/stores/harness'
 import {
   formatSubagentType,
   subtaskActivityLabel,
-  buildChildSessionIdMap,
   resolveChildSessionId,
-} from '@/lib/harnessSubtaskActivity'
-import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
+} from '@opencuria/chat-core/harnessSubtaskActivity'
+import { formatHarnessModelEffort, type ProviderModel } from '@opencuria/chat-core/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import HarnessDesktopMini from './HarnessDesktopMini.vue'
 
 const props = defineProps<{
   part: HarnessPart
-  childSessionId?: string | null
   models?: ProviderModel[]
 }>()
 
@@ -25,23 +24,12 @@ const emit = defineEmits<{
 
 const harness = useHarnessStore()
 
-/** The child session id links parent/child (backend `parent` FK). */
-const childId = computed(() => {
-  const map = buildChildSessionIdMap(harness.sessions, harness.messagesBySession)
-  const subtaskId = String(props.part.meta?.['subtask_id'] ?? '')
-  const fromProp = props.childSessionId
-    ? {
-        [props.part.id]: props.childSessionId,
-        ...(subtaskId ? { [subtaskId]: props.childSessionId } : {}),
-      }
-    : {}
-  return resolveChildSessionId(props.part, harness.sessions, { ...map, ...fromProp })
-})
+const childId = computed(() => resolveChildSessionId(props.part))
 
 const catalog = ref<ProviderModel[]>(props.models ?? [])
 
 const agentLabel = computed(() => {
-  const raw = props.part.meta?.['agent']
+  const raw = props.part.meta?.['agent'] ?? props.part.display?.agent
   return formatSubagentType(typeof raw === 'string' ? raw : null)
 })
 
@@ -56,7 +44,7 @@ const childSession = computed(() => {
 })
 
 function metaString(key: string): string {
-  const raw = props.part.meta?.[key]
+  const raw = props.part.meta?.[key] ?? props.part.display?.[key]
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
@@ -85,9 +73,7 @@ onMounted(async () => {
   }
 })
 
-const activity = computed(() =>
-  subtaskActivityLabel(props.part, childMessages.value),
-)
+const activity = computed(() => subtaskActivityLabel(props.part, childMessages.value))
 
 const isRunning = computed(() => props.part.state === 'running')
 
@@ -113,13 +99,14 @@ function handleOpen(): void {
     <span
       data-testid="harness-subtask-indicator"
       :data-running="isRunning ? '1' : '0'"
-      class="mt-1.5 flex h-3 w-3 shrink-0 items-center justify-center"
+      class="mt-0.5 flex size-[18px] shrink-0 items-center justify-center"
     >
-      <Loader2
+      <OpenCuriaLogo
         v-if="isRunning"
-        :size="12"
-        class="text-muted-foreground motion-reduce:hidden motion-safe:animate-spin"
-        aria-hidden="true"
+        icon-only
+        motion="working"
+        alt=""
+        class="size-[18px] motion-reduce:hidden"
       />
       <span
         class="h-1.5 w-1.5 rounded-full bg-muted-foreground"
@@ -128,7 +115,11 @@ function handleOpen(): void {
     </span>
     <span class="min-w-0 flex-1">
       <span class="flex min-w-0 items-baseline gap-1.5">
-        <span class="truncate text-sm font-medium text-foreground">
+        <span
+          data-testid="harness-subtask-title"
+          class="truncate text-sm font-medium"
+          :class="isRunning ? 'harness-shimmer' : 'text-foreground'"
+        >
           {{ part.title || 'Subagent task' }}
         </span>
         <span
@@ -145,11 +136,7 @@ function handleOpen(): void {
         >
           {{ modelLabel }}
         </span>
-        <ChevronRight
-          v-if="childId"
-          :size="14"
-          class="ml-auto shrink-0 text-muted-foreground"
-        />
+        <ChevronRight v-if="childId" :size="14" class="ml-auto shrink-0 text-muted-foreground" />
       </span>
       <span
         v-if="activity"

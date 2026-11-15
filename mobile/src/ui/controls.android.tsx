@@ -1,0 +1,191 @@
+import React from "react";
+import { StyleSheet, View } from "react-native";
+import {
+  Button as ComposeButton,
+  FilledTonalButton,
+  OutlinedButton,
+  TextButton,
+  IconButton as ComposeIconButton,
+  FilledIconButton,
+  Host,
+  Surface,
+  Text,
+} from "@expo/ui/jetpack-compose";
+import {
+  defaultMinSize,
+  combinedClickable,
+  fillMaxWidth,
+  fillMaxSize,
+  semantics,
+  size,
+} from "@expo/ui/jetpack-compose/modifiers";
+import type {
+  ButtonProps,
+  IconButtonProps,
+  NativeActionProps,
+} from "./controls.types";
+import {
+  controlContentStyle,
+  controlLayout,
+  hugsContent,
+} from "./controlLayout";
+import { useTheme } from "./theme";
+
+/** Material buttons retain their native sizing, shape, ripple and disabled colors. */
+export function Button({
+  title,
+  variant = "secondary",
+  busy,
+  disabled,
+  onPress,
+  style,
+  accessibilityLabel,
+  testID,
+}: ButtonProps): React.JSX.Element {
+  const { theme } = useTheme();
+  const Component =
+    variant === "ghost"
+      ? TextButton
+      : variant === "outline"
+        ? OutlinedButton
+        : variant === "secondary"
+          ? FilledTonalButton
+          : ComposeButton;
+  const layout = controlLayout(style);
+  const hug = hugsContent(layout);
+  return (
+    <View testID={testID} style={[{ alignSelf: "stretch" }, layout]}>
+      <Host
+        matchContents={{ vertical: true, horizontal: hug }}
+        colorScheme={theme.scheme}
+        seedColor={theme.primary}
+        ignoreSafeAreaKeyboardInsets
+      >
+        <Component
+          onClick={() => onPress?.()}
+          enabled={!disabled && !busy}
+          colors={
+            variant === "danger"
+              ? {
+                  containerColor: theme.danger,
+                  contentColor: theme.primaryForeground,
+                }
+              : undefined
+          }
+          modifiers={[
+            ...(hug ? [] : [fillMaxWidth()]),
+            defaultMinSize({ minHeight: 48 }),
+            semantics({ contentDescription: accessibilityLabel ?? title }),
+          ]}
+        >
+          <Text>{busy ? `${title}…` : title}</Text>
+        </Component>
+      </Host>
+    </View>
+  );
+}
+
+export function IconButton({
+  icon,
+  label,
+  size: diameter = 48,
+  tone = "neutral",
+  disabled,
+  onPress,
+  testID,
+}: IconButtonProps): React.JSX.Element {
+  const { theme } = useTheme();
+  const Component = tone === "primary" ? FilledIconButton : ComposeIconButton;
+  return (
+    <View
+      testID={testID}
+      style={[
+        { width: diameter, height: diameter },
+        // Floating controls sit over the transcript: a neutral surface instead
+        // of the seed-tinted tonal container.
+        tone === "floating" && {
+          borderRadius: diameter / 2,
+          backgroundColor: theme.surfaceMuted,
+        },
+      ]}
+    >
+      <Host
+        colorScheme={theme.scheme}
+        seedColor={theme.primary}
+        ignoreSafeAreaKeyboardInsets
+        style={{ width: diameter, height: diameter }}
+      >
+        <Component
+          enabled={!disabled}
+          onClick={() => onPress?.()}
+          modifiers={[
+            size(diameter, diameter),
+            semantics({ contentDescription: label }),
+          ]}
+        >
+          {null}
+        </Component>
+      </Host>
+      <View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          inset: 0,
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: disabled ? 0.38 : 1,
+        }}
+      >
+        {icon}
+      </View>
+    </View>
+  );
+}
+
+/** React Native measures rich labels; the native Material surface owns taps and ripple. */
+export function NativeAction({
+  children,
+  onPress,
+  onLongPress,
+  disabled,
+  style,
+  testID,
+  accessibilityLabel,
+}: NativeActionProps): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View collapsable={false} testID={testID} style={controlLayout(style)}>
+      <View pointerEvents="none" style={controlContentStyle(style)}>
+        {children}
+      </View>
+      <Host
+        style={StyleSheet.absoluteFill}
+        colorScheme={theme.scheme}
+        seedColor={theme.primary}
+        ignoreSafeAreaKeyboardInsets
+      >
+        <Surface
+          onClick={onLongPress ? undefined : () => onPress?.()}
+          enabled={!disabled}
+          color="transparent"
+          modifiers={[
+            fillMaxSize(),
+            ...(onLongPress
+              ? [
+                  combinedClickable({
+                    onClick: disabled ? undefined : onPress,
+                    onLongClick: disabled ? undefined : onLongPress,
+                  }),
+                ]
+              : []),
+            ...(accessibilityLabel
+              ? [semantics({ contentDescription: accessibilityLabel })]
+              : []),
+          ]}
+        >
+          {null}
+        </Surface>
+      </Host>
+    </View>
+  );
+}

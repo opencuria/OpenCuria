@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from apps.harness.access.base import FileContent
+import pytest
+
+from apps.harness.access.file_types import FileContent
 from apps.harness.agents.definitions import get_agent
 from apps.harness.prompts.composer import (
     MAX_CONTEXT_FILE_BYTES,
     compose_system_prompt,
     load_project_context,
 )
+from apps.harness.prompts.opencuria import opencuria_context
 from apps.harness.providers.base import ToolSchema
 from apps.harness.tests.conftest import FakeAccessor
 
@@ -122,11 +125,80 @@ async def test_composer_sections_and_metadata() -> None:
     assert "2026-09-05" in composed.system
     assert "Working directory: /workspace" in composed.system
     assert "Mode: build" in composed.system
+    assert "isolated OpenCuria workspace" in composed.system
+    assert composed.system.count(opencuria_context(get_agent("build"))) == 1
     assert "- read: Read a file." in composed.system
     assert "- general: Delegated subtasks." in composed.system
-    assert "Independent tool calls in one assistant message run in parallel" in composed.system
+    assert (
+        "Independent tool calls in one assistant message run in parallel"
+        in composed.system
+    )
     assert "Launch independent subagents in one message" in composed.system
+    assert "![Screenshot](/workspace/screenshots/result.png)" in composed.system
+    assert "actual running UI (not a mock)" in composed.system
     assert composed.truncated is False
+
+
+@pytest.mark.parametrize("native_tool_contracts", [False, True])
+@pytest.mark.parametrize(
+    ("agent_name", "mode"),
+    [("build", "build"), ("plan", "plan"), ("general", "build"), ("general", "plan")],
+)
+async def test_composer_encourages_local_testing_with_boundaries(
+    agent_name: str, mode: str, native_tool_contracts: bool
+) -> None:
+    """Active agents get initiative guidance without bypassing permissions."""
+    composed = await compose_system_prompt(
+        agent=get_agent(agent_name),
+        mode=mode,
+        native_tool_contracts=native_tool_contracts,
+    )
+    assert composed.system.count(opencuria_context(get_agent(agent_name))) == 1
+    assert "starting development servers" in composed.system
+    assert "installing dependencies" in composed.system
+    assert "running migrations against workspace-local test data" in composed.system
+    assert "testing relevant flows in the running app" in composed.system
+    assert "Preserve existing user work" in composed.system
+    assert "When permitted by the current task, mode, and permissions" in (
+        composed.system
+    )
+    assert "does not extend to external or production services" in composed.system
+    if agent_name == "plan":
+        assert "Ask before deliberate source/configuration changes" in composed.system
+
+
+@pytest.mark.parametrize("native_tool_contracts", [False, True])
+@pytest.mark.parametrize("agent_name", ["explore", "title", "compaction"])
+@pytest.mark.parametrize("mode", ["plan", "build"])
+async def test_composer_restricted_agents_do_not_get_local_testing_guidance(
+    agent_name: str, mode: str, native_tool_contracts: bool
+) -> None:
+    """Read-only and hidden agents must not be told to mutate the workspace."""
+    composed = await compose_system_prompt(
+        agent=get_agent(agent_name),
+        mode=mode,
+        native_tool_contracts=native_tool_contracts,
+    )
+    assert "starting development servers" not in composed.system
+    assert "installing dependencies" not in composed.system
+    assert "running migrations" not in composed.system
+    if agent_name == "explore":
+        assert "read-only research subagent" in composed.system.lower()
+        assert "Never edit or write files" in composed.system
+    else:
+        assert "not on the user's machine" not in composed.system
+        assert "OpenCuria chat renders" not in composed.system
+
+
+async def test_shared_chat_paths_stay_workspace_relative_from_a_subdirectory() -> None:
+    """Shell cwd must not change the paths advertised to the chat renderer."""
+    composed = await compose_system_prompt(
+        agent=get_agent("build"), mode="build", cwd="/workspace/project/backend"
+    )
+    assert "Working directory: /workspace/project/backend" in composed.system
+    assert "Relative chat paths resolve from /workspace" in composed.system
+    assert "![Screenshot](/workspace/screenshots/result.png)" in composed.system
+    assert composed.system.count("OpenCuria chat renders") == 1
 
 
 async def test_composer_skills_references_extension_point() -> None:
@@ -145,8 +217,6 @@ async def test_composer_skills_references_extension_point() -> None:
 
 async def test_composer_rejects_invalid_mode() -> None:
     """Unknown modes raise ValueError."""
-    import pytest
-
     with pytest.raises(ValueError, match="Invalid mode"):
         await compose_system_prompt(agent=get_agent("build"), mode="turbo")
 
@@ -154,3 +224,31 @@ async def test_composer_rejects_invalid_mode() -> None:
 async def test_composer_uses_max_context_byte_cap() -> None:
     """The per-file cap constant matches the read tool guard scale."""
     assert MAX_CONTEXT_FILE_BYTES == 32 * 1024
+
+
+async def test_plan_general_prompt_follows_its_own_agent_permissions() -> None:
+    """Delegated general agents do not acquire the root Plan edit restriction."""
+    for native_tool_contracts in (False, True):
+        composed = await compose_system_prompt(
+            agent=get_agent("general"),
+            mode="plan",
+            native_tool_contracts=native_tool_contracts,
+        )
+        system = composed.system
+        assert "follow the configured agent permissions" in system
+        assert "Ask before deliberate source" not in system
+        assert "before user approval" not in system
+        assert "unclassified mutations" not in system
+
+
+async def test_plan_explore_prompt_keeps_read_only_restrictions() -> None:
+    """Plan never grants Explore the shell/process or general edit freedoms."""
+    composed = await compose_system_prompt(
+        agent=get_agent("explore"), mode="plan", native_tool_contracts=True
+    )
+    assert (
+        "Plan mode does not relax Explore's read-only restrictions" in composed.system
+    )
+    assert "Do not edit files, run tests or mutating commands, or delegate" in (
+        composed.system
+    )

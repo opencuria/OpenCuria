@@ -1,0 +1,225 @@
+"""Focused integration contracts for the composed runner managers."""
+
+from __future__ import annotations
+
+import io
+import tarfile
+import tempfile
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from src.config import RunnerSettings
+from src.models import WorkspaceInfo
+from src.runtime.base import PtyHandle
+from src.service import WorkspaceService
+from src.services.sessions.desktop_leases import DesktopLeaseStore
+
+
+def _make_service(runtime=None) -> WorkspaceService:
+    return WorkspaceService(
+        runtime=runtime,
+        settings=RunnerSettings(),
+    )
+
+
+def _cache_workspace(
+    service: WorkspaceService,
+    workspace_id: uuid.UUID,
+    *,
+    instance_id: str = "instance-1",
+) -> WorkspaceInfo:
+    info = WorkspaceInfo(
+        workspace_id=workspace_id,
+        instance_id=instance_id,
+        status="running",
+    )
+    service.registry._cache[workspace_id] = info
+    return info
+
+
+async def test_stop_workspace_rejects_missing_instance() -> None:
+    service = _make_service(runtime=object())
+    workspace_id = uuid.uuid4()
+    _cache_workspace(service, workspace_id, instance_id="")
+    with pytest.raises(RuntimeError, match="no instance assigned"):
+        await service.lifecycle.stop_workspace(workspace_id)
+
+
+async def test_keyed_lock_maps_retain_manager_locks() -> None:
+    service = _make_service()
+    workspace_id = uuid.uuid4()
+    background = service.background
+    background_lock = await background._background_start_lock(workspace_id, "proc")
+    assert (
+        await background._background_start_lock(workspace_id, "proc") is background_lock
+    )
+    assert (
+        background._background_start_lock_map.locks[(workspace_id, "proc")]
+        is background_lock
+    )
+    assert (
+        await background._background_start_lock(workspace_id, "other")
+        is not background_lock
+    )
+
+    desktop = service.desktop
+    desktop_lock = await desktop._desktop_lock(workspace_id)
+    assert await desktop._desktop_lock(workspace_id) is desktop_lock
+    assert desktop._desktop_lock_map.locks[workspace_id] is desktop_lock
+    assert await desktop._desktop_lock(uuid.uuid4()) is not desktop_lock
+
+
+class _FakePtyRuntime:
+    def __init__(self) -> None:
+        self.exec_kwargs: dict | None = None
+        self.written: list[bytes] = []
+        self.resized: list[tuple[int, int]] = []
+        self.closed: list[PtyHandle] = []
+        self._read = False
+
+    async def workspace_exists(self, instance_id: str) -> bool:
+        return True
+
+    async def exec_pty(self, instance_id: str, **kwargs) -> PtyHandle:
+        self.exec_kwargs = {"instance_id": instance_id, **kwargs}
+        return PtyHandle(instance_id=instance_id, handle=object())
+
+    async def pty_read(self, handle: PtyHandle, size: int = 4096) -> bytes:
+        if self._read:
+            return b""
+        self._read = True
+        return b"terminal output"
+
+    async def pty_write(self, handle: PtyHandle, data: bytes) -> None:
+        self.written.append(bytes(data))
+
+    async def pty_resize(self, handle: PtyHandle, cols: int, rows: int) -> None:
+        self.resized.append((cols, rows))
+
+    async def pty_close(self, handle: PtyHandle) -> None:
+        handle.closed = True
+        self.closed.append(handle)
+
+
+async def test_terminal_manager_pty_lifecycle_and_unknown_id_error() -> None:
+    runtime = _FakePtyRuntime()
+    service = _make_service(runtime=runtime)
+    workspace_id = uuid.uuid4()
+    _cache_workspace(service, workspace_id)
+    terminals = service.terminal_manager
+
+    terminal_id = await terminals.start_terminal(workspace_id, cols=100, rows=40)
+    assert runtime.exec_kwargs is not None
+    assert runtime.exec_kwargs["instance_id"] == "instance-1"
+    assert runtime.exec_kwargs["cols"] == 100
+    assert runtime.exec_kwargs["rows"] == 40
+    assert runtime.exec_kwargs["command"][0] == "/bin/bash"
+
+    await terminals.write_terminal(terminal_id, b"ls\n")
+    await terminals.resize_terminal(terminal_id, 120, 50)
+    assert runtime.written == [b"ls\n"]
+    assert runtime.resized == [(120, 50)]
+    assert [chunk async for chunk in terminals.read_terminal(terminal_id)] == [
+        b"terminal output"
+    ]
+
+    with pytest.raises(ValueError, match="not found"):
+        await terminals.write_terminal("missing", b"x")
+    await terminals.close_terminal(terminal_id)
+    assert terminal_id not in terminals._terminals
+    assert len(runtime.closed) == 1 and runtime.closed[0].closed
+
+
+
+
+class _ComposedRuntime:
+
+    def __init__(self) -> None:
+        self.clone_calls: list[tuple[str, str]] = []
+        self.archives: list[tuple[str, str, bytes]] = []
+
+    async def exec_command_wait(
+        self, instance_id: str, command, workdir=None, env=None
+    ) -> tuple[int, str]:
+        return 0, "ok"
+
+    async def create_workspace_from_image_artifact(
+        self, artifact_id: str, workspace_id: str, **kwargs
+    ) -> str:
+        self.clone_calls.append((artifact_id, workspace_id))
+        return "cloned-instance"
+
+    async def put_archive(self, instance_id: str, path: str, archive: bytes) -> None:
+        self.archives.append((instance_id, path, archive))
+
+
+async def test_composer_wires_image_credentials() -> None:
+    runtime = _ComposedRuntime()
+    service = _make_service(runtime=runtime)
+    assert service.images._credentials_injector.__self__ is service.credentials
+
+    clone_id = uuid.uuid4()
+    (
+        cloned,
+        credentials_present,
+    ) = await service.images.create_workspace_from_image_artifact(
+        "artifact-1", clone_id, env_vars={"TOKEN": "secret"}
+    )
+    assert (cloned, credentials_present) == (clone_id, True)
+    assert runtime.clone_calls == [("artifact-1", str(clone_id))]
+    info = service.registry.get_cached(clone_id)
+    assert (info.instance_id, info.status, info.credentials_present) == (
+        "cloned-instance",
+        "running",
+        True,
+    )
+    assert len(runtime.archives) == 1
+    with tarfile.open(fileobj=io.BytesIO(runtime.archives[0][2])) as archive:
+        env_script = archive.extractfile("env.sh")
+        assert env_script is not None
+        assert b"export TOKEN=secret" in env_script.read()
+
+
+async def test_remove_workspace_uses_managed_lifecycle_confirmation() -> None:
+    runtime = SimpleNamespace(
+        remove_workspace=AsyncMock(),
+        get_workspace_status=AsyncMock(
+            return_value=SimpleNamespace(instance_id="instance-1", status="removed")
+        ),
+        workspace_exists=AsyncMock(return_value=False),
+    )
+    service = _make_service(runtime=runtime)
+    workspace_id = uuid.uuid4()
+    _cache_workspace(service, workspace_id)
+
+    with tempfile.TemporaryDirectory() as state_dir:
+        epoch = "contract-test-epoch"
+        store = DesktopLeaseStore(state_dir)
+        service.streams.intent_store = SimpleNamespace(
+            list_unfinished=AsyncMock(return_value=[]),
+            finish_workspace=AsyncMock(),
+        )
+        service.streams.lease_store = store
+        service.streams.epoch = epoch
+        service.desktop.configure_leases(
+            store, epoch, service.streams.close_owner_streams
+        )
+        service.streams.close_workspace_streams = AsyncMock(return_value=1)
+        service.background._kill_all_background_processes = AsyncMock()
+        confirmed = AsyncMock(return_value=True)
+        service.streams.confirm_workspace_ended = confirmed
+
+        await service.lifecycle.remove_workspace(workspace_id)
+
+    service.streams.close_workspace_streams.assert_awaited_once_with(
+        workspace_id, reason="remove"
+    )
+    service.background._kill_all_background_processes.assert_awaited_once_with(
+        workspace_id, reason="remove"
+    )
+    runtime.remove_workspace.assert_awaited_once_with("instance-1")
+    confirmed.assert_awaited_once_with(workspace_id, "instance-1")
+    assert workspace_id not in service.registry._cache
+    assert workspace_id not in service.desktop._desktop_sessions

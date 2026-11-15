@@ -1,21 +1,19 @@
 <!--
-  SettingsSheet — Großes Settings-Modal mit Seiten-Nav (Schritt 5).
+  SettingsSheet — large settings modal with side navigation.
 
-  Layout-Pattern angelehnt an OpenWebUI (chat/SettingsModal.svelte +
-  common/Modal.svelte, size=full): links Nav (w-60 border-r), rechts Content.
-  Inhalte sind OpenCuria-eigene Panels (keine OpenWebUI-Tabs).
+  Layout: left nav (w-60 border-r), right content. Contents are
+  OpenCuria-owned panels.
 
-  Öffnen:  (a) global via Window-Event `opencuria:open-settings`
+  Open:  (a) global via Window event `opencuria:open-settings`
              (CustomEvent, detail `{ tab?: string }`),
-           (b) kontrolliert via v-model:open (defineModel).
-  Tab-Auswahl: `resolveSettingsTab()` — mappt auch alte OrgSettings-Tabs
-  (`workspace-policies`, `provider`, `image-definitions`,
-  `credential-services`) und Legacy-Tabs (`preferences`, `theme` …).
-  Runners-Tab ist nur für Admins sichtbar (authStore.isAdmin).
-  Focus-Trap/Esc/Backdrop kommen vom Dialog (reka-ui) gratis.
+           (b) controlled via v-model:open (defineModel).
+  Tab selection: `resolveSettingsTab()` validates event and deep-link input.
+  Tabs with only admin-editable settings are admin-only (authStore.isAdmin);
+  members never see them and land on their first visible tab instead.
+  Focus trap / Esc / backdrop come from Dialog (reka-ui).
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   BookText,
   Bot,
@@ -23,33 +21,52 @@ import {
   Camera,
   Key,
   KeyRound,
+  Layers,
+  Puzzle,
   Server,
   Settings2,
-  Users,
+  Shield,
+  Sparkles,
 } from '@lucide/vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useAuthStore } from '@/stores/auth'
+import { provideAutosaveBoundary } from '@/composables/useAutosave'
 import { cn } from '@/lib/utils'
-import WorkspacePolicyTab from './WorkspacePolicyTab.vue'
-import ProviderConfigTab from './ProviderConfigTab.vue'
-import CredentialServicesTab from './CredentialServicesTab.vue'
-import SkillsPanel from './SkillsPanel.vue'
-import CredentialsPanel from './CredentialsPanel.vue'
-import ApiKeysPanel from './ApiKeysPanel.vue'
-import CapturedImagesPanel from './CapturedImagesPanel.vue'
-import RunnersPanel from './RunnersPanel.vue'
-import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
 import {
+  CLOSE_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
+  SETTINGS_CLOSED_EVENT,
   resolveSettingsTab,
   type SettingsTabId,
 } from './settingsTabs'
 
+const WorkspacePolicyTab = defineAsyncComponent(() => import('./WorkspacePolicyTab.vue'))
+const ProviderConfigTab = defineAsyncComponent(() => import('./ProviderConfigTab.vue'))
+const AgentConfigTab = defineAsyncComponent(() => import('./AgentConfigTab.vue'))
+const CredentialServicesTab = defineAsyncComponent(() => import('./CredentialServicesTab.vue'))
+const SkillsPanel = defineAsyncComponent(() => import('./SkillsPanel.vue'))
+const CredentialsPanel = defineAsyncComponent(() => import('./CredentialsPanel.vue'))
+const PluginsPanel = defineAsyncComponent(() => import('./PluginsPanel.vue'))
+const ApiKeysPanel = defineAsyncComponent(() => import('./ApiKeysPanel.vue'))
+const CapturedImagesPanel = defineAsyncComponent(() => import('./CapturedImagesPanel.vue'))
+const RunnersPanel = defineAsyncComponent(() => import('./RunnersPanel.vue'))
+const ImageDefinitionsTab = defineAsyncComponent(
+  () => import('@/components/images/ImageDefinitionsTab.vue'),
+)
+
 const authStore = useAuthStore()
+const flushChanges = provideAutosaveBoundary()
 
 const open = defineModel<boolean>('open', { default: false })
 const activeTab = defineModel<SettingsTabId>('tab', { default: 'general' })
+const settingsContext = ref<{
+  pluginId?: string
+  serviceId?: string
+  credentialId?: string
+  workspaceDraftId?: string
+  version: number
+}>({ version: 0 })
 
 const isAdmin = computed(() => authStore.isAdmin)
 
@@ -61,98 +78,174 @@ interface SettingsNavItem {
 }
 
 const navItems: SettingsNavItem[] = [
-  { id: 'general', label: 'Allgemein', icon: Settings2 },
-  { id: 'provider', label: 'Provider & Modelle', icon: Bot },
+  { id: 'general', label: 'General', icon: Settings2, adminOnly: true },
+  { id: 'provider', label: 'Provider & Models', icon: Bot },
+  { id: 'agents', label: 'Agents', icon: Sparkles, adminOnly: true },
   { id: 'skills', label: 'Skills', icon: BookText },
   { id: 'credentials', label: 'Credentials', icon: KeyRound },
+  { id: 'plugins', label: 'Plugins', icon: Puzzle },
   { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'images', label: 'Captured Images', icon: Camera },
   { id: 'runners', label: 'Runners', icon: Server, adminOnly: true },
-  { id: 'organization', label: 'Organization', icon: Users },
+  { id: 'credential-services', label: 'Credential Services', icon: Shield, adminOnly: true },
+  { id: 'image-definitions', label: 'Image Definitions', icon: Layers, adminOnly: true },
 ]
 
-const visibleNavItems = computed(() =>
-  navItems.filter((item) => !item.adminOnly || isAdmin.value),
-)
+const visibleNavItems = computed(() => navItems.filter((item) => !item.adminOnly || isAdmin.value))
+
+/** The tab itself when the user may see it, otherwise their first visible tab. */
+function allowedTab(tab: SettingsTabId): SettingsTabId {
+  return visibleNavItems.value.some((item) => item.id === tab)
+    ? tab
+    : (visibleNavItems.value[0]?.id ?? tab)
+}
+
+/** Rendered tab: admin-only content never shows for members, however the tab was set. */
+const shownTab = computed(() => allowedTab(activeTab.value))
 
 const activeLabel = computed(
-  () => visibleNavItems.value.find((item) => item.id === activeTab.value)?.label ?? 'Einstellungen',
+  () => visibleNavItems.value.find((item) => item.id === shownTab.value)?.label ?? 'Settings',
 )
 
 function openSheet(tab?: unknown): void {
-  const next = resolveSettingsTab(tab)
-  // Runners nur für Admins — sonst auf Allgemein zurückfallen.
-  activeTab.value = next === 'runners' && !isAdmin.value ? 'general' : next
+  activeTab.value = allowedTab(resolveSettingsTab(tab))
   open.value = true
 }
 
-function selectTab(id: SettingsTabId): void {
-  activeTab.value = id
+async function selectTab(id: SettingsTabId): Promise<void> {
+  if (id !== shownTab.value && (await flushChanges())) activeTab.value = id
 }
 
-function handleSettingsEvent(event: Event): void {
-  const detail = (event as CustomEvent<{ tab?: unknown }>).detail
+function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): void {
+  const version = settingsContext.value.version
+  if (kind === 'service') {
+    settingsContext.value = { version, workspaceDraftId: settingsContext.value.workspaceDraftId }
+  } else if (kind === 'credential') {
+    settingsContext.value = { version, workspaceDraftId: settingsContext.value.workspaceDraftId }
+  } else {
+    settingsContext.value = { version }
+  }
+}
+
+const selectedRunnerId = ref<string | undefined>()
+const selectedRunnerActivity = ref(false)
+// Tab whose panel currently shows a detail view; detail views use the full width.
+const detailTab = ref<SettingsTabId | null>(null)
+
+function setDetailOpen(tab: SettingsTabId, isOpen: boolean): void {
+  // A previous panel may report its unmount after the next panel opened a detail.
+  if (isOpen) detailTab.value = tab
+  else if (detailTab.value === tab) detailTab.value = null
+}
+
+watch(shownTab, (tab, previous) => {
+  detailTab.value = null
+  if (previous === 'runners' && tab !== 'runners') {
+    selectedRunnerId.value = undefined
+    selectedRunnerActivity.value = false
+  }
+})
+watch(open, (isOpen) => {
+  if (!isOpen) {
+    selectedRunnerId.value = undefined
+    selectedRunnerActivity.value = false
+    detailTab.value = null
+    settingsContext.value = { version: settingsContext.value.version + 1 }
+    window.dispatchEvent(new Event(SETTINGS_CLOSED_EVENT))
+  }
+})
+
+async function handleSettingsEvent(event: Event): Promise<void> {
+  if (open.value && !(await flushChanges())) return
+  const detail = (
+    event as CustomEvent<{
+      tab?: unknown
+      pluginId?: string
+      serviceId?: string
+      credentialId?: string
+      runnerId?: string
+      runnerActivity?: boolean
+      workspaceDraftId?: string
+    }>
+  ).detail
+  settingsContext.value = {
+    pluginId: detail?.pluginId,
+    serviceId: detail?.serviceId,
+    credentialId: detail?.credentialId,
+    workspaceDraftId: detail?.workspaceDraftId,
+    version: settingsContext.value.version + 1,
+  }
+  selectedRunnerId.value = detail?.runnerId
+  selectedRunnerActivity.value = detail?.runnerActivity === true
   openSheet(detail?.tab)
 }
 
+async function setOpen(value: boolean): Promise<void> {
+  if (value || (await flushChanges())) open.value = value
+}
+
+function closeSheet(): void {
+  void setOpen(false)
+}
 onMounted(() => {
   window.addEventListener(OPEN_SETTINGS_EVENT, handleSettingsEvent)
+  window.addEventListener(CLOSE_SETTINGS_EVENT, closeSheet)
 })
 
 onUnmounted(() => {
   window.removeEventListener(OPEN_SETTINGS_EVENT, handleSettingsEvent)
+  window.removeEventListener(CLOSE_SETTINGS_EVENT, closeSheet)
 })
 
-// Falls ein Admin den Runners-Tab offen hat und die Rolle verliert (Org-Wechsel),
-// zurück auf Allgemein wechseln.
-watch(isAdmin, (admin) => {
-  if (!admin && activeTab.value === 'runners') {
-    activeTab.value = 'general'
-  }
-})
+// Keep the selected tab visible, e.g. when an admin switches to an org as member.
+watch(
+  shownTab,
+  (tab) => {
+    if (tab !== activeTab.value) activeTab.value = tab
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
-  <Dialog v-model:open="open">
-    <!-- Breite mit Tailwind-v4-Important-Modifier (trailing `!`): tailwind-merge
-      löst die Dialog-Basis (`sm:max-w-md`, `w-full`) zwar korrekt ab
-      (verifiziert via twMerge + gemountetem Dialog), das `!` sichert die
-      80rem-Breite zusätzlich gegen die Stylesheet-Reihenfolge ab, falls die
-      Klasse je ohne Merge konkateniert wird (`sm:max-w-md` läge im
-      generierten CSS hinter `sm:max-w-[80rem]` und würde sonst gewinnen). -->
+  <Dialog :open="open" @update:open="setOpen">
+    <!-- Width uses the Tailwind v4 important modifier (trailing `!`):
+      tailwind-merge already replaces Dialog's `sm:max-w-md` / `w-full`,
+      and `!` additionally guards stylesheet order if the class is ever
+      concatenated without merge. -->
     <DialogContent
       aria-describedby="settings-sheet-description"
-      class="max-w-[80rem]! sm:max-w-[80rem]! w-[calc(100vw-2rem)]! h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
+      class="max-w-[80rem]! sm:max-w-[80rem]! w-[calc(100vw-2rem)]! h-[min(54rem,80dvh)] max-h-[calc(100dvh-2rem)] rounded-2xl min-w-0 p-0 gap-0 flex flex-col md:flex-row overflow-hidden"
       data-testid="settings-sheet"
       @open-auto-focus.prevent
     >
-      <DialogTitle class="sr-only">Einstellungen</DialogTitle>
+      <DialogTitle class="sr-only">Settings</DialogTitle>
       <DialogDescription id="settings-sheet-description" class="sr-only">
-        Organisations-, Provider- und Harness-Einstellungen.
+        Organization, provider, and harness settings.
       </DialogDescription>
 
-      <!-- Seiten-Nav: mobil horizontal, ab md vertikal -->
+      <!-- Side nav: horizontal on mobile, vertical from md -->
       <nav
-        aria-label="Einstellungen"
-        class="shrink-0 border-b border-border md:w-60 md:border-b-0 md:border-r"
+        aria-label="Settings"
+        class="min-w-0 max-w-full shrink-0 border-b border-border md:w-60 md:border-b-0 md:border-r"
       >
-        <!-- Mobil: horizontale Chips -->
+        <!-- Mobile: horizontal chips -->
         <div
-          class="flex gap-1.5 overflow-x-auto p-2 md:hidden"
+          class="flex min-w-0 max-w-full gap-1.5 overflow-x-auto p-2 md:hidden"
           role="tablist"
-          aria-label="Einstellungen-Tabs"
+          aria-label="Settings tabs"
         >
           <button
             v-for="item in visibleNavItems"
             :key="item.id"
             type="button"
             role="tab"
-            :aria-selected="activeTab === item.id"
+            :aria-selected="shownTab === item.id"
             :data-testid="`settings-nav-${item.id}`"
             :class="
               cn(
                 'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors',
-                activeTab === item.id
+                shownTab === item.id
                   ? 'border-primary/40 bg-primary/10 text-primary'
                   : 'border-border text-muted-foreground hover:text-foreground',
               )
@@ -164,13 +257,13 @@ watch(isAdmin, (admin) => {
           </button>
         </div>
 
-        <!-- Desktop: vertikale Liste -->
+        <!-- Desktop: vertical list -->
         <ScrollArea class="hidden h-full md:block">
-          <div class="flex flex-col gap-0.5 p-2" role="tablist" aria-label="Einstellungen-Tabs">
+          <div class="flex flex-col gap-0.5 p-2" role="tablist" aria-label="Settings tabs">
             <div class="flex items-center gap-2 px-2.5 pb-2 pt-1.5">
               <Building2 :size="16" class="text-muted-foreground" aria-hidden="true" />
               <span class="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                Einstellungen
+                Settings
               </span>
             </div>
             <button
@@ -178,12 +271,12 @@ watch(isAdmin, (admin) => {
               :key="item.id"
               type="button"
               role="tab"
-              :aria-selected="activeTab === item.id"
+              :aria-selected="shownTab === item.id"
               :data-testid="`settings-nav-${item.id}`"
               :class="
                 cn(
                   'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-                  activeTab === item.id
+                  shownTab === item.id
                     ? 'bg-muted text-foreground'
                     : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
                 )
@@ -199,30 +292,50 @@ watch(isAdmin, (admin) => {
 
       <!-- Content -->
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div class="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 lg:px-6">
+        <div
+          class="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 lg:px-6"
+        >
           <h2 class="text-base font-semibold text-foreground" data-testid="settings-sheet-title">
             {{ activeLabel }}
           </h2>
         </div>
-        <ScrollArea class="min-h-0 flex-1">
-          <div class="mx-auto w-full max-w-3xl p-4 lg:p-6" role="tabpanel" :aria-label="activeLabel">
-            <WorkspacePolicyTab v-if="activeTab === 'general'" />
-            <ProviderConfigTab v-else-if="activeTab === 'provider'" />
-            <SkillsPanel v-else-if="activeTab === 'skills'" />
-            <CredentialsPanel v-else-if="activeTab === 'credentials'" />
-            <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />
-            <CapturedImagesPanel v-else-if="activeTab === 'images'" />
-            <RunnersPanel v-else-if="activeTab === 'runners' && isAdmin" />
-            <div v-else-if="activeTab === 'organization'" class="space-y-8">
-              <section aria-label="Credential Services">
-                <h3 class="mb-3 text-sm font-semibold text-foreground">Credential Services</h3>
-                <CredentialServicesTab />
-              </section>
-              <section aria-label="Image Definitions">
-                <h3 class="mb-3 text-sm font-semibold text-foreground">Image Definitions</h3>
-                <ImageDefinitionsTab />
-              </section>
-            </div>
+        <ScrollArea class="min-h-0 min-w-0 flex-1">
+          <div
+            :key="`${authStore.user?.id}:${authStore.activeOrganizationId}`"
+            class="mx-auto min-w-0 w-full p-4 lg:p-6"
+            :class="detailTab === shownTab ? 'max-w-none' : 'max-w-3xl'"
+            role="tabpanel"
+            :aria-label="activeLabel"
+          >
+            <WorkspacePolicyTab v-if="open && shownTab === 'general'" />
+            <ProviderConfigTab v-else-if="open && shownTab === 'provider'" />
+            <AgentConfigTab v-else-if="open && shownTab === 'agents'" />
+            <SkillsPanel v-else-if="open && shownTab === 'skills'" />
+            <CredentialsPanel
+              v-else-if="open && shownTab === 'credentials'"
+              :initial-service-id="settingsContext.serviceId"
+              :initial-credential-id="settingsContext.credentialId"
+              :workspace-draft-id="settingsContext.workspaceDraftId"
+              :context-version="settingsContext.version"
+              @context-consumed="clearCredentialsContext"
+            />
+            <PluginsPanel
+              v-else-if="open && shownTab === 'plugins'"
+              :initial-plugin-id="settingsContext.pluginId"
+              :context-version="settingsContext.version"
+              @detail-change="setDetailOpen('plugins', $event)"
+            />
+            <ApiKeysPanel v-else-if="open && shownTab === 'api-keys'" />
+            <CapturedImagesPanel v-else-if="open && shownTab === 'images'" />
+            <RunnersPanel
+              v-else-if="open && shownTab === 'runners'"
+              :runner-id="selectedRunnerId"
+              :runner-activity="selectedRunnerActivity"
+              :context-version="settingsContext.version"
+              @detail-change="setDetailOpen('runners', $event)"
+            />
+            <CredentialServicesTab v-else-if="open && shownTab === 'credential-services'" />
+            <ImageDefinitionsTab v-else-if="open && shownTab === 'image-definitions'" />
           </div>
         </ScrollArea>
       </div>

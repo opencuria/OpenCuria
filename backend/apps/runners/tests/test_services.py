@@ -4,22 +4,21 @@ Tests for RunnerService business logic.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
-from apps.credentials.models import CredentialService
-from apps.credentials.services import (
-    CredentialSvc,
-    ResolvedCredentialFile,
-    ResolvedCredentials,
-)
+from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
+from apps.credentials.services import CredentialSvc
+from apps.organizations.models import Organization
 from apps.runners.enums import (
+    ProcessStatus,
     RunnerStatus,
     TaskStatus,
     TaskType,
@@ -27,23 +26,19 @@ from apps.runners.enums import (
     WorkspaceStatus,
 )
 from apps.runners.exceptions import (
-    RunnerNotFoundError,
     RunnerOfflineError,
     WorkspaceNotFoundError,
-    WorkspaceStateError,
 )
-from common.exceptions import ConflictError, NotFoundError
-
 from apps.runners.models import (
+    ImageBuildJob,
     ImageDefinition,
     ImageInstance,
     Runner,
-    ImageBuildJob,
     Task,
     Workspace,
 )
-from apps.organizations.models import Organization
 from apps.runners.services import RunnerService
+from common.exceptions import ConflictError, NotFoundError
 
 
 @pytest.fixture
@@ -62,385 +57,15 @@ def service(sio_mock: AsyncMock) -> RunnerService:
 class TestRegisterRunner:
     def test_register_sets_online(self, service, runner):
         """Registering a runner should set it online."""
-        result = service.register_runner(runner, sid="new-sid")
+        result = service.runner_lifecycle.register_runner(runner, sid="new-sid")
         assert result.status == RunnerStatus.ONLINE
         assert result.sid == "new-sid"
 
     def test_unregister_sets_offline(self, service, runner):
         """Disconnecting a runner should set it offline."""
-        service.unregister_runner(runner.sid)
+        service.runner_lifecycle.unregister_runner(runner.sid)
         runner.refresh_from_db()
         assert runner.status == RunnerStatus.OFFLINE
-
-
-@pytest.mark.django_db
-class TestDesktopStateCleanup:
-    @pytest.mark.asyncio
-    @pytest.mark.django_db(transaction=True)
-    async def test_desktop_started_records_active_state_and_completes_task(
-        self,
-        service,
-        runner,
-        workspace,
-        monkeypatch,
-    ):
-        """Desktop sessions are tracked in backend state and proxied via the runner."""
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.START_DESKTOP,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
-
-        await service.handle_desktop_started(
-            str(task.id),
-            str(workspace.id),
-            port=6901,
-            container_ip="172.19.0.3",
-            network_name="workspace-net",
-            runner_id=str(runner.id),
-        )
-
-        task.refresh_from_db()
-        assert task.status == TaskStatus.COMPLETED
-        assert service.get_desktop_info(str(workspace.id)) == {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-            "viewer": True,
-            "computer_use": False,
-        }
-        emit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    @pytest.mark.django_db(transaction=True)
-    async def test_desktop_started_for_qemu_records_runner_proxied_state(
-        self,
-        service,
-        runner,
-        workspace,
-        monkeypatch,
-    ):
-        """QEMU desktops use the same runner-proxied state model as Docker."""
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.START_DESKTOP,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
-
-        await service.handle_desktop_started(
-            str(task.id),
-            str(workspace.id),
-            port=6901,
-            container_ip="10.100.0.2",
-            network_name="",
-            runner_id=str(runner.id),
-        )
-
-        assert service.get_desktop_info(str(workspace.id)) == {
-            "port": 6901,
-            "container_ip": "10.100.0.2",
-            "network_name": "",
-            "viewer": True,
-            "computer_use": False,
-        }
-        emit.assert_awaited_once()
-
-    def test_workspace_stopped_clears_active_desktop(self, service, runner, workspace):
-        """Stopping a workspace must clear any cached desktop session state."""
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.STOP_WORKSPACE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        workspace_id = str(workspace.id)
-        service._active_desktops[workspace_id] = {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-        }
-        service._desktop_workspace_runner[workspace_id] = str(runner.id)
-
-        service.handle_workspace_stopped(
-            str(task.id),
-            workspace_id,
-            runner_id=str(runner.id),
-        )
-
-        workspace.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.STOPPED
-        assert workspace_id not in service._active_desktops
-        assert workspace_id not in service._desktop_workspace_runner
-
-    def test_workspace_removed_clears_active_desktop(self, service, runner, workspace):
-        """Removing a workspace must also clear any desktop proxy state."""
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.REMOVE_WORKSPACE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        workspace_id = str(workspace.id)
-        service._active_desktops[workspace_id] = {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-        }
-        service._desktop_workspace_runner[workspace_id] = str(runner.id)
-
-        service.handle_workspace_removed(
-            str(task.id),
-            workspace_id,
-            runner_id=str(runner.id),
-        )
-
-        workspace.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.DELETED
-        assert workspace_id not in service._active_desktops
-        assert workspace_id not in service._desktop_workspace_runner
-
-    def test_heartbeat_restores_active_desktop_state(
-        self,
-        service,
-        runner,
-        workspace,
-    ):
-        """Backend heartbeat should reconstruct live desktop sessions after restart."""
-        service.handle_heartbeat(
-            runner=runner,
-            workspaces=[
-                {
-                    "workspace_id": str(workspace.id),
-                    "status": "running",
-                    "runtime_type": "docker",
-                    "desktop": {
-                        "port": 6901,
-                        "container_ip": "172.19.0.3",
-                        "network_name": "workspace-net",
-                    },
-                }
-            ],
-        )
-
-        assert service.get_desktop_info(str(workspace.id)) == {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-            "viewer": False,
-            "computer_use": False,
-        }
-        assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
-
-    def test_heartbeat_missing_desktop_field_keeps_existing_state(
-        self,
-        service,
-        runner,
-        workspace,
-    ):
-        """Runner reconnects should not clear desktop state when the field is omitted."""
-        workspace_id = str(workspace.id)
-        service._active_desktops[workspace_id] = {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-        }
-        service._desktop_workspace_runner[workspace_id] = str(runner.id)
-
-        service.handle_heartbeat(
-            runner=runner,
-            workspaces=[
-                {
-                    "workspace_id": workspace_id,
-                    "status": "running",
-                    "runtime_type": "docker",
-                }
-            ],
-        )
-
-        assert service.get_desktop_info(workspace_id) == {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-        }
-
-    def test_heartbeat_explicit_null_desktop_cleans_existing_state(
-        self,
-        service,
-        runner,
-        workspace,
-    ):
-        """An explicit null desktop payload should clear stale desktop state."""
-        workspace_id = str(workspace.id)
-        service._active_desktops[workspace_id] = {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-        }
-        service._desktop_workspace_runner[workspace_id] = str(runner.id)
-
-        service.handle_heartbeat(
-            runner=runner,
-            workspaces=[
-                {
-                    "workspace_id": workspace_id,
-                    "status": "running",
-                    "runtime_type": "docker",
-                    "desktop": None,
-                }
-            ],
-        )
-
-        assert workspace_id not in service._active_desktops
-        assert workspace_id not in service._desktop_workspace_runner
-
-    def test_heartbeat_restores_lease_flags(self, service, runner, workspace):
-        """Heartbeat desktop payloads include viewer and computer-use leases."""
-        service.handle_heartbeat(
-            runner=runner,
-            workspaces=[
-                {
-                    "workspace_id": str(workspace.id),
-                    "status": "running",
-                    "runtime_type": "docker",
-                    "desktop": {
-                        "port": 6901,
-                        "container_ip": "172.19.0.3",
-                        "network_name": "workspace-net",
-                        "viewer": False,
-                        "computer_use": True,
-                    },
-                }
-            ],
-        )
-
-        assert service.get_desktop_info(str(workspace.id)) == {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-            "viewer": False,
-            "computer_use": True,
-        }
-
-    @pytest.mark.asyncio
-    @pytest.mark.django_db(transaction=True)
-    async def test_desktop_process_records_proxy_without_frontend_event(
-        self,
-        service,
-        runner,
-        workspace,
-        monkeypatch,
-    ):
-        """Reconnect process announcements must not look like a viewer acquire."""
-        emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
-
-        await service.handle_desktop_process(
-            str(workspace.id),
-            port=6901,
-            container_ip="172.19.0.3",
-            network_name="workspace-net",
-            runner_id=str(runner.id),
-            viewer=False,
-            computer_use=True,
-        )
-
-        assert service.get_desktop_info(str(workspace.id))["computer_use"] is True
-        emit.assert_not_called()
-
-    @pytest.mark.asyncio
-    @pytest.mark.django_db(transaction=True)
-    async def test_desktop_viewer_released_keeps_proxy_state(
-        self,
-        service,
-        runner,
-        workspace,
-        monkeypatch,
-    ):
-        """Releasing the viewer must not drop VNC routing while computer-use holds."""
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.STOP_DESKTOP,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
-        service._record_active_desktop(
-            str(workspace.id),
-            {
-                "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
-                "viewer": True,
-                "computer_use": True,
-            },
-            runner_id=str(runner.id),
-        )
-
-        await service.handle_desktop_viewer_released(
-            str(task.id),
-            str(workspace.id),
-            runner_id=str(runner.id),
-            computer_use_active=True,
-        )
-
-        task.refresh_from_db()
-        assert task.status == TaskStatus.COMPLETED
-        assert service.get_desktop_info(str(workspace.id)) == {
-            "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
-            "viewer": False,
-            "computer_use": True,
-        }
-        emit.assert_awaited_once()
-        assert emit.await_args.args[0] == "desktop:viewer_released"
-
-    @pytest.mark.asyncio
-    @pytest.mark.django_db(transaction=True)
-    async def test_desktop_stopped_clears_proxy_state(
-        self,
-        service,
-        runner,
-        workspace,
-        monkeypatch,
-    ):
-        """desktop:stopped still clears proxy routing when the process dies."""
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.STOP_DESKTOP,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
-        service._record_active_desktop(
-            str(workspace.id),
-            {
-                "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
-                "viewer": True,
-                "computer_use": False,
-            },
-            runner_id=str(runner.id),
-        )
-
-        await service.handle_desktop_stopped(
-            str(task.id),
-            str(workspace.id),
-            runner_id=str(runner.id),
-        )
-
-        assert service.get_desktop_info(str(workspace.id)) is None
-        emit.assert_awaited_once()
-        assert emit.await_args.args[0] == "desktop:stopped"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -452,7 +77,6 @@ class TestCreateWorkspace:
             organization=runner.organization,
             created_by=user,
             name="Base Workspace",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -462,8 +86,8 @@ class TestCreateWorkspace:
         )
         runner_ref = "opencuria/custom/base:1"
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
@@ -472,20 +96,13 @@ class TestCreateWorkspace:
             name="Base Workspace Artifact",
             status=ImageInstance.Status.READY,
         )
-        workspace, task = await service.create_workspace(
+        build.current_generation = artifact
+        build.save()
+        workspace, task = await service.workspace_lifecycle.create_workspace(
             name="Test Workspace",
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
-            env_vars={"GITHUB_TOKEN": "test-token"},
-            files=[
-                ResolvedCredentialFile(
-                    target_path="~/.codex/auth.json",
-                    content='{"access_token":"test"}',
-                )
-            ],
-            ssh_keys=[
-                "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
-            ],
+            credential_ids=[],
             user=user,
             organization_id=runner.organization_id,
         )
@@ -495,15 +112,14 @@ class TestCreateWorkspace:
         assert task.status == TaskStatus.IN_PROGRESS
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
-        assert payload["env_vars"] == {"GITHUB_TOKEN": "test-token"}
-        assert payload["files"] == [
-            {
-                "target_path": "~/.codex/auth.json",
-                "content": '{"access_token":"test"}',
-                "mode": 0o600,
-            }
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+        # Credentials require durable catalog associations, tested separately.
+        assert task.lifecyclecommand.event == "task:create_workspace"
+        assert task.lifecyclecommand.payload["repos"] == [
+            "https://github.com/test/repo"
         ]
-        assert len(payload["ssh_keys"]) == 1
         workspace.refresh_from_db()
         assert workspace.base_image_instance_id == artifact.id
 
@@ -521,7 +137,6 @@ class TestCreateWorkspace:
             organization=runner.organization,
             created_by=user,
             name="Base Workspace",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -530,8 +145,8 @@ class TestCreateWorkspace:
             status=ImageBuildJob.Status.ACTIVE,
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
@@ -540,30 +155,30 @@ class TestCreateWorkspace:
             name="Base Workspace Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
 
-        with pytest.raises(RunnerOfflineError):
-            await service.create_workspace(
-                name="Test Workspace",
-                repos=[],
-                image_artifact_id=artifact.id,
-                user=user,
-                organization_id=runner.organization_id,
-            )
-
+        await service.workspace_lifecycle.create_workspace(
+            name="Test Workspace",
+            repos=[],
+            image_artifact_id=artifact.id,
+            user=user,
+            organization_id=runner.organization_id,
+        )
         task = Task.objects.latest("created_at")
-        assert task.type == TaskType.CREATE_WORKSPACE
-        assert task.status == TaskStatus.FAILED
-        assert "offline" in task.error.lower()
+        assert task.status == TaskStatus.IN_PROGRESS
+        from apps.runners.models import LifecycleCommand
 
+        assert LifecycleCommand.objects.get(task=task).event == "task:create_workspace"
         workspace = Workspace.objects.latest("created_at")
-        assert workspace.active_operation is None
-        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.current_task_id == task.id
+        assert workspace.active_operation == WorkspaceOperation.CREATING
 
     @pytest.mark.asyncio
     async def test_requires_image_selection(self, service, runner, user):
         """Creating a workspace without an image should be rejected."""
         with pytest.raises(ConflictError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="No Image Workspace",
                 repos=[],
                 user=user,
@@ -574,7 +189,7 @@ class TestCreateWorkspace:
     async def test_unknown_image_raises_not_found(self, service):
         """Selecting an unknown image should be rejected."""
         with pytest.raises(NotFoundError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="No Runner Workspace",
                 repos=[],
                 image_artifact_id=uuid.uuid4(),
@@ -598,7 +213,6 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="local-sid",
             organization=local_org,
-            available_runtimes=["docker"],
         )
         foreign_org = Organization.objects.create(
             name=f"Foreign Org {uuid.uuid4().hex[:6]}",
@@ -610,13 +224,11 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="foreign-sid",
             organization=foreign_org,
-            available_runtimes=["docker"],
         )
         definition = ImageDefinition.objects.create(
             organization=foreign_org,
             created_by=owner,
             name="Foreign Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -626,8 +238,8 @@ class TestCreateWorkspace:
         )
         runner_ref = "opencuria/custom/foreign:1"
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=foreign_runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=owner,
@@ -636,9 +248,11 @@ class TestCreateWorkspace:
             name="Foreign Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
 
         with pytest.raises(NotFoundError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="cross-org",
                 repos=[],
                 image_artifact_id=artifact.id,
@@ -656,13 +270,11 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="other-sid",
             organization=runner.organization,
-            available_runtimes=["docker"],
         )
         definition = ImageDefinition.objects.create(
             organization=runner.organization,
             created_by=user,
             name="Definition Image",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -672,8 +284,8 @@ class TestCreateWorkspace:
         )
         runner_ref = "opencuria/custom/base:definition"
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
@@ -682,12 +294,14 @@ class TestCreateWorkspace:
             name="Definition Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
 
         with pytest.raises(
             ConflictError,
             match="Selected runner does not have the selected image artifact",
         ):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="mismatch-runner",
                 repos=[],
                 image_artifact_id=artifact.id,
@@ -714,7 +328,6 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="local-image-sid",
             organization=local_org,
-            available_runtimes=["docker"],
         )
         foreign_org = Organization.objects.create(
             name=f"Image Foreign Org {uuid.uuid4().hex[:6]}",
@@ -726,18 +339,16 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="foreign-image-sid",
             organization=foreign_org,
-            available_runtimes=["docker"],
         )
         foreign_workspace = Workspace.objects.create(
             runner=foreign_runner,
             name="Foreign Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=owner,
-            runtime_type="docker",
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=foreign_runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=foreign_workspace,
             created_by=owner,
@@ -747,41 +358,65 @@ class TestCreateWorkspace:
         )
 
         with pytest.raises(NotFoundError):
-            await service.create_workspace(
+            await service.workspace_lifecycle.create_workspace(
                 name="cross-org-image",
                 repos=[],
                 image_artifact_id=image.id,
                 organization_id=local_runner.organization_id,
             )
 
+    @pytest.mark.asyncio
+    async def test_creates_from_captured_image_without_origin_workspace(
+        self, service, sio_mock, runner, user
+    ):
+        artifact = ImageInstance.objects.create(
+            is_legacy=True,
+            runner=runner,
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=None,
+            created_by=user,
+            name="Orphan Captured Create",
+            runner_ref="orphan-captured-create",
+            status=ImageInstance.Status.READY,
+        )
+
+        workspace, task = await service.workspace_lifecycle.create_workspace(
+            name="From Orphan Capture",
+            repos=[],
+            image_artifact_id=artifact.id,
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.runner_id == runner.id
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        sio_mock.emit.assert_called_once()
+
 
 @pytest.mark.django_db(transaction=True)
 class TestRemoveWorkspace:
     @pytest.mark.asyncio
-    async def test_runner_without_sid_fails_remove_dispatch_and_rolls_back(
+    async def test_runner_without_sid_keeps_durable_remove_intent(
         self,
         service,
         runner,
         workspace,
     ):
-        """Removing must fail fast when the runner has no active socket session."""
+        """A missing socket leaves removal queued for durable delivery."""
         runner.sid = ""
         runner.save(update_fields=["sid"])
 
-        with pytest.raises(RunnerOfflineError):
-            await service.remove_workspace(workspace.id)
-
+        await service.workspace_lifecycle.remove_workspace(workspace.id)
         task = Task.objects.latest("created_at")
-        assert task.type == TaskType.REMOVE_WORKSPACE
-        assert task.status == TaskStatus.FAILED
-        assert "offline" in task.error.lower()
-
+        assert task.status == TaskStatus.IN_PROGRESS
         workspace.refresh_from_db()
-        assert workspace.active_operation is None
-        assert workspace.status == WorkspaceStatus.RUNNING
+        assert workspace.current_task_id == task.id
+        assert workspace.active_operation == WorkspaceOperation.REMOVING
+        assert workspace.status == WorkspaceStatus.DELETING
 
     @pytest.mark.asyncio
-    async def test_remove_workspace_tracks_delete_metadata_and_offline_retry_state(
+    async def test_remove_workspace_tracks_offline_delete_request(
         self,
         service,
         runner,
@@ -790,7 +425,7 @@ class TestRemoveWorkspace:
         runner.status = RunnerStatus.OFFLINE
         runner.save(update_fields=["status"])
 
-        await service.remove_workspace(workspace.id)
+        await service.workspace_lifecycle.remove_workspace(workspace.id)
 
         workspace.refresh_from_db()
         task = Task.objects.latest("created_at")
@@ -799,56 +434,6 @@ class TestRemoveWorkspace:
         assert workspace.delete_requested_at is not None
         assert workspace.delete_started_at is None
         assert workspace.delete_attempt_count == 0
-
-        runner.status = RunnerStatus.ONLINE
-        runner.sid = "runner-remove-retry"
-        runner.save(update_fields=["status", "sid"])
-
-        dispatched = await service.dispatch_pending_workspace_deletions(runner)
-
-        assert [item.id for item in dispatched] == [workspace.id]
-        workspace.refresh_from_db()
-        task.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.DELETING
-        assert workspace.delete_started_at is not None
-        assert workspace.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_workspace_deletion_reuses_attempt_metadata(
-        self,
-        service,
-        runner,
-        workspace,
-    ):
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.REMOVE_WORKSPACE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        started_at = timezone.now()
-        workspace.status = WorkspaceStatus.DELETING
-        workspace.delete_requested_at = started_at
-        workspace.delete_started_at = started_at
-        workspace.delete_attempt_count = 1
-        workspace.save(
-            update_fields=[
-                "status",
-                "delete_requested_at",
-                "delete_started_at",
-                "delete_attempt_count",
-                "updated_at",
-            ]
-        )
-
-        await service.dispatch_pending_workspace_deletions(runner)
-
-        workspace.refresh_from_db()
-        task.refresh_from_db()
-        assert workspace.delete_started_at == started_at
-        assert workspace.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
 
 
 @pytest.mark.django_db(transaction=True)
@@ -871,18 +456,16 @@ class TestCreateImageArtifactSecurity:
             status=RunnerStatus.ONLINE,
             sid="snapshot-foreign-sid",
             organization=foreign_org,
-            available_runtimes=["docker"],
         )
         foreign_workspace = Workspace.objects.create(
             runner=foreign_runner,
             name="Foreign Snapshot Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=user,
-            runtime_type="docker",
         )
 
         with pytest.raises(WorkspaceNotFoundError):
-            await service.create_image_artifact(
+            await service.image_lifecycle.create_image_artifact(
                 workspace_id=foreign_workspace.id,
                 name="forbidden-image-artifact",
                 organization_id=local_org.id,
@@ -911,7 +494,6 @@ class TestWorkspaceOwnerScoping:
             status=RunnerStatus.ONLINE,
             sid="owner-scope-sid",
             organization=org,
-            available_runtimes=["docker"],
         )
         owner_workspace = Workspace.objects.create(
             runner=runner,
@@ -926,12 +508,14 @@ class TestWorkspaceOwnerScoping:
             created_by=admin,
         )
 
-        visible = service.list_workspaces(organization_id=org.id, user=admin)
+        visible = service.runner_lifecycle.list_workspaces(
+            organization_id=org.id, user=admin
+        )
 
         assert len(visible) == 1
         assert visible[0].created_by_id == admin.id
         with pytest.raises(WorkspaceNotFoundError):
-            service.get_workspace_for_user(
+            service.workspace_access.get_workspace_for_user(
                 owner_workspace.id,
                 user=admin,
                 organization_id=org.id,
@@ -940,266 +524,6 @@ class TestWorkspaceOwnerScoping:
 
 @pytest.mark.django_db(transaction=True)
 class TestImageDeletionLifecycle:
-    @pytest.mark.asyncio
-    async def test_delete_rejects_image_when_workspace_still_depends_on_it(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            name="Reusable Base",
-            runner_ref="opencuria/custom/reusable:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        Workspace.objects.create(
-            runner=runner,
-            name="Dependent Workspace",
-            status=WorkspaceStatus.STOPPED,
-            runtime_type="docker",
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        with pytest.raises(ConflictError, match="is still used by 1 workspace\\(s\\)"):
-            await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.READY
-
-    @pytest.mark.asyncio
-    async def test_delete_marks_image_pending_deletion_when_runner_offline(
-        self, service, runner, user
-    ):
-        runner.status = RunnerStatus.OFFLINE
-        runner.save(update_fields=["status"])
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Offline Cleanup",
-            runner_ref="opencuria/custom/offline-cleanup:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-
-        await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.PENDING_DELETION
-        assert image.delete_requested_at is not None
-
-    @pytest.mark.asyncio
-    async def test_delete_ignores_workspace_already_deleting(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            name="Deleting Dependency Base",
-            runner_ref="opencuria/custom/deleting-dependency:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        Workspace.objects.create(
-            runner=runner,
-            name="Deleting Workspace",
-            status=WorkspaceStatus.DELETING,
-            runtime_type="docker",
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.DELETING
-        assert image.deleting_task_id is not None
-
-    @pytest.mark.asyncio
-    async def test_delete_build_job_ignores_workspace_already_deleting(
-        self, service, runner, user
-    ):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Build Deletion Base",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.ACTIVE,
-        )
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            name="Build Deletion Artifact",
-            runner_ref="opencuria/custom/build-delete:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        Workspace.objects.create(
-            runner=runner,
-            name="Deleting Build Workspace",
-            status=WorkspaceStatus.DELETING,
-            runtime_type="docker",
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        await service.delete_build_job(build.id)
-
-        build.refresh_from_db()
-        image.refresh_from_db()
-        assert build.status == ImageBuildJob.Status.DELETING
-        assert image.status == ImageInstance.Status.DELETING
-        assert build.deleting_task_id is not None
-        assert image.deleting_task_id == build.deleting_task_id
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_image_deletions_marks_task_in_progress(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            name="Pending Delete",
-            runner_ref="opencuria/custom/pending-delete:1",
-            status=ImageInstance.Status.DELETING,
-            created_by=user,
-            deleting_task_id=str(
-                Task.objects.create(
-                    runner=runner,
-                    type=TaskType.DELETE_IMAGE,
-                    status=TaskStatus.PENDING,
-                ).id
-            ),
-        )
-
-        dispatched = await service.dispatch_pending_image_deletions(runner)
-
-        assert [item.id for item in dispatched] == [image.id]
-        task = Task.objects.get(id=image.deleting_task_id)
-        assert task.status == TaskStatus.IN_PROGRESS
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_image_deletion_creates_task_when_missing(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Pending Delete Without Task",
-            runner_ref="opencuria/custom/pending-delete-missing-task:1",
-            status=ImageInstance.Status.PENDING_DELETION,
-            created_by=user,
-        )
-
-        dispatched = await service.dispatch_pending_image_deletions(runner)
-
-        assert [item.id for item in dispatched] == [image.id]
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.DELETING
-        assert image.deleting_task_id is not None
-        task = Task.objects.get(id=image.deleting_task_id)
-        assert task.status == TaskStatus.IN_PROGRESS
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_image_deletion_reuses_attempt_metadata(
-        self, service, runner, user
-    ):
-        task = Task.objects.create(
-            runner=runner,
-            type=TaskType.DELETE_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        started_at = timezone.now()
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Deleting Image",
-            runner_ref="opencuria/custom/reused-delete:1",
-            status=ImageInstance.Status.DELETING,
-            created_by=user,
-            deleting_task_id=str(task.id),
-            delete_requested_at=started_at,
-            delete_started_at=started_at,
-            delete_attempt_count=1,
-        )
-
-        await service.dispatch_pending_image_deletions(runner)
-
-        image.refresh_from_db()
-        task.refresh_from_db()
-        assert image.delete_started_at == started_at
-        assert image.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_build_deletion_reuses_attempt_metadata(
-        self, service, runner, user
-    ):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name=f"Build Delete Retry {uuid.uuid4().hex[:6]}",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-            status=ImageDefinition.Status.DELETING,
-            delete_attempt_count=1,
-        )
-        task = Task.objects.create(
-            runner=runner,
-            type=TaskType.DELETE_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        started_at = timezone.now()
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.DELETING,
-            deleting_task_id=str(task.id),
-            delete_requested_at=started_at,
-            delete_started_at=started_at,
-            delete_attempt_count=1,
-        )
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            name="Build Delete Retry Artifact",
-            runner_ref="opencuria/custom/build-reused-delete:1",
-            status=ImageInstance.Status.DELETING,
-            created_by=user,
-            deleting_task_id=str(task.id),
-            delete_requested_at=started_at,
-            delete_started_at=started_at,
-            delete_attempt_count=1,
-        )
-
-        await service.dispatch_pending_build_job_deletions(runner)
-
-        build.refresh_from_db()
-        image.refresh_from_db()
-        task.refresh_from_db()
-        assert build.delete_started_at == started_at
-        assert build.delete_attempt_count == 1
-        assert image.delete_started_at == started_at
-        assert image.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
-
     def test_handle_image_artifact_deleted_marks_image_deleted(
         self, service, runner, user
     ):
@@ -1209,8 +533,8 @@ class TestImageDeletionLifecycle:
             status=TaskStatus.IN_PROGRESS,
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             name="Delete Confirmed",
             runner_ref="opencuria/custom/delete-confirmed:1",
@@ -1219,7 +543,7 @@ class TestImageDeletionLifecycle:
             deleting_task_id=str(task.id),
         )
 
-        service.handle_image_artifact_deleted(
+        service.image_lifecycle.handle_image_artifact_deleted(
             task_id=str(task.id),
             image_instance_id=str(image.id),
             runner_id=str(runner.id),
@@ -1230,28 +554,6 @@ class TestImageDeletionLifecycle:
         assert image.status == ImageInstance.Status.DELETED
         assert task.status == TaskStatus.COMPLETED
 
-    @pytest.mark.asyncio
-    async def test_delete_rejects_capturing_artifact_without_runner_ref(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="qemu",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Still Capturing",
-            runner_ref="",
-            status=ImageInstance.Status.CAPTURING,
-            created_by=user,
-        )
-
-        with pytest.raises(
-            ConflictError, match="cannot be deleted while it is still capturing"
-        ):
-            await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.CAPTURING
-
     def test_handle_image_artifact_delete_failed_marks_build_and_definition_failed(
         self, service, runner, user
     ):
@@ -1259,25 +561,23 @@ class TestImageDeletionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Delete Failure Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETING,
+        )
+        task = Task.objects.create(
+            runner=runner,
+            type=TaskType.DELETE_IMAGE,
+            status=TaskStatus.IN_PROGRESS,
         )
         build = ImageBuildJob.objects.create(
             image_definition=definition,
             runner=runner,
             status=ImageBuildJob.Status.DELETING,
-            deleting_task_id=str(uuid.uuid4()),
-        )
-        task = Task.objects.create(
-            id=uuid.UUID(build.deleting_task_id),
-            runner=runner,
-            type=TaskType.DELETE_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
+            deleting_task=task,
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             build_job=build,
@@ -1287,8 +587,10 @@ class TestImageDeletionLifecycle:
             created_by=user,
             deleting_task_id=str(task.id),
         )
+        build.current_generation = image
+        build.save()
 
-        service.handle_image_artifact_delete_failed(
+        service.image_lifecycle.handle_image_artifact_delete_failed(
             task_id=str(task.id),
             error="runner refused delete",
             runner_id=str(runner.id),
@@ -1304,145 +606,6 @@ class TestImageDeletionLifecycle:
         assert "runner refused delete" in definition.delete_last_error
         assert task.status == TaskStatus.FAILED
 
-    @pytest.mark.asyncio
-    async def test_delete_image_definition_marks_definition_failed_when_build_delete_cannot_start(
-        self, service, runner, user
-    ):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name=f"Delete Definition Failure {uuid.uuid4().hex[:6]}",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.ACTIVE,
-        )
-        image = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            name="Definition Failure Artifact",
-            runner_ref="opencuria/custom/definition-failure:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        Workspace.objects.create(
-            runner=runner,
-            name="Dependent Definition Workspace",
-            status=WorkspaceStatus.RUNNING,
-            runtime_type="docker",
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        with pytest.raises(ConflictError, match="still used by 1 workspace\\(s\\)"):
-            await service.delete_image_definition(definition.id)
-
-        definition.refresh_from_db()
-        build.refresh_from_db()
-        assert definition.status == ImageDefinition.Status.DELETE_FAILED
-        assert "still used by 1 workspace(s)" in definition.delete_last_error
-        assert build.status == ImageBuildJob.Status.ACTIVE
-
-
-@pytest.mark.django_db(transaction=True)
-class TestRuntimeCompatibilityGuards:
-    @pytest.mark.asyncio
-    async def test_resume_workspace_rejects_runner_without_workspace_runtime(
-        self, service, stopped_workspace
-    ):
-        """Resume should fail when the runner no longer supports the workspace runtime."""
-        stopped_workspace.runtime_type = "qemu"
-        stopped_workspace.save(update_fields=["runtime_type"])
-        runner = stopped_workspace.runner
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            await service.resume_workspace(stopped_workspace.id)
-
-    def test_update_runner_qemu_settings_rejects_docker_only_runner(
-        self, service, runner
-    ):
-        """QEMU runner settings cannot be updated on a runner without QEMU support."""
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            service.update_runner_qemu_settings(runner.id, qemu_default_vcpus=4)
-
-    @pytest.mark.asyncio
-    async def test_trigger_build_job_rejects_unsupported_runtime(
-        self, service, runner, user
-    ):
-        """Image definition builds must match a runner-supported runtime."""
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="QEMU Base",
-            runtime_type="qemu",
-            base_distro="ubuntu:24.04",
-        )
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            await service.trigger_build_job(
-                image_definition=definition,
-                runner=runner,
-                activate=True,
-                created_by=user,
-            )
-
-    @pytest.mark.asyncio
-    async def test_clone_workspace_from_image_artifact_rejects_unsupported_runtime(
-        self, service, runner, user
-    ):
-        """Cloning from an artifact should fail if the runner no longer supports its runtime."""
-        source_workspace = Workspace.objects.create(
-            runner=runner,
-            name="QEMU Source",
-            status=WorkspaceStatus.RUNNING,
-            created_by=user,
-            runtime_type="qemu",
-            qemu_vcpus=2,
-            qemu_memory_mb=4096,
-            qemu_disk_size_gb=50,
-        )
-        artifact = ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="qemu",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            origin_workspace=source_workspace,
-            created_by=user,
-            name="QEMU Snapshot",
-            runner_ref="artifact-qemu-1",
-            status=ImageInstance.Status.READY,
-        )
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            await service.create_workspace_from_image_artifact(
-                image_artifact_id=artifact.id,
-                name="clone-qemu",
-                user=user,
-                organization_id=runner.organization_id,
-            )
-
 
 @pytest.mark.django_db(transaction=True)
 class TestCreateWorkspaceFromImageArtifact:
@@ -1455,11 +618,10 @@ class TestCreateWorkspaceFromImageArtifact:
             name="Source Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=user,
-            runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=source_workspace,
             created_by=user,
@@ -1474,6 +636,9 @@ class TestCreateWorkspaceFromImageArtifact:
             env_var_name="GITHUB_TOKEN",
             label="GitHub PAT",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=credential_service
+        )
         credential = CredentialSvc().create_org_credential(
             organization_id=runner.organization_id,
             service_id=credential_service.id,
@@ -1482,11 +647,13 @@ class TestCreateWorkspaceFromImageArtifact:
             user=user,
         )
 
-        workspace, task = await service.create_workspace_from_image_artifact(
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone Workspace",
-            env_vars={"GITHUB_TOKEN": "secret-token"},
-            credentials=[credential],
+            credential_ids=[credential.id],
             user=user,
             organization_id=runner.organization_id,
         )
@@ -1496,12 +663,76 @@ class TestCreateWorkspaceFromImageArtifact:
         assert list(workspace.credentials.values_list("id", flat=True)) == [
             credential.id
         ]
+        assert workspace.plugin_activations.count() == 0
 
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
         assert payload["env_vars"] == {"GITHUB_TOKEN": "secret-token"}
         assert payload["files"] == []
         assert payload["ssh_keys"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_missing_plugin_credentials_roll_back_clone_workspace_and_task(
+        self, service, sio_mock, runner, user
+    ):
+        from apps.credentials.models import OrgCredentialServiceActivation
+        from apps.plugins.models import (
+            OrgPluginActivation,
+            Plugin,
+            PluginCredentialRequirement,
+        )
+        from apps.plugins.services import PluginSelectionError
+        from apps.runners.models import Task as RunnerTask
+
+        source = Workspace.objects.create(
+            runner=runner, name="clone-source", created_by=user
+        )
+        artifact = ImageInstance.objects.create(
+            is_legacy=True,
+            runner=runner,
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source,
+            created_by=user,
+            name="artifact",
+            runner_ref="clone-atomic",
+            status=ImageInstance.Status.READY,
+        )
+        service_def = CredentialService.objects.create(
+            name="Required clone credential",
+            slug="required-clone-credential",
+            organization=runner.organization,
+            credential_type="env",
+            env_var_name="CLONE_TOKEN",
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=service_def
+        )
+        plugin = Plugin.objects.create(
+            name="Clone plugin", slug="clone-plugin", organization=runner.organization
+        )
+        OrgPluginActivation.objects.create(
+            organization=runner.organization, plugin=plugin, enabled_by=user
+        )
+        PluginCredentialRequirement.objects.create(
+            plugin=plugin, key="token", credential_service=service_def, required=True
+        )
+        workspaces_before = Workspace.objects.count()
+        tasks_before = RunnerTask.objects.count()
+
+        with pytest.raises(PluginSelectionError):
+            await service.workspace_lifecycle.create_workspace_from_image_artifact(
+                image_artifact_id=artifact.id,
+                name="Atomic clone",
+                credential_ids=[],
+                user=user,
+                organization_id=runner.organization_id,
+                plugin_ids=[plugin.id],
+            )
+
+        assert Workspace.objects.count() == workspaces_before
+        assert RunnerTask.objects.count() == tasks_before
+        sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_does_not_restore_credentials_from_artifact_metadata(
@@ -1512,11 +743,10 @@ class TestCreateWorkspaceFromImageArtifact:
             name="Source Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=user,
-            runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=source_workspace,
             created_by=user,
@@ -1525,7 +755,10 @@ class TestCreateWorkspaceFromImageArtifact:
             status=ImageInstance.Status.READY,
         )
 
-        workspace, task = await service.create_workspace_from_image_artifact(
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone Without Credentials",
             user=user,
@@ -1542,6 +775,80 @@ class TestCreateWorkspaceFromImageArtifact:
         assert payload["files"] == []
         assert payload["ssh_keys"] == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "origin_status",
+        [
+            WorkspaceStatus.PENDING_DELETION,
+            WorkspaceStatus.DELETING,
+            WorkspaceStatus.DELETED,
+        ],
+    )
+    async def test_clones_when_origin_workspace_is_in_deletion_state(
+        self, service, sio_mock, runner, user, origin_status
+    ):
+        source_workspace = Workspace.objects.create(
+            runner=runner,
+            name="Deleting Source",
+            status=origin_status,
+            created_by=user,
+        )
+        artifact = ImageInstance.objects.create(
+            is_legacy=True,
+            runner=runner,
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=source_workspace,
+            created_by=user,
+            name="Captured From Deleting",
+            runner_ref="captured-deleting-1",
+            status=ImageInstance.Status.READY,
+        )
+
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone After Delete",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.runner_id == runner.id
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        sio_mock.emit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_clones_captured_image_without_origin_workspace(
+        self, service, sio_mock, runner, user
+    ):
+        artifact = ImageInstance.objects.create(
+            is_legacy=True,
+            runner=runner,
+            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
+            origin_workspace=None,
+            created_by=user,
+            name="Orphan Captured Clone",
+            runner_ref="orphan-captured-clone",
+            status=ImageInstance.Status.READY,
+        )
+
+        (
+            workspace,
+            task,
+        ) = await service.workspace_lifecycle.create_workspace_from_image_artifact(
+            image_artifact_id=artifact.id,
+            name="Clone Orphan Capture",
+            user=user,
+            organization_id=runner.organization_id,
+        )
+
+        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.runner_id == runner.id
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
+        sio_mock.emit.assert_called_once()
+
 
 @pytest.mark.django_db
 class TestHandleWorkspaceCreated:
@@ -1557,18 +864,17 @@ class TestHandleWorkspaceCreated:
         workspace.status = WorkspaceStatus.CREATING
         workspace.save()
 
-        service.handle_workspace_created(
+        service.workspace_lifecycle.handle_workspace_created(
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
-            credentials_present=True,
         )
 
         workspace.refresh_from_db()
         task.refresh_from_db()
         assert workspace.status == WorkspaceStatus.RUNNING
         assert workspace.active_operation is None
-        assert workspace.credentials_present is True
+        assert workspace.credentials_present is False
         assert task.status == TaskStatus.COMPLETED
 
 
@@ -1585,7 +891,7 @@ class TestHandleWorkspaceError:
         workspace.status = WorkspaceStatus.CREATING
         workspace.save()
 
-        service.handle_workspace_error(
+        service.workspace_lifecycle.handle_workspace_error(
             task_id=str(task.id),
             error="clone failed",
         )
@@ -1618,7 +924,7 @@ class TestHandleWorkspaceError:
             ]
         )
 
-        service.handle_workspace_error(
+        service.workspace_lifecycle.handle_workspace_error(
             task_id=str(task.id),
             error="runner delete failed",
         )
@@ -1635,13 +941,11 @@ class TestWorkspaceOperationState:
     @pytest.mark.asyncio
     async def test_running_qemu_update_sets_restart_operation(self, service, workspace):
         """Running QEMU resource updates should mark the workspace as restarting."""
-        workspace.runtime_type = "qemu"
         workspace.qemu_vcpus = 2
         workspace.qemu_memory_mb = 4096
         workspace.qemu_disk_size_gb = 50
         workspace.save(
             update_fields=[
-                "runtime_type",
                 "qemu_vcpus",
                 "qemu_memory_mb",
                 "qemu_disk_size_gb",
@@ -1649,7 +953,7 @@ class TestWorkspaceOperationState:
             ]
         )
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             qemu_vcpus=4,
             qemu_memory_mb=8192,
@@ -1660,18 +964,63 @@ class TestWorkspaceOperationState:
         assert updated.active_operation == WorkspaceOperation.RESTARTING
 
     @pytest.mark.asyncio
+    async def test_running_qemu_update_kills_processes_without_async_unsafe(
+        self, service, workspace, monkeypatch
+    ):
+        """QEMU reconfigure must wrap process ORM off the event loop."""
+        import os
+
+        from django.core.exceptions import SynchronousOnlyOperation
+
+        workspace.qemu_vcpus = 2
+        workspace.qemu_memory_mb = 4096
+        workspace.qemu_disk_size_gb = 50
+        workspace.save(
+            update_fields=[
+                "qemu_vcpus",
+                "qemu_memory_mb",
+                "qemu_disk_size_gb",
+                "updated_at",
+            ]
+        )
+        process = service.processes.create(
+            process_id=uuid.uuid4(),
+            workspace=workspace,
+            command="sleep 60",
+            workdir="/workspace",
+            name="sleeper",
+        )
+
+        monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+        try:
+            updated = await service.workspace_lifecycle.update_workspace(
+                workspace.id,
+                qemu_vcpus=4,
+                qemu_memory_mb=8192,
+                qemu_disk_size_gb=60,
+            )
+        except SynchronousOnlyOperation:
+            pytest.fail("update_workspace called Django ORM from an async context")
+        finally:
+            os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+        assert updated is not None
+        assert updated.active_operation == WorkspaceOperation.RESTARTING
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.KILLED
+        assert process.ended_at is not None
+
+    @pytest.mark.asyncio
     async def test_running_qemu_update_skips_restart_for_unchanged_resources(
         self, service, runner, workspace
     ):
         """No-op QEMU updates must not restart a running workspace."""
-        service._dispatch_workspace_task = AsyncMock()
-        workspace.runtime_type = "qemu"
+        service.task_dispatch.dispatch_workspace_task = AsyncMock()
         workspace.qemu_vcpus = None
         workspace.qemu_memory_mb = None
         workspace.qemu_disk_size_gb = None
         workspace.save(
             update_fields=[
-                "runtime_type",
                 "qemu_vcpus",
                 "qemu_memory_mb",
                 "qemu_disk_size_gb",
@@ -1679,7 +1028,7 @@ class TestWorkspaceOperationState:
             ]
         )
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
             qemu_vcpus=runner.qemu_default_vcpus,
             qemu_memory_mb=runner.qemu_default_memory_mb,
@@ -1697,7 +1046,7 @@ class TestWorkspaceOperationState:
             workspace=workspace,
             type=TaskType.UPDATE_WORKSPACE,
         ).exists()
-        service._dispatch_workspace_task.assert_not_awaited()
+        service.task_dispatch.dispatch_workspace_task.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_busy_workspace_rejects_stop(self, service, workspace):
@@ -1706,7 +1055,7 @@ class TestWorkspaceOperationState:
         workspace.save(update_fields=["active_operation", "updated_at"])
 
         with pytest.raises(ConflictError, match="currently restarting"):
-            await service.stop_workspace(workspace.id)
+            await service.workspace_lifecycle.stop_workspace(workspace.id)
 
 
 @pytest.mark.django_db
@@ -1743,7 +1092,7 @@ class TestHeartbeatReconciliation:
         """Heartbeat should promote STOPPED to RUNNING when runtime is active."""
         runner = self._create_runner()
         stopped_workspace = self._create_workspace(runner, WorkspaceStatus.STOPPED)
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1761,7 +1110,7 @@ class TestHeartbeatReconciliation:
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.CREATING)
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1775,20 +1124,20 @@ class TestHeartbeatReconciliation:
         assert workspace.status == WorkspaceStatus.CREATING
 
     def test_missing_workspace_marked_failed(self, service):
-        """Heartbeat should mark backend workspace FAILED when runtime misses it."""
+        """Heartbeat should preserve backend workspace when runtime misses it."""
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.RUNNING)
 
-        service.handle_heartbeat(runner=runner, workspaces=[])
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=[])
 
         workspace.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.FAILED
+        assert workspace.status == WorkspaceStatus.RUNNING
 
     def test_delete_state_not_overwritten_by_heartbeat(self, service):
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.DELETING)
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1801,31 +1150,8 @@ class TestHeartbeatReconciliation:
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.DELETING
 
-    def test_unknown_runtime_workspace_triggers_cleanup_task(self, service, sio_mock):
-        """Heartbeat should request runner cleanup for unknown runtime workspaces."""
-        runner = self._create_runner()
-        unknown_workspace_id = str(uuid.uuid4())
-
-        service.handle_heartbeat(
-            runner=runner,
-            workspaces=[
-                {
-                    "workspace_id": unknown_workspace_id,
-                    "status": "running",
-                }
-            ],
-        )
-
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": unknown_workspace_id},
-            to=runner.sid,
-        )
-
-    def test_unknown_cleanup_request_is_deduplicated_while_pending(
-        self, service, sio_mock
-    ):
-        """Repeated heartbeats should not spam duplicate cleanup requests."""
+    def test_unknown_runtime_workspace_is_preserved(self, service, sio_mock):
+        """Repeated heartbeats never authorize deleting unknown runtime workspaces."""
         runner = self._create_runner()
         unknown_workspace_id = str(uuid.uuid4())
         payload = [
@@ -1835,27 +1161,23 @@ class TestHeartbeatReconciliation:
             }
         ]
 
-        service.handle_heartbeat(runner=runner, workspaces=payload)
-        service.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": unknown_workspace_id},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "terminal_state",
-        [WorkspaceStatus.FAILED, WorkspaceStatus.REMOVED],
+        [WorkspaceStatus.FAILED, WorkspaceStatus.DELETED],
     )
-    def test_terminal_backend_state_triggers_cleanup(
+    def test_terminal_backend_state_does_not_authorize_cleanup(
         self, service, sio_mock, terminal_state
     ):
-        """Heartbeat should clean runner instances for FAILED/REMOVED workspaces."""
+        """Terminal backend state alone never authorizes deleting runner instances."""
         runner = self._create_runner()
         workspace = self._create_workspace(runner, terminal_state)
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
@@ -1865,11 +1187,7 @@ class TestHeartbeatReconciliation:
             ],
         )
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": str(workspace.id)},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1885,7 +1203,7 @@ class TestAutoStopInactiveWorkspaces:
         workspace.last_activity_at = timezone.now() - timedelta(minutes=10)
         workspace.save(update_fields=["last_activity_at", "updated_at"])
 
-        tasks = await service.auto_stop_inactive_workspaces(
+        tasks = await service.heartbeat_reconciler.auto_stop_inactive_workspaces(
             runner_id=workspace.runner_id
         )
 
@@ -1902,7 +1220,7 @@ class TestAutoStopInactiveWorkspaces:
         self, service, workspace
     ):
         before = workspace.last_activity_at
-        await service.forward_terminal_input(
+        await service.interactive_sessions.forward_terminal_input(
             workspace_id=str(workspace.id),
             terminal_id="term-1",
             data="ls\n",
@@ -1911,7 +1229,7 @@ class TestAutoStopInactiveWorkspaces:
         after_terminal = workspace.last_activity_at
         assert after_terminal >= before
 
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:list",
             data={
@@ -1930,7 +1248,7 @@ class TestForwardFilesFind:
     async def test_forwards_files_find_to_online_runner(
         self, service, sio_mock, workspace
     ):
-        await service.forward_files_event(
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:find",
             data={
@@ -1956,8 +1274,10 @@ class TestForwardFilesFind:
             created_by=user,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
-        await service.forward_files_event(
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        await service.file_transfer.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:find",
             data={
@@ -1994,7 +1314,7 @@ class TestForwardFilesFind:
         )
         workspace = Workspace.objects.create(
             runner=runner,
-            status=WorkspaceStatus.REMOVED,
+            status=WorkspaceStatus.DELETED,
             created_by=user,
             name="Heartbeat Workspace",
         )
@@ -2005,14 +1325,10 @@ class TestForwardFilesFind:
             }
         ]
 
-        service.handle_heartbeat(runner=runner, workspaces=payload)
-        service.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
+        service.heartbeat_reconciler.handle_heartbeat(runner=runner, workspaces=payload)
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": str(workspace.id)},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2057,6 +1373,10 @@ class TestStartTerminal:
             env_var_name="GITHUB_TOKEN",
             label="GitHub PAT",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=workspace.runner.organization,
+            credential_service=credential_service,
+        )
         credential = CredentialSvc().create_org_credential(
             organization_id=workspace.runner.organization_id,
             service_id=credential_service.id,
@@ -2066,7 +1386,7 @@ class TestStartTerminal:
         )
         workspace.credentials.add(credential)
 
-        task = await service.start_terminal(workspace.id)
+        task = await service.interactive_sessions.start_terminal(workspace.id)
 
         assert task.type == TaskType.START_TERMINAL
         event, payload = sio_mock.emit.await_args.args[:2]
@@ -2074,94 +1394,6 @@ class TestStartTerminal:
         assert "env_vars" not in payload
         assert "ssh_keys" not in payload
         assert "files" not in payload
-
-
-@pytest.mark.django_db(transaction=True)
-class TestDispatchPendingImageBuilds:
-    """Tests for dispatching pending image builds when a runner comes online."""
-
-    @pytest.mark.asyncio
-    async def test_dispatches_pending_builds(self, service, sio_mock, runner, user):
-        """Pending builds without a task should be dispatched."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Pending Build Test",
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.PENDING,
-            build_task=None,
-        )
-
-        dispatched = await service.dispatch_pending_image_builds(runner)
-
-        assert len(dispatched) == 1
-        assert dispatched[0].id == build.id
-
-        # Build should now have a task and the SIO mock should have been called
-        build.refresh_from_db()
-        assert build.build_task is not None
-        assert build.status == ImageBuildJob.Status.PENDING
-        sio_mock.emit.assert_called()
-
-        # An artifact should have been created (in CREATING status)
-        artifact = ImageInstance.objects.filter(build_job=build).first()
-        assert artifact is not None
-        assert artifact.status == ImageInstance.Status.BUILDING
-
-    @pytest.mark.asyncio
-    async def test_skips_builds_with_task(self, service, sio_mock, runner, user):
-        """Builds that already have a task should not be re-dispatched."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Has Task Test",
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-        )
-        task = Task.objects.create(
-            runner=runner,
-            type=TaskType.BUILD_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.PENDING,
-            build_task=task,
-        )
-
-        dispatched = await service.dispatch_pending_image_builds(runner)
-        assert len(dispatched) == 0
-
-    @pytest.mark.asyncio
-    async def test_skips_active_builds(self, service, sio_mock, runner, user):
-        """Already active builds should not be dispatched."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Active Build Test",
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-        )
-        ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.ACTIVE,
-        )
-
-        dispatched = await service.dispatch_pending_image_builds(runner)
-        assert len(dispatched) == 0
-
-    @pytest.mark.asyncio
-    async def test_no_pending_builds_returns_empty(self, service, runner):
-        """When there are no pending builds, return an empty list."""
-        dispatched = await service.dispatch_pending_image_builds(runner)
-        assert dispatched == []
 
 
 @pytest.mark.django_db
@@ -2179,7 +1411,7 @@ class TestHarnessReplyRouting:
             "content": "agents",
         }
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             payload,
             runner_id=str(runner.id),
@@ -2203,7 +1435,7 @@ class TestHarnessReplyRouting:
             "image_b64": "aGVsbG8=",
         }
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:desktop_action_result",
             payload,
             runner_id=str(runner.id),
@@ -2225,7 +1457,7 @@ class TestHarnessReplyRouting:
             "workspace_id": workspace.id.hex,
         }
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             payload,
             runner_id=runner.id.hex,
@@ -2243,7 +1475,7 @@ class TestHarnessReplyRouting:
             lambda data: routed.append(data) or True,
         )
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             {
                 "request_id": "req-foreign",
@@ -2262,7 +1494,7 @@ class TestHarnessReplyRouting:
             lambda data: routed.append(data) or True,
         )
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             {
                 "request_id": "req-missing",
@@ -2281,7 +1513,7 @@ class TestHarnessReplyRouting:
             lambda data: routed.append(data) or True,
         )
 
-        service.handle_harness_reply(
+        service.runner_transport.handle_harness_reply(
             "harness:read_file_result",
             {
                 "request_id": "req-bad-runner",
@@ -2294,8 +1526,56 @@ class TestHarnessReplyRouting:
 
 
 @pytest.mark.django_db
+class TestNativeComputerUseWorkspaceDependencies:
+    """Native Computer Use dependencies ship in every QEMU image."""
+
+    _NATIVE_APT = (
+        "python3-xlib",
+        "python3-pil",
+        "python3-structlog",
+        "python3-gi",
+        "gir1.2-atspi-2.0",
+        "at-spi2-core",
+        "wmctrl",
+        "xclip",
+        "libreoffice-calc",
+        "python3-uno",
+        "sudo",
+        "iproute2",
+    )
+
+    def _definition(self, runner, user, **kw):
+        from apps.runners.models import ImageDefinition
+
+        params = {
+            "organization": runner.organization,
+            "created_by": user,
+            "name": "Native Computer Use Deps",
+            "base_distro": "ubuntu:24.04",
+        }
+        params.update(kw)
+        return ImageDefinition.objects.create(**params)
+
+    def test_qemu_init_script_installs_native_desktop_dependencies(
+        self, service, runner, user
+    ):
+        """The native X11/AT-SPI helpers and the XFCE desktop share one image."""
+        definition = self._definition(
+            runner,
+            user,
+        )
+        script = service.image_lifecycle._build_qemu_init_script_content(definition)
+        for package in self._NATIVE_APT:
+            assert package in script
+        assert "startxfce4" in script
+        # python-Xlib opens $XAUTHORITY/~/.Xauthority unconditionally,
+        # even against the auth-less Xvnc: native input needs this file.
+        assert "touch /root/.Xauthority" in script
+
+
+@pytest.mark.django_db
 class TestDesktopSessionImageContent:
-    """QEMU images get XFCE+WhiteSur; Docker keeps Openbox + Chrome."""
+    """QEMU images use XFCE and WhiteSur."""
 
     def test_qemu_init_script_uses_xfce_whitesur_stack(self, service, runner, user):
         """QEMU image builds must provision XFCE, WhiteSur, Plank, and no Openbox."""
@@ -2303,11 +1583,10 @@ class TestDesktopSessionImageContent:
             organization=runner.organization,
             created_by=user,
             name="QEMU Desktop",
-            runtime_type="qemu",
             base_distro="ubuntu:24.04",
         )
 
-        script = service._build_qemu_init_script_content(definition)
+        script = service.image_lifecycle._build_qemu_init_script_content(definition)
 
         assert "startxfce4" in script
         assert "WhiteSur" in script
@@ -2320,65 +1599,12 @@ class TestDesktopSessionImageContent:
         assert "ffmpeg" in script
         assert "xdotool" in script
         assert "allow_resize: false" in script
-        assert "-AcceptSetDesktopSize=0" in script
+        # The image owns KasmVNC YAML policy. Runtime startup flags are
+        # covered separately by runner/tests/test_service_desktop.py.
         assert "--start-maximized" not in script
         assert "openbox-session" not in script
         assert "xfce4-session" in script
         assert 'cd "$THEME_WORKDIR/cursors" && ./install.sh' in script
-
-    def test_qemu_init_script_skipped_for_alpine(self, service, runner, user):
-        """Alpine QEMU images must not receive the XFCE desktop block."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Alpine QEMU",
-            runtime_type="qemu",
-            base_distro="alpine:3.20",
-        )
-
-        script = service._build_qemu_init_script_content(definition)
-
-        assert "startxfce4" not in script
-        assert "kasmvnc" not in script.lower()
-        assert "WhiteSur" not in script
-
-    def test_docker_dockerfile_keeps_openbox(self, service, runner, user):
-        """Docker workspace images must keep the Openbox + Chrome desktop."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Docker Desktop",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-        )
-
-        dockerfile = service._generate_dockerfile_content(definition)
-
-        assert "openbox" in dockerfile
-        assert "openbox-session" in dockerfile
-        assert "ffmpeg" in dockerfile
-        assert "xdotool" in dockerfile
-        assert "startxfce4" not in dockerfile
-        assert "WhiteSur" not in dockerfile
-        assert "--start-maximized" in dockerfile
-
-    def test_qemu_and_packer_desktop_scripts_stay_in_sync(self):
-        """Backend and Packer QEMU desktop provisioners must stay identical."""
-        backend_script = (
-            Path(__file__).resolve().parents[1] / "scripts" / "qemu_desktop_session.sh"
-        )
-        packer_script = (
-            Path(__file__).resolve().parents[4]
-            / "runner"
-            / "packer"
-            / "desktop-session.sh"
-        )
-
-        assert backend_script.is_file()
-        assert packer_script.is_file()
-        assert backend_script.read_text(encoding="utf-8") == (
-            packer_script.read_text(encoding="utf-8")
-        )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2389,7 +1615,6 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Activate Ready",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -2398,9 +1623,9 @@ class TestImageDefinitionLifecycle:
             status=ImageBuildJob.Status.DEACTIVATED,
             built_at=timezone.now(),
         )
-        ImageInstance.objects.create(
+        legacy_image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             build_job=build,
@@ -2409,15 +1634,19 @@ class TestImageDefinitionLifecycle:
             runner_ref="opencuria/custom/activate-ready:1",
             status=ImageInstance.Status.RETIRED,
         )
+        build.current_generation = legacy_image
+        build.save()
 
-        updated = await service.activate_build_job(build, created_by=user)
+        updated = await service.image_lifecycle.activate_build_job(
+            build, created_by=user
+        )
 
         build.refresh_from_db()
         instance = ImageInstance.objects.get(build_job=build)
         assert updated.status == ImageBuildJob.Status.ACTIVE
         assert build.status == ImageBuildJob.Status.ACTIVE
         assert instance.status == ImageInstance.Status.READY
-        service.sio.emit.assert_not_called()
+        service.runner_transport.sio.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_activate_build_job_builds_when_never_built(
@@ -2427,7 +1656,6 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Activate Never Built",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -2436,12 +1664,14 @@ class TestImageDefinitionLifecycle:
             status=ImageBuildJob.Status.DEACTIVATED,
         )
 
-        updated = await service.activate_build_job(build, created_by=user)
+        updated = await service.image_lifecycle.activate_build_job(
+            build, created_by=user
+        )
 
         build.refresh_from_db()
         assert updated.id == build.id
         assert build.status == ImageBuildJob.Status.PENDING
-        service.sio.emit.assert_called()
+        service.runner_transport.sio.emit.assert_called()
 
     @pytest.mark.asyncio
     async def test_trigger_build_job_stays_pending_when_runner_offline(
@@ -2451,11 +1681,10 @@ class TestImageDefinitionLifecycle:
             organization=offline_runner.organization,
             created_by=user,
             name="Offline Pending",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
 
-        build = await service.trigger_build_job(
+        build = await service.image_lifecycle.trigger_build_job(
             image_definition=definition,
             runner=offline_runner,
             activate=True,
@@ -2463,8 +1692,9 @@ class TestImageDefinitionLifecycle:
         )
 
         assert build.status == ImageBuildJob.Status.PENDING
-        assert build.build_task_id is None
-        service.sio.emit.assert_not_called()
+        assert build.build_task_id is not None
+        assert build.pending_generation_id is not None
+        service.runner_transport.sio.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_trigger_build_job_rejects_deleting_definition(
@@ -2474,51 +1704,16 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Deleting Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETING,
         )
 
         with pytest.raises(ConflictError, match="deleting"):
-            await service.trigger_build_job(
+            await service.image_lifecycle.trigger_build_job(
                 image_definition=definition,
                 runner=runner,
                 activate=True,
             )
-
-    def test_timeout_stale_builds_marks_jobs_failed(self, service, runner, user):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Stale Build",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.BUILDING,
-        )
-        ImageInstance.objects.create(
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            created_by=user,
-            name="Stale Instance",
-            status=ImageInstance.Status.BUILDING,
-        )
-        ImageBuildJob.objects.filter(id=build.id).update(
-            updated_at=timezone.now() - timedelta(hours=2)
-        )
-
-        service.timeout_stale_image_operations(timeout_hours=1)
-
-        build.refresh_from_db()
-        instance = ImageInstance.objects.get(build_job=build)
-        assert build.status == ImageBuildJob.Status.FAILED
-        assert instance.status == ImageInstance.Status.FAILED
 
     @pytest.mark.asyncio
     async def test_restore_delete_failed_definition(self, service, runner, user):
@@ -2526,14 +1721,12 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Restore Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETE_FAILED,
-            is_active=False,
             delete_last_error="still used by 1 workspace(s)",
         )
 
-        await service.activate_image_definition(definition.id)
+        await service.image_lifecycle.activate_image_definition(definition.id)
 
         definition.refresh_from_db()
         assert definition.status == ImageDefinition.Status.ACTIVE
@@ -2543,7 +1736,7 @@ class TestImageDefinitionLifecycle:
 
 @pytest.mark.django_db(transaction=True)
 class TestPersistentWorkspaceCredentials:
-    def test_created_event_persists_credentials_present(
+    def test_created_event_leaves_presence_unchanged_without_ack(
         self, service, runner, workspace
     ):
         task = Task.objects.create(
@@ -2553,9 +1746,32 @@ class TestPersistentWorkspaceCredentials:
             status=TaskStatus.IN_PROGRESS,
         )
         workspace.status = WorkspaceStatus.CREATING
+        workspace.credentials_present = True
         workspace.save()
 
-        service.handle_workspace_created(
+        service.workspace_lifecycle.handle_workspace_created(
+            task_id=str(task.id),
+            workspace_id=str(workspace.id),
+            status="created",
+        )
+
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
+
+    def test_created_event_persists_runner_acknowledged_presence(
+        self, service, runner, workspace
+    ):
+        task = Task.objects.create(
+            runner=runner,
+            workspace=workspace,
+            type=TaskType.CREATE_WORKSPACE,
+            status=TaskStatus.IN_PROGRESS,
+        )
+        workspace.status = WorkspaceStatus.CREATING
+        workspace.credentials_present = False
+        workspace.save()
+
+        service.workspace_lifecycle.handle_workspace_created(
             task_id=str(task.id),
             workspace_id=str(workspace.id),
             status="created",
@@ -2577,7 +1793,9 @@ class TestPersistentWorkspaceCredentials:
             status=TaskStatus.IN_PROGRESS,
         )
 
-        service.handle_workspace_stopped(str(task.id), str(workspace.id))
+        service.workspace_lifecycle.handle_workspace_stopped(
+            str(task.id), str(workspace.id), credentials_present=False
+        )
 
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.STOPPED
@@ -2589,13 +1807,12 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present"])
 
-        service.handle_heartbeat(
+        service.heartbeat_reconciler.handle_heartbeat(
             runner=runner,
             workspaces=[
                 {
                     "workspace_id": str(workspace.id),
                     "status": "exited",
-                    "runtime_type": "docker",
                 }
             ],
         )
@@ -2613,12 +1830,11 @@ class TestPersistentWorkspaceCredentials:
             name="Secret Workspace",
             status=WorkspaceStatus.STOPPED,
             created_by=user,
-            runtime_type="qemu",
             credentials_present=True,
         )
 
         with pytest.raises(ConflictError, match="credentials on disk"):
-            await service.create_image_artifact(
+            await service.image_lifecycle.create_image_artifact(
                 workspace_id=workspace.id,
                 name="blocked-capture",
             )
@@ -2632,18 +1848,24 @@ class TestPersistentWorkspaceCredentials:
             name="Clean Workspace",
             status=WorkspaceStatus.STOPPED,
             created_by=user,
-            runtime_type="qemu",
             credentials_present=False,
         )
 
-        captured, task = await service.create_image_artifact(
+        captured, task = await service.image_lifecycle.create_image_artifact(
             workspace_id=workspace.id,
             name="clean-capture",
         )
 
         assert captured.id == workspace.id
         assert task.type == TaskType.CREATE_IMAGE_ARTIFACT
-        sio_mock.emit.assert_called()
+        from apps.runners.models import LifecycleCommand
+
+        assert (
+            LifecycleCommand.objects.get(task=task).event
+            == "task:create_image_artifact"
+        )
+        # Durable capture commands are delivered by the independent worker.
+        sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resume_sends_workspace_credentials(
@@ -2654,7 +1876,6 @@ class TestPersistentWorkspaceCredentials:
             name="Resume Creds",
             status=WorkspaceStatus.STOPPED,
             created_by=user,
-            runtime_type="docker",
             credentials_present=False,
         )
         credential_service = CredentialService.objects.create(
@@ -2663,6 +1884,9 @@ class TestPersistentWorkspaceCredentials:
             credential_type="env",
             env_var_name="GITHUB_TOKEN",
             label="GitHub PAT",
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=credential_service
         )
         credential = CredentialSvc().create_org_credential(
             organization_id=runner.organization_id,
@@ -2673,7 +1897,7 @@ class TestPersistentWorkspaceCredentials:
         )
         workspace.credentials.add(credential)
 
-        await service.resume_workspace(workspace.id)
+        await service.workspace_lifecycle.resume_workspace(workspace.id)
 
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:resume_workspace"
@@ -2687,6 +1911,9 @@ class TestPersistentWorkspaceCredentials:
             credential_type="env",
             env_var_name=env_var,
             label=name,
+        )
+        OrgCredentialServiceActivation.objects.create(
+            organization=runner.organization, credential_service=credential_service
         )
         return CredentialSvc().create_org_credential(
             organization_id=runner.organization_id,
@@ -2717,6 +1944,9 @@ class TestPersistentWorkspaceCredentials:
             target_path="~/.codex/auth.json",
             label="Codex",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=workspace.runner.organization, credential_service=file_service
+        )
         file_cred = CredentialSvc().create_org_credential(
             organization_id=workspace.runner.organization_id,
             service_id=file_service.id,
@@ -2730,6 +1960,9 @@ class TestPersistentWorkspaceCredentials:
             credential_type="ssh_key",
             label="SSH",
         )
+        OrgCredentialServiceActivation.objects.create(
+            organization=workspace.runner.organization, credential_service=ssh_service
+        )
         ssh_cred = CredentialSvc().create_org_credential(
             organization_id=workspace.runner.organization_id,
             service_id=ssh_service.id,
@@ -2737,17 +1970,15 @@ class TestPersistentWorkspaceCredentials:
             value=None,
             user=user,
         )
-        resolved = CredentialSvc()._build_resolved_credentials(
-            [env_cred, file_cred, ssh_cred]
-        )
-
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
-            resolved_credentials=resolved,
+            credential_ids=[env_cred.id, file_cred.id, ssh_cred.id],
         )
 
         assert updated is not None
         assert updated.credentials_present is True
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
         assert set(updated.credentials.values_list("id", flat=True)) == {
             env_cred.id,
             file_cred.id,
@@ -2759,6 +1990,192 @@ class TestPersistentWorkspaceCredentials:
         assert payload["files"][0]["target_path"] == "~/.codex/auth.json"
         assert payload["files"][0]["content"] == '{"access_token":"abc"}'
         assert payload["ssh_keys"]
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_successful_inject_requires_explicit_runner_disk_ack(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New token without ack",
+            env_var="NEW_TOKEN_NO_ACK",
+            value="secret",
+        )
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(return_value={"ok": True})
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[credential.id],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credential_sync_status == "pending"
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_runner_ack_overrides_selected_presence(
+        self, service, sio_mock, workspace, user
+    ):
+        existing = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Existing token",
+            env_var="EXISTING_TOKEN",
+            value="old",
+        )
+        replacement = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Replacement token",
+            env_var="REPLACEMENT_TOKEN",
+            value="new",
+        )
+        workspace.credentials.add(existing)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": False}
+        )
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[replacement.id],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credentials_present is False
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+
+    @staticmethod
+    def _connected_oauth_credential(workspace, user):
+        """Create a connected MCP OAuth grant required by a workspace plugin."""
+        from apps.credentials.enums import CredentialType
+        from apps.credentials.models import Credential, McpOAuthClientRegistration
+        from apps.plugins.models import (
+            Plugin,
+            PluginCredentialRequirement,
+            PluginMcpServer,
+        )
+        from common.utils import encrypt_value
+
+        plugin = Plugin.objects.create(
+            name="OAuth only",
+            slug="oauth-only",
+            organization=workspace.runner.organization,
+        )
+        server = PluginMcpServer.objects.create(
+            plugin=plugin,
+            name="OAuth server",
+            slug="oauth-server",
+            transport="streamable_http",
+            url="https://mcp.example/mcp",
+            auth_type="oauth",
+            oauth_requirement_key="server_auth",
+        )
+        oauth_service = CredentialService.objects.create(
+            name="OAuth server",
+            slug="oauth-only-server_auth-oauth",
+            credential_type=CredentialType.MCP_OAUTH,
+            organization=workspace.runner.organization,
+            oauth_server_url=server.url,
+        )
+        PluginCredentialRequirement.objects.create(
+            plugin=plugin,
+            key="server_auth",
+            credential_service=oauth_service,
+            required=True,
+        )
+        registration = McpOAuthClientRegistration.objects.create(
+            server_url=server.url,
+            callback_url="https://backend.example/api/v1/mcp-oauth/callback/",
+            issuer="https://auth.example/tenant",
+            client_id="client",
+            authorization_endpoint="https://auth.example/authorize",
+            token_endpoint="https://auth.example/token",
+        )
+        token_data = {
+            "access_token": "secret-access-token",
+            "refresh_token": "secret-refresh-token",
+            "resource": server.url,
+            "server_url": server.url,
+            "service_id": str(oauth_service.id),
+            "registration_id": str(registration.id),
+        }
+        return Credential.objects.create(
+            user=user,
+            service=oauth_service,
+            name="Connected",
+            encrypted_value=encrypt_value(json.dumps(token_data)),
+            created_by=user,
+            oauth_server_url=server.url,
+            oauth_resource=server.url,
+            oauth_registration=registration,
+            oauth_status="connected",
+        )
+
+    @pytest.mark.asyncio
+    async def test_oauth_only_attachment_does_not_require_runner_sync(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": False}
+        )
+        oauth_credential = self._connected_oauth_credential(workspace, user)
+        workspace.credentials.add(oauth_credential)
+        # OAuth grants are backend-side only; this workspace has no ordinary
+        # credential material on disk, so selecting the grant needs no runner IO.
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[oauth_credential.id],
+        )
+        assert updated.credentials_present is False
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+        sio_mock.call.assert_not_awaited()
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_adding_oauth_grant_keeps_delivered_material_unsynced(
+        self, service, sio_mock, workspace, user
+    ):
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": True}
+        )
+        env_credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Delivered token",
+            env_var="DELIVERED_TOKEN",
+            value="on-disk",
+        )
+        oauth_credential = self._connected_oauth_credential(workspace, user)
+        workspace.credentials.add(env_credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present", "updated_at"])
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[env_credential.id, oauth_credential.id],
+        )
+
+        # The delivered material is unchanged; the grant stays server-side.
+        assert set(updated.credentials.values_list("id", flat=True)) == {
+            env_credential.id,
+            oauth_credential.id,
+        }
+        assert updated.credentials_present is True
+        sio_mock.call.assert_not_awaited()
         sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -2779,13 +2196,15 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             workspace.id,
-            resolved_credentials=ResolvedCredentials(),
+            credential_ids=[],
         )
 
         assert list(updated.credentials.values_list("id", flat=True)) == []
         assert updated.credentials_present is False
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
         event, payload = sio_mock.call.await_args.args[:2]
         assert event == "task:inject_credentials"
         assert payload["env_vars"] == {}
@@ -2816,11 +2235,9 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(old_cred)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        resolved = CredentialSvc()._build_resolved_credentials([new_cred])
-
-        await service.update_workspace(
+        await service.workspace_lifecycle.update_workspace(
             workspace.id,
-            resolved_credentials=resolved,
+            credential_ids=[new_cred.id],
         )
 
         event, payload = sio_mock.call.await_args.args[:2]
@@ -2839,18 +2256,36 @@ class TestPersistentWorkspaceCredentials:
             env_var="GITHUB_TOKEN",
             value="stopped-token",
         )
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
-        updated = await service.update_workspace(
+        updated = await service.workspace_lifecycle.update_workspace(
             stopped_workspace.id,
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
         )
 
-        assert list(updated.credentials.values_list("id", flat=True)) == [
-            credential.id
-        ]
+        assert list(updated.credentials.values_list("id", flat=True)) == [credential.id]
         sio_mock.call.assert_not_awaited()
         sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_offline_qemu_resource_update_rejects_before_saving(
+        self, service, offline_runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline QEMU Workspace",
+            status=WorkspaceStatus.RUNNING,
+            qemu_vcpus=1,
+            qemu_memory_mb=1024,
+            qemu_disk_size_gb=20,
+            created_by=user,
+        )
+
+        with pytest.raises(RunnerOfflineError):
+            await service.workspace_lifecycle.update_workspace(
+                workspace.id, qemu_vcpus=2
+            )
+
+        workspace.refresh_from_db()
+        assert workspace.qemu_vcpus == 1
 
     @pytest.mark.asyncio
     async def test_offline_running_change_rejects_without_m2m_update(
@@ -2869,16 +2304,199 @@ class TestPersistentWorkspaceCredentials:
             env_var="GITHUB_TOKEN",
             value="offline-token",
         )
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
-        with pytest.raises(RunnerOfflineError):
-            await service.update_workspace(
-                workspace.id,
-                resolved_credentials=resolved,
-            )
-
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[credential.id],
+            user=workspace.created_by,
+            organization_id=offline_runner.organization_id,
+        )
+        assert updated.credential_sync_status == "pending"
         workspace.refresh_from_db()
-        assert list(workspace.credentials.values_list("id", flat=True)) == []
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_offline_removal_keeps_acknowledged_presence_pending(
+        self, service, offline_runner, user
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline removal",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+            credentials_present=True,
+        )
+        credential = self._org_env_credential(
+            offline_runner,
+            user,
+            name="Offline existing token",
+            env_var="OFFLINE_TOKEN",
+            value="secret",
+        )
+        workspace.credentials.add(credential)
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[],
+            user=user,
+            organization_id=offline_runner.organization_id,
+        )
+
+        assert updated.credential_sync_status == "pending"
+        workspace.refresh_from_db()
+        assert workspace.credentials.count() == 0
+        assert workspace.credentials_present is True
+
+    @pytest.mark.asyncio
+    async def test_failed_addition_preserves_acknowledged_presence(
+        self, service, sio_mock, workspace, user
+    ):
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New token",
+            env_var="NEW_TOKEN",
+            value="secret",
+        )
+        sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[credential.id],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credential_sync_status == "failed"
+        workspace.refresh_from_db()
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        assert workspace.credentials_present is False
+
+    @pytest.mark.django_db(transaction=True)
+    def test_failed_removal_preserves_presence_for_next_heartbeat(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Existing token",
+            env_var="EXISTING_TOKEN",
+            value="secret",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = True
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(
+            return_value={
+                "ok": False, "error": "runner failed", "outcome_known": True,
+            }
+        )
+        updated = asyncio.run(
+            service.workspace_lifecycle.update_workspace(
+                workspace.id,
+                credential_ids=[],
+                user=user,
+                organization_id=workspace.runner.organization_id,
+            )
+        )
+        assert updated.credential_sync_status == "failed"
+        workspace.refresh_from_db()
+        assert workspace.credentials.count() == 0
+        assert workspace.credentials_present is True
+
+        sync_ids = service.heartbeat_reconciler.handle_heartbeat(
+            runner=workspace.runner,
+            workspaces=[
+                {
+                    "workspace_id": str(workspace.id),
+                    "status": "running",
+                }
+            ],
+        )
+        assert workspace.id in sync_ids
+        sio_mock.emit = AsyncMock()
+        asyncio.run(service.credential_sync.dispatch_credential_reconcile(sync_ids))
+        _, payload = sio_mock.emit.await_args.args[:2]
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is True
+        task = (
+            Task.objects.filter(workspace=workspace, type=TaskType.INJECT_CREDENTIALS)
+            .order_by("-created_at")
+            .first()
+        )
+        service.credential_sync.handle_credentials_injected(
+            task_id=str(task.id),
+            workspace_id=str(workspace.id),
+            credentials_present=False,
+            runner_id=str(workspace.runner_id),
+        )
+        workspace.refresh_from_db()
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_failed_addition_does_not_claim_material_installed(
+        self, service, sio_mock, workspace, user
+    ):
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="New token",
+            env_var="NEW_TOKEN",
+            value="secret",
+        )
+        sio_mock.call = AsyncMock(return_value={"ok": False, "error": "runner failed"})
+
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[credential.id],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+        assert updated.credential_sync_status == "failed"
+        workspace.refresh_from_db()
+        assert list(workspace.credentials.values_list("id", flat=True)) == [
+            credential.id
+        ]
+        assert workspace.credentials_present is False
+
+    @pytest.mark.asyncio
+    async def test_same_credential_selection_retries_failed_disk_install(
+        self, service, sio_mock, workspace, user
+    ):
+        credential = self._org_env_credential(
+            workspace.runner,
+            user,
+            name="Retry token",
+            env_var="RETRY_TOKEN",
+            value="retry-secret",
+        )
+        workspace.credentials.add(credential)
+        workspace.credentials_present = False
+        workspace.save(update_fields=["credentials_present"])
+        sio_mock.call = AsyncMock(
+            return_value={"ok": True, "credentials_present": True}
+        )
+        updated = await service.workspace_lifecycle.update_workspace(
+            workspace.id,
+            credential_ids=[credential.id],
+            user=user,
+            organization_id=workspace.runner.organization_id,
+        )
+
+        assert updated.credentials_present is True
+        assert updated.credential_sync_status == "synced"
+        sio_mock.call.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_name_only_same_credentials_skips_inject(
@@ -2894,12 +2512,10 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(credential)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
-        await service.update_workspace(
+        await service.workspace_lifecycle.update_workspace(
             workspace.id,
             name="Renamed Workspace",
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
         )
 
         sio_mock.call.assert_not_awaited()
@@ -2924,13 +2540,12 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = False
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        sync_ids = service.handle_heartbeat(
+        sync_ids = service.heartbeat_reconciler.handle_heartbeat(
             runner=workspace.runner,
             workspaces=[
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                 }
             ],
         )
@@ -2948,13 +2563,12 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        sync_ids = service.handle_heartbeat(
+        sync_ids = service.heartbeat_reconciler.handle_heartbeat(
             runner=workspace.runner,
             workspaces=[
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                 }
             ],
         )
@@ -2977,8 +2591,515 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials_present = False
         workspace.save(update_fields=["credentials_present", "updated_at"])
 
-        await service.dispatch_credential_reconcile([workspace.id])
+        await service.credential_sync.dispatch_credential_reconcile([workspace.id])
 
         event, payload = sio_mock.emit.await_args.args[:2]
         assert event == "task:inject_credentials"
         assert payload["env_vars"]["GITHUB_TOKEN"] == "reconcile-token"
+
+
+@pytest.mark.django_db(transaction=True)
+class TestChunkedFileTransferOwnership:
+    """Chunked file transfer routing and validation.
+
+    ``handle_files_result`` only forwards runner-owned ``files:*_chunk``
+    payloads to the frontend; ``forward_files_event`` validates untrusted
+    chunk metadata from the frontend before it reaches the runner.
+    """
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_forwards_for_owning_runner(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        payload = {
+            "workspace_id": str(workspace.id),
+            "request_id": "content-1",
+            "path": "/workspace/a.txt",
+            "index": 0,
+            "total_chunks": 2,
+            "content": "aGVsbG8=",
+        }
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk", payload, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with("files:content_chunk", payload, str(workspace.id))
+
+    @pytest.mark.asyncio
+    async def test_download_chunk_forwards_for_owning_runner(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        payload = {
+            "workspace_id": str(workspace.id),
+            "request_id": "download-1",
+            "path": "/workspace/a.txt",
+            "index": 1,
+            "total_chunks": 2,
+            "content": "d29ybGQ=",
+        }
+        await service.file_transfer.handle_files_result(
+            "files:download_chunk", payload, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with(
+            "files:download_chunk", payload, str(workspace.id)
+        )
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_from_other_runner_is_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": "content-evil",
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(uuid.uuid4()),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_invalid_metadata_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        sio_mock.emit.reset_mock()
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-1",
+                "path": "/workspace/a.bin",
+                "index": 5,
+                "total_chunks": 2,
+                "content": "aGVsbG8=",
+            },
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        assert payload["status"] == "error"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_total_999_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        sio_mock.emit.reset_mock()
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-999",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 999,
+                "content": "aGVsbG8=",
+            },
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("total", [0, 2])
+    async def test_chunked_upload_start_relays_to_runner(
+        self, service, sio_mock, workspace, total
+    ):
+        sio_mock.emit.reset_mock()
+        data = {
+            "workspace_id": str(workspace.id),
+            "request_id": "upload-start",
+            "path": "/workspace/a.bin",
+            "total_chunks": total,
+        }
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_start",
+            data=data,
+        )
+        sio_mock.emit.assert_awaited_once()
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "files:upload_start"
+        assert payload["total_chunks"] == total
+
+    @pytest.mark.asyncio
+    async def test_offline_chunked_start_emits_one_error_then_chunks_are_silent(
+        self, service, sio_mock, offline_runner, user, monkeypatch
+    ):
+        workspace = Workspace.objects.create(
+            runner=offline_runner,
+            name="Offline Upload Workspace",
+            status=WorkspaceStatus.RUNNING,
+            created_by=user,
+        )
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        sio_mock.emit.reset_mock()
+        start = {
+            "workspace_id": str(workspace.id),
+            "request_id": "upload-off",
+            "path": "/workspace/a.bin",
+            "total_chunks": 2,
+        }
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id), event="files:upload_start", data=start
+        )
+        emit.assert_awaited_once()
+        event, payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        assert payload["error"] == "Runner is offline"
+
+        emit.reset_mock()
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-off",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 2,
+                "content": "aGVsbG8=",
+            },
+        )
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_finish",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-off",
+                "path": "/workspace/a.bin",
+            },
+        )
+        emit.assert_not_called()
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_non_string_content_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        sio_mock.emit.reset_mock()
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-bytes",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 2,
+                "content": b"not-a-string",
+            },
+        )
+        emit.assert_awaited_once()
+        event, _payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_oversized_content_emits_error_without_relay(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        sio_mock.emit.reset_mock()
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data={
+                "workspace_id": str(workspace.id),
+                "request_id": "upload-huge",
+                "path": "/workspace/a.bin",
+                "index": 0,
+                "total_chunks": 2,
+                "content": "A" * (256 * 1024 + 1),
+            },
+        )
+        emit.assert_awaited_once()
+        event, _payload, _workspace_id = emit.await_args.args
+        assert event == "files:upload_result"
+        sio_mock.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_chunk_exact_cap_relays_whitespace_accepted(
+        self, service, sio_mock, workspace
+    ):
+        sio_mock.emit.reset_mock()
+        data = {
+            "workspace_id": str(workspace.id),
+            "request_id": "upload-exact",
+            "path": "/workspace/a.bin",
+            "index": 0,
+            "total_chunks": 2,
+            # Exactly 256 KiB clean; surrounding whitespace is normalized.
+            "content": "  " + "A" * (256 * 1024) + "\n",
+        }
+        await service.file_transfer.forward_files_event(
+            workspace_id=str(workspace.id),
+            event="files:upload_chunk",
+            data=data,
+        )
+        sio_mock.emit.assert_awaited_once()
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "files:upload_chunk"
+        assert payload["request_id"] == "upload-exact"
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_invalid_total_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        for total in (0, 561, "bad"):
+            await service.file_transfer.handle_files_result(
+                "files:content_chunk",
+                {
+                    "workspace_id": str(workspace.id),
+                    "request_id": f"bad-{total}",
+                    "path": "/workspace/a.txt",
+                    "index": 0,
+                    "total_chunks": total,
+                    "content": "aGVsbG8=",
+                },
+                runner_id=str(workspace.runner_id),
+            )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_index_out_of_range_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": "bad-index",
+                "path": "/workspace/a.txt",
+                "index": 2,
+                "total_chunks": 2,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_exact_cap_forwards_but_plus_one_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        exact = {
+            "workspace_id": str(workspace.id),
+            "request_id": "exact-cap",
+            "path": "/workspace/a.txt",
+            "index": 0,
+            "total_chunks": 1,
+            "content": "A" * (256 * 1024),
+        }
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk", exact, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with("files:content_chunk", exact, str(workspace.id))
+
+        emit.reset_mock()
+        over = dict(exact, request_id="over-cap", content="A" * (256 * 1024 + 1))
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk", over, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_empty_or_oversize_content_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        for content in ("", "   \n ", "A" * (256 * 1024 + 1)):
+            await service.file_transfer.handle_files_result(
+                "files:content_chunk",
+                {
+                    "workspace_id": str(workspace.id),
+                    "request_id": "bad-content",
+                    "path": "/workspace/a.txt",
+                    "index": 0,
+                    "total_chunks": 1,
+                    "content": content,
+                },
+                runner_id=str(workspace.runner_id),
+            )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_whitespace_clean_still_forwards(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        payload = {
+            "workspace_id": str(workspace.id),
+            "request_id": "ws-clean",
+            "path": "/workspace/a.txt",
+            "index": 0,
+            "total_chunks": 1,
+            "content": "aGVs\nbG8=  ",
+        }
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk", payload, runner_id=str(workspace.runner_id)
+        )
+        emit.assert_awaited_once_with("files:content_chunk", payload, str(workspace.id))
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_missing_workspace_id_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk",
+            {
+                "request_id": "no-ws",
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_invalid_workspace_id_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        await service.file_transfer.handle_files_result(
+            "files:content_chunk",
+            {
+                "workspace_id": "not-a-uuid",
+                "request_id": "bad-ws",
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_download_chunk_missing_path_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr(
+            "common.realtime.emit_to_frontend", emit
+        )
+        await service.file_transfer.handle_files_result(
+            "files:download_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": "no-path",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_harness_read_chunk_invalid_payload_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        from apps.harness.access.runner_accessor import _ACCESSORS_BY_REQUEST
+
+        request_id = f"hr-chunk-{uuid.uuid4().hex[:8]}"
+        accessor = _ACCESSORS_BY_REQUEST.get(request_id)
+        assert accessor is None
+        # Invalid chunk (empty content) must not reach the accessor routing:
+        # it drops inside _route_harness_reply before any accessor lookup.
+        service.runner_transport.handle_harness_reply(
+            "harness:read_file_chunk",
+            {
+                "workspace_id": str(workspace.id),
+                "request_id": request_id,
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        assert request_id not in _ACCESSORS_BY_REQUEST
+
+    @pytest.mark.asyncio
+    async def test_harness_read_chunk_missing_workspace_dropped(
+        self, service, workspace, monkeypatch
+    ):
+        from apps.harness.access.runner_accessor import _ACCESSORS_BY_REQUEST
+
+        request_id = f"hr-nowss-{uuid.uuid4().hex[:8]}"
+        service.runner_transport.handle_harness_reply(
+            "harness:read_file_chunk",
+            {
+                "request_id": request_id,
+                "path": "/workspace/a.txt",
+                "index": 0,
+                "total_chunks": 1,
+                "content": "aGVsbG8=",
+            },
+            runner_id=str(workspace.runner_id),
+        )
+        assert request_id not in _ACCESSORS_BY_REQUEST

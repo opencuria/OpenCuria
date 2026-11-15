@@ -14,19 +14,19 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PART,
-    FRONTEND_EVENT_PERMISSION,
-    FRONTEND_EVENT_QUESTION,
     FRONTEND_EVENT_STATUS,
     HarnessService,
 )
+from apps.harness.interaction_service import (
+    FRONTEND_EVENT_PERMISSION,
+    FRONTEND_EVENT_QUESTION,
+)
+from apps.harness.media.tool_media import tool_media_path
 from apps.harness.models import HarnessSession, QuestionRequest, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.models import PermissionRequest
-from apps.harness.permissions.service import (
-    PermissionRequestRepository,
-    PermissionService,
-)
+from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
+from apps.harness.permissions.repositories import PermissionRequestRepository
+from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,
@@ -42,6 +42,11 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
+from apps.harness.run_events import assistant_run_finished
+from apps.harness.run_timeline import FRONTEND_EVENT_PART, tail_remainder
+from apps.harness.session_access_service import SessionAccessService
+from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.helpers import attach_run_context, parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
 
@@ -99,6 +104,7 @@ def _service(
     *,
     provider: FakeProvider | None = None,
     events: list[dict[str, Any]] | None = None,
+    accessor: FakeAccessor | None = None,
 ) -> tuple[HarnessService, FakeProvider, list[dict[str, Any]]]:
     collected: list[dict[str, Any]] = events if events is not None else []
     fake = provider or FakeProvider([_text_step("hello")])
@@ -113,6 +119,7 @@ def _service(
             ),
             emit=_emit,
             provider_factory=lambda _org: fake,
+            accessor_factory=None if accessor is None else (lambda _ws: accessor),
         ),
         fake,
         collected,
@@ -131,6 +138,53 @@ def _session(harness_workspace) -> HarnessSession:  # type: ignore[no-untyped-de
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_native_run_reuses_persisted_always_allowlist(
+    harness_workspace,
+) -> None:
+    """Native ask decisions consult the same persistent org/workspace grant."""
+    path = "/workspace/docs/guide.md"
+    permissions = PermissionService(
+        evaluator=PermissionEvaluator(global_rules={"read": "ask"})
+    )
+    from apps.harness.tests.conftest import FakeAccessor
+
+    async def _accessor(_workspace_id: str) -> FakeAccessor:
+        return FakeAccessor(files={path: b"guide"})
+
+    service = HarnessService(
+        permissions=permissions,
+        provider_factory=lambda _org: FakeProvider(
+            [_tool_step("read", {"path": path}), _text_step("done")]
+        ),
+        accessor_factory=_accessor,
+    )
+    session = await _db_create_session(harness_workspace)
+    await sync_to_async(PermissionAllowlist.objects.create)(
+        organization_id=session.organization_id,
+        workspace_id=session.workspace_id,
+        tool="read",
+        pattern=path,
+    )
+
+    await service.start_run(
+        session,
+        "read the guide",
+        organization_id=session.organization_id,
+        workspace_id=str(session.workspace_id),
+    )
+    await service.run_registry.get_task(str(session.id))
+
+    messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
+        session.id
+    )
+    assistant = next(message for message in messages if message.role == "assistant")
+    assert assistant.finish == "stop"
+    assert not await sync_to_async(
+        PermissionRequest.objects.filter(session_id=session.id).exists
+    )()
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_start_run_persists_messages_parts_and_history(
     harness_workspace,
 ) -> None:
@@ -146,7 +200,7 @@ async def test_start_run_persists_messages_parts_and_history(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     stored = HarnessMessageRepository.list_for_session(session.id)
     assert [m.role for m in stored] == ["user", "assistant"]
@@ -158,7 +212,7 @@ async def test_start_run_persists_messages_parts_and_history(
     assert assistant.tokens.get("prompt") == 1
     assert assistant.tokens.get("completion") == 1
 
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     assert any(p.type == "text" and "hello" in (p.output or "") for p in parts)
     assert any(p.type == "step-finish" for p in parts)
 
@@ -170,9 +224,282 @@ async def test_start_run_persists_messages_parts_and_history(
     emitted = [e["event"] for e in events]
     assert "harness.part_updated" in emitted
     assert "harness.session_status" in emitted
-    # Last status event marks the session idle again.
-    assert events[-1]["event"] == "harness.session_status"
-    assert events[-1]["status"] == "idle"
+    # The run ends idle; the status event is last apart from the trailing
+    # conversation-feed invalidation for root sessions.
+    idle_events = [e for e in events if e["event"] == "harness.session_status"]
+    assert idle_events[-1]["status"] == "idle"
+    assert events[-2]["event"] == "harness.session_status"
+    assert events[-2]["status"] == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_manual_chat_can_start_while_scheduled_run_is_active(
+    harness_workspace, monkeypatch
+) -> None:
+    """Scheduled admission gates launches, not later manual conversations."""
+    scheduled_gate = asyncio.Event()
+    manual_gate = asyncio.Event()
+    scheduled_started = asyncio.Event()
+    manual_started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            prompt = messages[-1].content
+            if prompt == "scheduled run":
+                scheduled_started.set()
+                await scheduled_gate.wait()
+            else:
+                manual_started.set()
+                await manual_gate.wait()
+            yield Delta(text="finished", usage=Usage(1, 1, 2))
+
+    reservations: list[tuple[uuid.UUID, bool]] = []
+    original_reserve = HarnessSessionRepository.reserve_run
+
+    def record_reservation(session_id: uuid.UUID, *, scheduled: bool = False) -> bool:
+        reservations.append((session_id, scheduled))
+        return original_reserve(session_id, scheduled=scheduled)
+
+    monkeypatch.setattr(HarnessSessionRepository, "reserve_run", record_reservation)
+    service, _, _ = _service(provider=SlowProvider([]))
+    scheduled_session = await _db_create_session(harness_workspace)
+    manual_session = await _db_create_session(harness_workspace)
+
+    await service.start_run(
+        scheduled_session,
+        "scheduled run",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+        scheduled=True,
+    )
+    await asyncio.wait_for(scheduled_started.wait(), timeout=2)
+
+    await service.start_run(
+        manual_session,
+        "manual chat",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(manual_started.wait(), timeout=2)
+    assert service.is_running(scheduled_session.id)
+    assert service.is_running(manual_session.id)
+    assert reservations == [
+        (scheduled_session.id, True),
+        (manual_session.id, False),
+    ]
+
+    # Both turns are concurrently active above. Finish deterministically to
+    # avoid unrelated simultaneous-write locks in SQLite's shared-memory DB.
+    scheduled_background = service.run_registry.get_task(str(scheduled_session.id))
+    manual_background = service.run_registry.get_task(str(manual_session.id))
+    scheduled_gate.set()
+    await scheduled_background
+    manual_gate.set()
+    await manual_background
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_scheduled_run_rejected_after_manual_root_reservation(
+    harness_workspace,
+) -> None:
+    """A user start admitted first makes a competing schedule skip cleanly."""
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            started.set()
+            await gate.wait()
+            yield Delta(text="manual", usage=Usage(1, 1, 2))
+
+    service, _, _ = _service(provider=SlowProvider([]))
+    manual_session = await _db_create_session(harness_workspace)
+    scheduled_session = await _db_create_session(harness_workspace)
+
+    await service.start_run(
+        manual_session,
+        "manual first",
+        organization_id=harness_workspace.runner.organization_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    with pytest.raises(ConflictError, match="already active in this workspace"):
+        await service.start_run(
+            scheduled_session,
+            "scheduled second",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+            scheduled=True,
+        )
+    assert HarnessMessageRepository.list_for_session(scheduled_session.id) == []
+
+    gate.set()
+    await service.run_registry.get_task(str(manual_session.id))
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_scheduled_admission_error_returns_session_to_idle(
+    harness_workspace, monkeypatch
+) -> None:
+    """Failures before spawning complete the shell and release the reservation."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+
+    async def fail_history(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("history unavailable")
+
+    monkeypatch.setattr(service.history, "build", fail_history)
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        await service.start_run(
+            session,
+            "scheduled failure",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+            scheduled=True,
+        )
+
+    session.refresh_from_db()
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    assert session.status == "idle"
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[-1].finish == "error"
+    assert "Run admission failed" in messages[-1].error
+
+
+@pytest.mark.parametrize("credential_type", ["mcp_oauth", "env"])
+@pytest.mark.django_db(transaction=True)
+async def test_scheduled_plugin_credential_failure_finishes_run(
+    harness_workspace, credential_type, monkeypatch
+) -> None:
+    """Live requirements fail closed and release the scheduled run ledger."""
+    from datetime import time, timedelta
+
+    from django.utils import timezone
+
+    from apps.credentials.models import CredentialService
+    from apps.plugins.models import (
+        OrgPluginActivation,
+        Plugin,
+        PluginCredentialRequirement,
+        PluginMcpServer,
+        WorkspacePluginActivation,
+    )
+    from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
+    from apps.scheduled_tasks.repositories import ScheduledTaskRepository
+    from apps.scheduled_tasks.services import ScheduledTaskService
+
+    org = harness_workspace.runner.organization
+    task = ScheduledTask.objects.create(
+        organization=org,
+        owner=harness_workspace.created_by,
+        workspace=harness_workspace,
+        name="Credential failure",
+        prompt="Check workspace",
+        model="fake-model",
+        local_time=time(9),
+        timezone_name="UTC",
+        next_run_at=timezone.now() + timedelta(days=1),
+    )
+    ledger = ScheduledTaskRepository.create_manual_run(task, timezone.now())
+    # Change the live workspace after the occurrence snapshot was captured.
+    oauth = credential_type == "mcp_oauth"
+    credential_service = CredentialService.objects.create(
+        organization=org,
+        name="Required account",
+        slug=f"required-{uuid.uuid4().hex}",
+        credential_type=credential_type,
+        env_var_name="" if oauth else "PLUGIN_TOKEN",
+        oauth_server_url="https://mcp.example.com/mcp" if oauth else "",
+    )
+    plugin = Plugin.objects.create(
+        organization=org, name="Required plugin", slug="required-plugin"
+    )
+    PluginCredentialRequirement.objects.create(
+        plugin=plugin, key="account", credential_service=credential_service
+    )
+    PluginMcpServer.objects.create(
+        plugin=plugin,
+        name="Tools",
+        slug="tools",
+        transport="streamable_http" if oauth else "stdio",
+        url="https://mcp.example.com/mcp" if oauth else "",
+        command="" if oauth else "tools",
+        env={} if oauth else {"TOKEN": "{{credential.account}}"},
+        auth_type="oauth" if oauth else "none",
+        oauth_requirement_key="account" if oauth else "",
+    )
+    OrgPluginActivation.objects.create(organization=org, plugin=plugin)
+    WorkspacePluginActivation.objects.create(workspace=harness_workspace, plugin=plugin)
+    provider_calls = []
+
+    def forbidden_provider(_organization_id):
+        provider_calls.append("called")
+        raise AssertionError("Plugin validation must precede provider construction")
+
+    service, _, events = _service()
+    service._provider_factory = forbidden_provider
+    monkeypatch.setattr(
+        service.metadata, "generate_title", lambda **kw: asyncio.sleep(0)
+    )
+    scheduler = ScheduledTaskService(harness=service)
+    run = await scheduler._create_and_start_run(task, ledger, service)
+    background = service.run_registry.get_task(str(run.session_id))
+    if background is not None:
+        await background
+    await scheduler.reconcile_runs()
+
+    run.refresh_from_db()
+    run.session.refresh_from_db()
+    run.assistant_message.refresh_from_db()
+    assert run.status == ScheduledTaskRun.Status.ERROR
+    assert run.assistant_message.finish == "error"
+    assert run.assistant_message.completed_at is not None
+    assert "required" in run.error.lower()
+    assert run.session.status == "idle"
+    assert not service.is_running(run.session_id)
+    assert service.run_registry.get(str(run.session_id)) is None
+    assert provider_calls == []
+    statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
+    assert statuses[-1]["status"] == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_finished_run_publishes_event_and_isolates_receivers(
+    harness_workspace,
+) -> None:
+    """Each settled run notifies subscribers once; failures never block idle."""
+    received: list[uuid.UUID] = []
+
+    def failing(sender, message_id, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("subscriber failed")
+
+    def recording(sender, message_id, **kwargs):  # type: ignore[no-untyped-def]
+        received.append(message_id)
+
+    assistant_run_finished.connect(failing)
+    assistant_run_finished.connect(recording)
+    try:
+        service, _, events = _service()
+        session = await _db_create_session(harness_workspace)
+        assistant = await service.start_run(
+            session,
+            "hello",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+        )
+        background = service.run_registry.get_task(str(session.id))
+        if background is not None:
+            await background
+    finally:
+        assistant_run_finished.disconnect(failing)
+        assistant_run_finished.disconnect(recording)
+
+    assert received == [assistant.id]
+    assert not service.is_running(session.id)
+    assert service.run_registry.get(str(session.id)) is None
+    statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
+    assert statuses[-1]["status"] == "idle"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -205,7 +532,7 @@ async def test_double_run_rejected_with_conflict(harness_workspace) -> None:
             workspace_id=str(harness_workspace.id),
         )
     gate.set()
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert assistant_first.id is not None
 
 
@@ -242,12 +569,91 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "aborted"
     assert assistant.error == "aborted by user"
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     assert reasoning
     assert reasoning[0].state == "completed"
     assert reasoning[0].output == "considering the layout"
-    assert [e["event"] for e in events][-1] == "harness.session_status"
+    idle_events = [e for e in events if e["event"] == "harness.session_status"]
+    assert idle_events
+    assert idle_events[-1]["status"] == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("boundary", ["provider", "event", "tool", "completion"])
+async def test_abort_stops_progress_when_dependency_swallows_cancellation(
+    harness_workspace: Any, boundary: str
+) -> None:
+    """A swallowed cancellation must not allow another model or tool step."""
+    entered = asyncio.Event()
+    continued = asyncio.Event()
+    provider_calls = 0
+
+    class CancellationSwallowingProvider(FakeProvider):
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self, model, messages, tools, opts=None
+        ):
+            nonlocal provider_calls
+            provider_calls += 1
+            if boundary in {"provider", "completion"}:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    pass
+            if boundary == "tool":
+                for delta in _tool_step("bash", {"command": "must not execute"}):
+                    yield delta
+            elif boundary != "completion":
+                yield Delta(text="streamed text")
+                continued.set()
+            yield Delta(usage=Usage(1, 1, 2))
+
+    provider = CancellationSwallowingProvider([])
+    service, _, events = _service(provider=provider)
+    if boundary in {"event", "tool"}:
+        original_emit = service._emit
+        assert original_emit is not None
+
+        async def swallow_cancel(event: str, data: dict[str, Any]) -> None:
+            key = "tool_started" if boundary == "tool" else "text"
+            if event == FRONTEND_EVENT_PART and data.get("delta", {}).get(key):
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    pass
+            await original_emit(event, data)
+
+        service._emit = swallow_cancel
+    if boundary == "tool":
+        from apps.harness.tests.conftest import FakeAccessor
+
+        accessor = FakeAccessor()
+
+        async def get_accessor(_workspace_id: str) -> FakeAccessor:
+            return accessor
+
+        service._accessor_factory = get_accessor
+    session = await _db_create_session(harness_workspace)
+    assistant = await service.start_run(
+        session,
+        "stop this run",
+        organization_id=session.organization_id,
+        workspace_id=str(session.workspace_id),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    await asyncio.wait_for(service.abort_run(session.id), timeout=2)
+
+    assistant.refresh_from_db()
+    assert assistant.finish == "aborted"
+    assert assistant.error == "aborted by user"
+    assert not continued.is_set()
+    assert provider_calls == 1
+    if boundary == "tool":
+        assert accessor.exec_calls == []
+    assert not service.is_running(session.id)
+    assert events[-2]["status"] == "idle"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -283,12 +689,136 @@ async def test_abort_rejects_pending_permission_and_question(
         event["event"] == FRONTEND_EVENT_PERMISSION
         and event.get("request_id") == str(permission.id)
         and event.get("decision") == "reject"
+        and event.get("root_session_id") == str(session.id)
         for event in events
     )
     assert any(
         event["event"] == FRONTEND_EVENT_QUESTION
         and event.get("request_id") == str(question.id)
         and event.get("status") == "rejected"
+        and event.get("root_session_id") == str(session.id)
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_permission_child_session_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """Child-session permission resolve must keep ORM calls off the event loop."""
+    service, _, events = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await _db_create_child_session(harness_workspace, parent)
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="ls",
+        title="$ ls",
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        outcome = await service.interactions.resolve_permission(
+            session=child,
+            request_id=permission.id,
+            response="once",
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("resolve_permission called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    assert outcome["decision"] == "allow"
+    assert any(
+        event["event"] == FRONTEND_EVENT_PERMISSION
+        and event.get("request_id") == str(permission.id)
+        and event.get("root_session_id") == str(parent.id)
+        and event.get("session_id") == str(child.id)
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_question_child_session_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """Child-session question resolve must keep ORM calls off the event loop."""
+    service, _, events = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await _db_create_child_session(harness_workspace, parent)
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        questions=[{"question": "Color?"}],
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        outcome = await service.interactions.resolve_question(
+            session=child,
+            question_id=question.id,
+            answers=["blue"],
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("resolve_question called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    assert outcome["status"] == "answered"
+    assert any(
+        event["event"] == FRONTEND_EVENT_QUESTION
+        and event.get("request_id") == str(question.id)
+        and event.get("root_session_id") == str(parent.id)
+        and event.get("session_id") == str(child.id)
+        for event in events
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_abort_run_child_session_pending_gates_without_sync_orm(
+    harness_workspace, monkeypatch
+) -> None:
+    """Aborting a child with pending gates must keep ORM calls off the event loop."""
+    service, _, events = _service()
+    parent = await _db_create_session(harness_workspace)
+    child = await _db_create_child_session(harness_workspace, parent)
+    permission = await sync_to_async(PermissionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        tool="bash",
+        pattern="reboot",
+        title="$ reboot",
+    )
+    question = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=harness_workspace.runner.organization_id,
+        session_id=child.id,
+        workspace_id=harness_workspace.id,
+        questions=[{"question": "Continue?"}],
+    )
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        aborted = await service.abort_run(child.id)
+    except SynchronousOnlyOperation:
+        pytest.fail("abort_run called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    assert aborted.status == "idle"
+    stored_permission = await sync_to_async(PermissionRequest.objects.get)(
+        id=permission.id
+    )
+    stored_question = await sync_to_async(QuestionRequest.objects.get)(id=question.id)
+    assert stored_permission.status == "rejected"
+    assert stored_question.status == "rejected"
+    assert any(
+        event["event"] == FRONTEND_EVENT_PERMISSION
+        and event.get("request_id") == str(permission.id)
+        and event.get("root_session_id") == str(parent.id)
+        for event in events
+    )
+    assert any(
+        event["event"] == FRONTEND_EVENT_QUESTION
+        and event.get("request_id") == str(question.id)
+        and event.get("root_session_id") == str(parent.id)
         for event in events
     )
 
@@ -314,9 +844,9 @@ async def test_start_run_settles_open_text_and_reasoning_parts(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     text = [p for p in parts if p.type == "text"]
     assert reasoning
@@ -346,13 +876,13 @@ async def test_run_error_preserves_stream_content_and_fails_tools(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     stored = HarnessMessageRepository.list_for_session(session.id)
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "error"
     assert "provider exploded" in (assistant.error or "")
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     assert reasoning
     assert reasoning[0].state == "completed"
@@ -393,7 +923,7 @@ async def test_fail_open_parts_preserves_partial_tool_output(
         title="read",
     )
 
-    await service._fail_open_parts(assistant, state="error", output="aborted")
+    await service.timeline.fail_open_parts(assistant, state="error", output="aborted")
 
     reasoning.refresh_from_db()
     tool_partial.refresh_from_db()
@@ -410,7 +940,7 @@ async def test_fail_open_parts_preserves_partial_tool_output(
 async def test_abort_run_does_not_call_orm_from_async_context(
     harness_workspace, monkeypatch
 ) -> None:
-    """Idle abort must wrap session lookup so Daphne does not 500."""
+    """Idle abort must keep the session lookup off the event loop."""
     service, _, _ = _service()
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
@@ -460,7 +990,9 @@ async def test_failed_run_persists_error_without_task_exception(
     harness_workspace, monkeypatch
 ) -> None:
     """Provider failures persist error finish and do not leak task exceptions."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
 
     class TimeoutProvider(FakeProvider):
         async def chat_stream(  # type: ignore[no-untyped-def]
@@ -481,7 +1013,7 @@ async def test_failed_run_persists_error_without_task_exception(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    task = service._tasks.get(str(session.id))
+    task = service.run_registry.get_task(str(session.id))
     if task is not None:
         await task
         assert task.exception() is None
@@ -493,8 +1025,8 @@ async def test_failed_run_persists_error_without_task_exception(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_execute_run_loads_org_provider_without_sync_orm(
-    harness_workspace, monkeypatch
+async def test_execute_run_loads_selected_provider_without_sync_orm(
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Production path (no provider_factory) must not hit ORM from asyncio."""
     from apps.harness.providers.models_catalog import ProviderModel
@@ -502,13 +1034,7 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
-        default_model="org-default-model",
-        small_model="",
-    )
+    account = provider_account_factory("openrouter")
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
@@ -523,7 +1049,9 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
 
     monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, *, user_id, account_ids=None):  # type: ignore[no-untyped-def]
+        assert user_id == harness_workspace.created_by_id
+        assert account_ids == {"openrouter": str(account.id)}
         assert organization_id == org_id
         return [
             ProviderModel(
@@ -557,8 +1085,9 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
             "say hello",
             organization_id=org_id,
             workspace_id=str(harness_workspace.id),
+            user_id=harness_workspace.created_by_id,
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     except SynchronousOnlyOperation:
         pytest.fail("_execute_run called Django ORM from an async context")
     finally:
@@ -572,22 +1101,17 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
 
 @pytest.mark.django_db(transaction=True)
 async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """_execute_run always resolves model limits and prior step tokens."""
+    from apps.harness.engines.base import RunOptions, RunResult
     from apps.harness.providers.models_catalog import ProviderModel
     from apps.harness.providers.openrouter import OpenRouterAdapter
-    from apps.harness.runner import HarnessRunner, RunOptions, RunResult
+    from apps.harness.runner import HarnessRunner
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
-        default_model="org-default-model",
-        small_model="",
-    )
+    account = provider_account_factory("openrouter")
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
@@ -614,7 +1138,9 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
         },
     )
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, *, user_id, account_ids=None):  # type: ignore[no-untyped-def]
+        assert user_id == harness_workspace.created_by_id
+        assert account_ids == {"openrouter": str(account.id)}
         return [
             ProviderModel(
                 id="fake-model",
@@ -636,14 +1162,13 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
 
     captured: list[RunOptions] = []
 
-    def _runner_factory(*, provider, tools, accessor, emit):  # type: ignore[no-untyped-def]
+    def _runner_factory(*, model_resolver, tools, accessor, emit):  # type: ignore[no-untyped-def]
         runner = HarnessRunner(
-            provider=provider,
+            model_resolver=model_resolver,
             tools=tools,
             accessor=accessor,
             emit=emit,
         )
-        original_run = runner.run
 
         async def _capturing_run(prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
             captured.append(opts)
@@ -665,8 +1190,9 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
         "follow up",
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
+        user_id=harness_workspace.created_by_id,
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert captured
     opts = captured[0]
@@ -721,14 +1247,14 @@ async def test_execute_run_todowrite_without_sync_orm(
             organization_id=org_id,
             workspace_id=str(harness_workspace.id),
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     except SynchronousOnlyOperation:
         pytest.fail("todowrite called Django ORM from an async context")
     finally:
         os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
     assert Todo.objects.filter(session_id=session.id).count() == 2
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert len(tool_parts) == 1
     assert tool_parts[0].state == "completed"
@@ -741,7 +1267,7 @@ async def test_execute_run_todowrite_without_sync_orm(
 async def test_execute_run_with_skills_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
-    """start_run must wrap skill-body ORM so Daphne does not 500."""
+    """start_run must keep skill-body ORM calls off the event loop."""
     from apps.skills.models import Skill
 
     org_id = harness_workspace.runner.organization_id
@@ -766,7 +1292,9 @@ async def test_execute_run_with_skills_without_sync_orm(
 
     async def _capture(self, **kwargs):  # type: ignore[no-untyped-def]
         key = str(kwargs["session"].id)
-        captured.append(list(self._runs.get(key, {}).get("skill_bodies") or []))
+        captured.append(
+            list(self.run_registry.get_context(key).get("skill_bodies") or [])
+        )
         await original(self, **kwargs)
 
     monkeypatch.setattr(HarnessService, "_execute_run", _capture)
@@ -780,7 +1308,7 @@ async def test_execute_run_with_skills_without_sync_orm(
             workspace_id=str(harness_workspace.id),
             user_id=user_id,
         )
-        await service._tasks[str(session.id)]
+        await service.run_registry.get_task(str(session.id))
     except SynchronousOnlyOperation:
         pytest.fail("start_run resolved skill bodies from an async context")
     finally:
@@ -795,27 +1323,25 @@ async def test_execute_run_with_skills_without_sync_orm(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_generate_title_loads_org_provider_without_sync_orm(
-    harness_workspace, monkeypatch
+async def test_generate_title_loads_selected_provider_without_sync_orm(
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Title agent without provider_factory must not hit ORM from asyncio."""
-    from apps.harness.harness_service import _title_from_prompt
     from apps.harness.providers.openrouter import OpenRouterAdapter
     from apps.harness.services import ProviderConfigService
+    from apps.harness.session_metadata_service import title_from_prompt
 
     org_id = harness_workspace.runner.organization_id
+    provider_account_factory("openrouter")
     prompt = "Please help me build a feature"
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
-        default_model="big-model",
         small_model="small-model",
     )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
-        title=_title_from_prompt(prompt),
+        title=title_from_prompt(prompt),
         agent_name="build",
         mode="build",
         model="big-model",
@@ -837,13 +1363,14 @@ async def test_generate_title_loads_org_provider_without_sync_orm(
     )
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
     try:
-        await service._generate_title(
+        await service.metadata.generate_title(
             session_id=session.id,
             prompt=prompt,
             organization_id=org_id,
+            initiated_by_id=harness_workspace.created_by_id,
         )
     except SynchronousOnlyOperation:
-        pytest.fail("_generate_title called Django ORM from an async context")
+        pytest.fail("generate_title called Django ORM from an async context")
     finally:
         os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
@@ -877,22 +1404,25 @@ async def test_history_built_from_db_not_params(harness_workspace) -> None:
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     await service.start_run(
         session,
         "second",
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
     assert len(seen) == 2
-    # Second run history contains the first persisted user turn.
-    assert "first" in json.dumps(seen[1]["texts"])
+    # History contains the first turn exactly once; the active prompt is
+    # appended by the runner, not replayed from persisted messages as well.
+    assert seen[0]["texts"].count("first") == 1
+    assert seen[1]["texts"].count("first") == 1
+    assert seen[1]["texts"].count("second") == 1
 
 
 @pytest.mark.django_db(transaction=True)
 async def test_build_history_includes_tool_calls(harness_workspace) -> None:
-    """_build_history replays assistant tool_calls and tool results from parts."""
+    """Provider history replays assistant tool_calls and tool results from parts."""
     service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     HarnessMessageRepository.create(
@@ -912,7 +1442,7 @@ async def test_build_history_includes_tool_calls(harness_workspace) -> None:
         input={"tool": "read", "arguments": '{"path":"a.txt"}'},
     )
     HarnessPartRepository.mark_state(part, "completed", output="file contents")
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     roles = [m.role for m in history]
     assert roles == ["user", "assistant", "tool"]
     assistant_msg = history[1]
@@ -945,12 +1475,358 @@ async def test_build_history_truncates_huge_tool_output(harness_workspace) -> No
         input={"tool": "grep", "arguments": '{"pattern":"Force"}'},
         output="x" * (MAX_BYTES + 8_000),
     )
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     tool_msg = next(message for message in history if message.role == "tool")
     assert isinstance(tool_msg.content, str)
     preview = tool_msg.content.split("\n\n...", 1)[0]
     assert len(preview.encode("utf-8")) <= MAX_BYTES
     assert len(tool_msg.content) < len(part.output)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_build_history_rebuilds_tool_images_from_meta(
+    harness_workspace,
+) -> None:
+    """Persisted meta attachments rebuild multimodal tool messages."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="look at cat"
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id,
+        role="assistant",
+        content="seen",
+    )
+    part = HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-img",
+        title="Read cat.png",
+        input={"tool": "read", "arguments": '{"path":"cat.png"}'},
+        output="Image read successfully",
+        meta={
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,AAAA",
+                    "filename": "cat.png",
+                }
+            ]
+        },
+    )
+    history = await service.history.build(session)
+    tool_msg = next(message for message in history if message.role == "tool")
+    assert isinstance(tool_msg.content, list)
+    assert tool_msg.content[0] == {
+        "type": "text",
+        "text": "Image read successfully",
+    }
+    assert {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    } in tool_msg.content
+    assert part.meta.get("attachments")
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_completed_event_persists_attachments_in_meta(
+    harness_workspace,
+) -> None:
+    """tool_completed media lands in the workspace; meta keeps only its path."""
+    import base64
+    import os
+
+    os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+    accessor = FakeAccessor()
+    service, _, events = _service(accessor=accessor)
+    session = await _db_create_session(harness_workspace)
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant"
+    )
+    big = "A" * 100
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "call-img",
+            "tool": "read",
+            "title": "Read cat.png",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "call-img",
+            "tool": "read",
+            "output": "Image read successfully",
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": f"data:image/png;base64,{big}",
+                    "filename": "cat.png",
+                },
+                {"type": "file", "mime": "image/png", "url": "not-a-data-url"},
+            ],
+        },
+    )
+    parts = [
+        part
+        for part in parts_for_session(session.id)
+        if part.type == "tool"
+    ]
+    assert len(parts) == 1
+    assert parts[0].state == "completed"
+    assert parts[0].output == "Image read successfully"
+    image = base64.b64decode(big)
+    path = tool_media_path("image/png", image)
+    assert parts[0].meta.get("attachments") == [
+        {"type": "file", "mime": "image/png", "path": path, "filename": "cat.png"}
+    ]
+    assert accessor.written == {path: image}
+    assert big not in json.dumps(parts[0].meta)
+    # tool_started meta (step) survives the completed merge (no replace).
+    assert parts[0].meta.get("step") == 1
+    assert parts[0].display["tool"] == "read"
+    completed_deltas = [
+        item.get("delta", {})
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "tool_completed" in (item.get("delta") or {})
+    ]
+    assert completed_deltas
+    assert completed_deltas[0]["tool_completed"] == "read"
+    assert completed_deltas[0]["display"]["tool"] == "read"
+    assert "output" not in completed_deltas[0]
+    assert "attachments" not in completed_deltas[0]
+    assert big not in str(events)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_media_write_failure_never_persists_bytes(
+    harness_workspace,
+) -> None:
+    """An unwritable workspace drops the attachment instead of storing base64."""
+    accessor = FakeAccessor(error=OSError("workspace stopped"))
+    service, _, _ = _service(accessor=accessor)
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "call-img",
+            "tool": "read",
+            "output": "Image read successfully",
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,AAAA",
+                    "filename": "cat.png",
+                }
+            ],
+        },
+    )
+    part = next(
+        part
+        for part in await sync_to_async(parts_for_session)(session.id)
+        if part.type == "tool"
+    )
+    assert part.state == "completed"
+    assert "attachments" not in part.meta
+    assert accessor.written == {}
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_build_history_replays_tool_media_as_path_notice(
+    harness_workspace,
+) -> None:
+    """Earlier tool media is offered by path instead of replayed as bytes."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="look at cat"
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="seen"
+    )
+    path = tool_media_path("image/png", b"png-bytes")
+    HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        state="completed",
+        call_id="call-img",
+        title="Read cat.png",
+        input={"tool": "read", "arguments": '{"path":"cat.png"}'},
+        output="Image read successfully",
+        meta={
+            "attachments": [
+                {"type": "file", "mime": "image/png", "path": path, "filename": ""}
+            ]
+        },
+    )
+    history = await service.history.build(session)
+    tool_msg = next(message for message in history if message.role == "tool")
+    assert isinstance(tool_msg.content, str)
+    assert tool_msg.content.startswith("Image read successfully")
+    assert f"Original file: {path}." in tool_msg.content
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_large_tool_payloads_are_not_emitted(
+    harness_workspace,
+) -> None:
+    """Live deltas stay small while the persisted part retains full detail."""
+    accessor = FakeAccessor()
+    service, _, events = _service(accessor=accessor)
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+
+    secret = "WRITE-CONTENT-SHOULD-STAY-SERVER-SIDE"
+    arguments = json.dumps({"path": "/workspace/large.py", "content": secret * 4000})
+    attachment_data = "A" * 160_000
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "large-call",
+            "tool": "write",
+            "title": "Write /workspace/large.py",
+            "arguments": arguments,
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "large-call",
+            "tool": "write",
+            "title": "Write /workspace/large.py",
+            "arguments": arguments,
+        },
+    )
+    output = "TOOL-OUTPUT-SECRET-" * 12_000
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "large-call",
+            "tool": "write",
+            "output": output,
+            "attachments": [
+                {
+                    "type": "file",
+                    "mime": "image/png",
+                    "url": f"data:image/png;base64,{attachment_data}",
+                    "filename": "large.png",
+                }
+            ],
+        },
+    )
+
+    stored = HarnessPartRepository.list_for_message(assistant.id)
+    tool_part = next(part for part in stored if part.type == "tool")
+    assert tool_part.input["arguments"] == arguments
+    assert tool_part.output == output
+    assert tool_part.meta["attachments"][0]["path"] in accessor.written
+    assert attachment_data not in json.dumps(tool_part.meta)
+
+    socket_json = json.dumps(events)
+    assert len(socket_json) < 20_000
+    for private in (secret, attachment_data, output):
+        assert private not in socket_json
+    tool_deltas = [
+        item["delta"]
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and any(
+            key in item.get("delta", {})
+            for key in ("tool_started", "tool_completed")
+        )
+    ]
+    assert [delta["state"] for delta in tool_deltas] == [
+        "pending",
+        "running",
+        "completed",
+    ]
+    assert all("arguments" not in delta for delta in tool_deltas)
+    assert all(
+        "output" not in delta and "attachments" not in delta for delta in tool_deltas
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_error_socket_payload_is_bounded_and_sanitized(
+    harness_workspace,
+) -> None:
+    """An error does not forward potentially untrusted tool output verbatim."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    error = "ERROR-SECRET-" + "x" * 20_000
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "failed-call",
+            "tool": "bash",
+            "title": "Run command",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_error",
+            "step": 1,
+            "call_id": "failed-call",
+            "tool": "bash",
+            "error": error,
+        },
+    )
+    failure = next(
+        item["delta"]
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "tool_error" in item.get("delta", {})
+    )
+    assert failure["tool_error"] == "Tool failed"
+    assert failure["state"] == "error"
+    assert len(json.dumps(failure)) < 1000
+    assert error not in json.dumps(events)
+    part = HarnessPartRepository.list_for_message(assistant.id)[0]
+    assert part.output == error
+    assert part.state == "error"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -974,7 +1850,7 @@ async def test_compaction_event_persists_output(harness_workspace) -> None:
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "compaction"
     ]
     assert len(parts) == 1
@@ -1008,7 +1884,7 @@ async def test_patch_event_persists_unified_diff(harness_workspace) -> None:
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "patch"
     ]
     assert len(parts) == 1
@@ -1016,7 +1892,42 @@ async def test_patch_event_persists_unified_diff(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None:
+async def test_patch_event_emits_bounded_display(harness_workspace) -> None:
+    """Patch deltas carry the timeline preview so clients need no refetch."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "patch",
+            "call_id": "c1",
+            "title": "Patch a.txt",
+            "path": "/workspace/a.txt",
+            "unified_diff": diff,
+            "tool": "edit",
+            "step": 1,
+        },
+    )
+    [event] = [
+        item
+        for item in events
+        if item["event"] == "harness.part_updated" and "patch" in item["delta"]
+    ]
+    display = event["delta"]["display"]
+    assert event["delta"]["patch"] == "/workspace/a.txt"
+    assert display["path"] == "/workspace/a.txt"
+    assert (display["additions"], display["deletions"]) == (1, 1)
+    assert [line["type"] for line in display["preview"]] == ["context", "del", "add"]
+    assert "output" not in event["delta"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_session_access_rejects_user_prompts_to_child(harness_workspace) -> None:
     """Users cannot prompt subagent child sessions; root sessions stay open."""
     service, _, _ = _service()
     parent = service.create_session(
@@ -1030,9 +1941,9 @@ def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None
         prompt="child",
         parent_id=parent.id,
     )
-    service.ensure_user_promptable(parent)
+    SessionAccessService.require_user_promptable(parent.parent_id)
     with pytest.raises(ValueError, match="subagent"):
-        service.ensure_user_promptable(child)
+        SessionAccessService.require_user_promptable(child.parent_id)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1063,7 +1974,7 @@ async def test_start_run_on_child_session_still_works(harness_workspace) -> None
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(child.id)]
+    await service.run_registry.get_task(str(child.id))
     assistant.refresh_from_db()
     assert assistant.content == "hello"
 
@@ -1142,8 +2053,53 @@ def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
         reasoning_effort="high",
     )
     assert session.reasoning_effort == "high"
-    updated = service.set_reasoning_effort(session.id, "low")
+    updated = service.session_settings.set_reasoning_effort(session.id, "low")
     assert updated.reasoning_effort == "low"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("agent", "requested_effort", "expected_effort"),
+    [("build", "", "high"), ("plan", "", "low"), ("build", "low", "low")],
+)
+def test_create_session_uses_agent_effort_unless_explicit(
+    harness_workspace, agent, requested_effort, expected_effort
+) -> None:
+    """Agent-specific defaults apply without a ProviderConfig row."""
+    from apps.harness.services import AgentConfigService
+
+    org_id = harness_workspace.runner.organization_id
+    AgentConfigService().save_configs(
+        org_id,
+        [
+            {"agent": "build", "model": "build-model", "effort": "high"},
+            {"agent": "plan", "model": "plan-model", "effort": "low"},
+        ],
+    )
+    service, _, _ = _service()
+    session = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=org_id,
+        prompt="think hard",
+        mode=agent,
+        reasoning_effort=requested_effort,
+    )
+    assert session.reasoning_effort == expected_effort
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_session_without_config_and_effort_stays_empty(
+    harness_workspace,
+) -> None:
+    """Missing agent configuration leaves the session effort on Auto."""
+    service, _, _ = _service()
+    session = service.create_session(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="plain task",
+        mode="build",
+    )
+    assert session.reasoning_effort == ""
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1171,21 +2127,26 @@ async def test_start_run_snapshots_reasoning_effort_on_assistant(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_start_run_snapshots_org_default_when_session_model_empty(
-    harness_workspace, monkeypatch
+@pytest.mark.parametrize(
+    ("session_effort", "expected_effort"), [("medium", "medium"), ("", "high")]
+)
+async def test_start_run_snapshots_agent_defaults_without_persisting_overrides(
+    harness_workspace,
+    provider_account_factory,
+    monkeypatch,
+    session_effort,
+    expected_effort,
 ) -> None:
-    """Auto (empty session.model) snapshots org default onto the assistant."""
+    """Auto snapshots the agent defaults while preserving explicit effort."""
     from apps.harness.providers.models_catalog import ProviderModel
     from apps.harness.providers.openrouter import OpenRouterAdapter
-    from apps.harness.services import ProviderConfigService
+    from apps.harness.services import AgentConfigService, ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
-        default_model="org-default-model",
-        small_model="",
+    account = provider_account_factory("openrouter")
+    AgentConfigService().save_configs(
+        org_id,
+        [{"agent": "build", "model": "agent-default-model", "effort": "high"}],
     )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
@@ -1194,7 +2155,7 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
         agent_name="build",
         mode="build",
         model="",
-        reasoning_effort="medium",
+        reasoning_effort=session_effort,
     )
 
     async def _scripted_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
@@ -1202,11 +2163,13 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
 
     monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, *, user_id, account_ids=None):  # type: ignore[no-untyped-def]
+        assert user_id == harness_workspace.created_by_id
+        assert account_ids == {"openrouter": str(account.id)}
         return [
             ProviderModel(
-                id="org-default-model",
-                name="Org Default",
+                id="agent-default-model",
+                name="Agent Default",
                 reasoning_efforts=("medium",),
                 default_effort="medium",
                 supports_tools=True,
@@ -1233,9 +2196,10 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
         "say hello",
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
+        user_id=harness_workspace.created_by_id,
     )
-    assert assistant.model == "org-default-model"
-    assert assistant.reasoning_effort == "medium"
+    assert assistant.model == "agent-default-model"
+    assert assistant.reasoning_effort == expected_effort
     refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert refreshed is not None
     assert refreshed.model == ""
@@ -1244,9 +2208,9 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
         for item in collected
         if item.get("event") == FRONTEND_EVENT_STATUS and item.get("status") == "busy"
     )
-    assert busy["model"] == "org-default-model"
-    assert busy["reasoning_effort"] == "medium"
-    await service._tasks[str(session.id)]
+    assert busy["model"] == "agent-default-model"
+    assert busy["reasoning_effort"] == expected_effort
+    await service.run_registry.get_task(str(session.id))
     refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert refreshed is not None
     assert refreshed.model == ""
@@ -1258,14 +2222,14 @@ async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
     service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     assert session.agent_name == "build"
-    updated = await sync_to_async(service.set_mode)(session.id, "plan")
+    updated = await sync_to_async(service.session_settings.set_mode)(session.id, "plan")
     assert updated.mode == "plan"
     assert updated.agent_name == "plan"
 
 
 @pytest.mark.django_db(transaction=True)
 async def test_missing_provider_config_raises(harness_workspace) -> None:
-    """start_run without provider config raises NotFoundError before task."""
+    """start_run without model/provider config raises NotFoundError before task."""
     collected: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
@@ -1297,7 +2261,7 @@ async def _wait_for_part(
     """Poll until a part of *part_type* exists for *session_id*."""
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
-        parts = await sync_to_async(HarnessPartRepository.list_for_session)(
+        parts = await sync_to_async(parts_for_session)(
             session_id
         )
         match = [part for part in parts if part.type == part_type]
@@ -1319,6 +2283,19 @@ async def _db_create_session(harness_workspace):  # type: ignore[no-untyped-def]
         agent_name="build",
         mode="build",
         model="fake-model",
+    )
+
+
+async def _db_create_child_session(harness_workspace, parent: HarnessSession):
+    """Create a subagent child session from async test context."""
+    return await sync_to_async(HarnessSessionRepository.create)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="child",
+        agent_name="general",
+        mode="build",
+        model="fake-model",
+        parent_id=parent.id,
     )
 
 
@@ -1362,10 +2339,10 @@ async def test_start_run_uses_accessor_factory_for_list_tool(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     assert wired == [str(harness_workspace.id)]
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert len(tool_parts) == 1
     assert tool_parts[0].state == "completed"
@@ -1391,8 +2368,8 @@ async def test_start_run_without_accessor_factory_errors_list_tool(
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
-    parts = HarnessPartRepository.list_for_session(session.id)
+    await service.run_registry.get_task(str(session.id))
+    parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert tool_parts and tool_parts[0].state == "error"
     assert "No workspace accessor configured" in (tool_parts[0].output or "")
@@ -1408,13 +2385,7 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant"
     )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
 
     async def start(call_id: str, title: str) -> None:
         await service._on_runner_event(
@@ -1455,7 +2426,7 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "tool"
     ]
     by_call = {part.call_id: part for part in parts}
@@ -1486,22 +2457,23 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_always_allow_resolves_sibling_pending_asks(
-    harness_workspace,
+async def test_always_allow_resolves_only_matching_sibling_asks(
+    harness_workspace, monkeypatch
 ) -> None:
-    """Always-allow auto-approves remaining pending asks for the same tool."""
+    """Always resolves identical asks but leaves other actions pending."""
     emitted: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
         emitted.append({"event": event, **data})
 
     service = HarnessService(emit=_emit)
-    session = await _db_create_session(harness_workspace)
+    parent = await _db_create_session(harness_workspace)
+    session = await _db_create_child_session(harness_workspace, parent)
     assistant = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="assistant"
     )
     first = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -1511,13 +2483,23 @@ async def test_always_allow_resolves_sibling_pending_asks(
         )
     )
     second = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
+            session,
+            assistant,
+            tool="bash",
+            action="git status",
+            title="$ git status",
+            call_id="c2",
+        )
+    )
+    third = asyncio.create_task(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
             action="git diff",
             title="$ git diff",
-            call_id="c2",
+            call_id="c3",
         )
     )
     request_ids: list[str] = []
@@ -1527,24 +2509,57 @@ async def test_always_allow_resolves_sibling_pending_asks(
             for item in emitted
             if item.get("event") == FRONTEND_EVENT_PERMISSION
         ]
-        if len(request_ids) >= 2:
+        if len(request_ids) >= 3:
             break
         await asyncio.sleep(0.02)
-    assert len(request_ids) >= 2
-    await service.resolve_permission(
-        session=session,
-        request_id=uuid.UUID(request_ids[0]),
-        response="always",
-    )
+    assert len(request_ids) >= 3
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        await service.interactions.resolve_permission(
+            session=session,
+            request_id=uuid.UUID(request_ids[0]),
+            response="always",
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("resolve_permission called Django ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
     decisions = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
     assert set(decisions) == {"once"}
+    rows = await sync_to_async(list)(
+        PermissionRequest.objects.filter(id__in=request_ids).values(
+            "id", "pattern", "status"
+        )
+    )
+    matching_rows = [row for row in rows if row["pattern"] == "git status"]
+    nonmatching_rows = [row for row in rows if row["pattern"] == "git diff"]
+    assert len(matching_rows) == 2
+    assert len(nonmatching_rows) == 1
+    assert all(row["status"] == "approved" for row in matching_rows)
+    assert nonmatching_rows[0]["status"] == "pending"
+    matching_ids = [str(row["id"]) for row in matching_rows]
+    nonmatching_id = str(nonmatching_rows[0]["id"])
+    assert not third.done()
+    third.cancel()
+    await asyncio.gather(third, return_exceptions=True)
     resolved_events = [
         item
         for item in emitted
         if item.get("event") == FRONTEND_EVENT_PERMISSION and item.get("decision")
     ]
     assert len(resolved_events) == 2
-    assert {item["request_id"] for item in resolved_events} == set(request_ids[:2])
+    assert {item["request_id"] for item in resolved_events} == set(matching_ids)
+    nonmatching_record = await sync_to_async(PermissionRequest.objects.get)(
+        id=nonmatching_id
+    )
+    await sync_to_async(PermissionRequestRepository.mark_resolved)(
+        nonmatching_record,
+        approved=False,
+        remember="once",
+    )
+    assert all(
+        item.get("root_session_id") == str(parent.id) for item in resolved_events
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1569,7 +2584,7 @@ async def test_abort_run_cancels_child_session_task(
         await hang.wait()
 
     child_task = asyncio.create_task(never())
-    service._tasks[str(child.id)] = child_task
+    service.run_registry.start_execution(str(child.id), child_task)
     await service.abort_run(parent.id)
     assert child_task.done()
 
@@ -1607,9 +2622,9 @@ async def test_abort_busy_computeruse_leaves_parent_running(
     parent_task = asyncio.create_task(never())
     cu_task = asyncio.create_task(never())
     explore_task = asyncio.create_task(never())
-    service._tasks[str(parent.id)] = parent_task
-    service._tasks[str(computeruse.id)] = cu_task
-    service._tasks[str(explore.id)] = explore_task
+    service.run_registry.start_execution(str(parent.id), parent_task)
+    service.run_registry.start_execution(str(computeruse.id), cu_task)
+    service.run_registry.start_execution(str(explore.id), explore_task)
     await sync_to_async(HarnessSessionRepository.mark_status)(parent, "busy")
     await sync_to_async(HarnessSessionRepository.mark_status)(computeruse, "busy")
     await sync_to_async(HarnessSessionRepository.mark_status)(explore, "busy")
@@ -1627,3 +2642,701 @@ async def test_abort_busy_computeruse_leaves_parent_running(
         await parent_task
     with pytest.raises(asyncio.CancelledError):
         await explore_task
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_step_start_carries_part_id_and_finish_completes_it(
+    harness_workspace,
+) -> None:
+    """step_start emits part_id; step_finish completes that DB part."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 1}
+    )
+    started = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "step_start" in (item.get("delta") or {})
+    ]
+    assert len(started) == 1
+    assert started[0].get("part_id")
+    part = await sync_to_async(parts_for_session)(session.id)
+    step_starts = [p for p in part if p.type == "step-start"]
+    assert len(step_starts) == 1
+    assert step_starts[0].state == "running"
+    assert str(step_starts[0].id) == started[0]["part_id"]
+
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
+    )
+    step_starts[0].refresh_from_db()
+    assert step_starts[0].state == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_reasoning_part_is_per_step_and_meta_carries_step(
+    harness_workspace,
+) -> None:
+    """Reasoning closes DB-side on step_finish; next step gets a fresh part."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 1}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"reasoning": "first"}, "step": 1},
+    )
+    first_id = service.run_registry.get_context(str(session.id)).get(
+        "reasoning_part_id"
+    )
+    assert first_id
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
+    )
+    assert (
+        service.run_registry.get_context(str(session.id)).get("reasoning_part_id")
+        is None
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 2}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"reasoning": "second"}, "step": 2},
+    )
+    second_id = service.run_registry.get_context(str(session.id)).get(
+        "reasoning_part_id"
+    )
+    assert second_id and second_id != first_id
+    parts = parts_for_session(session.id)
+    by_id = {str(part.id): part for part in parts if part.type == "reasoning"}
+    assert by_id[first_id].state == "completed"
+    assert by_id[first_id].output == "first"
+    assert by_id[first_id].meta.get("step") == 1
+    assert by_id[second_id].state == "running"
+    assert by_id[second_id].output == "second"
+    assert by_id[second_id].meta.get("step") == 2
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_text_part_is_per_step_so_final_answer_stays_after_tools(
+    harness_workspace,
+) -> None:
+    """Text closes DB-side on step_finish; next step gets a fresh part."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 1}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"text": "I'll look"}, "step": 1},
+    )
+    first_id = service.run_registry.get_context(str(session.id)).get("text_part_id")
+    assert first_id
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "step_finish", "step": 1, "tokens": {}, "cost": 0.0},
+    )
+    assert service.run_registry.get_context(str(session.id)).get("text_part_id") is None
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "c1",
+            "tool": "read",
+            "title": "Read AGENTS.md",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "step_start", "step": 2}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {"type": "part_updated", "delta": {"text": "Done"}, "step": 2},
+    )
+    second_id = service.run_registry.get_context(str(session.id)).get("text_part_id")
+    assert second_id and second_id != first_id
+    parts = parts_for_session(session.id)
+    by_id = {str(part.id): part for part in parts if part.type == "text"}
+    assert by_id[first_id].state == "completed"
+    assert by_id[first_id].output == "I'll look"
+    assert by_id[first_id].meta.get("step") == 1
+    assert by_id[second_id].state == "running"
+    assert by_id[second_id].output == "Done"
+    assert by_id[second_id].meta.get("step") == 2
+    ordered = [part.type for part in parts if part.type in {"text", "tool"}]
+    assert ordered == ["text", "tool", "text"]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
+    """Normal LLM reasoning without a step keeps working (step None)."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"reasoning": "x"}}
+    )
+    parts = parts_for_session(session.id)
+    reasoning = [p for p in parts if p.type == "reasoning"]
+    assert len(reasoning) == 1
+    assert reasoning[0].output == "x"
+    forwarded = [
+        item
+        for item in events
+        if item.get("event") == FRONTEND_EVENT_PART
+        and "reasoning" in (item.get("delta") or {})
+    ]
+    assert len(forwarded) == 1
+    assert forwarded[0].get("step") is None
+
+
+# ---------------------------------------------------------------------------
+# Reliable chat timeline regression tests (positions, live ids, boundaries)
+# ---------------------------------------------------------------------------
+
+
+
+@pytest.mark.django_db(transaction=True)
+def test_message_positions_sequential_with_tied_timestamps(harness_workspace) -> None:
+    """Messages allocate 0..n positions in creation order (ties stable)."""
+    from django.utils import timezone
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="tied",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    first = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="one"
+    )
+    second = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="two"
+    )
+    third = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="three"
+    )
+    stamp = timezone.now()
+    from apps.harness.models import HarnessMessage as _Msg
+
+    _Msg.objects.filter(id__in=[first.id, second.id, third.id]).update(
+        created_at=stamp
+    )
+    ordered = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.id for m in ordered] == [first.id, second.id, third.id]
+    assert [m.position for m in ordered] == [0, 1, 2]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_part_positions_sequential_with_tied_timestamps(harness_workspace) -> None:
+    """Parts allocate 0..n positions per message in creation order."""
+    from django.utils import timezone
+
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="tied-parts",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content=""
+    )
+    p1 = HarnessPartRepository.create(
+        message_id=assistant.id, type="text", state="completed", output="a"
+    )
+    p2 = HarnessPartRepository.create(
+        message_id=assistant.id, type="tool", state="completed", call_id="c1"
+    )
+    p3 = HarnessPartRepository.create(
+        message_id=assistant.id, type="text", state="completed", output="b"
+    )
+    stamp = timezone.now()
+    from apps.harness.models import HarnessPart as _Part
+
+    _Part.objects.filter(id__in=[p1.id, p2.id, p3.id]).update(created_at=stamp)
+    ordered = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.id for p in ordered] == [p1.id, p2.id, p3.id]
+    assert [p.position for p in ordered] == [0, 1, 2]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_text_tool_text_observed_order_and_live_ids(harness_workspace) -> None:
+    """text/tool/text persists in observed order; live events carry ids."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+
+    await service._on_runner_event(
+        session, assistant,
+        {"type": "part_updated", "delta": {"text": "before "}, "step": 1}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "call-1",
+            "tool": "read",
+            "title": "Read a.txt",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "call-1",
+            "tool": "read",
+            "title": "Read a.txt",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "call-1",
+            "tool": "read",
+            "output": "contents",
+        },
+    )
+    await service._on_runner_event(
+        session, assistant,
+        {"type": "part_updated", "delta": {"text": "after"}, "step": 1}
+    )
+
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.type for p in parts] == ["text", "tool", "text"]
+    assert [p.position for p in parts] == [0, 1, 2]
+    assert parts[0].output == "before "
+    assert parts[1].state == "completed"
+    assert parts[1].output == "contents"
+    assert parts[2].output == "after"
+
+    part_events = [e for e in events if e.get("event") == FRONTEND_EVENT_PART]
+    assert part_events
+    for payload in part_events:
+        assert payload.get("message_id") == str(assistant.id)
+    text_events = [e for e in part_events if "text" in (e.get("delta") or {})]
+    assert len(text_events) == 2
+    assert text_events[0]["part_id"] == str(parts[0].id)
+    assert text_events[1]["part_id"] == str(parts[2].id)
+    assert text_events[0]["part_id"] != text_events[1]["part_id"]
+    queued = [
+        e for e in part_events if (e.get("delta") or {}).get("tool_started") == "read"
+    ]
+    assert len(queued) == 2  # tool_queued + tool_started, same part_id
+    assert queued[0]["part_id"] == str(parts[1].id)
+    assert queued[1]["part_id"] == str(parts[1].id)
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_queued_then_started_same_part_id_pending_then_running(
+    harness_workspace,
+) -> None:
+    """tool_queued creates pending part; tool_started flips same row running."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 2,
+            "call_id": "q-1",
+            "tool": "bash",
+            "title": "$ ls",
+            "arguments": "{}",
+        },
+    )
+    queued_row = HarnessPartRepository.list_for_message(assistant.id)[0]
+    assert queued_row.state == "pending"
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 2,
+            "call_id": "q-1",
+            "tool": "bash",
+            "title": "$ ls",
+            "arguments": "{}",
+        },
+    )
+    rows = HarnessPartRepository.list_for_message(assistant.id)
+    assert len(rows) == 1
+    assert rows[0].id == queued_row.id
+    assert rows[0].state == "running"
+    started = [
+        e
+        for e in events
+        if e.get("event") == FRONTEND_EVENT_PART
+        and (e.get("delta") or {}).get("tool_started") == "bash"
+    ]
+    assert [e["part_id"] for e in started] == [str(queued_row.id)] * 2
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_tool_result_updates_same_part_no_new_row(harness_workspace) -> None:
+    """tool completion/error updates the queued row; no extra part is added."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "r-1",
+            "tool": "read",
+            "title": "Read",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_started",
+            "step": 1,
+            "call_id": "r-1",
+            "tool": "read",
+            "title": "Read",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_completed",
+            "step": 1,
+            "call_id": "r-1",
+            "tool": "read",
+            "output": "done",
+        },
+    )
+    rows = HarnessPartRepository.list_for_message(assistant.id)
+    assert len(rows) == 1
+    assert rows[0].state == "completed"
+    assert rows[0].output == "done"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_text_reasoning_kind_transition_closes_other_stream(
+    harness_workspace,
+) -> None:
+    """A text->reasoning (and back) transition closes the other open stream."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "t1"}}
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"reasoning": "r1"}}
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "t2"}}
+    )
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.type for p in parts] == ["text", "reasoning", "text"]
+    assert [p.output for p in parts] == ["t1", "r1", "t2"]
+    assert [p.position for p in parts] == [0, 1, 2]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_non_text_part_closes_running_text(harness_workspace) -> None:
+    """tool_queued closes an open text stream so nothing merges across it."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "hello"}}
+    )
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "tool_queued",
+            "step": 1,
+            "call_id": "c-close",
+            "tool": "bash",
+            "title": "$ ls",
+            "arguments": "{}",
+        },
+    )
+    await service._on_runner_event(
+        session, assistant, {"type": "part_updated", "delta": {"text": "after"}}
+    )
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert [p.type for p in parts] == ["text", "tool", "text"]
+    assert parts[0].state == "completed"
+    assert parts[0].output == "hello"
+    assert parts[2].output == "after"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_status_busy_and_idle_carry_current_assistant_message_id(
+    harness_workspace,
+) -> None:
+    """Follow-up turns emit busy/idle with the fresh assistant message id."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    org_id = harness_workspace.runner.organization_id
+    first = await service.start_run(
+        session,
+        "first",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service.run_registry.get_task(str(session.id))
+    busy_first = [
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
+    ]
+    idle_first = [
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
+    ]
+    assert busy_first and busy_first[-1]["message_id"] == str(first.id)
+    assert idle_first and idle_first[-1]["message_id"] == str(first.id)
+    events.clear()
+    session.refresh_from_db()
+    second = await service.start_run(
+        session,
+        "second",
+        organization_id=org_id,
+        workspace_id=str(harness_workspace.id),
+    )
+    await service.run_registry.get_task(str(session.id))
+    assert str(second.id) != str(first.id)
+    busy_second = [
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
+    ]
+    idle_second = [
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
+    ]
+    assert busy_second and busy_second[-1]["message_id"] == str(second.id)
+    assert idle_second and idle_second[-1]["message_id"] == str(second.id)
+    stored = HarnessMessageRepository.list_for_session(session.id)
+    assert [m.position for m in stored] == [0, 1, 2, 3]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_execute_run_tail_remainder_creates_text_part_without_duplicates(
+    harness_workspace,
+) -> None:
+    """A non-streamed tail is appended once to content and to a text part."""
+    service, _, _events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="streamed "
+    )
+    await sync_to_async(HarnessPartRepository.create)(
+        message_id=assistant.id, type="text", state="running", output="streamed "
+    )
+    attach_run_context(service, session, assistant)
+    await service.timeline.append_tail_text(session, assistant, "tail words")
+    await sync_to_async(HarnessMessageRepository.append_content)(
+        assistant, "tail words"
+    )
+    assistant.refresh_from_db()
+    assert assistant.content == "streamed tail words"
+    parts = HarnessPartRepository.list_for_message(assistant.id)
+    assert "".join(p.output for p in parts if p.type == "text") == "streamed tail words"
+    assert tail_remainder("abc", "abc") == ""
+    assert tail_remainder("abc", "abcdef") == "def"
+    assert tail_remainder("abcdef", "abc") == ""
+    assert tail_remainder("", "hello") == "hello"
+    assert tail_remainder("already streamed", "different final") == ""
+
+
+@pytest.mark.django_db(transaction=True)
+def test_copy_prefix_preserves_positions_in_order(harness_workspace) -> None:
+    """Fork copies keep chronological order with fresh sequential positions."""
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="src",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    first_user = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="one"
+    )
+    first_asst = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="two"
+    )
+    HarnessPartRepository.create(
+        message_id=first_asst.id, type="text", state="completed", output="two"
+    )
+    second_user = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="three"
+    )
+    forked = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="dst",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+    )
+    id_map = HarnessMessageRepository.copy_prefix(session.id, forked.id, first_asst.id)
+    assert set(id_map) == {first_user.id, first_asst.id}
+    copied = HarnessMessageRepository.list_for_session(forked.id)
+    assert [m.content for m in copied] == ["one", "two"]
+    assert [m.position for m in copied] == [0, 1]
+    copied_parts = HarnessPartRepository.list_for_message(copied[1].id)
+    assert [p.position for p in copied_parts] == [0]
+    full_map = HarnessMessageRepository.copy_prefix(session.id, forked.id, None)
+    assert set(full_map) == {first_user.id, first_asst.id, second_user.id}
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_build_history_keeps_text_between_tool_calls(harness_workspace) -> None:
+    """Follow-up replay must keep text/tool/text/tool/final-text in order."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="inspect files"
+    )
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="before between after"
+    )
+    for kind, output, call_id in [
+        ("text", "before ", ""),
+        ("tool", "first result", "first"),
+        ("text", "between ", ""),
+        ("tool", "second result", "second"),
+        ("text", "after", ""),
+    ]:
+        await sync_to_async(HarnessPartRepository.create)(
+            message_id=assistant.id,
+            type=kind,
+            state="completed",
+            output=output,
+            call_id=call_id,
+            input={"tool": "read", "arguments": "{}"} if call_id else {},
+        )
+    history = await service.history.build(session)
+    assert [(m.role, m.content, m.tool_call_id) for m in history] == [
+        ("user", "inspect files", None),
+        ("assistant", "before ", None),
+        ("tool", "first result", "first"),
+        ("assistant", "between ", None),
+        ("tool", "second result", "second"),
+        ("assistant", "after", None),
+    ]
+    assert [m.tool_calls[0]["id"] for m in history if m.tool_calls] == [
+        "first", "second"
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_parallel_same_tool_provisional_ids_rebind_by_queued_id(
+    harness_workspace,
+) -> None:
+    """Same-name parallel calls never exchange their queued part/arguments."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content=""
+    )
+    attach_run_context(service, session, assistant)
+    for queued_id, path in [("temp-1", "a.txt"), ("temp-2", "b.txt")]:
+        await service._on_runner_event(session, assistant, {
+            "type": "tool_queued", "step": 1, "call_id": queued_id,
+            "tool": "read", "title": "Read", "arguments": json.dumps({"path": path}),
+        })
+    initial = HarnessPartRepository.list_for_message(assistant.id)
+    assert [part.call_id for part in initial] == ["temp-1", "temp-2"]
+    # Dispatch in reverse order to stress the correlation (not newest-match).
+    for queued_id, real_id, path in [
+        ("temp-2", "real-b", "b.txt"), ("temp-1", "real-a", "a.txt")
+    ]:
+        await service._on_runner_event(session, assistant, {
+            "type": "tool_started", "step": 1, "call_id": real_id,
+            "queued_id": queued_id, "tool": "read", "title": "Read",
+            "arguments": json.dumps({"path": path}),
+        })
+        await service._on_runner_event(session, assistant, {
+            "type": "tool_completed", "step": 1, "call_id": real_id,
+            "queued_id": queued_id, "tool": "read", "output": path,
+        })
+    result = HarnessPartRepository.list_for_message(assistant.id)
+    assert [part.id for part in result] == [part.id for part in initial]
+    observed = [(part.call_id, part.input["arguments"], part.output) for part in result]
+    assert observed == [
+        ("real-a", '{"path": "a.txt"}', "a.txt"),
+        ("real-b", '{"path": "b.txt"}', "b.txt"),
+    ]
+    started = [e for e in events if (e.get("delta") or {}).get("tool_started")]
+    assert [e["delta"]["state"] for e in started] == [
+        "pending", "pending", "running", "running"
+    ]
+    assert [e["part_id"] for e in started] == [
+        str(initial[0].id), str(initial[1].id), str(initial[1].id), str(initial[0].id)
+    ]

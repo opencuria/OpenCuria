@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["OpenCuriaPdfModule"],
+    "podspecPath": "OpenCuriaPdf.podspec"
+  },
+  "android": {
+    "modules": ["expo.modules.opencuriapdf.OpenCuriaPdfModule"]
+  }
+}

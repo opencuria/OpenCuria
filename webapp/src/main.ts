@@ -14,11 +14,12 @@ const app = createApp(App)
 const pinia = createPinia()
 
 app.use(pinia)
-app.use(router)
 
 // Load runtime config first (fetches /config.json in production),
 // then initialize auth and mount the app.
 loadConfig().then(() => {
+  // Installing the router starts auth guards, which need the configured API URL.
+  app.use(router)
   const authStore = useAuthStore(pinia)
   authStore.initialize().then(() => {
     app.mount('#app')

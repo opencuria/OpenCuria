@@ -1,0 +1,359 @@
+"""
+Repository layer for the plugins app.
+
+Encapsulates all database queries. Services never use the ORM directly.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from django.db.models import Q, QuerySet
+
+from .models import (
+    OrgPluginActivation,
+    Plugin,
+    PluginCredentialRequirement,
+    PluginMcpServer,
+    PluginSkill,
+    WorkspacePluginActivation,
+)
+
+# ---------------------------------------------------------------------------
+# Plugin Repository
+# ---------------------------------------------------------------------------
+
+
+class PluginRepository:
+    """Data access for Plugin records."""
+
+    @staticmethod
+    def list_visible_to_org(org_id: uuid.UUID) -> QuerySet[Plugin]:
+        """Return global + org-owned plugins visible in the org."""
+        return (
+            Plugin.objects.filter(
+                Q(organization__isnull=True) | Q(organization_id=org_id)
+            )
+            .select_related("organization", "created_by")
+            .order_by("name")
+        )
+
+    @staticmethod
+    def get_visible_by_id(plugin_id: uuid.UUID, org_id: uuid.UUID) -> Plugin | None:
+        """Fetch a plugin visible in the org (global or org-owned)."""
+        return (
+            Plugin.objects.filter(id=plugin_id)
+            .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
+            .select_related("organization", "created_by")
+            .first()
+        )
+
+    @staticmethod
+    def get_by_id(plugin_id: uuid.UUID) -> Plugin | None:
+        """Fetch a plugin by ID."""
+        return (
+            Plugin.objects.filter(id=plugin_id)
+            .select_related("organization", "created_by")
+            .first()
+        )
+
+    @staticmethod
+    def get_global_by_slug(slug: str) -> Plugin | None:
+        """Fetch a global plugin by slug."""
+        return Plugin.objects.filter(slug=slug, organization__isnull=True).first()
+
+    @staticmethod
+    def get_org_by_slug(slug: str, org_id: uuid.UUID) -> Plugin | None:
+        """Fetch an org-owned plugin of this org by slug."""
+        return Plugin.objects.filter(slug=slug, organization_id=org_id).first()
+
+    @staticmethod
+    def list_org_owned(org_id: uuid.UUID) -> QuerySet[Plugin]:
+        """Return org-owned plugins of the given org."""
+        return Plugin.objects.filter(organization_id=org_id)
+
+    @staticmethod
+    def create(
+        *,
+        name: str,
+        slug: str,
+        description: str,
+        organization_id: uuid.UUID | None,
+        created_by,
+        enabled: bool = True,
+        published: bool = True,
+    ) -> Plugin:
+        """Create a plugin record."""
+        return Plugin.objects.create(
+            name=name,
+            slug=slug,
+            description=description,
+            organization_id=organization_id,
+            created_by=created_by,
+            enabled=enabled,
+            published=published,
+        )
+
+    @staticmethod
+    def update(plugin: Plugin, **fields) -> Plugin:
+        """Update mutable plugin metadata fields."""
+        allowed = {"name", "slug", "description", "enabled", "published"}
+        update_fields = ["updated_at"]
+        for key, value in fields.items():
+            if key in allowed and value is not None:
+                setattr(plugin, key, value)
+                update_fields.append(key)
+        plugin.save(update_fields=update_fields)
+        return plugin
+
+    @staticmethod
+    def delete(plugin_id: uuid.UUID) -> int:
+        """Delete a plugin by ID. Returns number of rows deleted."""
+        count, _ = Plugin.objects.filter(id=plugin_id).delete()
+        return count
+
+
+# ---------------------------------------------------------------------------
+# Component repositories
+# ---------------------------------------------------------------------------
+
+
+class PluginSkillRepository:
+    """Data access for PluginSkill records."""
+
+    @staticmethod
+    def list_for_plugin(plugin_id: uuid.UUID) -> QuerySet[PluginSkill]:
+        return PluginSkill.objects.filter(plugin_id=plugin_id).order_by(
+            "position", "name"
+        )
+
+    @staticmethod
+    def list_for_plugins(plugin_ids: list[uuid.UUID]) -> QuerySet[PluginSkill]:
+        return PluginSkill.objects.filter(plugin_id__in=plugin_ids).order_by(
+            "plugin_id", "position", "name"
+        )
+
+    @staticmethod
+    def replace_for_plugin(plugin, skills: list[dict]) -> list[PluginSkill]:
+        """Atomically replace the skill list of a plugin."""
+        PluginSkill.objects.filter(plugin=plugin).delete()
+        instances = [
+            PluginSkill(
+                plugin=plugin,
+                name=item["name"],
+                slug=item["slug"],
+                body=item["body"],
+                position=item.get("position", index),
+            )
+            for index, item in enumerate(skills)
+        ]
+        if instances:
+            PluginSkill.objects.bulk_create(instances)
+        return list(PluginSkillRepository.list_for_plugin(plugin.id))
+
+
+class PluginMcpServerRepository:
+    """Data access for PluginMcpServer records."""
+
+    @staticmethod
+    def list_for_plugin(plugin_id: uuid.UUID) -> QuerySet[PluginMcpServer]:
+        return PluginMcpServer.objects.filter(plugin_id=plugin_id).order_by("name")
+
+    @staticmethod
+    def list_oauth_for_plugins(
+        plugin_ids: list[uuid.UUID],
+    ) -> QuerySet[PluginMcpServer]:
+        """Load only OAuth binding fields needed for workspace readiness."""
+        return (
+            PluginMcpServer.objects.filter(plugin_id__in=plugin_ids, auth_type="oauth")
+            .only("plugin_id", "oauth_requirement_key", "url")
+            .order_by("plugin_id", "name")
+        )
+
+    @staticmethod
+    def list_for_plugins(
+        plugin_ids: list[uuid.UUID],
+    ) -> QuerySet[PluginMcpServer]:
+        return PluginMcpServer.objects.filter(plugin_id__in=plugin_ids).order_by(
+            "plugin_id", "name"
+        )
+
+    @staticmethod
+    def replace_for_plugin(plugin, servers: list[dict]) -> list[PluginMcpServer]:
+        """Replace MCP servers while retaining IDs for unchanged slugs."""
+        existing = {
+            server.slug: server
+            for server in PluginMcpServer.objects.filter(plugin_id=plugin.id)
+        }
+        retained_slugs = {item["slug"] for item in servers}
+        stale_ids = [
+            server.id for slug, server in existing.items() if slug not in retained_slugs
+        ]
+        if stale_ids:
+            PluginMcpServer.objects.filter(id__in=stale_ids).delete()
+
+        mutable_fields = {
+            "tool_policy",
+            "runtime_artifact",
+            "name",
+            "transport",
+            "command",
+            "args",
+            "cwd",
+            "env",
+            "resources",
+            "url",
+            "headers",
+            "auth_type",
+            "oauth_requirement_key",
+            "startup_timeout_seconds",
+            "request_timeout_seconds",
+        }
+        for item in servers:
+            values = {
+                key: value for key, value in item.items() if key in mutable_fields
+            }
+            server = existing.get(item["slug"])
+            if server is None:
+                PluginMcpServer.objects.create(plugin=plugin, **item)
+                continue
+
+            changed_fields = []
+            for field, value in values.items():
+                if getattr(server, field) != value:
+                    setattr(server, field, value)
+                    changed_fields.append(field)
+            if changed_fields:
+                server.save(update_fields=[*changed_fields, "updated_at"])
+
+        return list(PluginMcpServerRepository.list_for_plugin(plugin.id))
+
+
+class PluginCredentialRequirementRepository:
+    """Data access for PluginCredentialRequirement records."""
+
+    @staticmethod
+    def list_for_plugin(
+        plugin_id: uuid.UUID,
+    ) -> QuerySet[PluginCredentialRequirement]:
+        return PluginCredentialRequirement.objects.filter(
+            plugin_id=plugin_id
+        ).select_related("credential_service")
+
+    @staticmethod
+    def list_for_plugins(
+        plugin_ids: list[uuid.UUID],
+    ) -> QuerySet[PluginCredentialRequirement]:
+        return PluginCredentialRequirement.objects.filter(
+            plugin_id__in=plugin_ids
+        ).select_related("credential_service")
+
+    @staticmethod
+    def delete_for_plugin(plugin_id: uuid.UUID) -> int:
+        count, _ = PluginCredentialRequirement.objects.filter(
+            plugin_id=plugin_id
+        ).delete()
+        return count
+
+    @staticmethod
+    def bulk_create_for_plugin(plugin, prepared: list[dict]) -> None:
+        """Persist prepared requirements for a plugin."""
+        instances = [
+            PluginCredentialRequirement(
+                plugin=plugin,
+                key=item["key"],
+                credential_service=item["service"],
+                required=item["required"],
+                description=item["description"],
+            )
+            for item in prepared
+        ]
+        if instances:
+            PluginCredentialRequirement.objects.bulk_create(instances)
+
+
+# ---------------------------------------------------------------------------
+# Activation repositories
+# ---------------------------------------------------------------------------
+
+
+class OrgPluginActivationRepository:
+    """Data access for OrgPluginActivation records."""
+
+    @staticmethod
+    def enabled_plugin_ids(
+        org_id: uuid.UUID, *, plugin_ids: list[uuid.UUID] | None = None
+    ) -> set[uuid.UUID]:
+        """Return org activations, optionally restricted to requested plugins."""
+        queryset = OrgPluginActivation.objects.filter(organization_id=org_id)
+        if plugin_ids is not None:
+            queryset = queryset.filter(plugin_id__in=plugin_ids)
+        return set(queryset.values_list("plugin_id", flat=True))
+
+    @staticmethod
+    def set_enabled(*, org_id: uuid.UUID, plugin, enabled_by, active: bool) -> bool:
+        """Create or delete the org activation row. Returns new state."""
+        if active:
+            OrgPluginActivation.objects.get_or_create(
+                organization_id=org_id,
+                plugin=plugin,
+                defaults={"enabled_by": enabled_by},
+            )
+            return True
+        OrgPluginActivation.objects.filter(
+            organization_id=org_id, plugin_id=plugin.id
+        ).delete()
+        return False
+
+
+class WorkspacePluginActivationRepository:
+    """Data access for WorkspacePluginActivation records."""
+
+    @staticmethod
+    def list_plugin_ids(workspace_id: uuid.UUID) -> list[uuid.UUID]:
+        """Return persisted selections in activation order, newest first."""
+        return WorkspacePluginActivationRepository.list_plugin_ids_many(
+            [workspace_id]
+        )[workspace_id]
+
+    @staticmethod
+    def list_plugin_ids_many(
+        workspace_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        """Read selections for authorized workspaces in activation order."""
+        grouped: dict[uuid.UUID, list[uuid.UUID]] = {
+            workspace_id: [] for workspace_id in workspace_ids
+        }
+        if not grouped:
+            return grouped
+        rows = (
+            WorkspacePluginActivation.objects.filter(
+                workspace_id__in=grouped
+            ).values_list("workspace_id", "plugin_id")
+        )
+        for workspace_id, plugin_id in rows:
+            grouped[workspace_id].append(plugin_id)
+        return grouped
+
+    @staticmethod
+    def enabled_plugin_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:
+        return set(WorkspacePluginActivationRepository.list_plugin_ids(workspace_id))
+
+    @staticmethod
+    def replace_for_workspace(
+        workspace_id: uuid.UUID, plugin_ids: list[uuid.UUID], *, enabled_by
+    ) -> None:
+        """Replace activations in the caller's validated transaction scope."""
+        WorkspacePluginActivation.objects.filter(workspace_id=workspace_id).delete()
+        if plugin_ids:
+            WorkspacePluginActivation.objects.bulk_create(
+                [
+                    WorkspacePluginActivation(
+                        workspace_id=workspace_id,
+                        plugin_id=plugin_id,
+                        enabled_by=enabled_by,
+                    )
+                    for plugin_id in plugin_ids
+                ],
+                ignore_conflicts=True,
+            )

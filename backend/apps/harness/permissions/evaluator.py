@@ -13,13 +13,14 @@ Matching rules:
   command-scoped tools (``bash``) it is the command line.
 - LAST-MATCH-WINS within one rule dict (insertion order).
 - Merge order across layers: global -> agent -> mode. ``deny``
-  in any layer beats a merged allow; ``ask`` beats ``allow``
-  (see ``_combine_decisions`` in ``runner``).
-- Default when nothing matches: ``allow``, except the reserved keys
-  ``external_directory`` and ``doom_loop`` which default to ``ask``.
-- Filename-only secret matching: granular ``read`` rules are matched
-  against both the full action path and its basename, so ``*.env``
-  fires for ``/workspace/.env`` (OpenCode parity).
+  in any layer beats a merged allow.
+- An agent's own rules are evaluated apart from the base policy and the
+  stricter decision wins, so ``ask`` beats ``allow`` (see
+  :class:`AgentPolicy` and :func:`combine_decisions`).
+- Default when nothing matches: ``allow``, except the reserved key
+  ``doom_loop`` which defaults to ``ask``. ``external_directory``
+  falls through to normal tool rules unless an explicit reserved-key
+  rule is set (paths outside ``/workspace`` are allowed by default).
 
 Phase 3 decision (WIRE, not remove): ``HarnessRunner._decide`` and
 ``_filtered_schemas`` forward ``mode`` to :meth:`evaluate`, so
@@ -48,23 +49,10 @@ DENY: Decision = "deny"
 VALID_DECISIONS = (ALLOW, ASK, DENY)
 
 #: Reserved permission keys with an ``ask`` default instead of ``allow``.
-ASK_BY_DEFAULT_KEYS = ("external_directory", "doom_loop")
+ASK_BY_DEFAULT_KEYS = ("doom_loop",)
 
-#: Global baseline rules (OpenCode parity): secret files ask for
-#: approval while everything else reads freely. Order matters
-#: (last-match-wins): the ``*.env.example`` allow must come after the
-#: ``*.env``/``*.env.*`` asks so the shipped example stays readable.
-#: Agent layers with ``{"*": "allow"}`` (build/general) do NOT override
-#: this: the runner combines the base and agent evaluators with
-#: deny > ask > allow precedence, so a base ``ask`` always survives.
-DEFAULT_GLOBAL_RULES: dict[str, Any] = {
-    "read": {
-        "*": "allow",
-        "*.env": "ask",
-        "*.env.*": "ask",
-        "*.env.example": "allow",
-    }
-}
+#: No built-in secret-file ask rule; explicit global rules still apply.
+DEFAULT_GLOBAL_RULES: dict[str, Any] = {}
 
 # Tools whose action string is a workspace path (pattern-matched).
 PATH_SCOPED_KEYS = ("read", "edit", "glob", "grep", "list")
@@ -149,6 +137,15 @@ def compile_rules(rules: dict[str, Any] | None) -> list[PermissionRule]:
     return compiled
 
 
+def combine_decisions(*decisions: str) -> Decision:
+    """Return the strictest decision: ``deny`` > ``ask`` > ``allow``."""
+    if DENY in decisions:
+        return DENY
+    if ASK in decisions:
+        return ASK
+    return ALLOW
+
+
 class PermissionEvaluator:
     """Evaluate tool permissions across global/agent/mode layers.
 
@@ -195,6 +192,12 @@ class PermissionEvaluator:
         )
         return self.evaluate_context(ctx).decision
 
+    def for_agent(self, agent_rules: dict[str, Any] | None) -> AgentPolicy:
+        """Return this policy merged with an agent's own permission rules."""
+        return AgentPolicy(
+            base=self, agent=PermissionEvaluator(agent_rules=agent_rules)
+        )
+
     def evaluate_context(self, ctx: PermissionContext) -> Evaluation:
         """Evaluate a full PermissionContext with reserved-key handling."""
         if ctx.doom_loop:
@@ -206,7 +209,8 @@ class PermissionEvaluator:
             decision = self._lookup("external_directory", "")
             if decision is not None:
                 return decision
-            return Evaluation(decision=ASK, matched_rule="external_directory")
+            # No reserved-key rule: fall through to normal tool matching
+            # so bash/process denies (e.g. explore ``rm``) still apply.
         layers: list[tuple[str, list[PermissionRule]]] = [
             ("global", self._global),
             ("agent", self._agent),
@@ -292,3 +296,39 @@ class PermissionEvaluator:
             if any(_matches(pattern, candidate) for candidate in candidates):
                 matched = (decision, pattern)
         return matched
+
+
+@dataclass(frozen=True)
+class AgentPolicy:
+    """A base policy and one agent's rules; the stricter decision wins.
+
+    The agent's rules form their own evaluator instead of a layer of the base
+    policy, so an agent ``allow`` never relaxes an ``ask`` or ``deny`` of the
+    base policy. Build it with :meth:`PermissionEvaluator.for_agent`.
+    """
+
+    base: PermissionEvaluator
+    agent: PermissionEvaluator
+
+    def evaluate(
+        self,
+        tool: str,
+        action: str = "",
+        *,
+        mode: str = "",
+        external_directory: bool = False,
+        doom_loop: bool = False,
+    ) -> Decision:
+        """Evaluate (*tool*, *action*) in both policies and combine them."""
+        return combine_decisions(
+            *(
+                evaluator.evaluate(
+                    tool,
+                    action,
+                    mode=mode,
+                    external_directory=external_directory,
+                    doom_loop=doom_loop,
+                )
+                for evaluator in (self.base, self.agent)
+            )
+        )

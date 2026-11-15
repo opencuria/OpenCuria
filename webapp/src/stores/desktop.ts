@@ -1,45 +1,48 @@
 /**
- * Desktop session store — manages the KasmVNC desktop panel state.
+ * Desktop session store — manages the KasmVNC desktop session state.
  *
- * Tracks whether the desktop viewer is open, whether a session is
- * active, and stores the proxy URL for the KasmVNC iframe.
+ * `isOpen` controls the desktop modal. The session itself (proxy URL,
+ * connection state) is independent of the modal: closing the modal keeps
+ * the session running so the side-panel live view stays alive.
  */
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { desktopViewerClientId } from '@/composables/useDesktopSessionCoordinator'
 
 export const useDesktopStore = defineStore('desktop', () => {
+  const viewerClientId = desktopViewerClientId
+  const intentRevision = ref<number | null>(null)
+  const viewerLeaseState = ref('unknown')
+  const viewerOwned = computed(
+    () => intentRevision.value !== null && viewerLeaseState.value === 'held',
+  )
+
+  function setViewerIntent(revision: number | null, state: string): void {
+    intentRevision.value = revision
+    viewerLeaseState.value = state
+  }
+
   const isOpen = ref(false)
-  const isMinimized = ref(false)
   const isConnecting = ref(false)
   const isConnected = ref(false)
   const computerUseRuns = ref<Set<string>>(new Set())
   const computerUseActive = computed(() => computerUseRuns.value.size > 0)
   const proxyUrl = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
-
-  function toggle(): void {
-    isOpen.value = !isOpen.value
-  }
+  const viewerGeneration = ref(0)
 
   function open(): void {
     isOpen.value = true
-    isMinimized.value = false
   }
 
   function close(): void {
     isOpen.value = false
-    isMinimized.value = false
   }
 
-  function minimize(): void {
-    if (!isOpen.value) return
-    isMinimized.value = true
-  }
-
-  function restore(): void {
-    isOpen.value = true
-    isMinimized.value = false
+  /** Remount the KasmVNC iframe without stopping the runner session. */
+  function bumpViewer(): void {
+    viewerGeneration.value += 1
   }
 
   function setConnecting(wsId: string): void {
@@ -78,28 +81,32 @@ export const useDesktopStore = defineStore('desktop', () => {
   }
 
   function reset(): void {
+    setViewerIntent(null, 'unknown')
     isOpen.value = false
-    isMinimized.value = false
     isConnected.value = false
     isConnecting.value = false
     computerUseRuns.value = new Set()
     proxyUrl.value = null
     workspaceId.value = null
+    viewerGeneration.value = 0
   }
 
   return {
+    viewerClientId,
+    intentRevision,
+    viewerLeaseState,
+    viewerOwned,
+    setViewerIntent,
     isOpen,
-    isMinimized,
     isConnecting,
     isConnected,
     computerUseActive,
     proxyUrl,
     workspaceId,
-    toggle,
+    viewerGeneration,
     open,
     close,
-    minimize,
-    restore,
+    bumpViewer,
     setConnecting,
     setConnected,
     setComputerUseActive,

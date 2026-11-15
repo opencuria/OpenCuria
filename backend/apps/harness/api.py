@@ -1,9 +1,9 @@
 """
-REST API for the harness sessions (M6, additive).
+REST API for harness sessions.
 
 Thin Ninja routers: validate input, resolve organization + owner
 scoping via the runners ``RunnerService`` (``get_workspace_for_user``
-equivalent), delegate to ``HarnessService``, and format responses.
+equivalent), delegate to harness services, and format responses.
 No business logic here.
 
 Fine-grained API key permissions (new keys, never auto-granted to
@@ -14,66 +14,89 @@ existing keys — see ``APIKeyPermission``)::
   switch session mode, rename/delete sessions, save/delete provider config
 - ``harness:permissions`` — resolve permission and question requests
 
-All old ``session:*`` socket events and runners REST endpoints stay
-untouched (M8 removes them).
+Provider-account management and ChatGPT OAuth use ``harness:providers`` in the
+separate provider-account adapter.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
 
 from django.http import HttpRequest
-from ninja import Router, Schema
+from ninja import Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
+from apps.runners.services import get_runner_service
+from common.api_errors import api_key_permission_denied
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
-from common.utils import decrypt_value
+from common.request_context import get_organization_id
+
+from .conversation_service import ConversationService
+from .schemas import (
+    AgentConfigOut,
+    AgentConfigSaveIn,
+    ComputerUseConfigIn,
+    ComputerUseConfigOut,
+    HarnessConversationOut,
+    HarnessForkIn,
+    HarnessMessageEditIn,
+    HarnessMessageIn,
+    HarnessModeIn,
+    HarnessPermissionOut,
+    HarnessPermissionResolveIn,
+    HarnessQuestionOut,
+    HarnessQuestionResolveIn,
+    HarnessSessionCreateIn,
+    HarnessSessionOut,
+    HarnessSessionPatchIn,
+    HarnessSteerIn,
+    HarnessSteerOut,
+    HarnessTodoOut,
+    ProviderConfigIn,
+    ProviderConfigOut,
+    RecentModelOut,
+    RecentModelSaveIn,
+    SubagentConfigIn,
+    SubagentConfigOut,
+    computer_use_config_to_out,
+    part_to_out,
+    provider_config_to_out,
+    session_to_out,
+    session_to_out_with_unread,
+    timeline_to_out,
+)
+from .session_access_service import SessionAccessService
+from .session_settings_service import SessionSettingsService
 
 harness_router = Router(tags=["harness"])
 
 
-def _perm_denied(permission: APIKeyPermission):  # type: ignore[no-untyped-def]
-    """Return a 403 error tuple for a denied API key permission."""
-    return 403, {
-        "detail": f"API key lacks permission: {permission.value}",
-        "code": "permission_denied",
-    }
-
-
 def _get_service():  # type: ignore[no-untyped-def]
     """Return the runners service (owner scoping lives there)."""
-    from apps.runners.sio_server import get_runner_service
-
     return get_runner_service()
 
 
 def _resolve_harness_service():  # type: ignore[no-untyped-def]
-    """Return the process-wide HarnessService (runner accessor wired)."""
+    """Resolve persisted command submission for the API process."""
     from apps.harness.harness_service import get_harness_service
 
     return get_harness_service()
 
 
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract the organization ID from the X-Organization-Id header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
+def _non_empty(value: str) -> str | None:
+    """Return the stripped string or None when blank (edit no-op)."""
+    stripped = (value or "").strip()
+    return stripped or None
 
 
 def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID):  # type: ignore[no-untyped-def]
     """Return a workspace only for org members + owners (404 otherwise)."""
     service = _get_service()
     try:
-        return service.get_workspace_for_user(
+        return service.workspace_access.get_workspace_for_user(
             workspace_id,
             user=request.user,
             organization_id=org_id,
@@ -82,280 +105,43 @@ def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid
         raise NotFoundError("Workspace", str(workspace_id))
 
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
+def _org_admin_denied(
+    request: HttpRequest, org_id: uuid.UUID
+) -> tuple[int, dict] | None:
+    """Return a 403 response unless the user administers the organization.
+
+    Organization-wide harness settings apply to every member's runs, so only
+    admins may change them; members keep read access for their own runs.
+    """
+    organizations = OrganizationService()
+    organizations.require_membership(request.user, org_id)
+    if organizations.get_user_role(request.user, org_id) != "admin":
+        return 403, {"detail": "Admin role required", "code": "forbidden"}
+    return None
 
 
-class HarnessSessionCreateIn(Schema):
-    """Request schema for starting a harness session."""
-
-    prompt: str
-    agent_name: str = "build"
-    mode: str = "build"
-    model: str = ""
-    reasoning_effort: str = ""
-    skill_ids: list[str] = []
-
-
-class HarnessSessionPatchIn(Schema):
-    """Request schema for updating a harness session."""
-
-    title: str = ""
-
-
-class HarnessConversationOut(Schema):
-    """Response schema for org-wide harness conversations."""
-
-    session_id: uuid.UUID
-    workspace_id: uuid.UUID
-    workspace_name: str
-    title: str
-    status: str
-    mode: str
-    agent_name: str
-    model: str = ""
-    reasoning_effort: str = ""
-    unread: bool = False
-    updated_at: datetime
-
-
-class HarnessMessageIn(Schema):
-    """Request schema for a follow-up prompt on a session."""
-
-    prompt: str
-    mode: str = ""
-    model: str = ""
-    reasoning_effort: str = ""
-    skill_ids: list[str] = []
-
-
-class HarnessModeIn(Schema):
-    """Request schema for switching a session's plan|build mode."""
-
-    mode: str
-
-
-class HarnessPermissionResolveIn(Schema):
-    """Request schema for resolving a permission request."""
-
-    response: str
-
-
-class HarnessQuestionResolveIn(Schema):
-    """Request schema for answering a harness question request."""
-
-    answers: list[Any] = []
-    reject: bool = False
-
-
-class HarnessQuestionOut(Schema):
-    """Response schema for a resolved question request."""
-
-    request_id: uuid.UUID
-    status: str
-
-
-class HarnessSessionOut(Schema):
-    """Response schema for a harness session."""
-
-    id: uuid.UUID
-    workspace_id: uuid.UUID
-    parent_id: uuid.UUID | None = None
-    title: str
-    mode: str
-    agent_name: str
-    model: str
-    reasoning_effort: str = ""
-    status: str
-    cost: float
-    tokens: dict = {}
-    skill_ids: list[str] = []
-    unread: bool = False
-    created_at: datetime
-    updated_at: datetime
-
-
-class HarnessMessageOut(Schema):
-    """Response schema for a harness message."""
-
-    id: uuid.UUID
-    role: str
-    content: str
-    model: str
-    reasoning_effort: str = ""
-    cost: float
-    tokens: dict = {}
-    finish: str
-    error: str
-    created_at: datetime
-    completed_at: datetime | None = None
-
-
-class HarnessPartOut(Schema):
-    """Response schema for a harness part."""
-
-    id: uuid.UUID
-    message_id: uuid.UUID
-    type: str
-    state: str
-    call_id: str
-    title: str
-    output: str
-    input: dict = {}
-    meta: dict = {}
-
-
-class HarnessTodoOut(Schema):
-    """Response schema for a harness todo."""
-
-    id: uuid.UUID
-    content: str
-    status: str
-    priority: str
-    order: int
-
-
-class HarnessPermissionOut(Schema):
-    """Response schema for a resolved permission request."""
-
-    request_id: uuid.UUID
-    decision: str
-    remember: str
-
-
-class ProviderConfigIn(Schema):
-    """Request schema for saving the org-wide provider config."""
-
-    api_key: str = ""
-    base_url: str = ""
-    default_model: str = ""
-    small_model: str = ""
-    computer_use_model: str = ""
-
-
-class ProviderConfigOut(Schema):
-    """Response schema for the org-wide provider config (no secret)."""
-
-    base_url: str
-    default_model: str
-    small_model: str
-    computer_use_model: str
-    has_api_key: bool
-    api_key_hint: str
-
-
-class ProviderModelOut(Schema):
-    """One model from the org provider catalog."""
-
-    id: str
-    name: str
-    reasoning_efforts: list[str] = []
-    default_effort: str = ""
-    supports_tools: bool = False
-    context_length: int = 0
-    max_output_tokens: int = 0
-
-
-def _api_key_hint(config) -> str:  # type: ignore[no-untyped-def]
-    """Return a masked hint (last four chars) when a key is stored."""
-    if not config.api_key_encrypted:
-        return ""
-    try:
-        plain = decrypt_value(config.api_key_encrypted)
-    except Exception:
-        return "••••"
-    suffix = plain[-4:] if len(plain) >= 4 else plain
-    return f"••••{suffix}"
-
-
-def _provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
-    """Map a ProviderConfig ORM row to ProviderConfigOut (never plaintext)."""
-    return ProviderConfigOut(
-        base_url=config.base_url or "",
-        default_model=config.default_model or "",
-        small_model=config.small_model or "",
-        computer_use_model=config.computer_use_model or "",
-        has_api_key=bool(config.api_key_encrypted),
-        api_key_hint=_api_key_hint(config),
+def _agent_config_to_out(row: dict) -> AgentConfigOut:
+    """Map an AgentConfigService row to AgentConfigOut."""
+    return AgentConfigOut(
+        agent=row["agent"],
+        mode=row["mode"],
+        description=row["description"],
+        model=row.get("model") or "",
+        effort=row.get("effort") or "",
+        inherit_model=bool(row.get("inherit_model", False)),
+        effort_strategy=row.get("effort_strategy") or "fixed",
     )
 
 
-def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
-    """Load the org provider config and map to the public response."""
-    from apps.harness.services import ProviderConfigService
-
-    config = ProviderConfigService().get_config(org_id)
-    return _provider_config_to_out(config)
-
-
-def _list_org_provider_models(org_id: uuid.UUID) -> list[ProviderModelOut]:
-    """Fetch the OpenRouter catalog for an organization."""
-    from apps.harness.services import ProviderConfigService
-
-    models = ProviderConfigService().list_models(org_id)
-    return [
-        ProviderModelOut(
-            id=model.id,
-            name=model.name,
-            reasoning_efforts=list(model.reasoning_efforts),
-            default_effort=model.default_effort,
-            supports_tools=model.supports_tools,
-            context_length=model.context_length,
-            max_output_tokens=model.max_output_tokens,
-        )
-        for model in models
-    ]
-
-
-def _save_org_provider_config(
-    org_id: uuid.UUID, payload: ProviderConfigIn
-) -> ProviderConfigOut:
-    """Upsert the org provider config and map to the public response."""
-    from apps.harness.services import ProviderConfigService
-
-    config = ProviderConfigService().save_config(
-        organization_id=org_id,
-        api_key=payload.api_key or "",
-        base_url=payload.base_url or "",
-        default_model=payload.default_model or "",
-        small_model=payload.small_model or "",
-        computer_use_model=payload.computer_use_model or "",
+def _recent_model_to_out(row) -> RecentModelOut:  # type: ignore[no-untyped-def]
+    """Map a RecentModel ORM row to its response schema."""
+    return RecentModelOut(
+        model=row.model or "",
+        effort=row.effort or "",
+        harness_id=row.harness_id,
+        mode=row.mode,
+        last_used_at=row.last_used_at,
     )
-    return _provider_config_to_out(config)
-
-
-def _delete_org_provider_config(org_id: uuid.UUID) -> None:
-    """Delete the org provider config."""
-    from apps.harness.services import ProviderConfigService
-
-    ProviderConfigService().delete_config(org_id)
-
-
-def _session_to_out(session, *, unread: bool = False) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
-    """Map a HarnessSession ORM row to HarnessSessionOut."""
-    return HarnessSessionOut(
-        id=session.id,
-        workspace_id=session.workspace_id,
-        parent_id=session.parent_id,
-        title=session.title or "",
-        mode=session.mode,
-        agent_name=session.agent_name,
-        model=session.model or "",
-        reasoning_effort=session.reasoning_effort or "",
-        status=session.status,
-        cost=float(session.cost or 0.0),
-        tokens=dict(session.tokens or {}),
-        skill_ids=[str(skill_id) for skill_id in (session.skill_ids or [])],
-        unread=unread,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-    )
-
-
-def _session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
-    """Map a session and compute its unread flag."""
-    return _session_to_out(session, unread=service.is_session_unread(session))
 
 
 # ---------------------------------------------------------------------------
@@ -371,16 +157,27 @@ def _session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type:
 def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
     """Return all harness sessions of a workspace (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
         _owned_workspace(request, org_id, workspace_id)
-        service = _resolve_harness_service()
-        sessions = service.list_sessions(workspace_id)
-        unread_map = service.unread_for_sessions(sessions)
+        conversations = ConversationService()
+        sessions = conversations.list_sessions(workspace_id)
+        unread_map = conversations.unread_for_sessions(sessions)
+        attention_map = conversations.attention_for_sessions(sessions)
         return 200, [
-            _session_to_out(session, unread=unread_map.get(session.id, False))
+            session_to_out(
+                session,
+                unread=unread_map.get(session.id, False),
+                manual_unread=session.manual_unread_at is not None,
+                needs_attention=attention_map.get(session.id, {}).get(
+                    "needs_attention", False
+                ),
+                attention_kind=attention_map.get(session.id, {}).get(
+                    "attention_kind", ""
+                ),
+            )
             for session in sessions
         ]
     except NotFoundError as exc:
@@ -403,10 +200,10 @@ async def create_harness_session(
 ):
     """Create a session and dispatch the first prompt as a background run."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
@@ -417,6 +214,8 @@ async def create_harness_session(
             organization_id=org_id,
             prompt=payload.prompt,
             agent_name=payload.agent_name or "build",
+            harness_id=payload.harness_id,
+            connection_id=payload.connection_id,
             mode=payload.mode or "build",
             model=payload.model or "",
             reasoning_effort=payload.reasoning_effort or "",
@@ -431,8 +230,13 @@ async def create_harness_session(
             user_id=request.user.id,
             skill_ids=payload.skill_ids or [],
         )
-        fresh = await sync_to_async(service.get_session)(session.id)
-        return 201, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
+        return 201, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
+    except AuthenticationError as exc:
+        status = 403 if exc.code == "authentication_error" else 401
+        return status, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -443,7 +247,14 @@ async def create_harness_session(
 
 @harness_router.post(
     "/harness/sessions/{session_id}/message",
-    response={202: HarnessSessionOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    response={
+        202: HarnessSessionOut,
+        400: dict,
+        401: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
     summary="Send a follow-up prompt to a harness session",
 )
 async def send_harness_message(
@@ -451,28 +262,37 @@ async def send_harness_message(
 ):
     """Start a follow-up run on an idle session (409 when busy)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        await sync_to_async(service.ensure_user_promptable)(session)
-        if not service.is_running(session.id):
+        try:
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
+        SessionAccessService.require_user_promptable(session.parent_id)
+        if not await sync_to_async(service.is_running)(session.id):
+            settings = SessionSettingsService()
             if payload.mode and payload.mode.strip():
-                session = await sync_to_async(service.set_mode)(
+                session = await sync_to_async(settings.set_mode)(
                     session.id, payload.mode
                 )
             if payload.model and payload.model.strip():
-                session = await sync_to_async(service.set_model)(
+                session = await sync_to_async(settings.set_model)(
                     session.id, payload.model
                 )
             if payload.reasoning_effort and payload.reasoning_effort.strip():
-                session = await sync_to_async(service.set_reasoning_effort)(
+                session = await sync_to_async(settings.set_reasoning_effort)(
                     session.id, payload.reasoning_effort
                 )
         await service.start_run(
@@ -483,8 +303,187 @@ async def send_harness_message(
             user_id=request.user.id,
             skill_ids=payload.skill_ids if payload.skill_ids else None,
         )
-        fresh = await sync_to_async(service.get_session)(session.id)
-        return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
+        return 202, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+def _steer_to_out(entry) -> HarnessSteerOut:  # type: ignore[no-untyped-def]
+    """Map a :class:`SteerEntry` to its response schema."""
+    return HarnessSteerOut(
+        id=uuid.UUID(entry.id), content=entry.content, created_at=entry.created_at
+    )
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/steer",
+    response={202: HarnessSteerOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    summary="Send a message into the running turn of a harness session",
+)
+async def steer_harness_session(
+    request: HttpRequest, session_id: uuid.UUID, payload: HarnessSteerIn
+):
+    """Queue a message the active run picks up at its next step boundary.
+
+    Answers 409 ``no_active_run`` when the run already ended; clients then
+    send the message as a regular prompt. A message still queued when the
+    run settles automatically starts a follow-up run.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    org_id = get_organization_id(request)
+    await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(ConversationService().get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=request.user.id,
+        )
+        entry = await service.steer_run(
+            session, payload.prompt, user_id=request.user.id
+        )
+        return 202, _steer_to_out(entry)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.delete(
+    "/harness/sessions/{session_id}/steer/{steer_id}",
+    response={200: HarnessSteerOut, 403: dict, 404: dict},
+    summary="Withdraw a queued message before the running turn picked it up",
+)
+async def withdraw_harness_steer(
+    request: HttpRequest, session_id: uuid.UUID, steer_id: uuid.UUID
+):
+    """Remove a queued message; 404 ``not_found`` once the run consumed it."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    org_id = get_organization_id(request)
+    await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(ConversationService().get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=request.user.id,
+        )
+        entry = await service.withdraw_steer(session, str(steer_id))
+        return 200, _steer_to_out(entry)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/fork",
+    response={201: HarnessSessionOut, 400: dict, 403: dict, 404: dict},
+    summary="Fork a harness session (read-only, works while busy)",
+)
+async def fork_harness_session(
+    request: HttpRequest, session_id: uuid.UUID, payload: HarnessForkIn
+):
+    """Fork a session through the selected assistant answer."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    org_id = get_organization_id(request)
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(request.user, org_id)
+    try:
+        service = ConversationService()
+        session = await sync_to_async(service.get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        forked = await service.fork_session(session.id, payload.message_id)
+        out = await sync_to_async(session_to_out_with_unread)(service, forked)
+        return 201, out
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/messages/{message_id}/edit",
+    response={
+        202: HarnessSessionOut,
+        400: dict,
+        401: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
+    summary="Edit a user message and rerun the session from there",
+)
+async def edit_harness_message(
+    request: HttpRequest,
+    session_id: uuid.UUID,
+    message_id: uuid.UUID,
+    payload: HarnessMessageEditIn,
+):
+    """Edit a user message, drop the suffix, and start a rerun (409 busy)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    from asgiref.sync import sync_to_async
+
+    org_id = get_organization_id(request)
+    org_service = OrganizationService()
+    await sync_to_async(org_service.require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(ConversationService().get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        try:
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
+        await service.edit_user_message(
+            session.id,
+            message_id=message_id,
+            prompt=payload.prompt,
+            mode=_non_empty(payload.mode),
+            model=_non_empty(payload.model),
+            reasoning_effort=_non_empty(payload.reasoning_effort),
+            skill_ids=payload.skill_ids if payload.skill_ids else None,
+            organization_id=org_id,
+            workspace_id=str(session.workspace_id),
+            user_id=request.user.id,
+        )
+        fresh = await sync_to_async(ConversationService().get_session)(session.id)
+        return 202, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -503,23 +502,22 @@ async def patch_harness_session(
 ):
     """Rename a harness session (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
-        service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         if not (payload.title or "").strip():
             raise ValueError("title must not be empty")
-        updated = await sync_to_async(service.update_title)(
+        updated = await sync_to_async(SessionSettingsService().update_title)(
             session.id, payload.title
         )
-        return 200, await sync_to_async(_session_to_out_with_unread)(
-            service, updated
+        return 200, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), updated
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
@@ -529,26 +527,28 @@ async def patch_harness_session(
 
 @harness_router.delete(
     "/harness/sessions/{session_id}",
-    response={204: None, 403: dict, 404: dict},
+    response={204: None, 403: dict, 404: dict, 409: dict},
     summary="Delete a harness session",
 )
 async def delete_harness_session(request: HttpRequest, session_id: uuid.UUID):
     """Delete a session, aborting any active run first (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         await service.delete_session(session.id)
         return 204, None
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
 
 
 @harness_router.get(
@@ -559,18 +559,19 @@ async def delete_harness_session(request: HttpRequest, session_id: uuid.UUID):
 def list_harness_conversations(request: HttpRequest):
     """Return root sessions across the caller's workspaces in the org."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     runner_service = _get_service()
-    workspaces = runner_service.list_workspaces(
+    workspaces = runner_service.runner_lifecycle.list_workspaces(
         organization_id=org_id,
         user=request.user,
     )
-    service = _resolve_harness_service()
+    service = ConversationService()
+    workspace_ids = [workspace.id for workspace in workspaces]
     rows = service.list_conversations(
         organization_id=org_id,
-        workspace_ids=[workspace.id for workspace in workspaces],
+        workspace_ids=workspace_ids,
     )
     return 200, [
         HarnessConversationOut(
@@ -581,10 +582,15 @@ def list_harness_conversations(request: HttpRequest):
             status=row["status"],
             mode=row["mode"],
             agent_name=row["agent_name"],
+            harness_id=row["harness_id"],
             model=row.get("model") or "",
             reasoning_effort=row.get("reasoning_effort") or "",
             unread=row["unread"],
+            manual_unread=bool(row.get("manual_unread")),
+            needs_attention=bool(row.get("needs_attention")),
+            attention_kind=row.get("attention_kind") or "",
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            last_message_at=datetime.fromisoformat(row["last_message_at"]),
         )
         for row in rows
     ]
@@ -598,14 +604,58 @@ def list_harness_conversations(request: HttpRequest):
 def mark_harness_session_read(request: HttpRequest, session_id: uuid.UUID):
     """Record that the user opened a harness session (dashboard unread)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         service.mark_session_read(session.id)
+        return 204, None
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/unread",
+    response={204: None, 403: dict, 404: dict},
+    summary="Mark a harness session as unread",
+)
+def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
+    """Record that the user explicitly marked a harness session unread."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    try:
+        service = ConversationService()
+        session = service.get_session(session_id)
+        _owned_workspace(request, org_id, session.workspace_id)
+        service.mark_session_unread(session.id)
+        return 204, None
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/messages/{message_id}/notice-dismiss",
+    response={204: None, 403: dict, 404: dict},
+    summary="Dismiss the stopped/failed notice of a harness message",
+)
+def dismiss_harness_notice(
+    request: HttpRequest, session_id: uuid.UUID, message_id: uuid.UUID
+):
+    """Persist that the user dismissed one stopped/failed notice."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    try:
+        service = ConversationService()
+        session = service.get_session(session_id)
+        _owned_workspace(request, org_id, session.workspace_id)
+        service.dismiss_notice(session.id, message_id)
         return 204, None
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
@@ -621,23 +671,25 @@ async def set_harness_session_mode(
 ):
     """Switch mode on an idle session (409 when a run is active)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        if service.is_running(session.id):
+        if await sync_to_async(service.is_running)(session.id):
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
-        updated = await sync_to_async(service.set_mode)(session.id, payload.mode)
-        return 200, await sync_to_async(_session_to_out_with_unread)(
-            service, updated
+        updated = await sync_to_async(SessionSettingsService().set_mode)(
+            session.id, payload.mode
+        )
+        return 200, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), updated
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
@@ -649,95 +701,75 @@ async def set_harness_session_mode(
 
 @harness_router.post(
     "/harness/sessions/{session_id}/abort",
-    response={200: HarnessSessionOut, 403: dict, 404: dict},
+    response={200: HarnessSessionOut, 403: dict, 404: dict, 409: dict},
     summary="Abort the active run of a harness session",
 )
 async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
     """Cancel the active run task and mark message/parts aborted."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         aborted = await service.abort_run(session.id)
-        return 200, await sync_to_async(_session_to_out_with_unread)(
-            service, aborted
+        return 200, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), aborted
+        )
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.get(
+    "/harness/sessions/{session_id}/timeline",
+    response={200: dict, 403: dict, 404: dict},
+    summary="Load all session messages with lightweight part projections",
+)
+def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
+    """Return the session envelope without heavyweight detail fields."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    try:
+        conversations = ConversationService()
+        session = conversations.get_session(session_id)
+        _owned_workspace(request, org_id, session.workspace_id)
+        service = _resolve_harness_service()
+        return 200, timeline_to_out(
+            conversations,
+            session,
+            interactions=service.interactions,
+            pending_steers=service.list_pending_steers,
         )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
 
 
 @harness_router.get(
-    "/harness/sessions/{session_id}/parts",
+    "/harness/sessions/{session_id}/parts/{part_id}",
     response={200: dict, 403: dict, 404: dict},
-    summary="List messages and parts of a harness session",
+    summary="Load one full harness part by ID",
 )
-def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
-    """Return messages with their streamed parts and pending user gates."""
+def get_harness_part(request: HttpRequest, session_id: uuid.UUID, part_id: uuid.UUID):
+    """Return full detail for one part in an owned session."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
-        messages = service.list_messages(session.id)
-        parts = service.list_parts(session.id)
-        parts_by_message: dict[str, list] = {}
-        for part in parts:
-            parts_by_message.setdefault(str(part.message_id), []).append(
-                HarnessPartOut(
-                    id=part.id,
-                    message_id=part.message_id,
-                    type=part.type,
-                    state=part.state,
-                    call_id=part.call_id or "",
-                    title=part.title or "",
-                    output=part.output or "",
-                    input=dict(part.input or {}),
-                    meta=dict(part.meta or {}),
-                )
-            )
-        return 200, {
-            "session": _session_to_out_with_unread(service, session).model_dump(
-                mode="json"
-            ),
-            "messages": [
-                {
-                    **HarnessMessageOut(
-                        id=message.id,
-                        role=message.role,
-                        content=message.content or "",
-                        model=message.model or "",
-                        reasoning_effort=message.reasoning_effort or "",
-                        cost=float(message.cost or 0.0),
-                        tokens=dict(message.tokens or {}),
-                        finish=message.finish or "",
-                        error=message.error or "",
-                        created_at=message.created_at,
-                        completed_at=message.completed_at,
-                    ).model_dump(mode="json"),
-                    "parts": [
-                        part.model_dump(mode="json")
-                        for part in parts_by_message.get(str(message.id), [])
-                    ],
-                }
-                for message in messages
-            ],
-            "permissions": service.list_pending_permissions(
-                session.id, include_descendants=True
-            ),
-            "questions": service.list_pending_questions(
-                session.id, include_descendants=True
-            ),
-        }
+        part = service.get_part(session.id, part_id)
+        return 200, part_to_out(part)
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
 
@@ -750,11 +782,11 @@ def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
 def list_harness_todos(request: HttpRequest, session_id: uuid.UUID):
     """Return persisted todos of a session (owner-scoped)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    org_id = get_organization_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         rows = service.list_todos(session.id)
@@ -774,7 +806,7 @@ def list_harness_todos(request: HttpRequest, session_id: uuid.UUID):
 
 @harness_router.post(
     "/harness/sessions/{session_id}/permissions/{request_id}",
-    response={200: HarnessPermissionOut, 400: dict, 403: dict, 404: dict},
+    response={200: HarnessPermissionOut, 400: dict, 401: dict, 403: dict, 404: dict},
     summary="Resolve a harness permission request",
 )
 async def resolve_harness_permission(
@@ -785,17 +817,25 @@ async def resolve_harness_permission(
 ):
     """Resolve a pending permission request (once|always|reject)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PERMISSIONS):
-        return _perm_denied(APIKeyPermission.HARNESS_PERMISSIONS)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_PERMISSIONS.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        outcome = await service.resolve_permission(
+        try:
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
+        outcome = await service.interactions.resolve_permission(
             session=session,
             request_id=request_id,
             response=payload.response,
@@ -805,6 +845,8 @@ async def resolve_harness_permission(
             decision=outcome["decision"],
             remember=outcome["remember"],
         )
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, LookupError) as exc:
@@ -813,7 +855,7 @@ async def resolve_harness_permission(
 
 @harness_router.post(
     "/harness/sessions/{session_id}/questions/{question_id}",
-    response={200: HarnessQuestionOut, 400: dict, 403: dict, 404: dict},
+    response={200: HarnessQuestionOut, 400: dict, 401: dict, 403: dict, 404: dict},
     summary="Answer a harness question request",
 )
 async def resolve_harness_question(
@@ -824,17 +866,25 @@ async def resolve_harness_question(
 ):
     """Submit answers for a pending question request (resumes the tool)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PERMISSIONS):
-        return _perm_denied(APIKeyPermission.HARNESS_PERMISSIONS)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_PERMISSIONS.value)
     from asgiref.sync import sync_to_async
 
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
         service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        outcome = await service.resolve_question(
+        try:
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
+        outcome = await service.interactions.resolve_question(
             session=session,
             question_id=question_id,
             answers=payload.answers,
@@ -843,7 +893,10 @@ async def resolve_harness_question(
         return 200, HarnessQuestionOut(
             request_id=question_id,
             status=outcome["status"],
+            resumed=bool(outcome.get("resumed", True)),
         )
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, LookupError) as exc:
@@ -851,153 +904,262 @@ async def resolve_harness_question(
 
 
 # ---------------------------------------------------------------------------
-# Provider config endpoints (org-scoped; workspace paths are aliases)
+# Provider config endpoints (org-scoped)
 # ---------------------------------------------------------------------------
+
+
+@harness_router.get(
+    "/recent-models/",
+    response={200: list[RecentModelOut], 401: dict, 403: dict, 404: dict},
+    summary="List recently used composer models",
+)
+def list_recent_models(request: HttpRequest):
+    """Return the user's recent models (newest first, capped server-side)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    try:
+        org_id = get_organization_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import RecentModelService
+
+        rows = RecentModelService().list_for_user(org_id, request.user.id)
+        return 200, [_recent_model_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/recent-models/",
+    response={200: RecentModelOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Record a used composer model",
+)
+def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
+    """Upsert one recent-model row (LRU); called after a successful send."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    try:
+        org_id = get_organization_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import RecentModelService
+
+        model_id = (payload.model or "").strip()
+        if not model_id:
+            return 400, {"detail": "model is required", "code": "validation_error"}
+        row = RecentModelService().record_usage(
+            org_id,
+            request.user,
+            model=model_id,
+            effort=(payload.effort or "").strip(),
+            harness_id=payload.harness_id,
+            mode=payload.mode,
+        )
+        if row is None:
+            return 400, {"detail": "model is required", "code": "validation_error"}
+        return 200, _recent_model_to_out(row)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.get(
+    "/agent-configs/",
+    response={200: list[AgentConfigOut], 401: dict, 403: dict, 404: dict},
+    summary="List per-agent model/effort configs",
+)
+def list_org_agent_configs(request: HttpRequest):
+    """Return one row per configurable agent (defaults when unstored)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    try:
+        org_id = get_organization_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import AgentConfigService
+
+        rows = AgentConfigService().list_configs(org_id)
+        return 200, [_agent_config_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/agent-configs/",
+    response={200: list[AgentConfigOut], 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (bulk upsert) per-agent model/effort configs",
+)
+def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
+    """Validate and upsert per-agent configs (organization admins only)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    try:
+        org_id = get_organization_id(request)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
+        from apps.harness.services import AgentConfigService
+
+        rows = AgentConfigService().save_configs(
+            org_id,
+            [item.model_dump() for item in payload.configs],
+        )
+        return 200, [_agent_config_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.get(
+    "/subagent-config/",
+    response={200: SubagentConfigOut, 401: dict, 403: dict, 404: dict},
+    summary="Get the org-wide subagent depth config",
+)
+def get_org_subagent_config(request: HttpRequest):
+    """Return the org subagent config (defaults when unstored)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    try:
+        org_id = get_organization_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import SubagentConfigService
+
+        return 200, SubagentConfigOut(**SubagentConfigService().get_or_default(org_id))
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/subagent-config/",
+    response={200: SubagentConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (upsert) the org-wide subagent depth config",
+)
+def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
+    """Validate and upsert the org subagent config (organization admins only)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    try:
+        org_id = get_organization_id(request)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
+        from apps.harness.services import SubagentConfigService
+
+        return 200, SubagentConfigOut(
+            **SubagentConfigService().save_config(org_id, payload.max_depth)
+        )
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.get(
+    "/computer-use-config/",
+    response={200: ComputerUseConfigOut, 401: dict, 403: dict, 404: dict},
+    summary="Get the org-wide computer-use runtime config",
+)
+def get_org_computer_use_config(request: HttpRequest):
+    """Return the org computer-use config (defaults when unstored)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
+    try:
+        org_id = get_organization_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.services import ComputerUseConfigService
+
+        return 200, computer_use_config_to_out(
+            ComputerUseConfigService().get_or_default(org_id)
+        )
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/computer-use-config/",
+    response={200: ComputerUseConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (upsert) the org-wide computer-use runtime config",
+)
+def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfigIn):
+    """Validate and upsert the org computer-use config (organization admins only)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
+    try:
+        org_id = get_organization_id(request)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
+        from apps.harness.services import ComputerUseConfigService
+
+        # Partial payloads merge: only explicitly sent fields are updated.
+        row = ComputerUseConfigService().save_config(
+            org_id, payload.model_dump(exclude_unset=True)
+        )
+        return 200, computer_use_config_to_out(row)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
 
 
 @harness_router.get(
     "/provider-config/",
     response={200: ProviderConfigOut, 401: dict, 403: dict, 404: dict},
-    summary="Get the org-wide provider config (api key never returned)",
+    summary="Get the org-wide helper-model defaults",
 )
 def get_org_provider_config(request: HttpRequest):
-    """Return the org provider config (base_url/models only)."""
+    """Return the organization's helper-model and voice defaults."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_READ.value)
     try:
-        org_id = _get_org_id(request)
+        org_id = get_organization_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _fetch_org_provider_config(org_id)
+        from apps.harness.services import ProviderConfigService
+
+        return 200, provider_config_to_out(ProviderConfigService().find_config(org_id))
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.get(
-    "/provider-config/models/",
-    response={200: list[ProviderModelOut], 401: dict, 403: dict, 404: dict, 502: dict},
-    summary="List models from the org OpenRouter provider",
-)
-def list_org_provider_models(request: HttpRequest):
-    """Proxy OpenRouter GET /models for the org provider config."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        return 200, _list_org_provider_models(org_id)
-    except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except Exception as exc:
-        from apps.harness.providers.base import (
-            ProviderAuthError,
-            ProviderResponseError,
-            ProviderTimeoutError,
-        )
-
-        if isinstance(
-            exc, (ProviderAuthError, ProviderResponseError, ProviderTimeoutError)
-        ):
-            return 502, {"detail": str(exc), "code": "provider_error"}
-        raise
 
 
 @harness_router.put(
     "/provider-config/",
-    response={200: ProviderConfigOut, 400: dict, 401: dict, 403: dict},
-    summary="Save (upsert) the org-wide provider config",
+    response={200: ProviderConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save the org-wide helper-model defaults",
 )
 def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
-    """Upsert the org provider config via Fernet encryption."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        return 200, _save_org_provider_config(org_id, payload)
-    except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
-    except (ValueError, KeyError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
+    """Save helper-model and voice defaults (organization admins only).
 
-
-@harness_router.delete(
-    "/provider-config/",
-    response={204: None, 401: dict, 403: dict, 404: dict},
-    summary="Delete the org-wide provider config",
-)
-def delete_org_provider_config(request: HttpRequest):
-    """Delete the org provider config."""
+    Agent models belong to AgentConfig.
+    """
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+        return api_key_permission_denied(APIKeyPermission.HARNESS_RUN.value)
     try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        _delete_org_provider_config(org_id)
-        return 204, None
+        org_id = get_organization_id(request)
+        if denied := _org_admin_denied(request, org_id):
+            return denied
+        from apps.harness.services import ProviderConfigService
+
+        config = ProviderConfigService().save_config(
+            organization_id=org_id, **payload.model_dump()
+        )
+        return 200, provider_config_to_out(config)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.get(
-    "/workspaces/{workspace_id}/provider-config/",
-    response={200: ProviderConfigOut, 403: dict, 404: dict},
-    summary="Get the org-wide provider config (api key never returned)",
-)
-def get_provider_config(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return the org provider config (base_url/models only, owner-scoped)."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    org_id = _get_org_id(request)
-    try:
-        OrganizationService().require_membership(request.user, org_id)
-        _owned_workspace(request, org_id, workspace_id)
-        return 200, _fetch_org_provider_config(org_id)
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.put(
-    "/workspaces/{workspace_id}/provider-config/",
-    response={200: ProviderConfigOut, 400: dict, 403: dict, 404: dict},
-    summary="Save (upsert) the org-wide provider config",
-)
-def save_provider_config(
-    request: HttpRequest, workspace_id: uuid.UUID, payload: ProviderConfigIn
-):
-    """Upsert the org provider config via Fernet encryption (owner-scoped)."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    org_id = _get_org_id(request)
-    try:
-        OrganizationService().require_membership(request.user, org_id)
-        _owned_workspace(request, org_id, workspace_id)
-        return 200, _save_org_provider_config(org_id, payload)
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.delete(
-    "/workspaces/{workspace_id}/provider-config/",
-    response={204: None, 403: dict, 404: dict},
-    summary="Delete the org-wide provider config",
-)
-def delete_provider_config(request: HttpRequest, workspace_id: uuid.UUID):
-    """Delete the org provider config (owner-scoped)."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    org_id = _get_org_id(request)
-    try:
-        OrganizationService().require_membership(request.user, org_id)
-        _owned_workspace(request, org_id, workspace_id)
-        _delete_org_provider_config(org_id)
-        return 204, None
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}

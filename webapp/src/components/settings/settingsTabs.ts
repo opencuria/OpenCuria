@@ -1,59 +1,31 @@
-/**
- * Shared helpers for the global Settings-Sheet (Schritt 5).
- *
- * Kept in a lightweight module (no component imports) so that
- * OrgSettingsView can map legacy `?tab=` deep-links onto sheet tabs
- * without pulling the whole sheet (5 Views) into its bundle.
- */
+/** Shared helpers for the global Settings sheet. */
 
-/** Window-Event, das das Settings-Sheet öffnet. Detail: `{ tab?: string }`. */
+/** Window event that opens Settings with context IDs (never a workspace form payload). */
 export const OPEN_SETTINGS_EVENT = 'opencuria:open-settings'
+export const CLOSE_SETTINGS_EVENT = 'opencuria:close-settings'
+/** Window event fired after the sheet closed, so views can reload what Settings may change. */
+export const SETTINGS_CLOSED_EVENT = 'opencuria:settings-closed'
 
-/** Query-Param auf `/`, der das Sheet per Deep-Link öffnet (`/?settings=<tab>`). */
+/** Query param on `/` that opens the sheet via deep-link (`/?settings=<tab>`). */
 export const SETTINGS_QUERY_PARAM = 'settings'
 
-export type SettingsTabId =
-  | 'general'
-  | 'provider'
-  | 'skills'
-  | 'credentials'
-  | 'api-keys'
-  | 'images'
-  | 'runners'
-  | 'organization'
+const SETTINGS_TABS = [
+  'general',
+  'provider',
+  'agents',
+  'skills',
+  'credentials',
+  'plugins',
+  'api-keys',
+  'images',
+  'runners',
+  'credential-services',
+  'image-definitions',
+] as const
 
-/**
- * Mappt alte OrgSettings-Query-Tabs (`workspace-policies`, `provider`,
- * `image-definitions`, `credential-services`) und freie Eingaben
- * (Event-Detail, `?settings=`) auf Sheet-Tabs. Unbekannt → `general`.
- */
+export type SettingsTabId = (typeof SETTINGS_TABS)[number]
+
+/** Resolve event or deep-link input to a current tab, defaulting to General. */
 export function resolveSettingsTab(tab: unknown): SettingsTabId {
-  switch (tab) {
-    case 'general':
-    case 'workspace-policies':
-      return 'general'
-    case 'provider':
-      return 'provider'
-    case 'skills':
-      return 'skills'
-    case 'credentials':
-      return 'credentials'
-    case 'api-keys':
-    case 'apikeys':
-    case 'api_keys':
-      return 'api-keys'
-    case 'images':
-    case 'image-definitions':
-    case 'captured-images':
-      return 'images'
-    case 'runners':
-      return 'runners'
-    case 'organization':
-    case 'organisation':
-    case 'credential-services':
-    case 'members':
-      return 'organization'
-    default:
-      return 'general'
-  }
+  return SETTINGS_TABS.find((id) => id === tab) ?? 'general'
 }

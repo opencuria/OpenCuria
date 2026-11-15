@@ -1,0 +1,198 @@
+"""
+Pydantic schemas for the plugins REST API.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Literal
+
+from ninja import Schema
+from pydantic import ConfigDict, Field, model_serializer
+
+
+class DesktopResource(Schema):
+    """Runner-managed display activation policy."""
+
+    model_config = ConfigDict(extra="forbid")
+    activation: Literal["server_start", "first_tool"] = "server_start"
+
+
+class PluginResources(Schema):
+    """Declared runtime resources; omission means no managed desktop."""
+
+    model_config = ConfigDict(extra="forbid")
+    desktop: DesktopResource | None = None
+
+    @model_serializer
+    def serialize_resources(self) -> dict:
+        """Absent resources serialize as {}, not a null desktop declaration."""
+        return (
+            {"desktop": self.desktop.model_dump()} if self.desktop is not None else {}
+        )
+
+
+# --- Nested component inputs ---
+
+
+class McpToolPolicy(Schema):
+    """Explicit model exposure and managed lifecycle for one MCP server."""
+
+    model_config = ConfigDict(extra="forbid")
+    exposed_tools: list[str] | None = None
+    internal_tools: list[str] = Field(default_factory=list)
+    desktop_tools: list[str] | None = None
+    execution_tools: list[str] = Field(default_factory=list)
+    omit_tools_from: list[Literal["code_mode", "deferred"]] = Field(
+        default_factory=list
+    )
+    on_run_end: str = ""
+    desktop_kind: Literal["mcp", "computeruse"] = "mcp"
+    exclusive_input: bool = False
+
+
+class RuntimeArtifact(Schema):
+    """An allowlisted runner-provisioned executable, never an arbitrary URL."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=64)
+
+
+class PluginSkillIn(Schema):
+    """Nested skill definition for plugin create/replace."""
+
+    name: str
+    slug: str = ""
+    body: str
+    position: int = 0
+
+
+class PluginSkillOut(Schema):
+    """A plugin skill fragment."""
+
+    id: uuid.UUID
+    name: str
+    slug: str
+    body: str
+    position: int
+
+
+class PluginMcpServerIn(Schema):
+    """Nested MCP server definition for plugin create/replace."""
+
+    name: str
+    slug: str = ""
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = []
+    cwd: str = "/workspace"
+    resources: PluginResources = Field(default_factory=PluginResources)
+    tool_policy: McpToolPolicy = Field(default_factory=McpToolPolicy)
+    runtime_artifact: RuntimeArtifact | None = None
+    env: dict[str, str] = {}
+    url: str = ""
+    headers: dict[str, str] = {}
+    startup_timeout_seconds: int = 30
+    request_timeout_seconds: int = 60
+    auth_type: str = "none"
+    oauth_requirement_key: str = ""
+
+
+class PluginMcpServerOut(Schema):
+    """An MCP server definition."""
+
+    id: uuid.UUID
+    name: str
+    slug: str
+    transport: str
+    command: str
+    args: list[str]
+    cwd: str
+    resources: PluginResources = Field(default_factory=PluginResources)
+    tool_policy: McpToolPolicy = Field(default_factory=McpToolPolicy)
+    runtime_artifact: RuntimeArtifact | None = None
+    env: dict[str, str]
+    url: str
+    headers: dict[str, str]
+    startup_timeout_seconds: int
+    request_timeout_seconds: int
+    auth_type: str = "none"
+    oauth_requirement_key: str = ""
+
+
+class PluginCredentialRequirementIn(Schema):
+    """Declare a plugin dependency on an existing visible credential service."""
+
+    key: str
+    description: str = ""
+    required: bool = True
+    service_id: uuid.UUID
+
+
+class PluginCredentialRequirementOut(Schema):
+    """A plugin-wide credential requirement (no secret values)."""
+
+    id: uuid.UUID
+    key: str
+    description: str
+    required: bool
+    service_id: uuid.UUID
+    service_name: str
+    service_slug: str
+    credential_type: str
+
+
+# --- Plugin inputs / outputs ---
+
+
+class PluginCreateIn(Schema):
+    """Payload for creating an org-owned plugin with nested components."""
+
+    name: str
+    slug: str = ""
+    description: str = ""
+    enabled: bool = True
+    published: bool = True
+    skills: list[PluginSkillIn] = []
+    mcp_servers: list[PluginMcpServerIn] = []
+    credential_requirements: list[PluginCredentialRequirementIn] = []
+
+
+class PluginUpdateIn(Schema):
+    """Payload for replacing plugin metadata + full component lists."""
+
+    name: str | None = None
+    slug: str | None = None
+    description: str | None = None
+    enabled: bool | None = None
+    published: bool | None = None
+    skills: list[PluginSkillIn] | None = None
+    mcp_servers: list[PluginMcpServerIn] | None = None
+    credential_requirements: list[PluginCredentialRequirementIn] | None = None
+
+
+class PluginOut(Schema):
+    """A plugin with nested components and org activation state."""
+
+    id: uuid.UUID
+    name: str
+    slug: str
+    description: str
+    enabled: bool
+    published: bool
+    organization_id: uuid.UUID | None = None
+    is_global: bool = False
+    org_enabled: bool = False
+    skills: list[PluginSkillOut] = []
+    mcp_servers: list[PluginMcpServerOut] = []
+    credential_requirements: list[PluginCredentialRequirementOut] = []
+    created_at: datetime
+    updated_at: datetime
+
+
+class PluginActivationIn(Schema):
+    """Toggle org-wide activation of a plugin."""
+
+    active: bool

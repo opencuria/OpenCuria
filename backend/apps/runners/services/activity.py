@@ -1,0 +1,284 @@
+"""Present execution, unresolved outcomes and history as distinct activity states."""
+
+from common.user_labels import workspace_title
+
+from ..storage_schemas import RunnerActivityOut
+
+OPERATION_TITLES = {
+    "create_workspace": "Create workspace",
+    "create_workspace_from_image_artifact": "Create workspace",
+    "stop_workspace": "Stop workspace",
+    "resume_workspace": "Start workspace",
+    "update_workspace": "Update workspace",
+    "inject_credentials": "Sync credentials",
+    "remove_workspace": "Delete workspace",
+    "build_image": "Build image",
+    "create_image_artifact": "Save workspace as image",
+    "delete_image_artifact": "Delete image",
+}
+TERMINAL_PHASES = {"completed", "cancelled", "failed", "disposed", "result"}
+# Connection interruptions recover automatically. Changed destructive approval
+# and proven storage/record inconsistencies require an administrator's decision.
+RECOVERY_PHASES = {"intervention", "intervention_required"}
+ATTENTION_PHASES = {"reconfirmation_required", "attention_required"}
+
+
+class ActivityService:
+    """Project existing workflow facts; never resolve or release an operation."""
+
+    @staticmethod
+    def project(records: dict, viewer_id: int | None = None) -> list[RunnerActivityOut]:
+        """Group children under their workflow and retain closed failures in history.
+
+        Workspaces are named only for their owner (``viewer_id``); everyone
+        else sees them by owner label, since workspace names are private.
+        """
+        operations = {str(op["task_id"]): op for op in records["operations"]}
+        owners = records.get("workspace_owners", {})
+
+        def workspace_target(workspace_id, name: str | None) -> str:
+            owner = owners.get(str(workspace_id), {})
+            return workspace_title(
+                name,
+                owner_id=owner.get("owner_id"),
+                owner=owner.get("owner_label"),
+                viewer_id=viewer_id,
+            )
+
+        grouped: set[str] = set()
+        activities: list[RunnerActivityOut] = []
+        names = {}
+        for image in records.get("generations", []):
+            for identity in (
+                image["id"],
+                image.get("definition_id"),
+                image.get("captured_image_id"),
+            ):
+                if identity:
+                    names[str(identity)] = image.get("line_name") or image["name"]
+
+        def workflow(
+            record: dict,
+            kind: str,
+            title: str,
+            target: str,
+            child_ids: list,
+        ) -> None:
+            ids = {str(identity) for identity in child_ids if identity}
+            children = [op for identity, op in operations.items() if identity in ids]
+            grouped.update(ids)
+            blocked = [op for op in children if ActivityService.unresolved(op)]
+            repair_blocked = [op for op in blocked if op["phase"] in ATTENTION_PHASES]
+            phase = record["phase"]
+            state = (
+                "attention"
+                if phase in ATTENTION_PHASES or repair_blocked
+                else "active"
+                if blocked or phase in RECOVERY_PHASES
+                else "history"
+                if phase in TERMINAL_PHASES
+                else "active"
+            )
+            outcome = (
+                "blocked"
+                if state == "attention"
+                else "recovering"
+                if blocked or phase in RECOVERY_PHASES
+                else "resolved"
+                if any(op["phase"] == "disposed" for op in children)
+                and phase == "failed"
+                else phase
+                if state == "history"
+                else "in_progress"
+            )
+            diagnostic = record.get("diagnostic", "")
+            if repair_blocked:
+                diagnostic = "\n".join(
+                    dict.fromkeys(op["task__error"] for op in repair_blocked)
+                )
+            if kind == "capture" and record.get("resume_suppressed"):
+                diagnostic = (
+                    diagnostic + "\nAutomatic restart was skipped for this capture."
+                ).strip()
+            summary_title = (
+                "Use saved image"
+                if record.get("replacement_started")
+                and (state == "attention" or outcome == "failed")
+                else title
+            )
+            activities.append(
+                RunnerActivityOut(
+                    id=str(record["id"]),
+                    kind=kind,
+                    title=title,
+                    target_name=target or "Unnamed workspace",
+                    state=state,
+                    outcome=outcome,
+                    summary=ActivityService.summary(
+                        summary_title,
+                        state,
+                        outcome,
+                        "attention_required" if repair_blocked else phase,
+                    ),
+                    diagnostic=diagnostic,
+                    operation_ids=[str(op["task_id"]) for op in blocked],
+                    created_at=record["created_at"],
+                )
+            )
+
+        # A capture hands off to recreation in the same workspace-locked
+        # transaction. Its latest preceding capture is the enclosing workflow.
+        recreates_by_capture: dict[str, list[dict]] = {}
+        standalone_recreates = []
+        for recreate in records["recreate_requests"]:
+            captures = [
+                capture
+                for capture in records["capture_requests"]
+                if recreate["reason"] == "capture"
+                and capture["workspace_id"] == recreate["workspace_id"]
+                and capture["created_at"] <= recreate["created_at"]
+            ]
+            if captures:
+                capture = max(captures, key=lambda item: item["created_at"])
+                recreates_by_capture.setdefault(str(capture["id"]), []).append(recreate)
+            else:
+                standalone_recreates.append(recreate)
+        for request in records["capture_requests"]:
+            recreates = recreates_by_capture.get(str(request["id"]), [])
+            current = (
+                max(recreates, key=lambda item: item["created_at"])
+                if recreates
+                else request
+            )
+            record = {
+                **request,
+                "phase": current["phase"],
+                "diagnostic": current["diagnostic"],
+                "replacement_started": bool(recreates),
+            }
+            workflow(
+                record,
+                "capture",
+                "Save workspace as image",
+                workspace_target(request["workspace_id"], request["workspace__name"]),
+                [request["child_id"], request["image__creating_task_id"]]
+                + [recreate["child_id"] for recreate in recreates],
+            )
+        for request in standalone_recreates:
+            title = {
+                "reset": "Reset workspace",
+                "update": "Update workspace",
+                "capture": "Use saved image",
+            }.get(request["reason"], "Recreate workspace")
+            workflow(
+                request,
+                "recreate",
+                title,
+                workspace_target(request["workspace_id"], request["workspace__name"]),
+                [request["child_id"]],
+            )
+        for request in records["deletions"]:
+            items = request["approval"].get("images", [])
+            target = next(
+                (item["name"] for item in items if item["id"] == request["target_id"]),
+                names.get(request["target_id"], "Image"),
+            )
+            workflow(
+                request,
+                "deletion",
+                "Delete image",
+                target,
+                list(request["children"].values())
+                + request["approval"].get("failed_children", []),
+            )
+        for identity, op in operations.items():
+            if identity in grouped:
+                continue
+            state = (
+                "attention"
+                if op["phase"] in ATTENTION_PHASES
+                else "active"
+                if ActivityService.unresolved(op)
+                else "history"
+                if op["phase"] in TERMINAL_PHASES
+                or op["task__status"] in {"failed", "completed"}
+                else "active"
+            )
+            outcome = (
+                "blocked"
+                if state == "attention"
+                else "recovering"
+                if ActivityService.unresolved(op)
+                else "resolved"
+                if op["phase"] == "disposed"
+                else op["task__status"]
+                if state == "history"
+                else "in_progress"
+            )
+            title = OPERATION_TITLES.get(op["task__type"], "Workspace operation")
+            activities.append(
+                RunnerActivityOut(
+                    id=identity,
+                    kind="operation",
+                    title=title,
+                    target_name=workspace_target(
+                        op["task__workspace_id"], op["task__workspace__name"]
+                    )
+                    if op["task__workspace_id"]
+                    else names.get(op["target"], "Image"),
+                    state=state,
+                    outcome=outcome,
+                    summary=ActivityService.summary(title, state, outcome, op["phase"]),
+                    diagnostic=op["task__error"],
+                    operation_ids=[identity] if ActivityService.unresolved(op) else [],
+                    created_at=op["created_at"],
+                )
+            )
+        return sorted(
+            activities, key=lambda activity: activity.created_at, reverse=True
+        )
+
+    @staticmethod
+    def unresolved(operation: dict) -> bool:
+        """An interrupted attempt stays active until automatic proof closes it."""
+        return operation["phase"] != "disposed" and (
+            operation["phase"] in RECOVERY_PHASES | ATTENTION_PHASES
+            or (
+                operation["task__status"] == "failed"
+                and operation["task__workspace__current_task_id"]
+                == operation["task_id"]
+            )
+        )
+
+    @staticmethod
+    def summary(title: str, state: str, outcome: str, phase: str) -> str:
+        """Explain the next decision without exposing transport or locking terms."""
+        if phase == "reconfirmation_required":
+            return "Dependencies changed. Review the deletion before continuing."
+        if phase == "attention_required":
+            return (
+                "Storage or resource records need administrator repair. "
+                "See details; OpenCuria will check again automatically."
+            )
+        if outcome == "recovering":
+            return (
+                "OpenCuria is checking the interrupted operation automatically. "
+                "Recovery continues when the runner is connected and can verify "
+                "its resources."
+            )
+        if state == "attention":
+            return (
+                f"{title} could not be confirmed. "
+                "Check the current status before making further changes."
+            )
+        if outcome == "resolved":
+            return "Interrupted operation closed. Existing resources were kept."
+        if outcome == "failed":
+            return f"{title} failed. This operation is no longer blocking changes."
+        if outcome == "cancelled":
+            return "Cancelled. Existing resources were kept."
+        if state == "history":
+            return f"{title} completed."
+        if phase.startswith("waiting"):
+            return "Waiting for the runner or dependent resources."
+        return f"{title} is in progress."

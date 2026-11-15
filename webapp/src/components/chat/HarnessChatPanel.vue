@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
+import { pinHarnessPartDetailKey, requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 import { useRoute, useRouter } from 'vue-router'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
-import { onEvent, subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
-import type { HarnessSessionMode } from '@/types/harness'
-import type { MentionCandidate } from '@/lib/harnessMentions'
+import { onEvent, onReconnect, subscribeToWorkspace } from '@/services/socket'
+import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
+import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 import {
   buildComposerSheets,
   type ContextSheetState,
   type NoticeSheetState,
-} from '@/lib/composerSheets'
+} from '@opencuria/chat-core/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
-import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
+import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
+import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
@@ -32,6 +34,12 @@ const emit = defineEmits<{
 provide(harnessWorkspaceIdKey, toRef(props, 'workspaceId'))
 
 const harness = useHarnessStore()
+provide(requestHarnessPartDetailKey, (sessionId, partId) =>
+  harness.fetchPartDetail(sessionId, partId),
+)
+provide(pinHarnessPartDetailKey, (sessionId, partId, pinned) =>
+  harness.pinPartDetail(sessionId, partId, pinned),
+)
 const route = useRoute()
 const router = useRouter()
 const fileExplorer = useFileExplorerStore()
@@ -41,15 +49,33 @@ const sending = ref(false)
 const resolving = ref(false)
 const answeringQuestion = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
+const composerHarnessId = ref<HarnessId>('native')
 
 const activeSession = computed(() => harness.activeSession)
-const streamingSessionId = computed(() =>
-  activeSession.value?.status === 'busy' ? activeSession.value.id : null,
-)
+/**
+ * Deterministic per-turn streaming anchor: the running (not completed)
+ * assistant of the busy session. The container matches by message id so
+ * the cursor/Thinking render only on the fresh turn — never on the
+ * previous answer.
+ */
+const streamingMessageId = computed(() => {
+  if (activeSession.value?.status !== 'busy') return null
+  const messages = harness.activeMessages
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (
+      message?.role === 'assistant' &&
+      message.completed_at == null &&
+      message.session_id === activeSession.value.id
+    ) {
+      return message.id
+    }
+  }
+  return null
+})
 
-const childSessionIds = computed<Record<string, string>>(() =>
-  buildChildSessionIdMap(harness.sessions, harness.messagesBySession),
-)
+/** Skeleton only for the true initial workspace load (never over chat). */
+const chatLoading = computed(() => harness.loading && harness.activeMessages.length === 0)
 
 const activeRequests = computed(() => harness.activePermissionRequests)
 const activeQuestions = computed(() => harness.activeQuestionRequests)
@@ -62,13 +88,11 @@ const mentionCandidates = ref<MentionCandidate[]>([])
 const contextOpen = ref(false)
 const contextMetrics = ref<Pick<ContextSheetState, 'used' | 'limit' | 'percent'> | null>(null)
 
-const contextUsed = computed(
-  () => resolveSessionUsedTokens(harness.activeMessages).used,
-)
+const contextUsage = computed(() => resolveSessionUsedTokens(harness.activeMessages))
 
 const contextSheet = computed<ContextSheetState | null>(() => {
   if (!contextMetrics.value) return null
-  const breakdown = resolveSessionUsedTokens(harness.activeMessages)
+  const breakdown = contextUsage.value
   return {
     ...contextMetrics.value,
     promptTokens: breakdown.promptTokens,
@@ -78,15 +102,26 @@ const contextSheet = computed<ContextSheetState | null>(() => {
 
 const activeNotice = computed<NoticeSheetState | null>(() => {
   const messages = harness.activeMessages
+  // Instant auto-clear: only errors *after* the last user message count.
+  // The backend additionally dismisses priors on send (incl. edit rerun).
+  let lastUserIndex = -1
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') {
+      lastUserIndex = i
+      break
+    }
+  }
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
     if (message?.role !== 'assistant' || !message.error) continue
+    if (i < lastUserIndex) break
+    if (message.notice_dismissed_at) continue
     if (harness.dismissedNoticeIds[message.id]) continue
-    const aborted = message.finish === 'aborted'
+    const stoppedByUser = message.finish === 'aborted' && message.error === 'aborted by user'
     return {
       messageId: message.id,
-      text: aborted ? 'Run stopped by user' : message.error,
-      tone: aborted ? 'info' : 'error',
+      text: stoppedByUser ? 'Run stopped by user' : message.error,
+      tone: stoppedByUser ? 'info' : 'error',
     }
   }
   return null
@@ -100,6 +135,7 @@ const composerSheets = computed(() =>
         : null,
     questions: activeQuestions.value,
     permissions: activeRequests.value,
+    queue: harness.activeQueuedSteers,
     notice: activeNotice.value,
     todos: harness.activeTodos,
     processesOpen: Boolean(props.processesOpen),
@@ -108,7 +144,109 @@ const composerSheets = computed(() =>
   }),
 )
 
-const chatInputRef = ref<{ chooseMention: (candidate: MentionCandidate) => void } | null>(null)
+const chatInputRef = ref<{
+  chooseMention: (candidate: MentionCandidate) => void
+  setPrompt: (
+    text: string,
+    options?: { append?: boolean; focus?: boolean; skillIds?: string[] },
+  ) => void
+  uploadChatFiles: (files: File[] | FileList) => Promise<void>
+} | null>(null)
+
+/**
+ * Chat-wide drop zone: files dropped anywhere over history + composer
+ * upload into `/workspace/.opencuria/user-uploaded` and insert an `@file:`
+ * token. Subtle composer highlight only (no overlay). Ignored while the
+ * workspace is not ready for prompts (`inputDisabled`); a running session
+ * still accepts uploads because its composer steers the run.
+ */
+const chatDragCounter = ref(0)
+const chatDragActive = ref(false)
+const uploadDragState = computed(() => ({
+  active: chatDragActive.value,
+  uploading: false,
+}))
+
+const dropEnabled = computed(() => !inputDisabled.value && !isSubagentSession.value)
+
+function resetChatDrag(): void {
+  chatDragCounter.value = 0
+  chatDragActive.value = false
+}
+
+function onChatDragEnter(event: DragEvent): void {
+  if (!dropEnabled.value || !isFileDrag(event)) return
+  event.preventDefault()
+  chatDragCounter.value += 1
+  chatDragActive.value = true
+}
+
+function onChatDragLeave(event: DragEvent): void {
+  if (!chatDragActive.value) return
+  event.preventDefault()
+  chatDragCounter.value -= 1
+  if (chatDragCounter.value <= 0) resetChatDrag()
+}
+
+function onChatDragOver(event: DragEvent): void {
+  if (!dropEnabled.value || !isFileDrag(event)) return
+  event.preventDefault()
+}
+
+function onChatDrop(event: DragEvent): void {
+  // The composer card handles its own drops and stops propagation; if the
+  // event still reaches us marked as handled, ignore it to avoid a second
+  // upload of the same files (double `@file:` reference).
+  if (event.defaultPrevented) return
+  const wasActive = chatDragActive.value
+  resetChatDrag()
+  if (!dropEnabled.value) return
+  // Only handle drops that started inside this panel (prevents double
+  // uploads when nested composer handlers also match).
+  if (!wasActive && !isFileDrag(event)) return
+  event.preventDefault()
+  const files = getDroppedFiles(event)
+  if (files.length === 0) return
+  void chatInputRef.value?.uploadChatFiles(files)
+}
+
+/** Composer section container, used to locate the FLIP morph anchor card. */
+const composerMorphEl = ref<HTMLElement | null>(null)
+/** True while the home → chat entrance animation plays. */
+const entering = ref(false)
+
+/**
+ * FLIP-morph the composer from its armed home position (centered, narrower)
+ * to the natural chat position (bottom, full width). Runs synchronously in
+ * onMounted so the first paint already shows the transformed start state.
+ */
+function startComposerMorph(): void {
+  const from = consumeComposerTransition()
+  if (!from) return
+  const card = composerMorphEl.value?.querySelector<HTMLElement>('[data-testid="composer-card"]')
+  if (!card) return
+  const target = card.getBoundingClientRect()
+  const dx = from.left - target.left
+  const dy = from.top - target.top
+  const dw = from.width - target.width
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(dw) < 1) return
+  entering.value = true
+  const easing = 'cubic-bezier(0.22, 0.61, 0.21, 1)'
+  card.style.transition = 'none'
+  card.style.transform = `translate(${dx}px, ${dy}px)`
+  card.style.width = `${from.width}px`
+  // Force reflow so the start state is applied before the transition begins.
+  void card.offsetWidth
+  requestAnimationFrame(() => {
+    card.style.transition = `transform ${COMPOSER_MORPH_MS}ms ${easing}, width ${COMPOSER_MORPH_MS}ms ${easing}`
+    card.style.transform = ''
+    card.style.width = ''
+    window.setTimeout(() => {
+      card.style.transition = ''
+      entering.value = false
+    }, COMPOSER_MORPH_MS + 60)
+  })
+}
 
 function handleMentionMirror(
   open: boolean,
@@ -143,7 +281,7 @@ function handleCloseProcesses(): void {
 }
 
 function handleDismissNotice(messageId: string): void {
-  harness.dismissNotice(messageId)
+  void harness.dismissNotice(messageId)
 }
 
 function handleContextMetrics(
@@ -154,21 +292,51 @@ function handleContextMetrics(
 
 const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id))
 
-const inputDisabled = computed(() => !props.canPrompt || activeSession.value?.status === 'busy')
+/** No message edit/fork without prompt access or inside a subagent session. */
+const messageActionsDisabled = computed(() => !props.canPrompt || isSubagentSession.value)
+/** A running session hides fork; edit stays available and stops the run first. */
+const sessionBusy = computed(() => activeSession.value?.status === 'busy')
+const stopping = computed(() =>
+  Boolean(harness.activeSessionId && harness.stoppingSessionIds.includes(harness.activeSessionId)),
+)
+
+/** A running session keeps its composer: new messages steer the run. */
+const inputDisabled = computed(() => !props.canPrompt)
 const inputStoppable = computed(() =>
   Boolean(props.canPrompt && activeSession.value?.status === 'busy'),
 )
-const busyMessage = computed(() => {
-  if (!props.canPrompt) return 'Workspace is not ready for prompts.'
-  if (activeSession.value?.status === 'busy')
-    return 'Agent is running — stop or wait to send another message.'
-  return undefined
-})
+const busyMessage = computed(() =>
+  props.canPrompt ? undefined : 'Workspace is not ready for prompts.',
+)
 
 const cleanupFns: Array<() => void> = []
 
+function reconcileActiveSession(): void {
+  const sessionId = harness.activeSessionId
+  if (!sessionId) return
+  void harness.fetchSessions(props.workspaceId).then(() => {
+    if (harness.activeSessionId !== sessionId) return
+    const latest = harness.sessions.find((item) => item.id === sessionId)
+    if (latest) {
+      harness.handleSessionStatus(sessionId, latest.status)
+      refreshSessionDetails(sessionId)
+    }
+  })
+}
+
+function refreshSessionDetails(sessionId: string): void {
+  void harness.fetchParts(sessionId)
+  void harness.fetchTodos(sessionId)
+  // Pending permission/question state is authoritative in parts responses.
+}
+
 function setupSocketListeners(): void {
-  subscribeToWorkspace(props.workspaceId)
+  cleanupFns.push(subscribeToWorkspace(props.workspaceId))
+  cleanupFns.push(
+    onReconnect(() => {
+      reconcileActiveSession()
+    }),
+  )
 
   cleanupFns.push(
     onEvent('harness.part_updated', (data) => {
@@ -176,8 +344,10 @@ function setupSocketListeners(): void {
         harness.handlePartUpdated(data.session_id, data.delta, {
           step: data.step,
           partId: data.part_id,
+          partPosition: data.part_position,
+          messageId: data.message_id,
         })
-        if (data.delta?.patch || data.delta?.compaction) {
+        if (data.delta?.compaction) {
           void harness.fetchParts(data.session_id)
         }
       }
@@ -193,6 +363,14 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onEvent('harness.steer_queue', (data) => {
+      if (data.workspace_id === props.workspaceId) {
+        harness.handleSteerQueue(data.session_id, data.steers)
+      }
+    }),
+  )
+
+  cleanupFns.push(
     onEvent('harness.subtask_started', (data) => {
       if (data.workspace_id === props.workspaceId) {
         harness.handleSubtaskStarted(data.session_id, {
@@ -200,11 +378,17 @@ function setupSocketListeners(): void {
           agent: data.agent,
           description: data.description,
           part_id: data.part_id,
+          part_position: data.part_position,
           child_session_id: data.child_session_id,
           model: data.model,
           reasoning_effort: data.reasoning_effort,
+          message_id: data.message_id,
         })
         if (data.child_session_id) {
+          // Same-workspace refresh must not flash the skeleton over the
+          // parent chat: `fetchSessions` only sets `loading` on the true
+          // initial load (store-level guard), and the container hides the
+          // skeleton while messages exist.
           void harness.fetchSessions(props.workspaceId)
           void harness.fetchParts(data.child_session_id)
         }
@@ -221,6 +405,7 @@ function setupSocketListeners(): void {
           status: data.status,
           summary: data.summary,
           child_session_id: data.child_session_id,
+          message_id: data.message_id,
         })
       }
     }),
@@ -232,11 +417,26 @@ function setupSocketListeners(): void {
         harness.handleSessionStatus(data.session_id, data.status, {
           model: data.model,
           reasoning_effort: data.reasoning_effort,
+          message_id: data.message_id,
+          user_message_id: data.user_message_id,
         })
+        if (data.status === 'busy' && data.user_message_id) {
+          // A run opened by the server (queued steer follow-up) brings a user
+          // message this client has not loaded yet.
+          void harness.ensureUserTurnLoaded(data.session_id, data.user_message_id)
+        }
         if (data.status === 'idle') {
-          void harness.fetchParts(data.session_id)
+          void harness.refreshPartsAfterIdle(data.session_id)
           void harness.fetchTodos(data.session_id)
         }
+      }
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('harness.session_summary', (data) => {
+      if (data.workspace_id === props.workspaceId) {
+        harness.handleSessionSummary(data.session_id, data.summary)
       }
     }),
   )
@@ -286,15 +486,17 @@ function setupSocketListeners(): void {
 }
 
 function cleanupSocket(): void {
-  unsubscribeFromWorkspace(props.workspaceId)
   for (const fn of cleanupFns.splice(0)) fn()
 }
 
 onMounted(() => {
+  startComposerMorph()
   setupSocketListeners()
   void harness.fetchSessions(props.workspaceId).then(() => {
     applySessionQuery()
-    harness.setViewingSession(harness.activeSessionId)
+    const sessionId = harness.activeSessionId
+    if (sessionId) syncSessionComposer(sessionId)
+    harness.setViewingSession(sessionId)
   })
   void skillStore.fetchSkills()
 })
@@ -312,7 +514,9 @@ watch(
     setupSocketListeners()
     void harness.fetchSessions(next).then(() => {
       applySessionQuery()
-      harness.setViewingSession(harness.activeSessionId)
+      const sessionId = harness.activeSessionId
+      if (sessionId) syncSessionComposer(sessionId)
+      harness.setViewingSession(sessionId)
     })
   },
 )
@@ -342,27 +546,71 @@ function syncSessionQuery(sessionId: string | null): void {
 
 watch(
   () => route.query.session,
-  () => {
+  async (sessionId, _previous, onCleanup) => {
+    if (typeof sessionId !== 'string' || !sessionId) return
+    let cancelled = false
+    onCleanup(() => {
+      cancelled = true
+    })
+    const workspaceId = props.workspaceId
+    // Sidebar conversations can be newer than this workspace's session list.
+    if (!harness.sessions.some((session) => session.id === sessionId)) {
+      await harness.fetchSessions(workspaceId)
+    }
+    if (cancelled || props.workspaceId !== workspaceId) return
     applySessionQuery()
   },
   { immediate: true },
 )
 
+function syncSessionComposer(sessionId: string): void {
+  const session = harness.sessions.find((item) => item.id === sessionId)
+  if (!session) return
+  composerMode.value = session.mode
+  const harnessId = session.harness_id ?? 'native'
+  composerHarnessId.value = harnessId
+  harness.loadSessionIntoComposer(session.model, session.reasoning_effort ?? '')
+}
+
+function handleActiveSessionChanged(sessionId: string | null): void {
+  harness.setViewingSession(sessionId)
+  syncSessionQuery(sessionId)
+  if (!sessionId) {
+    composerMode.value = 'build'
+    composerHarnessId.value = 'native'
+    harness.loadSessionIntoComposer('', '')
+    return
+  }
+  void harness.fetchParts(sessionId)
+  void harness.fetchTodos(sessionId)
+  syncSessionComposer(sessionId)
+}
+
+watch(() => harness.activeSessionId, handleActiveSessionChanged, { immediate: true })
+
 watch(
-  () => harness.activeSessionId,
-  (sessionId) => {
-    harness.setViewingSession(sessionId)
-    syncSessionQuery(sessionId)
-    if (!sessionId) {
-      composerMode.value = 'build'
-      return
-    }
-    void harness.fetchParts(sessionId)
-    void harness.fetchTodos(sessionId)
-    const session = harness.sessions.find((item) => item.id === sessionId)
-    if (session) composerMode.value = session.mode
+  () => {
+    const session = harness.sessions.find((item) => item.id === harness.activeSessionId)
+    return session
+      ? [
+          session.id,
+          session.harness_id ?? 'native',
+          session.mode,
+          session.model,
+          session.reasoning_effort,
+        ]
+      : [harness.activeSessionId, '', '', '', '']
   },
-  { immediate: true },
+  ([sessionId]) => {
+    if (sessionId) syncSessionComposer(sessionId)
+  },
+)
+
+watch(
+  () => harness.activeSession?.status,
+  (status) => {
+    if (status && harness.activeSessionId) syncSessionComposer(harness.activeSessionId)
+  },
 )
 
 watch(composerMode, async (mode, prev) => {
@@ -378,19 +626,35 @@ async function handleSend(
   model: string,
   skillIds: string[],
   effort: string,
+  harnessId: HarnessId = composerHarnessId.value,
 ): Promise<void> {
-  if (isSubagentSession.value) return
+  if (!props.canPrompt || isSubagentSession.value) return
   sending.value = true
   try {
-    if (!harness.activeSessionId) {
-      await harness.createSession(props.workspaceId, prompt, mode, model, skillIds, effort)
-    } else {
-      await harness.sendMessage(harness.activeSessionId, prompt, {
+    const workspaceId = props.workspaceId
+    const sessionId = harness.activeSessionId
+    const options = { mode, model, skillIds, reasoningEffort: effort }
+    let accepted: boolean
+    if (!sessionId) {
+      const session = await harness.createSession(
+        workspaceId,
+        prompt,
         mode,
         model,
         skillIds,
-        reasoningEffort: effort,
-      })
+        effort,
+        harnessId,
+      )
+      accepted = session !== null
+    } else if (activeSession.value?.status === 'busy') {
+      accepted = await harness.steerSession(sessionId, prompt, options)
+    } else {
+      accepted = await harness.sendMessage(sessionId, prompt, options)
+    }
+    // The composer already cleared itself; give the draft back on failure
+    // unless the user moved on to another chat meanwhile.
+    if (!accepted && harness.activeSessionId === sessionId && props.workspaceId === workspaceId) {
+      chatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
     }
   } finally {
     sending.value = false
@@ -398,8 +662,22 @@ async function handleSend(
 }
 
 async function handleStop(): Promise<void> {
-  if (!harness.activeSessionId) return
-  await harness.abortSession(harness.activeSessionId)
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  const restored = await harness.abortSession(sessionId)
+  // Stopping drops the queue server-side: put the unsent messages back.
+  if (restored?.length && harness.activeSessionId === sessionId && !isSubagentSession.value) {
+    chatInputRef.value?.setPrompt(restored.join('\n\n'), { append: true })
+  }
+}
+
+async function handleWithdrawSteer(steerId: string): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  const text = await harness.withdrawSteer(sessionId, steerId)
+  if (text && harness.activeSessionId === sessionId) {
+    chatInputRef.value?.setPrompt(text, { append: true, focus: true })
+  }
 }
 
 async function handleResolve(
@@ -407,7 +685,7 @@ async function handleResolve(
   response: 'once' | 'always' | 'reject',
 ): Promise<void> {
   const request = activeRequests.value.find((item) => item.request_id === requestId)
-  if (!request) return
+  if (!props.canPrompt || !request) return
   resolving.value = true
   try {
     await harness.resolvePermission(request.session_id, request.request_id, response)
@@ -418,7 +696,7 @@ async function handleResolve(
 
 async function handleQuestionSubmit(requestId: string, answers: string[]): Promise<void> {
   const request = activeQuestions.value.find((item) => item.request_id === requestId)
-  if (!request) return
+  if (!props.canPrompt || !request) return
   answeringQuestion.value = true
   try {
     await harness.resolveQuestion(request.session_id, request.request_id, answers)
@@ -429,7 +707,7 @@ async function handleQuestionSubmit(requestId: string, answers: string[]): Promi
 
 async function handleQuestionSkip(requestId: string): Promise<void> {
   const request = activeQuestions.value.find((item) => item.request_id === requestId)
-  if (!request) return
+  if (!props.canPrompt || !request) return
   answeringQuestion.value = true
   try {
     await harness.resolveQuestion(request.session_id, request.request_id, [], true)
@@ -444,27 +722,73 @@ function handleOpenSubtask(childSessionId: string): void {
     void harness.fetchSessions(props.workspaceId)
   }
 }
+
+/**
+ * Rerun from an edited user message. A running session is stopped first (the
+ * edit card already confirmed discarding it); like Stop, unsent queued steers
+ * go back to the composer.
+ */
+async function handleEditMessage(
+  messageId: string,
+  text: string,
+  selection?: { model: string; effort: string },
+): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId || isSubagentSession.value) return
+  if (sessionBusy.value) {
+    const restored = await harness.abortSession(sessionId)
+    // A failed stop is already reported; never rerun over a live run.
+    if (harness.activeSessionId !== sessionId || sessionBusy.value) return
+    if (restored.length) chatInputRef.value?.setPrompt(restored.join('\n\n'), { append: true })
+  }
+  await harness.editMessage(sessionId, messageId, text, {
+    model: selection?.model,
+    reasoningEffort: selection?.effort,
+  })
+}
+
+/** Fork after an answer and open the new chat with an empty composer. */
+async function handleForkMessage(messageId: string): Promise<void> {
+  if (!props.canPrompt || !harness.activeSessionId || isSubagentSession.value) return
+  const result = await harness.forkSession(harness.activeSessionId, messageId)
+  if (!result) return
+  chatInputRef.value?.setPrompt('')
+}
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 w-full flex-col overflow-x-hidden">
+  <div
+    class="flex h-full min-h-0 w-full flex-col overflow-x-hidden"
+    data-testid="harness-chat-dropzone"
+    @dragenter="onChatDragEnter"
+    @dragleave="onChatDragLeave"
+    @dragover="onChatDragOver"
+    @drop="onChatDrop"
+  >
     <HarnessChatContainer
+      :key="harness.activeSessionId ?? 'new-session'"
       :messages="harness.activeMessages"
-      :loading="harness.loading"
-      :streaming-session-id="streamingSessionId"
-      :child-session-ids="childSessionIds"
+      :loading="chatLoading"
+      :streaming-message-id="streamingMessageId"
+      :summary="activeSession?.status === 'idle' ? activeSession.summary : ''"
+      :disabled="messageActionsDisabled"
+      :busy="sessionBusy"
       class="min-h-0 flex-1"
+      :class="entering ? 'chat-content-enter' : ''"
       @open-subtask="handleOpenSubtask"
+      @edit="handleEditMessage"
+      @fork="handleForkMessage"
     />
     <div
       v-if="!isSubagentSession"
+      ref="composerMorphEl"
       class="relative z-10 flex min-w-0 shrink-0 overflow-x-hidden"
     >
       <div class="flex min-w-0 flex-1 flex-col">
         <HarnessSheetStack
           :sheets="composerSheets"
-          :question-submitting="answeringQuestion"
-          :permission-resolving="resolving"
+          :question-submitting="answeringQuestion || !canPrompt"
+          :permission-resolving="resolving || !canPrompt"
           @mention-select="handleMentionSelect"
           @mention-hover="handleMentionHover"
           @question-submit="handleQuestionSubmit"
@@ -473,6 +797,7 @@ function handleOpenSubtask(childSessionId: string): void {
           @close-context="handleCloseContext"
           @close-processes="handleCloseProcesses"
           @dismiss-notice="handleDismissNotice"
+          @withdraw-steer="handleWithdrawSteer"
         />
         <HarnessChatInput
           ref="chatInputRef"
@@ -481,21 +806,29 @@ function handleOpenSubtask(childSessionId: string): void {
           :disabled="inputDisabled"
           :sending="sending"
           :stoppable="inputStoppable"
+          :stopping="stopping"
           :busy-message="busyMessage"
           :mode="composerMode"
+          :harness-id="composerHarnessId"
+          :engine-locked="Boolean(harness.activeSessionId)"
+          :restore-last-selection="!harness.activeSessionId"
+          :session-model="activeSession?.model"
           :model="harness.modelInput"
           :effort="harness.effortInput"
           :workspace-id="props.workspaceId"
           :session-id="harness.activeSessionId"
           :files="fileExplorer.tree"
           :skill-options="skillStore.skills"
-          :context-used="contextUsed"
+          :context-used="contextUsage.used"
+          :context-limit="contextUsage.limit"
           :context-open="contextOpen"
+          :upload-drag="uploadDragState"
           mention-controlled
           :mention-active-index="mentionActiveIndex"
           @update:mode="composerMode = $event"
-          @update:model="harness.modelInput = $event"
-          @update:effort="harness.effortInput = $event"
+          @update:harness-id="composerHarnessId = $event"
+          @update:model="harness.setComposerModel($event)"
+          @update:effort="harness.setComposerEffort($event)"
           @send="handleSend"
           @stop="handleStop"
           @toggle-context="handleToggleContext"
@@ -507,5 +840,36 @@ function handleOpenSubtask(childSessionId: string): void {
         />
       </div>
     </div>
+    <div
+      v-else-if="inputStoppable"
+      class="relative z-10 flex min-w-0 shrink-0 justify-end overflow-x-hidden"
+    >
+      <HarnessChatInput
+        :stop-only="true"
+        :stoppable="inputStoppable"
+        :stopping="stopping"
+        :disabled="true"
+        @stop="handleStop"
+      />
+    </div>
   </div>
 </template>
+
+<style scoped>
+@media (prefers-reduced-motion: no-preference) {
+  .chat-content-enter {
+    animation: chat-content-in 220ms ease-out 60ms both;
+  }
+}
+
+@keyframes chat-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+</style>

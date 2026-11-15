@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 import {
   computerUseSummary,
   hydrateHarnessPart,
@@ -8,7 +8,7 @@ import {
   resolveToolName,
   toolDisplayLabel,
   truncatePreview,
-} from './toolDisplay'
+} from '@opencuria/chat-core/toolDisplay'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -83,27 +83,40 @@ describe('toolDisplayLabel', () => {
         }),
       ),
     ).toBe('Read a.ts')
+    expect(
+      toolDisplayLabel(
+        makePart({
+          tool: 'websearch',
+          input: { arguments: '{"query":"climate","action":"news"}' },
+        }),
+      ),
+    ).toBe('Search climate · news')
+    expect(
+      toolDisplayLabel(
+        makePart({ tool: 'memory', input: { arguments: '{"operation":"recall"}' } }),
+      ),
+    ).toBe('Memory · recall')
+    expect(
+      toolDisplayLabel(
+        makePart({ tool: 'image_generation', input: { arguments: '{"prompt":"blue bird"}' } }),
+      ),
+    ).toBe('Generate image: blue bird')
+    expect(
+      toolDisplayLabel(
+        makePart({ tool: 'tool_call', input: { arguments: '{"name":"calculator"}' } }),
+      ),
+    ).toBe('Call calculator')
   })
 })
 
 describe('computerUseSummary', () => {
-  it('formats click coordinates and typed text', () => {
-    expect(
-      computerUseSummary(
-        makePart({
-          tool: 'left_click',
-          input: { arguments: '{"x":120,"y":40}' },
-        }),
-      ),
-    ).toBe('Left click (120, 40)')
-    expect(
-      computerUseSummary(
-        makePart({
-          tool: 'type_text',
-          input: { arguments: '{"text":"hello"}' },
-        }),
-      ),
-    ).toBe('Type “hello”')
+  it.each([
+    ['mcp_computer-use_cua_repl_js', {}, 'Computer Use'],
+    ['mcp_computer-use_cua_repl_js_reset', {}, 'Reset Computer Use'],
+    ['mcp_computer-use_cua_repl_js', { title: 'Click Save' }, 'Click Save'],
+    ['mcp_computer-use_cua_repl_js', { title: 'x'.repeat(100) }, 'x'.repeat(80)],
+  ])('summarizes %s from its bounded title', (tool, args, expected) => {
+    expect(computerUseSummary(makePart({ tool, input: { arguments: args } }))).toBe(expected)
   })
 })
 

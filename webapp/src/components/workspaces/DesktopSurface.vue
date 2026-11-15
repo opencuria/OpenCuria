@@ -1,0 +1,561 @@
+<script setup lang="ts">
+/**
+ * DesktopSurface owns the one persistent KasmVNC iframe for a workspace.
+ * The iframe stays at this component's fixed root placement; only that
+ * placement is aligned with the active sidebar/modal viewport. Keeping the
+ * browsing context stationary avoids WebKit/Chrome resetting VNC on moves.
+ * This component also owns session lifecycle, viewer recovery, scaling,
+ * the computer-use input shield and clipboard shortcuts.
+ */
+import { ref, computed, onMounted, onBeforeUnmount, watch, toRef, nextTick } from 'vue'
+import type { CSSProperties } from 'vue'
+import { useDesktopStore } from '@/stores/desktop'
+import { useWorkspaceStore } from '@/stores/workspaces'
+import { useDesktopSession } from '@/composables/useDesktopSession'
+import { bindDesktopClipboard, createDesktopClipboardReader } from '@/lib/desktopClipboard'
+import * as workspacesApi from '@/services/workspaces.api'
+import { getConfig } from '@/services/config'
+
+import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
+import {
+  DESKTOP_CONNECTION_TIMEOUT_MS,
+  buildDesktopViewerUrl,
+  workspaceDesktopSize,
+  createDesktopReconnectBackoff,
+  createPausableTimer,
+  parseDesktopConnectionStatus,
+} from '@opencuria/chat-core/desktopSurface'
+import { isTrustedDesktopMessage } from '@/lib/desktopSurfaceRecovery'
+import { Button } from '@/components/ui/button'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import { registerPointingDesktop } from '@/lib/voicePointing'
+
+const props = defineProps<{ workspaceId: string }>()
+
+const desktopStore = useDesktopStore()
+const workspaceStore = useWorkspaceStore()
+const {
+  clipboardBusy,
+  startDesktop,
+  handleReconnect,
+  stopDesktopIfActive,
+  copyFromVmClipboard,
+  copySelectionDuringGesture,
+  pasteToVmClipboard,
+  setupSocketListeners,
+  cleanupSocketListeners,
+} = useDesktopSession(toRef(props, 'workspaceId'))
+
+const surfaceRef = ref<HTMLElement | null>(null)
+const desktopIframeRef = ref<HTMLIFrameElement | null>(null)
+const inputShieldRef = ref<HTMLElement | null>(null)
+let unregisterPointingDesktop = registerPointingDesktop(
+  props.workspaceId,
+  () => desktopIframeRef.value,
+)
+const viewportWidth = ref(0)
+const viewportHeight = ref(0)
+const iframeLoaded = ref(false)
+const viewerStatus = ref<'connecting' | 'connected' | 'disconnected'>('connecting')
+const recoveryError = ref(false)
+const surfaceStyle = ref<CSSProperties>({
+  position: 'fixed',
+  left: '-10000px',
+  top: '0',
+  width: '1px',
+  height: '1px',
+  zIndex: 'var(--z-desktop-surface)',
+  visibility: 'hidden',
+  pointerEvents: 'none',
+})
+let hostResizeObserver: ResizeObserver | null = null
+let iframeKeydownCleanup: (() => void) | null = null
+let iframeErrorCleanup: (() => void) | null = null
+let iframeConnectionCleanup: (() => void) | null = null
+let disposed = false
+let recoveryPending = false
+const clipboardReader = createDesktopClipboardReader(
+  async () => (await workspacesApi.readDesktopClipboard(props.workspaceId)).text,
+)
+
+const desktopSize = computed(() => {
+  const workspace =
+    workspaceStore.workspaces.find((entry) => entry.id === props.workspaceId) ??
+    (workspaceStore.activeWorkspace?.id === props.workspaceId
+      ? workspaceStore.activeWorkspace
+      : null)
+  return workspaceDesktopSize(workspace)
+})
+
+const viewportScale = computed(() => {
+  if (viewportWidth.value <= 0 || viewportHeight.value <= 0) return 1
+  const fitScale = Math.min(
+    viewportWidth.value / Math.max(desktopSize.value.width, 1),
+    viewportHeight.value / Math.max(desktopSize.value.height, 1),
+  )
+  return Math.max(Math.min(fitScale, 1), 0.1)
+})
+
+const scaledFrameStyle = computed<CSSProperties>(() => ({
+  width: `${desktopSize.value.width}px`,
+  height: `${desktopSize.value.height}px`,
+  transform: `scale(${viewportScale.value})`,
+  transformOrigin: 'center center',
+}))
+
+const scaledIframeStyle = computed<CSSProperties>(() => ({
+  width: `${desktopSize.value.width}px`,
+  height: `${desktopSize.value.height}px`,
+}))
+
+const viewerKey = computed(() => `${desktopStore.proxyUrl}:${desktopStore.viewerGeneration}`)
+const viewerSrc = ref('')
+let viewerRequest = 0
+
+/**
+ * Open each viewer with a fresh single-use ticket; access tokens never enter
+ * viewer URLs. Stale answers are dropped when the route or intent moved on.
+ */
+async function loadViewerSrc(): Promise<void> {
+  const request = ++viewerRequest
+  viewerSrc.value = ''
+  const proxyUrl = desktopStore.proxyUrl
+  if (!proxyUrl) return
+  const intent =
+    desktopStore.intentRevision !== null
+      ? {
+          viewer_client_id: desktopStore.viewerClientId,
+          intent_revision: desktopStore.intentRevision,
+        }
+      : undefined
+  try {
+    const { ticket } = await workspacesApi.issueDesktopTicket(props.workspaceId)
+    if (disposed || request !== viewerRequest) return
+    viewerSrc.value = buildDesktopViewerUrl(getConfig().wsBaseUrl || '', proxyUrl, ticket, intent)
+  } catch {
+    if (!disposed && request === viewerRequest) markViewerDisconnected()
+  }
+}
+
+// --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
+
+function clearIframeListeners(): void {
+  iframeKeydownCleanup?.()
+  iframeKeydownCleanup = null
+  iframeErrorCleanup?.()
+  iframeErrorCleanup = null
+  clipboardReader.cancel()
+}
+
+function bindDesktopIframeListeners(): void {
+  clearIframeListeners()
+  const iframe = desktopIframeRef.value
+  const win = iframe?.contentWindow
+  // Cross-origin viewers report state through postMessage, but do not expose
+  // their document or Window event listeners to the parent.
+  if (!iframe || !win || !iframe.contentDocument) return
+  iframeKeydownCleanup = bindDesktopClipboard(iframe, {
+    enabled: () =>
+      desktopStore.isConnected &&
+      viewerStatus.value === 'connected' &&
+      !desktopStore.computerUseActive,
+    blocked: () => desktopStore.computerUseActive || clipboardBusy.value,
+    copy: (context) => {
+      void copyFromVmClipboard({ context, fallback: 'none', loadText: clipboardReader.read })
+    },
+    paste: pasteToVmClipboard,
+    copySelectionDuringGesture,
+  })
+
+  const onFrameError = (event: ErrorEvent) => {
+    // Never log the raw message or URL: either may contain the desktop ticket.
+    // Script basename and coordinates identify parser failures without secrets.
+    let script = '[unknown]'
+    try {
+      const pathname = new URL(event.filename).pathname
+      const match = pathname.match(/\/(?:dist|vendor|core|app)\/([\w.~-]+\.js)$/)
+      if (match) script = match[0].slice(1)
+    } catch {
+      // Inline and blob scripts have no safe vendor pathname.
+    }
+    console.error('Desktop viewer script error', {
+      kind: event.error instanceof SyntaxError ? 'SyntaxError' : 'JavaScriptError',
+      script,
+      line: Number.isFinite(event.lineno) ? event.lineno : 0,
+      column: Number.isFinite(event.colno) ? event.colno : 0,
+    })
+  }
+  win.addEventListener('error', onFrameError)
+  iframeErrorCleanup = () => win.removeEventListener('error', onFrameError)
+}
+
+// --- Fixed placement over the active viewport, without moving the iframe ---
+
+function activeHost(): HTMLElement | null {
+  return desktopStore.isOpen ? modalDesktopHost.value : sidebarDesktopHost.value
+}
+
+function refreshHostBounds(): void {
+  hostResizeObserver?.disconnect()
+  hostResizeObserver = null
+  const host = activeHost()
+  if (!host || !surfaceRef.value) {
+    viewportWidth.value = 0
+    viewportHeight.value = 0
+    surfaceStyle.value = {
+      ...surfaceStyle.value,
+      left: '-10000px',
+      visibility: 'hidden',
+      pointerEvents: 'none',
+    }
+    return
+  }
+
+  const update = () => {
+    if (activeHost() !== host || !surfaceRef.value) return
+    const rect = host.getBoundingClientRect()
+    const style = window.getComputedStyle(host)
+    const intersectsViewport =
+      rect.right > 0 &&
+      rect.bottom > 0 &&
+      rect.left < window.innerWidth &&
+      rect.top < window.innerHeight
+    const visible =
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      intersectsViewport
+    viewportWidth.value = visible ? rect.width : 0
+    viewportHeight.value = visible ? rect.height : 0
+    surfaceStyle.value = {
+      position: 'fixed',
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+      zIndex: 'var(--z-desktop-surface)',
+      visibility: visible ? 'visible' : 'hidden',
+      pointerEvents: visible ? 'auto' : 'none',
+    }
+  }
+
+  update()
+  hostResizeObserver = new ResizeObserver(update)
+  hostResizeObserver.observe(host)
+}
+
+function onViewportChange(): void {
+  refreshHostBounds()
+}
+
+// --- KasmVNC status, recovery and page visibility ---
+
+const connectionTimeout = createPausableTimer(() => {
+  if (readIframeConnection()) {
+    markViewerConnected()
+    return
+  }
+  markViewerDisconnected()
+})
+
+function startConnectionTimeout(): void {
+  if (!connectionTimeout.pending) connectionTimeout.start(DESKTOP_CONNECTION_TIMEOUT_MS)
+  if (document.visibilityState !== 'visible') connectionTimeout.pause()
+}
+
+const reconnectBackoff = createDesktopReconnectBackoff(
+  () => {
+    if (document.visibilityState !== 'visible') return
+    viewerStatus.value = 'connecting'
+    recoveryError.value = false
+    iframeLoaded.value = false
+    void reconnectViewer()
+  },
+  () => {
+    recoveryError.value = true
+  },
+)
+
+async function reconnectViewer(): Promise<void> {
+  if (disposed || recoveryPending) return
+  recoveryPending = true
+  try {
+    // Reconcile the lease/runner epoch before loading another viewer URL.
+    await handleReconnect()
+  } finally {
+    recoveryPending = false
+    if (!disposed && viewerStatus.value !== 'connected') startConnectionTimeout()
+  }
+}
+
+function clearIframeConnectionObserver(): void {
+  iframeConnectionCleanup?.()
+  iframeConnectionCleanup = null
+}
+
+function observeIframeConnection(): void {
+  clearIframeConnectionObserver()
+  const iframe = desktopIframeRef.value
+  try {
+    const root = iframe?.contentDocument?.documentElement
+    if (!iframe || !root) return
+    const observer = new MutationObserver(() => {
+      if (disposed || desktopIframeRef.value !== iframe) return
+      const connected = readIframeConnection()
+      if (connected === true) {
+        if (viewerStatus.value !== 'connected') markViewerConnected()
+      } else if (connected === false && viewerStatus.value === 'connected') markViewerDisconnected()
+    })
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] })
+    iframeConnectionCleanup = () => observer.disconnect()
+  } catch {
+    // Cross-origin viewers still use trusted postMessage and the timeout.
+  }
+}
+
+function markViewerConnected(): void {
+  viewerStatus.value = 'connected'
+  iframeLoaded.value = true
+  recoveryError.value = false
+  connectionTimeout.cancel()
+  reconnectBackoff.reset()
+  bindDesktopIframeListeners()
+}
+
+function markViewerDisconnected(): void {
+  if (!desktopStore.isConnected) return
+  connectionTimeout.cancel()
+  viewerStatus.value = 'disconnected'
+  iframeLoaded.value = false
+  reconnectBackoff.schedule()
+  if (document.visibilityState !== 'visible') reconnectBackoff.pause()
+}
+
+function readIframeConnection(): boolean | null {
+  try {
+    const root = desktopIframeRef.value?.contentDocument?.documentElement
+    return root ? root.classList.contains('noVNC_connected') : null
+  } catch {
+    // An inaccessible document says nothing about the WebSocket's health.
+    return null
+  }
+}
+
+function handleIframeLoad(event: Event): void {
+  if (event.currentTarget !== desktopIframeRef.value) return
+  // The blank placeholder awaiting its ticket is not a viewer load.
+  if (!viewerSrc.value) return
+  bindDesktopIframeListeners()
+  observeIframeConnection()
+  const connected = readIframeConnection()
+  if (connected === true || (connected === null && viewerStatus.value === 'connected')) {
+    markViewerConnected()
+    return
+  }
+  // A document load is not proof of a live KasmVNC websocket.
+  viewerStatus.value = 'connecting'
+  startConnectionTimeout()
+}
+
+function handleWindowMessage(event: MessageEvent): void {
+  const iframe = desktopIframeRef.value
+  if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return
+  const status = parseDesktopConnectionStatus(event.data)
+  if (event.data?.action === 'clipboardrx' && typeof event.data.value === 'string') {
+    clipboardReader.receive(event.data.value)
+    return
+  }
+  if (!status) return
+  if (status === 'connected') markViewerConnected()
+  else if (status === 'disconnected') markViewerDisconnected()
+  else if (viewerStatus.value !== 'connected') {
+    viewerStatus.value = 'connecting'
+    startConnectionTimeout()
+  }
+}
+
+function onVisibilityChange(): void {
+  if (document.visibilityState !== 'visible') {
+    connectionTimeout.pause()
+    reconnectBackoff.pause()
+    return
+  }
+
+  const connected = readIframeConnection()
+  if (connected === true) {
+    // A healthy frame survives backgrounding; do not reload it.
+    markViewerConnected()
+    return
+  }
+  connectionTimeout.resume()
+  reconnectBackoff.resume()
+  if (connected === false && viewerStatus.value === 'connected') markViewerDisconnected()
+}
+
+function retryViewer(): void {
+  connectionTimeout.cancel()
+  recoveryError.value = false
+  viewerStatus.value = 'connecting'
+  iframeLoaded.value = false
+  reconnectBackoff.retryNow()
+  startConnectionTimeout()
+}
+
+onMounted(() => {
+  if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId)
+    desktopStore.reset()
+  setupSocketListeners()
+  if (desktopStore.isOpen) void startDesktop()
+  window.addEventListener('message', handleWindowMessage)
+  window.addEventListener('resize', onViewportChange)
+  window.addEventListener('scroll', onViewportChange, true)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  refreshHostBounds()
+})
+
+onBeforeUnmount(() => {
+  unregisterPointingDesktop()
+  disposed = true
+  clearIframeConnectionObserver()
+  void stopDesktopIfActive(props.workspaceId)
+  cleanupSocketListeners()
+  hostResizeObserver?.disconnect()
+  hostResizeObserver = null
+  clearIframeListeners()
+  connectionTimeout.cancel()
+  reconnectBackoff.reset()
+  window.removeEventListener('message', handleWindowMessage)
+  window.removeEventListener('resize', onViewportChange)
+  window.removeEventListener('scroll', onViewportChange, true)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
+
+watch(
+  () => desktopStore.isOpen,
+  (open) => {
+    refreshHostBounds()
+    if (open) void startDesktop()
+  },
+)
+
+watch(
+  () => props.workspaceId,
+  (workspaceId) => {
+    unregisterPointingDesktop()
+    unregisterPointingDesktop = registerPointingDesktop(workspaceId, () => desktopIframeRef.value)
+  },
+)
+
+watch([sidebarDesktopHost, modalDesktopHost], refreshHostBounds)
+
+watch(
+  () => [viewerKey.value, desktopStore.intentRevision, desktopStore.viewerClientId] as const,
+  () => void loadViewerSrc(),
+  { immediate: true },
+)
+
+watch(
+  () => [desktopStore.proxyUrl, desktopStore.viewerGeneration] as const,
+  async () => {
+    iframeLoaded.value = false
+    viewerStatus.value = 'connecting'
+    connectionTimeout.cancel()
+    clearIframeListeners()
+    clearIframeConnectionObserver()
+    await nextTick()
+    if (desktopIframeRef.value) startConnectionTimeout()
+  },
+)
+
+// While Computer Use drives the desktop, keys typed into a focused viewer
+// would still reach it: move focus onto the read-only shield.
+watch(
+  inputShieldRef,
+  (shield) => {
+    if (shield && document.activeElement === desktopIframeRef.value)
+      shield.focus({ preventScroll: true })
+  },
+  { flush: 'post' },
+)
+
+watch(surfaceRef, refreshHostBounds)
+watch(desktopIframeRef, () => {
+  clearIframeListeners()
+  clearIframeConnectionObserver()
+  connectionTimeout.cancel()
+  if (desktopIframeRef.value) startConnectionTimeout()
+})
+</script>
+
+<template>
+  <div
+    v-if="desktopStore.isConnected && desktopStore.proxyUrl"
+    ref="surfaceRef"
+    class="fixed overflow-hidden"
+    :style="surfaceStyle"
+    data-testid="desktop-surface"
+  >
+    <div
+      class="absolute inset-0 flex h-full w-full items-center justify-center overflow-hidden"
+      :class="{ 'p-2': !desktopStore.isOpen }"
+    >
+      <div
+        class="relative shrink-0 overflow-hidden rounded-[var(--radius-xs)] border border-border bg-black shadow-sm"
+        :style="scaledFrameStyle"
+      >
+        <iframe
+          :key="viewerKey"
+          ref="desktopIframeRef"
+          :src="viewerSrc || undefined"
+          title="Desktop"
+          class="block border-0 transition-opacity duration-200"
+          :class="{ 'opacity-0': !iframeLoaded }"
+          :style="scaledIframeStyle"
+          sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
+          allow="clipboard-read; clipboard-write"
+          data-testid="desktop-surface-iframe"
+          :data-voice-desktop="iframeLoaded && viewerStatus === 'connected' ? '' : undefined"
+          :data-voice-workspace="workspaceId"
+          @load="handleIframeLoad"
+        />
+      </div>
+    </div>
+
+    <div
+      v-if="!iframeLoaded"
+      class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-card"
+      data-testid="desktop-surface-loading"
+    >
+      <LoadingSpinner v-if="viewerStatus === 'connecting' && !recoveryError" :size="24" />
+      <span
+        v-if="viewerStatus === 'connecting' && !recoveryError"
+        class="text-sm text-muted-foreground"
+      >
+        Connecting to desktop…
+      </span>
+      <span v-else class="text-center text-sm text-destructive">
+        {{ recoveryError ? 'Desktop connection failed.' : 'Desktop disconnected. Reconnecting…' }}
+      </span>
+      <Button
+        v-if="viewerStatus === 'disconnected' || recoveryError"
+        size="sm"
+        data-testid="desktop-surface-retry"
+        @click="retryViewer"
+      >
+        Retry
+      </Button>
+    </div>
+
+    <!-- Computer Use drives the desktop: fully visible, but read-only. Take
+      control lives in the toolbar (DesktopTakeControl). -->
+    <div
+      v-if="desktopStore.computerUseActive"
+      ref="inputShieldRef"
+      class="absolute inset-0 z-30 cursor-not-allowed outline-none"
+      tabindex="-1"
+      title="Computer Use is in control"
+      data-testid="desktop-surface-input-shield"
+    />
+  </div>
+</template>

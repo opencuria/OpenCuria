@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
+from apps.harness.engines.base import RunOptions
 from apps.harness.max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.providers.base import (
@@ -18,18 +19,17 @@ from apps.harness.providers.base import (
     LLMMessage,
     ProviderAdapter,
     ProviderAuthError,
+    ProviderResponseError,
     ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import (
-    AgentRunner,
-    HarnessRunner,
-    RunOptions,
-)
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.providers.resolver import StaticModelResolver
+from apps.harness.runner import HarnessRunner
+from apps.harness.tests.conftest import TINY_PNG, FakeAccessor
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolResult
+from apps.harness.tools.invocation import AuthorizedToolDispatcher
 
 
 class FakeProvider(ProviderAdapter):
@@ -181,7 +181,7 @@ def _runner(
         events.append(event)
 
     return HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(global_rules=agent_rules),
         accessor=FakeAccessor(files=files or {"/workspace/a.txt": b"hi"}),
@@ -316,20 +316,12 @@ async def test_always_approval_not_cached_as_once() -> None:
 
 async def test_mode_rules_reach_decide_and_schemas() -> None:
     """Mode-specific rules apply via the wired mode layer (happy path)."""
-    events: list[dict[str, Any]] = []
-
-    async def emit(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    provider = FakeProvider([_text_step("planned")])
-    runner = HarnessRunner(
-        provider=provider,
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(
             mode_rules={"plan": {"bash": "deny"}},
         ),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
-        emit=emit,
     )
     from apps.harness.agents.definitions import get_agent
 
@@ -351,11 +343,10 @@ async def test_tool_errors_include_raw_arguments() -> None:
     async def emit(event: dict[str, Any]) -> None:
         events.append(event)
 
-    from apps.harness.runner import _PendingToolCall
     from apps.harness.tools.base import ToolContext
+    from apps.harness.tools.invocation import _PendingToolCall
 
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -385,9 +376,171 @@ async def test_tool_errors_include_raw_arguments() -> None:
         doom_loop=False,
         opts=RunOptions(),
     )
+    assert isinstance(outcome.message.content, str)
     assert "SNIFF-ARGS-123" in outcome.message.content
     errors = [e for e in events if e["type"] == "tool_error"]
     assert errors and "SNIFF-ARGS-123" in errors[0]["error"]
+
+
+async def test_tool_image_attachment_reaches_tool_message() -> None:
+    """Tool image attachments become multimodal tool message content."""
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.tools.base import Tool, ToolContext, ToolResult
+    from apps.harness.tools.invocation import _PendingToolCall
+
+    class ImageArgs(BaseModel):
+        """No arguments for the image probe tool."""
+
+    class ImageTool(Tool):
+        """Test tool returning an image attachment."""
+
+        name = "imageprobe"
+        description = "Returns an image"
+        args_schema = ImageArgs
+
+        async def execute(  # type: ignore[no-untyped-def]
+            self, args: BaseModel | dict[str, object], ctx
+        ) -> ToolResult:
+            return ToolResult(
+                output="Image read successfully",
+                attachments=[
+                    {
+                        "type": "file",
+                        "mime": "image/png",
+                        "url": "data:image/png;base64,AAAA",
+                    }
+                ],
+            )
+
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    registry = default_tool_registry()
+    registry.register(ImageTool())
+    runner = AuthorizedToolDispatcher(
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    ctx = ToolContext(
+        session_id="s",
+        workspace_id="w",
+        accessor=FakeAccessor(files={}),
+    )
+    outcome = await runner._dispatch_tool_call(
+        call=_PendingToolCall(
+            call_id="c-img", name="imageprobe", arguments={}, raw_arguments="{}"
+        ),
+        ctx=ctx,
+        agent=get_agent("build"),
+        mode="build",
+        step=1,
+        depth=0,
+        max_depth=1,
+        doom_loop=False,
+        opts=RunOptions(),
+    )
+    assert isinstance(outcome.message.content, list)
+    assert outcome.message.content[0] == {
+        "type": "text",
+        "text": "Image read successfully",
+    }
+    assert {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,AAAA"},
+    } in outcome.message.content
+    completed = [e for e in events if e["type"] == "tool_completed"]
+    assert completed and completed[0]["attachments"] == [
+        {
+            "type": "file",
+            "mime": "image/png",
+            "url": "data:image/png;base64,AAAA",
+        }
+    ]
+
+
+async def test_tool_pdf_attachment_reaches_model_as_file_part() -> None:
+    """PDF attachments become file parts in tool content (OpenCode parity)."""
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.tools.base import Tool, ToolContext, ToolResult
+    from apps.harness.tools.invocation import _PendingToolCall
+
+    class PdfArgs(BaseModel):
+        """No arguments for the PDF probe tool."""
+
+    class PdfTool(Tool):
+        """Test tool returning a PDF attachment."""
+
+        name = "pdfprobe"
+        description = "Returns a PDF"
+        args_schema = PdfArgs
+
+        async def execute(  # type: ignore[no-untyped-def]
+            self, args: BaseModel | dict[str, object], ctx
+        ) -> ToolResult:
+            return ToolResult(
+                output="PDF read successfully",
+                attachments=[
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    }
+                ],
+            )
+
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    registry = default_tool_registry()
+    registry.register(PdfTool())
+    runner = AuthorizedToolDispatcher(
+        tools=registry,
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    ctx = ToolContext(
+        session_id="s",
+        workspace_id="w",
+        accessor=FakeAccessor(files={}),
+    )
+    outcome = await runner._dispatch_tool_call(
+        call=_PendingToolCall(
+            call_id="c-pdf", name="pdfprobe", arguments={}, raw_arguments="{}"
+        ),
+        ctx=ctx,
+        agent=get_agent("build"),
+        mode="build",
+        step=1,
+        depth=0,
+        max_depth=1,
+        doom_loop=False,
+        opts=RunOptions(),
+    )
+    assert isinstance(outcome.message.content, list)
+    assert {"type": "text", "text": "PDF read successfully"} in (
+        outcome.message.content
+    )
+    assert {
+        "type": "file",
+        "mime": "application/pdf",
+        "url": "data:application/pdf;base64,BBBB",
+        "filename": "doc.pdf",
+    } in outcome.message.content
+    completed = [e for e in events if e["type"] == "tool_completed"]
+    assert completed and completed[0]["attachments"] == [
+        {
+            "type": "file",
+            "mime": "application/pdf",
+            "url": "data:application/pdf;base64,BBBB",
+            "filename": "doc.pdf",
+        }
+    ]
 
 
 async def test_permission_ask_deny_skips_tool() -> None:
@@ -512,8 +665,32 @@ async def test_explore_research_bash_skips_ask() -> None:
     assert any(event["type"] == "tool_completed" for event in events)
 
 
-async def test_external_directory_triggers_ask_gate() -> None:
-    """Bash touching /etc hits the ask gate even when bash allows."""
+async def test_external_directory_bash_allows_without_ask() -> None:
+    """Bash outside /workspace runs without a permission callback."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
+    provider = FakeProvider(
+        [
+            _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
+            _text_step("ok"),
+        ]
+    )
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(
+        provider, events, agent_rules={"bash": "allow"}, on_permission=on_permission
+    )
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.output == "ok"
+    assert called == []
+    assert any(event["type"] == "tool_completed" for event in events)
+
+
+async def test_external_directory_explicit_ask_still_gates() -> None:
+    """An explicit external_directory ask rule still hits the permission gate."""
 
     async def approve(**kwargs):  # type: ignore[no-untyped-def]
         return "once"
@@ -526,15 +703,18 @@ async def test_external_directory_triggers_ask_gate() -> None:
     )
     events: list[dict[str, Any]] = []
     runner, opts = _runner(
-        provider, events, agent_rules={"bash": "allow"}, on_permission=approve
+        provider,
+        events,
+        agent_rules={"bash": "allow", "external_directory": "ask"},
+        on_permission=approve,
     )
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.output == "gated"
     assert any(event["type"] == "tool_completed" for event in events)
 
 
-async def test_external_directory_auto_denies_without_callback() -> None:
-    """Without on_permission the external ask gate denies (failure path)."""
+async def test_external_directory_explicit_ask_denies_without_callback() -> None:
+    """Without on_permission an explicit external ask denies (failure path)."""
     provider = FakeProvider(
         [
             _tool_step("bash", {"command": "cat /etc/passwd"}, call_id="c1"),
@@ -542,11 +722,15 @@ async def test_external_directory_auto_denies_without_callback() -> None:
         ]
     )
     events: list[dict[str, Any]] = []
-    runner, opts = _runner(provider, events, agent_rules={"bash": "allow"})
+    runner, opts = _runner(
+        provider,
+        events,
+        agent_rules={"bash": "allow", "external_directory": "ask"},
+    )
     result = await runner.run("p", "build", "m", "build", opts)
     assert result.output == "skipped"
     errors = [event for event in events if event["type"] == "tool_error"]
-    assert errors and "external directory" in errors[0]["error"]
+    assert errors and "denied by permissions" in errors[0]["error"]
 
 
 async def test_workspace_bash_skips_external_gate() -> None:
@@ -587,7 +771,14 @@ async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:
 
     provider = FakeProvider(
         [
-            _tool_step("bash", {"command": "find /workspace"}),
+            _tool_step(
+                "edit",
+                {
+                    "path": "/workspace/a.py",
+                    "old_string": "a",
+                    "new_string": "b",
+                },
+            ),
             _text_step("ok"),
         ]
     )
@@ -599,7 +790,7 @@ async def test_permission_decision_logs_combined_ask(monkeypatch) -> None:
     pending = [item for item in captured if item[0] == "permission_ask_pending"]
     assert decisions
     assert decisions[0][1]["decision"] == "ask"
-    assert decisions[0][1]["tool"] == "bash"
+    assert decisions[0][1]["tool"] == "edit"
     assert decisions[0][1]["session_id"] == "plan-1"
     assert pending
     assert pending[0][1]["session_id"] == "plan-1"
@@ -625,7 +816,7 @@ async def test_abort_emits_aborted() -> None:
             await asyncio.sleep(30)
 
     slow_runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=slow_emit,
@@ -689,6 +880,30 @@ async def test_steps_budget_forces_text_only_last_step() -> None:
     assert errors[0]["error"] == MAX_STEPS_TOOL_ERROR
 
 
+async def test_unbounded_loop_past_former_default_cap() -> None:
+    """Without a configured budget the loop continues past 100 steps."""
+    extra = 101
+    provider = FakeProvider(
+        [
+            _tool_step(
+                "read",
+                {"path": f"/workspace/f{i}.txt"},
+                call_id=f"c{i}",
+            )
+            for i in range(extra)
+        ]
+        + [_text_step("done after many steps")]
+    )
+    events: list[dict[str, Any]] = []
+    files = {f"/workspace/f{i}.txt": b"x" for i in range(extra)}
+    runner, opts = _runner(provider, events, auto_approve=True, files=files)
+    result = await runner.run("p", "build", "m", "build", opts)
+    assert result.finish_reason == "stop"
+    assert result.steps == extra + 1
+    assert all(call["tool_choice"] is None for call in provider.calls)
+    assert all(call["tools"] for call in provider.calls)
+
+
 async def test_cost_tokens_summed_across_steps() -> None:
     """Usage from every step is summed into the final result."""
     provider = FakeProvider(
@@ -745,7 +960,7 @@ async def test_prompt_workspace_image_hydrated_for_provider() -> None:
     """User prompts with workspace image markdown become multimodal."""
     provider = FakeProvider([_text_step("seen")])
     events: list[dict[str, Any]] = []
-    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 4
+    png_bytes = TINY_PNG
     runner, opts = _runner(
         provider,
         events,
@@ -769,24 +984,41 @@ async def test_prompt_workspace_image_hydrated_for_provider() -> None:
     assert any(part.get("type") == "image_url" for part in last_user.content)
 
 
-async def test_plan_mode_read_only_bash_auto_flows() -> None:
-    """Plan agent allows read-only bash without a permission callback."""
+async def test_plan_mode_bash_and_process_auto_flow() -> None:
+    """Plan agent runs any bash/process without a permission callback."""
+    called: list[dict[str, Any]] = []
+
+    async def on_permission(**kwargs):  # type: ignore[no-untyped-def]
+        called.append(kwargs)
+        return "reject"
+
     provider = FakeProvider(
         [
-            _tool_step("bash", {"command": "git status"}, call_id="c1"),
+            _multi_tool_step(
+                [
+                    ("bash", {"command": "rm -rf /workspace/build"}, "c1"),
+                    (
+                            "process_start",
+                            {
+                                "command": "python -m http.server 8000",
+                                "name": "dev-server",
+                            },
+                            "c2",
+                        ),
+                ]
+            ),
             _text_step("plan ready"),
         ]
     )
     events: list[dict[str, Any]] = []
-    runner, opts = _runner(provider, events)
+    runner, opts = _runner(provider, events, on_permission=on_permission)
     result = await runner.run("scope it", "plan", "m", "plan", opts)
     assert result.output == "plan ready"
+    assert called == []
     assert not any(event["type"] == "permission_required" for event in events)
-
-
-async def test_agent_runner_alias() -> None:
-    """AgentRunner is an alias of HarnessRunner."""
-    assert AgentRunner is HarnessRunner
+    assert (
+        sum(1 for event in events if event["type"] == "tool_completed") == 2
+    )
 
 
 async def test_empty_prompt_rejected() -> None:
@@ -829,7 +1061,7 @@ async def test_parallel_tools_overlap_and_preserve_call_order() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -850,12 +1082,17 @@ async def test_parallel_tools_overlap_and_preserve_call_order() -> None:
     assert tool_ids == ["c1", "c2"]
 
 
-async def test_parallel_tool_failure_does_not_cancel_sibling() -> None:
-    """One failing call still lets the sibling complete."""
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_parallel_tool_failure_does_not_cancel_sibling(cancelled: bool) -> None:
+    """One failing/interrupted call still lets the sibling and run complete."""
     probe = ProbeTool()
     registry = default_tool_registry()
     registry.register(probe)
-    registry.register(BoomTool())
+    class InterruptedTool(BoomTool):
+        async def execute(self, args, ctx):  # type: ignore[no-untyped-def]
+            raise asyncio.CancelledError()
+
+    registry.register(InterruptedTool() if cancelled else BoomTool())
     provider = FakeProvider(
         [
             _multi_tool_step(
@@ -873,7 +1110,7 @@ async def test_parallel_tool_failure_does_not_cancel_sibling() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -884,6 +1121,11 @@ async def test_parallel_tool_failure_does_not_cancel_sibling() -> None:
     release_ok.set()
     result = await run_task
     assert result.output == "recovered"
+    assert not any(event["type"] == "aborted" for event in events)
+    outputs = [message for message in provider.messages[-1] if message.role == "tool"]
+    assert [message.tool_call_id for message in outputs] == ["c1", "c2"]
+    if cancelled:
+        assert "interrupted unexpectedly" in outputs[0].content
     assert any(
         event["type"] == "tool_error" and event.get("call_id") == "c1"
         for event in events
@@ -916,7 +1158,7 @@ async def test_abort_cancels_in_flight_parallel_tools() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -977,7 +1219,7 @@ async def test_send_logs_emitter_errors_without_raising() -> None:
 
     provider = FakeProvider([_text_step("ok")])
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=boom,
     )
@@ -1008,7 +1250,9 @@ class _FlakyTimeoutProvider(FakeProvider):
 
 async def test_transient_timeout_retries_then_succeeds(monkeypatch) -> None:
     """A single timeout is retried and the run completes."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
     provider = _FlakyTimeoutProvider(1, [_text_step("recovered")])
     events: list[dict[str, Any]] = []
     runner, opts = _runner(provider, events)
@@ -1021,7 +1265,9 @@ async def test_transient_timeout_gives_up_after_max_retries(monkeypatch) -> None
     """Six timeouts (1 + 5 retries) surface the original error."""
     from apps.harness.provider_retry import RETRY_MAX_RETRIES
 
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
     provider = _FlakyTimeoutProvider(99, [_text_step("never")])
     events: list[dict[str, Any]] = []
     runner, opts = _runner(provider, events)
@@ -1032,7 +1278,9 @@ async def test_transient_timeout_gives_up_after_max_retries(monkeypatch) -> None
 
 async def test_auth_error_is_not_retried(monkeypatch) -> None:
     """Auth failures fail the step immediately."""
-    monkeypatch.setattr("apps.harness.runner.retry_delay", lambda _attempt: 0)
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
 
     class AuthFailProvider(FakeProvider):
         def __init__(self) -> None:
@@ -1056,3 +1304,406 @@ async def test_auth_error_is_not_retried(monkeypatch) -> None:
     with pytest.raises(ProviderAuthError):
         await runner.run("go", "build", "m", "build", opts)
     assert provider.attempts == 1
+
+
+class _FlakyTransportProvider(FakeProvider):
+    """Fail the first N stream attempts with a retryable transport drop."""
+
+    def __init__(self, failures: int, steps: list[list[Delta]]) -> None:
+        super().__init__(steps)
+        self.failures = failures
+        self.attempts = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts: ChatOptions | None = None,
+    ) -> AsyncIterator[Delta]:
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise ProviderResponseError(
+                "Connection reset by server",
+                provider="fake",
+                is_retryable=True,
+            )
+        async for delta in super().chat_stream(model, messages, tools, opts):
+            yield delta
+
+
+async def test_transient_transport_error_retries_then_succeeds(monkeypatch) -> None:
+    """A single retryable ReadError-style drop is retried and completes."""
+    monkeypatch.setattr(
+        "apps.harness.runner.retry_delay", lambda _attempt, **_kwargs: 0
+    )
+    provider = _FlakyTransportProvider(1, [_text_step("recovered")])
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    result = await runner.run("go", "build", "m", "build", opts)
+    assert result.output == "recovered"
+    assert provider.attempts == 2
+
+
+async def test_retry_delay_receives_provider_error(monkeypatch) -> None:
+    """The runner passes the failed error into retry_delay for Retry-After."""
+    captured: dict[str, object] = {}
+
+    def fake_delay(
+        attempt: int,
+        random_value: float | None = None,
+        error: BaseException | None = None,
+    ) -> float:
+        captured["attempt"] = attempt
+        captured["error"] = error
+        return 0
+
+    monkeypatch.setattr("apps.harness.runner.retry_delay", fake_delay)
+    headers = {"retry-after": "2"}
+    error = ProviderResponseError(
+        "Connection reset by server",
+        provider="fake",
+        is_retryable=True,
+        response_headers=headers,
+    )
+
+    class OnceProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__([_text_step("ok")])
+            self.attempts = 0
+
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self,
+            model: str,
+            messages: list[LLMMessage],
+            tools: list[ToolSchema],
+            opts: ChatOptions | None = None,
+        ) -> AsyncIterator[Delta]:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise error
+            async for delta in super().chat_stream(model, messages, tools, opts):
+                yield delta
+
+    provider = OnceProvider()
+    events: list[dict[str, Any]] = []
+    runner, opts = _runner(provider, events)
+    result = await runner.run("go", "build", "m", "build", opts)
+    assert result.output == "ok"
+    assert captured["attempt"] == 1
+    assert captured["error"] is error
+
+
+async def _provider_calls(
+    step_deltas: list[Delta], *, step: int = 0
+) -> list[Any]:
+    """Run one ``_provider_step`` with canned deltas and return its calls."""
+    provider = FakeProvider([step_deltas])
+    runner, _ = _runner(provider, [])
+    _, calls, _, _ = await runner._provider_step(
+        model="m", messages=[], schemas=[], step=step
+    )
+    return calls
+
+
+async def _provider_step_events(
+    step_deltas: list[Delta], *, step: int = 0
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Run one ``_provider_step`` and return (calls, emitted events)."""
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    provider = FakeProvider([step_deltas])
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+        accessor=FakeAccessor(files={}),
+        emit=emit,
+    )
+    _, calls, _, _ = await runner._provider_step(
+        model="m", messages=[], schemas=[], step=step
+    )
+    return calls, events
+
+
+def _queued(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return tool_queued events in emission order."""
+    return [event for event in events if event.get("type") == "tool_queued"]
+
+
+async def test_provider_step_tool_queued_before_later_text_delta() -> None:
+    """tool_queued fires at observed position, before later text deltas."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(text="before "),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "call-1",
+                        "name": "read",
+                        "arguments": '{"path":"a"}',
+                    },
+                )
+            ),
+            Delta(text="after"),
+        ],
+        step=1,
+    )
+    assert [call.call_id for call in calls] == ["call-1"]
+    kinds = [event["type"] for event in events]
+    assert kinds == ["part_updated", "tool_queued", "part_updated"]
+    queued = _queued(events)[0]
+    assert queued["step"] == 1
+    assert queued["call_id"] == "call-1"
+    assert queued["tool"] == "read"
+    assert queued["arguments"] == '{"path":"a"}'
+    assert queued["title"]
+
+
+async def test_provider_step_text_tool_text_tool_observed_order() -> None:
+    """text/tool/text/tool streams queue tools in observed provider order."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(text="t0 "),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-b",
+                        "id": "call-b",
+                        "name": "read",
+                        "arguments": '{"path":"b"}',
+                    },
+                )
+            ),
+            Delta(text="t1 "),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-a",
+                        "id": "call-a",
+                        "name": "bash",
+                        "arguments": '{"command":"ls"}',
+                    },
+                )
+            ),
+        ],
+        step=2,
+    )
+    assert [(call.call_id, call.name) for call in calls] == [
+        ("call-b", "read"),
+        ("call-a", "bash"),
+    ]
+    queued = _queued(events)
+    assert [event["call_id"] for event in queued] == ["call-b", "call-a"]
+    # Each queued event precedes the next text delta after its position.
+    kinds = [event["type"] for event in events]
+    assert kinds == [
+        "part_updated",
+        "tool_queued",
+        "part_updated",
+        "tool_queued",
+    ]
+
+
+async def test_provider_step_string_keys_keep_observed_order_not_sorted() -> None:
+    """String stream keys never reorder lexicographically (item-10 vs item-2)."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-10",
+                        "id": "call-10",
+                        "name": "read",
+                        "arguments": '{"path":"a"}',
+                    },
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-2",
+                        "id": "call-2",
+                        "name": "read",
+                        "arguments": '{"path":"b"}',
+                    },
+                )
+            ),
+        ],
+        step=3,
+    )
+    assert [call.call_id for call in calls] == ["call-10", "call-2"]
+    assert [event["call_id"] for event in _queued(events)] == ["call-10", "call-2"]
+
+
+async def test_provider_step_numeric_index_order_preserved() -> None:
+    """Numeric provider indexes stream in numeric order (ordered blocks)."""
+    calls, events = await _provider_step_events(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "call-0",
+                        "name": "read",
+                        "arguments": '{"path":"a"}',
+                    },
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 1,
+                        "id": "call-1",
+                        "name": "bash",
+                        "arguments": '{"command":"ls"}',
+                    },
+                )
+            ),
+        ],
+        step=4,
+    )
+    assert [call.call_id for call in calls] == ["call-0", "call-1"]
+    assert [event["call_id"] for event in _queued(events)] == ["call-0", "call-1"]
+
+
+async def test_provider_step_provisional_id_rebound_when_real_id_arrives() -> None:
+    """A slot queued without an id is rebound when the real id arrives later."""
+    part_a = '{"path'
+    part_b = '":"a"}'
+    calls, events = await _provider_step_events(
+        [
+            Delta(
+                tool_calls=(
+                    {"index": 0, "name": "read", "arguments": part_a},
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {"index": 0, "id": "real-1", "arguments": part_b},
+                )
+            ),
+        ],
+        step=5,
+    )
+    assert len(calls) == 1
+    assert calls[0].call_id == "real-1"
+    assert calls[0].arguments == {"path": "a"}
+    queued = _queued(events)
+    assert len(queued) == 1
+    # First fragment had no id: the queued event carries the unique
+    # provisional id; the service rebinds it on tool_started.
+    assert queued[0]["call_id"] == "call-5-0"
+    assert queued[0]["tool"] == "read"
+
+
+async def test_provider_step_queued_ids_stable_without_index_or_id() -> None:
+    """Fragments lacking index/id keep a stable queued id per tool slot."""
+    args_a = '{"path":"a"}'
+    args_b = '{"command":"ls"}'
+    calls, events = await _provider_step_events(
+        [
+            Delta(tool_calls=({"name": "read", "arguments": args_a},)),
+            Delta(tool_calls=({"name": "bash", "arguments": args_b},)),
+        ],
+        step=6,
+    )
+    assert [(call.name) for call in calls] == ["read", "bash"]
+    queued = _queued(events)
+    assert len(queued) == 2
+    assert queued[0]["call_id"] != queued[1]["call_id"]
+    assert [call.call_id for call in calls] == [
+        event["call_id"] for event in queued
+    ]
+
+
+async def test_provider_step_parallel_tools_without_index_split_by_id() -> None:
+    """Two index-less fragments with different ids stay separate."""
+    calls = await _provider_calls(
+        [
+            Delta(
+                tool_calls=(
+                    {"id": "a1", "name": "read", "arguments": '{"path":"a"}'},
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {"id": "b2", "name": "read", "arguments": '{"path":"b"}'},
+                )
+            ),
+        ]
+    )
+    assert [(call.call_id, call.arguments) for call in calls] == [
+        ("a1", {"path": "a"}),
+        ("b2", {"path": "b"}),
+    ]
+
+
+async def test_provider_step_same_index_different_ids_split() -> None:
+    """A reused stream index never glues two call IDs into one string."""
+    calls = await _provider_calls(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "a1",
+                        "name": "read",
+                        "arguments": '{"path":"',
+                    },
+                )
+            ),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "b2",
+                        "name": "read",
+                        "arguments": '{"path":"b"}',
+                    },
+                )
+            ),
+        ]
+    )
+    assert len(calls) == 2
+    assert calls[0].call_id == "a1"
+    assert calls[0].raw_arguments == '{"path":"'
+    assert calls[1].call_id == "b2"
+    assert calls[1].arguments == {"path": "b"}
+
+
+async def test_provider_step_fragmented_args_same_key_concatenated() -> None:
+    """Fragments sharing one stream key concatenate into a single call."""
+    calls = await _provider_calls(
+        [
+            Delta(
+                tool_calls=(
+                    {
+                        "index": 0,
+                        "id": "a1",
+                        "name": "read",
+                        "arguments": '{"path":"a',
+                    },
+                )
+            ),
+            Delta(tool_calls=({"index": 0, "arguments": '.txt"}'},)),
+            Delta(
+                tool_calls=(
+                    {
+                        "index": "item-y",
+                        "id": "b2",
+                        "name": "read",
+                        "arguments": '{"path":"y"}',
+                    },
+                )
+            ),
+        ]
+    )
+    assert len(calls) == 2
+    assert calls[0].call_id == "a1"
+    assert calls[0].arguments == {"path": "a.txt"}
+    assert calls[1].call_id == "b2"
+    assert calls[1].arguments == {"path": "y"}

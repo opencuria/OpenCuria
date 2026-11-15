@@ -6,21 +6,32 @@ All business logic related to credential management lives here.
 
 from __future__ import annotations
 
-import logging
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+import structlog
 from django.utils.text import slugify
 
+from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
-from .enums import CredentialType
+from .deletion_guards import collect_deletion_blockers
+from .enums import SERVER_SIDE_CREDENTIAL_TYPES, CredentialType
+from .models import Credential, CredentialService
+from .oauth_errors import OAuthError
+from .oauth_grant_service import OAuthGrantService
+from .oauth_metadata import (
+    registration_fingerprint,
+    registration_metadata_safe,
+    validate_oauth_server_url,
+)
 from .repositories import CredentialRepository, CredentialServiceRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -28,9 +39,24 @@ class ResolvedCredentials:
     """Result of resolving a set of credential IDs."""
 
     env_vars: dict[str, str] = field(default_factory=dict)
-    files: list["ResolvedCredentialFile"] = field(default_factory=list)
+    files: list[ResolvedCredentialFile] = field(default_factory=list)
     ssh_keys: list[str] = field(default_factory=list)
     credentials: list = field(default_factory=list)
+    oauth_credentials: list[uuid.UUID] = field(default_factory=list, repr=False)
+
+    @property
+    def has_material(self) -> bool:
+        """Return whether a runner writes anything into the workspace."""
+        return bool(self.env_vars or self.files or self.ssh_keys)
+
+    @property
+    def material_ids(self) -> set[uuid.UUID]:
+        """Return IDs of resolved credentials a runner writes into the workspace."""
+        return {
+            credential.id
+            for credential in self.credentials
+            if credential.service.credential_type not in SERVER_SIDE_CREDENTIAL_TYPES
+        }
 
 
 @dataclass(frozen=True)
@@ -43,18 +69,25 @@ class ResolvedCredentialFile:
 
 
 class CredentialServiceSvc:
-    """Business logic for the credential service catalog (read-only via API)."""
+    """Business logic for the credential service catalog."""
 
     def __init__(self) -> None:
         self.services = CredentialServiceRepository
 
-    def list_services(self):
-        """Return all credential services."""
-        return self.services.list_all()
+    def list_services(self, *, org_id: uuid.UUID | None = None):
+        """Return visible credential service definitions, including OAuth."""
+        return (
+            self.services.list_all()
+            if org_id is None
+            else self.services.list_visible_to_org(org_id)
+        )
 
-    def get_service(self, service_id: uuid.UUID):
+    def get_service(self, service_id: uuid.UUID, *, org_id: uuid.UUID | None = None):
         """Return a single credential service or raise."""
-        svc = self.services.get_by_id(service_id)
+        if org_id is not None:
+            svc = self.services.get_visible_by_id(service_id, org_id)
+        else:
+            svc = self.services.get_by_id(service_id)
         if svc is None:
             raise NotFoundError("CredentialService", str(service_id))
         return svc
@@ -69,8 +102,14 @@ class CredentialServiceSvc:
         env_var_name: str,
         target_path: str,
         label: str,
+        organization_id: uuid.UUID | None = None,
+        oauth_server_url: str = "",
     ):
-        """Create a credential service with validation."""
+        """Create a credential service with validation.
+
+        Global services (organization_id None) enforce a globally unique
+        slug; org-owned services enforce uniqueness per org + slug.
+        """
         name = name.strip()
         if not name:
             raise ValueError("Name is required")
@@ -78,19 +117,49 @@ class CredentialServiceSvc:
         normalized_slug = slugify(slug.strip() if slug.strip() else name)
         if not normalized_slug:
             raise ValueError("Slug cannot be empty")
-        if self.services.get_by_slug(normalized_slug):
-            raise ValueError(f"Credential service slug '{normalized_slug}' already exists")
+        if organization_id is None:
+            if self.services.get_global_by_slug(normalized_slug):
+                raise ValueError(
+                    f"Credential service slug '{normalized_slug}' already exists"
+                )
+        elif self.services.get_org_by_slug(normalized_slug, organization_id):
+            raise ValueError(
+                f"Credential service slug '{normalized_slug}' already exists "
+                "in this organization"
+            )
 
-        if credential_type not in CredentialType.values:
+        if (
+            credential_type not in CredentialType.values
+            or credential_type == CredentialType.PROVIDER_SECRET
+        ):
             raise ValueError("Invalid credential type")
+        if credential_type == CredentialType.MCP_OAUTH:
+            cleaned_server_url = validate_oauth_server_url(oauth_server_url)
+            cleaned_env = ""
+            cleaned_target_path = ""
+            return self.services.create(
+                name=name,
+                slug=normalized_slug,
+                description=description.strip(),
+                credential_type=credential_type,
+                env_var_name=cleaned_env,
+                target_path=cleaned_target_path,
+                label=label.strip(),
+                organization_id=organization_id,
+                oauth_server_url=cleaned_server_url,
+            )
 
+        if oauth_server_url.strip():
+            raise ValueError("oauth_server_url is only valid for MCP OAuth services")
         cleaned_env = env_var_name.strip().upper()
         cleaned_target_path = target_path.strip()
         if credential_type == CredentialType.ENV:
             if not cleaned_env:
                 raise ValueError("env_var_name is required for env credentials")
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", cleaned_env):
-                raise ValueError("env_var_name must be a valid environment variable name")
+                raise ValueError(
+                    "env_var_name must be a valid environment variable name"
+                )
             cleaned_target_path = ""
         elif credential_type == CredentialType.FILE:
             cleaned_env = ""
@@ -109,6 +178,7 @@ class CredentialServiceSvc:
             env_var_name=cleaned_env,
             target_path=cleaned_target_path,
             label=label.strip(),
+            organization_id=organization_id,
         )
 
     def _validate_target_path(self, target_path: str) -> None:
@@ -131,8 +201,44 @@ class CredentialServiceSvc:
         elif normalized.startswith("/"):
             path_without_home = normalized[1:]
 
-        if any(part in {"", ".", ".."} for part in PurePosixPath(path_without_home).parts):
+        if any(
+            part in {"", ".", ".."} for part in PurePosixPath(path_without_home).parts
+        ):
             raise ValueError("target_path must not contain empty, '.' or '..' segments")
+
+
+class OrgCredentialServiceActivationSvc:
+    """Business logic for org credential-service activations."""
+
+    def __init__(self) -> None:
+        from .repositories import OrgCredentialServiceActivationRepository
+
+        self.activations = OrgCredentialServiceActivationRepository
+
+    def activated_service_ids(self, org_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return activated service IDs for the org."""
+        return self.activations.activated_service_ids(org_id)
+
+    def activate_global_services(self, org_id: uuid.UUID) -> None:
+        """Activate all global services, including OAuth services (idempotent)."""
+        self.activations.activate_all_global(org_id)
+
+    def set_activation(self, *, org_id: uuid.UUID, service, active: bool) -> bool:
+        """Activate/deactivate a service for the org. Returns new state.
+
+        Deactivation is blocked (409
+        ``plugin_service_activation_in_use``) while any *org-enabled*
+        plugin of this org references the service in its credential
+        requirements — the service-activation switch only gates UI
+        availability, but silently revoking it under an enabled plugin
+        would break the documented auto-activated setup. Reactivation
+        always succeeds (idempotent).
+        """
+        if active:
+            self.activations.ensure_activated(org_id, [service.id])
+            return True
+        self.activations.deactivate(org_id, service.id)
+        return False
 
 
 class CredentialSvc:
@@ -158,6 +264,34 @@ class CredentialSvc:
         """
         return list(self.credentials.list_for_user_in_org(user.id, org_id))
 
+    def list_workspace_credentials(
+        self, workspace_id: uuid.UUID, *, include_internal: bool = False
+    ) -> list[Credential]:
+        """Load attachments for an authorized workspace, newest first.
+
+        Runtime validation includes internal rows so it can reject forbidden
+        provider-secret attachments rather than silently ignoring them.
+        """
+        return self.credentials.list_for_workspace(
+            workspace_id, include_internal=include_internal
+        )
+
+    def workspace_credential_ids_many(
+        self, workspace_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        """Return ordinary attachment IDs for already-authorized workspaces."""
+        return self.credentials.ids_for_workspaces(workspace_ids)
+
+    def workspace_material_credential_ids(
+        self, workspace_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        """Return attached IDs a runner writes into the workspace.
+
+        Server-side types (MCP OAuth grants, provider secrets) are excluded;
+        compare with :attr:`ResolvedCredentials.material_ids` of a new selection.
+        """
+        return self.credentials.material_ids_for_workspace(workspace_id)
+
     # -- Create -------------------------------------------------------------
 
     def create_personal_credential(
@@ -167,9 +301,17 @@ class CredentialSvc:
         name: str | None,
         value: str | None,
         user,
+        org_id: uuid.UUID | None = None,
     ):
-        """Create a personal credential owned by the user."""
-        service = self._get_service_or_raise(service_id)
+        """Create a personal credential owned by the user.
+
+        When ``org_id`` is given, the service must be visible in that org
+        (global or org-owned); otherwise any existing service resolves.
+        """
+        service = self._get_service_or_raise(service_id, org_id=org_id)
+        self._assert_service_active(service, org_id)
+        if service.credential_type == CredentialType.MCP_OAUTH:
+            raise ValueError("MCP OAuth credentials must be created via OAuth connect")
 
         if not name:
             name = f"{service.name} Credential"
@@ -201,7 +343,10 @@ class CredentialSvc:
         user,
     ):
         """Create an org-scoped credential. Caller must verify admin role."""
-        service = self._get_service_or_raise(service_id)
+        service = self._get_service_or_raise(service_id, org_id=organization_id)
+        self._assert_service_active(service, organization_id)
+        if service.credential_type == CredentialType.MCP_OAUTH:
+            raise ValueError("MCP OAuth credentials must be created via OAuth connect")
 
         if not name:
             name = f"{service.name} Credential"
@@ -264,12 +409,26 @@ class CredentialSvc:
         - Org credential: only org admins may edit.
         """
         cred = self.credentials.get_by_id(credential_id)
-        if cred is None or not self._is_visible(cred, user=user, org_id=org_id):
+        if (
+            cred is None
+            or cred.service.credential_type == CredentialType.PROVIDER_SECRET
+            or not self._is_visible(cred, user=user, org_id=org_id)
+        ):
             raise NotFoundError("Credential", str(credential_id))
 
         self._assert_can_edit(cred, user=user, org_id=org_id, is_admin=is_admin)
 
+        if (
+            cred.service.credential_type == CredentialType.MCP_OAUTH
+            and value is not None
+        ):
+            raise ValueError("MCP OAuth tokens can only be updated via OAuth connect")
         encrypted = encrypt_value(value) if value else None
+        if (
+            encrypted is not None
+            and cred.service.credential_type == CredentialType.PROVIDER_SECRET
+        ):
+            raise NotFoundError("Credential", str(credential_id))
         return self.credentials.update(cred, name=name, encrypted_value=encrypted)
 
     # -- Delete -------------------------------------------------------------
@@ -287,12 +446,33 @@ class CredentialSvc:
         Ownership rules:
         - Personal credential: only the owner may delete.
         - Org credential: only org admins may delete.
+
+        Deletion is blocked (409 ``plugin_credentials_in_use``) when a
+        deletion guard reports the credential as required for an
+        *effective* plugin activation of any workspace it is attached to —
+        deleting would silently break the runtime. Re-attach-free personal
+        credentials and unused credentials delete normally. Updating the
+        value (PATCH) never blocks: the attachment stays intact.
         """
         cred = self.credentials.get_by_id(credential_id)
-        if cred is None or not self._is_visible(cred, user=user, org_id=org_id):
+        if (
+            cred is None
+            or cred.service.credential_type == CredentialType.PROVIDER_SECRET
+            or not self._is_visible(cred, user=user, org_id=org_id)
+        ):
             raise NotFoundError("Credential", str(credential_id))
 
         self._assert_can_edit(cred, user=user, org_id=org_id, is_admin=is_admin)
+        gaps = collect_deletion_blockers(cred, org_id=org_id)
+        if gaps:
+            raise ConflictError(
+                "Cannot delete credential required by active workspace "
+                "plugins: "
+                + ", ".join(
+                    f"{g['workspace_id']}:{g['plugin_id']}:{g['key']}" for g in gaps
+                ),
+                code="plugin_credentials_in_use",
+            )
         self.credentials.delete(credential_id)
         logger.info("Credential deleted: %s", credential_id)
 
@@ -320,6 +500,11 @@ class CredentialSvc:
         if not credential_ids:
             return ResolvedCredentials()
 
+        if self.credentials.get_many_internal_provider_secrets(credential_ids):
+            raise NotFoundError(
+                "Credential", ", ".join(str(value) for value in credential_ids)
+            )
+
         credentials = self.credentials.get_many_by_ids(
             credential_ids,
             org_id=org_id,
@@ -334,16 +519,118 @@ class CredentialSvc:
                 ", ".join(str(m) for m in missing),
             )
 
+        self._validate_credential_ownership(credentials, user=user, org_id=org_id)
+        self._validate_oauth_bindings(credentials, user=user, org_id=org_id)
+        owner_keys = [credential.service_id for credential in credentials]
+        if len(owner_keys) != len(set(owner_keys)):
+            raise ConflictError(
+                "Only one credential per credential service can be attached "
+                "to a workspace"
+            )
+        normal_credentials = [
+            credential
+            for credential in credentials
+            if credential.service.credential_type != CredentialType.MCP_OAUTH
+        ]
         self.assert_unique_workspace_credentials(credentials)
-        return self._build_resolved_credentials(credentials)
+        resolved = self._build_resolved_credentials(normal_credentials)
+        resolved.credentials = credentials
+        resolved.oauth_credentials = [
+            credential.id
+            for credential in credentials
+            if credential.service.credential_type == CredentialType.MCP_OAUTH
+        ]
+        return resolved
 
     def resolve_workspace_credentials(self, workspace) -> ResolvedCredentials:
-        """Resolve the credentials explicitly attached to a workspace."""
-        credentials = list(workspace.credentials.all().select_related("service"))
+        """Resolve ordinary credentials; reject any internal account attachment."""
+        credentials = self.list_workspace_credentials(
+            workspace.id, include_internal=True
+        )
+        if any(
+            credential.service.credential_type == CredentialType.PROVIDER_SECRET
+            for credential in credentials
+        ):
+            raise ConflictError(
+                "Internal provider secrets cannot be attached to workspaces"
+            )
         if not credentials:
             return ResolvedCredentials()
+        self._validate_credential_ownership(
+            credentials,
+            user=workspace.created_by,
+            org_id=workspace.runner.organization_id,
+        )
+        self._validate_oauth_bindings(
+            credentials,
+            user=workspace.created_by,
+            org_id=workspace.runner.organization_id,
+        )
+        normal_credentials = [
+            credential
+            for credential in credentials
+            if credential.service.credential_type != CredentialType.MCP_OAUTH
+        ]
+        self.assert_unique_workspace_credentials(credentials)
+        resolved = self._build_resolved_credentials(normal_credentials)
+        resolved.credentials = credentials
+        resolved.oauth_credentials = [
+            credential.id
+            for credential in credentials
+            if credential.service.credential_type == CredentialType.MCP_OAUTH
+        ]
+        return resolved
 
-        return self._build_resolved_credentials(credentials)
+    def _validate_credential_ownership(self, credentials, *, user, org_id) -> None:
+        """Fail closed on every credential owner and organization boundary."""
+        if org_id is None or user is None:
+            raise ConflictError("Workspace owner and organization are required")
+        for credential in credentials:
+            if credential.service.organization_id not in {None, org_id}:
+                raise NotFoundError("Credential", str(credential.id))
+            if credential.user_id is not None:
+                if (
+                    credential.user_id != user.id
+                    or credential.organization_id is not None
+                ):
+                    raise NotFoundError("Credential", str(credential.id))
+            elif credential.organization_id != org_id:
+                raise NotFoundError("Credential", str(credential.id))
+
+    def _validate_oauth_bindings(self, credentials, *, user, org_id):
+        """Validate OAuth ownership and grant integrity without plugin lookups."""
+        from .mcp_oauth import oauth_credential_status
+
+        if org_id is None or user is None:
+            raise ConflictError("Workspace owner and organization are required")
+        for credential in credentials:
+            if credential.service.credential_type != CredentialType.MCP_OAUTH:
+                continue
+            if (
+                not credential.oauth_server_url
+                or not credential.oauth_resource
+                or not credential.oauth_registration_id
+                or credential.oauth_server_url != credential.service.oauth_server_url
+            ):
+                raise ConflictError("MCP OAuth credential binding is invalid")
+            if credential.oauth_status not in {
+                "connected",
+                "reconnect_required",
+                "disconnected",
+            }:
+                raise ConflictError("MCP OAuth credential status is invalid")
+            if credential.service.organization_id not in {None, org_id}:
+                raise NotFoundError("Credential", str(credential.id))
+            if credential.user_id is not None and credential.user_id != user.id:
+                raise NotFoundError("Credential", str(credential.id))
+            if (
+                credential.organization_id is not None
+                and credential.organization_id != org_id
+            ):
+                raise NotFoundError("Credential", str(credential.id))
+            status = oauth_credential_status(credential)
+            if credential.oauth_status == "connected" and not status["connected"]:
+                raise ConflictError("MCP OAuth credential requires reconnect")
 
     def _build_resolved_credentials(self, credentials: list) -> ResolvedCredentials:
         """Convert credential model instances into decrypted workspace values."""
@@ -351,6 +638,9 @@ class CredentialSvc:
 
         for cred in credentials:
             svc = cred.service
+            if svc.credential_type == CredentialType.MCP_OAUTH:
+                result.oauth_credentials.append(cred.id)
+                continue
             plaintext = decrypt_value(cred.encrypted_value)
             if svc.credential_type == CredentialType.SSH_KEY:
                 result.ssh_keys.append(plaintext)
@@ -366,6 +656,146 @@ class CredentialSvc:
 
         return result
 
+    # -- Provider account secret storage -----------------------------------
+
+    def create_provider_secret(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        name: str,
+        value: dict,
+        created_by=None,
+    ) -> Credential:
+        """Persist internal JSON through the encrypted credential vault."""
+        import json
+
+        service = self.service_repo.create_internal_provider_secret_service(
+            organization_id=organization_id, provider=provider
+        )
+        return self.credentials.create_internal_provider_secret(
+            organization_id=organization_id,
+            user_id=user_id,
+            service=service,
+            name=name,
+            encrypted_value=encrypt_value(json.dumps(value)),
+            created_by=created_by,
+        )
+
+    def get_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> dict:
+        """Decrypt a secret only after validating its account/scope binding."""
+        credential = self.credentials.get_internal_provider_secret(
+            credential_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+        if credential is None:
+            raise NotFoundError("Credential", str(credential_id))
+        return self._decode_provider_secret(credential.encrypted_value)
+
+    def get_provider_secrets(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int,
+        account_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, dict]:
+        """Decrypt visible, live-bound account secrets in one repository read.
+
+        Missing or invalid bindings are omitted; callers must reject any missing
+        account they expected to have a secret.
+        """
+        return {
+            account_id: self._decode_provider_secret(value)
+            for account_id, value in self.credentials.get_bound_provider_secrets(
+                organization_id=organization_id,
+                user_id=user_id,
+                account_ids=account_ids,
+            ).items()
+        }
+
+    @staticmethod
+    def _decode_provider_secret(encrypted_value: str) -> dict:
+        """Decode provider JSON with the same fallback for single and batch reads."""
+        import json
+
+        try:
+            value = json.loads(decrypt_value(encrypted_value))
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def reassign_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        previous_user_id: int | None,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Move secret ownership to match a provider account's updated scope."""
+        return self.credentials.reassign_internal_provider_secret(
+            credential_id,
+            organization_id=organization_id,
+            previous_user_id=previous_user_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+
+    def update_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        value: dict,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Replace encrypted data only for its live account/scope binding."""
+        import json
+
+        return self.credentials.update_internal_provider_secret(
+            credential_id,
+            encrypt_value(json.dumps(value)),
+            organization_id=organization_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+
+    def delete_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> None:
+        """Remove one internal secret through its live account binding."""
+        self.credentials.delete_internal_provider_secret(
+            credential_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+
     # -- Internal helpers ---------------------------------------------------
 
     def assert_unique_workspace_credentials(self, credentials: list) -> None:
@@ -380,8 +810,24 @@ class CredentialSvc:
                 )
             seen_service_ids.add(credential.service_id)
 
-    def _get_service_or_raise(self, service_id: uuid.UUID):
-        service = self.service_repo.get_by_id(service_id)
+    @staticmethod
+    def _assert_service_active(service, org_id: uuid.UUID | None) -> None:
+        """Require visible org services to be activated before new credentials."""
+        if org_id is None:
+            return
+        from .repositories import OrgCredentialServiceActivationRepository
+
+        active_ids = OrgCredentialServiceActivationRepository.activated_service_ids(
+            org_id
+        )
+        if service.id not in active_ids:
+            raise ValueError("Credential service is inactive for this organization")
+
+    def _get_service_or_raise(self, service_id: uuid.UUID, *, org_id=None):
+        if org_id is not None:
+            service = self.service_repo.get_visible_by_id(service_id, org_id)
+        else:
+            service = self.service_repo.get_by_id(service_id)
         if service is None:
             raise NotFoundError("CredentialService", str(service_id))
         return service
@@ -398,8 +844,10 @@ class CredentialSvc:
 
     def _is_visible(self, credential, *, user, org_id: uuid.UUID) -> bool:
         """Return True if the credential is visible to the user in this org."""
+        if credential.service.organization_id not in {None, org_id}:
+            return False
         if credential.user_id is not None:
-            return credential.user_id == user.id
+            return credential.user_id == user.id and credential.organization_id is None
         return credential.organization_id == org_id
 
     def _assert_can_edit(
@@ -418,3 +866,250 @@ class CredentialSvc:
                 raise AuthenticationError(
                     "Only org admins can edit organization credentials"
                 )
+
+
+class CredentialOAuthSvc:
+    """Orchestrate service-owned OAuth authorization and credential mutations."""
+
+    def __init__(self) -> None:
+        from .repositories import (
+            CredentialRepository,
+            CredentialServiceRepository,
+            McpOAuthRepository,
+            OrgCredentialServiceActivationRepository,
+        )
+
+        self.credentials = CredentialRepository
+        self.services = CredentialServiceRepository
+        self.oauth = McpOAuthRepository
+        self.activations = OrgCredentialServiceActivationRepository
+        self.organizations = OrganizationService()
+        self.grants = OAuthGrantService(
+            repository=self.oauth, organizations=self.organizations
+        )
+
+    def resolve_connection_target(
+        self,
+        *,
+        user,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID | None = None,
+        credential_id: uuid.UUID | None = None,
+    ) -> tuple[CredentialService, Credential | None]:
+        """Return the OAuth service and, for a reconnect, the owned credential.
+
+        A fresh connection needs a visible OAuth service activated for the
+        organization; a reconnect needs the user's own or this organization's
+        OAuth credential of a visible service. Membership and admin checks
+        remain with the caller.
+
+        Raises:
+            NotFoundError: The service or credential is not a visible OAuth target.
+            ConflictError: The service is inactive for the organization.
+        """
+        if credential_id is None:
+            if service_id is None:
+                raise NotFoundError("CredentialService", "")
+            service = self.services.get_visible_by_id(service_id, organization_id)
+            if service is None or service.credential_type != CredentialType.MCP_OAUTH:
+                raise NotFoundError("CredentialService", str(service_id))
+            if service.id not in self.activations.activated_service_ids(
+                organization_id
+            ):
+                raise ConflictError(
+                    "Credential service is inactive for this organization",
+                    code="service_inactive",
+                )
+            return service, None
+        credential = self.oauth.get_reconnect_target(credential_id)
+        if (
+            credential is None
+            or credential.service.credential_type != CredentialType.MCP_OAUTH
+        ):
+            raise NotFoundError("Credential", str(credential_id))
+        service = self.services.get_visible_by_id(
+            credential.service_id, organization_id
+        )
+        if service is None:
+            raise NotFoundError("Credential", str(credential_id))
+        if credential.user_id is not None:
+            if credential.user_id != user.id:
+                raise NotFoundError("Credential", str(credential_id))
+        elif credential.organization_id != organization_id:
+            raise NotFoundError("Credential", str(credential_id))
+        return service, credential
+
+    def start_connection(
+        self,
+        *,
+        user,
+        organization_id: uuid.UUID,
+        organization_credential: bool,
+        request_scheme: str,
+        request_host: str,
+        service_id: uuid.UUID | None = None,
+        credential_id: uuid.UUID | None = None,
+        name: str = "",
+    ) -> tuple[str, str, str]:
+        """Start fresh authorization or reconnect one explicitly selected row."""
+        from .mcp_oauth import start_flow, validate_browser_request_origin
+
+        organization = self.organizations.require_organization(organization_id)
+        if credential_id is None:
+            membership = self.organizations.require_active_membership(
+                user.id, organization.id
+            )
+        service, credential = self.resolve_connection_target(
+            user=user,
+            organization_id=organization.id,
+            service_id=service_id,
+            credential_id=credential_id,
+        )
+        if credential is not None:
+            organization_credential = credential.user_id is None
+            membership = self.organizations.require_active_membership(
+                user.id, organization.id
+            )
+        if organization_credential and membership.role != "admin":
+            raise AuthenticationError(
+                "Admin role required for organization credentials"
+            )
+        validate_browser_request_origin(
+            request_scheme=request_scheme, request_host=request_host
+        )
+        return start_flow(
+            user=user,
+            organization=organization,
+            service=service,
+            organization_credential=organization_credential,
+            credential=credential,
+            credential_name=(name or (credential.name if credential else "")).strip(),
+        )
+
+    def complete_authorization(
+        self, *, raw_state: str, binding: str, code: str = "", error: str = ""
+    ) -> uuid.UUID:
+        """Validate and commit callbacks only while authorization rows are locked."""
+
+        from common.utils import decrypt_value
+
+        from .mcp_oauth import (
+            _consume_callback_state,
+            _post_token,
+            _token_auth,
+            authorization_grant_payload,
+        )
+
+        # Commit one-use state consumption independently so failed callbacks
+        # cannot replay an authorization code.
+        state = _consume_callback_state(raw_state, binding)
+        with self.oauth.grant_transaction():
+            if error:
+                raise OAuthError("Authorization was denied")
+            if not isinstance(code, str) or not code or len(code) > 8192:
+                raise OAuthError("OAuth callback is invalid")
+
+            service = self.oauth.get_service(state.service_id, lock=True)
+            registration = self.oauth.get_registration(state.registration_id, lock=True)
+            membership = self.organizations.get_active_membership(
+                state.user_id, state.organization_id, lock=True
+            )
+            target = (
+                self.oauth.get_reconnect_target(state.credential_id, lock=True)
+                if state.reconnect_existing and state.credential_id
+                else None
+            )
+            if membership is None or (
+                state.organization_credential and membership.role != "admin"
+            ):
+                raise AuthenticationError("OAuth authorization is no longer permitted")
+            if (
+                service is None
+                or registration is None
+                or service.credential_type != CredentialType.MCP_OAUTH
+                or service.oauth_server_url != state.server_url
+                or not self.oauth.service_visible_to_org(
+                    state.service_id, state.organization_id
+                )
+                or not registration_metadata_safe(
+                    registration,
+                    expected_url=state.server_url,
+                    expected_issuer=state.issuer,
+                    expected_callback=state.redirect_uri,
+                )
+                or registration_fingerprint(registration)
+                != state.registration_fingerprint
+            ):
+                raise AuthenticationError("OAuth endpoint or registration changed")
+            if state.reconnect_existing:
+                if (
+                    target is None
+                    or target.service_id != state.service_id
+                    or target.oauth_server_url != state.credential_server_url_snapshot
+                    or not self.grants.owner_matches_state(state, target)
+                    or not self.oauth.service_visible_to_org(
+                        target.service_id, state.organization_id
+                    )
+                ):
+                    raise NotFoundError("Credential", str(state.credential_id))
+            elif not self.oauth.service_active_for_org(
+                state.service_id, state.organization_id, lock=True
+            ):
+                raise ConflictError(
+                    "OAuth service is inactive for this organization",
+                    code="service_inactive",
+                )
+
+            secret = (
+                decrypt_value(registration.encrypted_client_secret)
+                if registration.encrypted_client_secret
+                else ""
+            )
+            auth, post_secret = _token_auth(registration, secret)
+            token = _post_token(
+                registration.token_endpoint,
+                {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": state.redirect_uri,
+                    "client_id": registration.client_id,
+                    "code_verifier": decrypt_value(state.encrypted_code_verifier),
+                    "resource": state.resource,
+                },
+                auth=auth,
+                post_client_secret=post_secret,
+            )
+            payload = authorization_grant_payload(state, token)
+            try:
+                return self.grants.persist(
+                    state=state, encrypted_value=encrypt_value(json.dumps(payload))
+                )
+            except ValueError as exc:
+                raise AuthenticationError(str(exc)) from None
+
+    def disconnect(
+        self, *, credential_id: uuid.UUID, user, organization_id: uuid.UUID
+    ) -> None:
+        """Clear an owned OAuth grant without detaching existing workspace links."""
+        from .mcp_oauth import disconnect_credential
+
+        credential = self.credentials.get_by_id(credential_id)
+        if (
+            credential is None
+            or credential.service.credential_type != CredentialType.MCP_OAUTH
+            or credential.service.organization_id not in {None, organization_id}
+        ):
+            raise NotFoundError("Credential", str(credential_id))
+        if credential.user_id is not None:
+            if credential.user_id != user.id or credential.organization_id is not None:
+                raise NotFoundError("Credential", str(credential_id))
+        elif credential.organization_id != organization_id:
+            raise NotFoundError("Credential", str(credential_id))
+        elif not self._is_admin(user.id, organization_id):
+            raise AuthenticationError("Admin role required")
+        if not disconnect_credential(credential_id):
+            raise NotFoundError("Credential", str(credential_id))
+
+    def _is_admin(self, user_id: int, organization_id: uuid.UUID) -> bool:
+        membership = self.organizations.get_active_membership(user_id, organization_id)
+        return bool(membership and membership.role == "admin")

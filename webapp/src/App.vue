@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { useTheme } from '@/composables/useTheme'
 import { Toaster } from '@/components/ui/sonner'
+import ClipboardDialog from '@/components/common/ClipboardDialog.vue'
 
-useTheme()
+const { isDark } = useTheme()
 </script>
 
 <template>
   <RouterView />
-  <Toaster rich-colors close-button />
+  <ClipboardDialog />
+  <Toaster :theme="isDark ? 'dark' : 'light'" close-button />
 </template>

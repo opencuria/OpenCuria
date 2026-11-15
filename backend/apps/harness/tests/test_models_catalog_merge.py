@@ -1,0 +1,173 @@
+"""Tests for multi-provider catalog merge and model ref parsing."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from apps.harness.model_catalog_service import (
+    clear_models_cache,
+    list_merged_provider_models,
+)
+from apps.harness.providers.bedrock import resolve_bedrock_model_id
+from apps.harness.providers.model_ref import namespaced_model_id, parse_model_ref
+from apps.harness.providers.models_catalog import (
+    bedrock_models,
+    chatgpt_models,
+)
+
+
+def test_parse_model_ref_namespaced_and_legacy() -> None:
+    """Namespaced refs split on the first slash; legacy ids stay OpenRouter."""
+    assert parse_model_ref("openrouter/openai/gpt-5") == (
+        "openrouter",
+        "openai/gpt-5",
+    )
+    assert parse_model_ref("chatgpt/gpt-5.5") == ("chatgpt", "gpt-5.5")
+    assert parse_model_ref("amazon-bedrock/us.anthropic.claude-sonnet-4-5") == (
+        "amazon-bedrock",
+        "us.anthropic.claude-sonnet-4-5",
+    )
+    assert parse_model_ref("openai/gpt-5") == ("openrouter", "openai/gpt-5")
+    assert namespaced_model_id("openai/gpt-5") == "openrouter/openai/gpt-5"
+
+
+def test_chatgpt_models_static_catalog() -> None:
+    """ChatGPT allowlist is namespaced and tool-capable."""
+    models = chatgpt_models()
+    assert len(models) == 7
+    assert [model.id for model in models] == [
+        "chatgpt/gpt-5.6-sol",
+        "chatgpt/gpt-5.6-terra",
+        "chatgpt/gpt-5.6-luna",
+        "chatgpt/gpt-6-astra",
+        "chatgpt/gpt-6-sol",
+        "chatgpt/gpt-6-luna",
+        "chatgpt/gpt-6.1-sol",
+    ]
+    assert models[0].provider == "chatgpt"
+    assert models[0].supports_tools is True
+    assert models[0].context_length == 1_050_000
+    assert models[0].max_output_tokens == 128_000
+    full_efforts = (
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    assert models[0].reasoning_efforts == full_efforts
+    astra = next(model for model in models if model.id == "chatgpt/gpt-6-astra")
+    assert astra.reasoning_efforts == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+    sol = next(model for model in models if model.id == "chatgpt/gpt-6-sol")
+    luna = next(model for model in models if model.id == "chatgpt/gpt-6-luna")
+    sol_61 = next(model for model in models if model.id == "chatgpt/gpt-6.1-sol")
+    assert sol.name == "GPT-6 Sol"
+    assert luna.name == "GPT-6 Luna"
+    assert sol_61.name == "GPT-6.1 Sol"
+    assert sol.reasoning_efforts == full_efforts
+    assert luna.reasoning_efforts == full_efforts
+    assert sol_61.reasoning_efforts == full_efforts
+    assert sol.default_effort == "medium"
+    assert luna.default_effort == "medium"
+    assert sol_61.default_effort == "medium"
+    assert sol.context_length == 1_050_000
+    assert luna.max_output_tokens == 128_000
+    assert sol_61.context_length == 1_050_000
+    assert sol_61.max_output_tokens == 128_000
+
+
+def test_bedrock_models_region_prefixing() -> None:
+    """Bedrock catalog ids are region-resolved then namespaced."""
+    models = bedrock_models("us-east-1")
+    sonnet = next(model for model in models if "claude-sonnet-4-5" in model.id)
+    expected = resolve_bedrock_model_id(
+        "anthropic.claude-sonnet-4-5",
+        "us-east-1",
+    )
+    assert sonnet.id == f"amazon-bedrock/{expected}"
+    assert sonnet.provider == "amazon-bedrock"
+    assert sonnet.supports_tools is True
+    opus = next(model for model in models if "claude-opus-4-6" in model.id)
+    opus_expected = resolve_bedrock_model_id(
+        "anthropic.claude-opus-4-6-v1",
+        "us-east-1",
+    )
+    assert opus.id == f"amazon-bedrock/{opus_expected}"
+    assert opus.name == "Claude Opus 4.6"
+    assert opus.context_length == 1_000_000
+    assert opus.max_output_tokens == 128_000
+    assert "xhigh" in opus.reasoning_efforts
+
+
+@pytest.mark.django_db
+def test_list_merged_provider_models_only_connected(
+    organization, provider_account_factory, provider_account_user
+) -> None:
+    """Merged catalog includes only providers with stored accounts."""
+    clear_models_cache()
+    provider_account_factory(
+        "chatgpt",
+        access="a",
+        refresh="r",
+        expires=1,
+    )
+
+    models = list_merged_provider_models(
+        organization_id=organization.id,
+        user_id=provider_account_user.id,
+    )
+    providers = {model.provider for model in models}
+    assert "chatgpt" in providers
+    assert "openrouter" not in providers
+    assert any(model.id == "chatgpt/gpt-5.6-sol" for model in models)
+    clear_models_cache(str(organization.id))
+
+
+@pytest.mark.django_db
+def test_selected_account_catalog_merges_and_caches_models(
+    organization, provider_account_factory, provider_account_user
+) -> None:
+    """OpenRouter live fetch and Bedrock static catalogs merge together."""
+    clear_models_cache()
+    provider_account_factory("openrouter", api_key="sk-live")
+    provider_account_factory(
+        "amazon-bedrock",
+        access_key_id="a",
+        secret_access_key="b",
+        region="us-west-2",
+        auth_method="access_keys",
+    )
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer sk-live"
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "acme/fast", "name": "Fast"}]},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        kwargs = {
+            "organization_id": organization.id,
+            "user_id": provider_account_user.id,
+            "client": client,
+        }
+        models = list_merged_provider_models(**kwargs)
+        assert list_merged_provider_models(**kwargs) == models
+        assert len(calls) == 1
+        clear_models_cache(str(organization.id))
+        assert list_merged_provider_models(**kwargs) == models
+        assert len(calls) == 2
+    ids = {model.id for model in models}
+    assert "openrouter/acme/fast" in ids
+    assert any(model.id.startswith("amazon-bedrock/") for model in models)
+    clear_models_cache(str(organization.id))

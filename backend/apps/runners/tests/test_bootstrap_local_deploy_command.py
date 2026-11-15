@@ -4,224 +4,122 @@ from __future__ import annotations
 
 from io import StringIO
 
+import pytest
 from django.contrib.auth import get_user_model
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 
-from apps.credentials.models import CredentialService
+from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RuntimeType
-from apps.runners.management.commands.bootstrap_local_deploy import (
-    DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
-    DEFAULT_WORKSPACE_PACKAGES,
+from apps.runners.models import (
+    ImageBuildJob,
+    ImageDefinition,
+    ImageInstance,
+    LifecycleCommand,
+    Runner,
+    Task,
 )
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob
 from common.utils import hash_token
 
 
-def test_bootstrap_creates_pending_build(db) -> None:
-    """Fresh bootstrap seeds a pending build, not a ready artifact."""
-    out = StringIO()
-
+def _bootstrap(*, email: str, org: str, runner: str, token: str, **kwargs) -> None:
     call_command(
         "bootstrap_local_deploy",
         "--admin-email",
-        "local-admin@example.com",
+        email,
         "--admin-password",
         "admin",
         "--organization-name",
-        "Local Dev",
+        org,
         "--runner-name",
-        "local-runner",
+        runner,
         "--runner-token",
-        "runner-secret",
+        token,
+        **kwargs,
+    )
+
+
+def _assert_no_images() -> None:
+    """Installation seeds no org recipe and requests no build.
+
+    Only the global recipe templates from migrations remain; they stay unbuilt.
+    """
+    assert not ImageDefinition.objects.filter(organization__isnull=False).exists()
+    assert ImageBuildJob.objects.count() == 0
+    assert ImageInstance.objects.count() == 0
+    assert Task.objects.count() == 0
+    assert LifecycleCommand.objects.count() == 0
+
+
+def test_bootstrap_creates_admin_org_and_runner_without_images(db) -> None:
+    """Fresh bootstrap creates the control-plane records only."""
+    out = StringIO()
+    services_before = set(CredentialService.objects.values_list("id", flat=True))
+
+    _bootstrap(
+        email="local-admin@example.com",
+        org="Local Dev",
+        runner="local-runner",
+        token="runner-secret",
         stdout=out,
     )
 
     user = get_user_model().objects.get(email="local-admin@example.com")
     org = Organization.objects.get(slug="local-dev")
     runner = Runner.objects.get(name="local-runner", organization=org)
-    definition = ImageDefinition.objects.get(
-        organization=org,
-        name="Local Docker Workspace",
-    )
-    build = ImageBuildJob.objects.get(image_definition=definition, runner=runner)
-
     membership = Membership.objects.get(user=user, organization=org)
 
     assert user.is_superuser is True
     assert membership.role == MembershipRole.ADMIN
     assert runner.api_token_hash == hash_token("runner-secret")
-    assert runner.available_runtimes == [RuntimeType.DOCKER]
-
-    # Build should be pending (not active) — the runner will build it
-    assert build.status == ImageBuildJob.Status.PENDING
-    assert build.build_task is None
-    assert build.built_at is None
-
-    # No artifact should exist yet
-    assert not ImageInstance.objects.filter(build_job=build).exists()
-
-    # Image definition should have the correct packages and Dockerfile
-    assert definition.packages == DEFAULT_WORKSPACE_PACKAGES
-    assert definition.custom_dockerfile == DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE
-    assert definition.runtime_type == RuntimeType.DOCKER
-    assert definition.base_distro == "ubuntu:22.04"
-
-    assert (
-        CredentialService.objects.filter(
-            slug="github-token",
-            env_var_name="GITHUB_TOKEN",
-        ).exists()
-        is True
+    # Global services come from migrations; the new org gets them activated.
+    assert set(CredentialService.objects.values_list("id", flat=True)) == (
+        services_before
     )
+    assert OrgCredentialServiceActivation.objects.filter(
+        organization=org, credential_service__slug="github"
+    ).exists()
+    _assert_no_images()
     assert "Local deployment bootstrap complete" in out.getvalue()
 
 
 def test_bootstrap_is_idempotent(db) -> None:
     """Running bootstrap twice should not create duplicate records."""
-    call_command(
-        "bootstrap_local_deploy",
-        "--admin-email",
-        "repeat@example.com",
-        "--admin-password",
-        "admin",
-        "--organization-name",
-        "Repeat Org",
-        "--runner-name",
-        "repeat-runner",
-        "--runner-token",
-        "runner-secret",
+    _bootstrap(
+        email="repeat@example.com",
+        org="Repeat Org",
+        runner="repeat-runner",
+        token="runner-secret",
     )
-    call_command(
-        "bootstrap_local_deploy",
-        "--admin-email",
-        "repeat@example.com",
-        "--admin-password",
-        "admin",
-        "--organization-name",
-        "Repeat Org",
-        "--runner-name",
-        "repeat-runner",
-        "--runner-token",
-        "new-token",
-    )
-
     org = Organization.objects.get(slug="repeat-org")
+    OrgCredentialServiceActivation.objects.filter(
+        organization=org, credential_service__slug="github"
+    ).delete()
+    _bootstrap(
+        email="repeat@example.com",
+        org="Repeat Org",
+        runner="repeat-runner",
+        token="new-token",
+    )
+
     runner = Runner.objects.get(name="repeat-runner", organization=org)
-    definition = ImageDefinition.objects.get(organization=org)
-    builds = ImageBuildJob.objects.filter(
-        image_definition=definition, runner=runner
-    )
 
-    assert builds.count() == 1
-    build = builds.first()
-    assert build.status == ImageBuildJob.Status.PENDING
+    assert Organization.objects.count() == 1
+    assert Runner.objects.count() == 1
     assert runner.api_token_hash == hash_token("new-token")
+    # Re-running keeps services the admin deactivated switched off.
+    assert not OrgCredentialServiceActivation.objects.filter(
+        organization=org, credential_service__slug="github"
+    ).exists()
+    _assert_no_images()
 
 
-def test_bootstrap_preserves_active_build(db) -> None:
-    """If a build already succeeded, bootstrap should not reset it to pending."""
-    from django.utils import timezone
-
-    call_command(
-        "bootstrap_local_deploy",
-        "--admin-email",
-        "active@example.com",
-        "--admin-password",
-        "admin",
-        "--organization-name",
-        "Active Org",
-        "--runner-name",
-        "active-runner",
-        "--runner-token",
-        "secret",
-    )
-
-    org = Organization.objects.get(slug="active-org")
-    runner = Runner.objects.get(name="active-runner", organization=org)
-    definition = ImageDefinition.objects.get(organization=org)
-    build = ImageBuildJob.objects.get(
-        image_definition=definition, runner=runner
-    )
-
-    # Simulate a successful build
-    build.status = ImageBuildJob.Status.ACTIVE
-    build.built_at = timezone.now()
-    build.save(update_fields=["status", "built_at"])
-    ImageInstance.objects.create(
-        runner=runner,
-        runtime_type=RuntimeType.DOCKER,
-        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-        origin_definition=definition,
-        build_job=build,
-        runner_ref="opencuria/custom/local-docker-workspace:test",
-        name="Local Docker Workspace (active-runner)",
-        status=ImageInstance.Status.READY,
-    )
-
-    # Run bootstrap again
-    call_command(
-        "bootstrap_local_deploy",
-        "--admin-email",
-        "active@example.com",
-        "--admin-password",
-        "admin",
-        "--organization-name",
-        "Active Org",
-        "--runner-name",
-        "active-runner",
-        "--runner-token",
-        "secret",
-    )
-
-    build.refresh_from_db()
-    assert build.status == ImageBuildJob.Status.ACTIVE
-    assert build.image_instance.runner_ref == "opencuria/custom/local-docker-workspace:test"
-
-
-def test_bootstrap_resets_failed_build_to_pending(db) -> None:
-    """A failed build should be reset to pending on next bootstrap."""
-    call_command(
-        "bootstrap_local_deploy",
-        "--admin-email",
-        "failed@example.com",
-        "--admin-password",
-        "admin",
-        "--organization-name",
-        "Failed Org",
-        "--runner-name",
-        "failed-runner",
-        "--runner-token",
-        "secret",
-    )
-
-    org = Organization.objects.get(slug="failed-org")
-    runner = Runner.objects.get(name="failed-runner", organization=org)
-    definition = ImageDefinition.objects.get(organization=org)
-    build = ImageBuildJob.objects.get(
-        image_definition=definition, runner=runner
-    )
-
-    # Simulate a failed build
-    build.status = ImageBuildJob.Status.FAILED
-    build.save(update_fields=["status"])
-
-    # Run bootstrap again
-    call_command(
-        "bootstrap_local_deploy",
-        "--admin-email",
-        "failed@example.com",
-        "--admin-password",
-        "admin",
-        "--organization-name",
-        "Failed Org",
-        "--runner-name",
-        "failed-runner",
-        "--runner-token",
-        "secret",
-    )
-
-    build.refresh_from_db()
-    assert build.status == ImageBuildJob.Status.PENDING
-    assert build.build_task is None
-    assert build.built_at is None
+def test_bootstrap_requires_runner_token(db) -> None:
+    """A blank runner token fails before any record is written."""
+    with pytest.raises(CommandError, match="--runner-token is required"):
+        _bootstrap(
+            email="blank@example.com",
+            org="Blank Org",
+            runner="blank-runner",
+            token="  ",
+        )
+    assert Runner.objects.count() == 0

@@ -5,9 +5,8 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type {
-  ImageArtifact,
-  ImageArtifactCreateIn,
-  ImageArtifactCloneIn,
+  CapturedImage,
+  CapturedImageWorkspaceInput,
   ImageDefinition,
   RunnerImageBuild,
 } from '@/types'
@@ -17,26 +16,62 @@ import { useNotificationStore } from './notifications'
 export const useImageStore = defineStore('images', () => {
   const notifications = useNotificationStore()
 
-  const images = ref<ImageArtifact[]>([])
+  const capturedImages = ref<CapturedImage[]>([])
   const imageDefinitions = ref<ImageDefinition[]>([])
   const runnerBuildsByDefinition = ref<Record<string, RunnerImageBuild[]>>({})
   const loading = ref(false)
+  /** True once the captured image list settled; later refreshes keep it on screen. */
+  const capturedImagesLoaded = ref(false)
+  /** Captured image list error (shown by the captured images panel). */
   const error = ref<string | null>(null)
+  /** Image definition or build list error, kept apart from captured images. */
+  const definitionsError = ref<string | null>(null)
 
-  async function fetchImages(): Promise<void> {
+  async function fetchCapturedImages(): Promise<void> {
     loading.value = true
-    error.value = null
     try {
-      images.value = await workspacesApi.listUserImageArtifacts()
+      capturedImages.value = await workspacesApi.listCapturedImages()
+      // Cleared only on success so a failing background refresh does not blink.
+      error.value = null
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load images'
     } finally {
       loading.value = false
+      capturedImagesLoaded.value = true
+    }
+  }
+
+  async function renameCapturedImage(id: string, name: string): Promise<boolean> {
+    try {
+      const updated = await workspacesApi.renameCapturedImage(id, name)
+      const idx = capturedImages.value.findIndex((image) => image.id === id)
+      if (idx !== -1) capturedImages.value[idx] = updated
+      notifications.success('Image renamed', `Image renamed to "${name}".`)
+      return true
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to rename image'
+      notifications.error('Rename failed', msg)
+      return false
+    }
+  }
+
+  /** New workspaces always start from the latest version of an image. */
+  async function createWorkspaceFromCapturedImage(
+    capturedImageId: string,
+    data: CapturedImageWorkspaceInput,
+  ): Promise<string | null> {
+    try {
+      const result = await workspacesApi.createWorkspaceFromCapturedImage(capturedImageId, data)
+      notifications.success('Creating workspace', 'New workspace is being created from image.')
+      return result.workspace_id
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to create workspace'
+      notifications.error('Create failed', msg)
+      return null
     }
   }
 
   async function fetchImageDefinitionsWithBuilds(): Promise<void> {
-    error.value = null
     try {
       const defs = await workspacesApi.listImageDefinitions()
       imageDefinitions.value = defs
@@ -49,93 +84,23 @@ export const useImageStore = defineStore('images', () => {
       )
 
       runnerBuildsByDefinition.value = Object.fromEntries(pairs)
+      definitionsError.value = null
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to load image definitions'
-    }
-  }
-
-  async function createImageArtifact(data: ImageArtifactCreateIn): Promise<boolean> {
-    try {
-      await workspacesApi.createImageArtifact(data)
-      await fetchImages()
-      notifications.success('Image creating', 'Image is being created. It will appear here when ready.')
-      return true
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to create image'
-      notifications.error('Image failed', msg)
-      return false
-    }
-  }
-
-  async function deleteImageArtifact(imageArtifactId: string): Promise<boolean> {
-    try {
-      await workspacesApi.deleteImageArtifact(imageArtifactId)
-      // Mark locally as deleting (will be confirmed via next fetch)
-      const idx = images.value.findIndex((a) => a.id === imageArtifactId)
-      if (idx !== -1) {
-        const imageArtifact = images.value[idx]
-        if (imageArtifact) {
-          images.value[idx] = { ...imageArtifact, status: 'deleting' }
-        }
-      }
-      await fetchImages()
-      notifications.success('Delete initiated', 'Image deletion has been initiated.')
-      return true
-    } catch (e: any) {
-      if (e?.response?.status === 409) {
-        const detail = e?.response?.data?.detail || 'Image is in use and cannot be deleted.'
-        notifications.error('Cannot delete', detail)
-      } else {
-        const msg = e instanceof Error ? e.message : 'Failed to delete image'
-        notifications.error('Delete failed', msg)
-      }
-      return false
-    }
-  }
-
-  async function renameImageArtifact(imageArtifactId: string, name: string): Promise<boolean> {
-    try {
-      const updated = await workspacesApi.renameImageArtifact(imageArtifactId, name)
-      const idx = images.value.findIndex((artifact) => artifact.id === imageArtifactId)
-      if (idx !== -1) images.value[idx] = updated
-      notifications.success('Image renamed', `Image renamed to "${name}".`)
-      return true
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to rename image'
-      notifications.error('Rename failed', msg)
-      return false
-    }
-  }
-
-  async function createWorkspaceFromImageArtifact(
-    imageArtifactId: string,
-    data: ImageArtifactCloneIn,
-  ): Promise<string | null> {
-    try {
-      const result = await workspacesApi.createWorkspaceFromUserImageArtifact(
-        imageArtifactId,
-        data,
-      )
-      notifications.success('Cloning workspace', 'New workspace is being created from image.')
-      return result.workspace_id
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to clone workspace'
-      notifications.error('Clone failed', msg)
-      return null
+      definitionsError.value = e instanceof Error ? e.message : 'Failed to load image definitions'
     }
   }
 
   return {
-    images,
+    capturedImages,
     imageDefinitions,
     runnerBuildsByDefinition,
     loading,
+    capturedImagesLoaded,
     error,
-    fetchImages,
+    definitionsError,
+    fetchCapturedImages,
+    renameCapturedImage,
+    createWorkspaceFromCapturedImage,
     fetchImageDefinitionsWithBuilds,
-    createImageArtifact,
-    renameImageArtifact,
-    deleteImageArtifact,
-    createWorkspaceFromImageArtifact,
   }
 })

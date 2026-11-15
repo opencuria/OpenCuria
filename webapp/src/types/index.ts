@@ -14,7 +14,6 @@ export enum WorkspaceStatus {
   RUNNING = 'running',
   STOPPED = 'stopped',
   FAILED = 'failed',
-  REMOVED = 'removed',
   PENDING_DELETION = 'pending_deletion',
   DELETING = 'deleting',
   DELETED = 'deleted',
@@ -28,6 +27,9 @@ export enum WorkspaceOperation {
   RESTARTING = 'restarting',
   REMOVING = 'removing',
   CAPTURING_IMAGE = 'capturing_image',
+  RESETTING = 'resetting',
+  UPDATING = 'updating',
+  SYNCHRONIZING_CREDENTIALS = 'synchronizing_credentials',
 }
 
 export enum TaskStatus {
@@ -49,19 +51,39 @@ export enum TaskType {
   BUILD_IMAGE = 'build_image',
 }
 
-export enum RuntimeType {
-  DOCKER = 'docker',
-  QEMU = 'qemu',
-}
+// --- Shared REST DTOs (one definition for web and mobile) ---
+
+export type {
+  ApiKey,
+  ApiKeyCreated,
+  ApiKeyCreateInput,
+  ApiKeyPermission,
+  CapturedImage,
+  CapturedImageWorkspaceInput,
+  Credential,
+  CredentialCreateInput,
+  CredentialServiceCreateInput,
+  CredentialUpdateInput,
+  ImageArtifact,
+  ImageCaptureInput,
+  ImageCaptureResult,
+  ImageDefinition,
+  ImageDefinitionInput,
+  Runner,
+  RunnerCreateResult,
+  RunnerImageBuild,
+  RunnerSystemMetrics,
+  RunnerUpdateInput,
+  Skill,
+  SkillCreateInput,
+  SkillUpdateInput,
+  VmSystemMetrics,
+} from '@opencuria/client/types'
+import type { ImageArtifact } from '@opencuria/client/types'
 
 // --- Auth ---
 
 export interface LoginRequest {
-  email: string
-  password: string
-}
-
-export interface RegisterRequest {
   email: string
   password: string
 }
@@ -121,95 +143,34 @@ export interface Organization {
   slug: string
   role: string
   workspace_auto_stop_timeout_minutes: number | null
+  image_versions_to_keep: number
   created_at: string
-}
-
-export interface OrganizationCreateIn {
-  name: string
 }
 
 // --- Runner ---
 
-export interface Runner {
-  id: string
-  name: string
-  status: RunnerStatus
-  available_runtimes: string[]
-  qemu_min_vcpus: number
-  qemu_max_vcpus: number
-  qemu_default_vcpus: number
-  qemu_min_memory_mb: number
-  qemu_max_memory_mb: number
-  qemu_default_memory_mb: number
-  qemu_min_disk_size_gb: number
-  qemu_max_disk_size_gb: number
-  qemu_default_disk_size_gb: number
-  qemu_max_active_vcpus: number | null
-  qemu_max_active_memory_mb: number | null
-  qemu_max_active_disk_size_gb: number | null
-  organization_id: string
-  connected_at: string | null
-  disconnected_at: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface RunnerCreateIn {
-  name: string
-}
-
-export interface RunnerCreateOut {
-  id: string
-  name: string
-  api_token: string
-}
-
-export interface RunnerUpdateIn {
-  qemu_min_vcpus?: number
-  qemu_max_vcpus?: number
-  qemu_default_vcpus?: number
-  qemu_min_memory_mb?: number
-  qemu_max_memory_mb?: number
-  qemu_default_memory_mb?: number
-  qemu_min_disk_size_gb?: number
-  qemu_max_disk_size_gb?: number
-  qemu_default_disk_size_gb?: number
-  qemu_max_active_vcpus?: number | null
-  qemu_max_active_memory_mb?: number | null
-  qemu_max_active_disk_size_gb?: number | null
-}
-
-export interface RunnerSystemMetrics {
-  runner_id: string
-  timestamp: string
-  cpu_usage_percent: number
-  ram_used_bytes: number
-  ram_total_bytes: number
-  disk_used_bytes: number
-  disk_total_bytes: number
-  vm_metrics?: Record<string, VmSystemMetrics>
-}
-
-export interface VmSystemMetrics {
-  cpu_usage_percent: number
-  ram_used_bytes: number
-  ram_total_bytes: number
-  disk_used_bytes: number
-  disk_total_bytes: number
-}
-
 // --- Workspace ---
 
+/** Last observed filesystem usage inside a workspace (`/workspace`). */
+export interface WorkspaceDiskUsage {
+  used_bytes: number
+  free_bytes: number
+  total_bytes: number
+  observed_at: string
+}
+
 export interface Workspace {
+  intervention_required?: boolean
+  lifecycle_diagnostic?: string
   id: string
   runner_id: string
   status: WorkspaceStatus
   active_operation: WorkspaceOperation | null
   name: string
-  runtime_type: string
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
+  disk_usage?: WorkspaceDiskUsage | null
   desktop_width: number
   desktop_height: number
   created_by_id: number
@@ -226,8 +187,32 @@ export interface Workspace {
   has_active_session: boolean
   runner_online: boolean
   credential_ids: string[]
+  plugin_ids: string[]
   credentials_present: boolean
   base_image_name?: string | null
+  base_image?: ImageVersionRef | null
+  pending_base_image?: ImageVersionRef | null
+  repos?: string[]
+}
+
+/** The image version a workspace is (or is being) based on. */
+export interface ImageVersionRef {
+  id: string
+  line_kind: 'captured' | 'definition' | null
+  line_id: string | null
+  name: string
+  version: number | null
+  message: string
+  status: ImageArtifact['status']
+  latest_id: string | null
+  latest_version: number | null
+  update_available: boolean
+}
+
+export interface WorkspaceRecreateOut {
+  workspace_id: string
+  task_id: string
+  active_operation: WorkspaceOperation | null
 }
 
 export type WorkspaceDetail = Workspace
@@ -235,8 +220,8 @@ export type WorkspaceDetail = Workspace
 export interface WorkspaceCreateIn {
   name: string
   repos: string[]
-  runtime_type?: string
   credential_ids: string[]
+  plugin_ids: string[]
   runner_id?: string | null
   qemu_vcpus?: number
   qemu_memory_mb?: number
@@ -249,6 +234,7 @@ export interface WorkspaceCreateIn {
 export interface WorkspaceUpdateIn {
   name?: string
   credential_ids?: string[]
+  plugin_ids?: string[]
   qemu_vcpus?: number
   qemu_memory_mb?: number
   qemu_disk_size_gb?: number
@@ -262,7 +248,10 @@ export interface WorkspaceUpdateOut {
   updated_at: string
   active_operation: WorkspaceOperation | null
   credential_ids: string[]
+  plugin_ids: string[]
   credentials_present: boolean
+  credential_sync_status: 'synced' | 'pending' | 'failed' | 'not_required'
+  credential_sync_detail?: string | null
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
@@ -274,6 +263,7 @@ export interface WorkspaceCreateOut {
   workspace_id: string
   task_id: string
   status: string
+  plugin_ids: string[]
 }
 
 // --- Task ---
@@ -289,56 +279,11 @@ export interface Task {
   completed_at: string | null
 }
 
-// --- Error ---
-
-export interface ApiError {
-  detail: string
-  code: string
-}
-
 // --- Credentials ---
 
-export interface CredentialService {
-  id: string
-  name: string
-  slug: string
-  description: string
-  credential_type: string
-  env_var_name: string
-  target_path: string
-  label: string
-}
-
-export interface Credential {
-  id: string
-  name: string
-  scope: 'personal' | 'organization'
-  service_id: string
-  service_name: string
-  service_slug: string
-  credential_type: string
-  env_var_name: string
-  target_path: string
-  has_public_key: boolean
-  created_by_id: number
-  created_at: string
-  updated_at: string
-}
-
-export interface CredentialCreateIn {
-  service_id: string
-  name?: string
-  value?: string
-  organization_credential?: boolean
-}
-
-export interface CredentialUpdateIn {
-  name?: string
-  value?: string
-}
-
-export interface PublicKeyOut {
-  public_key: string
+export interface OAuthConnectOut {
+  authorization_url: string
+  status: 'pending'
 }
 
 // --- File Explorer ---
@@ -352,45 +297,7 @@ export interface FileNode {
   isExpanded?: boolean
 }
 
-export interface FileEntryRaw {
-  name: string
-  path: string
-  type: 'file' | 'directory'
-  size: number
-}
-
-export interface FilesListResultEvent {
-  workspace_id: string
-  request_id: string
-  path: string
-  entries: FileEntryRaw[]
-  error?: string
-}
-
-export interface FilesFindPath {
-  name: string
-  path: string
-}
-
-export interface FilesFindResultEvent {
-  workspace_id: string
-  request_id: string
-  query: string
-  paths: FilesFindPath[]
-  truncated?: boolean
-  error?: string
-}
-
-export interface FilesContentResultEvent {
-  workspace_id: string
-  request_id: string
-  path: string
-  content: string
-  size: number
-  truncated: boolean
-  mime_type?: string
-  error?: string
-}
+export type { FileEntry as FileEntryRaw } from '@opencuria/client/types'
 
 export interface FilesUploadResultEvent {
   workspace_id: string
@@ -400,177 +307,6 @@ export interface FilesUploadResultEvent {
   error?: string
 }
 
-export interface FilesDownloadResultEvent {
-  workspace_id: string
-  request_id: string
-  path: string
-  content: string
-  filename: string
-  is_archive: boolean
-  error?: string
-}
-
-// --- Skills ---
-
-export interface Skill {
-  id: string
-  name: string
-  body: string
-  scope: 'personal' | 'organization'
-  created_by_email: string | null
-  created_at: string
-  updated_at: string
-}
-
-export interface SkillCreateIn {
-  name: string
-  body: string
-  organization_skill?: boolean
-}
-
-export interface SkillUpdateIn {
-  name?: string
-  body?: string
-}
-
-// --- API Keys ---
-
-export interface APIKeyPermissionInfo {
-  value: string
-  label: string
-  description: string
-  group: string
-}
-
-export interface APIKey {
-  id: string
-  name: string
-  key_prefix: string
-  is_active: boolean
-  created_at: string
-  last_used_at: string | null
-  expires_at: string | null
-  permissions: string[]
-}
-
-export interface APIKeyCreatedOut extends APIKey {
-  key: string
-}
-
-export interface APIKeyCreateIn {
-  name: string
-  expires_at: string | null
-  permissions: string[]
-}
-
-export interface APIKeyUpdateIn {
-  permissions: string[]
-}
-
-// --- Images ---
-
-export interface ImageArtifact {
-  id: string
-  source_workspace_id: string | null
-  runner_artifact_id: string
-  name: string
-  size_bytes: number | null
-  status:
-    | 'creating'
-    | 'capturing'
-    | 'building'
-    | 'ready'
-    | 'failed'
-    | 'retired'
-    | 'pending_deletion'
-    | 'deleting'
-    | 'deleted'
-    | 'delete_failed'
-  artifact_kind: 'built' | 'captured'
-  build_job_id?: string | null
-  source_definition_name?: string | null
-  source_runner_id?: string | null
-  runtime_type?: RuntimeType | 'docker' | 'qemu' | null
-  is_deactivated?: boolean
-  source_runner_online?: boolean
-  delete_requested_at?: string | null
-  delete_confirmed_at?: string | null
-  delete_last_error?: string
-  created_at: string
-  created_by_id: number | null
-}
-
-export interface ImageArtifactCreateIn {
-  name: string
-  workspace_id?: string
-}
-
-export interface ImageArtifactCreateOut {
-  task_id: string
-  workspace_id: string
-}
-
-export interface ImageArtifactCloneIn {
-  name?: string
-  credential_ids?: string[]
-}
-
-export interface ImageArtifactCloneOut {
-  workspace_id: string
-  task_id: string
-  status: string
-}
-
-export interface RunnerImageBuild {
-  id: string
-  image_definition_id: string
-  runner_id: string
-  image_artifact_id?: string | null
-  status: 'pending' | 'building' | 'active' | 'failed' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
-  build_log: string
-  build_task_id?: string | null
-  built_at?: string | null
-  deactivated_at?: string | null
-  delete_requested_at?: string | null
-  delete_confirmed_at?: string | null
-  delete_last_error?: string
-  created_at: string
-  updated_at: string
-}
-
-export interface ImageDefinitionBuildSummary {
-  active: number
-  building: number
-  failed: number
-  inactive: number
-  removing: number
-}
-
-export interface ImageDefinition {
-  id: string
-  organization_id: string | null
-  created_by_id?: number | null
-  name: string
-  description: string
-  is_standard: boolean
-  runtime_type: RuntimeType | 'docker' | 'qemu'
-  base_distro: string
-  packages: string[]
-  env_vars: Record<string, string>
-  custom_dockerfile: string
-  custom_init_script: string
-  is_active: boolean
-  status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'
-  runner_build_summary?: ImageDefinitionBuildSummary
-  delete_requested_at?: string | null
-  delete_started_at?: string | null
-  delete_confirmed_at?: string | null
-  delete_last_error?: string
-  delete_attempt_count?: number
-  created_at: string
-  updated_at: string
-}
-
 // --- Background processes ---
 
 export enum ProcessStatus {
@@ -578,6 +314,11 @@ export enum ProcessStatus {
   EXITED = 'exited',
   KILLED = 'killed',
   FAILED = 'failed',
+}
+
+export enum ProcessKind {
+  PERSISTENT = 'persistent',
+  TEMP = 'temp',
 }
 
 export interface WorkspaceProcess {
@@ -590,6 +331,8 @@ export interface WorkspaceProcess {
   log_path: string
   status: ProcessStatus | string
   exit_code: number | null
+  run_count: number
+  kind: ProcessKind | string
   started_at: string
   ended_at: string | null
   updated_at: string
@@ -601,4 +344,11 @@ export interface ProcessStatusChangedEvent {
   status: string
   exit_code: number | null
   pid: number | null
+  log_path?: string
+  run_count?: number
+}
+
+export interface ProcessRemovedEvent {
+  workspace_id: string
+  process_id: string
 }

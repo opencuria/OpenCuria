@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /**
- * WorkspacePicker — kleine Pill ÜBER dem Home-Composer.
+ * WorkspacePicker — small pill shown ABOVE the home composer.
  *
- * Zeigt den gewählten Workspace (Name + Status-Dot) und öffnet ein Dropdown
- * mit Suche, Liste aller nicht-gelöschten Workspaces und Footer-Aktion.
- * Die Auswahl-Logik (Default, localStorage) liegt in ChatHomeView;
- * der Picker zeigt nur an, lässt wählen und meldet neue Workspaces.
+ * Displays the selected workspace (name + status dot) and opens a dropdown
+ * with search, a list of all non-deleted workspaces, and a footer action.
+ * Default/localStorage selection logic lives in ChatHomeView; the picker
+ * only displays, lets the user choose, and reports newly created workspaces.
  */
 import { computed, ref } from 'vue'
 import { ChevronDown, Container, Plus } from '@lucide/vue'
@@ -38,7 +38,6 @@ const searchQuery = ref('')
 const createOpen = ref(false)
 
 const HIDDEN_STATUSES = new Set<string>([
-  WorkspaceStatus.REMOVED,
   WorkspaceStatus.DELETED,
   WorkspaceStatus.DELETING,
   WorkspaceStatus.PENDING_DELETION,
@@ -53,11 +52,7 @@ const selectedWorkspace = computed<Workspace | null>(
 )
 
 function isWorkspaceReady(workspace: Workspace): boolean {
-  return (
-    workspace.status === WorkspaceStatus.RUNNING &&
-    workspace.runner_online &&
-    !workspace.active_operation
-  )
+  return workspaceStore.canUseWorkspace(workspace.id)
 }
 
 const isReady = computed(() =>
@@ -72,13 +67,23 @@ const filteredWorkspaces = computed<Workspace[]>(() => {
   )
 })
 
+function isWorkspaceBusy(workspace: Workspace): boolean {
+  return Boolean(
+    workspaceStore.isWorkspaceTransitioning(workspace.id) || workspace.has_active_session,
+  )
+}
+
 function statusDotClass(workspace: Workspace): string {
+  if (isWorkspaceBusy(workspace)) return 'bg-amber-500'
   return isWorkspaceReady(workspace) ? 'bg-green-500' : 'bg-muted-foreground/40'
 }
 
 function statusLabel(workspace: Workspace): string {
-  if (workspace.active_operation) {
+  if (workspaceStore.isWorkspaceTransitioning(workspace.id)) {
     return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? workspace.status
+  }
+  if (workspace.has_active_session) {
+    return 'Busy'
   }
   if (workspace.status === WorkspaceStatus.RUNNING) {
     return workspace.runner_online ? 'Running' : 'Runner offline'
@@ -110,7 +115,7 @@ function handleCreated(id: string | null): void {
           :aria-label="
             selectedWorkspace
               ? `Workspace: ${selectedWorkspace.name}`
-              : 'Workspace wählen'
+              : 'Select workspace'
           "
           data-testid="workspace-picker-trigger"
           class="inline-flex max-w-64 items-center gap-1.5 rounded-full border font-medium transition-colors focus-visible:outline-2 focus-visible:outline-primary"
@@ -122,7 +127,7 @@ function handleCreated(id: string | null): void {
           ]"
         >
           <Container :size="14" class="shrink-0" />
-          <span class="truncate">{{ selectedWorkspace?.name ?? 'Workspace wählen' }}</span>
+          <span class="truncate">{{ selectedWorkspace?.name ?? 'Select workspace' }}</span>
           <span
             v-if="selectedWorkspace"
             class="size-1.5 shrink-0 rounded-full"
@@ -136,8 +141,8 @@ function handleCreated(id: string | null): void {
         <div class="p-1.5" @keydown.stop>
           <Input
             v-model="searchQuery"
-            placeholder="Workspace suchen..."
-            aria-label="Workspace suchen"
+            placeholder="Search workspaces..."
+            aria-label="Search workspaces"
             class="h-8"
             data-testid="workspace-picker-search"
           />
@@ -166,7 +171,7 @@ function handleCreated(id: string | null): void {
             v-if="filteredWorkspaces.length === 0"
             class="px-3 py-4 text-center text-xs text-muted-foreground"
           >
-            Keine Workspaces gefunden.
+            No workspaces found.
           </p>
         </div>
         <DropdownMenuSeparator />
@@ -176,21 +181,21 @@ function handleCreated(id: string | null): void {
           @click="openCreate"
         >
           <Plus :size="14" aria-hidden="true" />
-          Workspace erstellen
+          Create workspace
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
     <button
       type="button"
-      title="Neuen Workspace erstellen"
-      aria-label="Neuen Workspace erstellen"
+      title="Create new workspace"
+      aria-label="Create new workspace"
       data-testid="workspace-picker-new"
       class="inline-flex items-center gap-1 rounded-full text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary"
       :class="compact ? 'h-7 px-2 text-[11px]' : 'h-8 px-2.5'"
       @click="openCreate"
     >
       <Plus :size="14" aria-hidden="true" />
-      Neu
+      New
     </button>
     <CreateWorkspaceDialog v-model:open="createOpen" @created="handleCreated">
       <span class="hidden" aria-hidden="true" />

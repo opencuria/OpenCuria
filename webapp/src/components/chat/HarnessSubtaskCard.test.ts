@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import { useHarnessStore } from '@/stores/harness'
-import type { HarnessPart } from '@/types/harness'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
 
 vi.mock('./HarnessDesktopMini.vue', () => ({
   default: { template: '<div data-testid="harness-desktop-mini" />' },
@@ -15,7 +15,7 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    listProviderModels: vi.fn().mockResolvedValue([]),
+    listEngineModels: vi.fn().mockResolvedValue([]),
   }
 })
 
@@ -28,7 +28,7 @@ function makeSubtaskPart(overrides: Partial<HarnessPart> = {}): HarnessPart {
     state: 'completed',
     title: 'Find desktop VNC renderer',
     output: 'found it',
-    meta: { subtask_id: 'sub-1', agent: 'explore' },
+    meta: { subtask_id: 'sub-1', agent: 'explore', child_session_id: 'session-child' },
     ...overrides,
   }
 }
@@ -54,6 +54,7 @@ describe('HarnessSubtaskCard', () => {
     expect(wrapper.get('[data-testid="harness-subtask-indicator"]').attributes('data-running')).toBe(
       '0',
     )
+    expect(wrapper.find('[data-testid="harness-subtask-indicator"] svg').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('explore')
   })
 
@@ -62,11 +63,28 @@ describe('HarnessSubtaskCard', () => {
       props: { part: makeSubtaskPart({ state: 'running', output: '' }) },
     })
 
-    expect(wrapper.get('[data-testid="harness-subtask-indicator"]').attributes('data-running')).toBe(
-      '1',
-    )
+    const indicator = wrapper.get('[data-testid="harness-subtask-indicator"]')
+    expect(indicator.attributes('data-running')).toBe('1')
+    const logo = indicator.get('svg')
+    expect(logo.attributes('data-motion')).toBe('working')
+    expect(logo.classes()).toContain('oc-logo--working')
+    expect(logo.classes()).toContain('size-[18px]')
+    expect(logo.attributes('aria-hidden')).toBe('true')
     expect(wrapper.find('[data-testid="harness-subtask-activity"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Completed')
+    expect(wrapper.get('[data-testid="harness-subtask-title"]').classes()).toContain(
+      'harness-shimmer',
+    )
+  })
+
+  it('stops shimmering the title once the subtask is done', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart({ state: 'completed' }) },
+    })
+
+    const title = wrapper.get('[data-testid="harness-subtask-title"]')
+    expect(title.classes()).not.toContain('harness-shimmer')
+    expect(title.classes()).toContain('text-foreground')
   })
 
   it('shows the running child tool title as activity', () => {
@@ -94,7 +112,6 @@ describe('HarnessSubtaskCard', () => {
     const wrapper = mount(HarnessSubtaskCard, {
       props: {
         part: makeSubtaskPart({ state: 'running', output: '' }),
-        childSessionId: 'session-child',
       },
     })
 
@@ -103,54 +120,42 @@ describe('HarnessSubtaskCard', () => {
     )
   })
 
-  it('opens the only child session even when titles differ', async () => {
-    const store = useHarnessStore()
-    store.sessions = [
-      {
-        id: 'session-parent',
-        workspace_id: 'workspace-1',
-        parent_id: null,
-        title: 'parent',
-        mode: 'build',
-        agent_name: 'build',
-        model: 'm',
-        status: 'idle',
-        cost: 0,
-        tokens: {},
-      },
+  it('opens the child chat linked by the backend', async () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart() },
+    })
+    await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
+
+    expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+  })
+
+  it('leaves an unlinked subtask disabled even when a matching child exists', async () => {
+    useHarnessStore().sessions = [
       {
         id: 'session-child',
         workspace_id: 'workspace-1',
         parent_id: 'session-parent',
-        title: 'Generated login test title',
+        title: 'Find desktop VNC renderer',
         mode: 'build',
-        agent_name: 'computeruse',
+        agent_name: 'explore',
         model: 'm',
         status: 'idle',
         cost: 0,
         tokens: {},
       },
     ]
-
     const wrapper = mount(HarnessSubtaskCard, {
-      props: {
-        part: makeSubtaskPart({
-          title: 'Webapp Login und Dashboard testen',
-          meta: { subtask_id: 'sub-1', agent: 'computeruse' },
-        }),
-      },
+      props: { part: makeSubtaskPart({ meta: { subtask_id: 'sub-1', agent: 'explore' } }) },
     })
 
-    expect(wrapper.get('[data-testid="harness-subtask-row"]').classes()).toContain(
-      'cursor-pointer',
-    )
-    await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
-    expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+    expect(wrapper.get('button').element.disabled).toBe(true)
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.emitted('openSubtask')).toBeUndefined()
   })
 
   it('highlights the row on hover when it is clickable', () => {
     const wrapper = mount(HarnessSubtaskCard, {
-      props: { part: makeSubtaskPart(), childSessionId: 'session-child' },
+      props: { part: makeSubtaskPart() },
     })
 
     const classes = wrapper.get('[data-testid="harness-subtask-row"]').classes()
@@ -166,7 +171,6 @@ describe('HarnessSubtaskCard', () => {
           output: '',
           meta: { subtask_id: 'sub-1', agent: 'computeruse', child_session_id: 'cu-1' },
         }),
-        childSessionId: 'cu-1',
       },
     })
     expect(running.get('[data-testid="harness-subtask-type"]').text()).toBe('Computer use')
@@ -177,7 +181,6 @@ describe('HarnessSubtaskCard', () => {
         part: makeSubtaskPart({
           meta: { subtask_id: 'sub-1', agent: 'computeruse', child_session_id: 'cu-1' },
         }),
-        childSessionId: 'cu-1',
       },
     })
     expect(done.find('[data-testid="harness-desktop-mini"]').exists()).toBe(false)
@@ -257,6 +260,7 @@ describe('HarnessSubtaskCard', () => {
     })
 
     store.handleSubtaskFinished('session-parent', {
+      message_id: 'msg-1',
       subtask_id: 'sub-1',
       status: 'completed',
       summary: 'found it',

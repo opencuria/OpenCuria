@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
-import { Copy, RefreshCw, Square, X } from '@lucide/vue'
+import { Play, RefreshCw, RotateCcw, Square, Trash2, X } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useProcessesStore } from '@/stores/processes'
-import { ProcessStatus } from '@/types'
+import { ProcessKind, ProcessStatus } from '@/types'
 import type { WorkspaceProcess } from '@/types'
 
 const emit = defineEmits<{
@@ -14,7 +15,6 @@ const emit = defineEmits<{
 
 const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const processesStore = useProcessesStore()
-const copiedPath = ref<string | null>(null)
 
 const workspaceId = computed(() => workspaceIdRef.value)
 const processes = computed((): WorkspaceProcess[] =>
@@ -43,6 +43,18 @@ function isRunning(process: WorkspaceProcess): boolean {
   return process.status === ProcessStatus.RUNNING
 }
 
+function displayStatus(process: WorkspaceProcess): string {
+  return process.run_count === 0 && !isRunning(process) ? 'Not started' : process.status
+}
+
+function hasStarted(process: WorkspaceProcess): boolean {
+  return process.run_count !== 0
+}
+
+function isTemp(process: WorkspaceProcess): boolean {
+  return process.kind === ProcessKind.TEMP
+}
+
 function displayName(process: WorkspaceProcess): string {
   return process.name || process.id.slice(0, 8)
 }
@@ -51,26 +63,36 @@ function stopping(processId: string): boolean {
   return processesStore.isStopping(processId)
 }
 
+function restarting(processId: string): boolean {
+  return processesStore.isRestarting(processId)
+}
+
+function deleting(processId: string): boolean {
+  return processesStore.isDeleting(processId)
+}
+
 async function handleRefresh(): Promise<void> {
-  await processesStore.fetchProcesses(workspaceId.value)
+  await processesStore.fetchProcesses(workspaceId.value, { live: true })
 }
 
 async function handleStop(process: WorkspaceProcess): Promise<void> {
   await processesStore.stopProcess(workspaceId.value, process.id)
 }
 
-async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
-  if (!process.log_path) return
-  try {
-    await navigator.clipboard.writeText(process.log_path)
-    copiedPath.value = process.id
-    setTimeout(() => {
-      if (copiedPath.value === process.id) copiedPath.value = null
-    }, 1500)
-  } catch {
-    // Clipboard unavailable — the path is still visible for manual copy.
-  }
+async function handleRestart(process: WorkspaceProcess): Promise<void> {
+  await processesStore.restartProcess(workspaceId.value, process.id)
 }
+
+async function handleStart(process: WorkspaceProcess): Promise<void> {
+  // Restart the stored config of a stopped process.
+  await processesStore.restartProcess(workspaceId.value, process.id)
+}
+
+async function handleDelete(process: WorkspaceProcess): Promise<void> {
+  if (!confirm(`Delete process '${process.name || process.id}' from the list?`)) return
+  await processesStore.deleteProcess(workspaceId.value, process.id)
+}
+
 </script>
 
 <template>
@@ -136,7 +158,48 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
           >
             {{ displayName(process) }}
           </span>
-          <Badge :variant="statusVariant(process.status)">{{ process.status }}</Badge>
+          <Badge :variant="statusVariant(process.status)">{{ displayStatus(process) }}</Badge>
+          <Badge
+            v-if="isTemp(process)"
+            variant="outline"
+            title="Temporary session process — stopped automatically when the agent run finishes"
+            data-testid="composer-process-temp"
+          >
+            temp
+          </Badge>
+          <span
+            v-if="(process.run_count ?? 0) > 1"
+            class="shrink-0 text-xs text-muted-foreground"
+            data-testid="composer-process-run"
+          >
+            run {{ process.run_count }}
+          </span>
+          <Button
+            v-if="!isRunning(process) && !isTemp(process)"
+            type="button"
+            variant="ghost"
+            size="xs"
+            :disabled="restarting(process.id)"
+            title="Start process"
+            data-testid="composer-process-start"
+            @click="handleStart(process)"
+          >
+            <Play :size="13" />
+            Start
+          </Button>
+          <Button
+            v-if="!isTemp(process) && (hasStarted(process) || isRunning(process))"
+            type="button"
+            variant="ghost"
+            size="xs"
+            :disabled="restarting(process.id)"
+            title="Restart process"
+            data-testid="composer-process-restart"
+            @click="handleRestart(process)"
+          >
+            <RotateCcw :size="13" />
+            Restart
+          </Button>
           <Button
             v-if="isRunning(process)"
             type="button"
@@ -149,6 +212,19 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
           >
             <Square :size="13" />
             Stop
+          </Button>
+          <Button
+            v-if="!isTemp(process)"
+            type="button"
+            variant="ghost"
+            size="xs"
+            :disabled="deleting(process.id)"
+            title="Delete process"
+            data-testid="composer-process-delete"
+            @click="handleDelete(process)"
+          >
+            <Trash2 :size="13" />
+            Delete
           </Button>
         </div>
         <p
@@ -168,16 +244,14 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             {{ process.log_path }}
           </span>
           <span v-else class="text-xs text-muted-foreground">—</span>
-          <button
+          <CopyButton
             v-if="process.log_path"
-            type="button"
-            class="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            :title="copiedPath === process.id ? 'Copied' : 'Copy log path'"
+            :text="process.log_path"
+            label="log path"
+            size="icon-xs"
             data-testid="composer-process-copy"
-            @click="handleCopyLogPath(process)"
-          >
-            <Copy :size="12" />
-          </button>
+            class="size-5 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground [&_svg]:size-3"
+          />
         </div>
       </li>
     </ul>

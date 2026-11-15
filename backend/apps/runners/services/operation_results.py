@@ -1,0 +1,195 @@
+"""Validate and reconcile runner lifecycle results through one service boundary."""
+
+from __future__ import annotations
+
+import inspect
+import uuid
+from typing import Any
+
+from ..operation_result_repository import OperationResultRepository
+from ..operations import INSPECTION_PHASES, LIFECYCLE_TYPES
+from .runner_diagnostics import failure_message
+
+RESULT_METHODS = {
+    "workspace:created": (
+        "workspace_lifecycle",
+        "handle_workspace_created",
+        {"create_workspace", "create_workspace_from_image_artifact"},
+    ),
+    "workspace:stopped": (
+        "workspace_lifecycle",
+        "handle_workspace_stopped",
+        {"stop_workspace"},
+    ),
+    "workspace:resumed": (
+        "workspace_lifecycle",
+        "handle_workspace_resumed",
+        {"resume_workspace"},
+    ),
+    "workspace:updated": (
+        "workspace_lifecycle",
+        "handle_workspace_updated",
+        {"update_workspace"},
+    ),
+    "workspace:removed": (
+        "workspace_lifecycle",
+        "handle_workspace_removed",
+        {"remove_workspace"},
+    ),
+    "workspace:credentials_injected": (
+        "credential_sync",
+        "handle_credentials_injected",
+        {"inject_credentials"},
+    ),
+    "workspace:error": (
+        "workspace_lifecycle",
+        "handle_workspace_error",
+        LIFECYCLE_TYPES - {"build_image", "delete_image", "create_image_artifact"},
+    ),
+    "image:built": ("image_lifecycle", "handle_image_built", {"build_image"}),
+    "image:build_failed": (
+        "image_lifecycle",
+        "handle_image_build_failed",
+        {"build_image"},
+    ),
+    "image_artifact:created": (
+        "image_lifecycle",
+        "handle_image_artifact_created",
+        {"create_image_artifact"},
+    ),
+    "image_artifact:failed": (
+        "image_lifecycle",
+        "handle_image_artifact_failed",
+        {"create_image_artifact"},
+    ),
+    "image_artifact:deleted": (
+        "image_lifecycle",
+        "handle_image_artifact_deleted",
+        {"delete_image"},
+    ),
+    "image_artifact:delete_failed": (
+        "image_lifecycle",
+        "handle_image_artifact_delete_failed",
+        {"delete_image"},
+    ),
+}
+FAILURE_EVENTS = {
+    "workspace:error",
+    "image:build_failed",
+    "image_artifact:failed",
+    "image_artifact:delete_failed",
+}
+TERMINAL_STATUSES = {"completed", "failed"}
+
+
+def apply_result(service: Any, runner_id: str, event: str, data: dict) -> bool:
+    """Reconcile an authenticated result atomically; return terminal ACK eligibility."""
+    if event not in RESULT_METHODS:
+        return False
+    try:
+        uuid.UUID(str(runner_id))
+        uuid.UUID(str(data.get("operation_id")))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+    with OperationResultRepository.locked(
+        runner_id, data.get("operation_id")
+    ) as result:
+        if result is None:
+            return False
+        state = result.state()
+        domain, method_name, types = RESULT_METHODS[event]
+        if (
+            str(state.runner_id) != runner_id
+            or state.task_type not in types
+            or data.get("task_id") != str(state.task_id)
+            or data.get("attempt") != state.attempt
+            or data.get("target") != state.target
+            or data.get("runner_id") != runner_id
+        ):
+            return False
+        if state.workspace_id and data.get(
+            "workspace_id", str(state.workspace_id)
+        ) != str(state.workspace_id):
+            return False
+        if event in FAILURE_EVENTS:
+            # Runner text is sanitized and generic; users see the coded meaning.
+            data = {**data, "error": failure_message(data)}
+        if (
+            event in FAILURE_EVENTS
+            and data.get("outcome_known") is False
+            and (
+                state.status not in TERMINAL_STATUSES
+                or state.phase in INSPECTION_PHASES
+            )
+        ):
+            if state.phase == "attention_required":
+                # Replayed uncertainty cannot erase a proven repair requirement.
+                return False
+            reason = data["error"]
+            newly_interrupted = (
+                state.status != "failed" or state.phase != "intervention"
+            )
+            if newly_interrupted:
+                result.intervene(reason)
+            if state.workspace_id and newly_interrupted:
+                service.frontend_bus.forward_workspace_operation(
+                    str(state.workspace_id), None
+                )
+                service.frontend_bus.forward_to_frontend(
+                    "workspace:error",
+                    {
+                        "workspace_id": str(state.workspace_id),
+                        "task_id": str(state.task_id),
+                        "error": reason,
+                    },
+                    str(state.workspace_id),
+                )
+            return False
+        if state.status in TERMINAL_STATUSES:
+            if state.status == "failed" and state.phase in INSPECTION_PHASES:
+                # Backend delivery deadlines are not runner terminal outcomes.
+                # Exact authenticated journal completion can still resolve the fence.
+                if event in FAILURE_EVENTS and (
+                    not data.get("execution_finished") or not data.get("outcome_known")
+                ):
+                    return False
+                if state.workspace_id and state.current_task_id != state.task_id:
+                    return False
+                result.reopen(
+                    "building" if state.task_type == "build_image" else "capturing"
+                )
+            else:
+                return True
+        if state.workspace_id and state.current_task_id != state.task_id:
+            return False
+        data = {
+            **data,
+            "artifact_id": data.get("image_artifact_id", ""),
+            "runner_ref": data.get("image_artifact_id", ""),
+        }
+        result.mark_received()
+        method = getattr(getattr(service, domain), method_name)
+        kwargs = {
+            k: v
+            for k, v in {**data, "runner_id": runner_id}.items()
+            if k in inspect.signature(method).parameters
+        }
+        method(**kwargs)
+        status, _ = result.outcome()
+        if status not in TERMINAL_STATUSES:
+            return False
+        result.record_runtime_observation(
+            {
+                "workspace:created": "running",
+                "workspace:resumed": "running",
+                "workspace:updated": "running",
+                "workspace:stopped": "stopped",
+                "workspace:removed": "absent",
+                "workspace:credentials_injected": "running",
+            }.get(event, data.get("observed_status") or "unknown")
+            if status == "completed"
+            else data.get("observed_status") or "unknown"
+        )
+        result.release_workspace()
+        return True

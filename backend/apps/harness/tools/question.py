@@ -25,11 +25,18 @@ class QuestionItem(BaseModel):
     question: str = Field(description="The question text.")
     options: list[QuestionOption] = Field(
         default_factory=list,
-        description="Selectable options (free-text when empty).",
+        description=(
+            "Selectable options. The user can always also type a custom "
+            "free-text answer, so never add an 'Other' or catch-all option."
+        ),
     )
     multiple: bool = Field(
         default=False,
-        description="Allow selecting more than one option.",
+        description=(
+            "Allow selecting more than one option. Set to true when the user "
+            "may pick several options (e.g. 'which languages', 'select all "
+            "that apply'); leave false for exactly-one-choice questions."
+        ),
     )
 
 
@@ -48,7 +55,12 @@ class QuestionTool(Tool):
     name = "question"
     description = (
         "Ask the user one or more structured questions and pause until they "
-        "answer. Use when a decision or clarification is required mid-run."
+        "answer. Use when a decision or clarification is required mid-run. "
+        "The user can always answer with custom free text, even when options "
+        "are provided. Answers are returned as one string per question; for "
+        "multi-select questions (multiple: true) the selected option labels "
+        "are joined into that string. Set multiple: true when the user may "
+        "pick several options."
     )
     args_schema: type[BaseModel] = QuestionArgs
     permission_key = "question"

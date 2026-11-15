@@ -3,9 +3,19 @@ from __future__ import annotations
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import APIKey, User
+from .models import APIKey, SsoIdentity, User
 
 admin.site.register(User, UserAdmin)
+
+
+@admin.register(SsoIdentity)
+class SsoIdentityAdmin(admin.ModelAdmin):
+    """Bind an existing password account to its SSO identity explicitly."""
+
+    list_display = ["user", "issuer", "subject", "created_at"]
+    search_fields = ["user__email", "subject"]
+    raw_id_fields = ["user"]
+    readonly_fields = ["created_at"]
 
 
 @admin.register(APIKey)

@@ -1,0 +1,298 @@
+"""Persistence boundary for per-answer provider snapshots and revocation."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from django.db import transaction
+from django.db.models import F
+from django.utils import timezone
+
+from .models import ProviderConnection
+from .provider_turn_models import ProviderTurn, ProviderTurnMutex
+
+
+class ProviderTurnRepository:
+    """Serialize provider snapshot admission and account revocation."""
+
+    @staticmethod
+    def lock_mutex() -> None:
+        """Acquire the database admission/revocation fence in a transaction."""
+        ProviderTurnMutex.objects.get_or_create(id=1)
+        # An UPDATE obtains a real row/write lock on both PostgreSQL and SQLite;
+        # select_for_update alone is a no-op on SQLite.
+        ProviderTurnMutex.objects.filter(id=1).update(id=F("id"))
+        ProviderTurnMutex.objects.select_for_update().get(id=1)
+
+    @classmethod
+    @contextmanager
+    def admission_transaction(cls) -> Iterator[None]:
+        """Hold the revocation fence through snapshot reads, policy and writes."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            yield
+
+    @staticmethod
+    def snapshot_accounts(account_ids: list[uuid.UUID]) -> list[ProviderConnection]:
+        """Load requested accounts, including revoked and out-of-scope records.
+
+        Admission policy needs the full state to distinguish its error cases.
+        The caller holds ``admission_transaction`` while validating these rows.
+        """
+        return list(ProviderConnection.objects.filter(id__in=account_ids))
+
+    @staticmethod
+    def create(
+        *,
+        assistant_message_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        account_ids: dict[str, str],
+    ) -> ProviderTurn:
+        """Persist a validated snapshot inside the caller's admission scope."""
+        return ProviderTurn.objects.create(
+            assistant_message_id=assistant_message_id,
+            organization_id=organization_id,
+            initiated_by_id=user_id,
+            account_ids=dict(account_ids),
+            dependency_account_ids=[],
+            holder_tokens=[str(uuid.uuid4())],
+            holds=1,
+        )
+
+    @classmethod
+    def register_use(
+        cls,
+        turn_id: uuid.UUID | str,
+        account_id: uuid.UUID | str | None,
+        provider: str | None = None,
+    ) -> None:
+        """Record an account dependency before use and reject revocation races."""
+        if account_id is None:
+            return
+        parsed_id = uuid.UUID(str(account_id))
+        rejected = False
+        with transaction.atomic():
+            cls.lock_mutex()
+            turn = ProviderTurn.objects.select_for_update().get(id=turn_id)
+            account = ProviderConnection.objects.filter(id=parsed_id).first()
+            actual_provider = provider or (account.provider if account else "")
+            snapshot = turn.account_ids or {}
+            if provider is None:
+                actual_provider = next(
+                    (key for key, value in snapshot.items() if value == str(parsed_id)),
+                    actual_provider,
+                )
+            expected = snapshot.get(actual_provider)
+            if expected != str(parsed_id):
+                raise ValueError("The provider account is outside this answer snapshot")
+            rejected = (
+                not turn.active
+                or turn.cancel_requested
+                or account is None
+                or account.deleted_at is not None
+                or account.organization_id != turn.organization_id
+                or account.provider != actual_provider
+                or (
+                    account.user_id is not None
+                    and account.user_id != turn.initiated_by_id
+                )
+            )
+            if rejected:
+                turn.cancel_requested = True
+                turn.revoked_account_id = parsed_id
+                turn.save(update_fields=["cancel_requested", "revoked_account_id"])
+            else:
+                used = list(turn.used_account_ids or [])
+                dependencies = list(turn.dependency_account_ids or [])
+                token = str(parsed_id)
+                changed = False
+                if token not in used:
+                    used.append(token)
+                    turn.used_account_ids = used
+                    changed = True
+                if token not in dependencies:
+                    dependencies.append(token)
+                    turn.dependency_account_ids = dependencies
+                    changed = True
+                if changed:
+                    turn.save(
+                        update_fields=["used_account_ids", "dependency_account_ids"]
+                    )
+        if rejected:
+            raise ValueError(
+                "The selected provider account was removed or access revoked"
+            )
+
+    @classmethod
+    def cancellation_reason(cls, turn_id: uuid.UUID | str) -> str:
+        """Return the account-revoked reason while an answer remains active."""
+        turn = (
+            ProviderTurn.objects.filter(id=turn_id, active=True)
+            .values("cancel_requested")
+            .first()
+        )
+        return "account_revoked" if turn and turn["cancel_requested"] else ""
+
+    @classmethod
+    def revoke_account(
+        cls, account_id: uuid.UUID, *, allowed_user_id: int | None = None
+    ) -> int:
+        """Flag active turn snapshots that already depend on a revoked account."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            query = ProviderTurn.objects.filter(active=True)
+            if allowed_user_id is not None:
+                query = query.exclude(initiated_by_id=allowed_user_id)
+            # JSONField __contains is not supported by SQLite. Active sidecars
+            # are small, so filter the bounded candidate set in Python.
+            matching_ids = [
+                row.id
+                for row in query.only(
+                    "id", "account_ids", "dependency_account_ids"
+                ).iterator()
+                if str(account_id)
+                in {
+                    *list((row.account_ids or {}).values()),
+                    *list(row.dependency_account_ids or []),
+                }
+            ]
+            if not matching_ids:
+                return 0
+            return ProviderTurn.objects.filter(id__in=matching_ids).update(
+                cancel_requested=True,
+                revoked_account_id=account_id,
+            )
+
+    @classmethod
+    def revoke_member_turns(
+        cls, organization_id: uuid.UUID, user_id: int
+    ) -> set[uuid.UUID]:
+        """Revoke every active answer when a member loses org access.
+
+        Membership removal invalidates personal accounts too: the credentials
+        remain owned by the user, but an in-flight answer must not outlive the
+        organization authorization under which it was admitted.
+        """
+        with transaction.atomic():
+            cls.lock_mutex()
+            turns = list(
+                ProviderTurn.objects.filter(
+                    active=True,
+                    organization_id=organization_id,
+                    initiated_by_id=user_id,
+                ).values("id", "account_ids", "dependency_account_ids")
+            )
+            account_ids: set[uuid.UUID] = set()
+            for turn in turns:
+                references = [
+                    *list((turn["account_ids"] or {}).values()),
+                    *list(turn["dependency_account_ids"] or []),
+                ]
+                parsed_references: list[uuid.UUID] = []
+                for reference in references:
+                    try:
+                        account_id = uuid.UUID(str(reference))
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+                    account_ids.add(account_id)
+                    parsed_references.append(account_id)
+                ProviderTurn.objects.filter(id=turn["id"], active=True).update(
+                    cancel_requested=True,
+                    revoked_account_id=(
+                        parsed_references[0] if parsed_references else None
+                    ),
+                )
+            return account_ids
+
+    @classmethod
+    def finish_once(cls, turn_id: uuid.UUID | str, holder: str) -> bool:
+        """Idempotently release a named holder, retaining all other work."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            turn = (
+                ProviderTurn.objects.select_for_update()
+                .filter(id=turn_id, active=True)
+                .first()
+            )
+            if turn is None:
+                return False
+            holders = list(turn.holder_tokens or [])
+            if holder not in holders:
+                return False
+            holders.remove(holder)
+            turn.holder_tokens = holders
+            turn.holds = len(holders)
+            fields = ["holder_tokens", "holds"]
+            if not holders and not turn.monitor_required:
+                turn.active = False
+                turn.completed_at = timezone.now()
+                fields.extend(["active", "completed_at"])
+            turn.save(update_fields=fields)
+            return True
+
+    @classmethod
+    def set_monitor_required(cls, turn_id: uuid.UUID | str) -> None:
+        """Mark turn cancellation as retained until local followers drain."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            ProviderTurn.objects.filter(id=turn_id, active=True).update(
+                monitor_required=True
+            )
+
+    @staticmethod
+    def monitor_required(turn_id: uuid.UUID | str) -> bool:
+        """Return the monitor-retention flag for one live turn."""
+        return bool(
+            ProviderTurn.objects.filter(id=turn_id, active=True)
+            .values_list("monitor_required", flat=True)
+            .first()
+        )
+
+    @classmethod
+    def clear_monitor_required(cls, turn_id: uuid.UUID | str) -> None:
+        """Release the monitor hold after its follower tree drains."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            turn = (
+                ProviderTurn.objects.select_for_update()
+                .filter(id=turn_id, active=True)
+                .first()
+            )
+            if turn is None:
+                return
+            turn.monitor_required = False
+            fields = ["monitor_required"]
+            if not turn.holder_tokens:
+                turn.active = False
+                turn.completed_at = timezone.now()
+                fields.extend(["active", "completed_at"])
+            turn.save(update_fields=fields)
+
+    @classmethod
+    def add_hold(cls, turn_id: uuid.UUID | str, holder: str) -> bool:
+        """Keep a turn snapshot active for one unique follow-up holder."""
+        with transaction.atomic():
+            cls.lock_mutex()
+            turn = (
+                ProviderTurn.objects.select_for_update()
+                .filter(id=turn_id, active=True)
+                .first()
+            )
+            if turn is None or turn.cancel_requested:
+                return False
+            holders = list(turn.holder_tokens or [])
+            if holder in holders:
+                return True
+            holders.append(holder)
+            turn.holder_tokens = holders
+            turn.holds = len(holders)
+            turn.save(update_fields=["holder_tokens", "holds"])
+            return True
+
+    @staticmethod
+    def get(turn_id: uuid.UUID | str) -> ProviderTurn | None:
+        """Return one durable turn sidecar."""
+        return ProviderTurn.objects.filter(id=turn_id).first()

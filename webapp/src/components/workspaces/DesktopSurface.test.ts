@@ -1,0 +1,685 @@
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
+
+import DesktopSurface from './DesktopSurface.vue'
+import {
+  closeDesktopViewer,
+  desktopViewerSession,
+  refreshDesktopViewer,
+} from '@/composables/useDesktopSessionCoordinator'
+import { useDesktopStore } from '@/stores/desktop'
+import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
+import { activePointingWorkspace } from '@/lib/voicePointing'
+import * as workspacesApi from '@/services/workspaces.api'
+import { copyToClipboard } from '@/lib/clipboard'
+
+type ClipboardCopyContent = string | (() => Promise<string>)
+function clipboardCopyCalls(): [ClipboardCopyContent, string][] {
+  return (
+    copyToClipboard as unknown as {
+      mock: { calls: [ClipboardCopyContent, string][] }
+    }
+  ).mock.calls
+}
+
+vi.mock('@/lib/clipboard', () => ({
+  copyToClipboard: vi.fn(async () => true),
+}))
+
+vi.mock('@/services/workspaces.api', () => ({
+  getDesktopStatus: vi.fn(),
+  issueDesktopTicket: vi.fn(),
+  startDesktop: vi.fn(),
+  stopDesktop: vi.fn(),
+  renewDesktop: vi.fn(),
+  takeDesktopControl: vi.fn(),
+  writeDesktopClipboard: vi.fn(),
+  readDesktopClipboard: vi.fn(),
+  copyDesktopSelectionDuringGesture: vi.fn(),
+}))
+
+vi.mock('@/services/config', () => ({
+  getConfig: () => ({ apiBaseUrl: '', wsBaseUrl: '' }),
+}))
+
+vi.mock('@/services/socket', () => ({
+  onEvent: vi.fn(() => () => {}),
+}))
+
+const getDesktopStatus = vi.mocked(workspacesApi.getDesktopStatus)
+const issueDesktopTicket = vi.mocked(workspacesApi.issueDesktopTicket)
+const startDesktop = vi.mocked(workspacesApi.startDesktop)
+const stopDesktop = vi.mocked(workspacesApi.stopDesktop)
+
+const uiStubs = {
+  Button: {
+    template:
+      '<button v-bind="$attrs" :title="title" @click="$emit(\'click\', $event)"><slot /></button>',
+    props: ['title'],
+    emits: ['click'],
+  },
+  LoadingSpinner: { template: '<div />' },
+}
+
+let sidebarHost: HTMLElement
+let modalHost: HTMLElement
+const wrappers: VueWrapper[] = []
+
+function setHostRect(
+  host: HTMLElement,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): void {
+  vi.spyOn(host, 'getBoundingClientRect').mockReturnValue({
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    width,
+    height,
+    toJSON: () => ({}),
+  } as DOMRect)
+}
+
+function mountSurface() {
+  const wrapper = mount(DesktopSurface, {
+    attachTo: document.body,
+    props: { workspaceId: 'ws-1' },
+    global: { stubs: uiStubs },
+  })
+  wrappers.push(wrapper)
+  return wrapper
+}
+
+function connectionMessage(
+  source: MessageEventSource | null,
+  value: string,
+  origin = window.location.origin,
+) {
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      data: { action: 'connection_state', value },
+      source,
+      origin,
+    }),
+  )
+}
+
+function clipboardMessage(source: MessageEventSource | null, value: string) {
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      data: { action: 'clipboardrx', value },
+      source,
+      origin: window.location.origin,
+    }),
+  )
+}
+
+function prepareFrameCanvas(iframe: HTMLIFrameElement): HTMLCanvasElement {
+  const doc = iframe.contentDocument!
+  doc.open()
+  doc.write('<!doctype html><html><body><canvas tabindex="0"></canvas></body></html>')
+  doc.close()
+  return doc.querySelector('canvas')!
+}
+
+describe('DesktopSurface', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    localStorage.clear()
+    let tickets = 0
+    issueDesktopTicket.mockImplementation(async () => ({
+      ticket: `ticket-${++tickets}`,
+      expires_in: 60,
+    }))
+    class ResizeObserverStub {
+      observe(): void {}
+      disconnect(): void {}
+      unobserve(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+
+    document.body.innerHTML = ''
+    sidebarHost = document.createElement('div')
+    modalHost = document.createElement('div')
+    document.body.append(sidebarHost, modalHost)
+    setHostRect(sidebarHost, 10, 20, 320, 240)
+    setHostRect(modalHost, 50, 60, 800, 450)
+    sidebarDesktopHost.value = sidebarHost
+    modalDesktopHost.value = modalHost
+
+    getDesktopStatus.mockResolvedValue({
+      active: true,
+      proxy_url: '/ws/desktop/ws-1/',
+      viewer_held: false,
+      computer_use_active: false,
+    })
+    startDesktop.mockResolvedValue({ task_id: 'task-1' })
+    stopDesktop.mockResolvedValue({ task_id: 'task-2' })
+  })
+
+  afterEach(async () => {
+    activePointingWorkspace.value = null
+    while (wrappers.length) wrappers.pop()?.unmount()
+    // The viewer session is module state shared across tests.
+    await closeDesktopViewer('ws-1')
+    desktopViewerSession('ws-1').status = null
+    sidebarDesktopHost.value = null
+    modalDesktopHost.value = null
+    document.body.innerHTML = ''
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps one fixed iframe node while overlaying the active host rectangle', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    mountSurface()
+    await nextTick()
+
+    const surface = document.querySelector('[data-testid="desktop-surface"]') as HTMLElement
+    const iframe = surface.querySelector('iframe')
+    expect(iframe).toBeTruthy()
+    expect(surface.parentElement).not.toBe(sidebarHost)
+    await flushPromises()
+    expect(iframe?.getAttribute('src')).toContain('/ws/desktop/ws-1/')
+    expect(iframe?.getAttribute('src')).toContain('ticket=ticket-1')
+    expect(iframe?.getAttribute('src')).not.toContain('token')
+    expect(surface.style.position).toBe('fixed')
+    expect(surface.style.zIndex).toBe('var(--z-desktop-surface)')
+    expect(surface.style.left).toBe('10px')
+    expect(surface.style.top).toBe('20px')
+    expect(surface.style.width).toBe('320px')
+    expect(surface.style.height).toBe('240px')
+
+    store.open()
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface"] iframe')).toBe(iframe)
+    expect(surface.parentElement).not.toBe(modalHost)
+    expect(surface.style.zIndex).toBe('var(--z-desktop-surface)')
+    expect(surface.style.left).toBe('50px')
+    expect(surface.style.top).toBe('60px')
+    expect(surface.style.width).toBe('800px')
+    expect(surface.style.height).toBe('450px')
+
+    store.close()
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface"] iframe')).toBe(iframe)
+    expect(surface.style.left).toBe('10px')
+  })
+
+  it('observes the connected viewer without placing an input-blocking overlay over it', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    expect(iframe.hasAttribute('data-voice-desktop')).toBe(false)
+    iframe.dispatchEvent(new Event('load'))
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    expect(document.querySelector('[data-voice-desktop]')).toBe(iframe)
+    activePointingWorkspace.value = 'ws-1'
+    await nextTick()
+    expect(document.querySelectorAll('[data-voice-desktop]')).toHaveLength(1)
+    expect(iframe.dataset.voiceWorkspace).toBe('ws-1')
+    expect(document.querySelector('[title*="desktop input is paused"]')).toBeNull()
+    activePointingWorkspace.value = null
+    await nextTick()
+    expect(document.querySelector('iframe')).toBe(iframe)
+  })
+
+  it('keeps the iframe mounted but hides it when no visible host exists', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    sidebarDesktopHost.value = null
+
+    const wrapper = mountSurface()
+    await nextTick()
+
+    expect(wrapper.find('iframe').exists()).toBe(true)
+    expect(
+      (document.querySelector('[data-testid="desktop-surface"]') as HTMLElement).style.visibility,
+    ).toBe('hidden')
+  })
+
+  it('auto-starts the session when the modal opens', async () => {
+    const store = useDesktopStore()
+    mountSurface()
+    await flushPromises()
+    expect(startDesktop).not.toHaveBeenCalled()
+
+    store.open()
+    await flushPromises()
+
+    expect(getDesktopStatus).toHaveBeenCalledWith(
+      'ws-1',
+      expect.any(String),
+      expect.any(AbortSignal),
+    )
+    expect(startDesktop).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({
+        viewer_client_id: expect.any(String),
+        intent_revision: expect.any(Number),
+      }),
+      expect.any(AbortSignal),
+    )
+  })
+
+  it('keeps the desktop fully visible but read-only while computer use drives it', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    iframe.focus()
+    expect(document.activeElement).toBe(iframe)
+
+    store.setComputerUseActive(true)
+    await flushPromises()
+    const shield = document.querySelector<HTMLElement>(
+      '[data-testid="desktop-surface-input-shield"]',
+    )!
+    // Nothing dims or covers the screen; the shield only takes its input,
+    // including keys of a viewer that still had focus.
+    expect(shield.className).not.toMatch(/\bbg-/)
+    expect(shield.textContent).toBe('')
+    expect(iframe.classList.contains('opacity-0')).toBe(false)
+    expect(document.activeElement).toBe(shield)
+    // Take control lives in the toolbars, not on the screen.
+    expect(document.body.textContent).not.toContain('Take control')
+
+    store.setComputerUseActive(false)
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-input-shield"]')).toBeNull()
+  })
+
+  it('requires KasmVNC connection status after iframe load', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    mountSurface()
+    await nextTick()
+
+    const iframe = document.querySelector('iframe')!
+    expect(iframe.classList.contains('opacity-0')).toBe(true)
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    expect(iframe.classList.contains('opacity-0')).toBe(false)
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+  })
+
+  it('observes a delayed DOM connection and disconnect without status messages', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    // jsdom does not fetch the proxied document; supply the loaded root.
+    iframe.contentDocument!.appendChild(iframe.contentDocument!.createElement('html'))
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    const root = iframe.contentDocument!.documentElement
+    root.classList.add('noVNC_connected')
+    await flushPromises()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+    expect(store.viewerGeneration).toBe(0)
+
+    root.classList.remove('noVNC_connected')
+    await flushPromises()
+    expect(document.body.textContent).toContain('Reconnecting')
+  })
+
+  it('bounds unsuccessful viewer retries and lets a manual retry recover', async () => {
+    vi.useFakeTimers()
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    // Initial handshake timeout and three retries (1s, 2s, 4s backoff).
+    await vi.advanceTimersByTimeAsync(67_000)
+    expect(store.viewerGeneration).toBe(3)
+    expect(document.body.textContent).toContain('Desktop connection failed.')
+    document.querySelector<HTMLButtonElement>('[data-testid="desktop-surface-retry"]')!.click()
+    await flushPromises()
+    expect(store.viewerGeneration).toBe(4)
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'connected')
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+  })
+
+  it('resolves the guest clipboard event from the iframe canvas without a REST fallback', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    const iframe = document.querySelector('iframe')!
+    const canvas = prepareFrameCanvas(iframe)
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    canvas.focus()
+    // This test covers the secure/async lazy-loader branch. Without a frame
+    // clipboard writer jsdom models HTTP and takes the new synchronous path.
+    Object.defineProperty(iframe.contentWindow!.navigator, 'clipboard', {
+      configurable: true,
+      value: { write: vi.fn() },
+    })
+    canvas.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'c',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+
+    expect(copyToClipboard).toHaveBeenCalledOnce()
+    expect(workspacesApi.readDesktopClipboard).not.toHaveBeenCalled()
+    const [content, label] = clipboardCopyCalls()[0] ?? []
+    expect(typeof content).toBe('function')
+    expect(label).toBe('VM clipboard')
+
+    if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
+    const loadedText = content()
+    clipboardMessage(iframe.contentWindow, 'guest clipboard text')
+    await expect(loadedText).resolves.toBe('guest clipboard text')
+    expect(workspacesApi.readDesktopClipboard).not.toHaveBeenCalled()
+  })
+
+  it('ignores messages from the wrong origin or a different frame', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected', 'https://attacker.example')
+    connectionMessage(window, 'connected')
+    await nextTick()
+    expect(iframe.classList.contains('opacity-0')).toBe(true)
+
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    expect(iframe.classList.contains('opacity-0')).toBe(false)
+  })
+
+  it('ignores a delayed status from an older iframe generation', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const oldFrame = document.querySelector('iframe')!
+
+    store.bumpViewer()
+    await nextTick()
+    const currentFrame = document.querySelector('iframe')!
+    expect(currentFrame).not.toBe(oldFrame)
+    connectionMessage(oldFrame.contentWindow, 'connected')
+    await nextTick()
+    expect(currentFrame.classList.contains('opacity-0')).toBe(true)
+  })
+
+  it('renders visible Retry on disconnect and retries by bumping the viewer', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+
+    connectionMessage(iframe.contentWindow, 'disconnected')
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-retry"]')).toBeTruthy()
+    expect(document.body.textContent).toContain('Reconnecting')
+
+    document.querySelector<HTMLButtonElement>('[data-testid="desktop-surface-retry"]')!.click()
+    await flushPromises()
+    expect(getDesktopStatus).toHaveBeenCalledWith(
+      'ws-1',
+      expect.any(String),
+      expect.any(AbortSignal),
+    )
+    expect(store.viewerGeneration).toBe(1)
+  })
+
+  it('does not remount a healthy iframe when the tab becomes visible', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+
+    expect(store.viewerGeneration).toBe(0)
+    expect(document.querySelector('iframe')).toBe(iframe)
+  })
+
+  it('keeps a cross-origin viewer connected across load and visibility changes', async () => {
+    vi.useFakeTimers()
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    // The configured backend may have another origin. Its DOM is then
+    // unavailable, while authenticated connection messages still arrive.
+    vi.spyOn(iframe, 'contentDocument', 'get').mockReturnValue(null)
+    connectionMessage(iframe.contentWindow, 'connected')
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+
+    for (const visibility of ['hidden', 'visible']) {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        get: () => visibility,
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+    await vi.advanceTimersByTimeAsync(16_000)
+
+    expect(store.viewerGeneration).toBe(0)
+    expect(document.querySelector('iframe')).toBe(iframe)
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+
+    connectionMessage(iframe.contentWindow, 'disconnected')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(store.viewerGeneration).toBe(1)
+  })
+
+  it('pauses recovery while hidden and does not reload on hidden transitions', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(store.viewerGeneration).toBe(0)
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await nextTick()
+    expect(store.viewerGeneration).toBe(0)
+  })
+
+  it('does not restart a stopped desktop when its viewer drops afterwards', async () => {
+    vi.useFakeTimers()
+    const store = useDesktopStore()
+    getDesktopStatus.mockImplementation(async () => ({
+      active: true,
+      proxy_url: '/ws/desktop/ws-1/',
+      viewer_held: true,
+      computer_use_active: false,
+      viewer_lease_state: 'held',
+      revision: desktopViewerSession('ws-1').revision,
+      epoch: 'epoch-1',
+    }))
+    mountSurface()
+    store.open()
+    await flushPromises()
+    expect(startDesktop).toHaveBeenCalledOnce()
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'connected')
+    await nextTick()
+
+    // Stop is acknowledged before the runner tears down Xvnc, so the viewer
+    // drops while the route is still published, then desktop:stopped lands.
+    await closeDesktopViewer('ws-1')
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'disconnected')
+    await nextTick()
+    getDesktopStatus.mockImplementation(async () => ({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+      viewer_lease_state: 'released',
+      revision: desktopViewerSession('ws-1').revision,
+      epoch: 'epoch-1',
+    }))
+    await refreshDesktopViewer('ws-1')
+    expect(store.isConnected).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(startDesktop).toHaveBeenCalledOnce()
+    expect(desktopViewerSession('ws-1').wanted).toBe(false)
+  })
+
+  it('does not stop a globally inherited session on unmount', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    const wrapper = mountSurface()
+    await flushPromises()
+    wrapper.unmount()
+    await flushPromises()
+
+    expect(stopDesktop).not.toHaveBeenCalled()
+  })
+
+  it('shows connecting content until Kasm reports connected', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'connecting')
+    await nextTick()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+  })
+
+  it('remounts the iframe when viewer generation bumps', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    store.bumpViewer()
+    await nextTick()
+
+    const nextIframe = document.querySelector('iframe')
+    expect(nextIframe).toBeTruthy()
+    expect(nextIframe).not.toBe(iframe)
+    expect(nextIframe?.classList.contains('opacity-0')).toBe(true)
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeTruthy()
+  })
+
+  it('opens every viewer with a fresh ticket and never an access token', async () => {
+    localStorage.setItem('kern_access_token', 'secret-access-token')
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    store.setViewerIntent(1, 'held')
+    await flushPromises()
+    const iframe = document.querySelector('iframe')!
+    expect(issueDesktopTicket).toHaveBeenLastCalledWith('ws-1')
+    const first = new URL(iframe.src).searchParams
+    expect(first.get('intent_revision')).toBe('1')
+    const firstTicket = first.get('ticket')
+
+    // Tickets are single-use: a remounted viewer must never reuse one.
+    store.bumpViewer()
+    await flushPromises()
+
+    const replacement = document.querySelector('iframe')!
+    expect(replacement).not.toBe(iframe)
+    const params = new URL(replacement.src).searchParams
+    expect(params.get('ticket')).toMatch(/^ticket-\d+$/)
+    expect(params.get('ticket')).not.toBe(firstTicket)
+    expect(params.get('intent_revision')).toBe('1')
+    expect(params.has('token')).toBe(false)
+    expect(params.has('path')).toBe(false)
+    expect(replacement.src).not.toContain('secret-access-token')
+  })
+
+  it('drops a ticket that arrives after the viewer moved on', async () => {
+    let release: (value: { ticket: string; expires_in: number }) => void = () => {}
+    issueDesktopTicket.mockImplementationOnce(
+      () => new Promise((resolve) => (release = resolve)),
+    )
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    store.bumpViewer()
+    await flushPromises()
+    const current = document.querySelector('iframe')!.src
+
+    release({ ticket: 'stale-ticket', expires_in: 60 })
+    await flushPromises()
+
+    expect(document.querySelector('iframe')!.src).toBe(current)
+    expect(current).not.toContain('stale-ticket')
+  })
+
+  it('treats a failed ticket request as a lost viewer', async () => {
+    issueDesktopTicket.mockRejectedValue(new Error('offline'))
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await flushPromises()
+
+    expect(document.querySelector('iframe')!.hasAttribute('src')).toBe(false)
+    expect(
+      document.querySelector('[data-testid="desktop-surface-loading"]')?.textContent,
+    ).toContain('Desktop disconnected')
+  })
+})

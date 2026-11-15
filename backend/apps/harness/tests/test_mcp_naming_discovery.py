@@ -1,0 +1,207 @@
+"""Tests for MCP discovery caps, namespacing, schemas, and normalization."""
+
+from __future__ import annotations
+
+import base64
+import json
+
+import mcp.types as types
+import pytest
+
+from apps.harness.mcp_client.connection import (
+    MAX_SCHEMA_SERIALIZED_BYTES,
+    McpServerHealthError,
+    McpTool,
+    build_mcp_tool_title,
+    check_name_collisions,
+    normalize_call_result,
+    validate_mcp_args,
+)
+from apps.harness.mcp_client.naming import (
+    MAX_TOOL_NAME_LEN,
+    TOOL_NAME_RE,
+    mcp_tool_name,
+)
+from apps.harness.tools.base import ToolError, ToolRegistry
+
+
+def _text_result(*texts: str, is_error: bool = False) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=t) for t in texts],
+        isError=is_error,
+    )
+
+
+def test_tool_namespacing_deterministic_and_bounded():
+    first = mcp_tool_name("my-plugin", "main-server", "do_thing")
+    assert first == mcp_tool_name("my-plugin", "main-server", "do_thing")
+    assert first == "mcp_my-plugin_main-server_do_thing"
+    assert TOOL_NAME_RE.match(first)
+    long_name = mcp_tool_name("p" * 40, "s" * 40, "t" * 40)
+    assert len(long_name) <= MAX_TOOL_NAME_LEN
+    assert TOOL_NAME_RE.match(long_name)
+    weird = mcp_tool_name("plug in!", "srv@x", "tool with spaces & stuff")
+    assert TOOL_NAME_RE.match(weird)
+
+
+def test_name_collisions_fail_closed():
+    with pytest.raises(McpServerHealthError):
+        check_name_collisions(["mcp_a_b_c", "mcp_a_b_c"])
+    with pytest.raises(McpServerHealthError):
+        check_name_collisions(["mcp_a_b_c"], existing=["Read", "MCP_A_B_C"])
+    check_name_collisions(["mcp_a_b_c"], existing=["read", "bash"])
+
+
+def test_args_validated_against_original_schema_not_lossy():
+    schema = {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer", "minimum": 2, "maximum": 5},
+            "mode": {"type": "string", "enum": ["a", "b"]},
+        },
+        "required": ["count"],
+        "additionalProperties": False,
+    }
+    validate_mcp_args(schema, {"count": 3, "mode": "a"})
+    with pytest.raises(ToolError):
+        validate_mcp_args(schema, {"count": 9, "mode": "a"})
+    with pytest.raises(ToolError):
+        validate_mcp_args(schema, {"mode": "a"})
+    with pytest.raises(ToolError):
+        validate_mcp_args(schema, {"count": 3, "extra": 1})
+
+
+def test_provider_schema_is_original_input_schema():
+    tool = McpTool(
+        namespaced_name="mcp_p_s_echo",
+        original_name="echo",
+        description="echo it",
+        input_schema={"type": "object", "properties": {"x": {"type": "integer"}}},
+        connection=None,  # type: ignore[arg-type]
+        title_text=build_mcp_tool_title("P", "S", "echo"),
+    )
+    assert tool.permission_key == "mcp_p_s_echo"
+    assert tool.title(tool.coerce_args({})) == "P / S / echo"
+    assert tool.parameters_schema() == {
+        "type": "object",
+        "properties": {"x": {"type": "integer"}},
+    }
+    registry = ToolRegistry()
+    registry.register(tool)
+    schemas = registry.schemas()
+    assert schemas[0].parameters["properties"]["x"] == {"type": "integer"}
+
+
+def test_normalize_text_and_structured():
+    result = _text_result("hello", "world")
+    normalized = normalize_call_result(result)
+    assert normalized.output == "hello\nworld"
+    structured = types.CallToolResult(
+        content=[],
+        structuredContent={"answer": 42},
+    )
+    assert json.loads(normalize_call_result(structured).output) == {"answer": 42}
+    serialized = types.CallToolResult(
+        content=[types.TextContent(type="text", text='{"b": 1,"a": [2]}')],
+        structuredContent={"a": [2], "b": 1},
+    )
+    assert normalize_call_result(serialized).output == '{"b": 1,"a": [2]}'
+    supplemented = types.CallToolResult(
+        content=[types.TextContent(type="text", text="summary")],
+        structuredContent={"answer": 42},
+    )
+    assert normalize_call_result(supplemented).output == 'summary\n{"answer": 42}'
+    with pytest.raises(ToolError, match="boom"):
+        normalize_call_result(_text_result("boom", is_error=True))
+
+
+def test_normalize_resource_link_and_embedded():
+    result = types.CallToolResult(
+        content=[
+            types.ResourceLink(
+                type="resource_link",
+                uri="file:///workspace/a.txt",
+                name="a.txt",
+            )
+        ],
+    )
+    assert "a.txt" in normalize_call_result(result).output
+    embedded = types.CallToolResult(
+        content=[
+            types.EmbeddedResource(
+                type="resource",
+                resource=types.TextResourceContents(
+                    uri="file:///workspace/b.txt",
+                    mimeType="text/plain",
+                    text="file body here",
+                ),
+            )
+        ],
+    )
+    assert "file body here" in normalize_call_result(embedded).output
+
+
+@pytest.mark.parametrize(
+    "mime", ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
+)
+def test_normalize_image_attachment_reaches_model_and_persistence(mime):
+    from apps.harness.media.attachments import (
+        build_tool_message_content,
+        select_persisted_tool_attachments,
+    )
+
+    encoded = base64.b64encode(b"image").decode()
+    result = types.CallToolResult(
+        content=[types.ImageContent(type="image", data=encoded, mimeType=mime)]
+    )
+    out = normalize_call_result(result)
+    assert out.output == "[MCP tool returned no text output]"
+    normalized_mime = "image/jpeg" if mime == "image/jpg" else mime
+    url = f"data:{normalized_mime};base64,{encoded}"
+    assert out.attachments == [
+        {"type": "file", "mime": normalized_mime, "url": url, "filename": ""}
+    ]
+    assert out.metadata["attachments"] == out.attachments
+    parts = build_tool_message_content(out.output, out.attachments)
+    assert parts[1] == {"type": "image_url", "image_url": {"url": url}}
+    assert select_persisted_tool_attachments(out.attachments) == out.attachments
+
+
+@pytest.mark.parametrize("data", [base64.b64encode(b"a" * 16).decode(), "A" * 64])
+def test_normalize_oversize_image_is_descriptor(monkeypatch, data):
+    monkeypatch.setattr("apps.harness.mcp_client.connection.MAX_MCP_IMAGE_BYTES", 8)
+
+    result = types.CallToolResult(
+        content=[
+            types.ImageContent(type="image", data=data, mimeType="image/jpeg")
+        ],
+    )
+    out = normalize_call_result(result)
+    assert out.attachments == []
+    assert "exceeds" in out.output
+
+
+@pytest.mark.parametrize("mime", ["image/jpeg", "image/png"])
+def test_normalize_mcp_image_rejects_unsupported_and_caps_count(mime):
+    encoded = base64.b64encode(b"image").decode()
+    result = types.CallToolResult(
+        content=[
+            types.ImageContent(type="image", data=encoded, mimeType="image/svg+xml"),
+            *[
+                types.ImageContent(type="image", data=encoded, mimeType=mime)
+                for _ in range(3)
+            ],
+        ]
+    )
+    out = normalize_call_result(result)
+    assert len(out.attachments) == 2
+    assert "not supported" in out.output
+    assert "omitted" in out.output
+
+
+def test_discovery_caps_constants_sane():
+    from apps.harness.mcp_client import connection as conn
+
+    assert conn.MAX_DISCOVERY_PAGES == 1000
+    assert conn.MAX_TOOLS_PER_SERVER == 256
+    assert MAX_SCHEMA_SERIALIZED_BYTES == 256 * 1024

@@ -1,0 +1,274 @@
+"""REST contracts for versioned images, recreate and retention policy."""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+from django.contrib.auth import get_user_model
+from django.test import Client
+
+from apps.accounts.models import APIKey, APIKeyPermission
+from apps.organizations.models import Membership, MembershipRole
+from apps.runners.models import WorkspaceRecreateRequest
+from apps.runners.services import get_runner_service
+from apps.runners.tests.test_image_versions import make_line, qemu_workspace
+from common.exceptions import NotFoundError
+from common.utils import generate_api_token, hash_token
+
+pytestmark = pytest.mark.django_db
+
+
+def headers(user, organization, permissions):
+    token = generate_api_token()
+    APIKey.objects.create(
+        user=user,
+        name="versions-test",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=[permission.value for permission in permissions],
+    )
+    return {"HTTP_X_API_KEY": token, "HTTP_X_ORGANIZATION_ID": str(organization.id)}
+
+
+@pytest.fixture
+def member(user, organization):
+    Membership.objects.create(
+        user=user, organization=organization, role=MembershipRole.MEMBER
+    )
+    return user
+
+
+def test_captured_images_list_versions_and_latest(member, runner, organization):
+    line, (v1, v2) = make_line(runner, member, ("ready", "ready"))
+    qemu_workspace(runner, member, v1)
+    response = Client().get(
+        "/api/v1/captured-images/",
+        **headers(member, organization, [APIKeyPermission.IMAGES_READ]),
+    )
+    assert response.status_code == 200, response.content
+    [image] = response.json()
+    assert image["id"] == str(line.id) and image["latest_version"] == 2
+    assert image["total_size_bytes"] == 300 and image["workspace_count"] == 1
+    versions = {v["version"]: v for v in image["versions"]}
+    assert versions[2]["is_latest"] and versions[2]["retention"] == "latest"
+    assert versions[1]["retention"] == "kept"
+    # Usage is a count only; workspace names stay private to their owners.
+    assert versions[1]["workspace_count"] == 1
+    assert versions[2]["workspace_count"] == 0
+    assert "workspaces" not in versions[1]
+    assert "Versioned" not in response.content.decode()
+    assert versions[2]["source_workspace_id"] is None
+    assert versions[2]["source_runner_id"] == str(runner.id)
+    assert "runtime_type" not in versions[2]
+    assert "credential_ids" not in versions[2]
+
+
+def test_captured_images_are_owner_scoped(member, runner, organization):
+    make_line(runner, member)
+    other = get_user_model().objects.create_user(email="x@example.com", password="x")
+    Membership.objects.create(
+        user=other, organization=organization, role=MembershipRole.MEMBER
+    )
+    auth = headers(other, organization, [APIKeyPermission.IMAGES_READ])
+    assert Client().get("/api/v1/captured-images/", **auth).json() == []
+
+
+@pytest.mark.parametrize("role", [MembershipRole.MEMBER, MembershipRole.ADMIN])
+def test_captured_versions_cannot_start_other_users_workspaces(
+    member, runner, organization, role
+):
+    """A capture holds its owner's files; nobody else may start a workspace on it."""
+    _, (version,) = make_line(runner, member)
+    other = get_user_model().objects.create_user(email="y@example.com", password="x")
+    Membership.objects.create(user=other, organization=organization, role=role)
+    response = Client().post(
+        "/api/v1/workspaces/",
+        data=json.dumps({"name": "Borrowed", "image_artifact_id": str(version.id)}),
+        content_type="application/json",
+        **headers(other, organization, [APIKeyPermission.WORKSPACES_CREATE]),
+    )
+    assert response.status_code == 404, response.content
+    lifecycle = get_runner_service().workspace_lifecycle
+    with pytest.raises(NotFoundError):
+        lifecycle._placement_for_image_instance(version, user=other)
+    assert lifecycle._placement_for_image_instance(version, user=member) == runner
+
+
+def test_rename_captured_image(member, runner, organization):
+    line, _ = make_line(runner, member)
+    response = Client().patch(
+        f"/api/v1/captured-images/{line.id}/",
+        data=json.dumps({"name": "Renamed"}),
+        content_type="application/json",
+        **headers(member, organization, [APIKeyPermission.IMAGES_CREATE]),
+    )
+    assert response.status_code == 200 and response.json()["name"] == "Renamed"
+
+
+@pytest.mark.parametrize("method", ["patch", "delete"])
+def test_image_artifact_mutation_routes_are_removed(member, runner, organization, method):
+    _, (version,) = make_line(runner, member)
+    response = getattr(Client(), method)(
+        f"/api/v1/image-artifacts/{version.id}/",
+        data=json.dumps({"name": "Unused"}),
+        content_type="application/json",
+        **headers(
+            member,
+            organization,
+            [APIKeyPermission.IMAGES_CREATE, APIKeyPermission.IMAGES_DELETE],
+        ),
+    )
+    assert response.status_code == 404
+
+
+def test_new_workspace_from_captured_image_uses_latest(
+    member, runner, organization, monkeypatch
+):
+    line, (_, v2) = make_line(runner, member, ("ready", "ready"))
+    workspace = qemu_workspace(runner, member, v2)
+    calls = []
+
+    async def create(**kwargs):
+        calls.append(kwargs["image_artifact_id"])
+        return workspace, SimpleNamespace(id=workspace.id)
+
+    monkeypatch.setattr(
+        get_runner_service().workspace_lifecycle,
+        "create_workspace_from_image_artifact",
+        create,
+    )
+    response = Client().post(
+        f"/api/v1/captured-images/{line.id}/workspaces/",
+        data=json.dumps({"name": "From latest"}),
+        content_type="application/json",
+        **headers(member, organization, [APIKeyPermission.IMAGES_CLONE]),
+    )
+    assert response.status_code == 202, response.content
+    assert calls == [v2.id]
+
+
+@pytest.mark.parametrize("unavailable", ["offline", "no_ready_version"])
+def test_clone_rejects_unavailable_image(member, runner, organization, unavailable):
+    line, _ = make_line(
+        runner, member, ("failed",) if unavailable == "no_ready_version" else ("ready",)
+    )
+    if unavailable == "offline":
+        runner.status = "offline"
+        runner.save(update_fields=["status"])
+    response = Client().post(
+        f"/api/v1/captured-images/{line.id}/workspaces/",
+        data=json.dumps({"name": "Unavailable", "credential_ids": []}),
+        content_type="application/json",
+        **headers(member, organization, [APIKeyPermission.IMAGES_CLONE]),
+    )
+    assert response.status_code == 409, response.content
+    assert response.json()["code"] == (
+        "runner_offline" if unavailable == "offline" else "conflict"
+    )
+
+
+def test_workspace_out_exposes_version_and_update(member, runner, organization):
+    _, (v1, v2) = make_line(runner, member, ("ready", "ready"))
+    ws = qemu_workspace(runner, member, v1)
+    response = Client().get(
+        f"/api/v1/workspaces/{ws.id}/",
+        **headers(member, organization, [APIKeyPermission.WORKSPACES_READ]),
+    )
+    assert response.status_code == 200, response.content
+    base = response.json()["base_image"]
+    assert base["version"] == 1 and base["line_kind"] == "captured"
+    assert base["latest_id"] == str(v2.id) and base["update_available"] is True
+
+
+def test_recreate_requires_owner_and_delete_permission(member, runner, organization):
+    _, (v1,) = make_line(runner, member)
+    ws = qemu_workspace(runner, member, v1)
+    url = f"/api/v1/workspaces/{ws.id}/recreate/"
+    body = {
+        "data": json.dumps({"image_id": str(v1.id)}),
+        "content_type": "application/json",
+    }
+    denied = Client().post(
+        url,
+        **body,
+        **headers(member, organization, [APIKeyPermission.WORKSPACES_UPDATE]),
+    )
+    assert denied.status_code == 403
+    other = get_user_model().objects.create_user(email="y@example.com", password="x")
+    Membership.objects.create(
+        user=other, organization=organization, role=MembershipRole.MEMBER
+    )
+    hidden = Client().post(
+        url,
+        **body,
+        **headers(other, organization, [APIKeyPermission.WORKSPACES_DELETE]),
+    )
+    assert hidden.status_code == 404
+    assert not WorkspaceRecreateRequest.objects.exists()
+    accepted = Client().post(
+        url,
+        **body,
+        **headers(member, organization, [APIKeyPermission.WORKSPACES_DELETE]),
+    )
+    assert accepted.status_code == 202, accepted.content
+    assert accepted.json()["active_operation"] == "resetting"
+    conflict = Client().post(
+        url,
+        **body,
+        **headers(member, organization, [APIKeyPermission.WORKSPACES_DELETE]),
+    )
+    assert conflict.status_code == 409
+
+
+def test_recreate_refuses_offline_runner(member, runner, organization):
+    _, (v1,) = make_line(runner, member)
+    ws = qemu_workspace(runner, member, v1)
+    runner.status = "offline"
+    runner.save(update_fields=["status"])
+    response = Client().post(
+        f"/api/v1/workspaces/{ws.id}/recreate/",
+        data=json.dumps({"image_id": str(v1.id)}),
+        content_type="application/json",
+        **headers(member, organization, [APIKeyPermission.WORKSPACES_DELETE]),
+    )
+    assert response.status_code == 409 and response.json()["code"] == "runner_offline"
+    assert not WorkspaceRecreateRequest.objects.exists()
+
+
+def test_policy_patch_is_partial_and_validated(user, organization):
+    Membership.objects.create(
+        user=user, organization=organization, role=MembershipRole.ADMIN
+    )
+    organization.workspace_auto_stop_timeout_minutes = 30
+    organization.save()
+    auth = headers(user, organization, [APIKeyPermission.ORGANIZATIONS_WRITE])
+    url = f"/api/v1/organizations/{organization.id}/workspace-policy/"
+    response = Client().patch(
+        url,
+        data=json.dumps({"image_versions_to_keep": 4}),
+        content_type="application/json",
+        **auth,
+    )
+    assert response.status_code == 200, response.content
+    organization.refresh_from_db()
+    assert organization.image_versions_to_keep == 4
+    assert organization.workspace_auto_stop_timeout_minutes == 30
+    invalid = Client().patch(
+        url,
+        data=json.dumps({"image_versions_to_keep": 0}),
+        content_type="application/json",
+        **auth,
+    )
+    assert invalid.status_code == 400
+
+
+def test_policy_update_requires_admin(member, organization):
+    response = Client().patch(
+        f"/api/v1/organizations/{organization.id}/workspace-policy/",
+        data=json.dumps({"image_versions_to_keep": 5}),
+        content_type="application/json",
+        **headers(member, organization, [APIKeyPermission.ORGANIZATIONS_WRITE]),
+    )
+    assert response.status_code == 403
+    organization.refresh_from_db()
+    assert organization.image_versions_to_keep == 2

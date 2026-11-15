@@ -10,17 +10,37 @@ from ninja import NinjaAPI
 
 from apps.accounts.api import auth_router
 from apps.accounts.api_auth import APIKeyBearer, APIKeyInHeader, JWTAuth
-from apps.credentials.api import credential_router, credential_service_router, org_credential_service_router
+from apps.credentials.api import (
+    credential_router,
+    credential_service_router,
+    org_credential_service_router,
+)
+from apps.credentials.oauth_api import (
+    callback as mcp_oauth_callback,
+)
+from apps.credentials.oauth_api import credential_oauth_router, service_oauth_router
 from apps.harness.api import harness_router
-from apps.skills.api import skill_router
+from apps.harness.commit_message_api import commit_message_router
+from apps.harness.engines.api import engines_router
+from apps.harness.provider_accounts_api import provider_accounts_router
+from apps.harness.voice_api import voice_router, voice_settings_router
+from apps.mobile_apps.api import app_router
+from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
+from apps.organizations.member_profile_api import member_profile_router
+from apps.plugins.api import plugin_router
 from apps.runners.api import (
+    captured_image_router,
+    git_router,
     image_artifact_router,
     image_definition_router,
     runner_router,
     workspace_image_artifact_router,
     workspace_router,
 )
+from apps.scheduled_tasks.api import scheduled_task_router
+from apps.skills.api import skill_router
+from common.exceptions import ServiceUnavailableError
 
 api = NinjaAPI(
     title="opencuria API",
@@ -30,9 +50,18 @@ api = NinjaAPI(
 )
 
 
+@api.exception_handler(ServiceUnavailableError)
+def service_unavailable(request, exc: ServiceUnavailableError):
+    """Report an unreachable backend process as retryable on every endpoint."""
+    return api.create_response(
+        request, {"detail": exc.message, "code": exc.code}, status=503
+    )
+
+
 # ---------------------------------------------------------------------------
 # Health check (unauthenticated)
 # ---------------------------------------------------------------------------
+
 
 @api.get("/health/", auth=None, tags=["health"])
 def health_check(request):
@@ -41,19 +70,34 @@ def health_check(request):
 
 
 api.add_router("/auth/", auth_router)
+api.add_router("/notifications/", notification_router)
+api.add_router("/auth/", member_profile_router)
 api.add_router("/organizations/", org_router)
 api.add_router("/runners/", runner_router)
 api.add_router("/workspaces/", workspace_router)
 api.add_router("/workspaces/", workspace_image_artifact_router)
+api.add_router("/workspaces/", git_router)
+api.add_router("/workspaces/", commit_message_router)
+api.add_router("/workspaces/", voice_router)
+api.add_router("/voice/", voice_settings_router)
 api.add_router("/image-artifacts/", image_artifact_router)
+api.add_router("/captured-images/", captured_image_router)
 api.add_router("/credential-services/", credential_service_router)
+api.add_router("/credential-services/", service_oauth_router)
 api.add_router("/credentials/", credential_router)
+api.add_router("/credentials/", credential_oauth_router)
 api.add_router("/skills/", skill_router)
 api.add_router("/", harness_router)
+api.add_router("/", provider_accounts_router)
+api.add_router("/", engines_router)
+api.add_router("/", scheduled_task_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
 api.add_router("/image-definitions/", image_definition_router)
+api.add_router("/plugins/", plugin_router)
+api.add_router("/apps/", app_router)
 
 urlpatterns = [
+    path("api/v1/mcp-oauth/callback/", mcp_oauth_callback, name="mcp_oauth_callback"),
     path("admin/", admin.site.urls),
     path("api/v1/", api.urls),
 ]

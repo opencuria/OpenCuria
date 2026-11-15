@@ -1,9 +1,9 @@
 """System-prompt composer for the agent harness.
 
-Assembles the system prompt from the agent definition, project context
-files (``AGENTS.md`` walk-up with ``CLAUDE.md`` fallback), environment
-facts (date, working directory, mode), the available tools, and the
-subagent descriptions used by the ``task`` tool.
+Assembles the system prompt from the agent definition, shared OpenCuria
+product context, project context files (``AGENTS.md`` walk-up with ``CLAUDE.md``
+fallback), environment facts (date, platform, working directory, mode), the
+available tools, and the subagent descriptions used by the ``task`` tool.
 
 Truncation limits (documented here so callers can reason about them):
 
@@ -23,7 +23,7 @@ logic lives here on purpose.
 
 from __future__ import annotations
 
-import platform
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -32,6 +32,7 @@ import structlog
 
 from ..access.base import HARNESS_WORKSPACE_ROOT
 from ..agents.definitions import AgentDefinition
+from .opencuria import opencuria_context
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard for typing only
     from ..access.base import WorkspaceAccessor
@@ -151,6 +152,7 @@ async def compose_system_prompt(
     now: datetime | None = None,
     skills: list[str] | None = None,
     references: list[str] | None = None,
+    native_tool_contracts: bool = False,
 ) -> ComposedPrompt:
     """Compose the full system prompt for an agent run.
 
@@ -165,6 +167,7 @@ async def compose_system_prompt(
         now: Timestamp for the environment section (defaults to UTC).
         skills: Extension point (M5/M7): skill names/blobs to append.
         references: Extension point (M5/M7): ``@file``-style references.
+        native_tool_contracts: The CLI owns native tool names and descriptions.
 
     Returns:
         The composed prompt plus loaded sources and a truncated flag.
@@ -172,7 +175,29 @@ async def compose_system_prompt(
     if mode not in ("plan", "build"):
         raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
     moment = now or datetime.now(timezone.utc)
-    sections: list[str] = [agent.system_prompt.strip()]
+    agent_prompt = agent.system_prompt.strip()
+    if native_tool_contracts:
+        # Adapt names only; never replace the CLI's native tool contracts.
+        for local, native in (
+            ("read", "Read"),
+            ("glob", "Glob"),
+            ("grep", "Grep"),
+            ("bash", "Bash"),
+        ):
+            agent_prompt = re.sub(rf"\b{local}\b", native, agent_prompt)
+        agent_prompt = agent_prompt.replace(
+            "Read, Glob, Grep, list", "Read, Glob, Grep"
+        )
+        agent_prompt = agent_prompt.replace(
+            "read tools (Read, Glob, Grep, list)", "Read, Glob, and Grep"
+        )
+        agent_prompt = agent_prompt.replace(
+            "question tool", "mcp__opencuria__question tool"
+        )
+    sections: list[str] = [agent_prompt]
+    product_context = opencuria_context(agent)
+    if product_context:
+        sections.append(product_context)
     sources: list[str] = []
     truncated = False
 
@@ -188,33 +213,43 @@ async def compose_system_prompt(
     env_lines = [
         "# Environment",
         f"Date: {moment.strftime('%Y-%m-%d')}",
-        f"Platform: {platform.system()} {platform.machine()}",
-        f"Workspace root: {HARNESS_WORKSPACE_ROOT}",
+        "Platform: Linux",
         f"Working directory: {cwd}",
-        f"Mode: {mode} (plan = propose, do not mutate without approval; "
-        "build = implement Hunted changes directly)",
+        f"Mode: {mode} (plan = scope and propose; "
+        "build = implement intended changes directly)",
     ]
     if mode == "plan":
-        env_lines.append(
-            "Plan mode: investigate read-only; "
-            "ask before edits/mutating commands."
-        )
+        if agent.name == "explore":
+            env_lines.append(
+                "Plan mode does not relax Explore's read-only restrictions. "
+                "Do not edit files, run tests or mutating commands, or delegate."
+            )
+        else:
+            plan_reminder = (
+                "Plan mode: research, tests, builds, and development servers may "
+                "create ordinary temporary artifacts. "
+            )
+            if agent.name == "plan":
+                plan_reminder += "Ask before deliberate source/configuration changes. "
+            env_lines.append(
+                plan_reminder
+                + "Shell commands, background processes, and delegated tools "
+                "follow the configured agent permissions."
+            )
     sections.append("\n".join(env_lines))
 
     if tools:
-        tool_lines = ["# Available tools"]
+        tool_lines = [
+            "# OpenCuria tools" if native_tool_contracts else "# Available tools"
+        ]
         for schema in tools:
             tool_lines.append(f"- {schema.name}: {schema.description}")
-        if any(schema.name == "process_start" for schema in tools):
+        if not native_tool_contracts:
             tool_lines.append(
-                "Background servers via process_start; read logs from the "
-                "returned log_path."
+                "Independent tool calls in one assistant message run in parallel. "
+                "Issue multiple tool calls in a single step for independent work; "
+                "wait for results before dependent follow-ups."
             )
-        tool_lines.append(
-            "Independent tool calls in one assistant message run in parallel. "
-            "Issue multiple tool calls in a single step for independent work; "
-            "wait for results before dependent follow-ups."
-        )
         sections.append("\n".join(tool_lines))
 
     if subagents:
@@ -234,12 +269,11 @@ async def compose_system_prompt(
     if skills:
         sections.append("# Skills\n" + "\n".join(f"- {skill}" for skill in skills))
     if references:
-        sections.append(
-            "# References\n" + "\n".join(f"- {ref}" for ref in references)
-        )
+        sections.append("# References\n" + "\n".join(f"- {ref}" for ref in references))
 
-    return ComposedPrompt(system="\n\n".join(sections), sources=sources,
-                           truncated=truncated)
+    return ComposedPrompt(
+        system="\n\n".join(sections), sources=sources, truncated=truncated
+    )
 
 
 def describe_tools_for_prompt(tools: list[ToolSchema] | None) -> list[str]:

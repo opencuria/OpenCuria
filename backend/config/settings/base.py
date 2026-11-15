@@ -19,17 +19,31 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "insecure-dev-key-change-in-production")
+MCP_OAUTH_CALLBACK_URL = os.getenv("MCP_OAUTH_CALLBACK_URL", "").strip()
+MCP_OAUTH_FRONTEND_RETURN_URL = os.getenv(
+    "MCP_OAUTH_FRONTEND_RETURN_URL", ""
+).strip()
+
+# Hosting-owned push key files, validated and loaded at startup.
+# Leave all APNs values or the FCM path empty to disable that provider.
+APNS_TEAM_ID = os.getenv("APNS_TEAM_ID", "").strip()
+APNS_KEY_ID = os.getenv("APNS_KEY_ID", "").strip()
+APNS_PRIVATE_KEY_FILE = os.getenv("APNS_PRIVATE_KEY_FILE", "").strip()
+FCM_SERVICE_ACCOUNT_FILE = os.getenv("FCM_SERVICE_ACCOUNT_FILE", "").strip()
 
 DEBUG = False
 
 ALLOWED_HOSTS: list[str] = []
+
+# Voice input sends up to 8 MiB of compressed audio as base64 JSON. Keep the
+# request bounded while allowing ten-minute recordings and pointing manifests.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
 
 
 # --- Application definition ---
 
 INSTALLED_APPS = [
     # Django
-    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -37,7 +51,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     # Third-party
-    "channels",
     "corsheaders",
     # Local apps
     "apps.accounts",
@@ -45,7 +58,12 @@ INSTALLED_APPS = [
     "apps.runners",
     "apps.credentials",
     "apps.harness",
+    "apps.scheduled_tasks",
+    "apps.notifications",
+    "apps.plugins",
     "apps.skills",
+    "apps.mcp_app",
+    "apps.mobile_apps",
 ]
 
 MIDDLEWARE = [
@@ -137,6 +155,10 @@ USE_TZ = True
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
+# Uploaded and published files (e.g. agent-built apps). Backend and execution
+# processes must share this directory, so deployments point it at their volume.
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
+
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -152,15 +174,9 @@ STORAGES = {
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Organization-Id",
 ]
-
-
-# --- Django Channels ---
-
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
-    }
-}
+# MCP OAuth initiation stores a host-only, state-scoped HttpOnly cookie on
+# this backend from the cross-origin browser API request.
+CORS_ALLOW_CREDENTIALS = True
 
 
 # --- Misc ---
@@ -193,6 +209,11 @@ LOGGING = {
         "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
     },
     "loggers": {
+        # APNs destinations contain private device tokens in their URL paths.
+        "httpx": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "httpcore": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "hpack": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "h2": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "django": {
             "handlers": ["console"],
             "level": "INFO",

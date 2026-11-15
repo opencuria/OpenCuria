@@ -2,64 +2,33 @@
 
 from __future__ import annotations
 
-import base64
+import io
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import Callable
 from typing import Any
 
 import pytest
+from PIL import Image
 
-from apps.harness.access.base import (
-    DirEntry,
-    ExecChunk,
-    ExecResult,
-    FileContent,
-    FileStat,
-    WorkspaceAccessor,
-)
+from apps.harness.access.base import ExecResult, WorkspaceAccessor
+from apps.harness.access.file_types import DirEntry, FileContent
 from apps.harness.access.runner_accessor import RunnerAccessorError
+from apps.harness.models import HarnessSession, ProviderConnection
+from apps.harness.repositories import HarnessSessionRepository
 from apps.organizations.models import Organization
 
 # Allow sync ORM calls from async test functions (Django safety check).
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
-TINY_JPEG = (
-    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
-)
-DEFAULT_DESKTOP_WIDTH = 1920
-DEFAULT_DESKTOP_HEIGHT = 1080
+def make_image(size: tuple[int, int] = (1, 1), *, format: str = "PNG") -> bytes:
+    """Return a complete decodable image instead of a magic-byte stub."""
+    output = io.BytesIO()
+    Image.new("RGB", size, "white").save(output, format=format)
+    return output.getvalue()
 
 
-def desktop_screenshot_result(
-    *,
-    width: int = DEFAULT_DESKTOP_WIDTH,
-    height: int = DEFAULT_DESKTOP_HEIGHT,
-    jpeg: bytes = TINY_JPEG,
-) -> dict[str, Any]:
-    """Build a runner-style screenshot payload for FakeAccessor."""
-    return {
-        "ok": True,
-        "image_b64": base64.b64encode(jpeg).decode("ascii"),
-        "mime": "image/jpeg",
-        "width": width,
-        "height": height,
-        "text": "",
-    }
-
-
-def desktop_display_info_result(
-    *,
-    width: int = DEFAULT_DESKTOP_WIDTH,
-    height: int = DEFAULT_DESKTOP_HEIGHT,
-) -> dict[str, Any]:
-    """Build a runner-style display_info payload for FakeAccessor."""
-    return {
-        "ok": True,
-        "display": ":1",
-        "width": width,
-        "height": height,
-    }
+TINY_PNG = make_image()
 
 
 @pytest.fixture
@@ -69,6 +38,46 @@ def organization(db) -> Organization:
         name=f"Harness Org {uuid.uuid4().hex[:6]}",
         slug=f"harness-org-{uuid.uuid4().hex[:10]}",
     )
+
+
+@pytest.fixture
+def provider_account_user(organization: Organization) -> Any:
+    """An active administrator for provider-account and catalog tests."""
+    from django.contrib.auth import get_user_model
+
+    from apps.organizations.models import Membership, MembershipRole
+
+    admin = get_user_model().objects.create_user(
+        email=f"provider-admin-{uuid.uuid4().hex[:8]}@example.com", password="secret"
+    )
+    Membership.objects.create(
+        user=admin, organization=organization, role=MembershipRole.ADMIN
+    )
+    return admin
+
+
+@pytest.fixture
+def provider_account_factory(
+    organization: Organization,
+    provider_account_user: Any,
+) -> Callable[..., ProviderConnection]:
+    """Create shared provider accounts through the current admin-owned API."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    service = ProviderAccountService()
+
+    def create(
+        provider: str = "openrouter", **payload: Any
+    ) -> ProviderConnection:
+        defaults = {"api_key": "sk-test"} if provider == "openrouter" else {}
+        return service.save_account(
+            organization_id=organization.id,
+            user=provider_account_user,
+            provider=provider,
+            payload={**defaults, **payload, "shared": True},
+        )
+
+    return create
 
 
 class FakeAccessor(WorkspaceAccessor):
@@ -82,18 +91,12 @@ class FakeAccessor(WorkspaceAccessor):
         error: Exception | None = None,
         exec_result: ExecResult | None = None,
         desktop_result: dict[str, Any] | None = None,
-        desktop_results: list[dict[str, Any]] | None = None,
-        desktop_width: int = DEFAULT_DESKTOP_WIDTH,
-        desktop_height: int = DEFAULT_DESKTOP_HEIGHT,
     ) -> None:
         super().__init__(workspace_id)
         self.files: dict[str, bytes] = dict(files or {})
         self.error = error
         self.exec_result = exec_result
         self.desktop_result = desktop_result
-        self.desktop_results = list(desktop_results or [])
-        self.desktop_width = desktop_width
-        self.desktop_height = desktop_height
         self.written: dict[str, bytes] = {}
         self.exec_calls: list[tuple] = []
         self.desktop_calls: list[tuple] = []
@@ -106,17 +109,16 @@ class FakeAccessor(WorkspaceAccessor):
     def _desktop_payload(
         self, action: str, args: dict[str, Any] | None
     ) -> dict[str, Any]:
-        if self.desktop_results:
-            return dict(self.desktop_results.pop(0))
         if self.desktop_result is not None:
             return dict(self.desktop_result)
-        if action == "display_info":
-            return desktop_display_info_result(
-                width=self.desktop_width,
-                height=self.desktop_height,
-            )
-        if action == "ensure":
-            return {"ok": True, "display": ":1", "port": 5900}
+        if action == "binding":
+            return {
+                "ok": True,
+                "display": ":1",
+                "xauthority": "/root/.Xauthority",
+                "epoch": "epoch",
+                "protocol_version": 2,
+            }
         if action == "hold":
             return {
                 "ok": True,
@@ -142,24 +144,7 @@ class FakeAccessor(WorkspaceAccessor):
             run_id = str((args or {}).get("run_id") or "run")
             path = f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"
             return {"ok": True, "path": path}
-        if action == "screenshot":
-            crop_w = (args or {}).get("crop_w")
-            crop_h = (args or {}).get("crop_h")
-            width = int(crop_w) if crop_w is not None else self.desktop_width
-            height = int(crop_h) if crop_h is not None else self.desktop_height
-            return desktop_screenshot_result(width=width, height=height)
         return {"ok": True}
-
-    async def exec_stream(
-        self,
-        command,
-        workdir="/workspace",
-        env=None,
-        timeout=None,
-    ) -> AsyncIterator[ExecChunk]:
-        """Yield a single done chunk (unused by current tools)."""
-        self._maybe_fail()
-        yield ExecChunk(stream="", exit_code=0, done=True)
 
     async def exec_wait(
         self,
@@ -187,7 +172,18 @@ class FakeAccessor(WorkspaceAccessor):
         if path not in self.files:
             raise RunnerAccessorError(f"read_file failed: not found {path}")
         content = self.files[path]
-        return FileContent(content=content, size=len(content))
+        size = len(content)
+        truncated = max_size is not None and size > int(max_size)
+        shown = content[: int(max_size)] if truncated else content
+        return FileContent(
+            content=shown,
+            size=size,
+            truncated=truncated,
+        )
+
+    async def read_file_no_follow(self, path: str, max_size=None) -> FileContent:
+        """Media-read counterpart for the in-memory fake (no symlinks exist)."""
+        return await self.read_file(path, max_size)
 
     async def write_file(self, path: str, content: bytes, mode=0o644) -> None:
         """Write into the in-memory file map."""
@@ -214,13 +210,6 @@ class FakeAccessor(WorkspaceAccessor):
                     )
         return entries
 
-    async def stat(self, path: str) -> FileStat:
-        """Stat the in-memory file map."""
-        self._maybe_fail()
-        if path in self.files:
-            return FileStat(path=path, size=len(self.files[path]))
-        raise RunnerAccessorError(f"stat failed: not found {path}")
-
     async def desktop_action(
         self,
         action: str,
@@ -238,50 +227,202 @@ class FakeAccessor(WorkspaceAccessor):
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         name: str = "",
+        *,
+        session_id: str | None = None,
+        kind: str = "persistent",
     ) -> dict[str, Any]:
-        """Return a canned started-process record."""
+        """Return a canned started-process record (upsert by name)."""
         self._maybe_fail()
+        cleaned_name = (name or "").strip()
+        cleaned_kind = (kind or "persistent").strip().lower() or "persistent"
+        if cleaned_kind == "temp":
+            if not (session_id or "").strip():
+                from apps.harness.access.runner_accessor import (
+                    RunnerAccessorError as _AccessorError,
+                )
+
+                raise _AccessorError("process_start failed: session required")
+            for record in self.processes.values():
+                if (
+                    record.get("name") == cleaned_name
+                    and record.get("kind") == "temp"
+                    and str(record.get("session_id") or "") == session_id
+                ):
+                    run_count = int(record.get("run_count") or 1) + 1
+                    record.update(
+                        {
+                            "command": command,
+                            "workdir": workdir,
+                            "pid": 1234 + run_count,
+                            "log_path": (
+                                "/workspace/.opencuria/processes/"
+                                f"{record['process_id']}_r{run_count}.log"
+                            ),
+                            "status": "running",
+                            "exit_code": None,
+                            "run_count": run_count,
+                        }
+                    )
+                    return dict(record)
+            record = {
+                "process_id": f"proc-{len(self.processes) + 1}",
+                "workspace_id": self.workspace_id,
+                "name": cleaned_name,
+                "command": command,
+                "workdir": workdir,
+                "pid": 1234,
+                "log_path": (
+                    "/workspace/.opencuria/processes/"
+                    f"proc-{len(self.processes) + 1}.log"
+                ),
+                "status": "running",
+                "exit_code": None,
+                "run_count": 1,
+                "kind": "temp",
+                "session_id": session_id,
+            }
+            self.processes[record["process_id"]] = record
+            return dict(record)
+        if cleaned_name:
+            for record in self.processes.values():
+                if record.get("name") == cleaned_name and record.get(
+                    "kind", "persistent"
+                ) == "persistent":
+                    run_count = int(record.get("run_count") or 1) + 1
+                    record.update(
+                        {
+                            "command": command,
+                            "workdir": workdir,
+                            "pid": 1234 + run_count,
+                            "log_path": (
+                                "/workspace/.opencuria/processes/"
+                                f"{record['process_id']}_r{run_count}.log"
+                            ),
+                            "status": "running",
+                            "exit_code": None,
+                            "run_count": run_count,
+                        }
+                    )
+                    return dict(record)
         record = {
-            "process_id": "proc-1",
+            "process_id": f"proc-{len(self.processes) + 1}",
             "workspace_id": self.workspace_id,
-            "name": name or "",
+            "name": cleaned_name,
             "command": command,
             "workdir": workdir,
             "pid": 1234,
-            "log_path": "/workspace/.opencuria/processes/proc-1.log",
+            "log_path": (
+                f"/workspace/.opencuria/processes/proc-{len(self.processes) + 1}.log"
+            ),
             "status": "running",
             "exit_code": None,
+            "run_count": 1,
+            "kind": "persistent",
+            "session_id": None,
         }
         self.processes[record["process_id"]] = record
         return dict(record)
 
-    async def process_list(self) -> list[dict[str, Any]]:
-        """Return canned process records."""
+    async def process_list(
+        self, *, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return canned process records (own temps + persistent)."""
         self._maybe_fail()
-        return [dict(record) for record in self.processes.values()]
+        if not session_id:
+            return [dict(record) for record in self.processes.values()]
+        return [
+            dict(record)
+            for record in self.processes.values()
+            if record.get("kind", "persistent") != "temp"
+            or str(record.get("session_id") or "") == session_id
+        ]
 
-    async def process_get(self, process_id: str) -> dict[str, Any]:
-        """Return one canned process record."""
-        self._maybe_fail()
-        try:
-            return dict(self.processes[process_id])
-        except KeyError as exc:
-            raise RunnerAccessorError(
-                f"process_get failed: unknown process {process_id}"
-            ) from exc
+    def _resolve_process_record(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Resolve a canned record by id or exact name (temp scoped)."""
+        key = (process_id or "").strip()
+        if key in self.processes:
+            record = self.processes[key]
+            if record.get("kind") == "temp" and session_id is not None:
+                if str(record.get("session_id") or "") != session_id:
+                    raise RunnerAccessorError(
+                        f"process lookup failed: unknown process {process_id}"
+                    )
+            return record
+        cands = [
+            record
+            for record in self.processes.values()
+            if record.get("name") == key
+        ]
+        if session_id is not None:
+            for record in cands:
+                if (
+                    record.get("kind") == "temp"
+                    and str(record.get("session_id") or "") == session_id
+                ):
+                    return record
+        for record in cands:
+            if record.get("kind", "persistent") != "temp":
+                return record
+        if cands and session_id is None:
+            return cands[0]
+        raise RunnerAccessorError(
+            f"process lookup failed: unknown process {process_id}"
+        )
 
-    async def process_stop(self, process_id: str) -> dict[str, Any]:
-        """Mark a canned process record stopped."""
+    async def process_get(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Return one canned process record (id or name)."""
         self._maybe_fail()
-        try:
-            record = self.processes[process_id]
-        except KeyError as exc:
-            raise RunnerAccessorError(
-                f"process_stop failed: unknown process {process_id}"
-            ) from exc
+        return dict(self._resolve_process_record(process_id, session_id=session_id))
+
+    async def process_stop(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Mark a canned process record stopped (id or name)."""
+        self._maybe_fail()
+        record = self._resolve_process_record(process_id, session_id=session_id)
         record["status"] = "exited"
         record["exit_code"] = 0
         return dict(record)
+
+    async def process_restart(
+        self, process_id: str, *, session_id: str | None = None
+    ) -> dict[str, Any]:
+        """Restart a canned record: run_count+1, new pid/log (id or name)."""
+        self._maybe_fail()
+        record = self._resolve_process_record(process_id, session_id=session_id)
+        run_count = int(record.get("run_count") or 1) + 1
+        record.update(
+            {
+                "pid": 1234 + run_count,
+                "log_path": (
+                    "/workspace/.opencuria/processes/"
+                    f"{record['process_id']}_r{run_count}.log"
+                ),
+                "status": "running",
+                "exit_code": None,
+                "run_count": run_count,
+            }
+        )
+        return dict(record)
+
+    async def process_delete(self, process_id: str) -> dict[str, Any]:
+        """Delete a canned record (id or name)."""
+        self._maybe_fail()
+        record = self._resolve_process_record(process_id)
+        removed = self.processes.pop(record["process_id"])
+        return {"process_id": removed["process_id"], "deleted": True}
+
+    async def open_process(self, command, workdir="/workspace", env=None, timeout=None):  # type: ignore[no-untyped-def]
+        """Not supported by the in-memory fake (no runner transport)."""
+        raise NotImplementedError("FakeAccessor does not support open_process")
+
+    async def open_tcp(self, host, port, tls=False, server_hostname=None, timeout=None):  # type: ignore[no-untyped-def]
+        """Not supported by the in-memory fake (no runner transport)."""
+        raise NotImplementedError("FakeAccessor does not support open_tcp")
 
 
 @pytest.fixture
@@ -306,17 +447,31 @@ def harness_workspace(db, organization):
         email=f"harness-{_uuid.uuid4().hex[:8]}@example.com",
         password="secret",
     )
+    from apps.organizations.models import Membership, MembershipRole
+
+    Membership.objects.create(
+        user=user, organization=organization, role=MembershipRole.MEMBER
+    )
     runner = Runner.objects.create(
         name="harness-runner",
         api_token_hash=hash_token(f"harness-{_uuid.uuid4().hex}"),
         status=RunnerStatus.ONLINE,
         sid=f"harness-sid-{_uuid.uuid4().hex[:8]}",
         organization=organization,
-        available_runtimes=["docker"],
     )
     return Workspace.objects.create(
         runner=runner,
         name="Harness Workspace",
         status=WorkspaceStatus.RUNNING,
         created_by=user,
+    )
+
+
+@pytest.fixture
+def harness_session(harness_workspace) -> HarnessSession:
+    """A persisted session for tools that read or write session state."""
+    return HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="Harness Session",
     )

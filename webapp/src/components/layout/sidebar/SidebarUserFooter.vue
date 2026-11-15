@@ -3,8 +3,7 @@
  * Account row with a live/offline dot on the avatar and the user menu.
  */
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
-import { BookOpen, Check, LogOut, Monitor, Moon, Settings, Sun } from '@lucide/vue'
+import { Check, LogOut, Monitor, Moon, Settings, Sun } from '@lucide/vue'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import {
   DropdownMenu,
@@ -21,7 +20,6 @@ import { isConnected } from '@/services/socket'
 const emit = defineEmits<{
   settings: []
   logout: []
-  navigate: []
 }>()
 
 const authStore = useAuthStore()
@@ -38,7 +36,7 @@ const userInitials = computed(() => {
     <SidebarMenuItem>
       <DropdownMenu>
         <DropdownMenuTrigger as-child>
-          <SidebarMenuButton class="h-10" :tooltip="authStore.user?.email ?? 'Konto'">
+          <SidebarMenuButton class="h-10" :tooltip="authStore.user?.email ?? 'Account'">
             <span class="relative shrink-0">
               <Avatar class="size-6">
                 <AvatarFallback class="text-[10px]">{{ userInitials }}</AvatarFallback>
@@ -57,17 +55,17 @@ const userInitials = computed(() => {
         <DropdownMenuContent class="w-60 text-xs" align="end" side="top">
           <DropdownMenuItem @click="emit('settings')">
             <Settings class="size-4" />
-            Einstellungen öffnen
+            Open settings
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem @click="setTheme('light')">
             <Sun class="size-4" />
-            <span class="flex-1">Hell</span>
+            <span class="flex-1">Light</span>
             <Check v-if="mode === 'light'" class="size-4" />
           </DropdownMenuItem>
           <DropdownMenuItem @click="setTheme('dark')">
             <Moon class="size-4" />
-            <span class="flex-1">Dunkel</span>
+            <span class="flex-1">Dark</span>
             <Check v-if="mode === 'dark'" class="size-4" />
           </DropdownMenuItem>
           <DropdownMenuItem @click="setTheme('auto')">
@@ -76,15 +74,9 @@ const userInitials = computed(() => {
             <Check v-if="mode === 'auto'" class="size-4" />
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem as-child>
-            <RouterLink to="/docs" class="flex items-center gap-2" @click="emit('navigate')">
-              <BookOpen class="size-4" />
-              Docs
-            </RouterLink>
-          </DropdownMenuItem>
           <DropdownMenuItem @click="emit('logout')">
             <LogOut class="size-4" />
-            Abmelden
+            Log out
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

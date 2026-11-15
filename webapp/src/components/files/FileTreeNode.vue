@@ -4,11 +4,8 @@ import type { FileNode } from '@/types'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import {
   ChevronRight,
-  Folder,
-  FolderOpen,
-  FileText,
-  File as FileIcon,
 } from '@lucide/vue'
+import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 
 const props = defineProps<{
   node: FileNode
@@ -90,11 +87,12 @@ function handleDrop(e: DragEvent): void {
       <span v-else class="w-3.5 shrink-0" />
 
       <!-- Icon -->
-      <component
-        :is="isDirectory ? (isExpanded ? FolderOpen : Folder) : (node.name.match(/\.(ts|js|vue|py|md|json|yaml|yml|toml|css|html|sh|sql)$/) ? FileText : FileIcon)"
+      <WorkspaceFileIcon
+        :path="node.path"
+        :name="node.name"
+        :directory="isDirectory"
+        :expanded="isDirectory && isExpanded"
         :size="14"
-        class="shrink-0"
-        :class="isDirectory ? 'text-amber-500' : 'text-muted-foreground'"
       />
 
       <!-- Name -->

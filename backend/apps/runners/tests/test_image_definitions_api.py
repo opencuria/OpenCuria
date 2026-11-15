@@ -14,8 +14,8 @@ from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob, Workspace
+from apps.runners.enums import RunnerStatus
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob
 from common.utils import generate_api_token, hash_token
 
 
@@ -54,14 +54,12 @@ def test_list_includes_global_and_org_image_definitions(client: Client):
         organization=None,
         created_by=admin,
         name="Global Base",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     local = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Local Base",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
 
@@ -102,7 +100,6 @@ def test_org_admin_can_duplicate_global_image_definition(client: Client):
         organization=None,
         created_by=admin,
         name="Global Python",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         packages=["python3"],
         env_vars={"HELLO": "world"},
@@ -152,7 +149,6 @@ def test_foreign_org_cannot_list_runner_builds(client: Client):
         organization=owner_org,
         created_by=admin,
         name="Owner Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageBuildJob.objects.create(
@@ -195,7 +191,6 @@ def test_foreign_org_cannot_update_runner_build(client: Client):
         organization=owner_org,
         created_by=admin,
         name="Build Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageBuildJob.objects.create(
@@ -220,203 +215,6 @@ def test_foreign_org_cannot_update_runner_build(client: Client):
     assert response.json()["detail"] == "Runner image build not found"
 
 
-@pytest.mark.django_db
-def test_list_user_images_includes_source_runner_online_flag(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-list-user@test.com", password="secret")
-    org = Organization.objects.create(name="Images Org", slug="images-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner_online = Runner.objects.create(
-        name="runner-online",
-        api_token_hash=hash_token("runner-online-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-    )
-    runner_offline = Runner.objects.create(
-        name="runner-offline",
-        api_token_hash=hash_token("runner-offline-token"),
-        status=RunnerStatus.OFFLINE,
-        organization=org,
-    )
-    ws_online = Workspace.objects.create(
-        runner=runner_online,
-        name="Workspace Online",
-        status=WorkspaceStatus.RUNNING,
-        created_by=admin,
-    )
-    ws_offline = Workspace.objects.create(
-        runner=runner_offline,
-        name="Workspace Offline",
-        status=WorkspaceStatus.RUNNING,
-        created_by=admin,
-    )
-    image_online = ImageInstance.objects.create(
-        runner=runner_online,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-        origin_workspace=ws_online,
-        created_by=admin,
-        name="Captured Online",
-        runner_ref="img-online",
-        status=ImageInstance.Status.READY,
-    )
-    image_offline = ImageInstance.objects.create(
-        runner=runner_offline,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-        origin_workspace=ws_offline,
-        created_by=admin,
-        name="Captured Offline",
-        runner_ref="img-offline",
-        status=ImageInstance.Status.READY,
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGES_READ.value],
-    )
-    response = client.get(
-        "/api/v1/image-artifacts/",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 200
-    payload = {entry["id"]: entry for entry in response.json()}
-    assert payload[str(image_online.id)]["source_runner_online"] is True
-    assert payload[str(image_offline.id)]["source_runner_online"] is False
-
-
-@pytest.mark.django_db
-def test_clone_workspace_from_offline_image_returns_runner_offline(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-clone-offline@test.com", password="secret")
-    org = Organization.objects.create(name="Clone Org", slug="clone-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner_offline = Runner.objects.create(
-        name="runner-offline-clone",
-        api_token_hash=hash_token("runner-offline-clone-token"),
-        status=RunnerStatus.OFFLINE,
-        organization=org,
-    )
-    ws_offline = Workspace.objects.create(
-        runner=runner_offline,
-        name="Workspace Offline Clone",
-        status=WorkspaceStatus.RUNNING,
-        created_by=admin,
-    )
-    image_offline = ImageInstance.objects.create(
-        runner=runner_offline,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-        origin_workspace=ws_offline,
-        created_by=admin,
-        name="Captured Offline Clone",
-        runner_ref="img-offline-clone",
-        status=ImageInstance.Status.READY,
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGES_CLONE.value],
-    )
-    response = client.post(
-        f"/api/v1/image-artifacts/{image_offline.id}/workspaces/",
-        data=json.dumps({"name": "clone-offline"}),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 409
-    assert response.json()["code"] == "runner_offline"
-
-
-@pytest.mark.django_db
-def test_assign_runner_build_rejects_incompatible_runtime(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-build-runtime@test.com", password="secret")
-    org = Organization.objects.create(name="Runtime Org", slug="runtime-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner = Runner.objects.create(
-        name="docker-only-runner",
-        api_token_hash=hash_token("docker-only-runner-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-        available_runtimes=["docker"],
-    )
-    definition = ImageDefinition.objects.create(
-        organization=org,
-        created_by=admin,
-        name="QEMU Definition",
-        runtime_type="qemu",
-        base_distro="ubuntu:24.04",
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
-    )
-    response = client.post(
-        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
-        data=json.dumps({"runner_id": str(runner.id), "activate": True}),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Runner does not support runtime 'qemu'"
-
-
-@pytest.mark.django_db
-def test_clone_workspace_from_image_rejects_incompatible_runtime(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-clone-runtime@test.com", password="secret")
-    org = Organization.objects.create(name="Clone Runtime Org", slug="clone-runtime-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner = Runner.objects.create(
-        name="docker-only-clone-runner",
-        api_token_hash=hash_token("docker-only-clone-runner-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-        available_runtimes=["docker"],
-    )
-    workspace = Workspace.objects.create(
-        runner=runner,
-        name="QEMU Workspace",
-        status=WorkspaceStatus.RUNNING,
-        runtime_type="qemu",
-        created_by=admin,
-        qemu_vcpus=2,
-        qemu_memory_mb=4096,
-        qemu_disk_size_gb=50,
-    )
-    artifact = ImageInstance.objects.create(
-        runner=runner,
-        runtime_type="qemu",
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-        origin_workspace=workspace,
-        created_by=admin,
-        name="QEMU Clone Source",
-        runner_ref="qemu-clone-artifact",
-        status=ImageInstance.Status.READY,
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGES_CLONE.value],
-    )
-    response = client.post(
-        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
-        data=json.dumps({"name": "clone-runtime-mismatch"}),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Runner does not support runtime 'qemu'"
 
 
 @pytest.mark.django_db
@@ -431,13 +229,11 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
         api_token_hash=hash_token("artifact-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Artifact Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -447,8 +243,8 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
     )
     runner_ref = "/var/lib/opencuria/base-images/artifact.qcow2"
     artifact = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
-        runtime_type="qemu",
         origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
         origin_definition=definition,
         created_by=admin,
@@ -457,6 +253,8 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
         name="Artifact Image",
         status=ImageInstance.Status.READY,
     )
+    build.current_generation = artifact
+    build.save()
 
     token = _create_api_key(
         user=admin,
@@ -484,13 +282,11 @@ def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Cli
         api_token_hash=hash_token("backfill-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Backfill Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -515,53 +311,6 @@ def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Cli
 
 
 @pytest.mark.django_db
-def test_delete_in_use_image_retires_it_and_returns_conflict(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-retire@test.com", password="secret")
-    org = Organization.objects.create(name="Retire Org", slug="retire-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner = Runner.objects.create(
-        name="retire-runner",
-        api_token_hash=hash_token("retire-runner-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-        available_runtimes=["docker"],
-    )
-    image = ImageInstance.objects.create(
-        runner=runner,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-        created_by=admin,
-        name="Retire Me",
-        runner_ref="opencuria/custom/retire-me:1",
-        status=ImageInstance.Status.READY,
-    )
-    Workspace.objects.create(
-        runner=runner,
-        name="Dependent Workspace",
-        status=WorkspaceStatus.STOPPED,
-        runtime_type="docker",
-        created_by=admin,
-        base_image_instance=image,
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGES_DELETE.value],
-    )
-    response = client.delete(
-        f"/api/v1/image-artifacts/{image.id}/",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 409
-    assert "still used by 1 workspace(s)" in response.json()["detail"]
-    image.refresh_from_db()
-    assert image.status == ImageInstance.Status.READY
-
-
-@pytest.mark.django_db
 def test_create_runner_build_returns_pending_build_without_artifact(client: Client, monkeypatch):
     user_model = get_user_model()
     admin = user_model.objects.create_user(email="image-build-create@test.com", password="secret")
@@ -573,13 +322,11 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
         api_token_hash=hash_token("create-build-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Create Build Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -593,7 +340,9 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
-        lambda: SimpleNamespace(trigger_build_job=_trigger_build_job),
+        lambda: SimpleNamespace(
+            image_lifecycle=SimpleNamespace(trigger_build_job=_trigger_build_job),
+        ),
     )
 
     token = _create_api_key(
@@ -626,13 +375,11 @@ def test_list_runner_builds_includes_global_definition_builds(client: Client):
         api_token_hash=hash_token("global-build-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=None,
         created_by=admin,
         name="Global QEMU Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -668,13 +415,11 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
         api_token_hash=hash_token("global-rebuild-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=None,
         created_by=admin,
         name="Global Rebuild Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -688,7 +433,9 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
-        lambda: SimpleNamespace(trigger_build_job=_trigger_build_job),
+        lambda: SimpleNamespace(
+            image_lifecycle=SimpleNamespace(trigger_build_job=_trigger_build_job),
+        ),
     )
 
     token = _create_api_key(
@@ -707,148 +454,6 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
 
 
 @pytest.mark.django_db
-def test_list_image_artifacts_returns_valid_json_without_credential_ids(client: Client):
-    """
-    Regression test: the list endpoint must return valid JSON.
-
-    This test ensures the response is always serialisable JSON and that
-    credential_ids is not exposed on the artifact schema.
-    """
-    import json as _json
-
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="artifact-schema@test.com", password="secret")
-    org = Organization.objects.create(name="Schema Org", slug="schema-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-    runner = Runner.objects.create(
-        name="schema-runner",
-        api_token_hash=hash_token("schema-runner-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-    )
-    ws = Workspace.objects.create(
-        runner=runner,
-        name="Schema WS",
-        status=WorkspaceStatus.RUNNING,
-        created_by=admin,
-    )
-    ImageInstance.objects.create(
-        runner=runner,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-        origin_workspace=ws,
-        created_by=admin,
-        name="Schema Image",
-        runner_ref="schema-art-1",
-        status=ImageInstance.Status.READY,
-    )
-
-    token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_READ.value])
-    response = client.get("/api/v1/image-artifacts/", **_auth_headers(token, str(org.id)))
-
-    assert response.status_code == 200, (
-        f"Expected 200 but got {response.status_code}. "
-        "If this is 500, a DB access error (e.g. missing table) is likely."
-    )
-    # Must be parseable JSON — any HTML traceback would raise ValueError here.
-    try:
-        data = _json.loads(response.content)
-    except ValueError as exc:
-        raise AssertionError(
-            f"Response is not valid JSON. Got: {response.content[:200]!r}"
-        ) from exc
-
-    assert isinstance(data, list)
-    assert len(data) == 1
-    artifact = data[0]
-
-    assert "credential_ids" not in artifact, (
-        "credential_ids must not appear on the image artifact response — "
-        "credentials are now selected explicitly when cloning."
-    )
-
-
-@pytest.mark.django_db
-def test_clone_workspace_from_image_sends_explicit_credential_ids(client: Client):
-    """
-    Regression test: the clone endpoint must accept an explicit credential_ids list.
-
-    Prior to this PR, credentials were restored automatically from the artifact.
-    After the PR, the caller must pass credential_ids explicitly (can be empty).
-
-    We verify that:
-    - Sending credential_ids=[] does not cause a 422 schema validation error.
-    - The endpoint is reachable and returns a parseable JSON error (409 is
-      expected here because no real runner is connected, but 422 would mean
-      the request schema rejected credential_ids).
-    """
-    import json as _json
-
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="clone-cred-ids@test.com", password="secret")
-    org = Organization.objects.create(name="Clone Cred Org", slug="clone-cred-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-    runner = Runner.objects.create(
-        name="clone-cred-runner",
-        api_token_hash=hash_token("clone-cred-runner-token"),
-        status=RunnerStatus.OFFLINE,
-        organization=org,
-    )
-    ws = Workspace.objects.create(
-        runner=runner,
-        name="Clone Cred WS",
-        status=WorkspaceStatus.RUNNING,
-        created_by=admin,
-    )
-    artifact = ImageInstance.objects.create(
-        runner=runner,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-        origin_workspace=ws,
-        created_by=admin,
-        name="Clone Cred Image",
-        runner_ref="clone-cred-art",
-        status=ImageInstance.Status.READY,
-    )
-
-    token = _create_api_key(user=admin, permissions=[APIKeyPermission.IMAGES_CLONE.value])
-
-    # Request with no credential_ids field (old implicit behaviour) must still work.
-    response_no_creds = client.post(
-        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
-        data=_json.dumps({"name": "cloned-ws-no-creds"}),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-    # Runner is offline → 409, not 422 (which would indicate schema mismatch).
-    assert response_no_creds.status_code == 409, (
-        f"Expected 409 (runner offline), got {response_no_creds.status_code}. "
-        "A 422 here means credential_ids is unexpectedly required."
-    )
-
-    # Request with explicit credential_ids=[] must also be valid schema.
-    response_empty_creds = client.post(
-        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
-        data=_json.dumps({"name": "cloned-ws-empty-creds", "credential_ids": []}),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-    assert response_empty_creds.status_code == 409, (
-        f"Expected 409 (runner offline), got {response_empty_creds.status_code}. "
-        "A 422 means credential_ids:[] was not accepted by the request schema."
-    )
-
-    # Verify both responses are valid JSON (no traceback HTML).
-    for resp in (response_no_creds, response_empty_creds):
-        try:
-            _json.loads(resp.content)
-        except ValueError as exc:
-            raise AssertionError(
-                f"Response is not valid JSON: {resp.content[:200]!r}"
-            ) from exc
-
-
-@pytest.mark.django_db
 def test_list_image_definitions_excludes_deleted_and_counts_builds(client: Client):
     user_model = get_user_model()
     admin = user_model.objects.create_user(
@@ -861,27 +466,23 @@ def test_list_image_definitions_excludes_deleted_and_counts_builds(client: Clien
         api_token_hash=hash_token("summary-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     second_runner = Runner.objects.create(
         name="summary-runner-2",
         api_token_hash=hash_token("summary-runner-token-2"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     visible = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Visible Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Gone Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         status=ImageDefinition.Status.DELETED,
     )
@@ -933,13 +534,11 @@ def test_list_runner_builds_excludes_deleted_jobs(client: Client):
         api_token_hash=hash_token("deleted-build-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Deleted Build Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageBuildJob.objects.create(
@@ -977,14 +576,12 @@ def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch)
         api_token_hash=hash_token("activate-action-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
         sid="activate-action-sid",
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Activate Action Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -1000,7 +597,7 @@ def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch)
         triggered["rebuild"] = True
         return build
 
-    async def _activate_build_job(job, *, created_by=None):
+    async def _activate_build_job(job, *, created_by=None, message=""):
         triggered["activate"] = True
         job.status = ImageBuildJob.Status.ACTIVE
         return job
@@ -1008,9 +605,10 @@ def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch)
     monkeypatch.setattr(
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
-            trigger_build_job=_trigger_build_job,
-            activate_build_job=_activate_build_job,
-            _ensure_definition_mutable=lambda definition: None,
+            image_lifecycle=SimpleNamespace(
+                trigger_build_job=_trigger_build_job,
+                activate_build_job=_activate_build_job,
+            ),
         ),
     )
 
@@ -1045,14 +643,12 @@ def test_rebuild_runner_build_uses_rebuild_action(client: Client, monkeypatch):
         api_token_hash=hash_token("rebuild-action-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
         sid="rebuild-action-sid",
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Rebuild Action Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -1067,16 +663,17 @@ def test_rebuild_runner_build_uses_rebuild_action(client: Client, monkeypatch):
         triggered["rebuild"] = True
         return build
 
-    async def _activate_build_job(job, *, created_by=None):
+    async def _activate_build_job(job, *, created_by=None, message=""):
         triggered["activate"] = True
         return job
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
-            trigger_build_job=_trigger_build_job,
-            activate_build_job=_activate_build_job,
-            _ensure_definition_mutable=lambda definition: None,
+            image_lifecycle=SimpleNamespace(
+                trigger_build_job=_trigger_build_job,
+                activate_build_job=_activate_build_job,
+            ),
         ),
     )
 
@@ -1108,14 +705,12 @@ def test_runner_build_mutation_rejected_for_deleting_definition(client: Client):
         api_token_hash=hash_token("locked-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
         sid="locked-sid",
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Locked Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         status=ImageDefinition.Status.DELETING,
     )
@@ -1138,3 +733,130 @@ def test_runner_build_mutation_rejected_for_deleting_definition(client: Client):
 
     assert response.status_code == 409
     assert "deleting" in response.json()["detail"]
+
+
+@pytest.mark.django_db
+def test_list_runner_builds_omits_full_log_but_reports_size(client: Client):
+    """List endpoint stays polling-cheap: no build_log, only build_log_size."""
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="build-log-size@test.com", password="secret"
+    )
+    org = Organization.objects.create(name="Log Size Org", slug="log-size-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="log-size-runner",
+        api_token_hash=hash_token("log-size-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Log Size Definition",
+        base_distro="ubuntu:24.04",
+    )
+    log_text = "x" * 5000 + "\n"
+    ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.BUILDING,
+        build_log=log_text,
+    )
+
+    token = _create_api_key(
+        user=admin,
+        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_READ.value],
+    )
+    response = client.get(
+        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert "build_log" not in payload[0]
+    assert payload[0]["build_log_size"] == len(log_text)
+
+
+@pytest.mark.django_db
+def test_handle_image_build_progress_appends_atomically_and_caps_log():
+    """Progress writes never read the full log and cap the stored tail."""
+    from apps.runners.services import RunnerService
+
+    user_model = get_user_model()
+    admin = user_model.objects.create_user(
+        email="build-progress@test.com", password="secret"
+    )
+    org = Organization.objects.create(name="Progress Org", slug="progress-org")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    runner = Runner.objects.create(
+        name="progress-runner",
+        api_token_hash=hash_token("progress-runner-token"),
+        status=RunnerStatus.ONLINE,
+        organization=org,
+    )
+    definition = ImageDefinition.objects.create(
+        organization=org,
+        created_by=admin,
+        name="Progress Definition",
+        base_distro="ubuntu:24.04",
+    )
+    build = ImageBuildJob.objects.create(
+        image_definition=definition,
+        runner=runner,
+        status=ImageBuildJob.Status.PENDING,
+        build_log="old\n",
+    )
+
+    from apps.runners.repositories import ImageGenerationRepository
+    build, image, task = ImageGenerationRepository.request(
+        definition=definition, runner=runner, rendered_input={}, created_by=admin
+    )
+    ImageBuildJob.objects.filter(id=build.id).update(build_log="old\n")
+    service = RunnerService(sio_server=None)
+    service.image_lifecycle.handle_image_build_progress(
+        str(build.id), "new line", runner_id=str(runner.id), task_id=str(task.id)
+    )
+
+    build.refresh_from_db()
+    assert build.status == ImageBuildJob.Status.PENDING
+    assert build.build_log == "old\nnew line\n"
+
+    # Over-long stored logs are trimmed to the tail cap atomically.
+    big = "y" * (service.image_lifecycle.BUILD_LOG_MAX_CHARS + 100)
+    ImageBuildJob.objects.filter(id=build.id).update(build_log=big)
+    service.image_lifecycle.handle_image_build_progress(
+        str(build.id), "tail", runner_id=None, task_id=str(task.id)
+    )
+    build.refresh_from_db()
+    assert len(build.build_log) == service.image_lifecycle.BUILD_LOG_MAX_CHARS
+    assert build.build_log.endswith("tail\n")
+
+    # Runner mismatch and unknown jobs are ignored without writes.
+    before = build.build_log
+    service.image_lifecycle.handle_image_build_progress(
+        str(build.id), "evil", runner_id="00000000-0000-0000-0000-000000000000"
+    )
+    build.refresh_from_db()
+    assert build.build_log == before
+    service.image_lifecycle.handle_image_build_progress(
+        "00000000-0000-0000-0000-000000000000", "noop", runner_id=None
+    )
+
+
+@pytest.mark.django_db
+def test_global_recipe_activation_is_read_only_for_org_admin(client):
+    user = get_user_model().objects.create_user(email="readonly@test.com", password="secret")
+    org = Organization.objects.create(name="Readonly org", slug="readonly-org")
+    Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
+    definition = ImageDefinition.objects.create(name="Readonly global", organization=None)
+    token = _create_api_key(user=user, permissions=[APIKeyPermission.IMAGE_DEFINITIONS_WRITE.value])
+    response = client.post(
+        f"/api/v1/image-definitions/{definition.id}/activate/",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 404
+    definition.refresh_from_db()
+    assert definition.status == "active"

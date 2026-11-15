@@ -1,0 +1,46 @@
+"""Request/response schemas and DTO mappers for the harness engine adapters.
+
+Pure mapping for the REST router (``engines/api.py``).
+"""
+
+from __future__ import annotations
+
+from ninja import Schema
+
+
+class HarnessEngineOut(Schema):
+    """Public engine availability and connection state."""
+
+    id: str
+    name: str
+    modes: list[str]
+    connected: bool
+    default_model: str | None
+    default_effort: str | None
+
+
+class EngineModelOut(Schema):
+    """Harness model using the shared picker model shape."""
+
+    id: str
+    name: str
+    provider: str = ""
+    reasoning_efforts: list[str] = []
+    default_effort: str = ""
+    supports_tools: bool = False
+    context_length: int = 0
+    max_output_tokens: int = 0
+
+
+def engine_model_to_out(model) -> EngineModelOut:  # type: ignore[no-untyped-def]
+    """Convert the shared provider-model shape into this engine's API schema."""
+    return EngineModelOut(
+        id=model.id,
+        name=model.name,
+        provider=model.provider,
+        reasoning_efforts=list(model.reasoning_efforts),
+        default_effort=model.default_effort,
+        supports_tools=model.supports_tools,
+        context_length=model.context_length,
+        max_output_tokens=model.max_output_tokens,
+    )

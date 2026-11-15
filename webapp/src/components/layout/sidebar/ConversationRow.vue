@@ -1,10 +1,24 @@
 <script setup lang="ts">
 /**
  * One-line conversation row: status slot, truncated title, trailing
- * time/workspace replaced by a hover menu (rename / mark read / delete).
+ * time/workspace replaced by a hover menu (rename / mark read / unread / delete).
  */
-import { computed, nextTick, ref } from 'vue'
-import { Check, Loader2, MoreHorizontal, Pencil, Trash2, X } from '@lucide/vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import {
+  Check,
+  CircleAlert,
+  Hammer,
+  ListTodo,
+  Loader2,
+  Mail,
+  MailOpen,
+  MessageCircleQuestion,
+  MoreHorizontal,
+  Pencil,
+  ShieldAlert,
+  Trash2,
+  X,
+} from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -14,16 +28,18 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { conversationTitle, formatTimeAgo } from '@/lib/conversationGroups'
-import type { HarnessConversation } from '@/types/harness'
+import { conversationTitle, formatTimeAgo } from '@opencuria/chat-core/conversationGroups'
+import type { HarnessAttentionKind, HarnessConversation } from '@opencuria/chat-core/harness'
 
 const props = withDefaults(
   defineProps<{
     conversation: HarnessConversation
     active?: boolean
     showWorkspace?: boolean
+    inbox?: boolean
+    actionsDisabled?: boolean
   }>(),
-  { active: false, showWorkspace: false },
+  { active: false, showWorkspace: false, inbox: false, actionsDisabled: false },
 )
 
 const emit = defineEmits<{
@@ -31,6 +47,7 @@ const emit = defineEmits<{
   rename: [conversation: HarnessConversation, title: string]
   delete: [conversation: HarnessConversation]
   'mark-read': [conversation: HarnessConversation]
+  'mark-unread': [conversation: HarnessConversation]
 }>()
 
 const editing = ref(false)
@@ -38,6 +55,59 @@ const editTitle = ref('')
 const inputRef = ref<{ $el: HTMLInputElement } | null>(null)
 
 const title = computed(() => conversationTitle(props.conversation))
+const needsAttention = computed(() => Boolean(props.conversation.needs_attention))
+const attentionKind = computed<HarnessAttentionKind>(
+  () => props.conversation.attention_kind ?? '',
+)
+const attentionIcon = computed(() => {
+  if (attentionKind.value === 'question') return MessageCircleQuestion
+  if (attentionKind.value === 'permission') return ShieldAlert
+  return CircleAlert
+})
+const attentionLabel = computed(() => {
+  if (attentionKind.value === 'question') return 'Question waiting'
+  if (attentionKind.value === 'permission') return 'Permission required'
+  if (attentionKind.value === 'both') return 'Permission and question waiting'
+  return 'Action required'
+})
+
+// The inbox reflects existing idle/unread state, not run success or task completion.
+const inboxResult = computed(() => {
+  if (
+    !props.inbox ||
+    needsAttention.value ||
+    !props.conversation.unread ||
+    props.conversation.status !== 'idle'
+  ) {
+    return null
+  }
+  return props.conversation.agent_name === 'plan'
+    ? {
+        icon: ListTodo,
+        kind: 'plan',
+        label: 'Unread plan response',
+        iconClass: 'text-sidebar-accent-foreground',
+        edgeClass: 'bg-primary',
+        rowClass: props.active ? 'bg-primary/15' : 'bg-primary/5 hover:bg-primary/10',
+      }
+    : {
+        icon: Hammer,
+        kind: 'build',
+        label: 'Unread build response',
+        iconClass: 'text-emerald-700 dark:text-emerald-400',
+        edgeClass: 'bg-emerald-500',
+        rowClass: props.active ? 'bg-emerald-500/20' : 'bg-emerald-500/10 hover:bg-emerald-500/15',
+      }
+})
+const statusLabel = computed(() =>
+  needsAttention.value ? attentionLabel.value : inboxResult.value?.label,
+)
+const rowClass = computed(() => {
+  if (needsAttention.value) {
+    return props.active ? 'bg-amber-500/20' : 'bg-amber-500/10 hover:bg-amber-500/15'
+  }
+  return inboxResult.value?.rowClass ?? (props.active ? 'bg-primary/10' : 'hover:bg-muted')
+})
 
 function handleSelect(): void {
   if (editing.value) return
@@ -45,6 +115,7 @@ function handleSelect(): void {
 }
 
 async function startRename(): Promise<void> {
+  if (props.actionsDisabled) return
   editing.value = true
   editTitle.value = title.value
   await nextTick()
@@ -58,14 +129,22 @@ function cancelRename(): void {
 }
 
 function confirmRename(): void {
+  if (props.actionsDisabled) return
   const nextTitle = editTitle.value.trim()
   if (!nextTitle) return
   editing.value = false
   emit('rename', props.conversation, nextTitle)
 }
 
+watch(
+  () => props.actionsDisabled,
+  (disabled) => {
+    if (disabled) cancelRename()
+  },
+)
+
 function tooltipDate(): string {
-  return new Date(props.conversation.updated_at).toLocaleString('de-DE', {
+  return new Date(props.conversation.last_message_at).toLocaleString('en-US', {
     dateStyle: 'medium',
     timeStyle: 'short',
   })
@@ -84,7 +163,7 @@ function tooltipDate(): string {
       class="h-7 flex-1 rounded-lg text-xs"
       maxlength="255"
       data-testid="conversation-rename-input"
-      aria-label="Chat umbenennen"
+      aria-label="Rename chat"
       @keydown.enter.prevent="confirmRename"
       @keydown.esc.prevent="cancelRename"
       @click.stop
@@ -92,7 +171,7 @@ function tooltipDate(): string {
     <Button
       variant="ghost"
       size="icon-xs"
-      aria-label="Umbenennen bestätigen"
+      aria-label="Confirm rename"
       @click.stop="confirmRename"
     >
       <Check />
@@ -100,7 +179,7 @@ function tooltipDate(): string {
     <Button
       variant="ghost"
       size="icon-xs"
-      aria-label="Umbenennen abbrechen"
+      aria-label="Cancel rename"
       @click.stop="cancelRename"
     >
       <X />
@@ -113,17 +192,42 @@ function tooltipDate(): string {
     tabindex="0"
     data-testid="conversation-row"
     :aria-selected="props.active"
-    :aria-label="`Chat ${title} öffnen`"
-    class="group/row flex h-8 cursor-pointer items-center gap-1.5 rounded-xl px-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-primary"
-    :class="props.active ? 'bg-primary/10' : 'hover:bg-muted'"
+    :aria-label="statusLabel ? `Open chat ${title} — ${statusLabel}` : `Open chat ${title}`"
+    class="group/row relative flex h-8 cursor-pointer items-center gap-1.5 rounded-xl px-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-primary"
+    :class="rowClass"
     @click="handleSelect"
     @keydown.enter="handleSelect"
   >
-    <div class="flex size-4 shrink-0 items-center justify-center">
+    <span
+      v-if="needsAttention"
+      class="absolute inset-y-1 left-0 w-0.5 rounded-full bg-amber-500"
+      data-testid="attention-edge"
+    />
+    <span
+      v-else-if="inboxResult"
+      class="absolute inset-y-1 left-0 w-0.5 rounded-full"
+      :class="inboxResult.edgeClass"
+      data-testid="inbox-result-edge"
+    />
+    <div class="flex size-4 shrink-0 items-center justify-center" :title="statusLabel">
+      <component
+        :is="attentionIcon"
+        v-if="needsAttention"
+        data-testid="attention-icon"
+        class="size-3.5 animate-pulse text-amber-500"
+      />
       <Loader2
-        v-if="props.conversation.status === 'busy'"
+        v-else-if="props.conversation.status === 'busy'"
         data-testid="busy-spinner"
         class="size-3 animate-spin text-primary"
+      />
+      <component
+        :is="inboxResult.icon"
+        v-else-if="inboxResult"
+        data-testid="inbox-result-icon"
+        :data-kind="inboxResult.kind"
+        class="size-3.5"
+        :class="inboxResult.iconClass"
       />
       <span
         v-else-if="props.conversation.unread"
@@ -132,27 +236,38 @@ function tooltipDate(): string {
       />
     </div>
 
-    <Tooltip :delay-duration="500">
-      <TooltipTrigger as-child>
-        <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">
-          {{ title }}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="right" class="space-y-0.5 text-left">
-        <div class="font-medium">{{ title }}</div>
-        <div>{{ props.conversation.workspace_name }}</div>
-        <div class="text-background/70">{{ tooltipDate() }}</div>
-      </TooltipContent>
-    </Tooltip>
+    <div class="min-w-0 flex-1">
+      <Tooltip :delay-duration="500">
+        <TooltipTrigger as-child>
+          <span
+            class="block truncate text-[13px] text-foreground"
+            :class="needsAttention || props.conversation.unread ? 'font-semibold' : 'font-medium'"
+          >
+            {{ title }}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="right" class="space-y-0.5 text-left">
+          <div class="font-medium">{{ title }}</div>
+          <div>{{ props.conversation.workspace_name }}</div>
+          <div v-if="needsAttention" class="text-amber-200">{{ attentionLabel }}</div>
+          <div v-else-if="inboxResult">{{ inboxResult.label }}</div>
+          <div class="text-background/70">{{ tooltipDate() }}</div>
+        </TooltipContent>
+      </Tooltip>
+    </div>
 
-    <div class="relative flex h-6 w-20 shrink-0 items-center justify-end">
+    <div
+      class="relative flex h-6 min-w-6 shrink-0 items-center justify-end"
+      data-testid="conversation-row-meta"
+    >
       <span
-        class="max-w-full truncate text-right text-[11px] text-muted-foreground group-hover/row:invisible group-focus-within/row:invisible"
+        class="text-right text-[11px] text-muted-foreground group-hover/row:invisible group-focus-within/row:invisible"
+        :class="props.showWorkspace ? 'max-w-16 truncate' : ''"
       >
         {{
           props.showWorkspace
             ? props.conversation.workspace_name
-            : formatTimeAgo(props.conversation.updated_at)
+            : formatTimeAgo(props.conversation.last_message_at)
         }}
       </span>
       <DropdownMenu>
@@ -161,27 +276,40 @@ function tooltipDate(): string {
             type="button"
             data-testid="conversation-row-menu"
             class="absolute inset-y-0 right-0 hidden size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:flex focus-visible:outline-2 focus-visible:outline-primary group-hover/row:flex group-focus-within/row:flex data-[state=open]:flex"
-            :aria-label="`Aktionen für ${title}`"
+            :aria-label="`Actions for ${title}`"
             @click.stop
           >
             <MoreHorizontal class="size-3.5" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" class="w-44">
-          <DropdownMenuItem @click="startRename">
+        <DropdownMenuContent align="end" class="w-48">
+          <DropdownMenuItem :disabled="props.actionsDisabled" @click="startRename">
             <Pencil class="size-4" />
-            Umbenennen
+            Rename
           </DropdownMenuItem>
           <DropdownMenuItem
             v-if="props.conversation.unread"
+            data-testid="mark-read-item"
             @click="emit('mark-read', props.conversation)"
           >
-            <Check class="size-4" />
-            Als gelesen markieren
+            <MailOpen class="size-4" />
+            Mark as read
           </DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" @click="emit('delete', props.conversation)">
+          <DropdownMenuItem
+            v-else
+            data-testid="mark-unread-item"
+            @click="emit('mark-unread', props.conversation)"
+          >
+            <Mail class="size-4" />
+            Mark as unread
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            variant="destructive"
+            :disabled="props.actionsDisabled"
+            @click="!props.actionsDisabled && emit('delete', props.conversation)"
+          >
             <Trash2 class="size-4" />
-            Löschen
+            Delete
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

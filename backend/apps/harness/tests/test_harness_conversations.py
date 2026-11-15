@@ -1,4 +1,4 @@
-"""Tests for harness conversations feed and unread tracking (Paket 5)."""
+"""Tests for harness conversations feed and unread tracking."""
 
 from __future__ import annotations
 
@@ -12,12 +12,22 @@ from django.utils import timezone
 
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessMessage, HarnessMessageRole, HarnessSessionStatus
+from apps.harness.models import (
+    HarnessMessage,
+    HarnessMessageRole,
+    HarnessSession,
+    HarnessSessionStatus,
+)
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
-from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
+from apps.harness.repositories import (
+    HarnessMessageRepository,
+    HarnessSessionRepository,
+    QuestionRequestRepository,
+)
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -77,7 +87,6 @@ def conv_setup(db):
         status=RunnerStatus.ONLINE,
         sid=f"conv-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     owned = Workspace.objects.create(
         runner=runner,
@@ -153,10 +162,97 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
     assert row["status"] == HarnessSessionStatus.IDLE
     assert row["mode"] == "build"
     assert row["agent_name"] == "build"
+    assert row["harness_id"] == "native"
     assert row["model"] == "openrouter/test-model"
     assert row["reasoning_effort"] == "high"
     assert row["unread"] is False
+    assert row["manual_unread"] is False
+    assert row["needs_attention"] is False
+    assert row["attention_kind"] == ""
     assert "updated_at" in row
+    assert "last_message_at" in row
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("harness_id", ["native", "claude", "codex", ""])
+def test_list_conversations_service_projects_public_engine(
+    conv_setup, fake_harness_service, harness_id: str
+) -> None:
+    """The shared service owns engine projection without leaking private state."""
+    session = HarnessSession.objects.create(
+        workspace=conv_setup["owned"],
+        organization_id=conv_setup["org"].id,
+        harness_id=harness_id,
+        engine_state={"connection_id": "private-connection"},
+        external_session_id="private-external-session",
+    )
+
+    rows = ConversationService().list_conversations(
+        organization_id=conv_setup["org"].id,
+        workspace_ids=[conv_setup["owned"].id],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == str(session.id)
+    assert rows[0]["harness_id"] == (harness_id or "native")
+    assert "private-connection" not in repr(rows)
+    assert "private-external-session" not in repr(rows)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("workspace_count", [1, 10])
+def test_list_conversations_query_count_is_independent_of_workspaces(
+    conv_setup, fake_harness_service, django_assert_num_queries, workspace_count: int
+) -> None:
+    """Engine enrichment must not re-read every workspace's root/child sessions."""
+    roots = {}
+    for index in range(workspace_count):
+        workspace = Workspace.objects.create(
+            runner=conv_setup["owned"].runner,
+            name=f"Feed workspace {index}",
+            created_by=conv_setup["owner"],
+        )
+        harness_id = ("native", "claude", "codex")[index % 3]
+        session = HarnessSessionRepository.create(
+            workspace_id=workspace.id,
+            organization_id=conv_setup["org"].id,
+            harness_id=harness_id,
+            engine_state={"connection_id": "private-connection"},
+        )
+        roots[str(session.id)] = harness_id
+        HarnessSessionRepository.create(
+            workspace_id=workspace.id,
+            organization_id=conv_setup["org"].id,
+            parent_id=session.id,
+            harness_id="codex",
+        )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+
+    # Authentication/membership/workspaces: 5; batched gateway activity: 1;
+    # root sessions/unread/attention: 6, independent of workspace count.
+    with django_assert_num_queries(12):
+        response = client.get("/api/v1/harness/conversations/")
+
+    assert response.status_code == 200
+    assert {
+        row["session_id"]: row["harness_id"] for row in response.json()
+    } == roots
+    assert "private-connection" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_list_conversations_empty_for_owner_without_workspaces(
+    conv_setup, fake_harness_service
+) -> None:
+    """A valid member with no owned workspace receives an empty feed."""
+    owner = get_user_model().objects.create_user(
+        email=f"conv-empty-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+    Membership.objects.create(user=owner, organization=conv_setup["org"])
+    client = _client(user=owner, org=conv_setup["org"], permissions=READ)
+    response = client.get("/api/v1/harness/conversations/")
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.django_db
@@ -190,6 +286,39 @@ def test_list_conversations_requires_harness_read(conv_setup, fake_harness_servi
     client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=RUN)
     response = client.get("/api/v1/harness/conversations/")
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["feed", "read", "unread", "notice-dismiss"])
+def test_saved_conversation_endpoints_do_not_resolve_live_harness(
+    conv_setup, monkeypatch, action: str
+) -> None:
+    """Feed and navigation work without constructing agent run orchestration."""
+    session = HarnessSessionRepository.create(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+
+    def unexpected_harness():
+        raise AssertionError("Saved conversation operations must use their service")
+
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_harness)
+    if action == "feed":
+        response = client.get("/api/v1/harness/conversations/")
+        assert response.status_code == 200
+        assert response.json()[0]["session_id"] == str(session.id)
+    else:
+        path = f"/api/v1/harness/sessions/{session.id}/{action}"
+        if action == "notice-dismiss":
+            message = HarnessMessageRepository.create(
+                session_id=session.id, role="assistant", content="Stopped"
+            )
+            path = (
+                f"/api/v1/harness/sessions/{session.id}/messages/"
+                f"{message.id}/notice-dismiss"
+            )
+        assert client.post(path).status_code == 204
 
 
 @pytest.mark.django_db
@@ -333,3 +462,228 @@ def test_list_sessions_unread_false_after_mark_read(conv_setup, fake_harness_ser
         f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
     )
     assert listed.json()[0]["unread"] is False
+
+
+@pytest.mark.django_db
+def test_manual_unread_true_when_busy(conv_setup, fake_harness_service):
+    """Explicit unread stays true even while the session is busy."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="running",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.BUSY)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    mark = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert mark.status_code == 204
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["unread"] is True
+    assert row["manual_unread"] is True
+
+
+@pytest.mark.django_db
+def test_mark_unread_cleared_by_mark_read(conv_setup, fake_harness_service):
+    """Mark-read clears an explicit unread flag."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="toggle",
+    )
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.IDLE)
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    unread = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert unread.status_code == 204
+    assert client.get("/api/v1/harness/conversations/").json()[0]["unread"] is True
+    read = client.post(f"/api/v1/harness/sessions/{session.id}/read")
+    assert read.status_code == 204
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["unread"] is False
+    assert row["manual_unread"] is False
+
+
+@pytest.mark.django_db
+def test_mark_unread_requires_harness_read(conv_setup, fake_harness_service):
+    """Run-only keys cannot mark sessions unread."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="perm",
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=RUN)
+    response = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_mark_unread_foreign_session_is_404(conv_setup, fake_harness_service):
+    """Cannot mark another owner's session as unread."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["foreign"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="foreign",
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    response = client.post(f"/api/v1/harness/sessions/{session.id}/unread")
+    assert response.status_code == 404
+
+
+@pytest.mark.django_db
+def test_needs_attention_permission_and_question(conv_setup, fake_harness_service):
+    """Pending gates surface needs_attention and attention_kind on the feed."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="gates",
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["needs_attention"] is False
+    assert row["attention_kind"] == ""
+
+    fake_harness_service.permissions.requests.create(
+        organization_id=conv_setup["org"].id,
+        session_id=session.id,
+        workspace_id=conv_setup["owned"].id,
+        tool="bash",
+        pattern="ls",
+        title="$ ls",
+    )
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["needs_attention"] is True
+    assert row["attention_kind"] == "permission"
+
+    QuestionRequestRepository.create(
+        organization_id=conv_setup["org"].id,
+        session_id=session.id,
+        workspace_id=conv_setup["owned"].id,
+        questions=[{"question": "Which one?"}],
+    )
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["needs_attention"] is True
+    assert row["attention_kind"] == "both"
+
+
+@pytest.mark.django_db
+def test_needs_attention_maps_child_gate_to_root(conv_setup, fake_harness_service):
+    """Subagent pending gates mark the root conversation as needing attention."""
+    parent = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="parent",
+    )
+    child = HarnessSessionRepository.create(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        title="child",
+        parent_id=parent.id,
+        agent_name="explore",
+    )
+    QuestionRequestRepository.create(
+        organization_id=conv_setup["org"].id,
+        session_id=child.id,
+        workspace_id=conv_setup["owned"].id,
+        questions=[{"question": "Child ask?"}],
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    row = client.get("/api/v1/harness/conversations/").json()[0]
+    assert row["session_id"] == str(parent.id)
+    assert row["needs_attention"] is True
+    assert row["attention_kind"] == "question"
+
+    listed = client.get(
+        f"/api/v1/workspaces/{conv_setup['owned'].id}/harness/sessions/"
+    ).json()
+    by_id = {item["id"]: item for item in listed}
+    assert by_id[str(parent.id)]["needs_attention"] is True
+    assert by_id[str(child.id)]["needs_attention"] is True
+    assert by_id[str(child.id)]["attention_kind"] == "question"
+    assert HarnessSessionRepository.get_root_id(child) == parent.id
+    assert HarnessSessionRepository.get_root_id(parent) == parent.id
+
+
+@pytest.mark.django_db
+def test_list_conversations_orders_by_last_message_at_not_updated_at(
+    conv_setup, fake_harness_service
+):
+    """Opening a chat must not move it above more recently messaged chats."""
+    older = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="older activity",
+    )
+    newer = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="newer activity",
+    )
+    now = timezone.now()
+    HarnessSession.objects.filter(id=older.id).update(
+        last_message_at=now - timedelta(hours=2)
+    )
+    HarnessSession.objects.filter(id=newer.id).update(
+        last_message_at=now - timedelta(minutes=1)
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    mark = client.post(f"/api/v1/harness/sessions/{older.id}/read")
+    assert mark.status_code == 204
+    older.refresh_from_db()
+    newer.refresh_from_db()
+    assert older.updated_at > newer.updated_at
+    rows = client.get("/api/v1/harness/conversations/").json()
+    assert [row["session_id"] for row in rows] == [str(newer.id), str(older.id)]
+
+
+@pytest.mark.django_db
+def test_mark_read_does_not_change_last_message_at(conv_setup, fake_harness_service):
+    """Mark-read updates last_read_at without changing last_message_at."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="stay put",
+    )
+    session.refresh_from_db()
+    before = session.last_message_at
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+    assert client.post(f"/api/v1/harness/sessions/{session.id}/read").status_code == 204
+    session.refresh_from_db()
+    assert session.last_message_at == before
+
+
+@pytest.mark.django_db
+def test_last_message_at_touches_user_create_and_assistant_complete(
+    conv_setup, fake_harness_service
+):
+    """Status changes and assistant shells leave last_message_at alone."""
+    session = fake_harness_service.create_session(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+        prompt="running",
+    )
+    past = timezone.now() - timedelta(minutes=5)
+    HarnessSession.objects.filter(id=session.id).update(last_message_at=past)
+    frozen = HarnessSession.objects.get(id=session.id).last_message_at
+
+    HarnessSessionRepository.mark_status(session, HarnessSessionStatus.BUSY)
+    session.refresh_from_db()
+    assert session.last_message_at == frozen
+
+    assistant = HarnessMessageRepository.create(
+        session_id=session.id,
+        role=HarnessMessageRole.ASSISTANT,
+        content="",
+    )
+    session.refresh_from_db()
+    assert session.last_message_at == frozen
+
+    HarnessMessageRepository.complete(assistant)
+    session.refresh_from_db()
+    assert session.last_message_at > frozen
+
+    after_complete = session.last_message_at
+    HarnessMessageRepository.create(
+        session_id=session.id,
+        role=HarnessMessageRole.USER,
+        content="follow up",
+    )
+    session.refresh_from_db()
+    assert session.last_message_at > after_complete

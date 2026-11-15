@@ -1,641 +1,571 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
-import { Badge } from '@/components/ui/badge'
+/**
+ * ImageDefinitionsTab — image recipes, one status per row. Expanding a row
+ * lists the runners with the next step for each build. Polls every 3s while
+ * something builds or is removed, otherwise every 15s.
+ */
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import {
+  ChevronRight,
+  Copy,
+  Eye,
+  Layers,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Trash2,
+} from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import {
-  Plus,
-  Pencil,
-  Trash2,
-  ChevronsDownUp,
-  ChevronsUpDown,
-  Loader2,
-  Copy,
-  RotateCcw,
-} from '@lucide/vue'
-import { RunnerStatus, type ImageDefinition, type Runner, type RunnerImageBuild } from '@/types'
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import EmptyState from '@/components/common/EmptyState.vue'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import SettingsSection from '@/components/settings/SettingsSection.vue'
+import { usePolling } from '@/composables/usePolling'
+import { listRunners } from '@/services/runners.api'
 import * as workspacesApi from '@/services/workspaces.api'
-import { ApiRequestError, get } from '@/services/api'
-import { filterRunnersByRuntime } from '@/lib/runtimeSupport'
+import { useAuthStore } from '@/stores/auth'
+import type {
+  ImageArtifact,
+  ImageDefinition,
+  ImageDefinitionInput,
+  Runner,
+  RunnerImageBuild,
+} from '@/types'
+import type { DeletionTarget } from '@opencuria/client/types'
 import ImageDefinitionModal from './ImageDefinitionModal.vue'
+import ImageDeletionDialog from './ImageDeletionDialog.vue'
+import ImageRunnerBuildRow from './ImageRunnerBuildRow.vue'
+import ImageStatusBadge from './ImageStatusBadge.vue'
 import {
   buildNeedsPolling,
   definitionNeedsPolling,
-  formatRunnerBuildSummary,
   getDefinitionActions,
-  getRunnerBuildActions,
-  getRunnerBuildStatusLabel,
+  getDefinitionStatus,
   isDefinitionLocked,
   visibleImageDefinitions,
   type RunnerBuildAction,
-  type RunnerBuildConfirmKind,
-} from './imageDefinitionLifecycle'
+} from '@opencuria/chat-core/imageDefinitionLifecycle'
 
-const loading = ref(true)
-const error = ref<string | null>(null)
-const imageDefinitions = ref<ImageDefinition[]>([])
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.isAdmin)
+
+const loaded = ref(false)
+const loadError = ref<string | null>(null)
+const actionError = ref<string | null>(null)
+const error = computed(() => actionError.value ?? loadError.value)
+const definitions = ref<ImageDefinition[]>([])
 const runners = ref<Runner[]>([])
-const buildsByDefinition = ref<Record<string, RunnerImageBuild[]>>({})
+const builds = ref<Record<string, RunnerImageBuild[]>>({})
 const expanded = ref<string | null>(null)
-const modalOpen = ref(false)
+/** `definitionId` or `definitionId:runnerId` of the action in flight. */
+const busyKey = ref<string | null>(null)
+
+const editorOpen = ref(false)
+const editorSaving = ref(false)
+const editorError = ref<string | null>(null)
 const editing = ref<ImageDefinition | null>(null)
-const actionLoading = ref<string | null>(null)
-const logText = ref<string | null>(null)
-const confirmDialog = ref<{
-  title: string
-  body: string
-  confirmLabel: string
-  destructive: boolean
-  kind: RunnerBuildConfirmKind | 'delete_definition'
-} | null>(null)
-const pendingConfirm = ref<(() => Promise<void>) | null>(null)
+const rebuildTarget = ref<{ definition: ImageDefinition; runner: Runner } | null>(null)
+const rebuildMessage = ref('')
+const log = ref<{ title: string; text: string } | null>(null)
+const logOutput = ref<HTMLElement | null>(null)
+const deletion = ref<{ target: DeletionTarget; name: string } | null>(null)
 
-let refreshTimer: number | null = null
+const inFlight = computed(
+  () =>
+    definitions.value.some((definition) => definitionNeedsPolling(definition)) ||
+    (expanded.value !== null &&
+      (builds.value[expanded.value] ?? []).some((build) => buildNeedsPolling(build))),
+)
+const { start } = usePolling(
+  refresh,
+  computed(() => (inFlight.value ? 3000 : 15000)),
+)
+onMounted(start)
 
-const REBUILD_CONFIRM = {
-  title: 'Rebuild this runner image?',
-  body:
-    'The image on this runner will be rebuilt. Existing workspaces keep the filesystem they were created with and are not deleted or updated. New workspaces will use the rebuilt image after the build succeeds.',
-  confirmLabel: 'Rebuild',
-  destructive: false,
-  kind: 'rebuild' as const,
-}
-
-const REMOVE_CONFIRM = {
-  title: 'Remove this runner image?',
-  body:
-    'The built image will be deleted from this runner. Existing workspaces are not deleted. Removal is blocked until those workspaces are gone.',
-  confirmLabel: 'Remove',
-  destructive: true,
-  kind: 'remove' as const,
-}
-
-const DELETE_DEFINITION_CONFIRM = {
-  title: 'Delete this image definition?',
-  body:
-    'This recipe will be deactivated and its built images will be removed from every runner. Existing workspaces are not deleted. If any workspace still uses one of those images, deletion stays blocked until those workspaces are removed.',
-  confirmLabel: 'Delete definition',
-  destructive: true,
-  kind: 'delete_definition' as const,
-}
+// Running builds append at the end: open the log there.
+watch(log, async (value) => {
+  if (!value) return
+  await nextTick()
+  const output = logOutput.value
+  if (output) output.scrollTop = output.scrollHeight
+})
 
 function errorMessage(e: unknown, fallback: string): string {
-  if (e instanceof ApiRequestError) return e.message
-  if (e instanceof Error) return e.message
-  return fallback
+  return e instanceof Error && e.message ? e.message : fallback
 }
 
-function needsPolling(): boolean {
-  if (imageDefinitions.value.some((definition) => definitionNeedsPolling(definition.status))) {
-    return true
-  }
-  if (!expanded.value) return false
-  return (buildsByDefinition.value[expanded.value] || []).some((build) =>
-    buildNeedsPolling(build.status),
-  )
+function runnerName(runner: Runner): string {
+  return runner.name || runner.id.slice(0, 8)
 }
 
-function stopRefresh(): void {
-  if (refreshTimer !== null) {
-    window.clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+/** "Standard · ubuntu:24.04 · Python tools". */
+function definitionMeta(definition: ImageDefinition): string {
+  return [definition.is_standard ? 'Standard' : '', definition.base_distro, definition.description]
+    .filter(Boolean)
+    .join(' · ')
 }
 
-function ensureRefresh(): void {
-  stopRefresh()
-  if (!needsPolling()) return
-  refreshTimer = window.setInterval(async () => {
-    await loadDefinitions({ quiet: true })
-    if (expanded.value) await loadBuilds(expanded.value)
-    if (!needsPolling()) stopRefresh()
-  }, 3000)
+function hasMenu(definition: ImageDefinition): boolean {
+  return isAdmin.value && Object.values(getDefinitionActions(definition)).some(Boolean)
 }
 
-async function loadDefinitions(options: { quiet?: boolean } = {}): Promise<void> {
-  if (!options.quiet) {
-    loading.value = true
-    error.value = null
-  }
+function buildFor(definitionId: string, runnerId: string): RunnerImageBuild | null {
+  return builds.value[definitionId]?.find((build) => build.runner_id === runnerId) ?? null
+}
+
+async function refresh(): Promise<void> {
+  await Promise.all([loadDefinitions(), expanded.value ? loadBuilds(expanded.value) : null])
+}
+
+async function loadDefinitions(): Promise<void> {
   try {
-    const [defs, runnerList] = await Promise.all([
+    const [list, runnerList] = await Promise.all([
       workspacesApi.listImageDefinitions(),
-      get<Runner[]>('/runners/'),
+      listRunners(),
     ])
-    imageDefinitions.value = visibleImageDefinitions(defs)
+    definitions.value = visibleImageDefinitions(list)
     runners.value = runnerList
+    loadError.value = null
   } catch (e) {
-    error.value = errorMessage(e, 'Failed to load image definitions')
+    loadError.value = errorMessage(e, 'Could not load image definitions.')
   } finally {
-    if (!options.quiet) loading.value = false
+    loaded.value = true
   }
 }
 
 async function loadBuilds(definitionId: string): Promise<void> {
   try {
-    buildsByDefinition.value[definitionId] =
-      await workspacesApi.listRunnerImageBuilds(definitionId)
+    const list = await workspacesApi.listRunnerImageBuilds(definitionId)
+    builds.value = { ...builds.value, [definitionId]: list }
   } catch (e) {
-    error.value = errorMessage(e, 'Failed to load runner builds')
+    loadError.value = errorMessage(e, 'Could not load runner builds.')
   }
 }
 
-function openCreate() {
-  editing.value = null
-  modalOpen.value = true
-}
-
-function openEdit(definition: ImageDefinition) {
-  editing.value = definition
-  modalOpen.value = true
-}
-
-async function onModalSaved(payload: Partial<ImageDefinition>): Promise<void> {
-  try {
-    if (editing.value) {
-      await workspacesApi.updateImageDefinition(editing.value.id, payload)
-    } else {
-      await workspacesApi.createImageDefinition(payload)
-    }
-    modalOpen.value = false
-    await loadDefinitions()
-  } catch (e) {
-    error.value = errorMessage(e, 'Failed to save image definition')
+async function setExpanded(definition: ImageDefinition, open: boolean): Promise<void> {
+  if (!open) {
+    if (expanded.value === definition.id) expanded.value = null
+    return
   }
+  expanded.value = definition.id
+  await loadBuilds(definition.id)
 }
 
-function askConfirm(
-  spec: NonNullable<typeof confirmDialog.value>,
-  action: () => Promise<void>,
-): void {
-  confirmDialog.value = spec
-  pendingConfirm.value = action
-}
-
-async function runConfirmed(): Promise<void> {
-  const action = pendingConfirm.value
-  confirmDialog.value = null
-  pendingConfirm.value = null
-  if (!action) return
-  await action()
-}
-
-function cancelConfirm(): void {
-  confirmDialog.value = null
-  pendingConfirm.value = null
-}
-
-function requestDeleteDefinition(definition: ImageDefinition): void {
-  askConfirm(DELETE_DEFINITION_CONFIRM, () => executeDeleteDefinition(definition.id))
-}
-
-async function executeDeleteDefinition(id: string): Promise<void> {
-  try {
-    await workspacesApi.deleteImageDefinition(id)
-    await loadDefinitions()
-    ensureRefresh()
-  } catch (e) {
-    error.value = errorMessage(e, 'Failed to delete image definition')
-    await loadDefinitions({ quiet: true })
-  }
-}
-
-async function restoreDefinition(id: string): Promise<void> {
-  actionLoading.value = `${id}:restore`
-  try {
-    await workspacesApi.activateImageDefinition(id)
-    await loadDefinitions()
-  } catch (e) {
-    error.value = errorMessage(e, 'Failed to restore image definition')
-  } finally {
-    actionLoading.value = null
-  }
-}
-
-async function duplicateDefinition(definition: ImageDefinition): Promise<void> {
-  try {
-    await workspacesApi.duplicateImageDefinition(definition.id)
-    await loadDefinitions()
-  } catch (e) {
-    error.value = errorMessage(e, 'Failed to duplicate image definition')
-  }
-}
-
-function getBuild(definitionId: string, runnerId: string): RunnerImageBuild | null {
-  return buildsByDefinition.value[definitionId]?.find((b) => b.runner_id === runnerId) ?? null
-}
-
-function compatibleRunners(definition: ImageDefinition): Runner[] {
-  return filterRunnersByRuntime(runners.value, definition.runtime_type)
-}
-
-function isRunnerOnline(runner: Runner): boolean {
-  return runner.status === RunnerStatus.ONLINE
-}
-
-function actionKey(definitionId: string, runnerId: string, action: string): string {
-  return `${definitionId}:${runnerId}:${action}`
-}
-
-async function refreshRunner(definitionId: string): Promise<void> {
-  await loadBuilds(definitionId)
-  await loadDefinitions({ quiet: true })
-  ensureRefresh()
-}
-
-async function runRunnerAction(
-  definitionId: string,
-  runnerId: string,
-  action: string,
-  work: () => Promise<void>,
+/** Run one action, show its error, then reload what it changed. */
+async function run(
+  key: string,
+  work: () => Promise<unknown>,
+  definitionId?: string,
 ): Promise<void> {
-  actionLoading.value = actionKey(definitionId, runnerId, action)
-  error.value = null
+  busyKey.value = key
+  actionError.value = null
   try {
     await work()
-    await refreshRunner(definitionId)
   } catch (e) {
-    error.value = errorMessage(e, 'Failed to update runner image')
+    actionError.value = errorMessage(e, 'The action failed.')
   } finally {
-    actionLoading.value = null
+    busyKey.value = null
   }
+  await Promise.all([loadDefinitions(), definitionId ? loadBuilds(definitionId) : null])
 }
 
-async function buildOnRunner(definitionId: string, runnerId: string): Promise<void> {
-  await runRunnerAction(definitionId, runnerId, 'build', async () => {
-    await workspacesApi.createRunnerImageBuild(definitionId, {
-      runner_id: runnerId,
-      activate: true,
-    })
-  })
+function openCreate(): void {
+  editing.value = null
+  editorError.value = null
+  editorOpen.value = true
 }
 
-async function patchRunner(
-  definitionId: string,
-  runnerId: string,
-  action: 'activate' | 'deactivate' | 'rebuild',
-): Promise<void> {
-  await runRunnerAction(definitionId, runnerId, action, async () => {
-    await workspacesApi.updateRunnerImageBuild(definitionId, runnerId, { action })
-  })
+function openEdit(definition: ImageDefinition): void {
+  editing.value = definition
+  editorError.value = null
+  editorOpen.value = true
 }
 
-async function removeRunnerBuild(definitionId: string, runnerId: string): Promise<void> {
-  await runRunnerAction(definitionId, runnerId, 'remove', async () => {
-    await workspacesApi.deleteRunnerImageBuild(definitionId, runnerId)
-  })
-}
-
-async function viewLog(definitionId: string, runnerId: string): Promise<void> {
-  actionLoading.value = actionKey(definitionId, runnerId, 'log')
+async function onEditorSaved(payload: ImageDefinitionInput): Promise<void> {
+  if (editorSaving.value) return
+  editorSaving.value = true
+  editorError.value = null
   try {
-    const result = await workspacesApi.getRunnerImageBuildLog(definitionId, runnerId)
-    logText.value = result.build_log?.trim() || 'No build log available.'
+    const current = editing.value
+    const saved = current
+      ? await workspacesApi.updateImageDefinition(current.id, payload)
+      : await workspacesApi.createImageDefinition(payload)
+    editorOpen.value = false
+    await loadDefinitions()
+    // A saved recipe is built next: open it so Build or Rebuild is right there.
+    if (saved) await setExpanded(saved, true)
   } catch (e) {
-    error.value = errorMessage(e, 'Failed to load build log')
+    editorError.value = errorMessage(e, 'Could not save the image definition.')
   } finally {
-    actionLoading.value = null
+    editorSaving.value = false
   }
 }
 
-function handleAction(
+/** Copy a recipe and open the copy for editing. */
+async function duplicate(definition: ImageDefinition): Promise<void> {
+  busyKey.value = definition.id
+  actionError.value = null
+  try {
+    const copy = await workspacesApi.duplicateImageDefinition(definition.id)
+    await loadDefinitions()
+    openEdit(copy)
+  } catch (e) {
+    actionError.value = errorMessage(e, 'Could not duplicate the image definition.')
+  } finally {
+    busyKey.value = null
+  }
+}
+
+function activate(definition: ImageDefinition): void {
+  void run(definition.id, () => workspacesApi.activateImageDefinition(definition.id))
+}
+
+function requestDelete(definition: ImageDefinition): void {
+  deletion.value = {
+    target: { target_type: 'definition', target_id: definition.id },
+    name: definition.name,
+  }
+}
+
+function requestDeleteVersion(definition: ImageDefinition, version: ImageArtifact): void {
+  deletion.value = {
+    target: { target_type: 'image', target_id: version.id },
+    name: version.version ? `${definition.name} · v${version.version}` : definition.name,
+  }
+}
+
+async function showLog(definition: ImageDefinition, runner: Runner): Promise<void> {
+  busyKey.value = `${definition.id}:${runner.id}`
+  actionError.value = null
+  try {
+    const result = await workspacesApi.getRunnerImageBuildLog(definition.id, runner.id)
+    log.value = {
+      title: `${definition.name} on ${runnerName(runner)}`,
+      text: result.build_log?.trim() || 'No output yet.',
+    }
+  } catch (e) {
+    actionError.value = errorMessage(e, 'Could not load the build log.')
+  } finally {
+    busyKey.value = null
+  }
+}
+
+function onRunnerAction(
   definition: ImageDefinition,
   runner: Runner,
   action: RunnerBuildAction,
 ): void {
-  const definitionId = definition.id
-  const runnerId = runner.id
-  const run = (): Promise<void> => {
-    switch (action.id) {
-      case 'build':
-      case 'retry':
-        return buildOnRunner(definitionId, runnerId)
-      case 'activate':
-        return patchRunner(definitionId, runnerId, 'activate')
-      case 'deactivate':
-        return patchRunner(definitionId, runnerId, 'deactivate')
-      case 'rebuild':
-        return patchRunner(definitionId, runnerId, 'rebuild')
-      case 'remove':
-      case 'retry_remove':
-        return removeRunnerBuild(definitionId, runnerId)
-      case 'view_log':
-        return viewLog(definitionId, runnerId)
+  const key = `${definition.id}:${runner.id}`
+  switch (action.id) {
+    case 'build':
+    case 'retry':
+      void run(
+        key,
+        () =>
+          workspacesApi.createRunnerImageBuild(definition.id, {
+            runner_id: runner.id,
+            activate: true,
+          }),
+        definition.id,
+      )
+      return
+    case 'activate':
+    case 'deactivate': {
+      const change = action.id
+      void run(
+        key,
+        () => workspacesApi.updateRunnerImageBuild(definition.id, runner.id, { action: change }),
+        definition.id,
+      )
+      return
+    }
+    case 'rebuild':
+      rebuildMessage.value = ''
+      rebuildTarget.value = { definition, runner }
+      return
+    case 'view_log':
+      void showLog(definition, runner)
+      return
+    case 'remove':
+    case 'retry_remove': {
+      const build = buildFor(definition.id, runner.id)
+      if (build) {
+        deletion.value = {
+          target: { target_type: 'assignment', target_id: build.id },
+          name: `${definition.name} on ${runnerName(runner)}`,
+        }
+      }
+      return
     }
   }
-
-  if (action.confirm === 'rebuild') {
-    askConfirm(REBUILD_CONFIRM, run)
-    return
-  }
-  if (action.confirm === 'remove') {
-    askConfirm(REMOVE_CONFIRM, run)
-    return
-  }
-  void run()
 }
 
-async function toggleExpand(definitionId: string): Promise<void> {
-  expanded.value = expanded.value === definitionId ? null : definitionId
-  if (expanded.value === definitionId) {
-    await loadBuilds(definitionId)
-  }
-  ensureRefresh()
+async function confirmRebuild(): Promise<void> {
+  const target = rebuildTarget.value
+  if (!target) return
+  rebuildTarget.value = null
+  const message = rebuildMessage.value.trim()
+  await run(
+    `${target.definition.id}:${target.runner.id}`,
+    () =>
+      workspacesApi.updateRunnerImageBuild(target.definition.id, target.runner.id, {
+        action: 'rebuild',
+        ...(message ? { message } : {}),
+      }),
+    target.definition.id,
+  )
 }
 
-onMounted(() => {
-  loadDefinitions().then(() => ensureRefresh())
-})
-
-onUnmounted(() => {
-  stopRefresh()
-})
+async function onDeletionRequested(): Promise<void> {
+  await refresh()
+}
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex justify-between items-start gap-4">
-      <p class="text-sm text-muted-foreground">
-        An image definition is a recipe. Build it on a runner to make it available for new
-        workspaces. Rebuilding or removing an image does not delete existing workspaces.
+  <div class="space-y-6">
+    <SettingsSection description="Build a recipe on a runner to start new workspaces from it.">
+      <template v-if="isAdmin" #actions>
+        <Button size="sm" data-testid="image-definition-create" @click="openCreate">
+          <Plus />
+          New Definition
+        </Button>
+      </template>
+
+      <p
+        v-if="error"
+        role="alert"
+        class="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+      >
+        {{ error }}
       </p>
-      <Button size="sm" class="shrink-0" @click="openCreate">
-        <Plus :size="14" />
-        New Image Definition
-      </Button>
-    </div>
 
-    <div v-if="loading" class="flex justify-center py-10"><LoadingSpinner :size="24" /></div>
-
-    <div
-      v-if="error"
-      class="rounded-[var(--radius-md)] border border-error/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-    >
-      {{ error }}
-    </div>
-
-    <div v-if="!loading" class="space-y-2">
-      <Card v-for="definition in imageDefinitions" :key="definition.id">
-        <CardContent>
-          <div class="flex items-center gap-3">
-            <button
-              type="button"
-              class="text-muted-foreground hover:text-foreground"
-              @click="toggleExpand(definition.id)"
-            >
-              <ChevronsUpDown v-if="expanded !== definition.id" :size="14" />
-              <ChevronsDownUp v-else :size="14" />
-            </button>
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-medium text-foreground">{{ definition.name }}</span>
-                <Badge variant="default">{{ definition.runtime_type }}</Badge>
-                <Badge variant="secondary">
-                  {{ definition.is_standard ? 'standard' : 'custom' }}
-                </Badge>
-                <Badge v-if="definition.status === 'deactivated'" variant="outline">
-                  deactivated
-                </Badge>
-                <Badge v-else-if="definition.status === 'pending_deletion'" variant="destructive">
-                  <Loader2 :size="10" class="inline animate-spin mr-1" />
-                  removing
-                </Badge>
-                <Badge v-else-if="definition.status === 'deleting'" variant="destructive">
-                  <Loader2 :size="10" class="inline animate-spin mr-1" />
-                  removing
-                </Badge>
-                <Badge v-else-if="definition.status === 'delete_failed'" variant="destructive">
-                  remove failed
-                </Badge>
-              </div>
-              <p class="text-xs text-muted-foreground truncate">
-                {{ definition.description || 'No description' }}
-              </p>
-              <p class="text-xs text-muted-foreground">
-                Base: {{ definition.base_distro }} ·
-                {{ formatRunnerBuildSummary(definition.runner_build_summary) }}
-              </p>
-              <p
-                v-if="definition.status === 'delete_failed' && definition.delete_last_error"
-                class="text-xs text-destructive mt-1"
-              >
-                {{ definition.delete_last_error }}
-              </p>
-            </div>
-            <template v-if="getDefinitionActions(definition).canDuplicate">
-              <Button variant="ghost" size="icon-sm" @click="duplicateDefinition(definition)">
-                <Copy :size="14" />
-              </Button>
-            </template>
-            <Button
-              v-if="getDefinitionActions(definition).canEdit"
-              variant="ghost"
-              size="icon-sm"
-              @click="openEdit(definition)"
-            >
-              <Pencil :size="14" />
-            </Button>
-            <Button
-              v-if="getDefinitionActions(definition).canDelete"
-              variant="ghost"
-              size="icon-sm"
-              class="text-destructive"
-              @click="requestDeleteDefinition(definition)"
-            >
-              <Trash2 :size="14" />
-            </Button>
-            <Button
-              v-if="getDefinitionActions(definition).canRestore"
-              size="sm"
-              variant="outline"
-              :disabled="actionLoading === `${definition.id}:restore`"
-              @click="restoreDefinition(definition.id)"
-            >
-              Restore
-            </Button>
-            <Button
-              v-if="getDefinitionActions(definition).canRetryDelete"
-              size="sm"
-              variant="destructive"
-              @click="requestDeleteDefinition(definition)"
-            >
-              <RotateCcw :size="12" />
-              Retry delete
-            </Button>
-          </div>
-
-          <div v-if="expanded === definition.id" class="mt-4 border-t border-border pt-3">
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="text-left text-muted-foreground">
-                    <th class="py-1 pr-3">Runner</th>
-                    <th class="py-1 pr-3">Status</th>
-                    <th class="py-1">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="runner in compatibleRunners(definition)"
-                    :key="runner.id"
-                    class="border-t border-border/40"
-                  >
-                    <td class="py-2 pr-3">
-                      <div class="flex items-center gap-2">
-                        <span>{{ runner.name || runner.id.slice(0, 8) }}</span>
-                        <Badge v-if="!isRunnerOnline(runner)" variant="outline">offline</Badge>
-                      </div>
-                    </td>
-                    <td class="py-2 pr-3">
-                      <Badge
-                        :variant="
-                          ['pending_deletion', 'deleting', 'delete_failed', 'failed'].includes(
-                            getBuild(definition.id, runner.id)?.status || '',
-                          )
-                            ? 'destructive'
-                            : 'secondary'
-                        "
-                      >
-                        <Loader2
-                          v-if="
-                            ['pending', 'building', 'pending_deletion', 'deleting'].includes(
-                              getBuild(definition.id, runner.id)?.status || '',
-                            )
-                          "
-                          :size="10"
-                          class="inline animate-spin mr-1"
-                        />
-                        {{
-                          getRunnerBuildStatusLabel(
-                            getBuild(definition.id, runner.id)?.status,
-                            isRunnerOnline(runner),
-                          )
-                        }}
-                      </Badge>
-                    </td>
-                    <td class="py-2">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <Button
-                          v-if="
-                            ['pending', 'building'].includes(
-                              getBuild(definition.id, runner.id)?.status || '',
-                            )
-                          "
-                          size="sm"
-                          variant="outline"
-                          disabled
-                        >
-                          <Loader2 :size="12" class="animate-spin" />
-                          {{
-                            getBuild(definition.id, runner.id)?.status === 'pending' &&
-                            !isRunnerOnline(runner)
-                              ? 'Waiting for runner'
-                              : 'Building…'
-                          }}
-                        </Button>
-                        <Button
-                          v-else-if="
-                            ['pending_deletion', 'deleting'].includes(
-                              getBuild(definition.id, runner.id)?.status || '',
-                            )
-                          "
-                          size="sm"
-                          variant="outline"
-                          disabled
-                        >
-                          <Loader2 :size="12" class="animate-spin" />
-                          Removing…
-                        </Button>
-                        <Button
-                          v-for="action in getRunnerBuildActions(
-                            getBuild(definition.id, runner.id)?.status,
-                            { definitionLocked: isDefinitionLocked(definition.status) },
-                          )"
-                          :key="action.id"
-                          size="sm"
-                          :variant="
-                            action.kind === 'destructive'
-                              ? 'ghost'
-                              : action.kind === 'ghost'
-                                ? 'ghost'
-                                : 'outline'
-                          "
-                          :class="action.kind === 'destructive' ? 'text-destructive' : ''"
-                          :disabled="Boolean(actionLoading?.startsWith(`${definition.id}:${runner.id}:`))"
-                          @click="handleAction(definition, runner, action)"
-                        >
-                          {{ action.label }}
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p v-if="compatibleRunners(definition).length === 0" class="mt-3 text-xs text-muted-foreground">
-              No runners in this organization currently support the {{ definition.runtime_type }} runtime.
-            </p>
-            <p
-              v-else-if="!isDefinitionLocked(definition.status)"
-              class="mt-3 text-xs text-muted-foreground"
-            >
-              Deactivate only hides this image from new workspaces on that runner. Existing
-              workspaces keep running.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div v-if="imageDefinitions.length === 0" class="py-10 text-center text-sm text-muted-foreground">
-        No image definitions found.
+      <div v-if="!loaded" class="flex justify-center py-12">
+        <LoadingSpinner :size="24" />
       </div>
-    </div>
 
+      <div
+        v-else-if="!definitions.length && !loadError"
+        class="overflow-hidden rounded-lg border border-border bg-card"
+      >
+        <EmptyState :icon="Layers" title="No image definitions yet" />
+      </div>
+
+      <div
+        v-else-if="definitions.length"
+        class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+      >
+        <Collapsible
+          v-for="definition in definitions"
+          :key="definition.id"
+          :open="expanded === definition.id"
+          data-testid="image-definition-row"
+          @update:open="(open) => setExpanded(definition, open)"
+        >
+          <div class="flex items-center gap-1 pr-3 transition-colors hover:bg-muted/30">
+            <CollapsibleTrigger
+              class="flex min-w-0 flex-1 items-center gap-3 rounded-lg py-3 pl-4 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              data-testid="image-definition-toggle"
+            >
+              <ChevronRight
+                class="size-4 shrink-0 text-muted-foreground transition-transform"
+                :class="{ 'rotate-90': expanded === definition.id }"
+                aria-hidden="true"
+              />
+              <span class="min-w-0 space-y-0.5">
+                <span class="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span class="truncate text-sm font-medium text-foreground">
+                    {{ definition.name }}
+                  </span>
+                  <ImageStatusBadge :status="getDefinitionStatus(definition)" />
+                </span>
+                <span class="block truncate text-xs text-muted-foreground">
+                  {{ definitionMeta(definition) }}
+                </span>
+              </span>
+            </CollapsibleTrigger>
+
+            <DropdownMenu v-if="hasMenu(definition)">
+              <DropdownMenuTrigger as-child>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  class="text-muted-foreground"
+                  :disabled="busyKey === definition.id"
+                  :aria-label="`More actions for ${definition.name}`"
+                  title="More actions"
+                  data-testid="image-definition-menu"
+                >
+                  <MoreHorizontal />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="w-44">
+                <DropdownMenuItem
+                  v-if="getDefinitionActions(definition).canEdit"
+                  data-testid="image-definition-edit"
+                  @select="openEdit(definition)"
+                >
+                  <Pencil />
+                  Edit
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  v-if="getDefinitionActions(definition).canDuplicate"
+                  data-testid="image-definition-duplicate"
+                  @select="duplicate(definition)"
+                >
+                  <Copy />
+                  Duplicate
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  v-if="getDefinitionActions(definition).canEnable"
+                  data-testid="image-definition-enable"
+                  @select="activate(definition)"
+                >
+                  <Eye />
+                  Enable
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  v-if="getDefinitionActions(definition).canRestore"
+                  data-testid="image-definition-restore"
+                  @select="activate(definition)"
+                >
+                  <RotateCcw />
+                  Restore
+                </DropdownMenuItem>
+                <template
+                  v-if="
+                    getDefinitionActions(definition).canDelete ||
+                    getDefinitionActions(definition).canRetryDelete
+                  "
+                >
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    data-testid="image-definition-delete"
+                    @select="requestDelete(definition)"
+                  >
+                    <Trash2 />
+                    {{
+                      getDefinitionActions(definition).canRetryDelete ? 'Retry delete' : 'Delete'
+                    }}
+                  </DropdownMenuItem>
+                </template>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
+          <p
+            v-if="definition.status === 'delete_failed' && definition.delete_last_error"
+            class="pb-3 pl-11 pr-4 text-xs text-destructive"
+          >
+            {{ definition.delete_last_error }}
+          </p>
+
+          <CollapsibleContent>
+            <div class="border-t border-border/60 bg-muted/20 py-1">
+              <div v-if="!(definition.id in builds)" class="flex justify-center py-3">
+                <LoadingSpinner :size="16" />
+              </div>
+              <template v-else>
+                <ImageRunnerBuildRow
+                  v-for="runner in runners"
+                  :key="runner.id"
+                  :runner="runner"
+                  :build="buildFor(definition.id, runner.id)"
+                  :can-manage="isAdmin"
+                  :locked="isDefinitionLocked(definition.status)"
+                  :busy="busyKey === `${definition.id}:${runner.id}`"
+                  @action="(action) => onRunnerAction(definition, runner, action)"
+                  @delete-version="(version) => requestDeleteVersion(definition, version)"
+                />
+                <p v-if="!runners.length" class="py-2.5 pl-11 pr-4 text-sm text-muted-foreground">
+                  No runners yet.
+                </p>
+              </template>
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+      </div>
+    </SettingsSection>
+
+    <ImageDeletionDialog
+      :target="deletion?.target ?? null"
+      :name="deletion?.name"
+      @close="deletion = null"
+      @requested="onDeletionRequested"
+    />
     <ImageDefinitionModal
-      :open="modalOpen"
+      :open="editorOpen"
       :image-definition="editing"
-      @update:open="(v) => (modalOpen = v)"
-      @saved="onModalSaved"
+      :saving="editorSaving"
+      :error="editorError"
+      @update:open="(value) => (editorOpen = value)"
+      @saved="onEditorSaved"
     />
 
-    <Dialog :open="Boolean(confirmDialog)" @update:open="(open) => (open ? null : cancelConfirm())">
+    <Dialog
+      :open="rebuildTarget !== null"
+      @update:open="(open) => (open ? null : (rebuildTarget = null))"
+    >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{{ confirmDialog?.title }}</DialogTitle>
-          <DialogDescription>{{ confirmDialog?.body }}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" type="button" @click="cancelConfirm">Cancel</Button>
-          <Button
-            :variant="confirmDialog?.destructive ? 'destructive' : 'default'"
-            type="button"
-            @click="runConfirmed"
+          <DialogTitle>
+            Rebuild on {{ rebuildTarget ? runnerName(rebuildTarget.runner) : '' }}?
+          </DialogTitle>
+          <DialogDescription
+            >Builds a new version. Existing workspaces keep theirs.</DialogDescription
           >
-            {{ confirmDialog?.confirmLabel }}
+        </DialogHeader>
+        <DialogBody>
+          <form id="image-rebuild-form" @submit.prevent="confirmRebuild">
+            <Input
+              v-model="rebuildMessage"
+              maxlength="500"
+              placeholder="What changed? (optional)"
+              aria-label="What changed?"
+              data-testid="rebuild-message-input"
+            />
+          </form>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="outline" type="button" @click="rebuildTarget = null">Cancel</Button>
+          <Button type="submit" form="image-rebuild-form" data-testid="rebuild-confirm">
+            Rebuild
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
-    <Dialog :open="logText !== null" @update:open="(open) => (open ? null : (logText = null))">
-      <DialogContent class="max-w-2xl">
+    <Dialog :open="log !== null" @update:open="(open) => (open ? null : (log = null))">
+      <DialogContent class="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Build log</DialogTitle>
-          <DialogDescription>Latest output from the runner image build.</DialogDescription>
+          <DialogDescription>{{ log?.title }}</DialogDescription>
         </DialogHeader>
-        <pre class="max-h-80 overflow-auto rounded-[var(--radius-md)] bg-muted p-3 text-xs whitespace-pre-wrap">{{ logText }}</pre>
-        <DialogFooter>
-          <Button variant="outline" type="button" @click="logText = null">Close</Button>
-        </DialogFooter>
+        <DialogBody>
+          <pre
+            ref="logOutput"
+            class="max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 font-mono text-xs"
+            >{{ log?.text }}</pre
+          >
+        </DialogBody>
       </DialogContent>
     </Dialog>
   </div>

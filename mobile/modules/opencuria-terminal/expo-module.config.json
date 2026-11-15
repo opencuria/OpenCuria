@@ -1,0 +1,10 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["OpenCuriaTerminalModule"],
+    "podspecPath": "OpenCuriaTerminal.podspec"
+  },
+  "android": {
+    "modules": ["expo.modules.opencuriaterminal.OpenCuriaTerminalModule"]
+  }
+}

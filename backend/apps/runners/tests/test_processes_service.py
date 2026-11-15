@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.db import IntegrityError
 
 from apps.runners.enums import ProcessStatus, RunnerStatus, WorkspaceStatus
 from apps.runners.exceptions import RunnerOfflineError, WorkspaceStateError
@@ -40,6 +43,24 @@ def _make_process(service: RunnerService, workspace, **kwargs) -> WorkspaceProce
     return service.processes.create(**defaults)
 
 
+def _make_process_definition(
+    workspace,
+    *,
+    name: str = "configured",
+    command: str = "python -m app",
+    workdir: str = "/app",
+) -> WorkspaceProcess:
+    """Create a never-started persistent process definition as restored from an image."""
+    return WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name=name,
+        command=command,
+        workdir=workdir,
+        status=ProcessStatus.EXITED,
+        run_count=0,
+    )
+
+
 def _feed_reply(
     service: RunnerService,
     event: str,
@@ -54,7 +75,7 @@ def _feed_reply(
         "workspace_id": str(workspace_id),
         **extra,
     }
-    service.handle_process_reply(event, data, runner_id=str(runner.id))
+    service.process_manager.handle_process_reply(event, data, runner_id=str(runner.id))
 
 
 @pytest.mark.django_db(transaction=True)
@@ -62,9 +83,9 @@ class TestStartProcess:
     @pytest.mark.asyncio
     async def test_start_happy_path(self, service, runner, workspace, user):
         """Start should persist a record and resolve pid/log_path from the reply."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         pushes: list[tuple] = []
-        service._forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             assert event == "harness:process_start"
@@ -83,9 +104,9 @@ class TestStartProcess:
                 },
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
-        process = await service.start_process(
+        process = await service.process_manager.start_process(
             workspace.id,
             "sleep 60",
             workdir="/workspace",
@@ -102,11 +123,88 @@ class TestStartProcess:
         assert pushes[0][0] == "process:status_changed"
 
     @pytest.mark.asyncio
+    async def test_start_existing_never_started_definition_uses_first_run_log(
+        self, service, runner, workspace, user
+    ):
+        """Starting an imported count-zero definition keeps its id and first log."""
+        definition = _make_process_definition(workspace)
+        transport = AsyncMock(return_value={"pid": 2121})
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+
+        started = await service.process_manager.start_process(
+            workspace.id,
+            "python -m updated_app",
+            workdir="/srv/app",
+            env=None,
+            name=definition.name,
+            user=user,
+        )
+
+        assert started.id == definition.id
+        assert started.run_count == 1
+        assert started.command == "python -m updated_app"
+        assert started.workdir == "/srv/app"
+        assert started.status == ProcessStatus.RUNNING
+        transport.assert_awaited_once()
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(definition.id)
+        assert payload["command"] == "python -m updated_app"
+        assert payload["workdir"] == "/srv/app"
+        assert payload["env"] == {}
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{definition.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+
+    @pytest.mark.asyncio
+    async def test_start_integrity_error_retries_count_zero_winner(
+        self, service, workspace, user
+    ):
+        """An upsert race restarts the winner at run one, not run two."""
+        winner = _make_process_definition(workspace, name="race-winner")
+        transport = AsyncMock(return_value={"pid": 3232})
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+        with (
+            patch.object(
+                service.processes, "get_by_name", side_effect=[None, winner]
+            ) as get_by_name,
+            patch.object(
+                service.processes, "create", side_effect=IntegrityError
+            ) as create,
+        ):
+            started = await service.process_manager.start_process(
+                workspace.id,
+                "python -m winner",
+                workdir="/srv/winner",
+                name="race-winner",
+                user=user,
+            )
+
+        assert get_by_name.call_count == 2
+        assert all(
+            call.args == (workspace.id, "race-winner")
+            for call in get_by_name.call_args_list
+        )
+        create.assert_called_once()
+        assert started.id == winner.id
+        assert started.run_count == 1
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(winner.id)
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{winner.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+
+    @pytest.mark.asyncio
     async def test_start_runner_error_marks_failed(
         self, service, runner, workspace, user
     ):
         """Runner error replies should mark the record failed and raise."""
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             _feed_reply(
@@ -118,16 +216,17 @@ class TestStartProcess:
                 {"process_id": payload["process_id"], "error": "boom"},
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
         with pytest.raises(ConflictError):
-            await service.start_process(workspace.id, "sleep 60", user=user)
+            await service.process_manager.start_process(
+                workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
-        failed = WorkspaceProcess.objects.exclude(
-            status=ProcessStatus.RUNNING
-        ).first()
+        failed = WorkspaceProcess.objects.exclude(status=ProcessStatus.RUNNING).first()
         assert failed is not None
         assert failed.status == ProcessStatus.FAILED
+        assert failed.run_count == 1
 
     @pytest.mark.asyncio
     async def test_start_rejects_foreign_runner_reply(
@@ -143,9 +242,8 @@ class TestStartProcess:
             status=RunnerStatus.ONLINE,
             sid="other-sid",
             organization=organization,
-            available_runtimes=["docker"],
         )
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             # Send the reply as if it came from the *other* runner.
@@ -158,11 +256,13 @@ class TestStartProcess:
                 {"process_id": payload["process_id"], "pid": 1},
             )
 
-        service._emit_to_runner.side_effect = _emit
-        service._PROCESS_RPC_TIMEOUT_SECONDS = 1
+        service.runner_transport.emit_to_runner.side_effect = _emit
+        service.process_manager._PROCESS_RPC_TIMEOUT_SECONDS = 1
 
         with pytest.raises(ConflictError):
-            await service.start_process(workspace.id, "sleep 60", user=user)
+            await service.process_manager.start_process(
+                workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
     @pytest.mark.asyncio
     async def test_start_runner_offline(self, service, offline_runner, user):
@@ -176,7 +276,9 @@ class TestStartProcess:
             created_by=user,
         )
         with pytest.raises(RunnerOfflineError):
-            await service.start_process(workspace.id, "sleep 60", user=user)
+            await service.process_manager.start_process(
+                workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
     @pytest.mark.asyncio
     async def test_start_requires_running_workspace(
@@ -184,13 +286,116 @@ class TestStartProcess:
     ):
         """Non-running workspaces cannot start processes."""
         with pytest.raises(WorkspaceStateError):
-            await service.start_process(stopped_workspace.id, "sleep 60", user=user)
+            await service.process_manager.start_process(
+                stopped_workspace.id, "sleep 60", name="sleeper", user=user
+            )
 
     @pytest.mark.asyncio
     async def test_start_unknown_workspace(self, service, user):
         """Unknown workspace IDs raise WorkspaceNotFoundError."""
         with pytest.raises(NotFoundError):
-            await service.start_process(uuid.uuid4(), "sleep 60", user=user)
+            await service.process_manager.start_process(
+                uuid.uuid4(), "sleep 60", name="sleeper", user=user
+            )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRestartProcess:
+    @pytest.mark.asyncio
+    async def test_restart_existing_never_started_definition_uses_first_run_log(
+        self, service, workspace, user
+    ):
+        """Explicit restart reuses the definition's row and stored config."""
+        definition = _make_process_definition(
+            workspace,
+            name="configured-restart",
+            command="python -m configured_app",
+            workdir="/srv/configured",
+        )
+        transport = AsyncMock(return_value={"pid": 2122})
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+
+        restarted = await service.process_manager.restart_process(
+            workspace.id, definition.id, user=user
+        )
+
+        assert restarted.id == definition.id
+        assert restarted.run_count == 1
+        assert restarted.status == ProcessStatus.RUNNING
+        assert restarted.command == "python -m configured_app"
+        assert restarted.workdir == "/srv/configured"
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(definition.id)
+        assert payload["command"] == "python -m configured_app"
+        assert payload["workdir"] == "/srv/configured"
+        assert payload["env"] == {}
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{definition.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_restarts_reject_second_stale_count_zero_copy(
+        self, service, workspace, user
+    ):
+        """Only one restart using the same stale count-zero snapshot can win."""
+        definition = _make_process_definition(
+            workspace,
+            name="concurrent-restart",
+            command="python -m concurrent_app",
+            workdir="/srv/concurrent",
+        )
+        resolved_both = asyncio.Event()
+        resolved: list[WorkspaceProcess] = []
+
+        async def _resolve_stale_copy(*args, **kwargs):
+            stale = copy.copy(definition)
+            resolved.append(stale)
+            if len(resolved) == 2:
+                resolved_both.set()
+            await resolved_both.wait()
+            return stale
+
+        service.process_manager._resolve_process = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_resolve_stale_copy
+        )
+        transport = AsyncMock(return_value={"pid": 4343})
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+
+        outcomes = await asyncio.gather(
+            service.process_manager.restart_process(
+                workspace.id, definition.id, user=user
+            ),
+            service.process_manager.restart_process(
+                workspace.id, definition.id, user=user
+            ),
+            return_exceptions=True,
+        )
+
+        assert len(resolved) == 2
+        assert resolved[0] is not resolved[1]
+        assert [item.run_count for item in resolved] == [0, 0]
+        successes = [item for item in outcomes if not isinstance(item, BaseException)]
+        conflicts = [item for item in outcomes if isinstance(item, ConflictError)]
+        assert len(successes) == 1
+        assert len(conflicts) == 1
+        assert successes[0].id == definition.id
+        assert successes[0].run_count == 1
+
+        transport.assert_awaited_once()
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(definition.id)
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{definition.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+        definition.refresh_from_db()
+        assert definition.status == ProcessStatus.RUNNING
+        assert definition.run_count == 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -200,10 +405,11 @@ class TestStopProcess:
         """Stop should RPC the runner and mark the record killed."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
-        service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
         pushes: list[tuple] = []
-        service._forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
+        service.frontend_bus.forward_to_frontend = lambda *a: pushes.append(a)  # type: ignore[method-assign]
 
         async def _emit(runner_arg, event, payload):
             assert event == "harness:process_stop"
@@ -223,32 +429,191 @@ class TestStopProcess:
                 },
             )
 
-        service._emit_to_runner.side_effect = _emit
+        service.runner_transport.emit_to_runner.side_effect = _emit
 
-        stopped = await service.stop_process(workspace.id, process.id)
+        stopped = await service.process_manager.stop_process(workspace.id, process.id)
         assert stopped.status == ProcessStatus.KILLED
         assert pushes
         assert pushes[0][0] == "process:status_changed"
 
     @pytest.mark.asyncio
     async def test_stop_idempotent_for_finished(self, service, workspace):
-        """Stopping an already-finished process returns it unchanged."""
         process = _make_process(service, workspace)
         service.processes.mark_finished(
             process.id, status=ProcessStatus.EXITED, exit_code=0
         )
         emit = AsyncMock()
-        service._emit_to_runner = emit  # type: ignore[method-assign]
+        service.runner_transport.emit_to_runner = emit  # type: ignore[method-assign]
 
-        result = await service.stop_process(workspace.id, process.id)
+        result = await service.process_manager.stop_process(workspace.id, process.id)
         assert result.status == ProcessStatus.EXITED
         emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_not_found_verifies_then_retries_on_running(
+        self, service, runner, workspace
+    ):
+        """A 'not found' stop reattaches live processes and retries the stop."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+        state: dict = {"first_stop_id": None}
+
+        async def _emit(runner_arg, event, payload):
+            if event == "harness:process_verify":
+                _feed_reply(
+                    service,
+                    "harness:process_verify_result",
+                    runner_arg,
+                    workspace.id,
+                    payload["request_id"],
+                    {
+                        "processes": [
+                            {
+                                "process_id": str(process.id),
+                                "status": "running",
+                                "exit_code": None,
+                                "pid": 4242,
+                            }
+                        ]
+                    },
+                )
+            elif event == "harness:process_stop":
+                if state["first_stop_id"] is None:
+                    state["first_stop_id"] = payload["request_id"]
+                if payload["request_id"] == state["first_stop_id"]:
+                    _feed_reply(
+                        service,
+                        "harness:process_stop_result",
+                        runner_arg,
+                        workspace.id,
+                        payload["request_id"],
+                        {
+                            "process_id": str(process.id),
+                            "stopped": False,
+                            "error": "Background process abc not found for workspace",
+                        },
+                    )
+                else:
+                    _feed_reply(
+                        service,
+                        "harness:process_stop_result",
+                        runner_arg,
+                        workspace.id,
+                        payload["request_id"],
+                        {
+                            "process_id": str(process.id),
+                            "stopped": True,
+                            "status": "killed",
+                            "exit_code": None,
+                            "pid": 4242,
+                        },
+                    )
+
+        service.runner_transport.emit_to_runner.side_effect = _emit
+
+        stopped = await service.process_manager.stop_process(workspace.id, process.id)
+        assert stopped.status == ProcessStatus.KILLED
+        events = [
+            call.args[1]
+            for call in service.runner_transport.emit_to_runner.call_args_list
+        ]
+        assert events.count("harness:process_stop") == 2
+        assert "harness:process_verify" in events
+
+    @pytest.mark.asyncio
+    async def test_stop_not_found_with_confirmed_exit_marks_exited(
+        self, service, runner, workspace
+    ):
+        """A 'not found' stop with verify=exited marks the row EXITED."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+
+        async def _emit(runner_arg, event, payload):
+            if event == "harness:process_verify":
+                _feed_reply(
+                    service,
+                    "harness:process_verify_result",
+                    runner_arg,
+                    workspace.id,
+                    payload["request_id"],
+                    {
+                        "processes": [
+                            {
+                                "process_id": str(process.id),
+                                "status": "exited",
+                                "exit_code": 3,
+                                "pid": 4242,
+                            }
+                        ]
+                    },
+                )
+            else:
+                _feed_reply(
+                    service,
+                    "harness:process_stop_result",
+                    runner_arg,
+                    workspace.id,
+                    payload["request_id"],
+                    {
+                        "process_id": str(process.id),
+                        "stopped": False,
+                        "error": "Background process abc not found for workspace",
+                    },
+                )
+
+        service.runner_transport.emit_to_runner.side_effect = _emit
+
+        stopped = await service.process_manager.stop_process(workspace.id, process.id)
+        assert stopped.status == ProcessStatus.EXITED
+        assert stopped.exit_code == 3
+
+    @pytest.mark.asyncio
+    async def test_stop_not_found_with_verify_timeout_stays_running(
+        self, service, runner, workspace
+    ):
+        """A failed verify (timeout) keeps the row RUNNING (fail-open)."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
+        service.runner_transport.emit_to_runner = AsyncMock()  # type: ignore[method-assign]
+
+        async def _emit(runner_arg, event, payload):
+            if event == "harness:process_verify":
+                return  # never reply -> live-timeout -> ConflictError
+            _feed_reply(
+                service,
+                "harness:process_stop_result",
+                runner_arg,
+                workspace.id,
+                payload["request_id"],
+                {
+                    "process_id": str(process.id),
+                    "stopped": False,
+                    "error": "Background process abc not found for workspace",
+                },
+            )
+
+        service.runner_transport.emit_to_runner.side_effect = _emit
+
+        with patch.object(
+            service.process_manager, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05
+        ):
+            result = await service.process_manager.stop_process(
+                workspace.id, process.id
+            )
+        assert result.status == ProcessStatus.RUNNING
+        result.refresh_from_db()
+        assert result.status == ProcessStatus.RUNNING
 
     @pytest.mark.asyncio
     async def test_stop_unknown_process(self, service, workspace):
         """Unknown process IDs raise NotFoundError."""
         with pytest.raises(NotFoundError):
-            await service.stop_process(workspace.id, uuid.uuid4())
+            await service.process_manager.stop_process(workspace.id, uuid.uuid4())
 
     @pytest.mark.asyncio
     async def test_stop_foreign_workspace_process(self, service, workspace, runner, user):
@@ -263,7 +628,104 @@ class TestStopProcess:
         )
         process = _make_process(service, other_ws)
         with pytest.raises(NotFoundError):
-            await service.stop_process(workspace.id, process.id)
+            await service.process_manager.stop_process(workspace.id, process.id)
+
+
+@pytest.mark.django_db(transaction=True)
+class TestListProcesses:
+    @pytest.mark.asyncio
+    async def test_live_false_returns_db_rows_without_runner_rpc(
+        self, service, workspace
+    ):
+        """UI polling can use heartbeat-updated DB state without runner RPC."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(
+            process.id, status=ProcessStatus.RUNNING, pid=4242
+        )
+        emit = AsyncMock()
+        service.runner_transport.emit_to_runner = emit  # type: ignore[method-assign]
+
+        rows = await service.process_manager.list_processes(workspace.id, live=False)
+
+        assert [row.id for row in rows] == [process.id]
+        assert rows[0].status == ProcessStatus.RUNNING
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_false_keeps_stale_database_status_explicitly(
+        self, service, workspace
+    ):
+        """DB-only results can be stale between 15-second heartbeats."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(
+            process.id, status=ProcessStatus.RUNNING, pid=4242
+        )
+        process.refresh_from_db()
+
+        rows = await service.process_manager.list_processes(workspace.id, live=False)
+
+        assert rows[0].status == ProcessStatus.RUNNING
+        assert rows[0].pid == 4242
+
+    @pytest.mark.asyncio
+    async def test_live_empty_listing_preserves_never_started_definition(
+        self, service, runner, workspace
+    ):
+        """An empty runner list and stale-row sweep leave EXITED definitions alone."""
+        definition = _make_process_definition(workspace)
+        transport = AsyncMock(return_value={"processes": []})
+        service.process_manager._await_process_result = transport  # type: ignore[method-assign]
+
+        rows = await service.process_manager.list_processes(workspace.id, live=True)
+
+        assert [row.id for row in rows] == [definition.id]
+        assert rows[0].status == ProcessStatus.EXITED
+        assert rows[0].run_count == 0
+        transport.assert_awaited_once()
+        assert transport.await_args.kwargs["event"] == "harness:process_list"
+
+        changed, vanished = service.process_manager.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
+        assert changed == []
+        assert vanished == []
+        assert (
+            service.process_manager.sweep_unconfirmed_processes(str(workspace.id)) == []
+        )
+        definition.refresh_from_db()
+        assert definition.status == ProcessStatus.EXITED
+        assert definition.run_count == 0
+
+    @pytest.mark.asyncio
+    async def test_live_defaults_to_existing_runner_reconciliation(
+        self, service, runner, workspace
+    ):
+        """Agent/MCP consumers retain live reconciliation unless opting out."""
+        process = _make_process(service, workspace)
+        service.processes.update_status(
+            process.id, status=ProcessStatus.RUNNING, pid=4242
+        )
+        process.refresh_from_db()
+
+        async def _emit(runner_arg, event, payload):
+            assert event == "harness:process_list"
+            _feed_reply(
+                service,
+                "harness:process_list_result",
+                runner_arg,
+                workspace.id,
+                payload["request_id"],
+                {"processes": [{"process_id": str(process.id), "status": "running"}]},
+            )
+
+        service.runner_transport.emit_to_runner = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_emit
+        )
+
+        rows = await service.process_manager.list_processes(workspace.id)
+
+        assert [row.id for row in rows] == [process.id]
+        service.runner_transport.emit_to_runner.assert_awaited_once()
 
 
 @pytest.mark.django_db
@@ -272,9 +734,10 @@ class TestReconcile:
         """Exited reports update the DB record and push to the frontend."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
-        with patch.object(service, "_forward_to_frontend") as forward:
-            changed = service.reconcile_workspace_processes(
+        with patch.object(service.frontend_bus, 'forward_to_frontend') as forward:
+            changed, vanished = service.process_manager.reconcile_workspace_processes(
                 str(workspace.id),
                 [
                     {
@@ -287,6 +750,7 @@ class TestReconcile:
             )
 
         assert changed == [process.id]
+        assert vanished == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.EXITED
         assert process.exit_code == 3
@@ -294,26 +758,30 @@ class TestReconcile:
         forward.assert_called_once()
         assert forward.call_args[0][0] == "process:status_changed"
 
-    def test_runner_restart_empty_list_marks_exited(self, service, runner, workspace):
-        """A missing process (e.g. after runner restart) becomes exited."""
+    def test_runner_restart_empty_list_defers_to_verify(self, service, runner, workspace):
+        """A missing process is a vanished candidate, not immediately exited."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
-
-        changed = service.reconcile_workspace_processes(str(workspace.id), [])
-
-        assert changed == [process.id]
         process.refresh_from_db()
-        assert process.status == ProcessStatus.EXITED
-        assert process.exit_code is None
-        assert process.ended_at is not None
+
+        changed, vanished = service.process_manager.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
+
+        assert changed == []
+        assert [row.id for row in vanished] == [process.id]
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+        assert process.ended_at is None
 
     def test_running_processes_stay_running(self, service, runner, workspace):
         """Processes the runner still tracks stay running without pushes."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
-        with patch.object(service, "_forward_to_frontend") as forward:
-            changed = service.reconcile_workspace_processes(
+        with patch.object(service.frontend_bus, 'forward_to_frontend') as forward:
+            changed, vanished = service.process_manager.reconcile_workspace_processes(
                 str(workspace.id),
                 [
                     {
@@ -326,41 +794,206 @@ class TestReconcile:
             )
 
         assert changed == []
+        assert vanished == []
         forward.assert_not_called()
 
     def test_pending_start_without_pid_is_skipped(self, service, runner, workspace):
         """Records without a confirmed pid are skipped until the runner ACKs."""
         process = _make_process(service, workspace)
         # pid stays None: start RPC not yet acknowledged.
-        changed = service.reconcile_workspace_processes(str(workspace.id), [])
+        changed, vanished = service.process_manager.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
         assert changed == []
+        assert vanished == []
         process.refresh_from_db()
         assert process.status == ProcessStatus.RUNNING
 
-    def test_heartbeat_reconcile_marks_vanished_processes(
+    def test_heartbeat_stashes_vanished_for_async_verify(
         self, service, runner, workspace
     ):
-        """Heartbeat handler should reconcile processes from the payload."""
+        """Heartbeat must not mark vanished rows exited (sync has no RPC)."""
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
 
-        with patch.object(
-            service, "auto_stop_inactive_workspaces", new=AsyncMock(return_value=None)
+        auto_stop = AsyncMock(return_value=None)
+        with (
+            patch.object(
+                service.heartbeat_reconciler,
+                "auto_stop_inactive_workspaces",
+                new=auto_stop,
+            ),
+            patch.object(
+                service.workspaces,
+                "list_by_runner",
+                wraps=service.workspaces.list_by_runner,
+            ) as list_by_runner,
         ):
-            service.handle_heartbeat(
+            service.heartbeat_reconciler.handle_heartbeat(
                 runner=runner,
                 workspaces=[
                     {
                         "workspace_id": str(workspace.id),
                         "status": "running",
-                        "runtime_type": "docker",
                         "processes": [],
                     }
                 ],
             )
 
+        list_by_runner.assert_called_once_with(runner.id)
+        auto_stop.assert_awaited_once()
+        assert auto_stop.await_args.kwargs["workspaces"][0].id == workspace.id
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+        assert [
+            row.id
+            for row in service.heartbeat_reconciler.pending_process_verify[
+                str(workspace.id)
+            ]
+        ] == [process.id]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestReverifyVanished:
+    def _running_process(self, service, workspace, pid=4242):
+        process = _make_process(service, workspace)
+        # Refresh the in-memory instance: update_status writes via
+        # QuerySet.update (no in-memory sync), and the verify payload is
+        # built from these attributes (pid must be set).
+        service.processes.update_status(process.id, status="running", pid=pid)
+        process.refresh_from_db()
+        return process
+
+    def _verify_reply(self, service, runner, workspace, statuses):
+        async def _emit(runner_arg, event, payload):
+            assert event == "harness:process_verify"
+            _feed_reply(
+                service,
+                "harness:process_verify_result",
+                runner_arg,
+                workspace.id,
+                payload["request_id"],
+                {"processes": statuses},
+            )
+
+        service.runner_transport.emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+
+    @pytest.mark.asyncio
+    async def test_verify_running_revives_row(self, service, runner, workspace):
+        """A reattached 'running' answer keeps the row RUNNING with fresh pid."""
+        process = self._running_process(service, workspace)
+        self._verify_reply(
+            service,
+            runner,
+            workspace,
+            [
+                {
+                    "process_id": str(process.id),
+                    "status": "running",
+                    "exit_code": None,
+                    "pid": 9999,
+                }
+            ],
+        )
+        with patch.object(service.frontend_bus, "forward_to_frontend"):
+            changed = await service.process_manager.reverify_vanished_processes(
+                workspace.id, [process]
+            )
+        assert changed == [process.id]
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+        assert process.pid == 9999
+        assert process.ended_at is None
+
+    @pytest.mark.asyncio
+    async def test_verify_exited_marks_exited(self, service, runner, workspace):
+        """A confirmed 'exited' answer marks the row EXITED with the code."""
+        process = self._running_process(service, workspace)
+        self._verify_reply(
+            service,
+            runner,
+            workspace,
+            [
+                {
+                    "process_id": str(process.id),
+                    "status": "exited",
+                    "exit_code": 3,
+                    "pid": 4242,
+                }
+            ],
+        )
+        changed = await service.process_manager.reverify_vanished_processes(
+            workspace.id, [process]
+        )
+        assert changed == [process.id]
         process.refresh_from_db()
         assert process.status == ProcessStatus.EXITED
+        assert process.exit_code == 3
+
+    @pytest.mark.asyncio
+    async def test_verify_timeout_keeps_running(self, service, runner, workspace):
+        """A verify timeout leaves the row RUNNING (fail-open, DB fallback)."""
+        process = self._running_process(service, workspace)
+
+        async def _emit(runner_arg, event, payload):
+            return  # never reply -> timeout
+
+        service.runner_transport.emit_to_runner = AsyncMock(side_effect=_emit)  # type: ignore[method-assign]
+        with patch.object(
+            service.process_manager, "_PROCESS_LIVE_TIMEOUT_SECONDS", 0.05
+        ):
+            changed = await service.process_manager.reverify_vanished_processes(
+                workspace.id, [process]
+            )
+        assert changed == []
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+
+    @pytest.mark.asyncio
+    async def test_reconcile_vanished_drains_stash(self, service, runner, workspace):
+        """The heartbeat stash is drained even when the runner is offline."""
+        process = self._running_process(service, workspace)
+        service.heartbeat_reconciler.pending_process_verify[str(workspace.id)] = [
+            process
+        ]
+        # Runner lost its sid -> offline path, rows stay RUNNING.
+        runner.sid = ""
+        runner.save(update_fields=["sid"])
+        changed = await service.heartbeat_reconciler.reconcile_vanished_processes(
+            runner
+        )
+        assert changed == []
+        assert service.heartbeat_reconciler.pending_process_verify == {}
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
+
+
+@pytest.mark.django_db
+class TestSweepUnconfirmed:
+    def test_stale_pid_none_row_is_failed(self, service, workspace):
+        """A stale RUNNING row without pid becomes FAILED (never RUNNING forever)."""
+        from django.utils import timezone as tz
+
+        process = _make_process(service, workspace)
+        assert process.pid is None
+        old = tz.now() - timedelta(seconds=3600)
+        type(process).objects.filter(id=process.id).update(started_at=old)
+        with patch.object(service.frontend_bus, "forward_to_frontend"):
+            changed = service.process_manager.sweep_unconfirmed_processes(
+                str(workspace.id)
+            )
+        assert changed == [process.id]
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.FAILED
+
+    def test_fresh_pid_none_row_is_kept(self, service, workspace):
+        """A fresh pid=None row (start in flight) is kept RUNNING."""
+        process = _make_process(service, workspace)
+        changed = service.process_manager.sweep_unconfirmed_processes(str(workspace.id))
+        assert changed == []
+        process.refresh_from_db()
+        assert process.status == ProcessStatus.RUNNING
 
 
 @pytest.mark.django_db
@@ -368,12 +1001,13 @@ class TestWorkspaceLifecycleKillsProcesses:
     def _running_process(self, service, workspace):
         process = _make_process(service, workspace)
         service.processes.update_status(process.id, status="running", pid=4242)
+        process.refresh_from_db()
         return process
 
     def test_mark_processes_killed(self, service, workspace):
         """mark_processes_killed transitions running records to killed."""
         process = self._running_process(service, workspace)
-        count = service.mark_processes_killed(
+        count = service.process_manager.mark_processes_killed(
             str(workspace.id), reason="workspace_stopped"
         )
         assert count == 1
@@ -392,7 +1026,7 @@ class TestWorkspaceLifecycleKillsProcesses:
             workspace=workspace,
             type=TaskType.STOP_WORKSPACE,
         )
-        service.handle_workspace_stopped(
+        service.workspace_lifecycle.handle_workspace_stopped(
             str(task.id), str(workspace.id), runner_id=str(runner.id)
         )
         process.refresh_from_db()
@@ -409,7 +1043,7 @@ class TestWorkspaceLifecycleKillsProcesses:
             workspace=workspace,
             type=TaskType.REMOVE_WORKSPACE,
         )
-        service.handle_workspace_removed(
+        service.workspace_lifecycle.handle_workspace_removed(
             str(task.id), str(workspace.id), runner_id=str(runner.id)
         )
         process.refresh_from_db()

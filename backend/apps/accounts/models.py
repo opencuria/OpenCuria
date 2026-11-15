@@ -18,7 +18,7 @@ class APIKeyPermission(str, enum.Enum):
     """
     Fine-grained permissions that can be assigned to an API key.
 
-    Applies to both the REST API and MCP interface.
+    Applies to the REST API.
     """
 
     # Workspaces
@@ -28,6 +28,10 @@ class APIKeyPermission(str, enum.Enum):
     WORKSPACES_STOP = "workspaces:stop"
     WORKSPACES_RESUME = "workspaces:resume"
     WORKSPACES_DELETE = "workspaces:delete"
+
+    # Workspace git integration (additive; existing keys are never auto-granted these)
+    WORKSPACES_GIT_READ = "workspaces:git_read"
+    WORKSPACES_GIT_WRITE = "workspaces:git_write"
 
     # Terminal
     TERMINAL_ACCESS = "terminal:access"
@@ -65,13 +69,15 @@ class APIKeyPermission(str, enum.Enum):
     SKILLS_READ = "skills:read"
     SKILLS_WRITE = "skills:write"
 
+    # Plugins (additive; existing keys are never auto-granted these)
+    PLUGINS_READ = "plugins:read"
+    PLUGINS_WRITE = "plugins:write"
+
     # Harness (M6, additive; existing keys are never auto-granted these)
     HARNESS_READ = "harness:read"
     HARNESS_RUN = "harness:run"
     HARNESS_PERMISSIONS = "harness:permissions"
-
-    # MCP
-    MCP_ACCESS = "mcp:access"
+    HARNESS_PROVIDERS = "harness:providers"
 
     @classmethod
     def all_values(cls) -> list[str]:
@@ -121,6 +127,34 @@ class User(AbstractUser):
 
     def __str__(self) -> str:
         return self.email
+
+
+class SsoIdentity(models.Model):
+    """External OIDC identity bound to a local account by issuer and subject.
+
+    SSO logins resolve accounts through this binding, never through the
+    mutable ``email`` claim alone.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="sso_identities"
+    )
+    issuer = models.CharField(max_length=255)
+    subject = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "accounts_ssoidentity"
+        verbose_name = "SSO identity"
+        verbose_name_plural = "SSO identities"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["issuer", "subject"], name="accounts_sso_identity_unique"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.issuer} {self.subject}"
 
 
 class APIKey(models.Model):

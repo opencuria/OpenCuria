@@ -1,20 +1,14 @@
 """
 Enums for the runners app.
 
-Mirror the state machines from the runner codebase so the backend
-can enforce identical transitions.
+Backend workflow and selection states are authoritative here. The runner owns
+physical guest states; authenticated results and observations map those into
+these control-plane states without deciding workflow policy.
 """
 
 from __future__ import annotations
 
 from django.db import models
-
-
-class RuntimeType(models.TextChoices):
-    """Virtualisation backend for workspaces."""
-
-    DOCKER = "docker", "Docker"
-    QEMU = "qemu", "QEMU/KVM"
 
 
 class RunnerStatus(models.TextChoices):
@@ -25,7 +19,7 @@ class RunnerStatus(models.TextChoices):
 
 
 class WorkspaceStatus(models.TextChoices):
-    """Lifecycle status of a workspace — mirrors runner WorkspaceStatus."""
+    """Control-plane workspace state; separate from observed guest power state."""
 
     CREATING = "creating", "Creating"
     RUNNING = "running", "Running"
@@ -35,7 +29,6 @@ class WorkspaceStatus(models.TextChoices):
     DELETING = "deleting", "Deleting"
     DELETED = "deleted", "Deleted"
     DELETE_FAILED = "delete_failed", "Delete Failed"
-    REMOVED = "removed", "Removed"
 
 
 class WorkspaceOperation(models.TextChoices):
@@ -47,6 +40,9 @@ class WorkspaceOperation(models.TextChoices):
     RESTARTING = "restarting", "Restarting"
     REMOVING = "removing", "Removing"
     CAPTURING_IMAGE = "capturing_image", "Capturing Image"
+    RESETTING = "resetting", "Resetting"
+    UPDATING = "updating", "Updating"
+    SYNCHRONIZING_CREDENTIALS = "synchronizing_credentials", "Synchronizing credentials"
 
 
 class TaskType(models.TextChoices):
@@ -86,3 +82,10 @@ class ProcessStatus(models.TextChoices):
     EXITED = "exited", "Exited"
     KILLED = "killed", "Killed"
     FAILED = "failed", "Failed"
+
+
+class ProcessKind(models.TextChoices):
+    """Persistence scope of a workspace background process."""
+
+    PERSISTENT = "persistent", "Persistent"
+    TEMP = "temp", "Temp"

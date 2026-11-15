@@ -6,7 +6,7 @@ import { ref } from 'vue'
 import HarnessProcessSheet from './HarnessProcessSheet.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useProcessesStore } from '@/stores/processes'
-import { ProcessStatus, type WorkspaceProcess } from '@/types'
+import { ProcessKind, ProcessStatus, type WorkspaceProcess } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 
 vi.mock('vue-sonner', () => ({
@@ -23,7 +23,10 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
   return {
     ...actual,
     listProcesses: vi.fn(),
+    listLiveProcesses: vi.fn(),
     stopProcess: vi.fn(),
+    restartProcess: vi.fn(),
+    deleteProcess: vi.fn(),
   }
 })
 
@@ -38,6 +41,8 @@ function makeProcess(overrides: Partial<WorkspaceProcess> = {}): WorkspaceProces
     log_path: overrides.log_path ?? '.opencuria/processes/process-1.log',
     status: overrides.status ?? ProcessStatus.RUNNING,
     exit_code: overrides.exit_code ?? null,
+    run_count: overrides.run_count ?? 1,
+    kind: overrides.kind ?? ProcessKind.PERSISTENT,
     started_at: overrides.started_at ?? '2026-09-06T10:00:00.000Z',
     ended_at: overrides.ended_at ?? null,
     updated_at: overrides.updated_at ?? '2026-09-06T10:00:00.000Z',
@@ -82,11 +87,114 @@ describe('HarnessProcessSheet', () => {
     expect(wrapper.text()).not.toContain('Force')
   })
 
-  it('hides stop for finished processes', () => {
+  it('shows Not started and only start/delete for imported process definitions', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ status: ProcessStatus.EXITED, run_count: 0, pid: null, log_path: '' }),
+    ]
+    const wrapper = mountSheet()
+    expect(wrapper.text()).toContain('Not started')
+    expect(wrapper.text()).not.toContain('exited')
+    expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-start"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-log-path"]').exists()).toBe(false)
+  })
+
+  it('hides stop for finished started processes but shows start/restart/delete', () => {
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess({ status: ProcessStatus.EXITED })]
     const wrapper = mountSheet()
     expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-start"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(true)
+  })
+
+  it('shows restart + stop + delete and hides start for running processes', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess({ status: ProcessStatus.RUNNING })]
+    const wrapper = mountSheet()
+    expect(wrapper.find('[data-testid="composer-process-start"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(true)
+  })
+
+  it('marks temp processes and allows only stop for them', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ kind: ProcessKind.TEMP, status: ProcessStatus.RUNNING }),
+    ]
+    const wrapper = mountSheet()
+    expect(wrapper.find('[data-testid="composer-process-temp"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-start"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(false)
+  })
+
+  it('shows the run badge only when run_count > 1', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess({ run_count: 1 })]
+    expect(mountSheet().find('[data-testid="composer-process-run"]').exists()).toBe(false)
+
+    store.processesByWorkspace['workspace-1'] = [makeProcess({ run_count: 2 })]
+    const wrapper = mountSheet()
+    const badge = wrapper.find('[data-testid="composer-process-run"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toContain('2')
+  })
+
+  it('restarts a running process', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess()]
+    vi.mocked(workspacesApi.restartProcess).mockResolvedValue(
+      makeProcess({ status: ProcessStatus.RUNNING, run_count: 2 }),
+    )
+    const wrapper = mountSheet()
+    await wrapper.find('[data-testid="composer-process-restart"]').trigger('click')
+    await flushPromises()
+    expect(workspacesApi.restartProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
+  })
+
+  it('starts a not-yet-run process via the restart endpoint', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ status: ProcessStatus.EXITED, run_count: 0, pid: null, log_path: '' }),
+    ]
+    vi.mocked(workspacesApi.restartProcess).mockResolvedValue(
+      makeProcess({ status: ProcessStatus.RUNNING, run_count: 1 }),
+    )
+    const wrapper = mountSheet()
+    await wrapper.find('[data-testid="composer-process-start"]').trigger('click')
+    await flushPromises()
+    expect(workspacesApi.restartProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
+  })
+
+  it('deletes after confirm', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess()]
+    vi.mocked(workspacesApi.deleteProcess).mockResolvedValue(undefined)
+    const wrapper = mountSheet()
+    await wrapper.find('[data-testid="composer-process-delete"]').trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(workspacesApi.deleteProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
+    confirmSpy.mockRestore()
+  })
+
+  it('skips delete when confirm is cancelled', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [makeProcess()]
+    const wrapper = mountSheet()
+    await wrapper.find('[data-testid="composer-process-delete"]').trigger('click')
+    await flushPromises()
+    expect(workspacesApi.deleteProcess).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
   })
 
   it('emits close from the header button', async () => {
@@ -96,11 +204,11 @@ describe('HarnessProcessSheet', () => {
   })
 
   it('refreshes via the store', async () => {
-    vi.mocked(workspacesApi.listProcesses).mockResolvedValue([])
+    vi.mocked(workspacesApi.listLiveProcesses).mockResolvedValue([])
     const wrapper = mountSheet()
     await wrapper.find('[data-testid="composer-process-refresh"]').trigger('click')
     await flushPromises()
-    expect(workspacesApi.listProcesses).toHaveBeenCalledWith('workspace-1')
+    expect(workspacesApi.listLiveProcesses).toHaveBeenCalledWith('workspace-1')
   })
 
   it('stops a running process', async () => {
@@ -115,14 +223,21 @@ describe('HarnessProcessSheet', () => {
     expect(workspacesApi.stopProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
   })
 
-  it('copies the log path', async () => {
+  it('copies the log path through the shared CopyButton', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess()]
     const wrapper = mountSheet()
+    const copyButton = wrapper.findComponent({ name: 'CopyButton' })
+    expect(copyButton.exists()).toBe(true)
+    expect(copyButton.props('label')).toBe('log path')
+    expect(wrapper.find('[data-testid="composer-process-copy"]').attributes('title')).toBe('Copy log path')
+
     await wrapper.find('[data-testid="composer-process-copy"]').trigger('click')
     await flushPromises()
+
     expect(writeText).toHaveBeenCalledWith('.opencuria/processes/process-1.log')
+    expect(wrapper.find('[data-testid="composer-process-copy"]').attributes('aria-label')).toBe('Copied')
   })
 })

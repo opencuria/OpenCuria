@@ -4,6 +4,7 @@ import { mount } from '@vue/test-utils'
 import WorkspaceChatHeader from './WorkspaceChatHeader.vue'
 import { WorkspaceStatus } from '@/types'
 import type { WorkspaceDetail } from '@/types'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
 
 const sidebarStubs = {
   SidebarTrigger: { template: '<button data-testid="sidebar-trigger" />' },
@@ -34,6 +35,24 @@ function makeWorkspace(): WorkspaceDetail {
   } as WorkspaceDetail
 }
 
+function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
+  return {
+    id: 'session-1',
+    workspace_id: 'ws-1',
+    parent_id: null,
+    title: 'First chat',
+    mode: 'build',
+    agent_name: 'build',
+    model: 'acme/think',
+    reasoning_effort: 'high',
+    status: 'idle',
+    unread: false,
+    cost: 0,
+    tokens: {},
+    ...overrides,
+  }
+}
+
 function baseProps(overrides: Record<string, unknown> = {}) {
   return {
     workspace: makeWorkspace(),
@@ -41,11 +60,7 @@ function baseProps(overrides: Record<string, unknown> = {}) {
     transitionLabel: null,
     autoStopLabel: null,
     runnerOffline: false,
-    fileExplorerOpen: false,
-    terminalOpen: false,
-    terminalMinimized: false,
-    desktopOpen: false,
-    desktopMinimized: false,
+    sidePanelOpen: false,
     processesActive: false,
     runningProcessCount: 0,
     canPrompt: true,
@@ -72,7 +87,9 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.find('[data-testid="workspace-chat-header-status"]').text()).toContain(
       'Alpha workspace',
     )
-    expect(wrapper.find('[data-testid="workspace-chat-header"]').classes()).not.toContain('border-b')
+    expect(wrapper.find('[data-testid="workspace-chat-header"]').classes()).not.toContain(
+      'border-b',
+    )
   })
 
   it('falls back to New chat when no session title is set', () => {
@@ -97,6 +114,13 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.findAllComponents({ name: 'Badge' })).toHaveLength(0)
   })
 
+  it('shows an amber status dot when a session is active', () => {
+    const wrapper = mountHeader({ hasActiveSession: true })
+    const dot = wrapper.find('[data-testid="workspace-chat-header-status"] span.rounded-full')
+    expect(dot.exists()).toBe(true)
+    expect(dot.classes()).toContain('bg-amber-500')
+  })
+
   it('shows a stop action in the overflow menu for a running workspace', async () => {
     const wrapper = mountHeader()
     const stop = wrapper.find('[data-testid="workspace-chat-header-stop"]')
@@ -116,6 +140,46 @@ describe('WorkspaceChatHeader', () => {
     await start.trigger('click')
     expect(wrapper.emitted('start-workspace')).toEqual([[]])
   })
+  it('F079 captures a clean stopped workspace even though chat cannot run', async () => {
+    const workspace = {
+      ...makeWorkspace(),
+      status: WorkspaceStatus.STOPPED,
+      credentials_present: false,
+    }
+    const wrapper = mountHeader({ workspace, canPrompt: false })
+    const capture = wrapper.get('[data-testid="workspace-chat-header-capture-image"]')
+    expect(capture.attributes('disabled')).toBeUndefined()
+    await capture.trigger('click')
+    expect(wrapper.emitted('capture-image')).toEqual([[]])
+    await wrapper.setProps({ workspace: { ...workspace, credentials_present: true } })
+    expect(capture.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+  it('F080 prioritizes runner disconnect over an in-flight operation label', () => {
+    const wrapper = mountHeader({ runnerOffline: true, transitionLabel: 'Capturing' })
+    expect(wrapper.get('[data-testid="workspace-chat-header-status-trigger"]').text()).toBe(
+      'Runner offline',
+    )
+    expect(
+      wrapper.get('[data-testid="workspace-chat-header-capture-image"]').attributes('disabled'),
+    ).toBeDefined()
+    wrapper.unmount()
+  })
+  it('F081 never shows a green running indicator for failed or stopped workspaces', () => {
+    for (const status of [
+      WorkspaceStatus.STOPPED,
+      WorkspaceStatus.FAILED,
+      WorkspaceStatus.DELETE_FAILED,
+    ]) {
+      const wrapper = mountHeader({ workspace: { ...makeWorkspace(), status } })
+      const dot = wrapper.get('[data-testid="workspace-chat-header-status"] span.rounded-full')
+      expect(dot.classes()).not.toContain('bg-green-500')
+      expect(
+        wrapper.get('[data-testid="workspace-chat-header-capture-image"]').attributes('disabled'),
+      )[status === WorkspaceStatus.STOPPED ? 'toBeUndefined' : 'toBeDefined']()
+      wrapper.unmount()
+    }
+  })
 
   it('disables the power button while a transition is running', () => {
     const wrapper = mountHeader({ transitionLabel: 'Stopping…' })
@@ -124,23 +188,34 @@ describe('WorkspaceChatHeader', () => {
     expect(stop.attributes('disabled')).toBeDefined()
     expect(wrapper.emitted('stop-workspace')).toBeUndefined()
   })
-  it('emits panel toggles and new chat', async () => {
+  it('emits side panel toggle, processes toggle and new chat', async () => {
     const wrapper = mountHeader()
     await wrapper.find('[data-testid="workspace-chat-header-new-chat"]').trigger('click')
-    await wrapper.find('[data-testid="workspace-chat-header-toggle-files"]').trigger('click')
-    await wrapper.find('[data-testid="workspace-chat-header-toggle-terminal"]').trigger('click')
-    await wrapper.find('[data-testid="workspace-chat-header-toggle-desktop"]').trigger('click')
+    await wrapper.find('[data-testid="workspace-chat-header-toggle-side-panel"]').trigger('click')
     await wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').trigger('click')
     expect(wrapper.emitted('new-chat')).toEqual([[]])
-    expect(wrapper.emitted('toggle-files')).toEqual([[]])
-    expect(wrapper.emitted('toggle-terminal')).toEqual([[]])
-    expect(wrapper.emitted('toggle-desktop')).toEqual([[]])
+    expect(wrapper.emitted('toggle-side-panel')).toEqual([[]])
     expect(wrapper.emitted('toggle-processes')).toEqual([[]])
+  })
+
+  it('places the side panel toggle right of the overflow menu', () => {
+    const wrapper = mountHeader()
+    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-side-panel"]').element
+      .parentElement
+    const children = Array.from(actions?.children ?? [])
+    const moreIndex = children.findIndex(
+      (el) => el.querySelector('[data-testid="workspace-chat-header-more"]') !== null,
+    )
+    const sidePanelIndex = children.findIndex(
+      (el) => el.getAttribute('data-testid') === 'workspace-chat-header-toggle-side-panel',
+    )
+    expect(moreIndex).toBeGreaterThanOrEqual(0)
+    expect(sidePanelIndex).toBe(moreIndex + 1)
   })
 
   it('places background processes immediately left of the overflow menu', () => {
     const wrapper = mountHeader({ runningProcessCount: 2 })
-    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-desktop"]').element
+    const actions = wrapper.find('[data-testid="workspace-chat-header-toggle-processes"]').element
       .parentElement
     const children = Array.from(actions?.children ?? [])
     const processesIndex = children.findIndex(
@@ -156,11 +231,24 @@ describe('WorkspaceChatHeader', () => {
     )
   })
 
+  it('plays the entrance animation when animateEntrance is set', () => {
+    const wrapper = mountHeader({ animateEntrance: true })
+    expect(wrapper.find('[data-testid="workspace-chat-header-actions"]').classes()).toContain(
+      'chat-header-enter-stagger',
+    )
+  })
+
+  it('does not play the entrance animation by default', () => {
+    const wrapper = mountHeader()
+    expect(wrapper.find('[data-testid="workspace-chat-header-actions"]').classes()).not.toContain(
+      'chat-header-enter-stagger',
+    )
+  })
+
   it('routes overflow actions through emits', async () => {
     const wrapper = mountHeader()
     const buttons = wrapper.findAll('button')
-    const byText = (label: string) =>
-      buttons.find((button) => button.text().includes(label))!
+    const byText = (label: string) => buttons.find((button) => button.text().includes(label))!
 
     expect(byText('Background processes')).toBeUndefined()
     await byText('Stop workspace').trigger('click')
@@ -170,5 +258,203 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.emitted('stop-workspace')).toEqual([[]])
     expect(wrapper.emitted('capture-image')).toEqual([[]])
     expect(wrapper.emitted('delete-workspace')).toEqual([[]])
+  })
+
+  it('hides the back button and breadcrumb on a root session', () => {
+    const wrapper = mountHeader({
+      chatLineage: [makeSession({ id: 'root', title: 'First chat' })],
+    })
+    expect(wrapper.find('[data-testid="workspace-chat-header-back-to-parent"]').exists()).toBe(
+      false,
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-chat-header-chat-title"]').text()).toBe(
+      'First chat',
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-agent-type"]').exists()).toBe(false)
+  })
+
+  it('shows a back button and breadcrumb in a subagent session', async () => {
+    const root = makeSession({ id: 'root', title: 'First chat' })
+    const child = makeSession({
+      id: 'child',
+      parent_id: 'root',
+      title: 'Explore auth',
+      agent_name: 'explore',
+    })
+    const wrapper = mountHeader({
+      activeChatTitle: 'Explore auth',
+      chatLineage: [root, child],
+    })
+
+    const back = wrapper.find('[data-testid="workspace-chat-header-back-to-parent"]')
+    expect(back.exists()).toBe(true)
+    expect(back.attributes('title')).toBe('Back to First chat')
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb"]').exists()).toBe(true)
+    const crumb = wrapper.find('[data-testid="workspace-chat-header-breadcrumb-item"]')
+    expect(crumb.text()).toBe('First chat')
+    expect(crumb.attributes('data-session-id')).toBe('root')
+    expect(wrapper.find('[data-testid="workspace-chat-header-chat-title"]').text()).toBe(
+      'Explore auth',
+    )
+    expect(wrapper.find('[data-testid="workspace-chat-header-agent-type"]').text()).toBe('Explorer')
+
+    await back.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['root']])
+
+    await crumb.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['root'], ['root']])
+  })
+
+  it('collapses middle ancestors into a dropdown when the chain is deep', async () => {
+    const root = makeSession({ id: 'root', title: 'Root chat' })
+    const midA = makeSession({
+      id: 'mid-a',
+      parent_id: 'root',
+      title: 'Mid A',
+      agent_name: 'explore',
+    })
+    const midB = makeSession({
+      id: 'mid-b',
+      parent_id: 'mid-a',
+      title: 'Mid B',
+      agent_name: 'general',
+    })
+    const current = makeSession({
+      id: 'leaf',
+      parent_id: 'mid-b',
+      title: 'Leaf task',
+      agent_name: 'explore',
+    })
+    const wrapper = mountHeader({
+      activeChatTitle: 'Leaf task',
+      chatLineage: [root, midA, midB, current],
+    })
+
+    const crumbs = wrapper.findAll('[data-testid="workspace-chat-header-breadcrumb-item"]')
+    expect(crumbs.map((crumb) => crumb.attributes('data-session-id'))).toEqual(['root', 'mid-b'])
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb-overflow"]').exists()).toBe(
+      true,
+    )
+    const overflow = wrapper.findAll(
+      '[data-testid="workspace-chat-header-breadcrumb-overflow-item"]',
+    )
+    expect(overflow).toHaveLength(1)
+    expect(overflow[0]?.text()).toBe('Mid A')
+    expect(overflow[0]?.attributes('data-session-id')).toBe('mid-a')
+
+    await overflow[0]!.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['mid-a']])
+  })
+
+  it('falls back to parent_id when the parent session is not in the lineage', async () => {
+    const wrapper = mountHeader({
+      activeChatTitle: 'Orphan subagent',
+      chatLineage: [
+        makeSession({
+          id: 'child',
+          parent_id: 'missing-parent',
+          title: 'Orphan subagent',
+          agent_name: 'explore',
+        }),
+      ],
+    })
+
+    const back = wrapper.find('[data-testid="workspace-chat-header-back-to-parent"]')
+    expect(back.exists()).toBe(true)
+    expect(back.attributes('title')).toBe('Back to parent chat')
+    expect(wrapper.find('[data-testid="workspace-chat-header-breadcrumb"]').exists()).toBe(false)
+
+    await back.trigger('click')
+    expect(wrapper.emitted('open-session')).toEqual([['missing-parent']])
+  })
+})
+
+it('disables actions including an already-open rename during capture', async () => {
+  const wrapper = mountHeader()
+  await wrapper.get('[data-testid="workspace-chat-header-name"]').trigger('click')
+  await wrapper.setProps({ transitionLabel: 'Capturing', canPrompt: false })
+  for (const id of [
+    'new-chat',
+    'toggle-processes',
+    'more',
+    'toggle-side-panel',
+    'name-input',
+    'name-save',
+    'delete-workspace',
+  ]) {
+    expect(
+      wrapper.get(`[data-testid="workspace-chat-header-${id}"]`).attributes('disabled'),
+    ).toBeDefined()
+  }
+  await wrapper.get('[data-testid="workspace-chat-header-name-cancel"]').trigger('click')
+  expect(
+    wrapper.get('[data-testid="workspace-chat-header-name"]').attributes('disabled'),
+  ).toBeDefined()
+  wrapper.unmount()
+})
+
+describe('WorkspaceChatHeader workspace status', () => {
+  const GIB = 1024 ** 3
+  const popoverStubs = {
+    Popover: { template: '<div><slot /></div>' },
+    PopoverTrigger: { template: '<div><slot /></div>' },
+    PopoverContent: { template: '<div data-testid="status-popover"><slot /></div>' },
+    WorkspaceStatusPanel: {
+      template: '<button data-testid="panel-increase-disk" @click="$emit(\'increase-disk\')" />',
+    },
+  }
+
+  function mountWithDisk(usedGib: number, freeGib: number) {
+    return mount(WorkspaceChatHeader, {
+      props: baseProps({
+        workspace: {
+          ...makeWorkspace(),
+          disk_usage: {
+            used_bytes: usedGib * GIB,
+            free_bytes: freeGib * GIB,
+            total_bytes: (usedGib + freeGib) * GIB,
+            observed_at: '2026-10-25T12:00:00Z',
+          },
+        },
+      }),
+      global: { stubs: { ...sidebarStubs, ...dropdownStubs, ...popoverStubs } },
+    })
+  }
+
+  it('keeps the status line quiet while the disk has room', () => {
+    const wrapper = mountWithDisk(8, 12)
+    expect(wrapper.find('[data-testid="workspace-chat-header-disk-alert"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="workspace-chat-header-status-trigger"]').text()).toBe(
+      'running',
+    )
+  })
+
+  it('surfaces an almost full disk next to the status, escalating when full', async () => {
+    const wrapper = mountWithDisk(18.6, 1.4)
+    const alert = wrapper.get('[data-testid="workspace-chat-header-disk-alert"]')
+    expect(alert.text()).toBe('Disk 93% full')
+    expect(alert.classes()).toContain('text-amber-600')
+
+    await wrapper.setProps({
+      workspace: {
+        ...makeWorkspace(),
+        disk_usage: {
+          used_bytes: 99 * GIB,
+          free_bytes: GIB,
+          total_bytes: 100 * GIB,
+          observed_at: '',
+        },
+      },
+    })
+    expect(wrapper.get('[data-testid="workspace-chat-header-disk-alert"]').classes()).toContain(
+      'text-destructive',
+    )
+  })
+
+  it('asks for more disk when the user requests it from the status panel', async () => {
+    const wrapper = mountWithDisk(19, 1)
+    await wrapper.get('[data-testid="panel-increase-disk"]').trigger('click')
+    expect(wrapper.emitted('increase-disk')).toHaveLength(1)
   })
 })

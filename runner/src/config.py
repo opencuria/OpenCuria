@@ -7,11 +7,8 @@ and optionally from a .env file in the runner directory.
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# Runtime type identifiers
-RUNTIME_DOCKER = "docker"
-RUNTIME_QEMU = "qemu"
 
 
 class RunnerSettings(BaseSettings):
@@ -25,19 +22,13 @@ class RunnerSettings(BaseSettings):
         extra="ignore",
     )
 
+    state_dir: str = str(Path.home() / ".local/share/opencuria/runner")
+
     # Backend connection
     backend_url: str = "wss://api.opencuria.example.com"
     # backend_url: str = "http://localhost:8000"
     api_token: str = ""
     socketio_path: str = "/ws/runner"
-
-    # Runtime selection — comma-separated list of enabled runtimes.
-    # Valid values: "docker", "qemu", "docker,qemu"
-    enabled_runtimes: str = "docker"
-
-    # Docker settings
-    docker_socket: str = "unix:///var/run/docker.sock"
-    docker_network: str = "bridge"
 
     # QEMU/KVM settings
     qemu_image_cache_dir: str = "/var/lib/opencuria/images"
@@ -46,26 +37,41 @@ class RunnerSettings(BaseSettings):
     qemu_vcpus: int = 2
     qemu_memory_mb: int = 4096
     qemu_disk_size_gb: int = 50
-    qemu_network: str = "default"
+    # Temporary image-build guests have a separate bounded resource budget.
+    qemu_build_vcpus: int = Field(default=1, gt=0)
+    qemu_build_memory_mb: int = Field(default=2048, gt=0)
+    qemu_build_concurrency: int = Field(default=2, gt=0)
+    qemu_build_queue_timeout: float = Field(default=1800, gt=0)
+    qemu_build_script_timeout: float = Field(default=7200, gt=0)
     qemu_ssh_key_path: str = str(Path.home() / ".local/share/opencuria/ssh/runner_key")
     qemu_ssh_user: str = "root"
     qemu_ssh_timeout: int = 60  # seconds to wait for VM SSH readiness
+    qemu_cloud_init_timeout: int = Field(default=300, gt=0)
+
+    credential_sync_timeout: float = Field(default=120, gt=0)
+    workspace_repo_clone_timeout: float = Field(default=1800, gt=0)
 
     # Heartbeat
+    inventory_interval: int = 120
     heartbeat_interval: int = 15  # seconds between heartbeats to backend
 
-    # SSH health check — self-healing for QEMU workspaces that become unreachable
-    ssh_health_check_interval: int = 30  # seconds between SSH reachability checks
-    ssh_unreachable_timeout: int = 90  # seconds before an unreachable workspace is restarted
+    # Durable ownership maintenance runs even while disconnected.
+    desktop_lease_interval: float = 15
+    desktop_lease_timeout: float = 10
+    desktop_lease_workers: int = 4
+    stream_shutdown_timeout: float = 10
+
+    # Each interactive terminal holds one guest SSH session. The backend renews
+    # the lease of terminals with a connected client on every heartbeat; the
+    # runner closes unrenewed, idle (0 disables) and surplus terminals itself.
+    terminal_lease_timeout: float = Field(default=90, gt=0)
+    terminal_idle_timeout: float = Field(default=3600, ge=0)
+    terminal_max_per_workspace: int = Field(default=4, gt=0)
+    terminal_sweep_interval: float = Field(default=15, gt=0)
 
     # Logging
     log_level: str = "INFO"
     log_format: Literal["json", "console"] = "console"
-
-    @property
-    def enabled_runtime_list(self) -> list[str]:
-        """Parse the comma-separated enabled_runtimes into a list."""
-        return [r.strip() for r in self.enabled_runtimes.split(",") if r.strip()]
 
 
 def get_settings() -> RunnerSettings:

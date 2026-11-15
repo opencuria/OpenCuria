@@ -19,17 +19,31 @@ from __future__ import annotations
 import uuid
 
 from django.db import models
+from django.utils import timezone
 
+from .constants import DEFAULT_MAX_DEPTH
+from .enums import ProviderType
 from .permissions.models import PermissionAllowlist, PermissionRequest
 
 __all__ = [
+    "AgentConfig",
+    "ComputerUseConfig",
     "HarnessMessage",
     "HarnessPart",
+    "HarnessRun",
+    "HarnessRunStatus",
     "HarnessSession",
+    "HarnessTranscriptBatch",
     "PermissionAllowlist",
     "PermissionRequest",
     "ProviderConfig",
+    "ProviderConnection",
+    "ProviderOAuthFlow",
+    "ProviderSelection",
+    "ProviderType",
     "QuestionRequest",
+    "RecentModel",
+    "SubagentConfig",
     "Todo",
 ]
 
@@ -48,12 +62,62 @@ class HarnessSessionMode(models.TextChoices):
     BUILD = "build", "Build"
 
 
+class AgentEffortStrategy(models.TextChoices):
+    """How a subagent derives its reasoning effort."""
+
+    FIXED = "fixed", "Fixed"
+    INHERIT = "inherit", "Inherit"
+    LOWEST = "lowest", "Lowest"
+    MEDIUM = "medium", "Medium"
+    HIGHEST = "highest", "Highest"
+
+
+class AgentConfig(models.Model):
+    """
+    Per-agent model/effort config (one row per org+agent).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_agent_configs",
+        help_text="Owning organization.",
+    )
+    agent = models.CharField(max_length=64, help_text="Agent name (build, plan, ...).")
+    model = models.CharField(max_length=255, default="", blank=True)
+    effort = models.CharField(max_length=50, default="", blank=True)
+    inherit_model = models.BooleanField(default=False)
+    effort_strategy = models.CharField(
+        max_length=16,
+        choices=AgentEffortStrategy.choices,
+        default=AgentEffortStrategy.FIXED,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_agent_config"
+        ordering = ["agent"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "agent"],
+                name="harness_agent_config_org_agent_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the config."""
+        return f"AgentConfig(org={self.organization_id}, {self.agent})"
+
+
 class ProviderConfig(models.Model):
     """
-    Org-wide LLM provider configuration.
+    Org-wide helper-model defaults for metadata and voice input.
 
-    Exactly one record per organization (OneToOne). Stores the
-    encrypted provider API key plus endpoint and model defaults.
+    Exactly one record per organization (OneToOne). Provider credentials
+    and per-provider settings live in ``ProviderConnection``; this record
+    holds helper-model choices and effort. Agent defaults live in ``AgentConfig``.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -63,31 +127,29 @@ class ProviderConfig(models.Model):
         related_name="harness_provider_config",
         help_text="Owning organization (exactly one config per org).",
     )
-    api_key_encrypted = models.TextField(
-        help_text="Fernet-encrypted provider API key.",
-    )
-    base_url = models.URLField(
-        max_length=1024,
-        default="https://openrouter.ai/api/v1",
-        help_text="OpenAI-compatible API base URL.",
-    )
-    default_model = models.CharField(
-        max_length=255,
-        default="",
-        blank=True,
-        help_text="Default model for agentic runs.",
-    )
     small_model = models.CharField(
         max_length=255,
         default="",
         blank=True,
         help_text="Cheaper model for title/compaction tasks.",
     )
-    computer_use_model = models.CharField(
+    small_effort = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+        help_text="Default reasoning effort for small model.",
+    )
+    speech_model = models.CharField(
         max_length=255,
         default="",
         blank=True,
-        help_text="Model for the computeruse subagent; falls back to default_model.",
+        help_text="Speech-to-text model; empty uses the speech default.",
+    )
+    voice_cleanup_model = models.CharField(
+        max_length=255,
+        default="",
+        blank=True,
+        help_text="Dictation cleanup model; empty inherits the small or Build model.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -99,6 +161,172 @@ class ProviderConfig(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the config."""
         return f"ProviderConfig(org={self.organization_id})"
+
+
+class ProviderConnection(models.Model):
+    """A named provider account scoped to one user or an organization."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="provider_connections",
+        help_text="Organization context owning this account.",
+    )
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="provider_connections",
+        help_text="Null for an organization-shared account.",
+    )
+    provider = models.CharField(
+        max_length=32,
+        choices=[*ProviderType.choices, ("claude-agent", "Claude Agent")],
+        help_text="Native provider identifier or the claude-agent harness provider.",
+    )
+    label = models.CharField(max_length=255, default="", blank=True)
+    credential = models.ForeignKey(
+        "credentials.Credential",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_accounts",
+    )
+    config = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Non-secret provider settings (including Claude auth_type).",
+    )
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_provider_connection"
+        ordering = ["provider", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "provider", "label"],
+                condition=models.Q(user__isnull=True, deleted_at__isnull=True),
+                name="provider_account_org_label_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["organization", "user", "provider", "label"],
+                condition=models.Q(user__isnull=False, deleted_at__isnull=True),
+                name="provider_account_user_label_uniq",
+            ),
+        ]
+
+    @property
+    def auth_type(self) -> str:
+        """Return the non-secret Claude authorization method, if applicable."""
+        return str((self.config or {}).get("auth_type") or "")
+
+    @property
+    def scope(self) -> str:
+        """Return the account scope label."""
+        return "personal" if self.user_id is not None else "organization"
+
+    def __str__(self) -> str:
+        """Return a secret-free description of the provider account."""
+        return f"ProviderConnection(org={self.organization_id}, {self.provider})"
+
+
+class ProviderSelection(models.Model):
+    """Per-user, per-organization selection for one provider."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="provider_selections",
+    )
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="provider_selections",
+    )
+    provider = models.CharField(
+        max_length=32,
+        choices=[*ProviderType.choices, ("claude-agent", "Claude Agent")],
+    )
+    account = models.ForeignKey(
+        ProviderConnection,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="selections",
+    )
+    # An absent row, an explicit empty choice, and a revoked choice differ.
+    is_revoked = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_provider_selection"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "user", "provider"],
+                name="provider_selection_org_user_provider_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a secret-free selection description."""
+        return f"ProviderSelection(org={self.organization_id}, {self.provider})"
+
+
+class ComputerUseConfig(models.Model):
+    """Org-wide desktop runtime settings; model selection stays in AgentConfig."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.OneToOneField(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_computer_use_config",
+    )
+    max_steps = models.PositiveIntegerField(default=15)
+    enable_recording = models.BooleanField(default=False)
+    screenshot_max_dimension = models.PositiveIntegerField(default=2400)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_computer_use_config"
+
+    def __str__(self) -> str:
+        """Return the owning organization without runtime data."""
+        return f"ComputerUseConfig(org={self.organization_id})"
+
+
+class SubagentConfig(models.Model):
+    """Org-wide maximum subagent nesting depth (no secrets)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.OneToOneField(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_subagent_config",
+    )
+    max_depth = models.PositiveIntegerField(default=DEFAULT_MAX_DEPTH)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_subagent_config"
+        ordering = ["-updated_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(max_depth__gte=1),
+                name="harness_subagent_config_depth_gte_1",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the config."""
+        return f"SubagentConfig(org={self.organization_id})"
 
 
 class HarnessSession(models.Model):
@@ -157,10 +385,50 @@ class HarnessSession(models.Model):
         blank=True,
         help_text="Selected skill UUIDs persisted for subsequent runs.",
     )
+    harness_id = models.CharField(
+        max_length=16,
+        default="native",
+        help_text="Execution engine that owns this session.",
+    )
+    created_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="harness_sessions",
+        help_text="User who owns this session and its engine authorization.",
+    )
+    external_session_id = models.CharField(max_length=64, blank=True, default="")
+    engine_state = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Engine-specific resumable session state (no credentials).",
+    )
     last_read_at = models.DateTimeField(
         null=True,
         blank=True,
         help_text="When the user last opened this session (null = never read).",
+    )
+    manual_unread_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the user explicitly marked this session unread.",
+    )
+    last_message_at = models.DateTimeField(
+        default=timezone.now,
+        db_index=True,
+        help_text=(
+            "Last completed user or assistant message (not tools, not last open)."
+        ),
+    )
+    summary = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "One-sentence status and next step of the last finished run. "
+            "Cleared when a new run starts."
+        ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -179,6 +447,17 @@ class HarnessMessageRole(models.TextChoices):
 
     USER = "user", "User"
     ASSISTANT = "assistant", "Assistant"
+
+
+class HarnessRunStatus(models.TextChoices):
+    """Durable lifecycle states of one external-engine attempt."""
+
+    STARTING = "starting", "Starting"
+    RUNNING = "running", "Running"
+    CLOSING = "closing", "Closing"
+    COMPLETED = "completed", "Completed"
+    INTERRUPTED = "interrupted", "Interrupted"
+    ERROR = "error", "Error"
 
 
 class HarnessMessage(models.Model):
@@ -213,16 +492,119 @@ class HarnessMessage(models.Model):
     )
     finish = models.CharField(max_length=32, blank=True, default="")
     error = models.TextField(blank=True, default="")
+    skill_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Skill UUIDs active for this user turn.",
+    )
+    harness_id = models.CharField(
+        max_length=16,
+        default="native",
+        help_text="Execution engine that produced this message.",
+    )
+    engine_meta = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Secret-free engine-specific message metadata.",
+    )
+    notice_dismissed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the user dismissed the stopped/failed notice for this message.",
+    )
+    position = models.PositiveIntegerField(
+        default=0,
+        db_index=True,
+        help_text="Per-session chronological order (0-based, gap-tolerant).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "harness_message"
-        ordering = ["created_at"]
+        ordering = ["position", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "position"],
+                name="harness_message_session_position_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
         """Return a short representation of the message."""
         return f"HarnessMessage({self.role}, session={str(self.session_id)[:8]})"
+
+
+class HarnessRun(models.Model):
+    """Durable attempt ownership for an engine-backed assistant turn.
+
+    The owner token fences writes from a worker after its lease has been
+    superseded. Lease identity is metadata only; credentials and prompt data
+    must never be stored here.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        HarnessSession,
+        on_delete=models.CASCADE,
+        related_name="runs",
+    )
+    assistant_message = models.OneToOneField(
+        HarnessMessage,
+        on_delete=models.CASCADE,
+        related_name="run_attempt",
+    )
+    organization_id = models.UUIDField(
+        help_text="Organization snapshot for durable attempt scoping."
+    )
+    initiated_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="harness_runs",
+    )
+    harness_id = models.CharField(max_length=16, default="claude")
+    status = models.CharField(
+        max_length=16,
+        choices=HarnessRunStatus.choices,
+        default=HarnessRunStatus.STARTING,
+        db_index=True,
+    )
+    owner_token = models.UUIDField(default=uuid.uuid4, editable=False)
+    heartbeat_at = models.DateTimeField(default=timezone.now, db_index=True)
+    lease_id = models.UUIDField(null=True, blank=True)
+    lease_epoch = models.CharField(max_length=128, blank=True, default="")
+    external_session_id = models.CharField(max_length=64, blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "harness_run"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(
+                fields=["session", "status"], name="harness_run_session_status_idx"
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session"],
+                condition=models.Q(
+                    status__in=[
+                        HarnessRunStatus.STARTING,
+                        HarnessRunStatus.RUNNING,
+                        HarnessRunStatus.CLOSING,
+                    ]
+                ),
+                name="harness_run_one_live_per_session",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return an operationally useful but secret-free description."""
+        return f"HarnessRun({str(self.id)[:8]}, {self.status})"
 
 
 class HarnessPartType(models.TextChoices):
@@ -235,8 +617,8 @@ class HarnessPartType(models.TextChoices):
     STEP_FINISH = "step-finish", "Step finish"
     SUBTASK = "subtask", "Subtask"
     PATCH = "patch", "Patch"
-    AGENT = "agent", "Agent"
     COMPACTION = "compaction", "Compaction"
+    STEER = "steer", "Steer"
 
 
 class HarnessPartState(models.TextChoices):
@@ -272,12 +654,31 @@ class HarnessPart(models.Model):
         blank=True,
         help_text="Extra payload (step number, cost, tokens, subtask id).",
     )
+    display = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Bounded timeline display projection; full details stay in "
+            "input/output/meta."
+        ),
+    )
+    position = models.PositiveIntegerField(
+        default=0,
+        db_index=True,
+        help_text="Per-message chronological order (0-based, gap-tolerant).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "harness_part"
-        ordering = ["created_at"]
+        ordering = ["position", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["message", "position"],
+                name="harness_part_message_position_uniq",
+            ),
+        ]
 
     def __str__(self) -> str:
         """Return a short representation of the part."""
@@ -366,3 +767,105 @@ class Todo(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the todo."""
         return f"Todo({self.status}, {self.content[:32]})"
+
+
+class RecentModel(models.Model):
+    """
+    Per-user recently used composer model and agent selection, org-scoped.
+
+    Written on successful chat sends (fire-and-forget); read to render the
+    composer's Recent list (max. 6 in the UI). One row per (organization,
+    user, model); ``effort`` is denormalized so the picker can restore the
+    last-used effort per model without joining message history. The newest
+    row also supplies the engine and mode for new chats.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="recent_models",
+        help_text="Owning organization (scoping).",
+    )
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="recent_models",
+        help_text="User who used the model.",
+    )
+    model = models.CharField(
+        max_length=255,
+        help_text="Catalog model id (e.g. openrouter/provider/name).",
+    )
+    effort = models.CharField(
+        max_length=50,
+        default="",
+        blank=True,
+        help_text="Last-used reasoning effort for this model.",
+    )
+    harness_id = models.CharField(max_length=20, default="native")
+    mode = models.CharField(max_length=10, default="build")
+    last_used_at = models.DateTimeField(
+        auto_now=True,
+        db_index=True,
+        help_text="When the model was last used (drives Recent ordering).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "harness_recent_model"
+        ordering = ["-last_used_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "user", "model"],
+                name="harness_recent_model_org_user_model_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the recent-model row."""
+        return f"RecentModel(org={self.organization_id}, {self.model})"
+
+
+class HarnessTranscriptBatch(models.Model):
+    """One encrypted, deduplicated engine transcript entry."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        HarnessSession,
+        on_delete=models.CASCADE,
+        related_name="transcript_batches",
+    )
+    external_session_id = models.CharField(max_length=64)
+    subpath = models.CharField(max_length=255, blank=True, default="")
+    digest = models.CharField(max_length=64)
+    payload_encrypted = models.TextField()
+    position = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "harness_transcript_batch"
+        ordering = ["position", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "external_session_id", "subpath", "digest"],
+                name="harness_transcript_digest_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["session", "external_session_id", "subpath", "position"],
+                name="harness_transcript_position_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a secret-free transcript record description."""
+        return f"HarnessTranscriptBatch(session={self.session_id}, pos={self.position})"
+
+
+# Imported last to keep the turn sidecar separate from core/domain models.
+from .provider_oauth_models import ProviderOAuthFlow  # noqa: E402,F401
+from .provider_refresh_models import ProviderRefreshLease  # noqa: E402,F401
+from .provider_turn_models import ProviderTurn, ProviderTurnMutex  # noqa: E402,F401
+from .command_models import HarnessCommand  # noqa: E402,F401
+from .command_models import HarnessExecutionHeartbeat  # noqa: E402,F401
+from .command_models import HarnessSteeringSnapshot  # noqa: E402,F401

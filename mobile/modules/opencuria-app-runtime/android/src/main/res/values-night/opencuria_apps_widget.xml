@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="opencuria_apps_widget_background">#303034</color>
+  <color name="opencuria_apps_widget_label">#E4E2E6</color>
+  <color name="opencuria_apps_widget_secondary">#C6C6D0</color>
+</resources>

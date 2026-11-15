@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { useHarnessStore } from '@/stores/harness'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { markHarnessSessionRead, listHarnessSessions } from '@/services/harness.api'
-import type { HarnessSession } from '@/types/harness'
+import type { HarnessSession } from '@opencuria/chat-core/harness'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
@@ -61,6 +61,7 @@ describe('harness store read tracking', () => {
         reasoning_effort: 'high',
         unread: true,
         updated_at: '2026-03-29T10:00:00.000Z',
+        last_message_at: '2026-03-29T10:00:00.000Z',
       },
     ]
 
@@ -77,6 +78,34 @@ describe('harness store read tracking', () => {
     store.handleSessionStatus('session-1', 'idle')
     await vi.waitFor(() => expect(markReadMock).toHaveBeenCalledWith('session-1'))
     expect(store.sessions[0]?.unread).toBe(false)
+  })
+
+  it('coalesces duplicate read requests for the same viewing session', async () => {
+    const store = useHarnessStore()
+    const conversations = useHarnessConversationStore()
+    store.sessions = [makeSession({ status: 'idle', unread: true })]
+    conversations.conversations = [{
+      session_id: 'session-1', workspace_id: 'ws-1', workspace_name: 'Workspace One',
+      title: 'Chat', status: 'idle', mode: 'build', agent_name: 'build', model: 'acme/think',
+      reasoning_effort: 'high', unread: true, updated_at: '2026-03-29T10:00:00.000Z',
+      last_message_at: '2026-03-29T10:00:00.000Z',
+    }]
+    let resolve!: () => void
+    markReadMock.mockImplementationOnce(() => new Promise<void>((r) => { resolve = r }))
+    store.setViewingSession('session-1')
+    store.handleSessionStatus('session-1', 'idle')
+    expect(markReadMock).toHaveBeenCalledTimes(1)
+    resolve()
+    await vi.waitFor(() => expect(markReadMock).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps manual unread when an idle event arrives for the viewing session', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy', unread: true, manual_unread: true })]
+    store.setViewingSession('session-1')
+    store.handleSessionStatus('session-1', 'idle')
+    expect(markReadMock).not.toHaveBeenCalled()
+    expect(store.sessions[0]?.unread).toBe(true)
   })
 
   it('marks unread when an idle event arrives for a session that is not viewed', () => {
@@ -106,6 +135,24 @@ describe('harness store read tracking', () => {
     expect(store.activeSessionId).toBeNull()
   })
 
+  it('keeps unread state retryable after a failed persisted read', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle', unread: true })]
+    const conversations = useHarnessConversationStore()
+    conversations.conversations = [{
+      session_id: 'session-1', workspace_id: 'ws-1', workspace_name: 'Workspace One',
+      title: 'Chat', status: 'idle', mode: 'build', agent_name: 'build', model: 'acme/think',
+      reasoning_effort: 'high', unread: true, updated_at: '2026-03-29T10:00:00.000Z',
+      last_message_at: '2026-03-29T10:00:00.000Z',
+    }]
+    markReadMock.mockRejectedValueOnce(new Error('offline'))
+
+    await store.markSessionRead('session-1')
+    await store.markSessionRead('session-1')
+
+    expect(markReadMock).toHaveBeenCalledTimes(2)
+  })
+
   it('stamps the running model onto the live assistant message', () => {
     const store = useHarnessStore()
     store.sessions = [makeSession({ model: '', reasoning_effort: '', status: 'busy' })]
@@ -128,5 +175,44 @@ describe('harness store read tracking', () => {
     expect(store.sessions[0]?.reasoning_effort).toBe('high')
     expect(store.messagesBySession['session-1']?.[0]?.model).toBe('acme/think')
     expect(store.messagesBySession['session-1']?.[0]?.reasoning_effort).toBe('high')
+  })
+
+  it('stamps completed_at on the live assistant message when the session goes idle', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.messagesBySession['session-1'] = [
+      {
+        id: 'msg-assistant-1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        parts: [],
+        created_at: '2026-03-29T10:00:00.000Z',
+      },
+    ]
+
+    store.handleSessionStatus('session-1', 'idle')
+
+    const completed = store.messagesBySession['session-1']?.[0]?.completed_at
+    expect(completed).toBeTruthy()
+    expect(Date.parse(completed ?? '')).toBeGreaterThan(
+      Date.parse('2026-03-29T10:00:00.000Z'),
+    )
+  })
+
+  it('keeps the summary of a settled run and drops it when the next run starts', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle', summary: 'Old sentence.' })]
+
+    store.handleSessionStatus('session-1', 'busy')
+    expect(store.sessions[0]?.summary).toBe('')
+
+    // A late sentence of the previous run must not reappear while busy.
+    store.handleSessionSummary('session-1', 'Late sentence.')
+    expect(store.sessions[0]?.summary).toBe('')
+
+    store.handleSessionStatus('session-1', 'idle')
+    store.handleSessionSummary('session-1', 'New sentence.')
+    expect(store.sessions[0]?.summary).toBe('New sentence.')
   })
 })

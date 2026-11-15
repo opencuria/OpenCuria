@@ -106,6 +106,7 @@ def test_retry_delay_without_headers_keeps_backoff() -> None:
         "GoUsageLimitError: plan limit reached",
         "Monthly usage limit reached, top up",
         "switch to available balance usage",
+        "Too many tokens per day, please wait before trying again.",
     ],
 )
 def test_quota_billing_errors_are_never_retried(message: str) -> None:
@@ -154,7 +155,7 @@ def test_overflow_patterns_are_not_retried() -> None:
 
 def test_throttling_is_not_overflow_but_retryable() -> None:
     """Throttling/rate-limit prefixes are excluded from overflow detection."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     throttling = RuntimeError("Throttling error: Too many tokens, please wait")
     assert not is_context_overflow_error(throttling)
@@ -195,12 +196,33 @@ def test_status_500_and_above_retry() -> None:
     assert is_retryable_provider_error(
         ProviderResponseError("boom", status_code=500)
     )
+    assert is_retryable_provider_error(
+        ProviderResponseError("boom", status_code=500, is_retryable=False)
+    )
     assert not is_retryable_provider_error(
         ProviderAuthError("denied", status_code=401)
     )
     assert not is_retryable_provider_error(
         ProviderAuthError("forbidden", status_code=403)
     )
+
+
+def test_is_retryable_flag_true_retries_without_pattern() -> None:
+    """OpenCode isRetryable=true retries even without 5xx or message match."""
+    assert is_retryable_provider_error(
+        ProviderResponseError("oops", is_retryable=True)
+    )
+
+
+def test_should_retry_header_false_wins_over_is_retryable_flag() -> None:
+    """x-should-retry: false still blocks an is_retryable=True 5xx error."""
+    error = ProviderResponseError(
+        "upstream",
+        status_code=503,
+        response_headers={"x-should-retry": "false"},
+        is_retryable=True,
+    )
+    assert not is_retryable_provider_error(error)
 
 
 def test_error_fields_default_backward_compatible() -> None:
@@ -215,3 +237,68 @@ def test_error_fields_default_backward_compatible() -> None:
     assert limited.response_headers == {}
     assert limited.response_body == ""
     assert limited.is_retryable is None
+
+
+def test_overflow_never_retried_despite_should_retry_hint() -> None:
+    """Overflow with x-should-retry:true still fails fast (parity)."""
+    overflow_hint = ProviderResponseError(
+        "busy",
+        status_code=503,
+        response_headers={"x-should-retry": "true"},
+        response_body="too many tokens",
+    )
+    assert not is_retryable_provider_error(overflow_hint)
+    overflow_limit = ProviderRateLimitError(
+        "slow",
+        status_code=429,
+        response_headers={"x-should-retry": "true"},
+        response_body="prompt is too long",
+    )
+    # Rate-limit types are never overflow, even with overflow-like bodies.
+    assert is_retryable_provider_error(overflow_limit)
+
+
+def test_daily_token_quota_rate_limit_is_not_retried() -> None:
+    """Bedrock daily token caps fail fast instead of retrying or compacting."""
+    from apps.harness.providers.context_errors import is_context_overflow_error
+
+    daily = ProviderRateLimitError(
+        "Too many tokens per day, please wait before trying again.",
+        status_code=429,
+        is_retryable=False,
+    )
+    assert not is_context_overflow_error(daily)
+    assert not is_retryable_provider_error(daily)
+    assert not is_retryable_provider_error(
+        ProviderRateLimitError(
+            "Too many tokens per day, please wait before trying again."
+        )
+    )
+
+
+def test_bedrock_stream_retryable_flags_pass_through() -> None:
+    """Bedrock throttling retries; validation overflow does not."""
+    from apps.harness.providers.bedrock import BedrockAdapter
+
+    adapter = BedrockAdapter(
+        {"access_key_id": "AKIA", "secret_access_key": "secret"},
+    )
+    throttling = adapter._stream_error_from_event(
+        {"throttlingException": {"message": "Slow down"}}
+    )
+    assert throttling is not None
+    assert getattr(throttling, "is_retryable") is True
+    assert is_retryable_provider_error(throttling)
+    internal = adapter._stream_error_from_event(
+        {"internalServerException": {"message": "upstream hiccup"}}
+    )
+    assert internal is not None
+    assert getattr(internal, "is_retryable") is True
+    assert is_retryable_provider_error(internal)
+    overflow = adapter._stream_error_from_event(
+        {"validationException": {"message": "model_context_window_exceeded"}}
+    )
+    assert overflow is not None
+    assert getattr(overflow, "is_retryable") is False
+    assert not is_retryable_provider_error(overflow)
+

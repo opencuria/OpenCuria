@@ -1,0 +1,1473 @@
+"""Desktop session lifecycle, durable leases, and recording management.
+
+:class:`DesktopManager` owns Xvnc process state, lease coordination, desktop
+actions, clipboard operations, and recordings.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import os
+import re
+import shlex
+import time
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from ...models import DesktopSession, WorkspaceInfo
+from ...runtime.base import RuntimeBackend
+from ...runtime.managed_process import validate_guest_token
+from ..capture_fence import CaptureFence, live_interaction
+from ..workspace_helpers import KeyedLockMap
+from ..workspace_helpers import sanitize_path as _sanitize_path
+from .clipboard_selection import build_guest_command
+from .desktop_leases import DesktopInputBusyError, DesktopLeaseStore
+
+logger = structlog.get_logger(__name__)
+
+DESKTOP_DISPLAY = ":1"
+DESKTOP_HOME = "/root"
+#: X11 clients require an authority file even when Xvnc disables authentication.
+DESKTOP_XAUTHORITY_PATH = "/root/.Xauthority"
+DEFAULT_DESKTOP_WIDTH = 1920
+DEFAULT_DESKTOP_HEIGHT = 1080
+MIN_DESKTOP_WIDTH = 800
+MAX_DESKTOP_WIDTH = 3840
+MIN_DESKTOP_HEIGHT = 600
+MAX_DESKTOP_HEIGHT = 2160
+COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
+_RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+DESKTOP_STOP_COMMAND = (
+    Path(__file__).with_name("desktop_stop.sh").read_text(encoding="utf-8")
+)
+DESKTOP_SESSION_COMMAND = (
+    Path(__file__).with_name("desktop_session.sh").read_text(encoding="utf-8")
+)
+#: Exit 0 once the exact :1 Xvnc display is gone (bounded ~5 s after SIGTERM).
+DESKTOP_STOPPED_PROBE = (
+    'i=0; while [ "$i" -lt 20 ]; do '
+    "pgrep -f '^(/[^[:space:]]*/)?(X[v]nc|X[t]igervnc) :1([[:space:]]|$)' "
+    ">/dev/null || exit 0; i=$((i+1)); sleep 0.25; done; exit 1"
+)
+
+
+@dataclass(frozen=True)
+class WorkspaceEndedEvidence:
+    """Exact physical identity confirmed by a successful lifecycle operation."""
+
+    workspace_id: uuid.UUID
+    instance_id: str
+    operation: str
+
+
+class DesktopManager:
+    """Owns desktop processes, leases, recordings, and desktop actions.
+
+    Runtime backends and workspace lookup functions are injected by the
+    runner composition root.
+    """
+
+    def __init__(
+        self,
+        runtime: RuntimeBackend | None = None,
+        get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
+        get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
+        lease_store: DesktopLeaseStore | None = None,
+        epoch: str | None = None,
+        close_owner_streams: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> None:
+        self._lease_store = lease_store
+        self.epoch = epoch or str(uuid.uuid4())
+
+        async def unconfigured_streams(lease_id: str) -> bool:
+            return False
+
+        self.close_owner_streams = close_owner_streams or unconfigured_streams
+        self.capture_fence: CaptureFence | None = None
+        self._runtime = runtime
+        self._get_cached = get_cached
+        self._get_runtime = get_runtime
+        self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
+        # Keep the last incarnation number after stop so generations remain
+        # monotonic for this runner epoch and can fence delayed stop events.
+        self._desktop_generations: dict[uuid.UUID, int] = {}
+        self._maintenance_locks: dict[uuid.UUID, asyncio.Lock] = {}
+        self._maintenance_offsets: dict[uuid.UUID, int] = {}
+        self._recording_waiters: dict[str, asyncio.Task] = {}
+        self._recording_handles: dict[str, tuple[Any, Any]] = {}
+        # Serialises concurrent viewer/computer-use lifecycle ops per
+        # workspace (same never-evict rationale as the background and
+        # git lock maps: dropping a lock object while a holder waits
+        # would hand the next caller a different lock). ``KeyedLockMap``
+        # supplies get-or-create, and properties below expose its dict and
+        # guard for manager integrations.
+        self._desktop_lock_map: KeyedLockMap = KeyedLockMap()
+
+    @property
+    def lease_store(self) -> DesktopLeaseStore:
+        """Return durable ownership configured before runner requests are accepted."""
+        if self._lease_store is None:
+            raise RuntimeError("Desktop leases are not configured")
+        return self._lease_store
+
+    async def workspace_ended(
+        self,
+        workspace_id: uuid.UUID,
+        instance_id: str,
+        evidence: WorkspaceEndedEvidence,
+    ) -> None:
+        """Finalize only proven-dead physical owners, without guest execution.
+
+        Lifecycle must confirm streams first, before losing registry metadata.
+        Retain tombstones: the same logical workspace/viewer UUID can return.
+        This internal coordinated operation deliberately has no capture decorator.
+        """
+        if (
+            not isinstance(evidence, WorkspaceEndedEvidence)
+            or evidence.workspace_id != workspace_id
+            or evidence.instance_id != instance_id
+            or evidence.operation not in {"stop", "remove"}
+            or not instance_id
+        ):
+            raise ValueError("Invalid physical workspace-ended evidence")
+        info = self._get_cached(workspace_id)
+        if info.instance_id != instance_id:
+            raise ValueError("Workspace-ended evidence does not match registry")
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            rows = await self.lease_store.list_unfinished(str(workspace_id))
+            for recording in await self.lease_store.unfinished_recordings(
+                str(workspace_id)
+            ):
+                if recording["instance_id"] != instance_id:
+                    continue
+                waiter = self._recording_waiters.pop(recording["recording_id"], None)
+                if waiter:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                # Detach local transport only; never signal or exec a guest
+                # after the exact physical disposal has been confirmed.
+                cached = self._recording_handles.pop(recording["recording_id"], None)
+                if cached:
+                    try:
+                        await cached[0].process_detach(cached[1])
+                    except Exception:
+                        logger.exception(
+                            "recording_local_detach_failed",
+                            recording_id=recording["recording_id"],
+                        )
+                await self.lease_store.recording_state(
+                    recording["recording_id"], "closed"
+                )
+            for row in rows:
+                if row["instance_id"] == instance_id:
+                    await self.lease_store.mark_closing(row["lease_id"])
+                    await self.lease_store.finish(row["lease_id"], "expired")
+            session = self._desktop_sessions.get(workspace_id)
+            if session and session.instance_id == instance_id:
+                self._desktop_sessions.pop(workspace_id, None)
+
+    def configure_leases(
+        self,
+        lease_store: DesktopLeaseStore,
+        epoch: str,
+        close_owner_streams: Callable[[str], Awaitable[bool]],
+    ) -> None:
+        """Configure production durability before accepting workspace requests."""
+        if self._desktop_sessions or self._recording_handles:
+            raise RuntimeError("Desktop lease configuration requires idle manager")
+        self._lease_store = lease_store
+        self.epoch = epoch
+        self.close_owner_streams = close_owner_streams
+
+    async def _recording_owner(
+        self, workspace_id: uuid.UUID, payload: dict[str, Any]
+    ) -> dict:
+        run_id = self._sanitize_run_id(str(payload.get("run_id", "")))
+        rows = await self.lease_store.list_workspace(str(workspace_id))
+        matches = [
+            r
+            for r in rows
+            if r["kind"] == "computeruse"
+            and r["owner_id"] == run_id
+            and (not payload.get("lease_id") or r["lease_id"] == payload["lease_id"])
+        ]
+        if len(matches) != 1:
+            raise ValueError("Recording requires an unambiguous computeruse lease")
+        return matches[0]
+
+    async def _managed_record_start(
+        self, workspace_id: uuid.UUID, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+            await self._check_unfinished_incarnations(workspace_id)
+            owner = await self._recording_owner(workspace_id, payload)
+            if (
+                owner["epoch"] != self.epoch
+                or owner["state"] not in {"reserved", "held"}
+                or owner["expires_at"] <= time.time()
+            ):
+                raise ValueError("Recording owner has ended")
+            existing = await self.lease_store.recordings(owner["lease_id"])
+            if payload.get("path"):
+                existing = [r for r in existing if r["path"] == payload["path"]]
+            if existing:
+                row = existing[0]
+                if row["state"] != "starting":
+                    raise ValueError("Recording attempt ended")
+                # ACK loss is idempotent, never a second guest launch.
+                return {"ok": True, "path": row["path"], "run_id": owner["owner_id"]}
+            record_path = _sanitize_path(
+                str(
+                    payload.get("path")
+                    or f"{COMPUTER_USE_RECORD_DIR}/{owner['owner_id']}/session.mp4"
+                )
+            )
+            width, height = await self._get_desktop_geometry(workspace_id)
+            runtime = self._get_runtime(workspace_id)
+            guest_token = validate_guest_token(
+                await runtime.probe_managed_token(owner["instance_id"])
+            )
+            # The probe awaits external I/O: durable ownership may have ended
+            # even though this manager still holds the desktop serialization lock.
+            fresh = await self.lease_store.get(owner["lease_id"])
+            if (
+                not fresh
+                or fresh["epoch"] != self.epoch
+                or fresh["state"] not in {"reserved", "held"}
+                or fresh["expires_at"] <= time.time()
+                or fresh["instance_id"] != owner["instance_id"]
+                or self._get_cached(workspace_id).instance_id != owner["instance_id"]
+            ):
+                raise ValueError("Recording owner ended during guest token probe")
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+            recording_id = str(uuid.uuid4())
+            control_path = f"/workspace/.opencuria/managed-recordings/{recording_id}"
+            row = dict(
+                recording_id=recording_id,
+                lease_id=owner["lease_id"],
+                workspace_id=str(workspace_id),
+                instance_id=owner["instance_id"],
+                owner_id=owner["owner_id"],
+                epoch=self.epoch,
+                control_path=control_path,
+                path=record_path,
+                state="starting",
+                guest_token=guest_token,
+            )
+            await self.lease_store.reserve_recording(row)
+            runtime = self._get_runtime(workspace_id)
+            # Redirect both streams rather than creating growing runner log buffers.
+            # exec preserves the supervisor-anchored process group.
+            command = (
+                f"mkdir -p {shlex.quote(os.path.dirname(record_path))} && "
+                f"exec ffmpeg -nostdin -hide_banner -loglevel error -y "
+                f"-f x11grab -video_size {width}x{height} -framerate 10 "
+                f"-draw_mouse 1 -i {DESKTOP_DISPLAY} -c:v libx264 "
+                f"-preset ultrafast -pix_fmt yuv420p {shlex.quote(record_path)} "
+                "</dev/null >/dev/null 2>&1"
+            )
+            try:
+                handle = await runtime.spawn_process(
+                    owner["instance_id"],
+                    ["sh", "-lc", command],
+                    workdir="/workspace",
+                    env=self._desktop_env(),
+                    control_path=control_path,
+                    expected_token=guest_token,
+                )
+                self._recording_handles[recording_id] = (runtime, handle)
+                self._recording_waiters[recording_id] = asyncio.create_task(
+                    self._wait_recording_exit(runtime, handle)
+                )
+            except BaseException:
+                await asyncio.shield(
+                    self.lease_store.recording_state(recording_id, "closing")
+                )
+                raise
+            return {"ok": True, "path": record_path, "run_id": owner["owner_id"]}
+
+    async def _wait_recording_exit(self, runtime: Any, handle: Any) -> int:
+        """Monitor without mistaking unknown/transport status for guest exit."""
+        while True:
+            code = await runtime.process_wait(handle)
+            if code is not None:
+                return code
+            await asyncio.sleep(15)
+
+    async def _cleanup_lease_recordings(self, lease_id: str) -> bool:
+        """Fence late recorder launches and verify anchored groups, even after crash."""
+        closed = True
+        for row in await self.lease_store.recordings(lease_id):
+            if row["state"] == "closed":
+                continue
+            await self.lease_store.recording_state(row["recording_id"], "closing")
+            try:
+                runtime = self._get_runtime(uuid.UUID(row["workspace_id"]))
+                proven_stopped = await self._instance_proven_stopped(
+                    uuid.UUID(row["workspace_id"]), row["instance_id"]
+                )
+                if (
+                    not proven_stopped
+                    and await runtime.close_managed_process(
+                        row["instance_id"], row["control_path"]
+                    )
+                    is not True
+                ):
+                    closed = False
+                    continue
+                cached = self._recording_handles.get(row["recording_id"])
+                if cached and not proven_stopped:
+                    # The durable guest close above is authoritative. Also release
+                    # local pipes; transport failure cannot erase the guest fence.
+                    try:
+                        await cached[0].process_close(cached[1])
+                    except Exception:
+                        logger.warning(
+                            "recording_transport_cleanup_failed",
+                            recording_id=row["recording_id"],
+                        )
+                    self._recording_handles.pop(row["recording_id"], None)
+                self._recording_handles.pop(row["recording_id"], None)
+                waiter = self._recording_waiters.pop(row["recording_id"], None)
+                if waiter:
+                    if not waiter.done():
+                        waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                await self.lease_store.recording_state(row["recording_id"], "closed")
+            except Exception:
+                closed = False
+                logger.exception(
+                    "recording_group_cleanup_unverified",
+                    recording_id=row["recording_id"],
+                )
+        return closed
+
+    async def _managed_record_stop(
+        self, workspace_id: uuid.UUID, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            owner = await self._recording_owner(workspace_id, payload)
+            rows = await self.lease_store.recordings(owner["lease_id"])
+            if not rows:
+                # stop-before-start is also an intent fence, not merely a read.
+                # A later delayed start for this attempt must not launch ffmpeg.
+                recording_id = str(uuid.uuid4())
+                row = dict(
+                    recording_id=recording_id,
+                    lease_id=owner["lease_id"],
+                    workspace_id=str(workspace_id),
+                    instance_id=owner["instance_id"],
+                    owner_id=owner["owner_id"],
+                    epoch=owner["epoch"],
+                    control_path=f"/workspace/.opencuria/managed-recordings/{recording_id}",
+                    path=f"{COMPUTER_USE_RECORD_DIR}/{owner['owner_id']}/session.mp4",
+                    state="closing",
+                )
+                await self.lease_store.reserve_recording(row)
+                rows = [row]
+            for row in rows:
+                await self.lease_store.recording_state(row["recording_id"], "closing")
+        if not await self._cleanup_lease_recordings(owner["lease_id"]):
+            raise RuntimeError("Recording termination unverified")
+        return {"ok": True, "path": rows[0]["path"]}
+
+    def binding(self) -> dict[str, Any]:
+        """Return the runner-owned X11 binding without activating a display."""
+        return {
+            "ok": True,
+            "display": DESKTOP_DISPLAY,
+            "xauthority": DESKTOP_XAUTHORITY_PATH,
+            "epoch": self.epoch,
+            "protocol_version": 2,
+            "lease_ttl_seconds": 180,
+            "renew_interval_seconds": 45,
+        }
+
+    async def _lease_projection(self, workspace_id: uuid.UUID) -> dict[str, Any]:
+        rows = await self.lease_store.list_unfinished(str(workspace_id))
+        held = [row for row in rows if row["activated"]]
+        session = self._desktop_sessions.get(workspace_id)
+        viewer = any(row["kind"] == "viewer" for row in held)
+        runs = {row["owner_id"] for row in held if row["kind"] == "computeruse"}
+        mcp = any(row["kind"] == "mcp" for row in held)
+        if session is not None:
+            session.viewer_held = viewer
+            session.computeruse_run_ids = runs
+            session.mcp_active = mcp
+            session.holder_count = len(held)
+        return {
+            "viewer": viewer,
+            "viewer_held": viewer,
+            "computer_use": bool(runs),
+            "computer_use_active": bool(runs),
+            "mcp": mcp,
+            "mcp_active": mcp,
+            "holder_count": len(held),
+            "active": session is not None,
+            "generation": self.get_desktop_generation(workspace_id),
+            "epoch": self.epoch,
+        }
+
+    async def _verify_binding(self, workspace_id: uuid.UUID) -> None:
+        # XOpenDisplay performs an actual authenticated X11 handshake. ctypes
+        # uses the guest's libX11, with no Python package dependency.
+        code = (
+            "import ctypes,ctypes.util,socket; "
+            "x=ctypes.CDLL(ctypes.util.find_library('X11') or 'libX11.so.6'); "
+            "x.XOpenDisplay.argtypes=[ctypes.c_char_p]; "
+            "x.XOpenDisplay.restype=ctypes.c_void_p; "
+            "x.XCloseDisplay.argtypes=[ctypes.c_void_p]; "
+            "d=x.XOpenDisplay(b':1'); assert d, 'X11 binding unavailable'; "
+            "x.XCloseDisplay(d); "
+            "s=socket.create_connection(('127.0.0.1',6901),2); s.close()"
+        )
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        rc, output = await runtime.exec_command_wait(
+            info.instance_id, ["python3", "-c", code], env=self._desktop_env()
+        )
+        if rc != 0:
+            raise RuntimeError(f"Desktop binding verification failed: {output}")
+
+    async def _check_unfinished_incarnations(self, workspace_id: uuid.UUID) -> None:
+        """Fence fresh work until old runtime/runner owners are verified closed.
+
+        Caller holds the desktop lock; this reads only durable metadata.
+        """
+        instance_id = self._get_cached(workspace_id).instance_id
+        rows = await self.lease_store.list_unfinished(str(workspace_id))
+        if any(
+            r["state"] not in {"released", "expired"}
+            and (r["epoch"] != self.epoch or r["instance_id"] != instance_id)
+            for r in rows
+        ):
+            raise RuntimeError("Previous desktop incarnation cleanup pending; retry")
+        recordings = await self.lease_store.unfinished_recordings(str(workspace_id))
+        if any(
+            r["workspace_id"] == str(workspace_id)
+            and r["state"] != "closed"
+            and (r["epoch"] != self.epoch or r["instance_id"] != instance_id)
+            for r in recordings
+        ):
+            raise RuntimeError("Previous recording incarnation cleanup pending; retry")
+
+    async def _instance_proven_stopped(
+        self, workspace_id: uuid.UUID, instance_id: str
+    ) -> bool:
+        """Only explicit runtime status proves guest effects no longer exist."""
+        try:
+            status = await self._get_runtime(workspace_id).get_workspace_status(
+                instance_id
+            )
+            return status.instance_id == instance_id and status.status in {
+                "stopped",
+                "exited",
+                "dead",
+                "removed",
+            }
+        except Exception:
+            return False
+
+    async def _lease_action(
+        self, workspace_id: uuid.UUID, action: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        if action == "binding":
+            self._get_cached(workspace_id)
+            return self.binding()
+        lease_id = str(payload.get("lease_id") or "")
+        if not lease_id:
+            raise ValueError("lease_id is required")
+        lock = await self._desktop_lock(workspace_id)
+        if action == "release":
+            return await self._release_lease(workspace_id, payload)
+        async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+            row = await self.lease_store.get(lease_id)
+            if row and row["workspace_id"] != str(workspace_id):
+                raise ValueError("Desktop lease workspace mismatch")
+            if action == "lease_status":
+                result = {
+                    **self.binding(),
+                    **await self._lease_projection(workspace_id),
+                    "lease_state": row["state"] if row else "unknown",
+                    "revision": row["revision"] if row else None,
+                    "lease_activated": bool(row and row["activated"]),
+                    "lease_live": bool(
+                        row
+                        and row["epoch"] == self.epoch
+                        and row["instance_id"]
+                        == self._get_cached(workspace_id).instance_id
+                        and row["state"] in {"reserved", "held"}
+                        and row["expires_at"] > time.time()
+                    ),
+                }
+                if payload.get("probe"):
+                    result["active"] = await self._is_desktop_session_live(workspace_id)
+                return result
+            epoch = str(payload.get("epoch") or "")
+            revision = payload.get("revision", 1)
+            if epoch != self.epoch:
+                raise ValueError("Stale runner epoch")
+            if action == "renew":
+                row = await self.lease_store.renew(lease_id, epoch, revision, 180)
+            elif action == "unhold":
+                if (
+                    not row
+                    or row["instance_id"] != self._get_cached(workspace_id).instance_id
+                ):
+                    raise ValueError("Unknown or stale desktop claim")
+                for key in ("kind", "owner_id"):
+                    if payload.get(key) != row[key]:
+                        raise ValueError("Desktop lease identity mismatch")
+                sequence = payload.get("activation_revision")
+                row = await self.lease_store.activate(
+                    lease_id, epoch, revision, sequence, active=False
+                )
+                summary = await self._lease_projection(workspace_id)
+                if row["activated"] and summary["holder_count"] == 1:
+                    session = self._desktop_sessions.setdefault(
+                        workspace_id, DesktopSession(workspace_id, row["instance_id"])
+                    )
+                    await self._stop_desktop_process(
+                        workspace_id, expected_session=session
+                    )
+                await self.lease_store.finish_unhold(lease_id, sequence)
+                row = await self.lease_store.get(lease_id)
+            else:
+                await self._check_unfinished_incarnations(workspace_id)
+                info = self._get_cached(workspace_id)
+                row = await self.lease_store.reserve(
+                    str(workspace_id),
+                    info.instance_id,
+                    lease_id,
+                    str(payload.get("kind") or ""),
+                    str(payload.get("owner_id") or ""),
+                    epoch,
+                    revision,
+                    180,
+                )
+                if action == "hold":
+                    # Persist activation BEFORE guest effects: cancellation or
+                    # failed start must leave a protective owner for recovery.
+                    row = await self.lease_store.activate(
+                        lease_id, epoch, revision, payload.get("activation_revision")
+                    )
+                    try:
+                        await self._ensure_desktop_process_locked(
+                            workspace_id,
+                            width=payload.get("desktop_width"),
+                            height=payload.get("desktop_height"),
+                        )
+                        await self._verify_binding(workspace_id)
+                    except BaseException:
+                        await asyncio.shield(self.lease_store.mark_closing(lease_id))
+                        raise
+            return {
+                **self.binding(),
+                **await self._lease_projection(workspace_id),
+                "lease_state": row["state"],
+                "revision": row["revision"],
+            }
+
+    @live_interaction
+    async def _release_lease(
+        self,
+        workspace_id: uuid.UUID,
+        payload: dict[str, Any],
+        *,
+        terminal_state: str = "released",
+    ) -> dict[str, Any]:
+        lease_id = str(payload["lease_id"])
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+            row = await self.lease_store.get(lease_id)
+            if row is None:
+                # A release arriving before a delayed reserve is still an
+                # authoritative tombstone for that identity/revision.
+                info = self._get_cached(workspace_id)
+                row = await self.lease_store.reserve(
+                    str(workspace_id),
+                    info.instance_id,
+                    lease_id,
+                    str(payload.get("kind") or ""),
+                    str(payload.get("owner_id") or ""),
+                    str(payload.get("epoch") or self.epoch),
+                    payload.get("revision", 1),
+                    180,
+                )
+            if row["workspace_id"] != str(workspace_id):
+                raise ValueError("Desktop lease workspace mismatch")
+            for key in ("kind", "owner_id"):
+                if key in payload and payload[key] != row[key]:
+                    raise ValueError("Desktop lease identity mismatch")
+            requested_revision = payload.get("revision", row["revision"])
+            if requested_revision != row["revision"]:
+                if (
+                    row["kind"] != "viewer"
+                    or not isinstance(requested_revision, int)
+                    or requested_revision <= row["revision"]
+                ):
+                    raise ValueError("Stale desktop lease revision")
+                row = await self.lease_store.reserve(
+                    row["workspace_id"],
+                    row["instance_id"],
+                    lease_id,
+                    row["kind"],
+                    row["owner_id"],
+                    row["epoch"],
+                    requested_revision,
+                    180,
+                )
+            row = await self.lease_store.mark_closing(lease_id)
+            if (
+                row["kind"] != "agent"
+                and row["activated"]
+                and workspace_id not in self._desktop_sessions
+                and row["instance_id"] == self._get_cached(workspace_id).instance_id
+            ):
+                # A protective owner is sufficient evidence to reconcile its
+                # process incarnation. Do not require a successful guest exec
+                # probe before runtime stopped-status proof can be consulted.
+                self._desktop_sessions[workspace_id] = DesktopSession(
+                    workspace_id, row["instance_id"]
+                )
+        # Agent leases own only their process streams; do not inspect runtime
+        # status or infer authority over the workspace desktop during release.
+        # Stream shutdown can acquire runtime/workspace locks: never await it
+        # while holding the desktop lock. Closing forbids holds/renew/spawn.
+        proven_stopped = False
+        if row["kind"] != "agent":
+            proven_stopped = await self._instance_proven_stopped(
+                workspace_id, row["instance_id"]
+            )
+        closed = row["state"] in {"released", "expired"}
+        if not closed:
+            try:
+                closed = await self.close_owner_streams(lease_id) or proven_stopped
+                if closed and row["kind"] == "computeruse":
+                    closed = await self._cleanup_lease_recordings(lease_id)
+
+            except Exception:
+                logger.exception("desktop_owner_cleanup_failed", lease_id=lease_id)
+                closed = proven_stopped
+                if closed and row["kind"] == "computeruse":
+                    closed = await self._cleanup_lease_recordings(lease_id)
+        async with lock:
+            # Another release may have finished already. Higher viewer revisions
+            # cannot replace a closing row until this cleanup completes.
+            current = await self.lease_store.get(lease_id)
+            if current["revision"] != row["revision"]:
+                raise ValueError("Desktop lease changed during cleanup")
+            summary = await self._lease_projection(workspace_id)
+            stopped = proven_stopped
+            session = self._desktop_sessions.get(workspace_id)
+            if proven_stopped and session and session.instance_id == row["instance_id"]:
+                self._desktop_sessions.pop(workspace_id, None)
+                session = None
+            current_instance = (
+                self._get_cached(workspace_id).instance_id
+                if row["kind"] != "agent"
+                else row["instance_id"]
+            )
+            if (
+                row["kind"] != "agent"
+                and row["instance_id"] != current_instance
+                and not proven_stopped
+            ):
+                closed = False
+            if session and session.instance_id != row["instance_id"]:
+                session = None  # Never stop a replacement guest's display.
+            own_membership = (
+                int(bool(row["activated"])) if row["kind"] != "agent" else 0
+            )
+            if (
+                row["kind"] != "agent"
+                and closed
+                and summary["holder_count"] == own_membership
+                and session is not None
+            ):
+                try:
+                    await self._stop_desktop_process(
+                        workspace_id,
+                        expected_session=session,
+                    )
+                    stopped = self._desktop_sessions.get(workspace_id) is None
+                except Exception:
+                    closed = False
+            if closed:
+                await self.lease_store.finish(lease_id, terminal_state)
+            summary = await self._lease_projection(workspace_id)
+            row = await self.lease_store.get(lease_id)
+            return {
+                **self.binding(),
+                **summary,
+                "ok": closed,
+                "lease_state": row["state"],
+                "stopped": stopped,
+                "process_alive": self._desktop_sessions.get(workspace_id) is not None,
+            }
+
+    async def maintenance_workspace_ids(self) -> list[uuid.UUID]:
+        """Return workspaces with unfinished durable owners or recordings."""
+        return [
+            uuid.UUID(value)
+            for value in await self.lease_store.unfinished_workspace_ids()
+        ]
+
+    async def maintain_workspace(self, workspace_id: uuid.UUID) -> None:
+        """Reconcile one workspace without guest starts or global head-of-line waits.
+
+        Bounded parallel owner cleanup and rotated admission keep a stuck owner
+        from starving later owners when the interface's outer timeout cancels a
+        tick. Duplicate overlapping ticks are harmless and skipped.
+        """
+        lock = self._maintenance_locks.setdefault(workspace_id, asyncio.Lock())
+        if lock.locked():
+            return
+        async with lock:
+            rows = await self.lease_store.list_unfinished(str(workspace_id))
+            expired = {
+                r["lease_id"]
+                for r in await self.lease_store.list_expired(str(workspace_id))
+            }
+            if not rows and not await self.lease_store.unfinished_recordings(
+                str(workspace_id)
+            ):
+                return
+            instance = self._get_cached(workspace_id).instance_id
+            releases = {
+                r["lease_id"]: r
+                for r in rows
+                if r["lease_id"] in expired
+                or r["epoch"] != self.epoch
+                or r["instance_id"] != instance
+            }
+            recordings = await self.lease_store.unfinished_recordings(str(workspace_id))
+            recording_owners = {
+                r["lease_id"]
+                for r in recordings
+                if r["state"] == "closing"
+                or (
+                    self._recording_waiters.get(r["recording_id"]) is not None
+                    and self._recording_waiters[r["recording_id"]].done()
+                )
+            }
+            jobs = [
+                (lease_id, releases.get(lease_id))
+                for lease_id in sorted(set(releases) | recording_owners)
+            ]
+            if jobs:
+                offset = self._maintenance_offsets.get(workspace_id, 0) % len(jobs)
+                jobs = jobs[offset:] + jobs[:offset]
+                self._maintenance_offsets[workspace_id] = offset + 8
+                slots = asyncio.Semaphore(8)
+
+                async def cleanup(lease_id: str, row: dict | None) -> None:
+                    async with slots:
+                        try:
+                            operation = (
+                                self._release_lease(
+                                    workspace_id, row, terminal_state="expired"
+                                )
+                                if row
+                                else self._cleanup_lease_recordings(lease_id)
+                            )
+                            await asyncio.wait_for(operation, timeout=8)
+                        except Exception:
+                            logger.exception(
+                                "desktop_maintenance_owner_pending", lease_id=lease_id
+                            )
+
+                await asyncio.gather(*(cleanup(*job) for job in jobs))
+            await self._lease_projection(workspace_id)
+
+    @property
+    def _desktop_locks(self) -> dict[uuid.UUID, asyncio.Lock]:
+        """Alias onto the desktop lock map's underlying dict (live)."""
+        return self._desktop_lock_map.locks
+
+    @_desktop_locks.setter
+    def _desktop_locks(self, value: dict) -> None:
+        self._desktop_lock_map.locks.clear()
+        self._desktop_lock_map.locks.update(value)
+
+    @property
+    def _desktop_locks_guard(self) -> asyncio.Lock:
+        """Alias onto the desktop lock map's guard lock."""
+        return self._desktop_lock_map.guard
+
+    @_desktop_locks_guard.setter
+    def _desktop_locks_guard(self, value: asyncio.Lock) -> None:
+        self._desktop_lock_map.guard = value
+
+    async def _desktop_lock(self, workspace_id: uuid.UUID) -> asyncio.Lock:
+        """Return the serialising lock for one workspace desktop lifecycle.
+
+        The entry is created once and retained for the lifetime of the
+        runner process (bounded by ever-seen workspaces; cleared on
+        restart). It is never dropped: dropping after release cannot
+        observe queued waiters via the public ``asyncio.Lock`` API —
+        ``release()`` only schedules the first waiter's wakeup, and the
+        waiter sets its locked state later — so a drop in that window
+        hands a third caller a different lock object while the woken
+        waiter still references the old one, silently breaking
+        serialisation. One small in-memory ``asyncio.Lock`` per workspace
+        is the accepted trade-off for correctness.
+
+        The map retains locks permanently to preserve serialization.
+        """
+        return await self._desktop_lock_map.get(workspace_id)
+
+    async def _is_desktop_session_live(self, workspace_id: uuid.UUID) -> bool:
+        """Return whether the cached desktop session still accepts connections."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        exit_code, _ = await runtime.exec_command_wait(
+            info.instance_id,
+            [
+                "sh",
+                "-lc",
+                (
+                    "if command -v python3 >/dev/null 2>&1; then "
+                    'python3 -c "import socket,sys; '
+                    "sock=socket.socket(); sock.settimeout(1); "
+                    "rc=sock.connect_ex(('127.0.0.1',6901)); sock.close(); "
+                    'sys.exit(0 if rc == 0 else 1)"; '
+                    "else "
+                    "pgrep -f '^(/usr/bin/)?Xvnc :1|^(/usr/bin/)?Xtigervnc :1' "
+                    ">/dev/null; "
+                    "fi"
+                ),
+            ],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        return exit_code == 0
+
+    def _desktop_heartbeat_payload(
+        self,
+        workspace_id: uuid.UUID,
+        session: DesktopSession,
+    ) -> dict[str, Any]:
+        """Return heartbeat fields for a live desktop session."""
+        return {
+            "port": session.port,
+            "guest_ip": self.get_desktop_guest_ip(workspace_id),
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+            "mcp": session.mcp_active,
+            "holder_count": session.holder_count,
+            "generation": session.generation,
+            "epoch": self.epoch,
+        }
+
+    @staticmethod
+    def _resolve_desktop_geometry(
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
+        """Return a sanitized even framebuffer size for Xvnc."""
+
+        def _coerce(value: int | None, default: int, minimum: int, maximum: int) -> int:
+            if value is None:
+                return default
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            if parsed % 2 != 0:
+                parsed -= 1
+            return max(minimum, min(maximum, parsed))
+
+        return (
+            _coerce(width, DEFAULT_DESKTOP_WIDTH, MIN_DESKTOP_WIDTH, MAX_DESKTOP_WIDTH),
+            _coerce(
+                height, DEFAULT_DESKTOP_HEIGHT, MIN_DESKTOP_HEIGHT, MAX_DESKTOP_HEIGHT
+            ),
+        )
+
+    @staticmethod
+    def _desktop_start_command(width: int, height: int) -> str:
+        """Return the shell used to start Xvnc at a fixed geometry.
+
+        Refresh the managed session script even in older workspace images.
+        Readiness requires X11, Kasm websocket port 6901, and accessibility
+        activation on the session bus before XFCE launches user applications.
+        Baked or user-edited xstartup files are retained for standalone VNC use.
+        """
+        geometry = f"{width}x{height}"
+        return (
+            "set -e\n"
+            "export DISPLAY=:1\n"
+            "export HOME=/root\n"
+            # Xvnc runs with ``-SecurityTypes None``, but python-Xlib
+            # unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` on
+            # connect — every X11 Python client (PyAutoGUI, mouseinfo,
+            # pyscreeze, OCR helpers, ...) requires the file to exist.
+            # Touch it at start so ``execute`` snippets never die with
+            # ``FileNotFoundError: ... '/root/.Xauthority'`` before even
+            # connecting (``_desktop_env`` additionally exports
+            # ``XAUTHORITY`` explicitly for the same reason).
+            "touch /root/.Xauthority\n"
+            "mkdir -p /root/.vnc\n"
+            "cat >/root/.vnc/opencuria-session <<'OPENCURIA_DESKTOP_SESSION'\n"
+            + DESKTOP_SESSION_COMMAND
+            + "OPENCURIA_DESKTOP_SESSION\n"
+            "chmod +x /root/.vnc/opencuria-session\n"
+            # Per-start marker: clearing it here guarantees the session runs
+            # again after every Xvnc (re)start. It must not persist across
+            # starts, otherwise a restarted Xvnc would show an empty desktop.
+            "rm -f /root/.vnc/.xstartup-started /root/.vnc/.accessibility-ready\n"
+            "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1\n"
+            f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
+            "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
+            "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
+            "-PublicIP 127.0.0.1 "
+            "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
+            "-AcceptPointerEvents -SendCutText -AcceptCutText "
+            "-AcceptSetDesktopSize=0 "
+            ">>/root/.vnc/server.log 2>&1 &\n"
+            "for _ in $(seq 1 120); do\n"
+            # The session launches exactly once as soon as the X11 socket
+            # exists (desktop does not wait for the 6901 websocket); the
+            # loop only returns once 6901 is additionally reachable, so
+            # ensure never reports a half-ready Xvnc.
+            "  if [ -e /tmp/.X11-unix/X1 ] "
+            "&& [ ! -f /root/.vnc/.xstartup-started ]; then\n"
+            "    touch /root/.vnc/.xstartup-started\n"
+            "    /root/.vnc/opencuria-session >>/root/.vnc/xstartup.log 2>&1 &\n"
+            "  fi\n"
+            "  if [ -e /tmp/.X11-unix/X1 ] "
+            "&& [ -f /root/.vnc/.accessibility-ready ] "
+            "&& (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then\n"
+            '    echo "Desktop session started on :1 (ws port 6901)"\n'
+            "    exit 0\n"
+            "  fi\n"
+            "  sleep 0.25\n"
+            "done\n"
+            'echo "Desktop session failed to start" >&2\n'
+            "tail -n 50 /root/.vnc/server.log /root/.vnc/xstartup.log >&2 || true\n"
+            "exit 1\n"
+        )
+
+    def get_desktop_generation(self, workspace_id: uuid.UUID) -> int:
+        """Return the current or most recently stopped desktop generation."""
+        session = self._desktop_sessions.get(workspace_id)
+        return max(
+            session.generation if session is not None else 0,
+            self._desktop_generations.get(workspace_id, 0),
+        )
+
+    async def reconcile_heartbeat_session(
+        self,
+        workspace_id: uuid.UUID,
+        expected_session: DesktopSession | None,
+        *,
+        workspace_running: bool,
+        liveness_probe: Callable[[uuid.UUID], Awaitable[bool]] | None = None,
+    ) -> tuple[dict[str, Any] | None, bool, int]:
+        """Reconcile heartbeat liveness without racing desktop lifecycle work.
+
+        Probe outside the lifecycle lock first so a transient negative cannot
+        block a concurrent acquire. Then take the lock, verify the cached
+        session identity, and confirm a negative while acquires/releases are
+        excluded. Stop-state evidence also prunes only the exact session that
+        the registry observed. Probe errors are unknown and preserve tracking.
+        """
+        probe = liveness_probe or self._is_desktop_session_live
+
+        if not workspace_running:
+            lock = await self._desktop_lock(workspace_id)
+            async with lock:
+                current = self._desktop_sessions.get(workspace_id)
+                if current is not None and current is expected_session:
+                    self._desktop_sessions.pop(workspace_id, None)
+                current = self._desktop_sessions.get(workspace_id)
+                return (
+                    None,
+                    current is not None,
+                    self.get_desktop_generation(workspace_id),
+                )
+
+        initial_live: bool | None = None
+        if expected_session is not None:
+            try:
+                initial_live = await probe(workspace_id)
+            except Exception:
+                logger.exception(
+                    "desktop_session_health_check_failed",
+                    workspace_id=str(workspace_id),
+                )
+                lock = await self._desktop_lock(workspace_id)
+                async with lock:
+                    current = self._desktop_sessions.get(workspace_id)
+                    return (
+                        None,
+                        current is not None,
+                        self.get_desktop_generation(workspace_id),
+                    )
+
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            current = self._desktop_sessions.get(workspace_id)
+            if current is None:
+                return None, False, self.get_desktop_generation(workspace_id)
+
+            # The initial probe only describes the expected session. If a
+            # lifecycle operation installed a replacement while it ran, probe
+            # that replacement under the lock rather than applying stale
+            # evidence to it.
+            confirmed_live = initial_live if current is expected_session else None
+            try:
+                if confirmed_live is None:
+                    confirmed_live = await probe(workspace_id)
+                if confirmed_live:
+                    return (
+                        self._desktop_heartbeat_payload(workspace_id, current),
+                        True,
+                        self.get_desktop_generation(workspace_id),
+                    )
+
+                # A single negative remains provisional. This confirmation is
+                # serialized with acquire/release and applies to `current`.
+                if await probe(workspace_id):
+                    return (
+                        self._desktop_heartbeat_payload(workspace_id, current),
+                        True,
+                        self.get_desktop_generation(workspace_id),
+                    )
+            except Exception:
+                logger.exception(
+                    "desktop_session_health_check_failed",
+                    workspace_id=str(workspace_id),
+                )
+                return None, True, self.get_desktop_generation(workspace_id)
+
+            # The lock keeps this identity stable, but retain the explicit
+            # guard so future changes cannot let stale evidence prune a new
+            # cache entry.
+            if self._desktop_sessions.get(workspace_id) is not current:
+                replacement = self._desktop_sessions.get(workspace_id)
+                return (
+                    None,
+                    replacement is not None,
+                    self.get_desktop_generation(workspace_id),
+                )
+            self._desktop_sessions.pop(workspace_id, None)
+            return None, False, self.get_desktop_generation(workspace_id)
+
+    def get_desktop_state_payload(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, Any] | None:
+        """Return cache/network fields for desktop lifecycle announcements."""
+        session = self._desktop_sessions.get(workspace_id)
+        if session is None:
+            return None
+        return {
+            "workspace_id": str(workspace_id),
+            "port": session.port,
+            "guest_ip": self.get_desktop_guest_ip(workspace_id),
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+            "generation": session.generation,
+            "epoch": self.epoch,
+            "mcp": session.mcp_active,
+            "holder_count": session.holder_count,
+        }
+
+    async def _ensure_desktop_process_locked(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> DesktopSession:
+        """Ensure the desktop process while holding the workspace lock."""
+        existing = self._desktop_sessions.get(workspace_id)
+        preserved_viewer = existing.viewer_held if existing is not None else False
+        preserved_runs = (
+            set(existing.computeruse_run_ids) if existing is not None else set()
+        )
+        preserved_generation = max(
+            existing.generation if existing is not None else 0,
+            self._desktop_generations.get(workspace_id, 0),
+        )
+        if existing is not None:
+            if await self._is_desktop_session_live(workspace_id):
+                logger.info("desktop_already_running", workspace_id=str(workspace_id))
+                return existing
+            self._desktop_sessions.pop(workspace_id, None)
+            logger.warning(
+                "desktop_cached_session_stale",
+                workspace_id=str(workspace_id),
+            )
+
+        if await self._is_desktop_session_live(workspace_id):
+            recovered = DesktopSession(
+                workspace_id=workspace_id,
+                instance_id=self._get_cached(workspace_id).instance_id,
+                viewer_held=preserved_viewer,
+                computeruse_run_ids=preserved_runs,
+                generation=preserved_generation + 1,
+            )
+            self._desktop_sessions[workspace_id] = recovered
+            self._desktop_generations[workspace_id] = recovered.generation
+            logger.info(
+                "desktop_session_recovered_on_start",
+                workspace_id=str(workspace_id),
+                generation=recovered.generation,
+            )
+            return recovered
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        resolved_width, resolved_height = self._resolve_desktop_geometry(width, height)
+
+        log = logger.bind(workspace_id=str(workspace_id))
+
+        # Use the runner-owned command for existing images too: legacy baked
+        # stop scripts match arbitrary argv text and can kill agent transports.
+        await runtime.exec_command_wait(
+            info.instance_id,
+            ["bash", "-lc", DESKTOP_STOP_COMMAND],
+            env={"HOME": "/root"},
+        )
+
+        start_command = self._desktop_start_command(resolved_width, resolved_height)
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["bash", "-lc", start_command],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            log.error("desktop_start_failed", exit_code=exit_code, output=output)
+            raise RuntimeError(f"Failed to start desktop session: {output}")
+
+        session = DesktopSession(
+            workspace_id=workspace_id,
+            instance_id=info.instance_id,
+            viewer_held=preserved_viewer,
+            computeruse_run_ids=preserved_runs,
+            generation=preserved_generation + 1,
+        )
+        self._desktop_sessions[workspace_id] = session
+        self._desktop_generations[workspace_id] = session.generation
+        log.info("desktop_started", port=session.port, generation=session.generation)
+        return session
+
+    @live_interaction
+    async def release_workspace(self, workspace_id: uuid.UUID) -> None:
+        """Attempt to close all durable owners before physical workspace disposal.
+
+        Unconfirmed cleanup retains protective leases; workspace_ended finalizes
+        them only after the runtime confirms the exact guest was stopped/removed.
+        """
+        for row in await self.lease_store.list_unfinished(str(workspace_id)):
+            if row["state"] in {"reserved", "held", "closing"}:
+                await self._release_lease(workspace_id, row)
+
+    async def _stop_desktop_process(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        expected_session: DesktopSession,
+    ) -> None:
+        """Stop the observed Xvnc process and confirm exit before clearing state."""
+        log = logger.bind(workspace_id=str(workspace_id))
+        if self._desktop_sessions.get(workspace_id) is not expected_session:
+            log.warning("desktop_stop_skipped_session_replaced")
+            return
+        runtime = self._get_runtime(workspace_id)
+        info = self._get_cached(workspace_id)
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id, ["bash", "-lc", DESKTOP_STOP_COMMAND]
+        )
+        if exit_code != 0:
+            log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
+        # Confirm exit separately before releasing desktop ownership.
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id, ["sh", "-lc", DESKTOP_STOPPED_PROBE]
+        )
+        if exit_code != 0:
+            log.warning("desktop_stop_unconfirmed", exit_code=exit_code, output=output)
+            raise RuntimeError("Desktop stop was not confirmed")
+        self._desktop_sessions.pop(workspace_id, None)
+        log.info("desktop_stopped")
+
+    @staticmethod
+    def _desktop_env() -> dict[str, str]:
+        """Pin X11 commands to the runner's display, home, and authority file."""
+        return {
+            "HOME": DESKTOP_HOME,
+            "DISPLAY": DESKTOP_DISPLAY,
+            "XAUTHORITY": DESKTOP_XAUTHORITY_PATH,
+        }
+
+    @staticmethod
+    def _sanitize_run_id(run_id: str) -> str:
+        """Validate a computer-use recording run identifier."""
+        if not run_id or not _RUN_ID_RE.match(run_id):
+            raise ValueError(f"Invalid run_id: {run_id}")
+        return run_id
+
+    async def _exec_desktop_shell(
+        self,
+        workspace_id: uuid.UUID,
+        command: str,
+    ) -> tuple[int, str]:
+        """Execute a shell command inside the workspace desktop environment."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        return await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env=self._desktop_env(),
+        )
+
+    async def _get_desktop_geometry(
+        self,
+        workspace_id: uuid.UUID,
+    ) -> tuple[int, int]:
+        """Return desktop width and height for recording."""
+        exit_code, output = await self._exec_desktop_shell(
+            workspace_id,
+            "xdotool getdisplaygeometry 2>/dev/null || echo '1920 1080'",
+        )
+        if exit_code == 0:
+            parts = output.strip().split()
+            if len(parts) >= 2:
+                try:
+                    return int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+
+        return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+
+    @live_interaction
+    async def desktop_action(
+        self,
+        workspace_id: uuid.UUID,
+        action: str,
+        args: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Manage desktop leases, input ownership, and recordings."""
+        payload = args or {}
+
+        if action == "activate":
+            if payload.get("kind") == "agent":
+                raise ValueError("Agent desktop leases are process ownership only")
+            raise ValueError("Desktop lease activation is only supported through hold")
+        if action == "hold" and payload.get("kind") == "agent":
+            raise ValueError("Agent desktop leases are process ownership only")
+
+        if action in {
+            "binding",
+            "reserve",
+            "renew",
+            "lease_status",
+            "hold",
+            "unhold",
+            "release",
+        }:
+            return await self._lease_action(workspace_id, action, payload)
+
+        if action in {"input_acquire", "input_release"}:
+            if payload.get("epoch") != self.epoch:
+                raise ValueError("Stale desktop input epoch")
+            lock = await self._desktop_lock(workspace_id)
+            async with lock:
+                if self.capture_fence is not None:
+                    self.capture_fence.check_current(workspace_id)
+                try:
+                    fence = await self.lease_store.input_ownership(
+                        str(workspace_id),
+                        str(payload.get("lease_id", "")),
+                        self.epoch,
+                        payload.get("revision", 1),
+                        acquire=action == "input_acquire",
+                        activation_revision=payload.get("activation_revision"),
+                    )
+                except DesktopInputBusyError:
+                    return {"ok": False, "busy": True}
+                return {
+                    "ok": True,
+                    "input_generation": fence,
+                    "generation": self.get_desktop_generation(workspace_id),
+                }
+
+        if action == "record_start":
+            if not await self._is_desktop_session_live(workspace_id):
+                raise RuntimeError("Desktop session is not active")
+            return await self._managed_record_start(workspace_id, payload)
+
+        if action == "record_stop":
+            return await self._managed_record_stop(workspace_id, payload)
+
+        raise ValueError(f"Unknown desktop action: {action}")
+
+    @live_interaction
+    async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
+        """Write plain text into the desktop clipboard inside the workspace VM/container."""
+        if not await self._is_desktop_session_live(workspace_id):
+            raise RuntimeError("Desktop session is not active")
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        command = (
+            "set -e;"
+            "TOOL='';"
+            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
+            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
+            "elif command -v apt-get >/dev/null 2>&1; then "
+            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
+            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
+            "if command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
+            "elif command -v xclip >/dev/null 2>&1; then TOOL='xclip'; fi; "
+            "fi; "
+            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
+            f"printf %s '{encoded_text}' | base64 -d | "
+            "if [ \"$TOOL\" = 'xsel' ]; then "
+            "DISPLAY=:1 xsel --clipboard --input; "
+            "else DISPLAY=:1 timeout 3 xclip -selection clipboard -in >/dev/null 2>&1 || true; fi"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to write desktop clipboard: {output}")
+
+    async def _copy_selection_desktop_clipboard(
+        self, workspace_id: uuid.UUID, *, shift: bool
+    ) -> str:
+        """Copy the current browser selection and return only its fresh text."""
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+
+            session = self._desktop_sessions.get(workspace_id)
+            if session is not None and session.computeruse_run_ids:
+                raise RuntimeError("Clipboard copy is unavailable during computer use")
+
+            rows = await self.lease_store.list_unfinished(str(workspace_id))
+            if any(
+                row["kind"] in {"agent", "computeruse"}
+                and row["state"] in {"reserved", "held", "closing"}
+                for row in rows
+            ):
+                raise RuntimeError("Clipboard copy is unavailable during computer use")
+
+            if not await self._is_desktop_session_live(workspace_id):
+                raise RuntimeError("Desktop session is not active")
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+
+            command = build_guest_command(shift=shift)
+            try:
+                exit_code, output = await asyncio.wait_for(
+                    self._exec_desktop_shell(workspace_id, command), timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("Failed to copy desktop selection") from None
+            except Exception:
+                raise RuntimeError("Failed to copy desktop selection") from None
+            if exit_code != 0:
+                raise RuntimeError("Failed to copy desktop selection")
+            return output
+
+    @live_interaction
+    async def read_desktop_clipboard(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        copy_selection: bool = False,
+        shift: bool = False,
+    ) -> str:
+        """Read clipboard text, optionally atomically copying the current selection."""
+        if type(copy_selection) is not bool:
+            raise ValueError("copy_selection must be a boolean")
+        if type(shift) is not bool:
+            raise ValueError("shift must be a boolean")
+        if copy_selection:
+            return await self._copy_selection_desktop_clipboard(
+                workspace_id, shift=shift
+            )
+        if shift:
+            raise ValueError("shift requires copy_selection")
+        if not await self._is_desktop_session_live(workspace_id):
+            raise RuntimeError("Desktop session is not active")
+
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        command = (
+            "set -e;"
+            "TOOL='';"
+            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
+            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; "
+            "elif command -v apt-get >/dev/null 2>&1; then "
+            "apt-get update >/tmp/opencuria-clipboard-apt.log 2>&1 && "
+            "DEBIAN_FRONTEND=noninteractive apt-get install -y xclip xsel "
+            ">>/tmp/opencuria-clipboard-apt.log 2>&1 || true; "
+            "if command -v xclip >/dev/null 2>&1; then TOOL='xclip'; "
+            "elif command -v xsel >/dev/null 2>&1; then TOOL='xsel'; fi; "
+            "fi; "
+            "if [ -z \"$TOOL\" ]; then echo 'clipboard tool missing' >&2; exit 127; fi; "
+            "if [ \"$TOOL\" = 'xclip' ]; then "
+            "DISPLAY=:1 xclip -selection clipboard -o 2>/dev/null || true; "
+            "else DISPLAY=:1 xsel --clipboard --output 2>/dev/null || true; fi"
+        )
+        exit_code, output = await runtime.exec_command_wait(
+            info.instance_id,
+            ["sh", "-lc", command],
+            env={"HOME": "/root", "DISPLAY": ":1"},
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"Failed to read desktop clipboard: {output}")
+        return output
+
+    def get_desktop_session(self, workspace_id: uuid.UUID) -> DesktopSession | None:
+        """Return the active desktop session if any."""
+        return self._desktop_sessions.get(workspace_id)
+
+    def get_desktop_guest_ip(self, workspace_id: uuid.UUID) -> str:
+        """Get the upstream IP address for the workspace desktop proxy."""
+        info = self._get_cached(workspace_id)
+        runtime = self._get_runtime(workspace_id)
+        if not hasattr(runtime, "get_guest_ip"):
+            raise RuntimeError("Runtime does not support desktop proxy")
+        return runtime.get_guest_ip(info.instance_id, str(workspace_id))
+
+
+__all__ = [
+    "COMPUTER_USE_RECORD_DIR",
+    "DEFAULT_DESKTOP_HEIGHT",
+    "DEFAULT_DESKTOP_WIDTH",
+    "DESKTOP_DISPLAY",
+    "DESKTOP_HOME",
+    "DESKTOP_XAUTHORITY_PATH",
+    "MAX_DESKTOP_HEIGHT",
+    "MAX_DESKTOP_WIDTH",
+    "MIN_DESKTOP_HEIGHT",
+    "MIN_DESKTOP_WIDTH",
+    "_RUN_ID_RE",
+    "DesktopManager",
+]

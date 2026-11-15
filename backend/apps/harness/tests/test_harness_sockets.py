@@ -7,16 +7,15 @@ import uuid
 from typing import Any
 
 import pytest
+from asgiref.sync import sync_to_async
 
+from apps.harness.conversation_events import FRONTEND_EVENT_CONVERSATIONS_CHANGED
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PART,
-    FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_STATUS,
-    FRONTEND_EVENT_SUBTASK_FINISHED,
-    FRONTEND_EVENT_SUBTASK_STARTED,
-    FRONTEND_EVENT_TODO,
     HarnessService,
 )
+from apps.harness.interaction_service import FRONTEND_EVENT_PERMISSION
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
@@ -26,9 +25,15 @@ from apps.harness.providers.base import (
 )
 from apps.harness.repositories import (
     HarnessMessageRepository,
-    HarnessPartRepository,
     HarnessSessionRepository,
 )
+from apps.harness.run_timeline import (
+    FRONTEND_EVENT_PART,
+    FRONTEND_EVENT_SUBTASK_FINISHED,
+    FRONTEND_EVENT_SUBTASK_STARTED,
+    FRONTEND_EVENT_TODO,
+)
+from apps.harness.tests.helpers import attach_run_context, parts_for_session
 
 
 class FakeProvider(ProviderAdapter):
@@ -70,7 +75,7 @@ async def test_socket_event_payloads(harness_workspace) -> None:
         organization_id=harness_workspace.runner.organization_id,
         workspace_id=str(harness_workspace.id),
     )
-    await service._tasks[str(session.id)]
+    await service.run_registry.get_task(str(session.id))
 
     by_event: dict[str, list[dict[str, Any]]] = {}
     for item in emitted:
@@ -90,6 +95,149 @@ async def test_socket_event_payloads(harness_workspace) -> None:
     deltas = [e.get("delta", {}) for e in part_events]
     assert any("text" in d for d in deltas)
     assert any("step_finish" in d for d in deltas)
+    changed = by_event[FRONTEND_EVENT_CONVERSATIONS_CHANGED]
+    assert len(changed) == 1  # idle completion only; not once per streamed token
+    assert changed[0] == {
+        "event": FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+        "workspace_id": str(harness_workspace.id),
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_conversation_changes_emit_for_lifecycle_mutations(
+    harness_workspace,
+) -> None:
+    """Synchronous and async mutations notify only the affected workspace."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="Create lifecycle session",
+        title="initial title",
+    )
+    await sync_to_async(service.session_settings.update_title)(session.id, "Renamed")
+    conversations = ConversationService(events=service.conversation_events)
+    await sync_to_async(conversations.mark_session_read)(session.id)
+    await sync_to_async(conversations.mark_session_unread)(session.id)
+    forked = await conversations.fork_session(session.id)
+    await service.delete_session(session.id)
+
+    changed = [
+        item
+        for item in emitted
+        if item["event"] == FRONTEND_EVENT_CONVERSATIONS_CHANGED
+    ]
+    assert len(changed) == 6
+    assert all(
+        item == {
+            "event": FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+            "workspace_id": str(harness_workspace.id),
+        }
+        for item in changed
+    )
+    # Fork notifies once, and remains a root conversation in the same workspace.
+    assert forked.parent_id is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("is_child", [False, True], ids=["root", "child"])
+@pytest.mark.parametrize("mode", ["plan", "build"])
+async def test_mode_change_invalidates_only_root_conversations(
+    harness_workspace, is_child: bool, mode: str
+) -> None:
+    """Persist normalized mode/agent before notifying the root workspace feed."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+        assert stored.mode == mode
+        assert stored.agent_name == mode
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    parent = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="parent",
+    )
+    session = HarnessSessionRepository.create(
+        workspace_id=parent.workspace_id,
+        organization_id=parent.organization_id,
+        title="mode change",
+        mode="build" if mode == "plan" else "plan",
+        agent_name="build" if mode == "plan" else "plan",
+        parent_id=parent.id if is_child else None,
+    )
+
+    updated = await sync_to_async(service.session_settings.set_mode)(
+        session.id, f" {mode.upper()} "
+    )
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert updated.mode == stored.mode == mode
+    assert updated.agent_name == stored.agent_name == mode
+    assert emitted == (
+        []
+        if is_child
+        else [
+            {
+                "event": FRONTEND_EVENT_CONVERSATIONS_CHANGED,
+                "workspace_id": str(harness_workspace.id),
+            }
+        ]
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_invalid_mode_does_not_invalidate_conversations(
+    harness_workspace,
+) -> None:
+    """Rejected modes neither persist nor notify the conversation feed."""
+    emitted: list[dict[str, Any]] = []
+
+    async def _emit(event: str, data: dict[str, Any]) -> None:
+        emitted.append({"event": event, **data})
+
+    service = HarnessService(emit=_emit)
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        title="invalid mode",
+        mode="build",
+        agent_name="build",
+    )
+
+    with pytest.raises(ValueError, match="Invalid mode"):
+        await sync_to_async(service.session_settings.set_mode)(session.id, "invalid")
+
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert stored.mode == "build"
+    assert stored.agent_name == "build"
+    assert emitted == []
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_conversation_change_emit_failure_is_best_effort(
+    harness_workspace,
+) -> None:
+    """A failed socket emit cannot break a synchronous lifecycle mutation."""
+    async def _broken_emit(_event: str, _data: dict[str, Any]) -> None:
+        raise RuntimeError("socket unavailable")
+
+    service = HarnessService(emit=_broken_emit)
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="Emit failure remains harmless",
+    )
+    renamed = await sync_to_async(service.session_settings.update_title)(
+        session.id, "Still works"
+    )
+    assert renamed.title == "Still works"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -124,7 +272,7 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
             "reasoning_effort": "high",
         },
     )
-    part = HarnessPartRepository.list_for_session(session.id)
+    part = parts_for_session(session.id)
     assert any(p.type == "subtask" for p in part)
     await service._on_runner_event(
         session,
@@ -170,13 +318,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
         title="parent",
     )
     assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
+    attach_run_context(service, session, assistant)
     await service._on_runner_event(
         session,
         assistant,
@@ -192,7 +334,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
     )
     started_parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "subtask"
     ]
     assert len(started_parts) == 1
@@ -213,7 +355,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
     )
     finished_parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "subtask"
     ]
     assert finished_parts[0].meta.get("child_session_id") == "child-session-1"
@@ -225,7 +367,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
 async def test_permission_event_emitted_once_with_request_id(
     harness_workspace,
 ) -> None:
-    """_on_permission emits a single harness.permission_required with request_id."""
+    """Permission requests emit one event containing their request_id."""
     emitted: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
@@ -239,7 +381,7 @@ async def test_permission_event_emitted_once_with_request_id(
     )
     assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
     permission_task = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -257,7 +399,9 @@ async def test_permission_event_emitted_once_with_request_id(
     assert permission_events[0]["tool"] == "bash"
     assert permission_events[0]["call_id"] == "call-9"
     assert permission_events[0]["agent_name"] == session.agent_name
-    await service.resolve_permission(
+    assert permission_events[0]["root_session_id"] == str(session.id)
+    assert permission_events[0]["session_id"] == str(session.id)
+    await service.interactions.resolve_permission(
         session=session,
         request_id=uuid.UUID(permission_events[0]["request_id"]),
         response="once",

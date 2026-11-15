@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import uuid
 
-from django.conf import settings
 from django.db.models import QuerySet
 
 from .models import Membership, MembershipRole, Organization
-
 
 # ---------------------------------------------------------------------------
 # Organization Repository
@@ -50,6 +48,15 @@ class OrganizationRepository:
         return organization
 
     @staticmethod
+    def update_image_versions_to_keep(
+        organization: Organization, keep: int
+    ) -> Organization:
+        """Persist how many newest image versions are always retained."""
+        organization.image_versions_to_keep = keep
+        organization.save(update_fields=["image_versions_to_keep", "updated_at"])
+        return organization
+
+    @staticmethod
     def list_for_user(user) -> QuerySet[Organization]:
         """Return all organizations a user is a member of."""
         return Organization.objects.filter(
@@ -66,11 +73,32 @@ class MembershipRepository:
     """Data access for Membership records."""
 
     @staticmethod
+    def get_for_user_and_org(
+        user_id: int, org_id: uuid.UUID, *, lock: bool = False
+    ) -> Membership | None:
+        """Fetch a user's membership and related identity by durable IDs."""
+        query = Membership.objects.filter(
+            user_id=user_id, organization_id=org_id
+        ).select_related("user", "organization")
+        if lock:
+            query = query.select_for_update()
+        return query.first()
+
+    @staticmethod
     def get(user, organization: Organization) -> Membership | None:
         """Fetch a specific membership."""
         return Membership.objects.filter(
             user=user,
             organization=organization,
+        ).first()
+
+    @staticmethod
+    def get_active(user, organization: Organization) -> Membership | None:
+        """Fetch a membership only while its user account is active."""
+        return Membership.objects.filter(
+            user=user,
+            organization=organization,
+            user__is_active=True,
         ).first()
 
     @staticmethod

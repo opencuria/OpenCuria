@@ -1,36 +1,36 @@
 """Abstract base class for runtime backends.
 
 The runtime backend is responsible for managing the lifecycle of isolated
-workspace environments (containers, VMs, etc.).  Concrete implementations
+QEMU/KVM virtual machines.  Concrete implementations
 must implement every abstract method defined here.
 """
 
 from __future__ import annotations
 
 import abc
-from collections.abc import AsyncIterator
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from .inventory import RuntimeInventory
+from .managed_process import (
+    TOKEN_PROBE_CODE,
+    ProcessProfile,
+    managed_close_argv,
+    validate_guest_token,
+)
 
 
 @dataclass(frozen=True)
 class WorkspaceConfig:
     """Parameters for creating a new workspace environment.
 
-    Fields are generic — each runtime interprets them appropriately:
-    - Docker: ``image`` is a Docker image tag, ``volumes`` maps volume
-      names to mount specs, ``network`` is a Docker network name.
-    - QEMU: ``image`` is a QCOW2 base image path, ``volumes`` is unused
-      (storage is managed via disk images), ``network`` is a libvirt
-      network name.
+    ``image`` is a QCOW2 base image path. Each VM gets its own libvirt network
+    and overlay disk.
     """
 
     workspace_id: str
     image: str
-    env_vars: dict[str, str]
-    volumes: dict[str, dict[str, str]] = field(default_factory=dict)
-    network: str | None = None
-    labels: dict[str, str] | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -50,7 +50,7 @@ class RuntimeWorkspaceInfo:
     """Workspace information discovered from the runtime.
 
     Used by ``list_workspaces`` to reconstruct workspace state from
-    container/VM metadata and status without needing a local database.
+    libvirt metadata and status without needing a local database.
     """
 
     workspace_id: str
@@ -60,16 +60,32 @@ class RuntimeWorkspaceInfo:
 
 
 @dataclass
+class ProcessHandle:
+    """Opaque handle for a generic non-TTY bidirectional process stream.
+
+    Created by ``spawn_process``; drive I/O with ``process_read`` /
+    ``process_write`` / ``process_close`` / ``process_wait``.
+
+    ``instance_id`` identifies the libvirt domain. ``handle`` stores the
+    transport's I/O object.
+    ``metadata`` holds runtime-specific data (exec id, pidfile, …).
+    """
+
+    instance_id: str
+    handle: object
+    metadata: dict = field(default_factory=dict)
+    closed: bool = field(default=False, init=False)
+
+
+@dataclass
 class PtyHandle:
     """Opaque handle for an interactive PTY session.
 
     Created by ``exec_pty`` and passed to ``pty_read``/``pty_write``/
     ``pty_resize``/``pty_close``.
 
-    ``instance_id`` identifies the workspace instance (container ID,
-    domain name, …).  ``handle`` stores the runtime-specific I/O object
-    (Docker exec socket, asyncssh process, …).  ``metadata`` holds any
-    additional runtime-specific data.
+    ``instance_id`` identifies the libvirt domain. ``handle`` stores the
+    asyncssh process. ``metadata`` holds additional transport data.
     """
 
     instance_id: str
@@ -87,29 +103,15 @@ class ImageArtifactInfo:
     name: str
     created_at: datetime
     size_bytes: int | None = None
-
-
-class CommandExecutionError(RuntimeError):
-    """Raised when a streamed workspace command exits unsuccessfully."""
-
-    def __init__(self, exit_code: int) -> None:
-        self.exit_code = exit_code
-        super().__init__(f"Command failed with exit code {exit_code}")
+    min_disk_size_gb: int | None = None
+    virtual_size_bytes: int | None = None
 
 
 class RuntimeBackend(abc.ABC):
     """Abstract interface for workspace runtime management.
 
-    Implement this interface to swap Docker for another virtualisation
-    technology (QEMU/KVM, Firecracker, Kata Containers, …).
+    Keeps workspace operations independent of the QEMU/libvirt transport.
     """
-
-    # --- Runtime identity ----------------------------------------------------
-
-    @property
-    @abc.abstractmethod
-    def runtime_type(self) -> str:
-        """Return a short identifier for this runtime (e.g. ``"docker"``)."""
 
     # --- Lifecycle ------------------------------------------------------------
 
@@ -117,8 +119,7 @@ class RuntimeBackend(abc.ABC):
     async def create_workspace(self, config: WorkspaceConfig) -> str:
         """Create and start a new workspace environment.
 
-        Returns the runtime-specific identifier (e.g. Docker container ID,
-        libvirt domain name).
+        Returns the libvirt domain name.
         """
 
     @abc.abstractmethod
@@ -151,16 +152,23 @@ class RuntimeBackend(abc.ABC):
             f"{self.__class__.__name__} does not support reconfigure_workspace"
         )
 
-    async def restart_workspace(self, instance_id: str) -> None:
-        """Force-restart a workspace (hard reset, then start).
+    async def validate_reconfigure(
+        self,
+        instance_id: str,
+        *,
+        qemu_vcpus: int,
+        qemu_memory_mb: int,
+        qemu_disk_size_gb: int,
+    ) -> None:
+        """Refuse a resource change before any effect.
 
-        Used by the self-healing health-check loop when a workspace becomes
-        unreachable.  The default implementation performs a stop followed by
-        a start.  Runtimes that support a faster hard-reset (e.g. QEMU
-        virDomainDestroy + virDomainCreate) should override this method.
+        Raise ``OperationRejectedError`` for values ``reconfigure_workspace`` would
+        reject; the default accepts everything.
         """
-        await self.stop_workspace(instance_id)
-        await self.start_workspace(instance_id)
+
+    async def inventory(self) -> RuntimeInventory:
+        """Return a full physical graph or explicit incomplete inspection."""
+        return RuntimeInventory(errors=["Inventory unsupported"])
 
     # --- Inspection -----------------------------------------------------------
 
@@ -180,19 +188,6 @@ class RuntimeBackend(abc.ABC):
         """
 
     # --- Execution ------------------------------------------------------------
-
-    @abc.abstractmethod
-    async def exec_command(
-        self,
-        instance_id: str,
-        command: list[str],
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> AsyncIterator[str]:
-        """Execute a command inside the workspace and stream stdout/stderr.
-
-        Yields output line-by-line as an async iterator.
-        """
 
     @abc.abstractmethod
     async def exec_command_wait(
@@ -215,6 +210,132 @@ class RuntimeBackend(abc.ABC):
         data: bytes,
     ) -> None:
         """Extract a tar archive stream into *path* inside the workspace."""
+
+    # --- Generic non-TTY bidirectional process streams ---------------------
+
+    # Limits shared by all runtime implementations of the generic stream
+    # transport (MCP stdio / workspace-local TCP relay).  Chunk sizes are
+    # bounded so one peer can never force unbounded buffering.
+    STREAM_CHUNK_SIZE = 64 * 1024
+    STREAM_READ_TIMEOUT = 300.0
+
+    @property
+    def supports_managed_process(self) -> bool:
+        """Whether durable fenced stream launch/close is implemented."""
+        return False
+
+    async def probe_managed_token(self, instance_id: str) -> dict[str, str]:
+        """Read boot + PID1 starttime before a managed launch is committed."""
+        code, output = await self.exec_command_wait(
+            instance_id, ["python3", "-c", TOKEN_PROBE_CODE],
+        )
+        if code != 0:
+            raise RuntimeError("Managed guest token probe failed")
+        return validate_guest_token(json.loads(output))
+
+    async def spawn_process(
+        self,
+        instance_id: str,
+        command: list[str],
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+        *,
+        control_path: str | None = None,
+        expected_token: dict[str, str] | None = None,
+        process_profile: ProcessProfile | None = None,
+        isolated_home: str | None = None,
+    ) -> ProcessHandle:
+        """Spawn a non-TTY bidirectional process inside the workspace.
+
+        Args:
+            instance_id: Runtime-specific instance identifier.
+            command: argv list (never shell-joined by the caller).
+            control_path: Optional runner-selected durable guest control directory.
+                Managed callers must persist this identity before spawning.
+            expected_token: Immutable guest incarnation token sampled before
+                the managed intent commit; never supplied by an external RPC.
+            workdir: Working directory inside the workspace.
+            env: Extra environment for the child only (least privilege:
+                persistent workspace credentials are NOT sourced).
+            process_profile: Optional isolated agent or credential-free helper
+                environment, independent of the managed process owner.
+            isolated_home: Runner-selected temporary home for isolated profiles.
+
+        Returns a ``ProcessHandle`` with split stdout/stderr streams.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support spawn_process"
+        )
+
+    async def process_read(
+        self,
+        handle: ProcessHandle,
+        stream: str = "stdout",
+        size: int = 65536,
+    ) -> bytes:
+        """Read raw bytes from *stream* (``"stdout"``/``"stderr"``).
+
+        Blocks until data is available.  Returns ``b""`` on EOF.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_read"
+        )
+
+    async def process_write(self, handle: ProcessHandle, data: bytes) -> None:
+        """Write raw bytes to the process stdin."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_write"
+        )
+
+    async def process_write_eof(self, handle: ProcessHandle) -> None:
+        """Half-close the process stdin (graceful EOF)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_write_eof"
+        )
+
+    async def process_wait(self, handle: ProcessHandle) -> int | None:
+        """Wait for the process tree to exit; return the exit code."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_wait"
+        )
+
+    async def close_managed_process(
+        self, instance_id: str, control_path: str,
+    ) -> bool:
+        """Fence late starts and verify group termination; raise if unknown."""
+        code, _ = await self.exec_command_wait(
+            instance_id, managed_close_argv(control_path),
+        )
+        if code != 0:
+            raise RuntimeError("Managed stream termination unverified")
+        return True
+
+    async def process_detach(self, handle: ProcessHandle) -> None:
+        """Release local transport only after lifecycle proves guest death.
+
+        Must never exec or signal the guest. Unsupported runtimes fail closed.
+        """
+        raise NotImplementedError("Local stream detach unsupported")
+
+    async def process_close(self, handle: ProcessHandle) -> bool | None:
+        """Terminate the tree and release transport resources.
+
+        Managed handles return True only after confirmed fenced group closure,
+        or raise on unknown outcome. Legacy unmanaged runtimes may return None.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support process_close"
+        )
+
+    def is_transport_failure(self, error: BaseException) -> bool:
+        """Whether *error* means the guest transport refused or lost the call.
+
+        Such failures (e.g. an exhausted guest session limit) say nothing
+        about the command itself and are reported as an unreachable
+        workspace instead of a command failure.
+        """
+        del error
+        return False
 
     # --- PTY / interactive terminal -----------------------------------------
 
@@ -254,16 +375,14 @@ class RuntimeBackend(abc.ABC):
     async def pty_close(self, handle: PtyHandle) -> None:
         """Close the PTY and release resources."""
 
-    # --- Image artifacts (optional) ------------------------------------------
+    # --- Image artifacts -----------------------------------------------------
 
-    @property
-    def supports_image_artifacts(self) -> bool:
-        """Whether this runtime supports image artifact capture/clone operations."""
-        return False
 
     async def create_image_artifact(
-        self, instance_id: str, artifact_name: str
-    ) -> str:
+        self, instance_id: str, artifact_name: str, *,
+        artifact_id: str | None = None, operation_id: str | None = None,
+        credential_clean: bool = False,
+    ) -> ImageArtifactInfo:
         """Capture an image artifact for the workspace.
 
         Returns an artifact identifier.
@@ -274,14 +393,6 @@ class RuntimeBackend(abc.ABC):
 
     async def delete_image_artifact(self, artifact_id: str) -> None:
         """Delete a previously created image artifact."""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support image artifacts"
-        )
-
-    async def list_image_artifacts(
-        self, instance_id: str | None = None
-    ) -> list[ImageArtifactInfo]:
-        """List image artifacts, optionally filtered by workspace instance."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support image artifacts"
         )

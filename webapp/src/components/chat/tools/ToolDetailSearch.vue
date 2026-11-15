@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { HarnessPart } from '@/types/harness'
-import { parseToolArguments, stringArg } from '@/lib/toolDisplay'
+import type { HarnessPart } from '@opencuria/chat-core/harness'
+import { parseToolArguments, stringArg } from '@opencuria/chat-core/toolDisplay'
 
 const props = defineProps<{
   part: HarnessPart
@@ -40,7 +40,7 @@ const query = computed(() => {
     </div>
     <ul
       v-if="lines.length"
-      class="max-h-64 overflow-auto rounded-md bg-muted/50 px-2 py-1.5 font-mono text-[11px] text-muted-foreground"
+      class="max-h-64 overflow-auto rounded-lg border border-border/60 bg-muted/40 px-2.5 py-2 font-mono text-[11px] text-muted-foreground"
     >
       <li v-for="(line, index) in lines" :key="index" class="truncate">{{ line }}</li>
     </ul>

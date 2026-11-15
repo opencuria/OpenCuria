@@ -1,0 +1,452 @@
+"""Reconcile runner observations and apply workspace inactivity policy."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+
+from asgiref.sync import async_to_sync, sync_to_async
+from django.utils import timezone
+
+from apps.credentials.services import CredentialSvc
+from common.exceptions import ConflictError
+
+from ...enums import WorkspaceStatus
+from ...exceptions import RunnerOfflineError, WorkspaceStateError
+
+# Forward references remain quoted to keep model imports typing-only.
+# ruff: noqa: UP037
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
+    from ...models import Runner, Task, WorkspaceProcess
+
+if TYPE_CHECKING:
+    from ...repositories import RunnerRepository, WorkspaceRepository
+    from ..domains.process_manager import ProcessManagerService
+    from ..domains.runner_lifecycle import RunnerLifecycleService
+    from ..domains.workspace_lifecycle import WorkspaceLifecycleService
+    from ..infra.frontend_bus import FrontendBusService
+    from ..infra.session_store import SessionStoreService
+
+logger = logging.getLogger(__name__)
+
+
+class HeartbeatReconcilerService:
+    """Heartbeat handling and auto-stop with explicitly supplied collaborators."""
+
+    def __init__(
+        self,
+        *,
+        runners: type[RunnerRepository],
+        workspaces: type[WorkspaceRepository],
+        frontend_bus: FrontendBusService,
+        process_manager: ProcessManagerService,
+        runner_lifecycle: RunnerLifecycleService,
+        session_store: SessionStoreService,
+        workspace_lifecycle: WorkspaceLifecycleService,
+    ) -> None:
+        """Compose this service without inheriting sibling behavior or state."""
+        self.runners = runners
+        self.workspaces = workspaces
+        self.frontend_bus = frontend_bus
+        self.process_manager = process_manager
+        self.runner_lifecycle = runner_lifecycle
+        self.session_store = session_store
+        self.workspace_lifecycle = workspace_lifecycle
+        self.pending_process_verify: dict[str, list] = {}
+
+    def _get_workspace_auto_stop_deadline(self, workspace) -> datetime | None:
+        """Return the inactivity deadline for a workspace, or None when disabled."""
+        organization = getattr(getattr(workspace, "runner", None), "organization", None)
+        timeout_minutes = getattr(
+            organization,
+            "workspace_auto_stop_timeout_minutes",
+            None,
+        )
+        if (
+            timeout_minutes is None
+            or timeout_minutes <= 0
+            or workspace.status != WorkspaceStatus.RUNNING
+            or workspace.last_activity_at is None
+        ):
+            return None
+        return workspace.last_activity_at + timedelta(minutes=timeout_minutes)
+
+    def _should_auto_stop_workspace(
+        self,
+        workspace,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Return True if inactivity policy requires stopping the workspace."""
+        if workspace.status != WorkspaceStatus.RUNNING:
+            return False
+        if workspace.active_operation or workspace.current_task_id:
+            return False
+        if getattr(workspace, "has_active_harness_session", False):
+            return False
+        runner = getattr(workspace, "runner", None)
+        if runner is None or not runner.is_online:
+            return False
+        deadline = self._get_workspace_auto_stop_deadline(workspace)
+        if deadline is None:
+            return False
+        return deadline <= (now or timezone.now())
+
+    async def auto_stop_inactive_workspaces(
+        self,
+        *,
+        runner_id: uuid.UUID | None = None,
+        organization_id: uuid.UUID | None = None,
+        now: datetime | None = None,
+        workspaces: list | None = None,
+    ) -> list["Task"]:
+        """Stop running workspaces whose inactivity deadline has elapsed."""
+        evaluation_time = now or timezone.now()
+        if workspaces is None:
+            if runner_id is not None:
+                workspaces = await sync_to_async(
+                    lambda: list(self.workspaces.list_by_runner(runner_id))
+                )()
+            elif organization_id is not None:
+                workspaces = await sync_to_async(
+                    lambda: list(self.workspaces.list_by_organization(organization_id))
+                )()
+            else:
+                workspaces = await sync_to_async(
+                    lambda: list(self.workspaces.list_all())
+                )()
+
+        dispatched: list["Task"] = []
+        for workspace in workspaces:
+            try:
+                task = await self.auto_stop_if_inactive(
+                    workspace.id, now=evaluation_time
+                )
+            except (ConflictError, RunnerOfflineError, WorkspaceStateError) as exc:
+                logger.info(
+                    "Skipped auto-stop for workspace %s: %s",
+                    workspace.id,
+                    exc,
+                )
+                continue
+            if task is None:
+                continue
+            logger.info(
+                "Dispatched inactivity auto-stop for workspace %s",
+                workspace.id,
+            )
+            dispatched.append(task)
+
+        return dispatched
+
+    async def auto_stop_if_inactive(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        now: datetime | None = None,
+    ) -> "Task | None":
+        """Stop one workspace when the inactivity policy requires it.
+
+        Returns None when the workspace stays running. ``stop_workspace``
+        re-checks eligibility under the runner lock and raises
+        ``ConflictError`` when state changed since this read.
+        """
+        # Heartbeat reconciliation may have loaded this workspace before a
+        # scheduled/manual harness run started. Refresh its busy-session
+        # state through the gateway at the auto-stop decision boundary.
+        # Manual stops keep their existing behavior in stop_workspace().
+        workspace = await sync_to_async(self.runner_lifecycle.get_workspace_or_none)(
+            workspace_id
+        )
+        if workspace is None or not self._should_auto_stop_workspace(
+            workspace, now=now
+        ):
+            return None
+        return await self.workspace_lifecycle.stop_workspace(
+            workspace.id, auto_stop=True
+        )
+
+    def handle_heartbeat(
+        self,
+        runner: "Runner",
+        workspaces: list[dict],
+    ) -> list[uuid.UUID]:
+        """Handle runner:heartbeat event — reconcile workspace state.
+
+        Compares the runner's reported container states with the backend's
+        records and updates any stale entries.
+
+        Args:
+            runner: The Runner that sent the heartbeat.
+            workspaces: List of dicts with workspace_id and status.
+
+        Returns:
+            Workspace IDs whose on-disk credentials need live reconciliation.
+        """
+        # Update heartbeat timestamp
+        self.runners.update_heartbeat(runner)
+        # Build lookup of runner-reported workspace states
+        runner_ws_payloads: dict[str, dict] = {}
+        runner_ws_states: dict[str, str] = {}
+        for ws_data in workspaces:
+            ws_id = ws_data.get("workspace_id", "")
+            status = ws_data.get("status", "unknown")
+            runner_ws_payloads[ws_id] = ws_data
+            runner_ws_states[ws_id] = status
+
+        # Check backend workspaces for this runner
+        backend_workspaces = list(self.workspaces.list_by_runner(runner.id))
+        runner_id_str = str(runner.id)
+        # Failed workspaces follow observed power states again once they were
+        # provisioned; failed creations may hide a partial guest.
+        recoverable_ids = self.workspaces.list_provisioned_ids(
+            [
+                ws.id
+                for ws in backend_workspaces
+                if ws.status == WorkspaceStatus.FAILED
+                and str(ws.id) in runner_ws_states
+            ]
+        )
+
+        # Unknown resources are inventory evidence, never cleanup authority.
+
+        credential_sync_ids: list[uuid.UUID] = []
+        # Vanished process rows collected during the sync reconcile pass.
+        # The heartbeat itself is sync (no RPC allowed), so verification
+        # against the runner happens in ``reconcile_vanished_processes``
+        # (async, called by the Socket.IO handler after this returns).
+        pending_vanished: dict[str, list["WorkspaceProcess"]] = {}
+        for ws in backend_workspaces:
+            ws_id_str = str(ws.id)
+            runner_status = runner_ws_states.get(ws_id_str)
+            runner_payload = runner_ws_payloads.get(ws_id_str, {})
+
+            if ws.status == WorkspaceStatus.DELETED or (
+                ws.status == WorkspaceStatus.FAILED and ws.id not in recoverable_ids
+            ):
+                continue
+            if ws.status in (
+                WorkspaceStatus.PENDING_DELETION,
+                WorkspaceStatus.DELETING,
+                WorkspaceStatus.DELETE_FAILED,
+            ):
+                self.session_store.cleanup_desktop_state(ws_id_str)
+                continue
+            if ws.current_task_id or ws.active_operation:
+                # Observations may arrive before guest preparation/scrubbing is
+                # finished. The bound lifecycle result owns these transitions.
+                continue
+
+            if ws_id_str not in runner_ws_states:
+                # Absence from a partial/failed scan proves nothing.
+                continue
+            else:
+                # Map the observed VM status to workspace status
+                new_status = self._map_instance_status(runner_status)
+                if new_status is None:
+                    # A transitional power state settles in a later observation.
+                    continue
+                if ws.status == WorkspaceStatus.FAILED and new_status not in {
+                    WorkspaceStatus.RUNNING,
+                    WorkspaceStatus.STOPPED,
+                }:
+                    continue
+                if new_status != ws.status:
+                    # Never promote CREATING → RUNNING via heartbeat.
+                    # Only the explicit workspace:created event (sent after
+                    # repos are cloned and SSH is established) may do that.
+                    if (
+                        ws.status == WorkspaceStatus.CREATING
+                        and new_status == WorkspaceStatus.RUNNING
+                    ):
+                        continue
+                    logger.info(
+                        "Heartbeat: workspace %s status %s -> %s",
+                        ws_id_str,
+                        ws.status,
+                        new_status,
+                    )
+                    if not self.workspaces.reconcile_heartbeat_status(
+                        ws, new_status, runner_sid=runner.sid
+                    ):
+                        # A newer result/admission/tombstone won since the list
+                        # query; do not apply any cleanup from this old snapshot.
+                        continue
+                    self.frontend_bus.forward_workspace_status(ws, status=new_status)
+
+                if new_status != WorkspaceStatus.RUNNING:
+                    self.session_store.cleanup_desktop_state(ws_id_str)
+                    effective = new_status
+                    if effective == WorkspaceStatus.STOPPED:
+                        try:
+                            self.process_manager.mark_processes_killed(
+                                ws_id_str, reason="workspace_stopped"
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed killing processes for workspace %s",
+                                ws_id_str,
+                            )
+                    continue
+
+                credentials_resolved = False
+                has_credentials = False
+                try:
+                    resolved = CredentialSvc().resolve_workspace_credentials(ws)
+                    has_credentials = resolved.has_material
+                    credentials_resolved = True
+                except Exception:
+                    logger.exception(
+                        "Failed to resolve attached credential material for "
+                        "workspace %s",
+                        ws_id_str,
+                    )
+                if (
+                    credentials_resolved
+                    and not ws.current_task_id
+                    and not ws.active_operation
+                    and ws.status != WorkspaceStatus.FAILED
+                    and ws.credentials_present != has_credentials
+                ):
+                    # Reconcile ordinary material against the runner-acknowledged
+                    # state; OAuth remains server-side and is never injected.
+                    credential_sync_ids.append(ws.id)
+
+                # Reconcile background processes with the reported list.
+                # Only while the workspace is running. Vanished rows are
+                # NOT marked exited here: the heartbeat is sync (no RPC),
+                # so they are collected for the async
+                # ``reconcile_vanished_processes`` pass after verify.
+                # Live-exited rows are marked EXITED immediately.
+                reported_processes = runner_payload.get("processes")
+                if (
+                    isinstance(reported_processes, list)
+                    and new_status == WorkspaceStatus.RUNNING
+                ):
+                    try:
+                        _, vanished = (
+                            self.process_manager.reconcile_workspace_processes(
+                                ws_id_str, reported_processes
+                            )
+                        )
+                        self.process_manager.sweep_unconfirmed_processes(ws_id_str)
+                        if vanished:
+                            pending_vanished.setdefault(ws_id_str, []).extend(vanished)
+                    except Exception:
+                        logger.exception(
+                            "Failed reconciling processes for workspace %s",
+                            ws_id_str,
+                        )
+
+                if "desktop" in runner_payload:
+                    self.session_store.sync_desktop_state_from_heartbeat(
+                        ws_id_str,
+                        runner_payload["desktop"],
+                        runner_id=runner_id_str,
+                        desktop_epoch=runner_payload["desktop_epoch"],
+                        desktop_generation=runner_payload["desktop_generation"],
+                        desktop_session_tracked=runner_payload[
+                            "desktop_session_tracked"
+                        ],
+                    )
+
+        async_to_sync(self.auto_stop_inactive_workspaces)(
+            runner_id=runner.id,
+            workspaces=backend_workspaces,
+        )
+        # Stash vanished candidates for the async verify pass: the sync
+        # heartbeat cannot do RPCs, so ``reconcile_vanished_processes``
+        # (called by the Socket.IO handler) picks them up. Merged per
+        # workspace id so repeated heartbeats before the async pass
+        # cannot duplicate rows.
+        for ws_id_str, rows in pending_vanished.items():
+            known = {
+                str(process.id)
+                for process in self.pending_process_verify.get(ws_id_str, [])
+            }
+            bucket = self.pending_process_verify.setdefault(ws_id_str, [])
+            for process in rows:
+                if str(process.id) not in known:
+                    bucket.append(process)
+                    known.add(str(process.id))
+        return credential_sync_ids
+
+    async def reconcile_vanished_processes(
+        self,
+        runner: "Runner",
+    ) -> list[uuid.UUID]:
+        """Verify heartbeat-vanished process rows against the runner.
+
+        Called by the Socket.IO heartbeat handler after the sync
+        :meth:`handle_heartbeat` stashed candidates in
+        ``_pending_process_verify``. Live rows reattach as RUNNING,
+        confirmed-gone rows become EXITED, unverifiable rows stay
+        RUNNING (fail-open). The stash is always drained, even on
+        failure, so one bad workspace cannot wedge later heartbeats.
+        Returns IDs of changed processes.
+        """
+        pending = self.pending_process_verify
+        self.pending_process_verify = {}
+        changed: list[uuid.UUID] = []
+        for ws_id_str, rows in pending.items():
+            try:
+                workspace_uuid = uuid.UUID(str(ws_id_str))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_uuid)
+            if workspace is None:
+                continue
+            # Only verify while the workspace is still running and the
+            # runner still owns it; anything else leaves rows untouched
+            # (workspace lifecycle handlers own those transitions).
+            if workspace.status != WorkspaceStatus.RUNNING:
+                continue
+            try:
+                owner_id = await sync_to_async(self.workspaces.get_runner_id)(
+                    workspace_uuid
+                )
+            except Exception:
+                continue
+            if owner_id is None or owner_id != runner.id:
+                continue
+            try:
+                changed.extend(
+                    await self.process_manager.reverify_vanished_processes(
+                        workspace_uuid, rows
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Failed verifying vanished processes for workspace %s",
+                    ws_id_str,
+                )
+        return changed
+
+    @staticmethod
+    def _map_instance_status(status: str) -> str | None:
+        """Map a runtime instance status string to a WorkspaceStatus value.
+
+        Supports normalized QEMU/libvirt domain states. Returns None for
+        transitional states that keep the current workspace status; unknown
+        or unusable states map to FAILED.
+        """
+        if status in {"creating", "stopping"}:
+            return None
+        mapping = {
+            "running": WorkspaceStatus.RUNNING,
+            "blocked": WorkspaceStatus.RUNNING,
+            "exited": WorkspaceStatus.STOPPED,
+            "dead": WorkspaceStatus.FAILED,
+            "removing": WorkspaceStatus.DELETING,
+            "created": WorkspaceStatus.CREATING,
+            "stopped": WorkspaceStatus.STOPPED,
+            "failed": WorkspaceStatus.FAILED,
+            "removed": WorkspaceStatus.DELETED,
+        }
+        return (
+            mapping.get(status, WorkspaceStatus.FAILED)
+            if isinstance(status, str)
+            else WorkspaceStatus.FAILED
+        )

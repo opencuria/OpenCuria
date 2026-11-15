@@ -10,7 +10,6 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import _call_get_workspace, _call_update_workspace
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.desktop import validate_desktop_dimension
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
@@ -30,16 +29,6 @@ def test_validate_desktop_dimension_rejects_odd_and_out_of_range() -> None:
         validate_desktop_dimension(1921, kind="width")
     with pytest.raises(ValueError, match="between"):
         validate_desktop_dimension(200, kind="width")
-
-
-def test_docker_desktop_block_disables_remote_resize() -> None:
-    """Docker workspace images start Xvnc at a fixed size without remote resize."""
-    from apps.runners.services import RunnerService
-
-    block = RunnerService._desktop_session_dockerfile_block()
-    assert "allow_resize: false" in block
-    assert "-AcceptSetDesktopSize=0" in block
-    assert "OPENCURIA_DESKTOP_GEOMETRY" in block
 
 
 @pytest.fixture
@@ -72,7 +61,6 @@ def desktop_api(db):
         status=RunnerStatus.ONLINE,
         sid="desktop-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,
@@ -134,43 +122,13 @@ async def test_update_workspace_service_persists_geometry(desktop_api) -> None:
 
     workspace = desktop_api["workspace"]
     service = RunnerService(sio_server=AsyncMock())
-    updated = await service.update_workspace(
+    updated = await service.workspace_lifecycle.update_workspace(
         workspace.id,
         desktop_width=1600,
         desktop_height=900,
     )
     assert updated.desktop_width == 1600
     assert updated.desktop_height == 900
-
-
-@pytest.mark.django_db(transaction=True)
-def test_mcp_get_and_update_workspace_desktop_size(desktop_api) -> None:
-    """MCP get/update expose the fixed desktop framebuffer size."""
-    from types import SimpleNamespace
-
-    workspace = desktop_api["workspace"]
-    api_key = SimpleNamespace(user=desktop_api["user"])
-    org_id = desktop_api["org"].id
-
-    listed = _call_get_workspace(
-        api_key, org_id, {"workspace_id": str(workspace.id)}
-    )
-    payload = json.loads(listed[0].text)
-    assert payload["desktop_width"] == 1920
-    assert payload["desktop_height"] == 1080
-
-    updated = _call_update_workspace(
-        api_key,
-        org_id,
-        {
-            "workspace_id": str(workspace.id),
-            "desktop_width": 1280,
-            "desktop_height": 720,
-        },
-    )
-    body = json.loads(updated[0].text)
-    assert body["desktop_width"] == 1280
-    assert body["desktop_height"] == 720
 
 
 @pytest.mark.django_db(transaction=True)
@@ -187,10 +145,40 @@ async def test_start_desktop_payload_includes_geometry(desktop_api) -> None:
     workspace.save(update_fields=["desktop_width", "desktop_height", "updated_at"])
 
     service = RunnerService(sio_server=AsyncMock())
-    service._emit_to_runner = AsyncMock()
-    await service.start_desktop(workspace.id)
-    event = service._emit_to_runner.await_args.args[1]
-    payload = service._emit_to_runner.await_args.args[2]
+    service.runner_transport.emit_to_runner = AsyncMock()
+    service.interactive_sessions._viewer_rpc = AsyncMock(
+        return_value={"epoch": "runner-epoch"}
+    )
+    await service.interactive_sessions.start_desktop(
+        workspace.id,
+        user=desktop_api["user"],
+        organization_id=desktop_api["org"].id,
+        viewer_client_id=uuid.uuid4(),
+        intent_revision=1,
+    )
+    event = service.runner_transport.emit_to_runner.await_args.args[1]
+    payload = service.runner_transport.emit_to_runner.await_args.args[2]
     assert event == "task:start_desktop"
     assert payload["desktop_width"] == 1280
     assert payload["desktop_height"] == 720
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("route", ["desktop/", "desktop/stop/", "desktop/renew/"])
+def test_viewer_rest_requires_terminal_permission(desktop_api, route):
+    response = desktop_api["client"].post(
+        f'/api/v1/workspaces/{desktop_api["workspace"].id}/{route}',
+        data=json.dumps({"viewer_client_id": str(uuid.uuid4()), "intent_revision": 1}),
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("route", ["desktop/", "desktop/stop/", "desktop/renew/"])
+def test_viewer_rest_requires_intent_payload(desktop_api, route):
+    response = desktop_api["client"].post(
+        f'/api/v1/workspaces/{desktop_api["workspace"].id}/{route}',
+        data="{}", content_type="application/json",
+    )
+    assert response.status_code == 422

@@ -7,8 +7,7 @@ import { WorkspaceStatus } from '@/types'
 
 const routerPush = vi.fn()
 
-const conversationStore = {
-  conversations: [
+const baseConversations = [
     {
       session_id: 's-1',
       workspace_id: 'ws-1',
@@ -19,7 +18,10 @@ const conversationStore = {
       agent_name: 'build',
       model: '',
       unread: false,
+      needs_attention: false,
+      attention_kind: '',
       updated_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
     },
     {
       session_id: 's-2',
@@ -31,9 +33,15 @@ const conversationStore = {
       agent_name: 'plan',
       model: '',
       unread: false,
+      needs_attention: false,
+      attention_kind: '',
       updated_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
     },
-  ],
+  ]
+
+const conversationStore = {
+  conversations: [...baseConversations],
   markAsRead: vi.fn(),
 }
 
@@ -79,7 +87,10 @@ function mountPalette(props = { open: true }) {
     global: {
       stubs: {
         Dialog: { template: '<div><slot /></div>' },
-        DialogContent: { template: '<div><slot /></div>' },
+        DialogContent: {
+          inheritAttrs: false,
+          template: '<div v-bind="$attrs"><slot /></div>',
+        },
         DialogHeader: { template: '<div><slot /></div>' },
         DialogTitle: { template: '<div><slot /></div>' },
         DialogDescription: { template: '<div><slot /></div>' },
@@ -91,15 +102,25 @@ function mountPalette(props = { open: true }) {
 describe('CommandPalette', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    conversationStore.conversations = [...baseConversations]
+  })
+
+  it('drops the dialog gap and uses a wider max width', () => {
+    const wrapper = mountPalette()
+    const classes = wrapper.find('[data-testid="command-palette"]').classes()
+
+    expect(classes).toContain('gap-0')
+    expect(classes).toContain('p-0')
+    expect(classes).toContain('sm:max-w-2xl')
   })
 
   it('lists actions, recent chats, and workspaces without a query', () => {
     const wrapper = mountPalette()
 
-    expect(wrapper.text()).toContain('Neuer Chat')
+    expect(wrapper.text()).toContain('New chat')
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha workspace')
-    expect(wrapper.text()).toContain('Workspaces verwalten')
+    expect(wrapper.text()).toContain('Manage workspaces')
   })
 
   it('filters chats, workspaces, and actions by query', async () => {
@@ -111,10 +132,10 @@ describe('CommandPalette', () => {
     expect(wrapper.text()).toContain('Second chat')
     expect(wrapper.text()).toContain('Beta workspace')
     expect(wrapper.text()).not.toContain('First chat')
-    expect(wrapper.text()).not.toContain('Neuer Chat')
+    expect(wrapper.text()).not.toContain('New chat')
   })
 
-  it('runs Neuer Chat on Enter when the query is empty', async () => {
+  it('runs New chat on Enter when the query is empty', async () => {
     const wrapper = mountPalette()
     const input = wrapper.find('[data-testid="command-palette-input"]')
 
@@ -144,6 +165,32 @@ describe('CommandPalette', () => {
     await input.trigger('keydown', { key: 'ArrowDown' })
 
     const selected = wrapper.find('[aria-selected="true"]')
-    expect(selected.text()).toContain('Workspaces verwalten')
+    expect(selected.text()).toContain('Manage workspaces')
+  })
+
+  it('lists action-required chats above recent chats', () => {
+    conversationStore.conversations = [
+      ...baseConversations,
+      {
+        session_id: 's-gate',
+        workspace_id: 'ws-1',
+        workspace_name: 'Alpha workspace',
+        title: 'Waiting chat',
+        status: 'busy',
+        mode: 'build',
+        agent_name: 'build',
+        model: '',
+        unread: false,
+        needs_attention: true,
+        attention_kind: 'question',
+        updated_at: new Date().toISOString(),
+        last_message_at: new Date().toISOString(),
+      },
+    ]
+    const wrapper = mountPalette()
+
+    expect(wrapper.text()).toContain('Action required')
+    expect(wrapper.text()).toContain('Waiting chat')
+    expect(wrapper.find('[data-testid="palette-attention-badge"]').exists()).toBe(true)
   })
 })

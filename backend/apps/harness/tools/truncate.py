@@ -28,6 +28,17 @@ class TruncateResult:
     truncated: bool
 
 
+def _utf8_size(text: str) -> int:
+    """Count UTF-8 bytes without allocating a copy of the complete output."""
+    if text.isascii():
+        return len(text)
+    chunk_chars = 64 * 1024
+    return sum(
+        len(text[start : start + chunk_chars].encode("utf-8"))
+        for start in range(0, len(text), chunk_chars)
+    )
+
+
 def _head_window(
     lines: list[str], max_lines: int, max_bytes: int
 ) -> tuple[list[str], int, bool]:
@@ -92,12 +103,17 @@ def truncate_tool_output(
         raise ValueError(f"Invalid direction {direction!r}; expected 'head'/'tail'")
     if not text:
         return TruncateResult(content=text, truncated=False)
-    lines = text.split("\n")
-    total_bytes = len(text.encode("utf-8"))
-    if len(lines) <= max_lines and total_bytes <= max_bytes:
+    total_lines = text.count("\n") + 1
+    total_bytes = _utf8_size(text)
+    if total_lines <= max_lines and total_bytes <= max_bytes:
         return TruncateResult(content=text, truncated=False)
 
+    # A UTF-8 character occupies at least one byte. One extra character makes
+    # a partial boundary line exceed the budget, just like its complete line.
+    # Split only this window; counting omitted lines requires no line objects.
+    window_chars = max_bytes + 1 if max_bytes > 0 else len(text)
     if direction == "head":
+        lines = text[:window_chars].split("\n")
         kept, bytes_used, hit_bytes = _head_window(lines, max_lines, max_bytes)
         if not kept and lines:
             first = (
@@ -107,6 +123,7 @@ def truncate_tool_output(
             bytes_used = len(first.encode("utf-8"))
             hit_bytes = True
     else:
+        lines = text[-window_chars:].split("\n")
         kept, bytes_used, hit_bytes = _tail_window(lines, max_lines, max_bytes)
         if not kept and lines:
             last = (
@@ -116,7 +133,7 @@ def truncate_tool_output(
             bytes_used = len(last.encode("utf-8"))
             hit_bytes = True
 
-    removed = total_bytes - bytes_used if hit_bytes else len(lines) - len(kept)
+    removed = total_bytes - bytes_used if hit_bytes else total_lines - len(kept)
     unit = "bytes" if hit_bytes else "lines"
     preview = "\n".join(kept)
     if direction == "head":

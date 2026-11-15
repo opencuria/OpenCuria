@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "artifacts": {
+    "claude-agent": {
+      "version": "2.1.321",
+      "manifest_url": "https://downloads.claude.ai/claude-code-releases/2.1.321/manifest.json",
+      "signature_url": "https://downloads.claude.ai/claude-code-releases/2.1.321/manifest.json.sig",
+      "signature_sha256": "0270d98c48cb12c9f956e55d3b0cbae10d7e239f1362bf0ccfaf16c59b20e8a6",
+      "manifest_sha256": "c32595914a31ba15d0c1a287f214658355994fcb2c2d42ca3883ec8aff4c485d",
+      "release_manifest_sha256": "d073d63928081951b871b35780d7abc83c26fa9b8b97f1ace64fc90d4591d325",
+      "signing_fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
+      "platforms": {
+        "linux-x64": {
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-x64/claude",
+          "sha256": "426c33815ca6645a772f722fbff10dbf2cbdb124a8aeab733c1365dbf8bbf61f",
+          "size": 341910032
+        },
+        "linux-arm64": {
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-arm64/claude",
+          "sha256": "6bea0633074627ba79328e00115ed0588c3acf906a8463612b25db696dbfd3f0",
+          "size": 341501368
+        },
+        "linux-x64-musl": {
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-x64-musl/claude",
+          "sha256": "efc4a3d94daf10c550cde589a4add37f67519be54252ba88f27e9627f7ad62b4",
+          "size": 328366664
+        },
+        "linux-arm64-musl": {
+          "url": "https://downloads.claude.ai/claude-code-releases/2.1.321/linux-arm64-musl/claude",
+          "sha256": "d223ea603b4fe8521d35a47f1972fbb36f1028a40927f16160e6258e0b92d597",
+          "size": 325808392
+        }
+      }
+    },
+    "codex-agent": {
+      "version": "0.166.0",
+      "platforms": {
+        "linux-x64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
+          "size": 155332411
+        },
+        "linux-x64-musl": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "e69a1b62488288f702186b9c216a8e3930e45475f70124381d4e1c633f2e0c76",
+          "size": 155332411
+        },
+        "linux-arm64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
+          "size": 145150661
+        },
+        "linux-arm64-musl": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
+          "size": 145150661
+        }
+      }
+    }
+  }
+}

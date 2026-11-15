@@ -3,68 +3,55 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
-import { useTerminalStore } from '@/stores/terminal'
-import { useDesktopStore } from '@/stores/desktop'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useProcessesStore } from '@/stores/processes'
-import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
-import { usePolling } from '@/composables/usePolling'
-import {
-  subscribeToWorkspace,
-  unsubscribeFromWorkspace,
-  onEvent,
-} from '@/services/socket'
+import { subscribeToWorkspace, onEvent, onReconnect } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
+import { isComposerTransitionPending } from '@/lib/composerTransition'
+import { resolveActiveChatTitle } from '@/lib/activeChatTitle'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
-import WorkspaceTerminal from '@/components/workspaces/WorkspaceTerminal.vue'
-import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
+import EditWorkspaceDialog from '@/components/workspaces/EditWorkspaceDialog.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
-import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
-import FileViewer from '@/components/files/FileViewer.vue'
+import WorkspaceRecreateDialog from '@/components/workspaces/WorkspaceRecreateDialog.vue'
+import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
+import { useSidePanelStore } from '@/stores/sidePanel'
+import { useRunnerStore } from '@/stores/runners'
+import { ArrowLeft, Plus } from '@lucide/vue'
 
 const route = useRoute()
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
-const terminalStore = useTerminalStore()
-const desktopStore = useDesktopStore()
 const processesStore = useProcessesStore()
+const sidePanelStore = useSidePanelStore()
+const runnerStore = useRunnerStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
-const fileExplorerStore = useFileExplorerStore()
 const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
-const terminalHeight = ref(300)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
+const recreateDialogOpen = ref(false)
+const editDialogOpen = ref(false)
+/** Header entrance animation only when arriving from the home composer send. */
+const animateEntrance = ref(isComposerTransitionPending())
 
-const lgQuery = window.matchMedia('(min-width: 1024px)')
-const isDesktop = ref(lgQuery.matches)
-const onBreakpointChange = (e: MediaQueryListEvent) => {
-  isDesktop.value = e.matches
-}
-
-const canPrompt = computed(
-  () =>
-    workspace.value?.status === WorkspaceStatus.RUNNING &&
-    workspace.value?.runner_online &&
-    !workspace.value?.active_operation,
-)
+const canPrompt = computed(() => workspaceStore.canUseWorkspace(workspaceId.value))
 const isRunnerOfflineState = computed(
-  () =>
-    !workspace.value?.runner_online &&
-    workspace.value?.status !== WorkspaceStatus.DELETED &&
-    workspace.value?.status !== WorkspaceStatus.REMOVED,
+  () => !workspace.value?.runner_online && workspace.value?.status !== WorkspaceStatus.DELETED,
 )
 const workspaceTransitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(workspaceId.value),
 )
 const autoStopCountdownLabel = computed(() =>
-  workspace.value?.auto_stop_at ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}` : null,
+  workspace.value?.auto_stop_at
+    ? `Stops ${formatRelativeTime(workspace.value.auto_stop_at)}`
+    : null,
 )
 const navbarStatusLabel = computed(() => {
   if (!showImminentAutoStop.value || !autoStopCountdownLabel.value) return null
@@ -80,38 +67,38 @@ const showImminentAutoStop = computed(() => {
 
 const harnessStore = useHarnessStore()
 
-const activeChatTitle = computed(
-  () => harnessStore.activeSession?.title?.trim() || null,
+const conversationStore = useHarnessConversationStore()
+const activeChatTitle = computed(() =>
+  resolveActiveChatTitle(
+    harnessStore.activeSession,
+    workspaceId.value,
+    conversationStore.conversations,
+  ),
 )
+const parentChat = computed(() => {
+  const lineage = harnessStore.activeSessionLineage
+  return lineage.length >= 2 ? lineage[lineage.length - 2] : null
+})
+const parentChatId = computed(
+  () => parentChat.value?.id ?? harnessStore.activeSession?.parent_id ?? null,
+)
+const backToParentTitle = computed(() => {
+  const title = parentChat.value?.title?.trim()
+  return title ? `Back to ${title}` : 'Back to parent chat'
+})
+
+function handleBackToParentChat(): void {
+  if (parentChatId.value) harnessStore.setActiveSession(parentChatId.value)
+}
 
 function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
 }
 
-function handleToggleTerminal(): void {
-  if (!canPrompt.value) return
-  if (!terminalStore.isOpen) {
-    terminalStore.open()
-    return
-  }
-  if (terminalStore.isMinimized) {
-    terminalStore.restore()
-    return
-  }
-  terminalStore.minimize()
-}
-
-function handleToggleDesktop(): void {
-  if (!canPrompt.value) return
-  if (!desktopStore.isOpen) {
-    desktopStore.open()
-    return
-  }
-  if (desktopStore.isMinimized) {
-    desktopStore.restore()
-    return
-  }
-  desktopStore.minimize()
+async function handleIncreaseDisk(): Promise<void> {
+  // Resource limits come from the runner; load them before the form renders.
+  if (!runnerStore.runners.length) await runnerStore.fetchRunners()
+  editDialogOpen.value = true
 }
 
 function handleDeleteWorkspace(): void {
@@ -131,40 +118,23 @@ function handleStopWorkspace(): void {
   void workspaceStore.stopWorkspace(workspace.value.id)
 }
 
-const isDesktopPanelVisible = computed(
-  () => desktopStore.isOpen && !desktopStore.isMinimized && canPrompt.value,
-)
-
-const runningProcessCount = computed(() =>
-  processesStore.runningCountFor(workspaceId.value),
-)
-const isProcessesPanelVisible = computed(
-  () => processesOpen.value && canPrompt.value,
-)
+const runningProcessCount = computed(() => processesStore.runningCountFor(workspaceId.value))
+const isProcessesPanelVisible = computed(() => processesOpen.value && canPrompt.value)
 
 function toggleProcessesPanel(): void {
+  if (!canPrompt.value) return
   processesOpen.value = !processesOpen.value
   if (processesOpen.value) {
     void processesStore.fetchProcesses(workspaceId.value)
   }
 }
 
-const chatPanelTarget = computed<HTMLElement | null>(() => {
-  if (isDesktopPanelVisible.value) {
-    return desktopChatPanelHost.value
-  }
-  return mainChatPanelHost.value
-})
-
-const mainChatPanelHost = ref<HTMLElement | null>(null)
-const desktopChatPanelHost = ref<HTMLElement | null>(null)
-
 // Socket.IO event cleanup functions
 const cleanupFns: (() => void)[] = []
 
 function setupSocketListeners(): void {
-  // Subscribe to workspace events
-  subscribeToWorkspace(workspaceId.value)
+  const releaseSubscription = subscribeToWorkspace(workspaceId.value)
+  cleanupFns.push(releaseSubscription)
 
   cleanupFns.push(
     onEvent('workspace:status_changed', (data) => {
@@ -184,6 +154,8 @@ function setupSocketListeners(): void {
         workspaceStore.updateWorkspaceOperation(
           data.workspace_id,
           data.active_operation as WorkspaceOperation | null,
+          data.intervention_required,
+          data.lifecycle_diagnostic,
         )
       }
     }),
@@ -214,6 +186,12 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onReconnect(() => {
+      void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
+      if (processesOpen.value) void processesStore.fetchProcesses(workspaceId.value, { live: true })
+    }),
+  )
+  cleanupFns.push(
     onEvent('process:status_changed', (data) => {
       if (data.workspace_id === workspaceId.value) {
         void processesStore.handleStatusChanged(data)
@@ -222,135 +200,47 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
-    onEvent('files:list_result', (data) => {
+    onEvent('process:removed', (data) => {
       if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleListResult(data.request_id, data.path, data.entries, data.error)
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:find_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleFindResult(
-          data.request_id,
-          (data.paths ?? []).map((entry) => entry.path),
-          data.error,
-        )
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:content_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleContentResult(
-          data.request_id,
-          data.path,
-          data.content,
-          data.size,
-          data.truncated,
-          data.error,
-        )
-        // Also dispatch to image store (it ignores requests it didn't initiate)
-        workspaceImageStore.handleContentResult(
-          data.request_id,
-          data.path,
-          data.content,
-          data.error,
-          data.mime_type,
-        )
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:upload_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleUploadResult(
-          data.request_id,
-          data.path,
-          data.status,
-          workspaceId.value,
-          data.error,
-        )
-        // Also dispatch to image store so the harness composer can show upload feedback.
-        workspaceImageStore.handleUploadResult(data.request_id, data.status, data.error)
-      }
-    }),
-  )
-
-  cleanupFns.push(
-    onEvent('files:download_result', (data) => {
-      if (data.workspace_id === workspaceId.value) {
-        fileExplorerStore.handleDownloadResult(
-          data.request_id,
-          data.content,
-          data.filename,
-          data.is_archive,
-          data.error,
-        )
+        processesStore.handleRemoved(data)
       }
     }),
   )
 }
 
 function cleanupSocket(): void {
-  unsubscribeFromWorkspace(workspaceId.value)
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
 }
 
-// Polling for workspace detail (fallback + initial load)
-const { start, stop } = usePolling(
-  () => workspaceStore.fetchWorkspaceDetail(workspaceId.value),
-  5000,
-)
-
-// Polling fallback for background processes (socket is the live path)
-const {
-  start: startProcessesPolling,
-  stop: stopProcessesPolling,
-} = usePolling(() => processesStore.fetchProcesses(workspaceId.value), 10000)
+function reconcileOnVisible(): void {
+  if (document.visibilityState !== 'visible') return
+  void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
+  if (processesOpen.value) void processesStore.fetchProcesses(workspaceId.value, { live: true })
+}
 
 onMounted(() => {
-  lgQuery.addEventListener('change', onBreakpointChange)
-  start()
-  startProcessesPolling()
+  void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
   setupSocketListeners()
-})
-
-watch(isDesktop, (desktop) => {
-  if (!desktop) {
-    fileExplorerStore.close()
-  }
+  document.addEventListener('visibilitychange', reconcileOnVisible)
 })
 
 onUnmounted(() => {
-  lgQuery.removeEventListener('change', onBreakpointChange)
-  stop()
-  stopProcessesPolling()
+  document.removeEventListener('visibilitychange', reconcileOnVisible)
   cleanupSocket()
-  desktopStore.reset()
-  terminalStore.reset()
   processesStore.reset()
-  fileExplorerStore.reset()
   workspaceImageStore.reset()
   harnessStore.reset()
   workspaceStore.activeWorkspace = null
 })
 
-// React to route changes (if user navigates between workspaces)
 watch(workspaceId, (newId, oldId) => {
   if (newId !== oldId) {
     cleanupSocket()
-    desktopStore.reset()
     processesStore.clearWorkspace(oldId)
     processesOpen.value = false
-    fileExplorerStore.reset()
     harnessStore.reset()
-    workspaceStore.fetchWorkspaceDetail(newId)
-    void processesStore.fetchProcesses(newId)
+    void workspaceStore.fetchWorkspaceDetail(newId)
     setupSocketListeners()
   }
 })
@@ -373,142 +263,86 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
   await workspaceStore.renameWorkspace(workspace.value.id, trimmed)
   renamingWorkspace.value = false
 }
-
-// --- Terminal resize drag ---
-
-const isDragging = ref(false)
-
-function onDragStart(e: MouseEvent): void {
-  e.preventDefault()
-  isDragging.value = true
-  const startY = e.clientY
-  const startHeight = terminalHeight.value
-
-  const onMove = (ev: MouseEvent) => {
-    const delta = startY - ev.clientY
-    terminalHeight.value = Math.max(150, Math.min(startHeight + delta, window.innerHeight * 0.7))
-  }
-
-  const onUp = () => {
-    isDragging.value = false
-    document.removeEventListener('mousemove', onMove)
-    document.removeEventListener('mouseup', onUp)
-  }
-
-  document.addEventListener('mousemove', onMove)
-  document.addEventListener('mouseup', onUp)
-}
 </script>
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <WorkspaceChatHeader
-      v-if="workspace"
-      :workspace="workspace"
-      :active-chat-title="activeChatTitle"
-      :transition-label="workspaceTransitionLabel"
-      :auto-stop-label="navbarStatusLabel"
-      :runner-offline="isRunnerOfflineState"
-      :file-explorer-open="fileExplorerStore.isOpen"
-      :terminal-open="terminalStore.isOpen"
-      :terminal-minimized="terminalStore.isMinimized"
-      :desktop-open="desktopStore.isOpen"
-      :desktop-minimized="desktopStore.isMinimized"
-      :processes-active="isProcessesPanelVisible"
-      :running-process-count="runningProcessCount"
-      :can-prompt="canPrompt"
-      @new-chat="handleNewHarnessChat"
-      @start-workspace="handleStartWorkspace"
-      @stop-workspace="handleStopWorkspace"
-      @save-workspace-name="handleSaveWorkspaceName"
-      @toggle-files="fileExplorerStore.toggle()"
-      @toggle-terminal="handleToggleTerminal"
-      @toggle-desktop="handleToggleDesktop"
-      @toggle-processes="toggleProcessesPanel"
-      @capture-image="imageArtifactDialogOpen = true"
-      @delete-workspace="handleDeleteWorkspace"
-    />
-
     <!-- Loading state -->
-    <div v-if="workspaceStore.loading && !workspace" class="flex-1 flex items-center justify-center">
+    <div
+      v-if="workspaceStore.loading && !workspace"
+      class="flex-1 flex items-center justify-center"
+    >
       <LoadingSpinner :size="24" />
     </div>
 
-    <!-- Chat area + terminal -->
-    <template v-else-if="workspace">
-      <div class="flex flex-col flex-1 min-h-0">
-        <!-- Chat content area -->
-        <div class="flex flex-1 min-h-0">
-          <WorkspaceDesktop
-            v-if="isDesktopPanelVisible"
-            :workspace-id="workspaceId"
-          >
-            <template #sidebar-content>
-              <div ref="desktopChatPanelHost" class="h-full min-h-0 w-full"></div>
-            </template>
-          </WorkspaceDesktop>
+    <WorkspaceToolsSplit v-else-if="workspace" :workspace-id="workspaceId" :can-prompt="canPrompt">
+      <template #chat-header>
+        <Button
+          v-if="parentChatId"
+          variant="ghost"
+          size="icon-sm"
+          class="size-6 shrink-0"
+          :title="backToParentTitle"
+          :aria-label="backToParentTitle"
+          data-testid="sidebar-chat-back-to-parent"
+          @click="handleBackToParentChat"
+          ><ArrowLeft :size="14"
+        /></Button>
+        <span class="min-w-0 flex-1 truncate" :title="activeChatTitle ?? 'New chat'">{{
+          activeChatTitle || 'New chat'
+        }}</span>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="size-6 shrink-0"
+          title="New chat"
+          aria-label="New chat"
+          @click="handleNewHarnessChat"
+          ><Plus :size="14"
+        /></Button>
+      </template>
+      <template #header>
+        <WorkspaceChatHeader
+          :workspace="workspace"
+          :active-chat-title="activeChatTitle"
+          :chat-lineage="harnessStore.activeSessionLineage"
+          :transition-label="workspaceTransitionLabel"
+          :auto-stop-label="navbarStatusLabel"
+          :runner-offline="isRunnerOfflineState"
+          :side-panel-open="sidePanelStore.isOpen"
+          :processes-active="isProcessesPanelVisible"
+          :running-process-count="runningProcessCount"
+          :can-prompt="canPrompt"
+          :has-active-session="workspace.has_active_session"
+          :animate-entrance="animateEntrance"
+          @new-chat="handleNewHarnessChat"
+          @open-session="harnessStore.setActiveSession($event)"
+          @start-workspace="handleStartWorkspace"
+          @stop-workspace="handleStopWorkspace"
+          @save-workspace-name="handleSaveWorkspaceName"
+          @toggle-side-panel="canPrompt && sidePanelStore.toggle()"
+          @toggle-processes="toggleProcessesPanel"
+          @capture-image="imageArtifactDialogOpen = true"
+          @recreate-workspace="recreateDialogOpen = true"
+          @increase-disk="handleIncreaseDisk"
+          @delete-workspace="handleDeleteWorkspace"
+        />
+      </template>
 
-          <template v-else>
-            <!-- Harness chat area -->
-            <div class="flex flex-col flex-1 min-w-0 overflow-x-hidden">
-              <FileViewer
-                v-if="fileExplorerStore.isViewingFile || fileExplorerStore.isLoadingContent"
-                :workspace-id="workspaceId"
-              />
-              <div
-                v-else
-                ref="mainChatPanelHost"
-                class="min-h-0 flex flex-1 min-w-0 overflow-hidden"
-              ></div>
-            </div>
-
-            <!-- File explorer panel (right side) -->
-            <FileExplorerPanel
-              v-if="isDesktop && fileExplorerStore.isOpen && canPrompt"
-              :workspace-id="workspaceId"
-            />
-          </template>
-        </div>
-
-        <!-- Terminal panel (bottom) -->
-        <template v-if="terminalStore.isOpen && canPrompt">
-          <!-- Drag handle -->
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="h-1 bg-border hover:bg-primary cursor-row-resize shrink-0 transition-colors"
-            @mousedown="onDragStart"
-          ></div>
-          <div
-            v-show="!terminalStore.isMinimized"
-            class="shrink-0 relative"
-            :style="{ height: terminalHeight + 'px' }"
-          >
-            <WorkspaceTerminal :workspace-id="workspaceId" />
-          </div>
-        </template>
-
-        <Teleport v-if="chatPanelTarget" :to="chatPanelTarget">
-          <HarnessChatPanel
-            :workspace-id="workspaceId"
-            :can-prompt="canPrompt"
-            :processes-open="isProcessesPanelVisible"
-            class="min-h-0 flex-1"
-            @close-processes="processesOpen = false"
-          />
-        </Teleport>
-      </div>
-    </template>
+      <HarnessChatPanel
+        :workspace-id="workspaceId"
+        :can-prompt="canPrompt"
+        :processes-open="isProcessesPanelVisible"
+        class="min-h-0 flex-1"
+        @close-processes="processesOpen = false"
+      />
+    </WorkspaceToolsSplit>
 
     <!-- Error -->
-    <div
-      v-else-if="workspaceStore.error"
-      class="flex-1 flex items-center justify-center"
-    >
+    <div v-else-if="workspaceStore.error" class="flex-1 flex items-center justify-center">
       <div class="text-center">
         <p class="text-error mb-2">{{ workspaceStore.error }}</p>
-        <Button variant="outline" @click="goBack">
-          Back
-        </Button>
+        <Button variant="outline" @click="goBack"> Back </Button>
       </div>
     </div>
   </div>
@@ -518,5 +352,19 @@ function onDragStart(e: MouseEvent): void {
     :workspace="workspace"
     :open="imageArtifactDialogOpen"
     @update:open="imageArtifactDialogOpen = $event"
+  />
+  <WorkspaceRecreateDialog
+    v-if="workspace && recreateDialogOpen"
+    :workspace="workspace"
+    :open="recreateDialogOpen"
+    @update:open="recreateDialogOpen = $event"
+  />
+  <!-- Stays mounted: the closed dialog keeps its form in sync with the workspace. -->
+  <EditWorkspaceDialog
+    v-if="workspace"
+    v-model:open="editDialogOpen"
+    :workspace="workspace"
+    hide-trigger
+    focus-disk
   />
 </template>

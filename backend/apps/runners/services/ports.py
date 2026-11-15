@@ -1,0 +1,141 @@
+"""Port protocols for the runners service package.
+
+Only :class:`typing.Protocol` definitions — no implementations and no
+imports from ``apps.harness`` / ``apps.credentials``. Concrete adapters
+live outside this package; the service depends on these protocols only
+via structural typing so tests can inject fakes.
+
+Wiring status (what ``RunnerService`` consumes):
+
+- ``CredentialResolver``: resolves the credentials attached to a workspace
+  (``credential_sync.dispatch_credential_inject`` and the ``resume`` /
+  ``recreate`` lifecycle paths). Credential selections requested by callers
+  (create / update / clone by ``credential_ids``) always resolve through
+  ``CredentialSyncService.resolve_credential_selection``.
+- ``HarnessGateway``: the only way the runners app reaches the agent
+  harness (reply/stream routing, stream failure, viewer desktop actions,
+  busy agent checks, workspace activity reads, desktop take-over).
+  The harness app registers its implementation at startup
+  (``infra/harness_gateway.register_harness_gateway``);
+  tests may inject a fake via ``RunnerService(harness_gateway=...)``.
+  Repositories never resolve the gateway themselves: lifecycle admissions
+  receive ``has_busy_session`` from the service as a predicate evaluated
+  under their row lock.
+
+Everything else in ``workspace_lifecycle`` / ``interactive_sessions`` /
+``file_transfer`` use the shared ``emit_to_frontend`` transport adapter.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from typing import Any, Protocol
+
+
+class RunnerTransport(Protocol):
+    """Socket.IO transport towards a connected runner."""
+
+    async def emit_to_runner(self, runner: Any, event: str, data: dict) -> None:
+        """Send a fire-and-forget event to *runner*."""
+        ...
+
+    async def call_runner(
+        self,
+        runner: Any,
+        event: str,
+        data: dict,
+        *,
+        timeout: int = 15,
+    ) -> dict:
+        """Send a request/response call to *runner* and return the reply."""
+        ...
+
+    def route_harness_reply(
+        self, event: str, data: dict, runner_id: str | None = None
+    ) -> bool | None:
+        """Return None for unrelated events, otherwise reply acceptance."""
+        ...
+
+
+class CredentialResolver(Protocol):
+    """Resolve the credentials attached to a workspace.
+
+    Phase-4 wiring: ``RunnerService(credential_resolver=...)`` stores the
+    object on ``self._credential_resolver``; attached-credential call sites
+    use ``resolver.resolve_workspace_credentials(workspace)`` (sync method,
+    called via ``sync_to_async``) instead of constructing ``CredentialSvc()``.
+    """
+
+    def resolve_workspace_credentials(self, workspace: Any) -> Any:
+        """Return the resolved credentials for *workspace*."""
+        ...
+
+
+class HarnessGateway(Protocol):
+    """Runner-service view of the agent harness.
+
+    Implemented by ``apps.harness`` and registered at app startup, so the
+    runner service never imports harness internals. Routing methods return
+    True when the payload reached a live harness waiter.
+    """
+
+    def owns_runner_reply(self, event: str, data: dict) -> bool:
+        """Return whether this process owns the live request or stream."""
+        ...
+
+    def route_harness_result(self, data: dict) -> bool:
+        """Route a ``harness:*_result`` payload to its waiting accessor."""
+        ...
+
+    def route_harness_file_chunk(self, data: dict) -> bool:
+        """Route a ``harness:read_file_chunk`` payload to its accessor."""
+        ...
+
+    def route_stream_output(self, data: dict) -> bool:
+        """Route a ``workspace:stream_output`` chunk to its byte stream."""
+        ...
+
+    def route_stream_closed(self, data: dict) -> bool:
+        """Route a ``workspace:stream_closed`` notice to its byte stream."""
+        ...
+
+    async def wait_stream_capacity(self, data: dict) -> None:
+        """Hold an accepted output ACK while the stream's consumer lags."""
+        ...
+
+    def fail_streams(
+        self, matches_workspace: Callable[[str], bool], error: str
+    ) -> None:
+        """Fail open byte streams whose workspace id matches the predicate."""
+        ...
+
+    async def desktop_action(
+        self, runner_service: Any, workspace_id: str, action: str, args: dict
+    ) -> dict:
+        """Run a correlated desktop action in *workspace_id*.
+
+        Raises:
+            HarnessActionError: When the runner reports a failure.
+            TimeoutError: When no reply arrives in time.
+        """
+        ...
+
+    def has_busy_computeruse_session(self, workspace_id: uuid.UUID) -> bool:
+        """Return True when a computer-use agent drives the desktop (sync)."""
+        ...
+
+    def has_busy_session(self, workspace_id: uuid.UUID) -> bool:
+        """Return True when any agent session in the workspace is busy (sync).
+
+        Busy includes sessions waiting for a user answer or approval.
+        """
+        ...
+
+    def busy_workspace_ids(self, workspace_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return requested workspace IDs with any busy root or child session."""
+        ...
+
+    async def abort_busy_computeruse(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:
+        """Abort busy computer-use sessions and return their session ids."""
+        ...

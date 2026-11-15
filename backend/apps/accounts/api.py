@@ -1,8 +1,8 @@
 """
 REST API endpoints for authentication.
 
-Public endpoints (auth=None): register, login, refresh.
-Protected endpoint: me (requires valid JWT).
+Public endpoints (auth=None): login, refresh, providers, SSO callback.
+API key management requires a valid JWT.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ import uuid
 from django.http import HttpRequest
 from ninja import Router
 
+from apps.accounts.api_auth import JWTAuth
 from apps.accounts.auth_backends import DjangoJWTBackend, get_auth_backend
 from apps.accounts.sso import KeycloakSsoService, get_sso_provider_config
-from apps.organizations.services import OrganizationService
-from common.exceptions import AuthenticationError
+from common.exceptions import AuthenticationError, NotFoundError, ServiceError
 
 from .schemas import (
     APIKeyCreatedOut,
@@ -25,29 +25,13 @@ from .schemas import (
     AuthProvidersOut,
     LoginIn,
     RefreshIn,
-    RegisterIn,
     SsoCallbackIn,
     SsoProviderOut,
     TokenOut,
-    UserOrgOut,
-    UserWithOrgsOut,
 )
+from .services import APIKeyService
 
 auth_router = Router(tags=["auth"])
-
-
-@auth_router.post(
-    "/register/",
-    response={201: TokenOut, 403: dict, 409: dict},
-    auth=None,
-    summary="Register a new user",
-)
-def register(request: HttpRequest, payload: RegisterIn):
-    """Create a new user account and return JWT tokens.
-
-    Registration is currently disabled — the system is closed.
-    """
-    return 403, {"detail": "Registration is currently disabled.", "code": "registration_disabled"}
 
 
 @auth_router.post(
@@ -144,50 +128,20 @@ def sso_callback(request: HttpRequest, payload: SsoCallbackIn):
     )
 
 
-@auth_router.get(
-    "/me/",
-    response=UserWithOrgsOut,
-    summary="Get current user",
-)
-def me(request: HttpRequest):
-    """Return the authenticated user's profile with organization memberships."""
-    user = request.user
-    org_service = OrganizationService()
-    org_list = org_service.list_user_organizations(user)
-
-    return UserWithOrgsOut(
-        id=user.id,
-        email=user.email,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        organizations=[
-            UserOrgOut(
-                id=o["id"],
-                name=o["name"],
-                slug=o["slug"],
-                role=o["role"],
-                created_at=o["created_at"],
-            )
-            for o in org_list
-        ],
-    )
-
-
 # ---------------------------------------------------------------------------
-# API key management
+# API key management — JWT sessions only; API keys must not manage credentials.
 # ---------------------------------------------------------------------------
 
 
 @auth_router.get(
     "/api-keys/",
     response=list[APIKeyOut],
+    auth=JWTAuth(),
     summary="List API keys",
 )
 def list_api_keys(request: HttpRequest):
     """Return all API keys for the authenticated user. Raw tokens are never returned."""
-    from .models import APIKey
-
-    keys = APIKey.objects.filter(user=request.user).order_by("-created_at")
+    keys = APIKeyService().list_keys(request.user)
     return [
         APIKeyOut(
             id=k.id,
@@ -206,6 +160,7 @@ def list_api_keys(request: HttpRequest):
 @auth_router.post(
     "/api-keys/",
     response={201: APIKeyCreatedOut, 400: dict},
+    auth=JWTAuth(),
     summary="Create API key",
 )
 def create_api_key(request: HttpRequest, payload: APIKeyCreateIn):
@@ -215,32 +170,15 @@ def create_api_key(request: HttpRequest, payload: APIKeyCreateIn):
     The raw token is returned **once** in the response and cannot be retrieved again.
     Store it securely — opencuria only stores a SHA-256 hash.
     """
-    from common.utils import generate_api_token, hash_token
-
-    from .models import APIKey
-
-    raw_token = f"kai_{generate_api_token()}"
-    token_hash = hash_token(raw_token)
-    key_prefix = raw_token[:12]
-
-    from .models import APIKeyPermission
-
-    # Validate permissions
-    valid_perms = APIKeyPermission.all_values()
-    invalid = [p for p in (payload.permissions or []) if p not in valid_perms]
-    if invalid:
-        return 400, {"detail": f"Invalid permissions: {invalid}", "code": "invalid_permissions"}
-
-    permissions = payload.permissions or valid_perms
-
-    api_key = APIKey.objects.create(
-        user=request.user,
-        name=payload.name,
-        key_hash=token_hash,
-        key_prefix=key_prefix,
-        expires_at=payload.expires_at,
-        permissions=permissions,
-    )
+    try:
+        api_key, raw_token = APIKeyService().create_key(
+            user=request.user,
+            name=payload.name,
+            expires_at=payload.expires_at,
+            permissions=payload.permissions,
+        )
+    except ServiceError as e:
+        return 400, {"detail": e.message, "code": e.code}
 
     return 201, APIKeyCreatedOut(
         id=api_key.id,
@@ -258,26 +196,21 @@ def create_api_key(request: HttpRequest, payload: APIKeyCreateIn):
 @auth_router.patch(
     "/api-keys/{key_id}/",
     response={200: APIKeyOut, 400: dict, 404: dict},
+    auth=JWTAuth(),
     summary="Update API key permissions",
 )
 def update_api_key(request: HttpRequest, key_id: uuid.UUID, payload: APIKeyUpdateIn):
     """
     Update the permissions of an existing API key.
     """
-    from .models import APIKey, APIKeyPermission
-
     try:
-        api_key = APIKey.objects.get(id=key_id, user=request.user)
-    except APIKey.DoesNotExist:
+        api_key = APIKeyService().update_permissions(
+            user=request.user, key_id=key_id, permissions=payload.permissions
+        )
+    except NotFoundError:
         return 404, {"detail": "API key not found.", "code": "not_found"}
-
-    valid_perms = APIKeyPermission.all_values()
-    invalid = [p for p in (payload.permissions or []) if p not in valid_perms]
-    if invalid:
-        return 400, {"detail": f"Invalid permissions: {invalid}", "code": "invalid_permissions"}
-
-    api_key.permissions = payload.permissions or valid_perms
-    api_key.save(update_fields=["permissions"])
+    except ServiceError as e:
+        return 400, {"detail": e.message, "code": e.code}
 
     return 200, APIKeyOut(
         id=api_key.id,
@@ -294,6 +227,7 @@ def update_api_key(request: HttpRequest, key_id: uuid.UUID, payload: APIKeyUpdat
 @auth_router.delete(
     "/api-keys/{key_id}/",
     response={204: None, 404: dict},
+    auth=JWTAuth(),
     summary="Revoke API key",
 )
 def delete_api_key(request: HttpRequest, key_id: uuid.UUID):
@@ -303,15 +237,10 @@ def delete_api_key(request: HttpRequest, key_id: uuid.UUID):
     Sets ``is_active=False`` immediately. The key can no longer be used
     for authentication. Only the owner can revoke their own keys.
     """
-    from .models import APIKey
-
     try:
-        api_key = APIKey.objects.get(id=key_id, user=request.user)
-    except APIKey.DoesNotExist:
+        APIKeyService().revoke(user=request.user, key_id=key_id)
+    except NotFoundError:
         return 404, {"detail": "API key not found.", "code": "not_found"}
-
-    api_key.is_active = False
-    api_key.save(update_fields=["is_active"])
     return 204, None
 
 
@@ -332,6 +261,8 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.WORKSPACES_STOP: "Stop running workspaces",
         APIKeyPermission.WORKSPACES_RESUME: "Resume stopped workspaces",
         APIKeyPermission.WORKSPACES_DELETE: "Delete workspaces",
+        APIKeyPermission.WORKSPACES_GIT_READ: "View git status, diffs and commit details",
+        APIKeyPermission.WORKSPACES_GIT_WRITE: "Run git operations (stage, commit, branches, merge, fetch/pull/push)",
         APIKeyPermission.TERMINAL_ACCESS: "Open interactive terminal sessions",
         APIKeyPermission.WORKSPACES_PROCESSES_READ: "List and view background processes",
         APIKeyPermission.WORKSPACES_PROCESSES_RUN: "Start and stop background processes",
@@ -352,10 +283,14 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS: "Assign, activate, deactivate and rebuild image definitions on runners",
         APIKeyPermission.SKILLS_READ: "List and view skills",
         APIKeyPermission.SKILLS_WRITE: "Create, update, delete skills",
+        APIKeyPermission.PLUGINS_READ: "List and view plugins",
+        APIKeyPermission.PLUGINS_WRITE: (
+            "Create, update, delete plugins and manage activations"
+        ),
         APIKeyPermission.HARNESS_READ: "List and view harness sessions",
         APIKeyPermission.HARNESS_RUN: "Create harness sessions and send prompts",
         APIKeyPermission.HARNESS_PERMISSIONS: "Resolve harness permission requests",
-        APIKeyPermission.MCP_ACCESS: "Connect via MCP interface",
+        APIKeyPermission.HARNESS_PROVIDERS: "Manage provider connections",
     }
 
     return [

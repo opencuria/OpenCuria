@@ -18,11 +18,18 @@ class ServiceError(Exception):
 
 
 class NotFoundError(ServiceError):
-    """Raised when a requested resource does not exist."""
+    """Raised when a requested resource does not exist.
 
-    def __init__(self, resource: str, identifier: str) -> None:
+    Omit ``identifier`` when the message must not echo the requested ID.
+    """
+
+    def __init__(self, resource: str, identifier: str | None = None) -> None:
         super().__init__(
-            message=f"{resource} '{identifier}' not found",
+            message=(
+                f"{resource} not found"
+                if identifier is None
+                else f"{resource} '{identifier}' not found"
+            ),
             code="not_found",
         )
         self.resource = resource
@@ -32,8 +39,8 @@ class NotFoundError(ServiceError):
 class ConflictError(ServiceError):
     """Raised when an operation conflicts with the current resource state."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message=message, code="conflict")
+    def __init__(self, message: str, code: str = "conflict") -> None:
+        super().__init__(message=message, code=code)
 
 
 class AuthenticationError(ServiceError):
@@ -41,3 +48,13 @@ class AuthenticationError(ServiceError):
 
     def __init__(self, message: str = "Authentication failed") -> None:
         super().__init__(message=message, code="authentication_error")
+
+
+class ServiceUnavailableError(ServiceError):
+    """Raised when a required backend process is temporarily unreachable.
+
+    The REST API answers it with HTTP 503 so clients can retry later.
+    """
+
+    def __init__(self, message: str, code: str = "service_unavailable") -> None:
+        super().__init__(message=message, code=code)

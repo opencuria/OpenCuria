@@ -19,6 +19,11 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from django.conf import settings
 
+from common.exceptions import AuthenticationError
+
+from .models import User
+from .repositories import UserRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TokenPair:
-    """Access + refresh token pair returned after login / register / refresh."""
+    """Access + refresh token pair returned after login or refresh."""
 
     access_token: str
     refresh_token: str
@@ -44,10 +49,9 @@ class AuthBackend(ABC):
     """
     Abstract authentication backend.
 
-    Implementations must provide methods for user creation, credential
-    validation, and JWT token management. To swap the entire auth system
-    (e.g. to Keycloak), implement a new subclass and update the
-    AUTH_BACKEND_CLASS setting.
+    Implementations must provide credential validation and JWT token management.
+    To swap the entire auth system (e.g. to Keycloak), implement a new subclass
+    and update the AUTH_BACKEND_CLASS setting.
     """
 
     @abstractmethod
@@ -56,14 +60,6 @@ class AuthBackend(ABC):
         Validate credentials and return the User instance.
 
         Raises AuthenticationError on failure.
-        """
-
-    @abstractmethod
-    def create_user(self, *, email: str, password: str, **kwargs):
-        """
-        Create a new user and return the User instance.
-
-        Raises ConflictError if email already exists.
         """
 
     @abstractmethod
@@ -113,38 +109,18 @@ class DjangoJWTBackend(AuthBackend):
 
     # -- Authenticate -------------------------------------------------
 
-    def authenticate(self, email: str, password: str):
-        from apps.accounts.models import User
-        from common.exceptions import AuthenticationError
-
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
+    def authenticate(self, email: str, password: str) -> User:
+        """Validate a local password and reject disabled accounts."""
+        user = UserRepository.get_by_email(email)
+        if user is None:
             raise AuthenticationError("Invalid email or password")
 
-        if not user.check_password(password):
+        if not UserRepository.verify_password(user, password):
             raise AuthenticationError("Invalid email or password")
 
         if not user.is_active:
             raise AuthenticationError("Account is disabled")
 
-        return user
-
-    # -- Create user --------------------------------------------------
-
-    def create_user(self, *, email: str, password: str, **kwargs):
-        from apps.accounts.models import User
-        from common.exceptions import ConflictError
-
-        if User.objects.filter(email=email).exists():
-            raise ConflictError(f"A user with email '{email}' already exists")
-
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=password,
-            **kwargs,
-        )
         return user
 
     # -- Token generation ---------------------------------------------
@@ -167,17 +143,19 @@ class DjangoJWTBackend(AuthBackend):
             "exp": now + self._refresh_lifetime,
         }
 
-        access_token = jwt.encode(access_payload, self._secret, algorithm=self._algorithm)
-        refresh_token = jwt.encode(refresh_payload, self._secret, algorithm=self._algorithm)
+        access_token = jwt.encode(
+            access_payload, self._secret, algorithm=self._algorithm
+        )
+        refresh_token = jwt.encode(
+            refresh_payload, self._secret, algorithm=self._algorithm
+        )
 
         return TokenPair(access_token=access_token, refresh_token=refresh_token)
 
     # -- Token validation ---------------------------------------------
 
-    def validate_access_token(self, token: str):
-        from apps.accounts.models import User
-        from common.exceptions import AuthenticationError
-
+    def validate_access_token(self, token: str) -> User:
+        """Validate a local access JWT and resolve its active account."""
         try:
             payload = jwt.decode(token, self._secret, algorithms=[self._algorithm])
         except jwt.ExpiredSignatureError:
@@ -193,8 +171,10 @@ class DjangoJWTBackend(AuthBackend):
             raise AuthenticationError("Invalid token payload")
 
         try:
-            user = User.objects.get(id=int(user_id))
-        except (User.DoesNotExist, ValueError):
+            user = UserRepository.get_by_id(int(user_id))
+        except ValueError:
+            raise AuthenticationError("User not found")
+        if user is None:
             raise AuthenticationError("User not found")
 
         if not user.is_active:
@@ -205,11 +185,11 @@ class DjangoJWTBackend(AuthBackend):
     # -- Token refresh ------------------------------------------------
 
     def refresh_tokens(self, refresh_token: str) -> TokenPair:
-        from apps.accounts.models import User
-        from common.exceptions import AuthenticationError
-
+        """Exchange a valid refresh JWT for tokens of its active account."""
         try:
-            payload = jwt.decode(refresh_token, self._secret, algorithms=[self._algorithm])
+            payload = jwt.decode(
+                refresh_token, self._secret, algorithms=[self._algorithm]
+            )
         except jwt.ExpiredSignatureError:
             raise AuthenticationError("Refresh token has expired")
         except jwt.InvalidTokenError:
@@ -223,8 +203,10 @@ class DjangoJWTBackend(AuthBackend):
             raise AuthenticationError("Invalid token payload")
 
         try:
-            user = User.objects.get(id=int(user_id))
-        except (User.DoesNotExist, ValueError):
+            user = UserRepository.get_by_id(int(user_id))
+        except ValueError:
+            raise AuthenticationError("User not found")
+        if user is None:
             raise AuthenticationError("User not found")
 
         if not user.is_active:

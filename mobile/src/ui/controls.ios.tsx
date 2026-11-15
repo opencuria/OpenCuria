@@ -1,0 +1,200 @@
+import React from "react";
+import { View } from "react-native";
+import { isLiquidGlassAvailable } from "expo-glass-effect";
+import { Button as SwiftButton, Host, RNHostView } from "@expo/ui/swift-ui";
+import {
+  accessibilityLabel,
+  accessibilityHint,
+  accessibilityValue,
+  buttonStyle,
+  buttonBorderShape,
+  controlSize,
+  disabled,
+  font,
+  frame,
+  labelStyle,
+  onLongPressGesture,
+  tint,
+} from "@expo/ui/swift-ui/modifiers";
+import type {
+  ButtonProps,
+  IconButtonProps,
+  NativeActionProps,
+} from "./controls.types";
+import {
+  controlContentStyle,
+  controlLayout,
+  hugsContent,
+} from "./controlLayout";
+import { useTheme } from "./theme";
+
+/** Floating controls are liquid glass on iOS 26 and bordered before it. */
+const FLOATING_STYLE = isLiquidGlassAvailable() ? "glass" : "bordered";
+
+/** SwiftUI owns highlighting, hit testing, disabled state and button appearance. */
+export function Button({
+  title,
+  symbol,
+  variant = "secondary",
+  busy,
+  compact,
+  shape,
+  disabled: inactive,
+  onPress,
+  style,
+  accessibilityLabel: label,
+  testID,
+}: ButtonProps): React.JSX.Element {
+  const { theme } = useTheme();
+  const layout = controlLayout(style);
+  const hug = hugsContent(layout);
+  return (
+    <Host
+      matchContents={{ vertical: true, horizontal: hug }}
+      colorScheme={theme.scheme}
+      seedColor={theme.primary}
+      ignoreSafeArea="all"
+      style={[{ alignSelf: "stretch" }, layout]}
+    >
+      <SwiftButton
+        label={busy ? `${title}…` : title}
+        systemImage={symbol}
+        testID={testID}
+        role={variant === "danger" ? "destructive" : undefined}
+        onPress={() => onPress?.()}
+        modifiers={[
+          buttonStyle(
+            variant === "primary" || variant === "danger"
+              ? "borderedProminent"
+              : variant === "ghost"
+                ? "borderless"
+                : "bordered",
+          ),
+          controlSize(compact ? "regular" : "large"),
+          ...(shape ? [buttonBorderShape(shape)] : []),
+          frame(
+            hug ? { minHeight: 44 } : { maxWidth: Infinity, minHeight: 44 },
+          ),
+          disabled(Boolean(inactive || busy)),
+          accessibilityLabel(label ?? title),
+        ]}
+      />
+    </Host>
+  );
+}
+
+/** System symbols and native button styles, including the filled send/stop action. */
+export function IconButton({
+  icon,
+  symbol,
+  label,
+  size = 44,
+  tone = "neutral",
+  disabled: inactive,
+  onPress,
+  accessibilityHint: hint,
+  accessibilityValue: value,
+  testID,
+}: IconButtonProps): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Host
+      colorScheme={theme.scheme}
+      seedColor={theme.primary}
+      ignoreSafeArea="all"
+      style={{ width: Math.max(44, size), height: Math.max(44, size) }}
+    >
+      <SwiftButton
+        label={symbol ? label : undefined}
+        systemImage={symbol}
+        testID={testID}
+        onPress={() => onPress?.()}
+        modifiers={[
+          buttonStyle(
+            tone === "primary"
+              ? "borderedProminent"
+              : tone === "floating"
+                ? FLOATING_STYLE
+                : "borderless",
+          ),
+          buttonBorderShape("circle"),
+          labelStyle("iconOnly"),
+          controlSize("large"),
+          // Quiet symbols follow the subheadline size instead of the large control.
+          ...(tone === "quiet" ? [font({ textStyle: "subheadline" })] : []),
+          frame({ minWidth: 44, minHeight: 44 }),
+          disabled(Boolean(inactive)),
+          tint(
+            tone === "danger"
+              ? theme.danger
+              : tone === "floating"
+                ? theme.text
+                : tone === "quiet"
+                  ? theme.mutedText
+                  : theme.primary,
+          ),
+          accessibilityLabel(label),
+          ...(hint ? [accessibilityHint(hint)] : []),
+          ...(value?.text ? [accessibilityValue(value.text)] : []),
+        ]}
+      >
+        {!symbol ? (
+          <RNHostView matchContents>
+            <View
+              style={{
+                width: 24,
+                height: 24,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {icon}
+            </View>
+          </RNHostView>
+        ) : undefined}
+      </SwiftButton>
+    </Host>
+  );
+}
+
+/** A native button for transcript content such as files and disclosure rows. */
+export function NativeAction({
+  children,
+  onPress,
+  onLongPress,
+  disabled: inactive,
+  fitContent,
+  style,
+  testID,
+  accessibilityLabel: label,
+  accessibilityHint: hint,
+}: NativeActionProps): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View style={controlLayout(style)}>
+      <Host
+        style={fitContent ? undefined : { width: "100%" }}
+        matchContents={fitContent ? true : { vertical: true }}
+        colorScheme={theme.scheme}
+        seedColor={theme.primary}
+        ignoreSafeArea="all"
+      >
+        <SwiftButton
+          onPress={() => onPress?.()}
+          testID={testID}
+          modifiers={[
+            buttonStyle("borderless"),
+            disabled(Boolean(inactive)),
+            ...(onLongPress ? [onLongPressGesture(onLongPress)] : []),
+            ...(label ? [accessibilityLabel(label)] : []),
+            ...(hint ? [accessibilityHint(hint)] : []),
+          ]}
+        >
+          <RNHostView matchContents={fitContent ? true : { vertical: true }}>
+            <View style={controlContentStyle(style)}>{children}</View>
+          </RNHostView>
+        </SwiftButton>
+      </Host>
+    </View>
+  );
+}

@@ -1,0 +1,925 @@
+"""Tests for the ChatGPT provider adapter (mocked SSE)."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+from unittest.mock import AsyncMock
+from unittest.mock import call as mock_call
+
+import httpx
+import pytest
+
+from apps.harness.providers.base import (
+    ChatOptions,
+    LLMMessage,
+    ProviderAuthError,
+    ProviderRateLimitError,
+    ProviderResponseError,
+    ToolSchema,
+)
+from apps.harness.providers.chatgpt import (
+    RECONNECT_MESSAGE,
+    USAGE_NOT_INCLUDED_MESSAGE,
+    ChatGPTAdapter,
+)
+from apps.harness.providers.chatgpt_oauth import CODEX_API_ENDPOINT
+
+
+def _responses_sse(events: list[dict[str, Any]]) -> bytes:
+    lines: list[str] = []
+    for event in events:
+        lines.append(f"data: {json.dumps(event)}")
+    lines.append("data: [DONE]")
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _credentials() -> dict[str, Any]:
+    return {"access": "access-token", "account_id": "acc-123"}
+
+
+def _adapter(
+    credentials: dict[str, Any], *, client: httpx.AsyncClient
+) -> ChatGPTAdapter:
+    return ChatGPTAdapter(
+        credentials,
+        client=client,
+        fresh_credentials=AsyncMock(return_value=credentials),
+    )
+
+
+def _mock_client(
+    payload: bytes,
+    status_code: int = 200,
+    *,
+    capture: dict[str, Any] | None = None,
+) -> httpx.AsyncClient:
+    """Build a client that serves one Codex SSE response."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if capture is not None:
+            capture["url"] = str(request.url)
+            capture["headers"] = dict(request.headers)
+            capture["body"] = json.loads(request.content.decode())
+        assert str(request.url) == CODEX_API_ENDPOINT
+        return httpx.Response(
+            status_code,
+            content=payload,
+            headers={"Content-Type": "text/event-stream"},
+            request=request,
+        )
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.parametrize("event_type", ["response.completed", "response.done"])
+async def test_chat_stream_happy_path_text_toolcall_reasoning_usage(
+    event_type: str,
+) -> None:
+    """Text, reasoning, tool call, and usage deltas stream correctly."""
+    payload = _responses_sse(
+        [
+            {"type": "response.output_text.delta", "delta": "Hello"},
+            {"type": "response.reasoning_summary_text.delta", "delta": "thinking"},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": '{"path":"a"}',
+                },
+            },
+            {
+                "type": event_type,
+                "response": {
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "input_tokens_details": {"cached_tokens": 2},
+                    },
+                },
+            },
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [ToolSchema(name="read", description="r")],
+        )
+    ]
+
+    assert "".join(d.text for d in deltas) == "Hello"
+    assert "".join(d.reasoning for d in deltas) == "thinking"
+    tool_calls = [c for d in deltas for c in d.tool_calls]
+    assert tool_calls[0]["id"] == "call_1"
+    assert tool_calls[0]["name"] == "read"
+    usages = [d.usage for d in deltas if d.usage is not None]
+    assert len(usages) == 1
+    assert usages[-1].prompt_tokens == 10
+    assert usages[-1].completion_tokens == 5
+    # input_tokens is the inclusive total: cached_tokens (2) is a subset.
+    assert usages[-1].total_tokens == 15
+    # response.status "completed" is a lifecycle marker, not a finish reason:
+    # no incomplete_details + tool calls observed -> "tool_calls".
+    assert deltas[-1].finish_reason == "tool_calls"
+
+
+async def test_chat_stream_separates_reasoning_summary_parts() -> None:
+    """Each Codex summary_index becomes a paragraph, not glued titles."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            },
+            {
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs_1",
+                "summary_index": 0,
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "summary_index": 0,
+                "delta": "First",
+            },
+            {
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "rs_1",
+                "summary_index": 0,
+            },
+            {
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs_1",
+                "summary_index": 1,
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1",
+                "summary_index": 1,
+                "delta": "Second",
+            },
+            {
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "rs_1",
+                "summary_index": 1,
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [],
+        )
+    ]
+
+    assert "".join(d.reasoning for d in deltas) == "First\n\nSecond"
+
+
+async def test_chat_stream_separates_summary_index_without_part_added() -> None:
+    """summary_index on text deltas still inserts a paragraph break."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 0,
+                "delta": "First",
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "summary_index": 1,
+                "delta": "Second",
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [],
+        )
+    ]
+
+    assert "".join(d.reasoning for d in deltas) == "First\n\nSecond"
+
+
+async def test_happy_path_toolcall_without_item_id_still_emits_index() -> None:
+    """Legacy done event without item.id gets a deterministic stream key."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read",
+                    "arguments": '{"path":"a"}',
+                },
+            },
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [ToolSchema(name="read", description="r")],
+        )
+    ]
+    tool_calls = [c for d in deltas for c in d.tool_calls]
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["index"] == "0"
+    assert tool_calls[0]["id"] == "call_1"
+    assert tool_calls[0]["name"] == "read"
+
+
+async def test_parallel_function_calls_keep_distinct_stream_keys() -> None:
+    """Two added+done items with different item.id stay in separate slots."""
+    events = [
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item-a",
+                "call_id": "call_a",
+                "name": "read",
+            },
+        },
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item-b",
+                "call_id": "call_b",
+                "name": "write",
+            },
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "item-a",
+                "call_id": "call_a",
+                "name": "read",
+                "arguments": '{"path":"a"}',
+            },
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "item-b",
+                "call_id": "call_b",
+                "name": "write",
+                "arguments": '{"path":"b"}',
+            },
+        },
+    ]
+    payload = _responses_sse(events)
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [ToolSchema(name="read", description="r")],
+        )
+    ]
+    tool_calls = [c for d in deltas for c in d.tool_calls]
+    keys = {c["index"] for c in tool_calls}
+    assert keys == {"item-a", "item-b"}
+    by_key = {c["index"]: c for c in tool_calls if c.get("id")}
+    assert by_key["item-a"]["id"] == "call_a"
+    assert by_key["item-b"]["id"] == "call_b"
+    # Runner concatenation per key yields two intact calls.
+    fragments: dict[str, str] = {}
+    for call in tool_calls:
+        fragments.setdefault(str(call["index"]), "")
+        fragments[str(call["index"])] += str(call.get("arguments", "") or "")
+    assert json.loads(fragments["item-a"]) == {"path": "a"}
+    assert json.loads(fragments["item-b"]) == {"path": "b"}
+
+
+async def test_fragmented_arguments_concatenate_without_duplication() -> None:
+    """added + 2x delta + done accumulates to exactly one argument string."""
+    events = [
+        {
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "item-1",
+                "call_id": "call_1",
+                "name": "read",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-1",
+            "delta": '{"path"',
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "item-1",
+            "delta": ':"a"}',
+        },
+        {
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "item-1",
+                "call_id": "call_1",
+                "name": "read",
+                "arguments": '{"path":"a"}',
+            },
+        },
+    ]
+    payload = _responses_sse(events)
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [ToolSchema(name="read", description="r")],
+        )
+    ]
+    tool_calls = [c for d in deltas for c in d.tool_calls]
+    assert {c["index"] for c in tool_calls} == {"item-1"}
+    # done carries only the unsent suffix ("" here), so concatenation
+    # of all fragments equals the full arguments exactly once.
+    assert "".join(str(c.get("arguments", "") or "") for c in tool_calls) == (
+        '{"path":"a"}'
+    )
+    done_calls = [c for c in tool_calls if c.get("name")]
+    assert done_calls[-1]["arguments"] == ""
+
+
+async def test_build_payload_shaping() -> None:
+    """Instructions, store:false, tools strict:false, no max_output_tokens."""
+    capture: dict[str, Any] = {}
+    payload = _responses_sse(
+        [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
+    )
+    adapter = _adapter(
+        _credentials(),
+        client=_mock_client(payload, capture=capture),
+    )
+    async for _ in adapter.chat_stream(
+        "gpt-5.4",
+        [
+            LLMMessage(role="system", content="You are helpful."),
+            LLMMessage(role="user", content="hi"),
+            LLMMessage(
+                role="assistant",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "function": {"name": "read", "arguments": "{}"},
+                    }
+                ],
+            ),
+            LLMMessage(role="tool", content="ok", tool_call_id="call_1"),
+        ],
+        [
+            ToolSchema(
+                name="read", description="read files", parameters={"type": "object"}
+            )
+        ],
+        ChatOptions(max_tokens=999, reasoning_effort="high"),
+    ):
+        pass
+
+    body = capture["body"]
+    assert body["instructions"] == "You are helpful."
+    assert body["store"] is False
+    assert body["stream"] is True
+    assert body["include"] == ["reasoning.encrypted_content"]
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert "max_output_tokens" not in body
+    assert body["tools"][0]["strict"] is False
+    roles = [
+        item.get("role") for item in body["input"] if item.get("type") == "message"
+    ]
+    assert "system" not in roles
+    assert body["input"][-1]["type"] == "function_call_output"
+
+
+async def test_request_headers_include_account_and_residency() -> None:
+    """Codex headers include bearer token, account id, and residency."""
+    capture: dict[str, Any] = {}
+    payload = _responses_sse(
+        [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
+    )
+    creds = _credentials()
+    creds["residency"] = "eu"
+    adapter = _adapter(creds, client=_mock_client(payload, capture=capture))
+    async for _ in adapter.chat_stream("gpt-5.4", [], []):
+        pass
+
+    headers = capture["headers"]
+    assert headers["authorization"] == "Bearer access-token"
+    assert headers["chatgpt-account-id"] == "acc-123"
+    assert headers["x-openai-internal-codex-residency"] == "eu"
+    assert headers["originator"] == "opencuria"
+    assert headers["user-agent"] == "opencuria"
+
+
+async def test_persistent_401_retries_once_then_raises_auth_error() -> None:
+    """A second rejection surfaces reconnect guidance without a retry loop."""
+    requests = []
+    credentials = _credentials()
+    fresh = AsyncMock(return_value=credentials)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == CODEX_API_ENDPOINT
+        requests.append(request)
+        return httpx.Response(401, content=b"unauthorized", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    adapter = ChatGPTAdapter(credentials, client=client, fresh_credentials=fresh)
+    with pytest.raises(ProviderAuthError, match=RECONNECT_MESSAGE):
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+    assert len(requests) == 2
+    assert fresh.call_args_list == [
+        mock_call(),
+        mock_call(rejected_access_token="access-token", force=True),
+    ]
+
+
+async def test_usage_not_included_maps_to_provider_auth_error() -> None:
+    """usage_not_included stream errors surface upgrade guidance."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "error",
+                "error": {
+                    "code": "usage_not_included",
+                    "message": "plan does not include usage",
+                },
+            }
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    with pytest.raises(ProviderAuthError, match=USAGE_NOT_INCLUDED_MESSAGE):
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+
+
+async def test_429_raises_rate_limit_error() -> None:
+    """HTTP 429 raises ProviderRateLimitError with retry hint."""
+    adapter = _adapter(
+        _credentials(),
+        client=_mock_client(b"slow down", status_code=429),
+    )
+    with pytest.raises(ProviderRateLimitError) as exc_info:
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+    assert exc_info.value.is_retryable is True
+
+
+async def test_response_failed_raises_provider_response_error() -> None:
+    """response.failed events become ProviderResponseError."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.failed",
+                "error": {"code": "server_error", "message": "upstream failed"},
+            }
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    with pytest.raises(ProviderResponseError, match="upstream failed"):
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+
+
+async def test_context_length_exceeded_stream_error_code_message_format() -> None:
+    """Overflow stream errors use 'code: message' and are compaction-visible."""
+    from apps.harness.providers.context_errors import is_context_overflow_error
+
+    payload = _responses_sse(
+        [
+            {
+                "type": "error",
+                "error": {
+                    "code": "context_length_exceeded",
+                    "message": "too many tokens",
+                },
+            }
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    with pytest.raises(ProviderResponseError) as exc_info:
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+    error = exc_info.value
+    assert str(error) == "context_length_exceeded: too many tokens"
+    assert error.is_retryable is False
+    assert "context_length_exceeded" in error.response_body
+    assert is_context_overflow_error(error)
+
+
+@pytest.mark.parametrize("event_type", ["response.incomplete", "response.done"])
+async def test_incomplete_max_output_tokens_maps_to_length_and_total(
+    event_type: str,
+) -> None:
+    """incomplete_details.reason drives finish; provider total is honored."""
+    payload = _responses_sse(
+        [
+            {
+                "type": event_type,
+                "response": {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                        "input_tokens_details": {"cached_tokens": 4},
+                    },
+                },
+            },
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [],
+        )
+    ]
+    assert deltas[-1].finish_reason == "length"
+    assert deltas[-1].usage is not None
+    assert deltas[-1].usage.total_tokens == 15
+
+
+@pytest.mark.parametrize("event_type", ["response.incomplete", "response.done"])
+async def test_incomplete_content_filter_maps_to_content_filter(
+    event_type: str,
+) -> None:
+    """incomplete_details content_filter aborts with content_filter reason."""
+    payload = _responses_sse(
+        [
+            {
+                "type": event_type,
+                "response": {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "content_filter"},
+                    "usage": {"input_tokens": 3, "output_tokens": 1},
+                },
+            },
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [
+        d
+        async for d in adapter.chat_stream(
+            "gpt-5.4",
+            [LLMMessage(role="user", content="hi")],
+            [],
+        )
+    ]
+    assert deltas[-1].finish_reason == "content_filter"
+    assert deltas[-1].usage is not None
+    assert deltas[-1].usage.total_tokens == 4
+
+
+@pytest.mark.parametrize("event_type", ["response.completed", "response.done"])
+async def test_failed_status_in_terminal_event_raises_response_error(
+    event_type: str,
+) -> None:
+    """A terminal-carried status 'failed' surfaces ProviderResponseError."""
+    payload = _responses_sse(
+        [
+            {
+                "type": event_type,
+                "response": {"status": "failed", "error": {"message": "boom"}},
+            },
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    with pytest.raises(ProviderResponseError, match="boom"):
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+
+
+@pytest.mark.parametrize("response", [None, {}, {"usage": None}])
+async def test_done_without_usage_still_finishes(response: Any) -> None:
+    """Missing usage does not prevent a terminal event from finishing the step."""
+    payload = _responses_sse([{"type": "response.done", "response": response}])
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    deltas = [d async for d in adapter.chat_stream("gpt-5.4", [], [])]
+    assert len(deltas) == 1
+    assert deltas[0].finish_reason == "stop"
+    assert deltas[0].usage is None
+
+
+async def test_done_with_failed_authorization_raises_auth_error() -> None:
+    """Done events keep the same plan-authorization handling as failed events."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.done",
+                "response": {
+                    "status": "failed",
+                    "error": {"code": "usage_not_included"},
+                },
+            }
+        ]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
+    with pytest.raises(ProviderAuthError, match=USAGE_NOT_INCLUDED_MESSAGE):
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+
+
+async def test_tool_schema_projection_anyof_in_chatgpt() -> None:
+    """ChatGPT tools go through the OpenAI projection (strict:false kept)."""
+    capture: dict[str, Any] = {}
+    payload = _responses_sse(
+        [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload, capture=capture))
+    async for _ in adapter.chat_stream(
+        "gpt-5.4",
+        [LLMMessage(role="user", content="hi")],
+        [
+            ToolSchema(
+                name="read",
+                description="r",
+                parameters={"anyOf": [{"properties": {"a": {"type": "string"}}}]},
+            )
+        ],
+    ):
+        pass
+    tool = capture["body"]["tools"][0]
+    assert tool["strict"] is False
+    assert tool["parameters"]["type"] == "object"
+    assert set(tool["parameters"]["properties"]) == {"a"}
+
+
+async def test_function_call_replay_authoritative_arguments() -> None:
+    """Assistant tool calls replay with JSON-string authoritative arguments."""
+    capture: dict[str, Any] = {}
+    payload = _responses_sse(
+        [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload, capture=capture))
+    async for _ in adapter.chat_stream(
+        "gpt-5.4",
+        [
+            LLMMessage(role="user", content="hi"),
+            LLMMessage(
+                role="assistant",
+                content="doing",
+                tool_calls=[{"id": "call_9", "name": "read", "arguments": {"p": "a"}}],
+            ),
+            LLMMessage(role="tool", content="ok", tool_call_id="call_9"),
+        ],
+        [],
+    ):
+        pass
+    calls = [i for i in capture["body"]["input"] if i.get("type") == "function_call"]
+    assert calls[0]["call_id"] == "call_9"
+    assert calls[0]["name"] == "read"
+    assert calls[0]["arguments"] == '{"p": "a"}'
+
+
+def test_assistant_text_with_function_call_replays_text_first() -> None:
+    """Assistant text plus function_call replays text before the call."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="assistant",
+                content="doing",
+                tool_calls=[{"id": "call_9", "name": "read", "arguments": '{"p":"a"}'}],
+            )
+        ]
+    )
+    assert items[0]["type"] == "message"
+    assert items[0]["role"] == "assistant"
+    assert items[0]["content"] == [{"type": "output_text", "text": "doing"}]
+    assert items[1]["type"] == "function_call"
+    assert items[1]["call_id"] == "call_9"
+
+
+def test_missing_call_id_gets_best_effort_id() -> None:
+    """tool_call_id-less tool roles never send an empty call_id."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [LLMMessage(role="tool", content="ok", tool_call_id=None)]
+    )
+    assert items and all(item.get("call_id") for item in items)
+
+
+async def test_user_image_url_parts_become_input_image() -> None:
+    """Agent-S PNG data URLs reach the Responses wire as input_image."""
+    capture: dict[str, Any] = {}
+    payload = _responses_sse(
+        [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
+    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload, capture=capture))
+    png_url = "data:image/png;base64,iVBORw0KGgo="
+    async for _ in adapter.chat_stream(
+        "gpt-5.4",
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see screenshot"},
+                    {"type": "image_url", "image_url": {"url": png_url}},
+                ],
+            )
+        ],
+        [],
+    ):
+        pass
+    user_item = next(
+        item
+        for item in capture["body"]["input"]
+        if item.get("type") == "message" and item.get("role") == "user"
+    )
+    assert {"type": "input_text", "text": "see screenshot"} in user_item["content"]
+    assert {"type": "input_image", "image_url": png_url} in user_item["content"]
+
+
+def test_user_image_parts_become_input_image() -> None:
+    """Hydrated image_url parts lower to Responses input_image items."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+            )
+        ]
+    )
+    assert items[0]["role"] == "user"
+    assert {"type": "input_text", "text": "see"} in items[0]["content"]
+    assert {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,AAAA",
+    } in items[0]["content"]
+
+
+class _RaiseTransport(httpx.AsyncBaseTransport):
+    """Transport that fails immediately with a fixed exception."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        raise self._error
+
+
+async def test_chat_stream_read_error_is_retryable() -> None:
+    """Mid-stream httpx.ReadError maps to Connection reset by server."""
+    client = httpx.AsyncClient(transport=_RaiseTransport(httpx.ReadError("")))
+    adapter = _adapter(_credentials(), client=client)
+    with pytest.raises(
+        ProviderResponseError, match="Connection reset by server"
+    ) as exc_info:
+        async for _ in adapter.chat_stream(
+            "gpt-5.4", [LLMMessage(role="user", content="hi")], []
+        ):
+            pass
+    assert exc_info.value.is_retryable is True
+
+
+def test_tool_image_parts_become_multimodal_output() -> None:
+    """Tool image_url parts ride inside function_call_output."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "Image read successfully"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAAA"},
+                    },
+                ],
+                tool_call_id="call_1",
+            )
+        ]
+    )
+    assert items[0]["type"] == "function_call_output"
+    assert items[0]["call_id"] == "call_1"
+    assert {"type": "input_text", "text": "Image read successfully"} in items[0][
+        "output"
+    ]
+    assert {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,AAAA",
+    } in items[0]["output"]
+
+
+def test_tool_text_only_stays_string_output() -> None:
+    """Image-less tool output keeps the legacy string format."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [LLMMessage(role="tool", content="ok", tool_call_id="call_1")]
+    )
+    assert items[0]["output"] == "ok"
+
+
+def test_tool_pdf_file_part_becomes_input_file_output() -> None:
+    """Tool PDF file parts ride inside function_call_output as input_file."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "PDF read successfully"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    },
+                ],
+                tool_call_id="call_1",
+            )
+        ]
+    )
+    assert items[0]["type"] == "function_call_output"
+    assert {"type": "input_text", "text": "PDF read successfully"} in items[0]["output"]
+    assert {
+        "type": "input_file",
+        "filename": "doc.pdf",
+        "file_data": "data:application/pdf;base64,BBBB",
+    } in items[0]["output"]
+
+
+def test_user_pdf_file_part_becomes_input_file() -> None:
+    """User PDF file parts lower to Responses input_file items."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "file",
+                        "mime": "application/pdf",
+                        "url": "data:application/pdf;base64,BBBB",
+                        "filename": "doc.pdf",
+                    },
+                ],
+            )
+        ]
+    )
+    assert {
+        "type": "input_file",
+        "filename": "doc.pdf",
+        "file_data": "data:application/pdf;base64,BBBB",
+    } in items[0]["content"]
+
+
+def test_tool_unknown_file_mime_does_not_crash() -> None:
+    """Unknown file MIMEs are dropped; text output survives."""
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    _, items = adapter._convert_messages(
+        [
+            LLMMessage(
+                role="tool",
+                content=[
+                    {"type": "text", "text": "done"},
+                    {
+                        "type": "file",
+                        "mime": "application/zip",
+                        "url": "data:application/zip;base64,AAAA",
+                        "filename": "a.zip",
+                    },
+                ],
+                tool_call_id="call_1",
+            )
+        ]
+    )
+    assert items[0]["output"] == "done"

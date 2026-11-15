@@ -1,24 +1,32 @@
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, nextTick, reactive } from 'vue'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatSidebar from './ChatSidebar.vue'
+import { useScheduledTaskStore } from '@/stores/scheduledTasks'
+import { subscribeToWorkspace } from '@/services/socket'
+
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
-import type { HarnessConversation } from '@/types/harness'
+import type { HarnessConversation } from '@opencuria/chat-core/harness'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
+
+enableAutoUnmount(afterEach)
 
 const authStore = {
   organizations: [{ id: 'org-1', name: 'Acme', role: 'admin' }],
   activeOrganization: { id: 'org-1', name: 'Acme', role: 'admin' },
   activeOrganizationId: 'org-1',
   isAdmin: true,
-  user: { email: 'admin@example.com' },
+  user: { id: 1, email: 'admin@example.com' },
   setActiveOrganization: vi.fn(),
   logout: vi.fn(),
 }
 
 const workspaceStore = {
+  getWorkspaceTransitionLabel: vi.fn<(id: string) => string | null>(() => null),
+  isWorkspaceTransitioning: vi.fn<(id: string) => boolean>(() => false),
   workspaces: [
     {
       id: 'ws-1',
@@ -57,6 +65,7 @@ const defaultConversation: HarnessConversation = {
   model: '',
   unread: true,
   updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  last_message_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
 }
 
 const conversationStore = {
@@ -64,8 +73,8 @@ const conversationStore = {
   uniqueWorkspaceIds: ['ws-1'],
   fetchConversations: vi.fn(),
   markAsRead: vi.fn(),
+  markAsUnread: vi.fn(),
   updateSessionStatus: vi.fn(),
-  touchConversation: vi.fn(),
 }
 
 const harnessStore = {
@@ -76,19 +85,20 @@ const harnessStore = {
 }
 
 const routerPush = vi.fn()
+const currentRoute = reactive({
+  path: '/',
+  name: 'home',
+  params: {} as Record<string, string>,
+  query: {} as Record<string, string>,
+  meta: {},
+})
 
 vi.mock('vue-router', () => ({
   RouterLink: {
     name: 'RouterLink',
     template: '<a><slot /></a>',
   },
-  useRoute: () => ({
-    path: '/',
-    name: 'home',
-    params: {},
-    query: {},
-    meta: {},
-  }),
+  useRoute: () => currentRoute,
   useRouter: () => ({
     go: vi.fn(),
     push: routerPush,
@@ -122,9 +132,9 @@ vi.mock('@/services/socket', () => ({
   connect: vi.fn(),
   disconnect: vi.fn(),
   isConnected: { value: true },
-  subscribeToWorkspace: vi.fn(),
-  unsubscribeFromWorkspace: vi.fn(),
+  subscribeToWorkspace: vi.fn(() => vi.fn()),
   onEvent: () => () => {},
+  onReconnect: () => () => {},
 }))
 
 const SidebarTestWrapper = defineComponent({
@@ -142,7 +152,10 @@ const sidebarStubs = {
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
-  DropdownMenuItem: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+  DropdownMenuItem: {
+    props: ['disabled'],
+    template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
+  },
   DropdownMenuSeparator: true,
 }
 
@@ -165,6 +178,9 @@ describe('ChatSidebar', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+    Object.assign(currentRoute, { path: '/', name: 'home', params: {}, query: {} })
+    workspaceStore.getWorkspaceTransitionLabel.mockReturnValue(null)
+    workspaceStore.isWorkspaceTransitioning.mockReturnValue(false)
     conversationStore.conversations = [makeConversation({ unread: true })]
     conversationStore.uniqueWorkspaceIds = ['ws-1']
     workspaceStore.workspaces = [
@@ -189,35 +205,274 @@ describe('ChatSidebar', () => {
     ]
   })
 
-  it('renders the active organization name', () => {
+  it('renders the OpenCuria brand name', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Acme')
+    expect(wrapper.text()).toContain('OpenCuria')
+    expect(wrapper.text()).not.toContain('Acme')
   })
 
-  it('shows unread chats in the active section and hides empty stopped workspaces', () => {
+  it('starts each shared data poll with a single initial request', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(true)
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(1)
+    expect(conversationStore.fetchConversations).toHaveBeenCalledTimes(1)
+    const releases = vi.mocked(subscribeToWorkspace).mock.results.map((result) => result.value)
+    wrapper.unmount()
+    for (const release of releases) expect(release).toHaveBeenCalledOnce()
+  })
+
+  it('shows unread chats in their workspace and hides empty stopped workspaces', () => {
+    const wrapper = mountSidebar()
+
+    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="time-list"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="workspace-section"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('First chat')
     expect(wrapper.text()).toContain('Alpha')
-    expect(wrapper.text()).toContain('Alle Workspaces (2)')
+    expect(wrapper.text()).toContain('All workspaces (2)')
     expect(wrapper.text()).not.toContain('Beta')
     expect(wrapper.text()).not.toContain('Keine Chats — Enter zum Starten')
+    expect(wrapper.get('[data-testid="inbox-count"]').text()).toBe('1')
+    expect(wrapper.findAll('[data-testid="inbox-result-icon"]')).toHaveLength(1)
     expect(wrapper.findAll('[data-testid="unread-dot"]')).toHaveLength(1)
+  })
+
+  it('shows action-required chats at the top and in their workspace', () => {
+    conversationStore.conversations = [
+      makeConversation({
+        session_id: 's-gate',
+        title: 'Needs a permission',
+        status: 'busy',
+        needs_attention: true,
+        attention_kind: 'permission',
+      }),
+    ]
+    const wrapper = mountSidebar()
+
+    expect(wrapper.find('[data-testid="inbox-section"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="inbox-section"]').text()).toContain('Inbox')
+    expect(wrapper.text()).toContain('Needs a permission')
+    expect(wrapper.findAll('[data-testid="attention-icon"]')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="workspace-conversation-group"]').text()).toContain(
+      'Needs a permission',
+    )
+    expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
+  })
+
+  it('hides stopped-workspace chats even when they require action', () => {
+    conversationStore.conversations = [
+      makeConversation({ workspace_id: 'ws-2', workspace_name: 'Beta', needs_attention: true }),
+    ]
+    const wrapper = mountSidebar()
+    expect(wrapper.find('[data-testid="inbox-section"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="Open workspace Beta"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('First chat')
+  })
+
+  it('shows stopped history only while its workspace detail route is open', async () => {
+    Object.assign(currentRoute, {
+      path: '/workspaces/ws-2',
+      name: 'workspace-detail',
+      params: { id: 'ws-2' },
+      query: { session: 's-2' },
+    })
+    conversationStore.conversations = [
+      makeConversation({ session_id: 's-2', workspace_id: 'ws-2', title: 'Archived chat' }),
+    ]
+    const wrapper = mountSidebar()
+    const stopped = wrapper.get('[data-workspace-id="ws-2"]')
+    expect(stopped.get('[data-testid="workspace-row"]').attributes('title')).toBe(
+      'Beta — Runner offline',
+    )
+    expect(stopped.get('[data-testid="workspace-row"]').text()).toContain('Runner offline')
+    const chat = stopped.get('[aria-label="Open chat Archived chat"]')
+    expect(chat.attributes('aria-selected')).toBe('true')
+    await chat.trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith({
+      path: '/workspaces/ws-2',
+      query: { session: 's-2' },
+    })
+
+    // A retained parameter on another route must not retain stopped history.
+    currentRoute.name = 'home'
+    await nextTick()
+    expect(wrapper.find('[data-workspace-id="ws-2"]').exists()).toBe(false)
+    expect(wrapper.find('[data-workspace-id="ws-1"]').exists()).toBe(true)
+  })
+
+  it('marks unread chats in the opened stopped workspace and running workspaces as read', async () => {
+    Object.assign(currentRoute, { name: 'workspace-detail', params: { id: 'ws-2' } })
+    workspaceStore.workspaces.push({ ...workspaceStore.workspaces[1]!, id: 'ws-3' })
+    conversationStore.conversations = [
+      makeConversation({ session_id: 'running-unread', unread: true }),
+      makeConversation({ session_id: 'opened-unread', workspace_id: 'ws-2', unread: true }),
+      makeConversation({ session_id: 'hidden-unread', workspace_id: 'ws-3', unread: true }),
+    ]
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="mark-all-read"]').trigger('click')
+    expect(conversationStore.markAsRead.mock.calls).toEqual([['running-unread'], ['opened-unread']])
+  })
+
+  it('combines gates and idle unread across workspaces with one count and no busy results', () => {
+    conversationStore.conversations = [
+      makeConversation({ session_id: 'build', unread: true }),
+      makeConversation({
+        session_id: 'stopped-plan',
+        title: 'Archived plan',
+        workspace_id: 'ws-2',
+        workspace_name: 'Beta',
+        unread: true,
+        mode: 'plan',
+        agent_name: 'plan',
+      }),
+      makeConversation({
+        session_id: 'question',
+        status: 'busy',
+        unread: true,
+        needs_attention: true,
+        attention_kind: 'question',
+      }),
+      makeConversation({
+        session_id: 'busy',
+        title: 'Still running',
+        status: 'busy',
+        unread: true,
+        manual_unread: true,
+      }),
+      makeConversation({ session_id: 'read', title: 'Read chat' }),
+    ]
+    const wrapper = mountSidebar()
+    const inbox = wrapper.get('[data-testid="inbox-section"]')
+    expect(wrapper.get('[data-testid="inbox-count"]').text()).toBe('3')
+    expect(inbox.findAll('[data-testid="conversation-row"]')).toHaveLength(3)
+    expect(inbox.findAll('[data-testid="attention-icon"]')).toHaveLength(1)
+    expect(
+      inbox
+        .findAll('[data-testid="inbox-result-icon"]')
+        .map((icon) => icon.attributes('data-kind')),
+    ).toEqual(['build', 'plan'])
+    expect(inbox.text()).toContain('Archived plan')
+    expect(inbox.text()).not.toContain('Still running')
+    expect(inbox.text()).not.toContain('Read chat')
+    expect(wrapper.find('[aria-label="Open workspace Beta"]').exists()).toBe(false)
+    expect(
+      wrapper
+        .get('[data-testid="workspace-conversation-list"]')
+        .find('[data-testid="inbox-result-icon"]')
+        .exists(),
+    ).toBe(false)
+  })
+
+  it('hides the inbox when there are only read or busy chats', () => {
+    conversationStore.conversations = [
+      makeConversation(),
+      makeConversation({ session_id: 'busy', status: 'busy', unread: true }),
+    ]
+    expect(mountSidebar().find('[data-testid="inbox-section"]').exists()).toBe(false)
+  })
+
+  it('opens and marks a stopped workspace inbox chat as read', async () => {
+    conversationStore.conversations = [
+      makeConversation({
+        session_id: 'stopped-plan',
+        workspace_id: 'ws-2',
+        workspace_name: 'Beta',
+        unread: true,
+        mode: 'plan',
+        agent_name: 'plan',
+      }),
+    ]
+    const wrapper = mountSidebar()
+    await wrapper
+      .get('[data-testid="inbox-section"]')
+      .get('[data-testid="conversation-row"]')
+      .trigger('click')
+    expect(conversationStore.markAsRead).toHaveBeenCalledWith('stopped-plan')
+    expect(routerPush).toHaveBeenCalledWith({
+      path: '/workspaces/ws-2',
+      query: { session: 'stopped-plan' },
+    })
+  })
+
+  it('persists collapsed workspace IDs across sidebar remounts, without navigating', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[aria-label="Collapse workspace Alpha"]').trigger('click')
+    expect(
+      wrapper
+        .get('[data-testid="workspace-conversation-group"]')
+        .find('[data-testid="conversation-row"]')
+        .exists(),
+    ).toBe(false)
+    expect(
+      wrapper
+        .get('[data-testid="inbox-section"]')
+        .find('[data-testid="conversation-row"]')
+        .exists(),
+    ).toBe(true)
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(
+      JSON.parse(localStorage.getItem('opencuria-sidebar-collapsed-workspaces:1:org-1')!),
+    ).toEqual(['ws-1'])
+    wrapper.unmount()
+    const reopened = mountSidebar()
+    expect(reopened.get('[aria-label="Expand workspace Alpha"]').attributes('aria-expanded')).toBe(
+      'false',
+    )
+    expect(
+      reopened
+        .get('[data-testid="workspace-conversation-group"]')
+        .find('[data-testid="conversation-row"]')
+        .exists(),
+    ).toBe(false)
+    await reopened.get('[aria-label="Expand workspace Alpha"]').trigger('click')
+    expect(reopened.find('[data-testid="conversation-row"]').exists()).toBe(true)
+    expect(
+      JSON.parse(localStorage.getItem('opencuria-sidebar-collapsed-workspaces:1:org-1')!),
+    ).toEqual([])
+  })
+
+  it('keeps collapsed inbox results readable while capture disables their mutations', async () => {
+    workspaceStore.isWorkspaceTransitioning.mockImplementation((id) => id === 'ws-1')
+    workspaceStore.getWorkspaceTransitionLabel.mockImplementation((id) =>
+      id === 'ws-1' ? 'Capturing' : null,
+    )
+    const wrapper = mountSidebar()
+    await wrapper.get('[aria-label="Collapse workspace Alpha"]').trigger('click')
+    const group = wrapper.get('[data-testid="workspace-conversation-group"]')
+    expect(group.find('[data-testid="conversation-row"]').exists()).toBe(false)
+    expect(group.find('[data-testid="workspace-busy"]').exists()).toBe(true)
+    expect(group.get('[data-testid="workspace-row"]').attributes('title')).toBe('Alpha — Capturing')
+    const inbox = wrapper.get('[data-testid="inbox-section"]')
+    expect(inbox.get('[data-testid="inbox-result-icon"]').attributes('data-kind')).toBe('build')
+    for (const label of ['Rename', 'Delete']) {
+      const action = inbox.findAll('button').find((button) => button.text() === label)!
+      expect(action.attributes('disabled')).toBeDefined()
+      await action.trigger('click')
+    }
+    expect(inbox.find('[data-testid="conversation-rename-input"]').exists()).toBe(false)
+    expect(harnessStore.renameSession).not.toHaveBeenCalled()
+    expect(harnessStore.removeSession).not.toHaveBeenCalled()
+    await inbox.get('[data-testid="mark-read-item"]').trigger('click')
+    expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
+    await inbox.get('[data-testid="conversation-row"]').trigger('keydown.enter')
+    expect(routerPush).toHaveBeenCalledWith({
+      path: '/workspaces/ws-1',
+      query: { session: 's-1' },
+    })
   })
 
   it('renders new chat and search actions', () => {
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Neuer Chat')
-    expect(wrapper.text()).toContain('Suchen')
+    expect(wrapper.text()).toContain('New chat')
+    expect(wrapper.text()).toContain('Search')
   })
 
   it('navigates to the workspace thread on chat click', async () => {
     const wrapper = mountSidebar()
 
-    const row = wrapper.find('[aria-label="Chat First chat öffnen"]')
+    const row = wrapper.find('[aria-label="Open chat First chat"]')
     await row.trigger('click')
 
     expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
@@ -227,32 +482,196 @@ describe('ChatSidebar', () => {
     })
   })
 
-  it('caps the time list at 15 rows and expands the rest', async () => {
+  it('starts with four chats and reveals four more per click', async () => {
     conversationStore.conversations = Array.from({ length: 20 }, (_, index) =>
       makeConversation({
         session_id: `s-${index}`,
         title: `Chat ${index}`,
         unread: false,
-        updated_at: new Date(Date.now() - index * 60 * 1000).toISOString(),
+        last_message_at: new Date(Date.now() - index * 60 * 1000).toISOString(),
       }),
     )
 
     const wrapper = mountSidebar()
 
     expect(wrapper.find('[data-testid="active-section"]').exists()).toBe(false)
-    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(15)
-    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('5 weitere Chats')
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(4)
+    expect(wrapper.get('[data-testid="show-more-chats"]').text()).toContain('Show 4 more chats')
 
     await wrapper.get('[data-testid="show-more-chats"]').trigger('click')
 
-    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(20)
+    expect(wrapper.findAll('[data-testid="conversation-row"]')).toHaveLength(8)
   })
 
-  it('shows an empty chat prompt when there are no conversations', () => {
+  it('marks only unread chats from running workspaces as read', async () => {
+    conversationStore.conversations = [
+      makeConversation({ session_id: 'unread-1', unread: true }),
+      makeConversation({ session_id: 'unread-2', workspace_id: 'ws-2', unread: true }),
+      makeConversation({ session_id: 'read', unread: false }),
+    ]
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="mark-all-read"]').trigger('click')
+    expect(conversationStore.markAsRead.mock.calls).toEqual([['unread-1']])
+  })
+
+  it('opens workspace navigation and management from the merged list', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[aria-label="Open workspace Alpha"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith({ path: '/workspaces/ws-1' })
+    await wrapper.get('[data-testid="all-workspaces"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/workspaces')
+    await wrapper.get('[data-testid="workspaces-create"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/workspaces')
+  })
+
+  it('forwards rename and read actions from workspace chat rows', async () => {
+    const wrapper = mountSidebar()
+    await wrapper
+      .get('[data-testid="workspace-conversation-group"]')
+      .get('[data-testid="mark-read-item"]')
+      .trigger('click')
+    expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
+    const rename = wrapper.findAll('button').find((button) => button.text() === 'Rename')!
+    await rename.trigger('click')
+    await wrapper.get('[data-testid="conversation-rename-input"]').setValue('Renamed chat')
+    await wrapper.get('[data-testid="conversation-rename-input"]').trigger('keydown.enter')
+    expect(harnessStore.renameSession).toHaveBeenCalledWith('s-1', 'Renamed chat')
+  })
+
+  it('places scheduled tasks after the workspace chat section and opens settings without navigation', async () => {
+    conversationStore.conversations = [makeConversation({ session_id: 'history', unread: false })]
+    const wrapper = mountSidebar()
+    const store = useScheduledTaskStore()
+    store.tasks = [
+      {
+        id: 'task-1',
+        name: 'Morning check',
+        workspace_id: 'ws-1',
+        prompt: 'Check',
+        mode: 'build',
+        model: '',
+        reasoning_effort: '',
+        skill_ids: [],
+        recurrence: 'daily',
+        weekdays: [],
+        local_time: '09:00',
+        timezone_name: 'UTC',
+        enabled: false,
+        next_run_at: '2026-10-08T09:00:00Z',
+        created_at: '',
+        updated_at: '',
+      },
+    ]
+    await nextTick()
+    expect(wrapper.find('[data-testid="scheduled-tasks-section"]').exists()).toBe(true)
+    expect(
+      wrapper
+        .find('[data-testid="workspace-conversation-list"]')
+        .element.compareDocumentPosition(
+          wrapper.find('[data-testid="scheduled-tasks-section"]').element,
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    const before = routerPush.mock.calls.length
+    await wrapper.get('[data-testid="scheduled-task-task-1"]').trigger('click')
+    expect(store.dialogOpen).toBe(true)
+    expect(store.selectedTaskId).toBe('task-1')
+    expect(routerPush).toHaveBeenCalledTimes(before)
+  })
+
+  it('shows scheduled task titles on their own line with concise cadence and pauses', async () => {
+    conversationStore.conversations = []
+    const wrapper = mountSidebar()
+    const store = useScheduledTaskStore()
+    store.tasks = [
+      {
+        id: 'long-task',
+        name: 'A full task title remains visible',
+        workspace_id: 'ws-1',
+        prompt: 'Check',
+        mode: 'build',
+        model: '',
+        reasoning_effort: '',
+        skill_ids: [],
+        recurrence: 'weekly',
+        weekdays: [0, 2],
+        local_time: '09:00',
+        timezone_name: 'UTC',
+        enabled: false,
+        next_run_at: '2026-10-08T09:00:00Z',
+        created_at: '',
+        updated_at: '',
+      },
+    ]
+    await nextTick()
+    const row = wrapper.get('[data-testid="scheduled-task-long-task"]')
+    expect(row.attributes('aria-label')).toContain('A full task title remains visible')
+    expect(row.text()).toContain('Mon, Wed · 09:00')
+    expect(row.find('.lucide-circle-pause').exists()).toBe(true)
+    expect(row.classes()).toContain('min-h-11')
+  })
+
+  it('opens the scheduled-task calendar from the section and the collapsed rail', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="open-schedule-calendar"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/scheduled-tasks')
+    routerPush.mockClear()
+    await wrapper.get('[data-testid="collapsed-scheduled-tasks"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/scheduled-tasks')
+    expect(useScheduledTaskStore().dialogOpen).toBe(false)
+  })
+
+  it('keeps active once tasks visible until completion and marks recurring runs', async () => {
+    const wrapper = mountSidebar()
+    const store = useScheduledTaskStore()
+    const once: ScheduledTask = {
+      id: 'once',
+      name: 'One-time check',
+      workspace_id: 'ws-1',
+      prompt: 'Check',
+      mode: 'build',
+      model: '',
+      reasoning_effort: '',
+      skill_ids: [],
+      recurrence: 'once',
+      weekdays: [],
+      run_date: '2020-01-01',
+      local_time: '09:00',
+      timezone_name: 'UTC',
+      enabled: false,
+      is_running: true,
+      next_run_at: '2020-01-01T09:00:00Z',
+      created_at: '',
+      updated_at: '',
+    }
+    store.tasks = [
+      once,
+      { ...once, id: 'done', name: 'Completed check', is_running: false },
+      { ...once, id: 'future', run_date: '2099-01-01', enabled: true, is_running: false },
+      { ...once, id: 'recurring', recurrence: 'daily', enabled: true },
+      { ...once, id: 'paused', recurrence: 'daily', is_running: false },
+    ]
+    await nextTick()
+    for (const id of ['once', 'recurring']) {
+      const row = wrapper.get(`[data-testid="scheduled-task-${id}"]`)
+      expect(row.text()).toContain('Running')
+      expect(row.attributes('aria-label')).toContain('Running')
+      expect(row.find('.animate-spin').exists()).toBe(true)
+      expect(row.find('.lucide-circle-pause').exists()).toBe(false)
+    }
+    expect(wrapper.find('[data-testid="scheduled-task-done"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="scheduled-task-future"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="scheduled-task-paused"]').exists()).toBe(true)
+    store.upsert({ ...once, is_running: false })
+    await nextTick()
+    expect(wrapper.find('[data-testid="scheduled-task-once"]').exists()).toBe(false)
+    expect(store.tasks.some((task) => task.id === 'once')).toBe(true)
+  })
+
+  it('shows empty chat state for a running workspace', () => {
     conversationStore.conversations = []
     const wrapper = mountSidebar()
 
-    expect(wrapper.text()).toContain('Noch keine Chats — starte mit Neuer Chat')
+    expect(wrapper.text()).toContain('No chats yet')
   })
 
   it('emits opencuria:open-settings from the user menu', async () => {
@@ -264,7 +683,7 @@ describe('ChatSidebar', () => {
     try {
       const settingsItem = wrapper
         .findAll('button')
-        .find((item) => item.text().includes('Einstellungen öffnen'))
+        .find((item) => item.text().includes('Open settings'))
       expect(settingsItem).toBeTruthy()
       await settingsItem!.trigger('click')
       expect(events.length).toBeGreaterThan(0)

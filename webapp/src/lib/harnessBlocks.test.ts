@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest'
 
-import type { HarnessPart, HarnessPartType } from '@/types/harness'
-import { buildRenderBlocks, countWorkItems, isCardPart, isWorkItem } from './harnessBlocks'
+import type { HarnessPart, HarnessPartType } from '@opencuria/chat-core/harness'
+import {
+  buildRenderBlocks,
+  countWorkItems,
+  isCardPart,
+  isPendingQuestionPart,
+  isQuestionToolPart,
+  isWorkItem,
+  wrapFinishedWork,
+} from '@opencuria/chat-core/harnessBlocks'
 
-function makePart(
-  type: HarnessPartType,
-  overrides: Partial<HarnessPart> = {},
-): HarnessPart {
+function makePart(type: HarnessPartType, overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
     id: overrides.id ?? `part-${type}`,
     session_id: 'session-1',
@@ -37,9 +42,7 @@ describe('buildRenderBlocks', () => {
   it('renders a single work item at the top level', () => {
     const parts = [makePart('reasoning', { id: 'r1', output: 'thinking' })]
 
-    expect(buildRenderBlocks(parts)).toEqual([
-      { kind: 'single', part: parts[0] },
-    ])
+    expect(buildRenderBlocks(parts)).toEqual([{ kind: 'single', part: parts[0] }])
   })
 
   it('groups two or more consecutive tool calls', () => {
@@ -143,12 +146,7 @@ describe('buildRenderBlocks', () => {
 
     const blocks = buildRenderBlocks(parts)
 
-    expect(blocks.map((block) => block.kind)).toEqual([
-      'single',
-      'card',
-      'single',
-      'card',
-    ])
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'card', 'single', 'card'])
     expect(blocks[1]).toMatchObject({ kind: 'card', part: { id: 'sub-1' } })
     expect(blocks[3]).toMatchObject({ kind: 'card', part: { id: 'patch-1' } })
   })
@@ -238,6 +236,287 @@ describe('buildRenderBlocks', () => {
     const blocks = buildRenderBlocks(parts)
     expect(blocks.map((block) => block.kind)).toEqual(['single', 'compaction', 'single'])
   })
+
+  it('skips edit/write tools that already have a matching patch card', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'edit-1',
+        tool: 'edit',
+        call_id: 'c1',
+        title: 'Edit a.ts',
+      }),
+      makePart('patch', {
+        id: 'patch-1',
+        call_id: 'c1',
+        title: 'Patch a.ts',
+      }),
+      makePart('tool', { id: 'read-1', tool: 'read', title: 'Read b.ts' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['card', 'single'])
+    expect(blocks[0]).toMatchObject({ kind: 'card', part: { id: 'patch-1' } })
+    expect(blocks[1]).toMatchObject({ kind: 'single', part: { id: 'read-1' } })
+  })
+
+  it('keeps a running edit row until the patch arrives', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'edit-1',
+        tool: 'edit',
+        call_id: 'c1',
+        state: 'running',
+        title: 'Edit a.ts',
+      }),
+    ]
+
+    expect(buildRenderBlocks(parts)).toEqual([{ kind: 'single', part: parts[0] }])
+  })
+
+  it('keeps failed file tools as error rows', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'edit-1',
+        tool: 'edit',
+        call_id: 'c1',
+        state: 'error',
+        title: 'Edit a.ts',
+      }),
+    ]
+
+    expect(buildRenderBlocks(parts)[0]).toMatchObject({
+      kind: 'single',
+      part: { id: 'edit-1' },
+    })
+  })
+
+  it('renders an answered question as a card and never as a work item', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        title: 'Which mode?',
+        output: '{"answers":["Build"]}',
+        input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+      }),
+      makePart('tool', { id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['single', 'card', 'single'])
+    expect(blocks[1]).toMatchObject({ kind: 'card', part: { id: 'q-1' } })
+  })
+
+  it('keeps question recognition when projection metadata is stale or absent', () => {
+    expect(
+      isQuestionToolPart(
+        makePart('tool', {
+          tool: 'question',
+          detail_loaded: true,
+          display: { tool: 'read' },
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      isQuestionToolPart(
+        makePart('tool', {
+          detail_loaded: false,
+          display: { tool: 'question' },
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it('skips a pending question while keeping the surrounding run intact', () => {
+    const parts = [
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'q-1', tool: 'question', state: 'running' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]?.kind).toBe('group')
+    if (blocks[0]?.kind === 'group') {
+      expect(blocks[0].parts.map((part) => part.id)).toEqual(['tool-1', 'tool-2'])
+    }
+  })
+
+  it('renders a failed question as a card', () => {
+    const parts = [
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        state: 'error',
+        title: 'Which mode?',
+        output: "Tool 'question' failed: Question rejected by user",
+      }),
+    ]
+
+    const blocks = buildRenderBlocks(parts)
+    expect(blocks.map((block) => block.kind)).toEqual(['card'])
+    expect(blocks[0]).toMatchObject({ kind: 'card', part: { id: 'q-1' } })
+  })
+
+  it('wraps an answered question and its leading text into the workedFor shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Hello' }),
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        output: '{"answers":["Build"]}',
+        input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+      }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'card'])
+  })
+})
+
+describe('question helpers', () => {
+  it('detects question tool parts and pending state', () => {
+    expect(isQuestionToolPart(makePart('tool', { tool: 'question' }))).toBe(true)
+    expect(isQuestionToolPart(makePart('tool', { tool: 'read' }))).toBe(false)
+    expect(isQuestionToolPart(makePart('patch'))).toBe(false)
+    expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'running' }))).toBe(
+      true,
+    )
+    expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'pending' }))).toBe(
+      true,
+    )
+    expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'completed' }))).toBe(
+      false,
+    )
+    expect(isWorkItem(makePart('tool', { tool: 'question' }))).toBe(false)
+  })
+})
+
+describe('wrapFinishedWork', () => {
+  it('wraps the initial text plus tools, thoughts, and patches into one workedFor shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Hello' }),
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      makePart('reasoning', { id: 'r1', output: 'hmm' }),
+      makePart('patch', { id: 'patch-1', title: 'Patch a.ts' }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'group', 'single', 'card'])
+  })
+
+  it('keeps interleaved text->tool->text->tool->text in strict chronological order inside one shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Looking' }),
+      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('text', { id: 't2', output: 'mid note' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep', title: 'Grep foo' }),
+      makePart('text', { id: 't3', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    // Never hoist tools above the intervening text: exact flat order stays.
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'single', 'text', 'single'])
+    expect(
+      shell.blocks.map((block) =>
+        block.kind === 'text' || block.kind === 'single' ? block.part.id : '',
+      ),
+    ).toEqual(['t1', 'tool-1', 't2', 'tool-2'])
+  })
+
+  it('keeps subagent and patch adjacency inside one shell', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Working' }),
+      makePart('subtask', { id: 'sub-1', title: 'Explore renderer' }),
+      makePart('tool', { id: 'read-1', tool: 'read', title: 'Read a.ts' }),
+      makePart('patch', {
+        id: 'patch-1',
+        call_id: 'c-other',
+        title: 'Patch b.ts',
+      }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'card', 'single', 'card'])
+  })
+
+  it('keeps error and answered question cards inside the shell in order', () => {
+    const parts = [
+      makePart('text', { id: 't1', output: 'Trying' }),
+      makePart('tool', {
+        id: 'tool-err',
+        tool: 'bash',
+        state: 'error',
+        title: '$ false',
+        output: 'boom',
+      }),
+      makePart('tool', {
+        id: 'q-1',
+        tool: 'question',
+        title: 'Which mode?',
+        output: '{"answers":["Build"]}',
+        input: { arguments: '{"questions":[{"question":"Which mode?"}]}' },
+      }),
+      makePart('text', { id: 't2', output: 'Done' }),
+    ]
+
+    const wrapped = wrapFinishedWork(buildRenderBlocks(parts))
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'text'])
+    const shell = wrapped[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['text', 'single', 'card'])
+  })
+
+  it('keeps a genuine leading compaction divider outside while grouping interleaved compaction inside', () => {
+    const leading = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('compaction', { id: 'compact-0', output: 'older summary' }),
+        makePart('text', { id: 't1', output: 'Hello' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('text', { id: 't2', output: 'Done' }),
+      ]),
+    )
+    expect(leading.map((block) => block.kind)).toEqual(['compaction', 'workedFor', 'text'])
+    const leadingShell = leading[1]
+    if (leadingShell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(leadingShell.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+
+    // Interleaved compaction between tool uses moves inside to preserve
+    // chronology instead of splitting the card.
+    const interleaved = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('compaction', { id: 'compact-1', output: 'summary' }),
+        makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      ]),
+    )
+    expect(interleaved.map((block) => block.kind)).toEqual(['workedFor'])
+    const shell = interleaved[0]
+    if (shell?.kind !== 'workedFor') throw new Error('expected workedFor')
+    expect(shell.blocks.map((block) => block.kind)).toEqual(['single', 'compaction', 'single'])
+  })
+
+  it('does not wrap a text-only message', () => {
+    const parts = [makePart('text', { id: 't1', output: 'Hello' })]
+    expect(wrapFinishedWork(buildRenderBlocks(parts)).map((block) => block.kind)).toEqual(['text'])
+  })
 })
 
 describe('work item helpers', () => {
@@ -259,5 +538,76 @@ describe('work item helpers', () => {
       makePart('tool', { id: 'err', state: 'error' }),
     ]
     expect(countWorkItems(parts)).toBe(1)
+  })
+})
+
+describe('steer blocks', () => {
+  it('renders delivered steers as their own blocks that break tool runs', () => {
+    const blocks = buildRenderBlocks([
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      makePart('steer', { id: 'steer-1', output: 'Use pnpm', meta: { steer_id: 's1' } }),
+      makePart('tool', { id: 'tool-3', tool: 'bash' }),
+      makePart('tool', { id: 'tool-4', tool: 'edit' }),
+    ])
+
+    expect(blocks.map((block) => block.kind)).toEqual(['group', 'steer', 'group'])
+    expect(blocks[1]).toMatchObject({ kind: 'steer', part: { id: 'steer-1' } })
+  })
+
+  it('ignores steers without text', () => {
+    const blocks = buildRenderBlocks([
+      makePart('text', { id: 't1', output: 'Hi' }),
+      makePart('steer'),
+    ])
+    expect(blocks.map((block) => block.kind)).toEqual(['text'])
+  })
+
+  it('keeps the steer visible outside Worked for and splits the timeline chronologically', () => {
+    const wrapped = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('text', { id: 't1', output: 'Looking' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('steer', { id: 'steer-1', output: 'Use pnpm' }),
+        makePart('text', { id: 't2', output: 'Switching' }),
+        makePart('tool', { id: 'tool-2', tool: 'bash' }),
+        makePart('text', { id: 't3', output: 'Done' }),
+      ]),
+    )
+
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'steer', 'workedFor', 'text'])
+    const [first, , second] = wrapped
+    if (first?.kind !== 'workedFor' || second?.kind !== 'workedFor') {
+      throw new Error('expected workedFor shells')
+    }
+    expect(first.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+    expect(second.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+    // The user's steer is never nested inside any collapsed card.
+    for (const shell of [first, second]) {
+      expect(shell.blocks.some((block) => block.kind === 'steer')).toBe(false)
+    }
+  })
+
+  it('leaves a steer with no surrounding work flat', () => {
+    const wrapped = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('text', { id: 't1', output: 'Hello' }),
+        makePart('steer', { id: 'steer-1', output: 'Actually, stop' }),
+        makePart('text', { id: 't2', output: 'Okay' }),
+      ]),
+    )
+    expect(wrapped.map((block) => block.kind)).toEqual(['text', 'steer', 'text'])
+  })
+
+  it('keeps leading and trailing steers outside tool work', () => {
+    const wrapped = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('steer', { id: 'steer-0', output: 'first' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('tool', { id: 'tool-2', tool: 'grep' }),
+        makePart('steer', { id: 'steer-1', output: 'last' }),
+      ]),
+    )
+    expect(wrapped.map((block) => block.kind)).toEqual(['steer', 'workedFor', 'steer'])
   })
 })

@@ -18,7 +18,6 @@ from apps.harness.compaction import (
     build_compaction_prompt,
     ensure_current_user,
     find_previous_summary,
-    is_context_overflow_error,
     is_overflow,
     max_output_tokens,
     preserve_recent_budget,
@@ -28,16 +27,19 @@ from apps.harness.compaction import (
     token_count,
     usable,
 )
+from apps.harness.engines.base import RunOptions
 from apps.harness.providers.base import (
     Delta,
     LLMMessage,
     ProviderAdapter,
+    ProviderRateLimitError,
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.providers.resolver import StaticModelResolver
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
-from apps.harness.tests.test_paket6_features import ScriptProvider
+from apps.harness.tests.test_questions_patches_compaction import ScriptProvider
 from apps.harness.tools import default_tool_registry
 
 
@@ -103,53 +105,6 @@ def test_preserve_recent_budget_formula() -> None:
     assert preserve_recent_budget(tiny) == 2_000
 
 
-def test_is_context_overflow_error_matches_phrases() -> None:
-    """Provider context errors are detected by message substring."""
-    assert is_context_overflow_error(RuntimeError("maximum context length exceeded"))
-    assert is_context_overflow_error(ValueError("prompt is too long: 999 > 100"))
-    assert not is_context_overflow_error(RuntimeError("rate limit exceeded"))
-
-
-def test_is_context_overflow_error_pi_patterns() -> None:
-    """Pi OVERFLOW_PATTERNS mark overflow; NON_OVERFLOW exclusions win."""
-    positives = [
-        "prompt is too long: 213462 tokens > 200000 maximum",
-        "request_too_large: request exceeds the maximum size",
-        "Your input exceeds the context window of this model",
-        "Requested token count exceeds the model's maximum context length",
-        "The input token count (1196265) exceeds the maximum number",
-        "This model's maximum prompt length is 131072",
-        "Please reduce the length of the messages or completion",
-        "This endpoint's maximum context length is 100000 tokens",
-        "Input length 10 exceeds the maximum allowed input length of 5",
-        "The input (10 tokens) is longer than the model's context length",
-        "the request exceeds the available context size",
-        "tokens to keep is greater than the context length",
-        "context window exceeds limit",
-        "Your request exceeded model token limit: 10 (requested: 20)",
-        "Prompt contains 10 tokens too large for model with 5 maximum",
-        "Prompt has 10 tokens, but the configured context size is 5 tokens",
-        "model_context_window_exceeded",
-        "prompt too long; exceeded max context length by 10 tokens",
-        "Range of input length should be [1, 100]",
-        "context_length_exceeded",
-        "too many tokens in request",
-        "token limit exceeded for model",
-        "400 (no body)",
-        "413 status code (no body)",
-    ]
-    for message in positives:
-        assert is_context_overflow_error(RuntimeError(message)), message
-    negatives = [
-        "Throttling error: Too many tokens, please wait before trying again.",
-        "Service unavailable: Too many tokens, try later.",
-        "rate limit exceeded, slow down",
-        "too many requests, retry later",
-    ]
-    for message in negatives:
-        assert not is_context_overflow_error(RuntimeError(message)), message
-
-
 def test_serialize_replaces_images_with_placeholder() -> None:
     """Image parts become ``[image]`` in compaction serialization."""
     message = LLMMessage(
@@ -164,13 +119,154 @@ def test_serialize_replaces_images_with_placeholder() -> None:
     assert "[image]" in text
 
 
+def test_serialize_tool_list_content_has_no_base64() -> None:
+    """Tool list content serializes text plus placeholder, never base64."""
+    message = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "Image read successfully"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/png;base64," + ("B" * 10_000),
+                },
+            },
+        ],
+        tool_call_id="c1",
+    )
+    text = serialize(message)
+    assert "BBBB" not in text
+    assert "Image read successfully" in text
+    assert "[image]" in text
+
+
+def test_serialize_tool_pdf_file_part_has_no_base64() -> None:
+    """Tool PDF file parts serialize as ``[file: <filename>]``, no base64."""
+    message = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "PDF read successfully"},
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": "data:application/pdf;base64," + ("C" * 10_000),
+                "filename": "doc.pdf",
+            },
+        ],
+        tool_call_id="c1",
+    )
+    text = serialize(message)
+    assert "CCCC" not in text
+    assert "PDF read successfully" in text
+    assert "[file: doc.pdf]" in text
+
+
+def test_estimate_tool_image_tokens_uses_image_estimate() -> None:
+    """Tool image parts use the constant estimate, not base64 length."""
+    from apps.harness.compaction import estimate_message_tokens
+    from apps.harness.media.limits import IMAGE_TOKEN_ESTIMATE
+
+    messages = [
+        LLMMessage(
+            role="tool",
+            content=[
+                {"type": "text", "text": "Image read successfully"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64," + ("B" * 10_000),
+                    },
+                },
+            ],
+            tool_call_id="c1",
+        )
+    ]
+    assert estimate_message_tokens(messages) == (
+        len("Image read successfully") // 4 + IMAGE_TOKEN_ESTIMATE
+    )
+
+
+def test_strip_tool_media_preserves_role_without_base64() -> None:
+    """strip_media on tool messages keeps role=tool and drops base64."""
+    tool = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "Image read successfully"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,BBBB"},
+            },
+        ],
+        tool_call_id="c1",
+    )
+    stripped = strip_media(tool)
+    assert stripped.role == "tool"
+    assert isinstance(stripped.content, str)
+    assert "BBBB" not in stripped.content
+    assert "Image read successfully" in stripped.content
+    assert "[Attached image: file]" in stripped.content
+
+
+def test_estimate_tool_pdf_file_tokens_use_filename_only() -> None:
+    """Tool PDF file parts estimate from filename length, not base64."""
+    from apps.harness.compaction import estimate_message_tokens
+
+    payload = "C" * 10_000
+    messages = [
+        LLMMessage(
+            role="tool",
+            content=[
+                {"type": "text", "text": "PDF read successfully"},
+                {
+                    "type": "file",
+                    "mime": "application/pdf",
+                    "url": f"data:application/pdf;base64,{payload}",
+                    "filename": "doc.pdf",
+                },
+            ],
+            tool_call_id="c1",
+        )
+    ]
+    assert estimate_message_tokens(messages) == (
+        len("PDF read successfully") // 4 + len("doc.pdf") // 4
+    )
+
+
+def test_strip_tool_pdf_file_part_keeps_filename_placeholder() -> None:
+    """strip_media keeps PDF file parts as ``[Attached file: ...]``."""
+    payload = "C" * 100
+    tool = LLMMessage(
+        role="tool",
+        content=[
+            {"type": "text", "text": "PDF read successfully"},
+            {
+                "type": "file",
+                "mime": "application/pdf",
+                "url": f"data:application/pdf;base64,{payload}",
+                "filename": "doc.pdf",
+            },
+        ],
+        tool_call_id="c1",
+    )
+    stripped = strip_media(tool)
+    assert stripped.role == "tool"
+    assert isinstance(stripped.content, str)
+    assert payload not in stripped.content
+    assert "PDF read successfully" in stripped.content
+    assert "[Attached file: doc.pdf]" in stripped.content
+
+
 def test_build_compaction_prompt_includes_template() -> None:
     """Compaction prompt uses the structured summary template."""
     prompt = build_compaction_prompt(
-        [LLMMessage(role="user", content="hello")],
+        [
+            LLMMessage(role="user", content="hello"),
+            LLMMessage(role="assistant", content="world"),
+        ],
     )
     assert "## Objective" in prompt
     assert "<conversation>" in prompt
+    assert "[User]: hello\n\n[Assistant]: world" in prompt
 
 
 def test_checkpoint_summary_round_trip() -> None:
@@ -315,6 +411,29 @@ def test_apply_compaction_keeps_current_user_when_older_turn_is_head() -> None:
     )
 
 
+class DailyQuotaRateLimitProvider(ProviderAdapter):
+    """Always fail with Bedrock daily-token throttling."""
+
+    name = "daily-quota"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat_stream(  # type: ignore[no-untyped-def]
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts=None,
+    ) -> AsyncIterator[Delta]:
+        self.calls += 1
+        raise ProviderRateLimitError(
+            "Too many tokens per day, please wait before trying again.",
+            is_retryable=False,
+        )
+        yield  # pragma: no cover - make this an async generator
+
+
 class OverflowRetryProvider(ProviderAdapter):
     """Fail once with a context error, then serve compaction and retry."""
 
@@ -354,7 +473,7 @@ async def test_provider_context_overflow_error_compacts_and_retries() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )
@@ -389,7 +508,10 @@ async def test_text_only_overflow_compacts_without_second_answer() -> None:
             [Delta(text="## Objective\n- summary", usage=Usage(1, 1, 2))],
         ]
     )
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     result = await runner.run(
         "follow-up",
         "build",
@@ -438,7 +560,7 @@ async def test_tool_step_overflow_does_not_compact_twice_same_turn() -> None:
         ]
     )
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/README.md": b"hello"}),
         emit=emit,
@@ -485,7 +607,10 @@ async def test_compaction_never_adds_synthetic_continue_user_message() -> None:
             [Delta(text="final", usage=Usage(1, 1, 2))],
         ]
     )
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     await runner.run(
         "follow-up",
         "build",
@@ -504,7 +629,9 @@ async def test_compaction_never_adds_synthetic_continue_user_message() -> None:
         ),
     )
     assert seen_user_texts
-    assert not any("Continue if you have next steps" in text for text in seen_user_texts)
+    assert not any(
+        "Continue if you have next steps" in text for text in seen_user_texts
+    )
 
 
 def test_strip_media_replaces_image_parts() -> None:
@@ -604,7 +731,10 @@ class AlwaysOverflowAfterCompactProvider(ProviderAdapter):
 async def test_overflow_retry_drops_huge_tool_output() -> None:
     """Provider overflow retries without the overflowing tool blob."""
     provider = OverflowRetryCaptureProvider()
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     result = await runner.run(
         "follow-up",
         "build",
@@ -642,10 +772,42 @@ async def test_overflow_retry_drops_huge_tool_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_daily_token_quota_is_not_treated_as_overflow() -> None:
+    """Bedrock daily-token throttling is re-raised, not compacted."""
+    from apps.harness.compaction import CONTEXT_OVERFLOW_COMPACTION_ERROR
+
+    provider = DailyQuotaRateLimitProvider()
+    events: list[dict[str, Any]] = []
+
+    async def emit(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+        emit=emit,
+    )
+    with pytest.raises(ProviderRateLimitError, match="tokens per day"):
+        await runner.run(
+            "hello",
+            "build",
+            "session-model",
+            "build",
+            RunOptions(auto_approve=True, context_length=1_000, max_output_tokens=100),
+        )
+    assert provider.calls == 1
+    assert not any(event.get("type") == "compaction" for event in events)
+    assert CONTEXT_OVERFLOW_COMPACTION_ERROR not in str(events)
+
+
+@pytest.mark.asyncio
 async def test_overflow_after_compaction_stops_without_loop() -> None:
     """A second context overflow after compaction fails the run once."""
     provider = AlwaysOverflowAfterCompactProvider()
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     with pytest.raises(RuntimeError, match="too large to compact"):
         await runner.run(
             "follow-up",

@@ -1,0 +1,145 @@
+"""Viewer intent identity, permissions and no-resurrection regressions."""
+
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from pydantic import ValidationError
+
+from apps.runners.desktop_proxy import _viewer_query, build_vnc_redirect_url
+from apps.runners.schemas import DesktopViewerIntentIn
+from apps.runners.services import RunnerService
+from apps.runners.services.domains.interactive_sessions import (
+    InteractiveSessionsService,
+)
+from common.exceptions import ConflictError
+
+
+def test_identity_scopes_client_to_user_and_workspace():
+    workspace, other_workspace, client = [uuid.uuid4() for _ in range(3)]
+    identity = InteractiveSessionsService.viewer_identity(workspace, 1, client)
+    assert identity == InteractiveSessionsService.viewer_identity(workspace, 1, client)
+    assert (
+        identity["lease_id"]
+        != InteractiveSessionsService.viewer_identity(workspace, 2, client)["lease_id"]
+    )
+    assert (
+        identity["lease_id"]
+        != InteractiveSessionsService.viewer_identity(other_workspace, 1, client)[
+            "lease_id"
+        ]
+    )
+    assert identity["owner_id"] == "1"
+    assert uuid.UUID(identity["lease_id"]).version == 5
+
+
+@pytest.mark.parametrize("revision", [0, -1, True, "1", 1.5])
+def test_revision_must_be_positive_integer(revision):
+    with pytest.raises(ValidationError):
+        DesktopViewerIntentIn(viewer_client_id=uuid.uuid4(), intent_revision=revision)
+
+
+def test_redirect_preserves_viewer_in_nested_websocket_path():
+    workspace, client = str(uuid.uuid4()), str(uuid.uuid4())
+    redirect = build_vnc_redirect_url(workspace, client, 7)
+    outer = parse_qs(urlparse(redirect).query)
+    nested = parse_qs(urlparse(outer["path"][0]).query)
+    assert outer["viewer_client_id"] == nested["viewer_client_id"] == [client]
+    assert nested["intent_revision"] == ["7"]
+    assert _viewer_query(urlparse(outer["path"][0]).query) == {
+        "viewer_client_id": client,
+        "intent_revision": 7,
+    }
+    assert _viewer_query("token=jwt") == {}
+    assert _viewer_query("viewer_client_id=bad&intent_revision=1") == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["unknown", "expired", "released", "closing"])
+async def test_renew_does_not_recreate_ended_intent(state):
+    service = RunnerService(sio_server=Mock())
+    service.interactive_sessions._viewer_workspace = AsyncMock()
+    service.interactive_sessions._viewer_rpc = AsyncMock(
+        return_value={"lease_state": state, "revision": 3, "epoch": "epoch"}
+    )
+    with pytest.raises(ConflictError):
+        await service.interactive_sessions.renew_desktop(
+            uuid.uuid4(),
+            user=SimpleNamespace(id=1),
+            organization_id=uuid.uuid4(),
+            viewer_client_id=uuid.uuid4(),
+            intent_revision=3,
+        )
+    assert [
+        call.args[1]
+        for call in service.interactive_sessions._viewer_rpc.await_args_list
+    ] == ["lease_status"]
+
+
+@pytest.mark.asyncio
+async def test_renew_only_existing_matching_revision_and_status_is_private():
+    service = RunnerService(sio_server=Mock())
+    service.interactive_sessions._viewer_workspace = AsyncMock()
+    service.interactive_sessions._viewer_rpc = AsyncMock(
+        side_effect=[
+            {"lease_state": "held", "revision": 4, "epoch": "e"},
+            {"lease_state": "held", "revision": 4, "epoch": "e"},
+            {"lease_state": "held", "revision": 4, "epoch": "e", "owner_id": "secret"},
+        ]
+    )
+    workspace, org, client = [uuid.uuid4() for _ in range(3)]
+    kwargs = dict(
+        user=SimpleNamespace(id=1), organization_id=org, viewer_client_id=client
+    )
+    result = await service.interactive_sessions.renew_desktop(
+        workspace, **kwargs, intent_revision=4
+    )
+    assert result == {"viewer_lease_state": "held", "revision": 4, "epoch": "e"}
+    assert (
+        service.interactive_sessions._viewer_rpc.await_args_list[1].args[1] == "renew"
+    )
+    assert (
+        service.interactive_sessions._viewer_rpc.await_args_list[1].args[2]["epoch"]
+        == "e"
+    )
+    result = await service.interactive_sessions.viewer_desktop_status(
+        workspace, **kwargs
+    )
+    assert result["viewer_lease_state"] == "held"
+    assert "owner_id" not in result and "lease_id" not in result
+    service.interactive_sessions._viewer_workspace.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_service_auth_rejects_other_owner_and_org(monkeypatch):
+    from apps.organizations.services import OrganizationService
+    from apps.runners.exceptions import WorkspaceNotFoundError
+
+    org = uuid.uuid4()
+    workspace = SimpleNamespace(
+        created_by_id=2, runner=SimpleNamespace(organization_id=org, is_online=True)
+    )
+    service = RunnerService(sio_server=Mock())
+    service.runner_lifecycle.get_workspace = Mock(return_value=workspace)
+    service.ownership.ensure_workspace_available = Mock()
+    monkeypatch.setattr(OrganizationService, "require_membership", Mock())
+    role = Mock(return_value="member")
+    monkeypatch.setattr(OrganizationService, "get_user_role", role)
+    user = SimpleNamespace(id=1)
+    with pytest.raises(WorkspaceNotFoundError):
+        await service.interactive_sessions._viewer_workspace(
+            uuid.uuid4(), user=user, organization_id=org
+        )
+    role.return_value = "admin"
+    assert (
+        await service.interactive_sessions._viewer_workspace(
+            uuid.uuid4(), user=user, organization_id=org
+        )
+        is workspace
+    )
+    with pytest.raises(WorkspaceNotFoundError):
+        await service.interactive_sessions._viewer_workspace(
+            uuid.uuid4(), user=user, organization_id=uuid.uuid4()
+        )

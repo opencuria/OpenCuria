@@ -1,0 +1,548 @@
+"""
+Request/response schemas and DTO mappers for the harness adapters.
+
+Pure mapping for REST responses: no business rules, no ORM queries.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal
+
+from ninja import Schema
+from pydantic import ConfigDict, Field
+
+from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
+from .timeline import (
+    TIMELINE_TEXT_PART_TYPES,
+    project_question_definitions,
+    timeline_part_payload,
+)
+
+if TYPE_CHECKING:
+    from .conversation_service import ConversationService
+    from .interaction_service import InteractionService
+    from .models import HarnessPart, HarnessSession
+    from .steering import SteerEntry
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+
+class HarnessSessionCreateIn(Schema):
+    """Request schema for starting a harness session."""
+
+    prompt: str
+    agent_name: str = "build"
+    harness_id: str = "native"
+    connection_id: uuid.UUID | None = None
+    mode: str = "build"
+    model: str = ""
+    reasoning_effort: str = ""
+    skill_ids: list[str] = []
+
+
+class HarnessSessionPatchIn(Schema):
+    """Request schema for updating a harness session."""
+
+    title: str = ""
+
+
+class HarnessConversationOut(Schema):
+    """Response schema for org-wide harness conversations."""
+
+    session_id: uuid.UUID
+    workspace_id: uuid.UUID
+    workspace_name: str
+    title: str
+    status: str
+    mode: str
+    agent_name: str
+    harness_id: str = "native"
+    model: str = ""
+    reasoning_effort: str = ""
+    unread: bool = False
+    manual_unread: bool = False
+    needs_attention: bool = False
+    attention_kind: str = ""
+    updated_at: datetime
+    last_message_at: datetime
+
+
+class HarnessMessageIn(Schema):
+    """Request schema for a follow-up prompt on a session."""
+
+    prompt: str
+    mode: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
+    skill_ids: list[str] = []
+
+
+class HarnessSteerIn(Schema):
+    """Request schema for a message sent into a running turn."""
+
+    prompt: str
+
+
+class HarnessSteerOut(Schema):
+    """A queued (or withdrawn) message addressed to a running turn."""
+
+    id: uuid.UUID
+    content: str
+    created_at: datetime
+
+
+class HarnessForkIn(Schema):
+    """Copy a session through an answer, or all messages when omitted."""
+
+    message_id: uuid.UUID | None = None
+
+
+class HarnessMessageEditIn(Schema):
+    """Request schema for editing a user message and rerunning."""
+
+    prompt: str
+    mode: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
+    skill_ids: list[str] = []
+
+
+class HarnessModeIn(Schema):
+    """Request schema for switching a session's plan|build mode."""
+
+    mode: str
+
+
+class HarnessPermissionResolveIn(Schema):
+    """Request schema for resolving a permission request."""
+
+    response: str
+
+
+class HarnessQuestionResolveIn(Schema):
+    """Request schema for answering a harness question request."""
+
+    answers: list[Any] = []
+    reject: bool = False
+
+
+class HarnessQuestionOut(Schema):
+    """Response schema for a resolved question request."""
+
+    request_id: uuid.UUID
+    status: str
+    resumed: bool = True
+
+
+class HarnessSessionOut(Schema):
+    """Response schema for a harness session."""
+
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    parent_id: uuid.UUID | None = None
+    title: str
+    summary: str = ""
+    mode: str
+    agent_name: str
+    harness_id: str = "native"
+    model: str
+    reasoning_effort: str = ""
+    status: str
+    cost: float
+    tokens: dict = {}
+    skill_ids: list[str] = []
+    unread: bool = False
+    manual_unread: bool = False
+    needs_attention: bool = False
+    attention_kind: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class HarnessMessageOut(Schema):
+    """Response schema for a harness message."""
+
+    id: uuid.UUID
+    harness_id: str = "native"
+    role: str
+    content: str
+    model: str
+    reasoning_effort: str = ""
+    cost: float
+    tokens: dict = {}
+    finish: str
+    error: str
+    skill_ids: list[str] = []
+    notice_dismissed_at: datetime | None = None
+    position: int = 0
+    message_position: int = 0
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class HarnessPartOut(Schema):
+    """Response schema for a harness part."""
+
+    id: uuid.UUID
+    message_id: uuid.UUID
+    type: str
+    state: str
+    call_id: str
+    title: str
+    output: str
+    input: dict = {}
+    meta: dict = {}
+    position: int = 0
+    message_position: int = 0
+
+
+class HarnessTodoOut(Schema):
+    """Response schema for a harness todo."""
+
+    id: uuid.UUID
+    content: str
+    status: str
+    priority: str
+    order: int
+
+
+class HarnessPermissionOut(Schema):
+    """Response schema for a resolved permission request."""
+
+    request_id: uuid.UUID
+    decision: str
+    remember: str
+
+
+class ProviderConfigIn(Schema):
+    """Org-wide helper-model defaults; agent defaults live in AgentConfig."""
+
+    small_model: str = ""
+    small_effort: str = ""
+    speech_model: str | None = Field(default=None, max_length=255)
+    voice_cleanup_model: str | None = Field(default=None, max_length=255)
+
+
+class ProviderConfigOut(ProviderConfigIn):
+    """Saved org-wide helper-model defaults."""
+
+    speech_model: str = ""
+    voice_cleanup_model: str = ""
+
+
+class AgentConfigIn(Schema):
+    """Request schema for one agent config row."""
+
+    agent: str
+    model: str = ""
+    effort: str = ""
+    inherit_model: bool = False
+    effort_strategy: str = "fixed"
+
+
+class AgentConfigSaveIn(Schema):
+    """Bulk save payload for agent configs."""
+
+    configs: list[AgentConfigIn] = []
+
+
+class AgentConfigOut(Schema):
+    """Response schema for one agent config row."""
+
+    agent: str
+    mode: str
+    description: str
+    model: str = ""
+    effort: str = ""
+    inherit_model: bool = False
+    effort_strategy: str = "fixed"
+
+
+class RecentModelOut(Schema):
+    """One recently used composer model with its effort and agent selection."""
+
+    model: str
+    effort: str = ""
+    harness_id: Literal["native", "claude", "codex"] = "native"
+    mode: Literal["build", "plan"] = "build"
+    last_used_at: datetime
+
+
+class RecentModelSaveIn(Schema):
+    """Record one model usage (called on successful send)."""
+
+    model: str
+    effort: str = ""
+    harness_id: Literal["native", "claude", "codex"] = "native"
+    mode: Literal["build", "plan"] = "build"
+
+
+class SubagentConfigIn(Schema):
+    """Request schema for org-wide subagent depth."""
+
+    max_depth: int = Field(
+        default=DEFAULT_MAX_DEPTH, strict=True, ge=1, le=MAX_SUBAGENT_DEPTH
+    )
+
+
+class SubagentConfigOut(Schema):
+    """Response schema for org-wide subagent depth."""
+
+    max_depth: int = DEFAULT_MAX_DEPTH
+
+
+class ComputerUseConfigIn(Schema):
+    """Partial update of desktop runtime settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_steps: int = Field(default=15, ge=1, le=1000, strict=True)
+    enable_recording: bool = Field(default=False, strict=True)
+    screenshot_max_dimension: int = Field(default=2400, ge=320, le=7680, strict=True)
+
+
+class ComputerUseConfigOut(ComputerUseConfigIn):
+    """Effective desktop runtime settings."""
+
+
+class ProviderAccountOut(Schema):
+    """Safe metadata for one provider account."""
+
+    id: str
+    provider: str
+    label: str
+    scope: str
+    connected: bool
+    is_active: bool
+    can_manage: bool
+    base_url: str = ""
+    api_key_hint: str = ""
+    account_id: str = ""
+    region: str = ""
+    auth_method: str = ""
+    models: list[str] = []
+    auth_type: str = ""
+
+
+class ProviderAccountIn(Schema):
+    """Create/update payload for a named provider account."""
+
+    label: str = ""
+    shared: bool = False
+    api_key: str = ""
+    base_url: str = ""
+    models: list[str] = []
+    auth_method: str = ""
+    region: str = "us-east-1"
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    session_token: str = ""
+    bearer_token: str = ""
+    token: str = ""
+    auth_type: str = "api_token"
+
+
+class ProviderSelectionIn(Schema):
+    """Explicit active-account choice, including an empty selection."""
+
+    account_id: uuid.UUID | None = Field(...)
+
+
+class ChatGPTOAuthStartIn(Schema):
+    """Optional account identity for a new or reconnecting ChatGPT flow."""
+
+    label: str = ""
+    shared: bool | None = None
+    account_id: uuid.UUID | None = None
+
+
+class ChatGPTOAuthCancelIn(Schema):
+    """Exact pending OAuth flow identifier for cancellation."""
+
+    flow_id: uuid.UUID
+
+
+class ChatGPTOAuthStartOut(Schema):
+    """Response for starting the ChatGPT device OAuth flow."""
+
+    flow_id: str
+    user_code: str
+    verification_url: str
+    interval: int
+    expires_in: int
+
+
+class ChatGPTOAuthStatusOut(Schema):
+    """Response for polling ChatGPT device OAuth status."""
+
+    status: str
+    account_id: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Mappers
+# ---------------------------------------------------------------------------
+
+
+def provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
+    """Map stored model/effort defaults (empty when unconfigured) to the response."""
+    if config is None:
+        return ProviderConfigOut()
+    return ProviderConfigOut(
+        **{name: getattr(config, name) or "" for name in ProviderConfigOut.model_fields}
+    )
+
+
+def computer_use_config_to_out(row: dict) -> ComputerUseConfigOut:
+    """Map effective computer-use values to their public schema."""
+    return ComputerUseConfigOut(**row)
+
+
+def session_to_out(
+    session,
+    *,
+    unread: bool = False,
+    manual_unread: bool = False,
+    needs_attention: bool = False,
+    attention_kind: str = "",
+) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
+    """Map a HarnessSession ORM row to HarnessSessionOut."""
+    return HarnessSessionOut(
+        id=session.id,
+        workspace_id=session.workspace_id,
+        parent_id=session.parent_id,
+        harness_id=getattr(session, "harness_id", "native"),
+        title=session.title or "",
+        summary=session.summary or "",
+        mode=session.mode,
+        agent_name=session.agent_name,
+        model=session.model or "",
+        reasoning_effort=session.reasoning_effort or "",
+        status=session.status,
+        cost=float(session.cost or 0.0),
+        tokens=dict(session.tokens or {}),
+        skill_ids=[str(skill_id) for skill_id in (session.skill_ids or [])],
+        unread=unread,
+        manual_unread=manual_unread,
+        needs_attention=needs_attention,
+        attention_kind=attention_kind,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+def session_to_out_with_unread(
+    conversations: ConversationService, session: HarnessSession
+) -> HarnessSessionOut:
+    """Map a session and compute its unread and attention flags."""
+    attention = conversations.attention_for_sessions([session]).get(session.id, {})
+    return session_to_out(
+        session,
+        unread=conversations.is_session_unread(session),
+        manual_unread=session.manual_unread_at is not None,
+        needs_attention=attention.get("needs_attention", False),
+        attention_kind=attention.get("attention_kind", ""),
+    )
+
+
+def timeline_to_out(
+    conversations: ConversationService,
+    session: HarnessSession,
+    *,
+    interactions: InteractionService,
+    pending_steers: Callable[[uuid.UUID], list[SteerEntry]],
+) -> dict[str, Any]:
+    """Present saved history with explicit interaction and live steering ports."""
+    messages = conversations.list_timeline_messages(session.id)
+    parts = conversations.list_timeline_parts(session.id)
+    message_positions = {
+        str(message.id): int(getattr(message, "position", 0) or 0)
+        for message in messages
+    }
+    parts_by_message: dict[str, list] = {}
+    for part in parts:
+        part.message_position = message_positions.get(str(part.message_id), 0)
+        payload = timeline_part_payload(
+            part,
+            text_output=getattr(part, "timeline_output", "")
+            if part.type in TIMELINE_TEXT_PART_TYPES
+            else None,
+        )
+        parts_by_message.setdefault(str(part.message_id), []).append(payload)
+    pending = interactions.list_pending_interactions(
+        session.id, include_descendants=True
+    )
+    pending_questions = [
+        {
+            **question,
+            "questions": project_question_definitions(question.get("questions")),
+        }
+        for question in pending.questions
+    ]
+    return {
+        "session": session_to_out_with_unread(conversations, session).model_dump(
+            mode="json"
+        ),
+        "messages": [
+            {
+                **HarnessMessageOut(
+                    id=message.id,
+                    harness_id=getattr(message, "harness_id", "native"),
+                    role=message.role,
+                    # Assistant text comes exclusively from ordered text parts.
+                    content=getattr(message, "timeline_content", "") or "",
+                    model=message.model or "",
+                    reasoning_effort=message.reasoning_effort or "",
+                    cost=float(message.cost or 0.0),
+                    tokens=dict(message.tokens or {}),
+                    finish=message.finish or "",
+                    error=message.error or "",
+                    skill_ids=[str(skill_id) for skill_id in (message.skill_ids or [])],
+                    notice_dismissed_at=message.notice_dismissed_at,
+                    position=int(getattr(message, "position", 0) or 0),
+                    message_position=int(getattr(message, "position", 0) or 0),
+                    created_at=message.created_at,
+                    completed_at=message.completed_at,
+                ).model_dump(mode="json"),
+                "parts": parts_by_message.get(str(message.id), []),
+            }
+            for message in messages
+        ],
+        "permissions": pending.permissions,
+        "questions": pending_questions,
+        "steers": [
+            entry.to_payload() for entry in pending_steers(session.id)
+        ],
+    }
+
+
+def part_to_out(part: HarnessPart) -> dict[str, Any]:
+    """Map expanded part detail, excluding private patch and reasoning fields."""
+    safe_meta = dict(part.meta or {})
+    if part.type == "patch":
+        safe_meta.pop("old_content", None)
+        safe_meta.pop("new_content", None)
+    display = dict(part.display or {})
+    display.pop("_reasoning_line", None)
+    return {
+        **HarnessPartOut(
+            id=part.id,
+            message_id=part.message_id,
+            type=part.type,
+            state=part.state,
+            call_id=part.call_id or "",
+            title=part.title or "",
+            output=part.output or "",
+            input=dict(part.input or {}),
+            meta=safe_meta,
+            position=int(getattr(part, "position", 0) or 0),
+            message_position=int(getattr(part, "message_position", 0) or 0),
+        ).model_dump(mode="json"),
+        "display": display,
+        "detail_loaded": True,
+    }

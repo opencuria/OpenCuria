@@ -5,6 +5,7 @@ Tests for the runners REST API.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -12,9 +13,10 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness.models import HarnessSession
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.models import Runner, Workspace
+from apps.runners.models import Runner, RunnerSystemMetrics, Workspace
 from common.utils import generate_api_token, hash_token
 
 
@@ -82,22 +84,20 @@ class TestListRunners:
 
 
 @pytest.mark.django_db
-class TestGetRunner:
-    def test_found(self, client, auth_context):
-        """GET /api/v1/runners/{id}/ should return the runner."""
+class TestRunnerDetailRemoved:
+    def test_detail_is_not_a_public_resource(self, client, auth_context):
+        """The runner list replaces the redundant detail GET; PATCH remains available."""
         runner = Runner.objects.create(
             name="test-runner",
             api_token_hash=hash_token("runner-token-2"),
             organization=auth_context["organization"],
         )
-        response = client.get(f"/api/v1/runners/{runner.id}/")
+        # The detail route only supports PATCH now, so a detail GET is
+        # rejected (405) instead of returning a runner payload.
+        assert client.get(f"/api/v1/runners/{runner.id}/").status_code == 405
+        response = client.get("/api/v1/runners/")
         assert response.status_code == 200
-        assert response.json()["id"] == str(runner.id)
-
-    def test_not_found(self, client):
-        """GET /api/v1/runners/{id}/ should return 404 for missing runner."""
-        response = client.get(f"/api/v1/runners/{uuid.uuid4()}/")
-        assert response.status_code == 404
+        assert any(row["id"] == str(runner.id) for row in response.json())
 
 
 @pytest.mark.django_db
@@ -115,9 +115,150 @@ class TestCreateRunner:
         assert data["name"] == "my-runner"
         assert Runner.objects.filter(id=data["id"]).exists()
 
+    def test_token_is_stored_hashed_in_the_active_org(self, client, auth_context):
+        """Only the token hash is persisted; the plaintext authenticates once."""
+        response = client.post(
+            "/api/v1/runners/",
+            data={"name": "hashed-runner"},
+            content_type="application/json",
+        )
+        data = response.json()
+        runner = Runner.objects.get(id=data["id"])
+        assert runner.organization_id == auth_context["organization"].id
+        assert runner.api_token_hash == hash_token(data["api_token"])
+        assert runner.api_token_hash != data["api_token"]
+
+
+def _metrics(runner: Runner, *, minutes_ago: int, cpu: float) -> None:
+    """Persist one host metrics sample *minutes_ago* minutes in the past."""
+    RunnerSystemMetrics.objects.create(
+        runner=runner,
+        timestamp=timezone.now() - timedelta(minutes=minutes_ago),
+        cpu_usage_percent=cpu,
+        ram_used_bytes=1,
+        ram_total_bytes=2,
+        disk_used_bytes=3,
+        disk_total_bytes=4,
+    )
+
+
+@pytest.mark.django_db
+class TestRunnerMetrics:
+    @pytest.fixture
+    def runner(self, auth_context) -> Runner:
+        return Runner.objects.create(
+            name="metrics-runner",
+            api_token_hash=hash_token(f"metrics-{uuid.uuid4().hex}"),
+            organization=auth_context["organization"],
+        )
+
+    def test_latest_returns_newest_sample(self, client, runner):
+        url = f"/api/v1/runners/{runner.id}/metrics/latest/"
+        response = client.get(url)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "No metrics available yet"
+
+        _metrics(runner, minutes_ago=10, cpu=10.0)
+        _metrics(runner, minutes_ago=1, cpu=20.0)
+        response = client.get(url)
+        assert response.status_code == 200
+        assert response.json()["cpu_usage_percent"] == 20.0
+
+    def test_history_is_windowed_and_oldest_first(self, client, runner):
+        _metrics(runner, minutes_ago=5 * 60, cpu=1.0)
+        _metrics(runner, minutes_ago=90, cpu=2.0)
+        _metrics(runner, minutes_ago=30, cpu=3.0)
+
+        response = client.get(f"/api/v1/runners/{runner.id}/metrics/history/?hours=2")
+        assert response.status_code == 200
+        assert [row["cpu_usage_percent"] for row in response.json()] == [2.0, 3.0]
+
+    def test_members_only_get_vm_metrics_of_their_workspaces(
+        self, client, auth_context, runner
+    ):
+        """Workspaces are private: other users' VM usage stays with admins."""
+        member = get_user_model().objects.create_user(
+            email=f"metrics-member-{uuid.uuid4().hex[:6]}@example.com",
+            password="secret",
+        )
+        org = auth_context["organization"]
+        Membership.objects.create(
+            user=member, organization=org, role=MembershipRole.MEMBER
+        )
+        own = Workspace.objects.create(runner=runner, created_by=member, name="own")
+        other = Workspace.objects.create(
+            runner=runner, created_by=auth_context["user"], name="other"
+        )
+        _metrics(runner, minutes_ago=1, cpu=5.0)
+        RunnerSystemMetrics.objects.update(
+            vm_metrics={str(own.id): {"cpu": 1}, str(other.id): {"cpu": 2}}
+        )
+        token = generate_api_token()
+        APIKey.objects.create(
+            user=member,
+            name="metrics-member",
+            key_hash=hash_token(token),
+            key_prefix=token[:12],
+            permissions=[APIKeyPermission.RUNNERS_READ.value],
+        )
+        as_member = Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org.id))
+        latest = f"/api/v1/runners/{runner.id}/metrics/latest/"
+        history = f"/api/v1/runners/{runner.id}/metrics/history/"
+
+        assert as_member.get(latest).json()["vm_metrics"] == {str(own.id): {"cpu": 1}}
+        assert [row["vm_metrics"] for row in as_member.get(history).json()] == [
+            {str(own.id): {"cpu": 1}}
+        ]
+        assert set(client.get(latest).json()["vm_metrics"]) == {
+            str(own.id),
+            str(other.id),
+        }
+
+    def test_foreign_org_runner_is_not_found(self, client):
+        foreign = Runner.objects.create(
+            name="foreign-runner",
+            api_token_hash=hash_token(f"foreign-{uuid.uuid4().hex}"),
+            organization=Organization.objects.create(
+                name="Foreign Metrics Org", slug=f"foreign-{uuid.uuid4().hex[:10]}"
+            ),
+        )
+        _metrics(foreign, minutes_ago=1, cpu=5.0)
+        for suffix in ("latest", "history"):
+            response = client.get(f"/api/v1/runners/{foreign.id}/metrics/{suffix}/")
+            assert response.status_code == 404
+            assert response.json()["detail"] == "Runner not found"
+
 
 @pytest.mark.django_db
 class TestListWorkspaces:
+    @pytest.mark.parametrize("busy", [False, True])
+    def test_list_and_detail_report_busy_child(self, client, auth_context, busy):
+        """The REST activity flag includes children of idle root sessions."""
+        runner = Runner.objects.create(
+            api_token_hash=uuid.uuid4().hex,
+            organization=auth_context["organization"],
+        )
+        workspace = Workspace.objects.create(
+            runner=runner, created_by=auth_context["user"]
+        )
+        root = HarnessSession.objects.create(
+            workspace=workspace, organization_id=runner.organization_id, status="idle"
+        )
+        HarnessSession.objects.create(
+            workspace=workspace,
+            organization_id=runner.organization_id,
+            parent=root,
+            status="busy" if busy else "idle",
+        )
+
+        response = client.get("/api/v1/workspaces/")
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+        assert response.json()[0]["has_active_session"] is busy
+        response = client.get(f"/api/v1/workspaces/{workspace.id}/")
+        assert response.status_code == 200
+        assert response.json()["has_active_session"] is busy
+
     def test_returns_workspaces(self, client, auth_context):
         """GET /api/v1/workspaces/ should return workspaces."""
         auth_context["organization"].workspace_auto_stop_timeout_minutes = 30
@@ -162,7 +303,38 @@ class TestListWorkspaces:
         assert response.json()["last_activity_at"]
         assert response.json()["desktop_width"] == 1920
         assert response.json()["desktop_height"] == 1080
+        assert response.json()["disk_usage"] is None
         assert "sessions" not in response.json()
+
+    def test_list_and_detail_report_last_observed_disk_usage(
+        self, client, auth_context
+    ):
+        """Disk usage is the last observation, also for stopped workspaces."""
+        runner = Runner.objects.create(
+            api_token_hash=uuid.uuid4().hex,
+            organization=auth_context["organization"],
+        )
+        observed_at = timezone.now() - timedelta(hours=2)
+        workspace = Workspace.objects.create(
+            runner=runner,
+            status=WorkspaceStatus.STOPPED,
+            created_by=auth_context["user"],
+            disk_used_bytes=18 * 1024**3,
+            disk_free_bytes=1024**3,
+            disk_total_bytes=20 * 1024**3,
+            disk_usage_observed_at=observed_at,
+        )
+
+        listed = client.get("/api/v1/workspaces/").json()[0]["disk_usage"]
+        detail = client.get(f"/api/v1/workspaces/{workspace.id}/").json()
+
+        assert listed == detail["disk_usage"]
+        assert detail["disk_usage"]["used_bytes"] == 18 * 1024**3
+        assert detail["disk_usage"]["free_bytes"] == 1024**3
+        assert detail["disk_usage"]["total_bytes"] == 20 * 1024**3
+        assert detail["disk_usage"]["observed_at"].startswith(
+            observed_at.isoformat()[:19]
+        )
 
 
 @pytest.mark.django_db

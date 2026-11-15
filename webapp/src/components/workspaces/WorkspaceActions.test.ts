@@ -1,22 +1,25 @@
-import { shallowMount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
-
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WorkspaceActions from './WorkspaceActions.vue'
-import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
+import { WorkspaceStatus, type Workspace } from '@/types'
 
-vi.mock('@/stores/workspaces', () => ({
-  useWorkspaceStore: () => ({
-    isWorkspaceTransitioning: () => false,
-    getWorkspaceTransitionLabel: () => '',
-    stopWorkspace: vi.fn(),
-    resumeWorkspace: vi.fn(),
-    removeWorkspace: vi.fn(),
-  }),
+const mocks = vi.hoisted(() => ({
+  isWorkspaceTransitioning: vi.fn(),
+  getWorkspaceTransitionLabel: vi.fn(),
+  stopWorkspace: vi.fn(),
+  resumeWorkspace: vi.fn(),
+  removeWorkspace: vi.fn(),
+  showEdit: vi.fn(),
+  auth: { isAdmin: true },
 }))
-
+vi.mock('@/stores/workspaces', () => ({ useWorkspaceStore: () => mocks }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => mocks.auth }))
 vi.mock('./EditWorkspaceDialog.vue', () => ({
   default: {
     name: 'EditWorkspaceDialog',
+    setup(_: unknown, { expose }: { expose: (methods: object) => void }) {
+      expose({ show: mocks.showEdit })
+    },
     template: '<div />',
   },
 }))
@@ -28,7 +31,6 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     active_operation: null,
     name: 'Workspace',
-    runtime_type: RuntimeType.QEMU,
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,
@@ -48,44 +50,187 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     has_active_session: false,
     runner_online: true,
     credential_ids: [],
+    plugin_ids: [],
     credentials_present: false,
     ...overrides,
   }
 }
 
-describe('WorkspaceActions capture gating', () => {
-  it('enables capture for a stopped QEMU workspace without credentials on disk', () => {
-    const wrapper = shallowMount(WorkspaceActions, {
-      props: {
-        workspace: makeWorkspace({
-          status: WorkspaceStatus.STOPPED,
-          credentials_present: false,
-        }),
-      },
-    })
+const mounted: ReturnType<typeof mount>[] = []
+function mountActions(overrides: Partial<Workspace> = {}, hideDestructive = false) {
+  const onClick = vi.fn()
+  const wrapper = mount(WorkspaceActions, {
+    props: { workspace: makeWorkspace(overrides), hideDestructive, onClick },
+    attachTo: document.body,
+  })
+  mounted.push(wrapper)
+  return { wrapper, onClick }
+}
+async function openMenu(wrapper: ReturnType<typeof mount>) {
+  await wrapper.get('button[title="More workspace actions"]').trigger('keydown', { key: 'Enter' })
+  await flushPromises()
+}
+function menuItem(label: string) {
+  const element = [...document.querySelectorAll('[role="menuitem"]')].find(
+    (item) => item.textContent?.trim() === label,
+  )
+  expect(element, `Menu item: ${label}`).toBeTruthy()
+  return new DOMWrapper(element!)
+}
 
-    const capture = wrapper.findAllComponents({ name: 'Button' }).find((button) => {
-      return button.attributes('title') === 'Capture image'
-    })
-    expect(capture).toBeTruthy()
-    expect(capture?.attributes('disabled')).not.toBe('true')
-    expect(capture?.attributes('disabled')).not.toBe('')
+describe('WorkspaceActions menu', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.auth.isAdmin = true
+    mocks.isWorkspaceTransitioning.mockReturnValue(false)
+    mocks.getWorkspaceTransitionLabel.mockReturnValue('')
+  })
+  afterEach(() => {
+    mounted.splice(0).forEach((wrapper) => wrapper.unmount())
+    vi.restoreAllMocks()
   })
 
-  it('disables capture when credentials are still on disk', () => {
-    const wrapper = shallowMount(WorkspaceActions, {
-      props: {
-        workspace: makeWorkspace({
-          status: WorkspaceStatus.STOPPED,
-          credentials_present: true,
-        }),
-      },
+  it('keeps stop and the menu visible and opens editing without clicking through the card', async () => {
+    const { wrapper, onClick } = mountActions()
+    expect(wrapper.findAll('button')).toHaveLength(2)
+    expect(document.querySelector('[role="menuitem"]')).toBeNull()
+    await wrapper.get('button[title="Stop workspace"]').trigger('click')
+    expect(mocks.stopWorkspace).toHaveBeenCalledWith('workspace-1')
+    await openMenu(wrapper)
+    await menuItem('Edit workspace').trigger('click')
+    expect(mocks.showEdit).toHaveBeenCalledOnce()
+    expect(onClick).not.toHaveBeenCalled()
+  })
+  it('starts a stopped workspace directly', async () => {
+    const { wrapper } = mountActions({ status: WorkspaceStatus.STOPPED })
+    await wrapper.get('button[title="Resume workspace"]').trigger('click')
+    expect(mocks.resumeWorkspace).toHaveBeenCalledWith('workspace-1')
+  })
+  it('F075 offers failed-deletion retry to ordinary users', async () => {
+    mocks.auth.isAdmin = false
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper } = mountActions({ status: WorkspaceStatus.DELETE_FAILED })
+    await openMenu(wrapper)
+    const retry = menuItem('Retry removal')
+    expect(retry.attributes('data-disabled')).toBeUndefined()
+    await retry.trigger('click')
+    expect(mocks.removeWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1')
+  })
+  it('F076 permits queued offline removal while blocking runner-dependent actions', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper } = mountActions({ runner_online: false })
+    expect(wrapper.get('button[title="Runner offline"]').attributes('disabled')).toBeDefined()
+    await openMenu(wrapper)
+    expect(menuItem('Edit workspace').attributes('data-disabled')).toBeDefined()
+    const remove = menuItem('Remove workspace')
+    expect(remove.attributes('data-disabled')).toBeUndefined()
+    await remove.trigger('click')
+    expect(mocks.removeWorkspace).toHaveBeenCalledExactlyOnceWith('workspace-1')
+    expect(mocks.resumeWorkspace).not.toHaveBeenCalled()
+  })
+  it('F077 hides controls for a fully deleted workspace', () => {
+    mocks.isWorkspaceTransitioning.mockReturnValue(true)
+    const { wrapper } = mountActions({ status: WorkspaceStatus.DELETED })
+    expect(wrapper.find('button').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Working')
+  })
+  it('F078 explains offline automatic recovery without administrator acknowledgment', async () => {
+    mocks.auth.isAdmin = false
+    const { wrapper } = mountActions({ runner_online: false, intervention_required: true })
+    await openMenu(wrapper)
+    expect(document.body.textContent).toContain('Recovery continues when it reconnects')
+    expect(menuItem('Remove workspace').attributes('data-disabled')).toBeDefined()
+    expect(document.body.textContent).not.toContain('administrator')
+    expect(document.body.textContent).not.toContain('View recovery status')
+  })
+  it('emits capture and reset from the menu', async () => {
+    const { wrapper, onClick } = mountActions({
+      pending_base_image: { id: 'image-1', version: 1 } as Workspace['pending_base_image'],
     })
-
-    const capture = wrapper.findAllComponents({ name: 'Button' }).find((button) => {
-      return String(button.attributes('title') || '').includes('Credentials are still on disk')
-    })
-    expect(capture).toBeTruthy()
-    expect(['true', '']).toContain(capture?.attributes('disabled'))
+    await openMenu(wrapper)
+    await menuItem('Capture image').trigger('click')
+    expect(wrapper.emitted('captureImage')).toHaveLength(1)
+    await openMenu(wrapper)
+    await menuItem('Reset workspace').trigger('click')
+    expect(wrapper.emitted('recreate')).toHaveLength(1)
+    expect(onClick).not.toHaveBeenCalled()
+  })
+  it('requires confirmation before removing a workspace', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { wrapper } = mountActions()
+    await openMenu(wrapper)
+    await menuItem('Remove workspace').trigger('click')
+    expect(mocks.removeWorkspace).not.toHaveBeenCalled()
+    confirm.mockReturnValue(true)
+    await openMenu(wrapper)
+    await menuItem('Remove workspace').trigger('click')
+    expect(mocks.removeWorkspace).toHaveBeenCalledWith('workspace-1')
+  })
+  it('blocks capture when stopped credentials remain on disk', async () => {
+    const { wrapper } = mountActions({ status: WorkspaceStatus.STOPPED, credentials_present: true })
+    await openMenu(wrapper)
+    const capture = menuItem('Capture image')
+    expect(capture.attributes('data-disabled')).toBeDefined()
+    expect(capture.attributes('title')).toContain('Credentials are still on disk')
+    await capture.trigger('click')
+    expect(wrapper.emitted('captureImage')).toBeUndefined()
+  })
+  it('allows capture of a stopped workspace after credentials have been removed', async () => {
+    const { wrapper } = mountActions({ status: WorkspaceStatus.STOPPED })
+    await openMenu(wrapper)
+    expect(menuItem('Capture image').attributes('data-disabled')).toBeUndefined()
+    await menuItem('Capture image').trigger('click')
+    expect(wrapper.emitted('captureImage')).toHaveLength(1)
+  })
+  it('blocks runner-dependent actions offline while keeping queued removal accessible', async () => {
+    const { wrapper } = mountActions({ runner_online: false })
+    expect(wrapper.get('button[title="Runner offline"]').attributes('disabled')).toBeDefined()
+    await openMenu(wrapper)
+    expect(menuItem('Edit workspace').attributes('data-disabled')).toBeDefined()
+    expect(menuItem('Remove workspace').attributes('data-disabled')).toBeUndefined()
+    expect(document.body.textContent).not.toContain('Capture image')
+  })
+  it('shows a single pending action and disables menu actions during transitions', async () => {
+    mocks.isWorkspaceTransitioning.mockReturnValue(true)
+    mocks.getWorkspaceTransitionLabel.mockReturnValue('Stopping')
+    const { wrapper } = mountActions()
+    expect(wrapper.findAll('button')).toHaveLength(2)
+    expect(wrapper.get('button[title="Stopping"]').attributes('disabled')).toBeDefined()
+    await openMenu(wrapper)
+    expect(menuItem('Capture image').attributes('data-disabled')).toBeDefined()
+    expect(menuItem('Edit workspace').attributes('data-disabled')).toBeDefined()
+  })
+  it('links admins to runner activity while keeping lifecycle actions blocked', async () => {
+    const event = vi.fn()
+    window.addEventListener('opencuria:open-settings', event)
+    try {
+      const { wrapper } = mountActions({ intervention_required: true })
+      await openMenu(wrapper)
+      expect(menuItem('Capture image').attributes('data-disabled')).toBeDefined()
+      await menuItem('View recovery status').trigger('click')
+      expect(event.mock.calls[0]![0].detail).toEqual({
+        tab: 'runners',
+        runnerId: 'runner-1',
+        runnerActivity: true,
+      })
+    } finally {
+      window.removeEventListener('opencuria:open-settings', event)
+    }
+  })
+  it('explains automatic recovery without requiring an administrator', async () => {
+    mocks.auth.isAdmin = false
+    const { wrapper } = mountActions({ intervention_required: true })
+    await openMenu(wrapper)
+    expect(document.body.textContent).toContain('Checking the interrupted operation automatically')
+    expect(document.body.textContent).not.toContain('Ask an organization admin')
+    expect(document.body.textContent).not.toContain('View recovery status')
+  })
+  it('respects the hidden destructive actions setting', async () => {
+    const { wrapper } = mountActions({}, true)
+    expect(wrapper.find('button[title="Stop workspace"]').exists()).toBe(false)
+    await openMenu(wrapper)
+    expect(document.body.textContent).not.toContain('Remove workspace')
+    expect(document.body.textContent).not.toContain('Reset workspace')
+    expect(menuItem('Capture image').exists()).toBe(true)
   })
 })

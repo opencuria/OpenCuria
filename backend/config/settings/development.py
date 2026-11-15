@@ -13,6 +13,13 @@ from .base import BASE_DIR
 
 DEBUG = True
 
+MCP_OAUTH_CALLBACK_URL = os.getenv(
+    "MCP_OAUTH_CALLBACK_URL", "http://127.0.0.1:8000/api/v1/mcp-oauth/callback/"
+).strip()
+MCP_OAUTH_FRONTEND_RETURN_URL = os.getenv(
+    "MCP_OAUTH_FRONTEND_RETURN_URL", "http://127.0.0.1:5173/?settings=credentials"
+).strip()
+
 ALLOWED_HOSTS = ["*"]
 
 # SQLite for local development
@@ -20,15 +27,14 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": os.getenv("SQLITE_PATH", str(BASE_DIR / "db.sqlite3")),
+        "OPTIONS": {
+            # Acquire the writer reservation before any atomic-block reads.
+            # A DEFERRED read-to-write upgrade can fail without honoring timeout.
+            "transaction_mode": "IMMEDIATE",
+            "timeout": 20,
+        },
     }
 }
 
 # CORS — allow all origins in development
 CORS_ALLOW_ALL_ORIGINS = True
-
-# In-memory channel layer for development
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
-    }
-}

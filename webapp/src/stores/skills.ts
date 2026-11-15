@@ -7,7 +7,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import type { Skill, SkillCreateIn, SkillUpdateIn } from '@/types'
+import type { Skill, SkillCreateInput, SkillUpdateInput } from '@/types'
 import * as skillsApi from '@/services/skills.api'
 import { useNotificationStore } from './notifications'
 
@@ -31,7 +31,7 @@ export const useSkillStore = defineStore('skills', () => {
     }
   }
 
-  async function createSkill(data: SkillCreateIn): Promise<boolean> {
+  async function createSkill(data: SkillCreateInput): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
       const skill = await skillsApi.createSkill(data)
@@ -45,17 +45,17 @@ export const useSkillStore = defineStore('skills', () => {
     }
   }
 
-  async function updateSkill(id: string, data: SkillUpdateIn): Promise<boolean> {
+  async function updateSkill(id: string, data: SkillUpdateInput, options: { silent?: boolean } = {}): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
       const updated = await skillsApi.updateSkill(id, data)
       const idx = skills.value.findIndex((s) => s.id === id)
       if (idx !== -1) skills.value[idx] = updated
-      notifications.success('Skill updated', 'The skill has been updated.')
+      if (!options.silent) notifications.success('Skill updated', 'The skill has been updated.')
       return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update skill'
-      notifications.error('Update failed', msg)
+      if (!options.silent) notifications.error('Update failed', msg)
       return false
     }
   }

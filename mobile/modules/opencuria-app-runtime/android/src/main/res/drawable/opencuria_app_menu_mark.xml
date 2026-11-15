@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OpenCuria's mark (brand/opencuria-mark.svg) without its tile, framed for the round menu button. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="48dp"
+  android:height="48dp"
+  android:viewportWidth="52"
+  android:viewportHeight="52">
+  <group
+    android:translateX="-6"
+    android:translateY="-6">
+    <path android:fillColor="#EFEFEF" android:pathData="M18,23L32,15L32,32Z" />
+    <path android:fillColor="#BCBCBC" android:pathData="M32,15L46,23L32,32Z" />
+    <path android:fillColor="#534AB7" android:pathData="M46,23L32,32L46,41Z" />
+    <path android:fillColor="#433A93" android:pathData="M32,32L32,49L46,41Z" />
+    <path android:fillColor="#1C1C1C" android:pathData="M18,23L32,32L18,41Z" />
+    <path android:fillColor="#111111" android:pathData="M32,32L32,49L18,41Z" />
+    <path
+      android:pathData="M18,23L32,15L46,23L46,41L32,49L18,41Z"
+      android:strokeColor="#0A0A0A"
+      android:strokeWidth="1.2" />
+    <path
+      android:pathData="M18,23L32,32M32,15L32,32M46,23L32,32M32,32L46,41M32,32L32,49M32,32L18,41"
+      android:strokeColor="#0A0A0A"
+      android:strokeWidth="1" />
+  </group>
+</vector>
