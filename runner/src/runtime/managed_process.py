@@ -41,6 +41,11 @@ ISOLATED_CODEX_PATH = (
     "/opt/opencuria/runtimes/codex-agent/0.166.0/codex-path:" + ISOLATED_AGENT_PATH
 )
 ISOLATED_AGENT_ENV_MAX_SIZE = 256 * 1024
+#: Appended to the isolated agent PATH inside Windows guests (MSYS2 Python).
+WINDOWS_AGENT_PATH = (
+    ":/c/Windows/System32:/c/Windows:/c/Windows/System32/Wbem"
+    ":/c/Windows/System32/WindowsPowerShell/v1.0"
+)
 _AGENT_DESKTOP_ENV = {"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"}
 _AGENT_AUTH_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 _AGENT_FIXED_ENV = {
@@ -264,7 +269,9 @@ def _isolated_agent_env(
 # stdin. Values never appear in argv, durable control JSON, or logs.
 MANAGED_CODE = r"""
 import fcntl, json, os, re, shutil, signal, subprocess, sys, time
-""" + GUEST_TOKEN_CODE + r"""
+""" + GUEST_TOKEN_CODE + f"""
+WINDOWS_AGENT_PATH = {WINDOWS_AGENT_PATH!r}
+""" + r"""
 path, action = sys.argv[1:3]
 os.umask(0o077)
 os.makedirs(path, mode=0o700, exist_ok=True)
@@ -421,6 +428,12 @@ if action == 'start':
         if os.path.islink(home) or not os.path.isdir(home): sys.exit(125)
         os.chmod(home, 0o700)
         child_env = {'PATH': expected_path, 'HOME': home}
+        if sys.platform in ('cygwin', 'msys'):
+            # Windows guests: native agents also need the system directories
+            # (PowerShell, cmd), and Claude Code runs its Bash tool in MSYS2.
+            child_env['PATH'] += WINDOWS_AGENT_PATH
+            if profile == 'claude':
+                child_env['CLAUDE_CODE_GIT_BASH_PATH'] = 'C:\\msys64\\usr\\bin\\bash.exe'
         child_env.update(explicit)
     else:
         child_env = dict(os.environ, **config['env'])
