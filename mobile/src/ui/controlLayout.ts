@@ -1,11 +1,18 @@
 import { StyleSheet, type PressableProps, type ViewStyle } from "react-native";
 
+/**
+ * Resting press state for resolving style callbacks. `hovered` is only typed
+ * when Expo's generated web types are loaded, so this stays a non-literal
+ * argument that type-checks with and without them.
+ */
+const RESTING_STATE = { pressed: false, hovered: false };
+
 /** Keep caller layout while the OS owns the control's paint and shape. */
 export function controlLayout(style: PressableProps["style"]): ViewStyle {
   const resolved =
     StyleSheet.flatten(
       typeof style === "function"
-        ? style({ pressed: false, hovered: false })
+        ? style(RESTING_STATE)
         : style,
     ) ?? {};
   const keys = [
@@ -60,7 +67,7 @@ export function controlContentStyle(style: PressableProps["style"]): ViewStyle {
   const resolved =
     StyleSheet.flatten(
       typeof style === "function"
-        ? style({ pressed: false, hovered: false })
+        ? style(RESTING_STATE)
         : style,
     ) ?? {};
   const layout = controlLayout(style);
