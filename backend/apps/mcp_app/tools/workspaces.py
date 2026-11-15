@@ -13,6 +13,12 @@ from apps.credentials.services import CredentialSvc
 from apps.harness.conversation_service import ConversationService
 from apps.plugins.services import PluginService
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
+from apps.runners.guest_os import (
+    WINDOWS,
+    distro_guest_os,
+    image_minimums,
+    normalize_guest_os,
+)
 from apps.runners.services import get_runner_service
 from apps.runners.services.image_definitions import ImageDefinitionService
 from apps.runners.services.image_versions import ImageVersionService
@@ -76,6 +82,7 @@ def _image_ref(workspace: Any) -> dict[str, Any] | None:
         {
             "name": ref["name"],
             "version": ref["version"],
+            "guest_os": workspace.guest_os,
             "update_available": ref["update_available"] or None,
         }
     )
@@ -196,6 +203,22 @@ def _details(ctx: ToolContext, workspace: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _guest_facts(guest_os: str | None, min_disk_gb: int | None = None) -> dict:
+    """Guest OS of an image and, for Windows, the resources it needs."""
+    guest_os = normalize_guest_os(guest_os)
+    if guest_os != WINDOWS:
+        return {"guest_os": guest_os}
+    minimums = image_minimums(guest_os, min_disk_gb)
+    return {
+        "guest_os": guest_os,
+        "minimums": {
+            "vcpus": minimums.vcpus,
+            "memory_mb": minimums.memory_mb,
+            "disk_gb": minimums.disk_size_gb,
+        },
+    }
+
+
 def _selectable_images(ctx: ToolContext) -> list[dict[str, Any]]:
     """Images a new workspace can start from right now, with their runners."""
     images: list[dict[str, Any]] = []
@@ -228,6 +251,7 @@ def _selectable_images(ctx: ToolContext) -> list[dict[str, Any]]:
                     "name": definition.name,
                     "kind": "organization",
                     "description": definition.description,
+                    **_guest_facts(distro_guest_os(definition.base_distro)),
                     "targets": targets,
                 }
             )
@@ -248,6 +272,7 @@ def _selectable_images(ctx: ToolContext) -> list[dict[str, Any]]:
                 "name": line.name,
                 "kind": "captured",
                 "description": f"Captured image, version {latest.generation}",
+                **_guest_facts(latest.guest_os, latest.min_disk_size_gb),
                 "targets": [
                     {
                         "runner_id": line.runner_id,
@@ -268,6 +293,8 @@ def _image_option(image: dict[str, Any]) -> dict[str, Any]:
             "name": image["name"],
             "kind": image["kind"],
             "description": image["description"],
+            "guest_os": image["guest_os"],
+            "minimums": image.get("minimums"),
             "runners": [target["runner"] for target in image["targets"]],
         }
     )
@@ -438,10 +465,11 @@ def _options(ctx: ToolContext) -> dict[str, Any]:
     schema=obj({}),
     description="""
         List the choices for workspace_create and workspace_update: images that
-        are ready on an online runner, runners with resource defaults and
-        limits, credentials the user can attach (API tokens, SSH keys, env
-        files; names only, never secrets) and the plugins enabled for the
-        organization with the credentials they require.
+        are ready on an online runner with their guest OS (linux or windows;
+        Windows images list the minimum resources they need), runners with
+        resource defaults and limits, credentials the user can attach (API
+        tokens, SSH keys, env files; names only, never secrets) and the
+        plugins enabled for the organization with the credentials they require.
     """,
 )
 async def workspace_options(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -558,6 +586,7 @@ async def workspace_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
         "workspace_start with wait_seconds) until status is 'running'.",
     )
     data["image"] = prepared["image"]["name"]
+    data["guest_os"] = prepared["image"]["guest_os"]
     data["runner"] = prepared["target"]["runner"]
     return data
 
