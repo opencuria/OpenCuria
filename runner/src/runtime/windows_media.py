@@ -100,7 +100,12 @@ _DISTRO = re.compile(r"windows:11(?:-(?P<edition>[a-z-]+))?")
 INSTALL_SCRIPTS = ("SetupComplete.cmd", "setup.ps1")
 #: Scripts every guest runs later. Builds refresh them from the runner, so a
 #: change never requires a new base installation.
-GUEST_SCRIPTS = ("bootstrap.ps1", "generalize.ps1", "generalize-unattend.xml")
+GUEST_SCRIPTS = (
+    "bootstrap.ps1",
+    "generalize.ps1",
+    "generalize-unattend.xml",
+    "display.ps1",
+)
 SETUP_SCRIPTS = INSTALL_SCRIPTS + GUEST_SCRIPTS
 #: Virtual size of the installed system disk (Windows 11 requires 64 GB).
 BASE_DISK_GB = 64

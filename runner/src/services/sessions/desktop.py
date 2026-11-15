@@ -1149,6 +1149,13 @@ class DesktopManager:
             )
 
         if await self._is_desktop_session_live(workspace_id):
+            if (display := await self._qemu_display(workspace_id)) is not None:
+                # QEMU's console is always there; a desktop start applies the
+                # workspace's desktop size inside the guest session.
+                await display.set_display_size(
+                    self._get_cached(workspace_id).instance_id,
+                    *self._resolve_desktop_geometry(width, height),
+                )
             recovered = DesktopSession(
                 workspace_id=workspace_id,
                 instance_id=self._get_cached(workspace_id).instance_id,

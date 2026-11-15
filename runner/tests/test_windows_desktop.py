@@ -221,9 +221,14 @@ class _Runtime:
     def __init__(self, server: FakeQemuDisplay | None):
         self.exec_command_wait = AsyncMock(side_effect=AssertionError("no guest exec"))
         self.server = server
+        self.display_sizes: list[tuple[int, int]] = []
 
     async def desktop_kind(self, instance_id: str) -> str:
         return "qemu"
+
+    async def set_display_size(self, instance_id: str, width: int, height: int) -> bool:
+        self.display_sizes.append((width, height))
+        return True
 
     @asynccontextmanager
     async def display_client(self, instance_id: str):
@@ -252,8 +257,11 @@ class WindowsDesktopSessionTests(unittest.IsolatedAsyncioTestCase):
         self.desktop = self.service.desktop
 
     async def test_session_starts_and_stops_without_guest_commands(self):
-        session = await self.desktop._ensure_desktop_process_locked(self.workspace_id)
+        session = await self.desktop._ensure_desktop_process_locked(
+            self.workspace_id, width=1600, height=900
+        )
         self.assertEqual(session.workspace_id, self.workspace_id)
+        self.assertEqual(self.runtime.display_sizes, [(1600, 900)])
         await self.desktop._verify_binding(self.workspace_id)
         await self.desktop._stop_desktop_process(
             self.workspace_id, expected_session=session

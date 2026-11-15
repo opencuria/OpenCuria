@@ -22,4 +22,11 @@ git config --system core.symlinks true
 git config --system init.defaultBranch main
 
 mkdir -p /workspace /c/ProgramData/opencuria
+
+# The desktop size belongs to root's console session: the runner asks this
+# task (also run at every logon) to apply display.json there.
+# MSYS2 would rewrite "/tn"-style switches as paths for native programs.
+MSYS2_ARG_CONV_EXCL='*' schtasks.exe /create /f /tn 'OpenCuria Display' /sc onlogon /ru root /it /rl highest \
+  /tr 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\opencuria\display.ps1' \
+  >/dev/null
 echo "opencuria-configure: done"

@@ -1344,6 +1344,37 @@ class QemuRuntime(RuntimeBackend):
             sock.close()
             raise
 
+    async def set_display_size(self, instance_id: str, width: int, height: int) -> bool:
+        """Ask a Windows guest to switch its console to ``width`` x ``height``.
+
+        Best effort: the change runs in the logged-on session and reports back
+        through ``display.result``; unsupported modes keep the current size.
+        """
+        if (await self._resolve_guest(instance_id)).desktop != "qemu":
+            return False
+        command = (
+            f"printf '{{\"width\": %d, \"height\": %d}}' {int(width)} {int(height)}"
+            f" > {WINDOWS_STATE_DIR}/display.json"
+            f" && rm -f {WINDOWS_STATE_DIR}/display.result"
+            " && MSYS2_ARG_CONV_EXCL='*' schtasks.exe /run /tn 'OpenCuria Display' >/dev/null"
+            f" && for _ in $(seq 50); do [ -s {WINDOWS_STATE_DIR}/display.result ] && break;"
+            " sleep 0.2; done"
+            f" && cat {WINDOWS_STATE_DIR}/display.result"
+        )
+        try:
+            code, output = await asyncio.wait_for(
+                self.exec_command_wait(instance_id, ["sh", "-c", command]), 30
+            )
+        except Exception:
+            logger.warning("vm_display_size_failed", instance_id=instance_id, exc_info=True)
+            return False
+        applied = code == 0 and output.strip() == "0"
+        logger.info(
+            "vm_display_size", instance_id=instance_id, width=width, height=height,
+            applied=applied,
+        )
+        return applied
+
     @contextlib.asynccontextmanager
     async def display_client(self, instance_id: str):
         """Yield a negotiated RFB control connection to QEMU's display."""
