@@ -252,3 +252,20 @@ def test_only_the_owner_reads_the_retained_diagnostic(runner, stopped_workspace,
 
     assert other.get(workspace_url).status_code == 404
     assert other.get(operation_url).status_code == 403
+
+
+def test_every_runner_diagnostic_code_has_user_wording():
+    """New runner codes (Windows guests included) never surface as generic text."""
+    import re
+    from pathlib import Path
+
+    from apps.runners.services.runner_diagnostics import DIAGNOSTICS
+
+    source = (
+        Path(__file__).resolve().parents[4] / "runner" / "src" / "runtime" / "diagnostics.py"
+    ).read_text()
+    codes = set(re.findall(r'^[A-Z_]+ = "([a-z_]+)"$', source, re.M))
+    internal = {"workspace_unreachable", "interrupted", "handler_failed"}
+    assert codes - internal <= DIAGNOSTICS.keys()
+    for code in ("generalize_failed", "windows_media_unavailable", "windows_host_unsupported"):
+        assert failure_message({"diagnostic_code": code}).startswith(DIAGNOSTICS[code][0])

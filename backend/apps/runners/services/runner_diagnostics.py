@@ -57,6 +57,18 @@ DIAGNOSTICS: dict[str, tuple[str, str]] = {
         "The runner is out of disk space.",
         "Free up storage on the runner, then try again.",
     ),
+    "generalize_failed": (
+        "Windows could not be prepared for the image (sysprep failed).",
+        "Check the build log, remove the blocking app or setting and try again.",
+    ),
+    "windows_media_unavailable": (
+        "The runner has no usable Windows 11 installation media.",
+        "Set RUNNER_WINDOWS_ISO on the runner, then build again.",
+    ),
+    "windows_host_unsupported": (
+        "The runner host cannot run Windows guests (Secure Boot firmware or TPM missing).",
+        "Install ovmf and swtpm on the runner host, then build again.",
+    ),
 }
 
 FAILED = (
