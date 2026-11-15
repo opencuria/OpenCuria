@@ -1,0 +1,400 @@
+"""Guest OS strategies: Linux keeps its definitions, Windows adds firmware and devices."""
+
+from __future__ import annotations
+
+import builtins
+import io
+import json
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+libvirt = pytest.importorskip("libvirt")
+
+from src.runtime.diagnostics import (
+    GENERALIZE_FAILED,
+    IMAGE_INVALID,
+    OperationError,
+    OperationRejectedError,
+)
+from src.runtime.guest_os import (
+    LINUX,
+    METADATA_NS,
+    WINDOWS,
+    GuestBootstrapError,
+    SeedSpec,
+    guest_for,
+    guest_for_distro,
+    validate_guest_os,
+)
+from src.runtime.managed_process import GUEST_TOKEN_CODE
+from src.runtime.qemu_runtime import QemuRuntime, _domain_xml
+
+_NS = f"{{{METADATA_NS}}}"
+
+
+def _xml(guest=None, network: str | None = "net0", vcpus: int = 4) -> ET.Element:
+    return ET.fromstring(
+        _domain_xml(
+            name="opencuria-workspace-ws",
+            vcpus=vcpus,
+            memory_mb=4096,
+            disk_path="/disks/ws.qcow2",
+            cloud_init_iso="/disks/ws-cloud-init.iso",
+            network=network,
+            guest=guest,
+            serial_log="/disks/ws-serial.log",
+        )
+    )
+
+
+def test_linux_definition_is_unchanged_by_the_strategy() -> None:
+    plain = _domain_xml(
+        name="opencuria-workspace-ws",
+        vcpus=2,
+        memory_mb=2048,
+        disk_path="/d.qcow2",
+        cloud_init_iso="/s.iso",
+        network="net0",
+    )
+    assert plain == _domain_xml(
+        name="opencuria-workspace-ws",
+        vcpus=2,
+        memory_mb=2048,
+        disk_path="/d.qcow2",
+        cloud_init_iso="/s.iso",
+        network="net0",
+        guest=guest_for(LINUX),
+        serial_log="/ignored.log",
+    )
+    root = ET.fromstring(plain)
+    assert root.find("./os/firmware") is None
+    assert root.find(f"./metadata/{_NS}workspace/{_NS}guest-os") is None
+    assert root.find("./devices/graphics") is None
+
+
+def test_windows_definition_meets_windows_11_requirements() -> None:
+    root = _xml(guest_for(WINDOWS), vcpus=6)
+
+    os_node = root.find("./os")
+    assert os_node.get("firmware") == "efi"
+    features = {f.get("name"): f.get("enabled") for f in os_node.findall("./firmware/feature")}
+    assert features == {"secure-boot": "yes", "enrolled-keys": "yes"}
+    assert root.find("./features/smm").get("state") == "on"
+    assert root.find("./features/hyperv/synic").get("state") == "on"
+    topology = root.find("./cpu/topology")
+    assert topology.attrib == {"sockets": "1", "dies": "1", "cores": "6", "threads": "1"}
+    assert root.find("./devices/tpm/backend").attrib == {
+        "type": "emulator",
+        "version": "2.0",
+    }
+    graphics = root.find("./devices/graphics")
+    assert graphics.get("type") == "vnc"
+    # No TCP listener: the runner reaches the display through libvirt only.
+    assert graphics.find("./listen").get("type") == "none"
+    assert root.find("./devices/input").attrib == {"type": "tablet", "bus": "usb"}
+    assert (
+        root.find("./devices/channel[@type='qemu-vdagent']/target").get("name")
+        == "com.redhat.spice.0"
+    )
+    assert root.find("./devices/serial/log").get("file") == "/disks/ws-serial.log"
+    assert root.findtext(f"./metadata/{_NS}workspace/{_NS}guest-os") == WINDOWS
+    assert root.findtext(f"./metadata/{_NS}workspace/{_NS}workspace-id") == "ws"
+
+
+def test_guests_without_network_have_no_interface() -> None:
+    assert _xml(guest_for(WINDOWS), network=None).find("./devices/interface") is None
+    assert _xml(network="net0").find("./devices/interface/source").get("network") == "net0"
+
+
+def test_seed_files_follow_the_guest() -> None:
+    spec = SeedSpec(bootstrap_id="id-1", public_key="ssh-ed25519 KEY", vm_ip="10.0.0.2",
+                    gateway="10.0.0.1")
+    linux = guest_for(LINUX).seed_files(spec)
+    assert set(linux) == {"user-data", "meta-data", "network-config"}
+    assert "instance-id: id-1" in linux["meta-data"]
+    assert "ssh-ed25519 KEY" in linux["user-data"]
+
+    windows = guest_for(WINDOWS).seed_files(
+        SeedSpec(bootstrap_id="id-2", public_key="ssh-ed25519 KEY", action="generalize")
+    )
+    assert set(windows) == {"meta-data", "opencuria.json"}
+    assert "instance-id: id-2" in windows["meta-data"]
+    assert json.loads(windows["opencuria.json"]) == {
+        "ssh_authorized_keys": ["ssh-ed25519 KEY"],
+        "action": "generalize",
+    }
+
+
+def test_windows_first_boot_state() -> None:
+    windows = guest_for(WINDOWS)
+    assert windows.first_boot_state(0, "") == "pending"
+    assert windows.first_boot_state(None, "") == "pending"
+    assert windows.first_boot_state(0, '{"status": "starting"}') == "pending"
+    assert windows.first_boot_state(0, '{"status": "ready"}') == "done"
+    with pytest.raises(GuestBootstrapError):
+        windows.first_boot_state(0, '{"status": "failed", "detail": "x"}')
+    with pytest.raises(ValueError):
+        windows.first_boot_state(0, "[]")
+
+
+def test_linux_first_boot_state_keeps_cloud_init_semantics() -> None:
+    linux = guest_for(LINUX)
+    assert linux.first_boot_state(0, '{"status": "done"}') == "done"
+    assert linux.first_boot_state(2, '{"status": "done"}') == "degraded"
+    assert linux.first_boot_state(0, '{"status": "running"}') == "pending"
+    with pytest.raises(GuestBootstrapError):
+        linux.first_boot_state(None, '{"status": "done"}')
+
+
+def test_guest_selection() -> None:
+    assert guest_for(None).name == LINUX
+    assert guest_for("unknown").name == LINUX
+    assert guest_for_distro("ubuntu:24.04").name == LINUX
+    assert guest_for_distro(" Windows:11-Enterprise ").name == WINDOWS
+    assert validate_guest_os(None) == LINUX
+    with pytest.raises(ValueError):
+        validate_guest_os("macos")
+    windows = guest_for(WINDOWS)
+    assert windows.dhcp and windows.compress_publication and windows.generalize_on_publish
+    assert "powershell.exe" in windows.build_script().command
+    assert guest_for(LINUX).build_script().command == (
+        "sudo -E bash /tmp/opencuria-image-build.sh"
+    )
+
+
+def _runtime(tmp_path: Path) -> QemuRuntime:
+    runtime = object.__new__(QemuRuntime)
+    runtime._settings = SimpleNamespace(
+        qemu_generalize_timeout=5, qemu_build_vcpus=1, qemu_build_memory_mb=2048
+    )
+    runtime._disk_dir = tmp_path
+    return runtime
+
+
+def _manifest(image: Path, **fields) -> None:
+    image.write_bytes(b"qcow2")
+    image.with_suffix(".manifest.json").write_text(json.dumps(fields))
+
+
+def test_image_guest_comes_from_the_manifest(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    linux, windows, broken = (tmp_path / f"{n}.qcow2" for n in ("l", "w", "b"))
+    _manifest(linux)
+    _manifest(windows, guest_os="windows")
+    _manifest(broken, guest_os="macos")
+
+    assert runtime._image_guest(linux).name == LINUX
+    assert runtime._image_guest(tmp_path / "unpublished.qcow2").name == LINUX
+    assert runtime._image_guest(windows, "windows").name == WINDOWS
+    with pytest.raises(OperationRejectedError) as mismatch:
+        runtime._image_guest(windows, "linux")
+    assert mismatch.value.code == IMAGE_INVALID
+    with pytest.raises(OperationRejectedError):
+        runtime._image_guest(broken)
+
+
+async def test_guest_is_read_from_domain_metadata_and_cached(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    domain = MagicMock()
+    domain.XMLDesc.return_value = ET.tostring(_xml(guest_for(WINDOWS)), encoding="unicode")
+    runtime._get_domain = MagicMock(return_value=domain)
+
+    assert (await runtime._resolve_guest("ws")).name == WINDOWS
+    assert (await runtime._resolve_guest("ws")).name == WINDOWS
+    runtime._get_domain.assert_called_once_with("ws")
+
+
+async def test_unreadable_domains_are_linux_but_not_cached(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._get_domain = MagicMock(side_effect=RuntimeError("libvirt down"))
+    assert (await runtime._resolve_guest("ws")).name == LINUX
+    assert "ws" not in runtime._guest_cache
+    plain = MagicMock()
+    plain.XMLDesc.return_value = ET.tostring(_xml(), encoding="unicode")
+    runtime._get_domain = MagicMock(return_value=plain)
+    assert (await runtime._resolve_guest("ws")).name == LINUX
+    assert runtime._guest_cache["ws"] == LINUX
+
+
+def _shutoff_domain() -> MagicMock:
+    domain = MagicMock()
+    domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
+    return domain
+
+
+async def test_generalize_result_comes_from_the_serial_log(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._get_domain = MagicMock(return_value=_shutoff_domain())
+    log = runtime._serial_log_path("copy")
+
+    log.write_text("boot noise\r\nopencuria-bootstrap: generalizing\r\nOPENCURIA_GENERALIZE_OK\r\n")
+    await runtime._await_generalized("copy")
+
+    log.write_text("OPENCURIA_GENERALIZE_FAILED sysprep failed (0x8007): appx\r\n")
+    with pytest.raises(OperationError) as failed:
+        await runtime._await_generalized("copy")
+    assert failed.value.code == GENERALIZE_FAILED
+    assert "appx" in str(failed.value)
+
+    log.write_text("")
+    with pytest.raises(OperationError, match="no result reported"):
+        await runtime._await_generalized("copy")
+
+
+async def test_generalize_wait_is_bounded(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._settings.qemu_generalize_timeout = 0.01
+    domain = MagicMock()
+    domain.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 0)
+    runtime._get_domain = MagicMock(return_value=domain)
+    with pytest.raises(OperationError) as timeout:
+        await runtime._await_generalized("copy")
+    assert timeout.value.code == GENERALIZE_FAILED
+    domain.destroy.assert_called_once()
+
+
+def test_serial_lines_strip_control_characters(tmp_path) -> None:
+    log = tmp_path / "serial.log"
+    log.write_bytes(b"\x1b[2Jopencuria-setup: installing MSYS2\r\nnoise\r\nopencuria-setup: done\r\n")
+    assert QemuRuntime._serial_lines(log, "opencuria-setup: ") == ["installing MSYS2", "done"]
+    assert QemuRuntime._serial_lines(tmp_path / "missing.log", "") == []
+
+
+def _capture_runtime(tmp_path: Path, guest: str) -> QemuRuntime:
+    runtime = _runtime(tmp_path)
+    runtime._snapshot_dir = tmp_path
+    runtime._managed_image_path = lambda reference: tmp_path / f"{reference}.qcow2"
+    runtime._guest_cache["ws"] = guest
+    published = {"created_at": "2026-11-15T00:00:00+00:00", "size_bytes": 7,
+                 "min_disk_size_gb": 64, "virtual_size_bytes": 64 * 1024**3}
+    runtime._publish_capture = AsyncMock(return_value=published)
+    runtime._prepare_capture_copy = AsyncMock(return_value=tmp_path / "copy.qcow2")
+    runtime._await_generalized = AsyncMock()
+    runtime._cleanup_build_instance = AsyncMock()
+    return runtime
+
+
+_ARTIFACT = "11111111-1111-4111-8111-111111111111"
+_OPERATION = "22222222-2222-4222-8222-222222222222"
+
+
+async def test_windows_capture_generalizes_a_copy_and_keeps_the_source(tmp_path) -> None:
+    runtime = _capture_runtime(tmp_path, WINDOWS)
+    await runtime.create_image_artifact(
+        "ws", "Captured", artifact_id=_ARTIFACT, operation_id=_OPERATION,
+        credential_clean=True,
+    )
+    copy_id = f"image-capture-{_OPERATION}"
+    runtime._prepare_capture_copy.assert_awaited_once()
+    assert runtime._prepare_capture_copy.await_args.args[:2] == ("ws", copy_id)
+    runtime._await_generalized.assert_awaited_once_with(copy_id)
+    source, disk, _, manifest = runtime._publish_capture.await_args.args
+    assert (source, disk) == ("ws", tmp_path / "copy.qcow2")
+    assert manifest["guest_os"] == WINDOWS and manifest["kind"] == "capture"
+    runtime._cleanup_build_instance.assert_awaited_once_with(copy_id)
+
+
+async def test_failed_generalize_removes_the_copy_and_publishes_nothing(tmp_path) -> None:
+    runtime = _capture_runtime(tmp_path, WINDOWS)
+    runtime._await_generalized.side_effect = OperationError(GENERALIZE_FAILED, "x")
+    with pytest.raises(OperationError):
+        await runtime.create_image_artifact(
+            "ws", "Captured", artifact_id=_ARTIFACT, operation_id=_OPERATION,
+            credential_clean=True,
+        )
+    runtime._publish_capture.assert_not_awaited()
+    runtime._cleanup_build_instance.assert_awaited_once_with(f"image-capture-{_OPERATION}")
+
+
+async def test_linux_capture_publishes_the_source_disk_unchanged(tmp_path) -> None:
+    runtime = _capture_runtime(tmp_path, LINUX)
+    await runtime.create_image_artifact(
+        "ws", "Captured", artifact_id=_ARTIFACT, operation_id=_OPERATION,
+        credential_clean=True,
+    )
+    runtime._prepare_capture_copy.assert_not_awaited()
+    source, disk, _, manifest = runtime._publish_capture.await_args.args
+    assert disk == runtime._disk_path("ws")
+    assert "guest_os" not in manifest
+
+
+async def test_capture_still_requires_scrub_proof(tmp_path) -> None:
+    runtime = _capture_runtime(tmp_path, WINDOWS)
+    with pytest.raises(RuntimeError, match="scrub proof"):
+        await runtime.create_image_artifact(
+            "ws", "Captured", artifact_id=_ARTIFACT, operation_id=_OPERATION
+        )
+    runtime._prepare_capture_copy.assert_not_awaited()
+
+
+async def test_reconfigure_keeps_the_cpu_topology_in_sync(monkeypatch) -> None:
+    from src.runtime import qemu_runtime
+
+    runtime = object.__new__(QemuRuntime)
+    runtime._libvirt_conn = MagicMock()
+    domain = runtime._libvirt_conn.return_value.lookupByName.return_value
+    domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
+    domain.XMLDesc.return_value = ET.tostring(
+        _xml(guest_for(WINDOWS), vcpus=2), encoding="unicode"
+    )
+    process = SimpleNamespace(
+        returncode=0,
+        communicate=AsyncMock(return_value=(b'{"virtual-size": 68719476736}', b"")),
+    )
+    monkeypatch.setattr(
+        qemu_runtime.asyncio, "create_subprocess_exec", AsyncMock(return_value=process)
+    )
+
+    await runtime._reconfigure_workspace(
+        "ws", qemu_vcpus=6, qemu_memory_mb=8192, qemu_disk_size_gb=64
+    )
+
+    root = ET.fromstring(runtime._libvirt_conn.return_value.defineXML.call_args.args[0])
+    assert root.find("./vcpu").text == "6"
+    assert root.find("./cpu/topology").attrib == {
+        "sockets": "1", "dies": "1", "cores": "6", "threads": "1",
+    }
+    # Firmware, TPM and the display survive a resource change.
+    assert root.find("./os").get("firmware") == "efi"
+    assert root.find("./devices/tpm") is not None
+    assert root.find("./devices/graphics/listen").get("type") == "none"
+
+
+def _token_namespace(files: dict[str, bytes]) -> dict:
+    def fake_open(path, mode="r", *args, **kwargs):
+        if path not in files:
+            raise FileNotFoundError(path)
+        data = files[path]
+        return io.BytesIO(data) if "b" in mode else io.StringIO(data.decode())
+
+    namespace = {"open": fake_open, "__builtins__": builtins}
+    exec(GUEST_TOKEN_CODE, namespace)
+    return namespace
+
+
+def test_windows_guest_token_combines_instance_and_boot_counter() -> None:
+    key = (
+        "/proc/registry/HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Control/"
+        "Session Manager/Memory Management/PrefetchParameters/BootId"
+    )
+    namespace = _token_namespace(
+        {key: (7).to_bytes(4, "little"), "/c/ProgramData/opencuria/instance-id": b"seed-1\r\n"}
+    )
+    assert namespace["guest_token"]() == {
+        "boot_id": "windows-seed-1-7",
+        "init_starttime": "7",
+    }
+
+
+def test_linux_guest_token_is_unchanged() -> None:
+    namespace = _token_namespace(
+        {
+            "/proc/sys/kernel/random/boot_id": b"boot\n",
+            "/proc/1/stat": b"1 (systemd) S 0 1 1 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 1 0 42 1",
+        }
+    )
+    assert namespace["guest_token"]() == {"boot_id": "boot", "init_starttime": "42"}

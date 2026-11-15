@@ -332,6 +332,11 @@ class WorkspaceService:
             if recover is not None:
                 await recover(identity["operation_id"])
         elif failure in {"workspace:error", "image_artifact:failed"}:
+            if failure == "image_artifact:failed":
+                # A capture may have left its disposable generalize copy.
+                recover_copy = getattr(self._runtime, "recover_interrupted_capture", None)
+                if recover_copy is not None and identity.get("operation_id"):
+                    await recover_copy(identity["operation_id"])
             workspace_id = identity.get("workspace_id")
             recover = getattr(self._runtime, "quiesce_interrupted_workspace", None)
             if workspace_id and recover is not None:

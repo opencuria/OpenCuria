@@ -34,6 +34,8 @@ class WorkspaceConfig:
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    #: Guest OS the control plane expects; the image manifest is authoritative.
+    guest_os: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,7 @@ class RuntimeWorkspaceInfo:
     instance_id: str
     status: str  # normalised: "running", "exited", etc.
     name: str | None = None
+    guest_os: str = "linux"
 
 
 @dataclass

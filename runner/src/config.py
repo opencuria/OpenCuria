@@ -47,6 +47,13 @@ class RunnerSettings(BaseSettings):
     qemu_ssh_user: str = "root"
     qemu_ssh_timeout: int = 60  # seconds to wait for VM SSH readiness
     qemu_cloud_init_timeout: int = Field(default=300, gt=0)
+    # Windows 11 guests: an administrator-provided installation ISO (local path
+    # or http(s) URL) and its optional SHA-256. Without it Windows images cannot
+    # be built; Linux images are unaffected.
+    windows_iso: str = ""
+    windows_iso_sha256: str = ""
+    qemu_windows_install_timeout: float = Field(default=14400, gt=0)
+    qemu_generalize_timeout: float = Field(default=3600, gt=0)
 
     credential_sync_timeout: float = Field(default=120, gt=0)
     workspace_repo_clone_timeout: float = Field(default=1800, gt=0)

@@ -79,17 +79,27 @@ try {
     Set-ItemProperty $nls -Name MACCP -Value '65001'
 
     $bash = "$msys\usr\bin\bash.exe"
-    function Invoke-Msys([string] $Script) {
-        & $bash -lc $Script 2>&1 | ForEach-Object { Log "msys: $_" }
-        if ($LASTEXITCODE -ne 0) { throw "MSYS2 command failed ($LASTEXITCODE): $Script" }
+    function Invoke-Msys([string] $Script, [int] $Attempts = 1) {
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            & $bash -lc $Script 2>&1 | ForEach-Object { Log "msys: $_" }
+            if ($LASTEXITCODE -eq 0) { return }
+            Log "msys command failed ($LASTEXITCODE), attempt $attempt of $Attempts"
+            Start-Sleep -Seconds 15
+        }
+        throw "MSYS2 command failed: $Script"
+    }
+    Log 'waiting for network'
+    for ($i = 0; $i -lt 60 -and -not (Test-Connection -ComputerName repo.msys2.org -Count 1 -Quiet); $i++) {
+        Start-Sleep -Seconds 5
     }
     Log 'initializing MSYS2'
     Invoke-Msys 'true'
-    # The first upgrade replaces the runtime itself and must be run twice.
-    Invoke-Msys 'pacman --noconfirm --noprogressbar -Syuu'
-    Invoke-Msys 'pacman --noconfirm --noprogressbar -Syuu'
-    Invoke-Msys ("pacman --noconfirm --noprogressbar -S --needed " + ($manifest.msys2_packages -join ' '))
+    # The first upgrade replaces the runtime and ends every MSYS2 process.
+    & $bash -lc 'pacman --noconfirm --noprogressbar -Syuu' 2>&1 | ForEach-Object { Log "msys: $_" }
+    Invoke-Msys 'pacman --noconfirm --noprogressbar -Syuu' 3
+    Invoke-Msys ("pacman --noconfirm --noprogressbar -S --needed " + ($manifest.msys2_packages -join ' ')) 3
     Invoke-Msys 'pacman --noconfirm -Scc >/dev/null; rm -rf /var/cache/pacman/pkg/*'
+    Invoke-Msys 'command -v python3 git tar base64 pgrep setsid flock'
 
     Log 'configuring sshd'
     $sshd = 'C:\ProgramData\ssh'
@@ -177,6 +187,16 @@ try {
         -ExecutionTimeLimit (New-TimeSpan -Hours 2) -StartWhenAvailable
     Register-ScheduledTask -TaskName 'OpenCuria Bootstrap' -Action $action -Trigger $trigger `
         -Principal $principal -Settings $settings -Force | Out-Null
+
+    # Setup places WinRE after C:; without it C: can always grow with the disk.
+    Log 'removing the recovery partition'
+    reagentc.exe /disable | Out-Null
+    $recovery = '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}'
+    Get-Partition -DiskNumber (Get-Partition -DriveLetter C).DiskNumber |
+        Where-Object { $_.GptType -eq $recovery } |
+        Remove-Partition -Confirm:$false
+    $size = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
+    if ($size -gt (Get-Partition -DriveLetter C).Size) { Resize-Partition -DriveLetter C -Size $size }
 
     Log 'cleaning up'
     Dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null

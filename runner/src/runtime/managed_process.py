@@ -8,11 +8,31 @@ from typing import Literal
 
 ProcessProfile = Literal["agent", "helper"]
 
-TOKEN_PROBE_CODE = """import json
-boot = open('/proc/sys/kernel/random/boot_id').read().strip()
-start = open('/proc/1/stat').read().rsplit(')', 1)[1].split()[19]
-print(json.dumps({'boot_id': boot, 'init_starttime': start}))
+#: Guest incarnation evidence, shared by the probe and the supervisor. Linux
+#: guests: kernel boot id and init's start time. Windows guests (MSYS2 Python):
+#: the bootstrap's per-seed instance id and the kernel boot counter, so a reboot,
+#: a reset or a clone always yields a different token.
+GUEST_TOKEN_CODE = r"""
+def guest_token():
+    try:
+        boot = open('/proc/sys/kernel/random/boot_id').read().strip()
+        start = open('/proc/1/stat').read().rsplit(')', 1)[1].split()[19]
+        return {'boot_id': boot, 'init_starttime': start}
+    except FileNotFoundError:
+        pass
+    key = ('/proc/registry/HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Control/'
+           'Session Manager/Memory Management/PrefetchParameters/BootId')
+    count = int.from_bytes(open(key, 'rb').read()[:4], 'little')
+    instance = open('/c/ProgramData/opencuria/instance-id').read().strip()
+    return {'boot_id': 'windows-%s-%d' % (instance[:64], count),
+            'init_starttime': str(count)}
 """
+
+TOKEN_PROBE_CODE = (
+    "import json\n"
+    + GUEST_TOKEN_CODE
+    + "print(json.dumps(guest_token()))\n"
+)
 
 ISOLATED_AGENT_PATH = "/usr/local/bin:/usr/bin:/bin"
 ISOLATED_AGENT_CONFIG_ROOT = "/workspace/.opencuria/harness/claude"
@@ -244,6 +264,7 @@ def _isolated_agent_env(
 # stdin. Values never appear in argv, durable control JSON, or logs.
 MANAGED_CODE = r"""
 import fcntl, json, os, re, shutil, signal, subprocess, sys, time
+""" + GUEST_TOKEN_CODE + r"""
 path, action = sys.argv[1:3]
 os.umask(0o077)
 os.makedirs(path, mode=0o700, exist_ok=True)
@@ -274,12 +295,12 @@ def cleanup_home(identity):
             re.fullmatch(r'/tmp/opencuria-agent-home-[0-9a-f]{32}', home) and
             os.path.isdir(home) and not os.path.islink(home)):
         shutil.rmtree(home)
-boot = open('/proc/sys/kernel/random/boot_id').read().strip()
+token = guest_token()
+boot = token['boot_id']
 lock = open(path + '/lock', 'a')
 fcntl.flock(lock, fcntl.LOCK_EX)
 if action == 'start':
     config = json.loads(sys.argv[3])
-    token = {'boot_id': boot, 'init_starttime': stat(1)['starttime']}
     if config.get('expected_token') != token:
         sys.exit(125)
     if os.path.exists(path + '/closed') or os.path.exists(path + '/identity'):
@@ -439,8 +460,8 @@ elif action == 'close':
         sys.exit(0)
     identity = json.load(open(path + '/identity'))
     if (identity['boot_id'] != boot or
-            identity.get('init_starttime', stat(1)['starttime'])
-            != stat(1)['starttime']):
+            identity.get('init_starttime', token['init_starttime'])
+            != token['init_starttime']):
         sys.exit(0)
     pid = identity['pid']; current = stat(pid)
     group = members(identity['pgid'])

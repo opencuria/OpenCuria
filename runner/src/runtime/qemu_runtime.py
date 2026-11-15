@@ -44,14 +44,33 @@ from .diagnostics import (
     BUILD_SCRIPT_TIMEOUT,
     DISK_BELOW_IMAGE_MINIMUM,
     DISK_SHRINK_UNSUPPORTED,
+    GENERALIZE_FAILED,
     IMAGE_INVALID,
     IMAGE_UNAVAILABLE,
     INVALID_RESOURCES,
+    WINDOWS_HOST_UNSUPPORTED,
     WORKSPACE_EXISTS,
     OperationError,
     OperationRejectedError,
 )
+from .guest_os import (
+    GUEST_OS_VALUES,
+    LINUX,
+    METADATA_NS,
+    GuestBootstrapError,
+    GuestOS,
+    SeedSpec,
+    guest_for,
+    guest_for_distro,
+    validate_guest_os,
+)
 from .inventory import RuntimeInventory, StorageResource
+from .linux_seed import (
+    GUEST_SSH_MAX_SESSIONS as _GUEST_SSH_MAX_SESSIONS,
+    GUEST_SSH_SESSIONS_CONF as _GUEST_SSH_SESSIONS_CONF,
+    GUEST_SSH_SESSIONS_RELOADED as _GUEST_SSH_SESSIONS_RELOADED,
+    GUEST_SSH_SESSIONS_SCRIPT as _GUEST_SSH_SESSIONS_SCRIPT,
+)
 from .recovery import RecoveryConflict
 from .managed_process import (
     ProcessProfile,
@@ -66,6 +85,12 @@ from .storage import (
     workspace_mutation,
 )
 from .stream_wrapper import shell_quote_argv, stream_wrapper_argv
+from .windows_media import (
+    BASE_DISK_GB,
+    VIRTIO_WIN,
+    WindowsMedia,
+    windows_edition,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -128,87 +153,9 @@ class _SSHState:
     blocked: bool = False
 
 
-# Cloud-init template for initial VM network config
-_CLOUD_INIT_META = """\
-instance-id: {bootstrap_id}
-local-hostname: opencuria-workspace
-"""
-
-# Every exec, upload, terminal and agent stream shares one SSH connection per
-# VM (see ``_get_ssh``), so sshd's default of 10 sessions per connection is
-# raised. write_files runs before sshd starts: the runner's first connection
-# predates runcmd's ssh restart and keeps its boot-time limits. sshd uses the
-# first value it reads, so the drop-in sorts before the image's own files.
-# Guests seeded before the drop-in existed receive it on the runner's next
-# connection (see ``_ensure_guest_session_cap``).
-_GUEST_SSH_MAX_SESSIONS = 64
-_GUEST_SSH_SESSIONS_CONF = "/etc/ssh/sshd_config.d/10-opencuria-sessions.conf"
 _GUEST_SSH_SESSIONS_TIMEOUT = 15.0
-_GUEST_SSH_SESSIONS_RELOADED = "opencuria-sshd-reloaded"
 _GUEST_SSH_RELOAD_DIAL_ATTEMPTS = 5
 _GUEST_SSH_RELOAD_DIAL_DELAY = 0.5
-# Install the drop-in once, validate it, and reload sshd. Reloading keeps open
-# connections (and their limits); only connections opened afterwards get it.
-_GUEST_SSH_SESSIONS_SCRIPT = f"""\
-PATH="$PATH:/usr/sbin:/sbin"
-conf={_GUEST_SSH_SESSIONS_CONF}
-[ -f "$conf" ] && exit 0
-[ -d "${{conf%/*}}" ] || exit 0
-printf 'MaxSessions {_GUEST_SSH_MAX_SESSIONS}\\n' > "$conf.tmp" || exit 1
-chmod 0644 "$conf.tmp" && mv -f "$conf.tmp" "$conf" || exit 1
-sshd -t >/dev/null 2>&1 || {{ rm -f "$conf"; exit 1; }}
-systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || exit 1
-echo {_GUEST_SSH_SESSIONS_RELOADED}
-"""
-
-_CLOUD_INIT_USER = """\
-#cloud-config
-users:
-  - name: ubuntu
-    groups: [sudo]
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - {ssh_public_key}
-write_files:
-  - path: /root/.ssh/authorized_keys
-    permissions: '0600'
-    content: |
-      {ssh_public_key}
-  - path: {sessions_conf}
-    permissions: '0644'
-    content: |
-      MaxSessions {max_sessions}
-runcmd:
-  - mkdir -p /workspace
-  - mkdir -p /root/.ssh
-  - chmod 700 /root/.ssh
-  - chmod 600 /root/.ssh/authorized_keys
-  - echo 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/99-opencuria-root.conf
-  - systemctl restart ssh
-  - tune2fs -e continue /dev/vda1
-"""
-
-# Cloud-init v2 (netplan) network config for static IP assignment inside the VM.
-# Applied at first boot so the VM always comes up with a predictable
-# address, independent of any DHCP server.
-# ``match: name: "en*"`` covers both enp1s0 (q35/PCI) and ens3 (i440fx/ISA).
-_CLOUD_INIT_NETWORK = """\
-version: 2
-ethernets:
-  id0:
-    match:
-      name: "en*"
-    addresses:
-      - {vm_ip}/30
-    routes:
-      - to: default
-        via: {gateway}
-    nameservers:
-      addresses:
-        - {gateway}
-"""
 
 
 def _domain_xml(
@@ -217,16 +164,51 @@ def _domain_xml(
     memory_mb: int,
     disk_path: str,
     cloud_init_iso: str,
-    network: str,
+    network: str | None,
+    *,
+    guest: GuestOS | None = None,
+    serial_log: str | None = None,
 ) -> str:
     """Build a libvirt domain XML definition.
 
     Each VM is connected to its own dedicated isolated network (created by
-    ``QemuRuntime._create_workspace_network``).  No MAC address is pinned
-    here because DHCP is not used — the static IP is configured inside the
-    guest via cloud-init's ``network-config`` file.
+    ``QemuRuntime._create_workspace_network``); ``network=None`` defines a guest
+    without any NIC. No MAC address is pinned: Linux guests configure their
+    static IP from the seed, Windows guests lease the same address via DHCP.
+    Guest-specific firmware and devices come from ``guest``; a Linux definition
+    is unchanged.
     """
+    xml = _base_domain_xml(name, vcpus, memory_mb, disk_path, cloud_init_iso, network)
+    if guest is None or guest.name == LINUX:
+        return xml
+    root = ET.fromstring(xml)
+    guest.customize_domain(root, vcpus=vcpus, serial_log=serial_log or "")
+    owner = root.find(f"./metadata/{{{METADATA_NS}}}workspace")
+    assert owner is not None
+    ET.SubElement(owner, f"{{{METADATA_NS}}}guest-os").text = guest.name
+    ET.register_namespace("opencuria", METADATA_NS)
+    return ET.tostring(root, encoding="unicode")
+
+
+def _base_domain_xml(
+    name: str,
+    vcpus: int,
+    memory_mb: int,
+    disk_path: str,
+    cloud_init_iso: str,
+    network: str | None,
+) -> str:
+    """Return the guest-independent domain definition."""
     memory_kb = memory_mb * 1024
+    interface = (
+        f"""    <interface type='network'>
+      <source network='{network}'/>
+      <model type='virtio'/>
+    </interface>
+"""
+        if network
+        else ""
+    )
     return f"""\
 <domain type='kvm'>
   <name>{name}</name>
@@ -254,11 +236,7 @@ def _domain_xml(
       <target dev='sda' bus='sata'/>
       <readonly/>
     </disk>
-    <interface type='network'>
-      <source network='{network}'/>
-      <model type='virtio'/>
-    </interface>
-    <serial type='pty'>
+{interface}    <serial type='pty'>
       <target port='0'/>
     </serial>
     <console type='pty'>
@@ -402,6 +380,96 @@ class QemuRuntime(RuntimeBackend):
     def _cloud_init_iso_path(self, instance_id: str) -> Path:
         """Path to the cloud-init ISO for a workspace."""
         return self._disk_dir / f"{instance_id}-cloud-init.iso"
+
+    @property
+    def _guest_cache(self) -> dict[str, str]:
+        """instance_id -> guest OS recorded in the domain metadata."""
+        cache = self.__dict__.get("_guest_names")
+        if cache is None:
+            cache = self.__dict__["_guest_names"] = {}
+        return cache
+
+    @property
+    def _windows(self) -> WindowsMedia:
+        """Windows installation media of this runner."""
+        media = self.__dict__.get("_windows_media")
+        if media is None:
+            media = self.__dict__["_windows_media"] = WindowsMedia(self._settings)
+        return media
+
+    def _serial_log_path(self, instance_id: str) -> Path:
+        """Path of the guest's COM1 log (Windows bootstrap and generalize results)."""
+        return self._disk_dir / f"{instance_id}-serial.log"
+
+    def _workspace_owned_paths(self, instance_id: str) -> tuple[Path, ...]:
+        """Every host file a workspace owns besides libvirt-managed state."""
+        return (
+            self._disk_path(instance_id),
+            self._cloud_init_iso_path(instance_id),
+            self._disk_dir / f"{instance_id}-cloud-init",
+            self._host_key_file(instance_id),
+            self._serial_log_path(instance_id),
+        )
+
+    def _read_guest_name(self, instance_id: str) -> str | None:
+        """Read the guest OS from the domain metadata; ``None`` if unreadable."""
+        try:
+            return self._guest_name_of(self._get_domain(instance_id))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _guest_name_of(domain: libvirt.virDomain) -> str | None:
+        """Return a domain's recorded guest OS; domains without one are Linux."""
+        try:
+            root = ET.fromstring(domain.XMLDesc(0))
+        except Exception:
+            return None
+        name = root.findtext(
+            f"./metadata/{{{METADATA_NS}}}workspace/{{{METADATA_NS}}}guest-os"
+        )
+        if name is None:
+            return LINUX
+        return name if name in GUEST_OS_VALUES else None
+
+    async def _resolve_guest(self, instance_id: str) -> GuestOS:
+        """Return a guest's strategy without blocking the event loop.
+
+        Only a successfully read value is cached; an unreadable domain is
+        treated as Linux for this call.
+        """
+        cached = self._guest_cache.get(instance_id)
+        if cached is None:
+            try:
+                name = await asyncio.to_thread(self._read_guest_name, instance_id)
+            except Exception:
+                name = None
+            if name not in GUEST_OS_VALUES:
+                return guest_for(LINUX)
+            cached = self._guest_cache[instance_id] = name
+        return guest_for(cached)
+
+    def _image_guest(self, image: Path, expected: str | None = None) -> GuestOS:
+        """Return the guest OS a published image records (default Linux).
+
+        An explicit ``expected`` value from the control plane must agree.
+        """
+        marker = image.with_suffix(".manifest.json")
+        recorded = LINUX
+        if marker.exists():
+            try:
+                recorded = validate_guest_os(
+                    json.loads(marker.read_text()).get("guest_os") or LINUX
+                )
+            except (ValueError, OSError, AttributeError) as exc:
+                raise OperationRejectedError(
+                    IMAGE_INVALID, "Image manifest records an unknown guest OS"
+                ) from exc
+        if expected is not None and validate_guest_os(expected) != recorded:
+            raise OperationRejectedError(
+                IMAGE_INVALID, "Image guest OS does not match the request"
+            )
+        return guest_for(recorded)
 
     def _get_domain(self, instance_id: str) -> libvirt.virDomain:
         """Look up a libvirt domain by instance_id."""
@@ -625,48 +693,45 @@ class QemuRuntime(RuntimeBackend):
         instance_id: str,
         vm_ip: str | None = None,
         gateway: str | None = None,
+        *,
+        guest: GuestOS | None = None,
+        action: str = "boot",
     ) -> Path:
-        """Create a cloud-init ISO for VM bootstrap.
+        """Create the NoCloud seed ISO (volume ``cidata``) for VM bootstrap.
 
-        When ``vm_ip`` and ``gateway`` are provided a ``network-config``
-        (cloud-init v2 format) is embedded in the ISO so the guest
-        configures a static IP at first boot — no DHCP server required.
+        The guest strategy decides the files: cloud-init ``user-data``,
+        ``meta-data`` and a static ``network-config`` for Linux, ``meta-data``
+        plus ``opencuria.json`` for the Windows bootstrap. ``action`` is
+        ``generalize`` only for disposable copies that are prepared for capture.
 
-        Each new seed has its own cloud-init identity, independent of the
+        Each new seed has its own bootstrap identity, independent of the
         stable workspace ID. This invalidates cached bootstrap state in
         captured images, including same-workspace resets. Normal starts
-        reuse the existing ISO and therefore keep their cloud-init identity.
+        reuse the existing ISO and therefore keep their bootstrap identity.
         """
+        guest = guest or guest_for(LINUX)
         iso_path = self._cloud_init_iso_path(instance_id)
         work_dir = self._disk_dir / f"{instance_id}-cloud-init"
-
-        meta = _CLOUD_INIT_META.format(bootstrap_id=str(uuid.uuid4()))
         public_key = await asyncio.to_thread(self._get_ssh_public_key)
-        user = _CLOUD_INIT_USER.format(
-            ssh_public_key=public_key,
-            sessions_conf=_GUEST_SSH_SESSIONS_CONF,
-            max_sessions=_GUEST_SSH_MAX_SESSIONS,
+        files = guest.seed_files(
+            SeedSpec(
+                bootstrap_id=str(uuid.uuid4()),
+                public_key=public_key,
+                vm_ip=vm_ip,
+                gateway=gateway,
+                action="generalize" if action == "generalize" else "boot",
+            )
         )
 
-        def write_seed() -> None:
+        def write_seed() -> list[str]:
             work_dir.mkdir(parents=True, exist_ok=True)
-            (work_dir / "meta-data").write_text(meta)
-            (work_dir / "user-data").write_text(user)
+            paths = []
+            for name, content in files.items():
+                (work_dir / name).write_text(content)
+                paths.append(str(work_dir / name))
+            return paths
 
-        await asyncio.to_thread(write_seed)
-
-        # Static network config (cloud-init v2) — gives the VM a
-        # predictable IP without a DHCP server on the isolated network.
-        files_to_include = [
-            str(work_dir / "user-data"),
-            str(work_dir / "meta-data"),
-        ]
-        if vm_ip and gateway:
-            network_cfg = _CLOUD_INIT_NETWORK.format(vm_ip=vm_ip, gateway=gateway)
-            await asyncio.to_thread(
-                (work_dir / "network-config").write_text, network_cfg
-            )
-            files_to_include.append(str(work_dir / "network-config"))
+        files_to_include = await asyncio.to_thread(write_seed)
 
         # Use genisoimage or mkisofs to create the ISO
         for tool in ("genisoimage", "mkisofs"):
@@ -793,13 +858,17 @@ class QemuRuntime(RuntimeBackend):
             "No available /30 subnet in 10.100.0.0/16 — all 16 384 blocks in use"
         )
 
-    async def _create_workspace_network(self, instance_id: str) -> tuple[str, str]:
+    async def _create_workspace_network(
+        self, instance_id: str, *, dhcp: bool = False
+    ) -> tuple[str, str]:
         """Create a dedicated isolated /30 NAT network for this workspace.
 
         Each workspace gets its own libvirt network with a unique /30 subnet
         in the ``10.100.0.0/16`` range.  The network uses NAT so the VM
         can reach the internet, but VMs on different networks cannot reach
-        each other because they are on separate bridge interfaces.
+        each other because they are on separate bridge interfaces. With
+        ``dhcp`` the network leases exactly the deterministic guest address,
+        so a guest that configures its NIC by DHCP gets the same IP.
 
         Returns ``(gateway_ip, vm_ip)``.
         """
@@ -813,6 +882,9 @@ class QemuRuntime(RuntimeBackend):
                 raise FileExistsError("Workspace domain already exists")
             gateway, vm_ip, netmask = self._pick_workspace_subnet()
             net_name = self._workspace_network_name(instance_id)
+            lease = (
+                f"<dhcp><range start='{vm_ip}' end='{vm_ip}'/></dhcp>" if dhcp else ""
+            )
             net_xml = f"""\
 <network>
   <name>{net_name}</name>
@@ -823,7 +895,7 @@ class QemuRuntime(RuntimeBackend):
     </nat>
   </forward>
   <dns enable='yes' forwardPlainNames='yes'/>
-  <ip address='{gateway}' netmask='{netmask}'/>
+  <ip address='{gateway}' netmask='{netmask}'>{lease}</ip>
 </network>"""
             conn = self._libvirt_conn()
             if any(net.name() == net_name for net in conn.listAllNetworks(0)):
@@ -1056,7 +1128,9 @@ class QemuRuntime(RuntimeBackend):
         """Install the session cap once; return whether sshd was reloaded.
 
         Best effort: guests that cannot take the drop-in keep working with
-        their own limits, so failures never block the connection.
+        their own limits, so failures never block the connection. Windows
+        images carry the cap in their sshd configuration; the script exits
+        early there because the drop-in directory does not exist.
         """
         try:
             result = await asyncio.wait_for(
@@ -1134,7 +1208,10 @@ class QemuRuntime(RuntimeBackend):
         state = self._ssh_state(instance_id)
         generation = state.generation
         state.blocked = False
-        deadline = asyncio.get_running_loop().time() + self._ssh_timeout
+        # Guests are recorded when this runtime defines or starts them.
+        guest = guest_for(self._guest_cache.get(instance_id))
+        ssh_timeout = max(self._ssh_timeout, guest.ssh_timeout_floor)
+        deadline = asyncio.get_running_loop().time() + ssh_timeout
         async with state.lock:
             self._check_ssh_generation(state, generation)
             while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
@@ -1153,41 +1230,39 @@ class QemuRuntime(RuntimeBackend):
                 await asyncio.sleep(min(2, max(0, remaining)))
                 self._check_ssh_generation(state, generation)
         raise RuntimeError(
-            f"VM {instance_id} did not become reachable via SSH "
-            f"within {self._ssh_timeout}s"
+            f"VM {instance_id} did not become reachable via SSH within {ssh_timeout}s"
         )
 
     async def _wait_for_cloud_init(self, instance_id: str) -> None:
         """Wait for first-boot completion before provisioning or admitting work.
 
-        SSH starts before cloud-init's final modules and its SSH restart. Only
-        this read-only status probe may be retried after a bootstrap disconnect;
-        the actual image script is issued exactly once afterwards.
+        SSH can start before the guest's first-boot configuration finishes
+        (cloud-init's final modules and SSH restart on Linux, the bootstrap
+        task on Windows). Only this read-only status probe may be retried after
+        a bootstrap disconnect; the actual image script is issued exactly once
+        afterwards.
         """
-        timeout = getattr(self._settings, "qemu_cloud_init_timeout", 300)
+        guest = await self._resolve_guest(instance_id)
+        timeout = max(
+            getattr(self._settings, "qemu_cloud_init_timeout", 300),
+            guest.first_boot_timeout_floor,
+        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while (remaining := deadline - loop.time()) > 0:
             try:
                 async def probe():
                     ssh = await self._get_ssh(instance_id)
-                    return await ssh.run("cloud-init status --format=json", check=False)
+                    return await ssh.run(guest.first_boot_probe(), check=False)
 
                 result = await asyncio.wait_for(probe(), min(10, remaining))
-                status = json.loads(result.stdout)
-                if not isinstance(status, dict):
-                    raise ValueError("Expected cloud-init status object")
-                state = status.get("status")
-                if result.exit_status in (0, 2) and state == "done":
-                    if status.get("errors"):
-                        raise RuntimeError("Guest cloud-init completed with errors")
-                    if result.exit_status == 2:
-                        logger.warning("vm_cloud_init_degraded", instance_id=instance_id)
+                state = guest.first_boot_state(result.exit_status, str(result.stdout or ""))
+                if state == "degraded":
+                    logger.warning("vm_cloud_init_degraded", instance_id=instance_id)
+                if state in ("done", "degraded"):
                     return
-                if result.exit_status not in (0, 2) or state not in (
-                    "running", "not started",
-                ):
-                    raise RuntimeError("Guest cloud-init did not complete successfully")
+            except GuestBootstrapError as exc:
+                raise RuntimeError(str(exc)) from exc
             except (OSError, asyncssh.Error, asyncio.TimeoutError):
                 # cloud-init's final ssh restart can close the first transport.
                 # The next acquisition reconnects once it is observed closed.
@@ -1301,49 +1376,84 @@ class QemuRuntime(RuntimeBackend):
                 WORKSPACE_EXISTS, f"Workspace disk already exists: {disk}"
             )
 
+        guest = await asyncio.to_thread(
+            self._image_guest, Path(config.image or ""), config.guest_os
+        )
         # Validate the base and publish its overlay before allocating a network.
         disk = await self._create_overlay_disk(
             instance_id,
             disk_size_gb=qemu_disk_size_gb,
             base_image=config.image,
         )
-        gateway, vm_ip = await self._create_workspace_network(instance_id)
-
-        # Create cloud-init ISO (includes static network config for the VM)
-        cloud_init_iso = await self._create_cloud_init_iso(
+        await self._define_and_start_guest(
             instance_id,
-            vm_ip=vm_ip,
-            gateway=gateway,
-        )
-
-        # Define and start the VM via libvirt
-        domain_xml = _domain_xml(
-            name=self._domain_name(instance_id),
+            guest=guest,
+            disk=disk,
             vcpus=qemu_vcpus,
             memory_mb=qemu_memory_mb,
-            disk_path=str(disk),
-            cloud_init_iso=str(cloud_init_iso),
-            network=self._workspace_network_name(instance_id),
         )
-
-        def _define_and_start() -> None:
-            conn = self._libvirt_conn()
-            dom = conn.defineXML(domain_xml)
-            dom.create()  # start the VM
-
-        await asyncio.to_thread(_define_and_start)
 
         logger.info(
             "vm_workspace_created",
             instance_id=instance_id,
             network=self._workspace_network_name(instance_id),
-            gateway=gateway,
-            vm_ip=vm_ip,
+            guest_os=guest.name,
             vcpus=qemu_vcpus,
             memory_mb=qemu_memory_mb,
             disk_size_gb=qemu_disk_size_gb,
         )
         return instance_id
+
+    async def _define_and_start_guest(
+        self,
+        instance_id: str,
+        *,
+        guest: GuestOS,
+        disk: Path,
+        vcpus: int,
+        memory_mb: int,
+        network: bool = True,
+        seed_action: str = "boot",
+    ) -> None:
+        """Allocate network and seed for a published disk, then boot the guest.
+
+        Shared by workspace creation, clones, image builds and capture copies;
+        the guest strategy decides firmware, devices, DHCP and seed contents.
+        """
+        vm_ip = gateway = None
+        network_name = None
+        if network:
+            gateway, vm_ip = await self._create_workspace_network(
+                instance_id, **({"dhcp": True} if guest.dhcp else {})
+            )
+            network_name = self._workspace_network_name(instance_id)
+        cloud_init_iso = await self._create_cloud_init_iso(
+            instance_id, vm_ip=vm_ip, gateway=gateway, guest=guest, action=seed_action
+        )
+        domain_xml = _domain_xml(
+            name=self._domain_name(instance_id),
+            vcpus=vcpus,
+            memory_mb=memory_mb,
+            disk_path=str(disk),
+            cloud_init_iso=str(cloud_init_iso),
+            network=network_name,
+            guest=guest,
+            serial_log=(
+                None if guest.name == LINUX else str(self._serial_log_path(instance_id))
+            ),
+        )
+
+        def _define_and_start() -> None:
+            conn = self._libvirt_conn()
+            dom = conn.defineXML(domain_xml)
+            # A fresh definition never inherits stale firmware variables.
+            if guest.name != LINUX:
+                dom.createWithFlags(libvirt.VIR_DOMAIN_START_RESET_NVRAM)
+            else:
+                dom.create()  # start the VM
+
+        self._guest_cache[instance_id] = guest.name
+        await asyncio.to_thread(_define_and_start)
 
     @workspace_mutation
     async def stop_workspace(self, instance_id: str) -> None:
@@ -1360,7 +1470,8 @@ class QemuRuntime(RuntimeBackend):
             if state != libvirt.VIR_DOMAIN_SHUTDOWN:
                 await asyncio.to_thread(domain.shutdown)
             # Wait for shutdown with timeout
-            for _ in range(30):
+            guest = await self._resolve_guest(instance_id)
+            for _ in range(int(guest.shutdown_timeout)):
                 await asyncio.sleep(1)
                 state, _ = await asyncio.to_thread(domain.state)
                 if state == libvirt.VIR_DOMAIN_SHUTOFF:
@@ -1399,6 +1510,10 @@ class QemuRuntime(RuntimeBackend):
             raise RuntimeError(f"Guest cannot start from libvirt state {state}")
         # An externally stopped guest may leave a silent cached transport.
         await self._invalidate_ssh(instance_id)
+        if instance_id not in self._guest_cache:
+            name = await asyncio.to_thread(self._guest_name_of, domain)
+            if name in GUEST_OS_VALUES:
+                self._guest_cache[instance_id] = name
         if state == libvirt.VIR_DOMAIN_PAUSED:
             await asyncio.to_thread(domain.resume)
         elif state == libvirt.VIR_DOMAIN_PMSUSPENDED:
@@ -1548,6 +1663,13 @@ class QemuRuntime(RuntimeBackend):
             vcpu_node = ET.SubElement(root, "vcpu")
         vcpu_node.set("placement", "static")
         vcpu_node.text = str(qemu_vcpus)
+        # libvirt rejects a topology that no longer matches the vCPU count.
+        topology = root.find("./cpu/topology")
+        if topology is not None:
+            topology.set("sockets", "1")
+            topology.set("dies", "1")
+            topology.set("threads", "1")
+            topology.set("cores", str(qemu_vcpus))
 
         _enable_free_page_reporting(root)
         updated_xml = ET.tostring(root, encoding="unicode")
@@ -1612,12 +1734,11 @@ class QemuRuntime(RuntimeBackend):
         await self._assert_workspace_resources_unconsumed(instance_id)
 
         def unlink_files() -> None:
-            disk.unlink(missing_ok=True)
-            self._cloud_init_iso_path(instance_id).unlink(missing_ok=True)
-            seed_directory = self._disk_dir / f"{instance_id}-cloud-init"
-            if seed_directory.exists():
-                shutil.rmtree(seed_directory)
-            self._host_key_file(instance_id).unlink(missing_ok=True)
+            for path in self._workspace_owned_paths(instance_id):
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
             directory = os.open(self._disk_dir, os.O_DIRECTORY)
             try:
                 os.fsync(directory)
@@ -1626,6 +1747,7 @@ class QemuRuntime(RuntimeBackend):
 
         await asyncio.to_thread(unlink_files)
         self._host_key_cache.pop(instance_id, None)
+        self._guest_cache.pop(instance_id, None)
 
         logger.info("vm_workspace_removed", instance_id=instance_id)
 
@@ -1643,12 +1765,7 @@ class QemuRuntime(RuntimeBackend):
                 return False
             # An unavailable storage root must not be mistaken for empty storage.
             self._disk_dir.stat()
-            for path in (
-                self._disk_path(instance_id),
-                self._cloud_init_iso_path(instance_id),
-                self._disk_dir / f"{instance_id}-cloud-init",
-                self._host_key_file(instance_id),
-            ):
+            for path in self._workspace_owned_paths(instance_id):
                 try:
                     path.lstat()
                 except FileNotFoundError:
@@ -2172,19 +2289,26 @@ class QemuRuntime(RuntimeBackend):
         """Discover all opencuria VM workspaces."""
         result: list[RuntimeWorkspaceInfo] = []
 
-        def _list() -> list[tuple[str, int]]:
+        def _list() -> list[tuple[str, int, str]]:
             # Never publish a partial list as authoritative absence. A domain
             # disappearing during inspection is retried by the next full scan.
-            return [
-                (domain.name(), domain.state()[0])
-                for domain in self._libvirt_conn().listAllDomains(0)
-            ]
+            listed = []
+            for domain in self._libvirt_conn().listAllDomains(0):
+                name = domain.name()
+                if not name.startswith("opencuria-workspace-"):
+                    continue
+                instance_id = name.replace("opencuria-workspace-", "")
+                guest_os = (
+                    self._guest_cache.get(instance_id)
+                    or self._read_guest_name(instance_id)
+                    or LINUX
+                )
+                listed.append((name, domain.state()[0], guest_os))
+            return listed
 
         domains = await asyncio.to_thread(_list)
 
-        for name, state in domains:
-            if not name.startswith("opencuria-workspace-"):
-                continue
+        for name, state, guest_os in domains:
             instance_id = name.replace("opencuria-workspace-", "")
             result.append(
                 RuntimeWorkspaceInfo(
@@ -2192,6 +2316,7 @@ class QemuRuntime(RuntimeBackend):
                     instance_id=instance_id,
                     status=_workspace_status(state),
                     name=name,
+                    guest_os=guest_os,
                 )
             )
 
@@ -2300,6 +2425,184 @@ class QemuRuntime(RuntimeBackend):
         process.stdin.write_eof()
         await process.wait()
 
+    def _require_windows_host(self) -> None:
+        """Refuse Windows guests on hosts without UEFI Secure Boot or a TPM."""
+        caps = ET.fromstring(
+            self._libvirt_conn().getDomainCapabilities(None, "x86_64", "q35", "kvm", 0)
+        )
+        def values(path: str) -> set[str]:
+            return {node.text or "" for node in caps.findall(path)}
+
+        if not (
+            "efi" in values("./os/enum[@name='firmware']/value")
+            and "yes" in values("./os/loader/enum[@name='secure']/value")
+            and "emulator" in values("./devices/tpm/enum[@name='backendModel']/value")
+        ):
+            raise OperationRejectedError(
+                WINDOWS_HOST_UNSUPPORTED,
+                "Windows guests need OVMF Secure Boot firmware and swtpm on the host",
+            )
+
+    async def _ensure_windows_base(
+        self, base_distro: str, *, operation_id: str, progress_callback=None
+    ) -> Path:
+        """Return the cached installed base of an edition, installing it once."""
+        media = self._windows
+        edition = windows_edition(base_distro)
+        await asyncio.to_thread(self._require_windows_host)
+        iso, iso_sha256 = await asyncio.to_thread(media.resolve_iso)
+        base = media.base_path(edition, iso_sha256)
+        if await asyncio.to_thread(media.base_ready, base):
+            return base
+        if progress_callback is not None:
+            await progress_callback(
+                f"Installing the Windows 11 {edition} base system; this takes a while"
+            )
+        virtio = await asyncio.to_thread(media.ensure_pinned, VIRTIO_WIN)
+        instance_id = f"{self._build_instance_id(operation_id)}-base"
+        temp, setup_iso = self._windows_install_files(operation_id, base)
+        try:
+            await asyncio.to_thread(media.build_setup_iso, edition, setup_iso)
+            await self._allocate_windows_install(instance_id, temp, iso, virtio, setup_iso)
+            await self._await_windows_install(instance_id, progress_callback)
+            await self._cleanup_build_instance(instance_id)
+            await asyncio.to_thread(os.replace, temp, base)
+            await asyncio.to_thread(
+                media.record_base, base, {"edition": edition, "iso_sha256": iso_sha256}
+            )
+            logger.info("windows_base_installed", edition=edition, path=str(base))
+            return base
+        finally:
+            await self._cleanup_build_instance(instance_id)
+            await asyncio.to_thread(temp.unlink, missing_ok=True)
+            await asyncio.to_thread(setup_iso.unlink, missing_ok=True)
+
+    def _windows_install_files(self, operation_id: str, base: Path) -> tuple[Path, Path]:
+        """Return the operation-owned temporary system disk and setup media."""
+        identity = uuid.UUID(operation_id).hex
+        instance_id = f"{self._build_instance_id(operation_id)}-base"
+        return (
+            base.with_name(base.name + f".tmp-{identity}"),
+            self._disk_dir / f"{instance_id}-setup.iso",
+        )
+
+    @storage_mutation
+    async def _allocate_windows_install(
+        self, instance_id: str, disk: Path, iso: Path, virtio: Path, setup_iso: Path
+    ) -> None:
+        """Define a guest that boots the installer onto an empty system disk."""
+        guest = guest_for("windows")
+        proc = await asyncio.create_subprocess_exec(
+            "qemu-img", "create", "-q", "-f", "qcow2", str(disk), f"{BASE_DISK_GB}G",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to create the Windows system disk: {stderr.decode()}")
+        await asyncio.to_thread(disk.chmod, 0o644)
+        gateway, vm_ip = await self._create_workspace_network(instance_id, dhcp=True)
+        seed = await self._create_cloud_init_iso(
+            instance_id, vm_ip=vm_ip, gateway=gateway, guest=guest
+        )
+        root = ET.fromstring(
+            _domain_xml(
+                name=self._domain_name(instance_id),
+                vcpus=max(self._settings.qemu_build_vcpus, guest.min_vcpus),
+                memory_mb=max(self._settings.qemu_build_memory_mb, guest.min_memory_mb),
+                disk_path=str(disk),
+                cloud_init_iso=str(seed),
+                network=self._workspace_network_name(instance_id),
+                guest=guest,
+                serial_log=str(self._serial_log_path(instance_id)),
+            )
+        )
+        # Boot the installer once; afterwards the installed disk boots first.
+        os_node = root.find("./os")
+        for boot in os_node.findall("./boot"):
+            os_node.remove(boot)
+        devices = root.find("./devices")
+        system = devices.find("./disk[@device='disk']")
+        ET.SubElement(system, "boot", order="1")
+        for target, source, order in (
+            ("sdb", iso, "2"), ("sdc", virtio, None), ("sdd", setup_iso, None)
+        ):
+            cdrom = ET.SubElement(devices, "disk", type="file", device="cdrom")
+            ET.SubElement(cdrom, "driver", name="qemu", type="raw")
+            ET.SubElement(cdrom, "source", file=str(source))
+            ET.SubElement(cdrom, "target", dev=target, bus="sata")
+            ET.SubElement(cdrom, "readonly")
+            if order:
+                ET.SubElement(cdrom, "boot", order=order)
+        xml = ET.tostring(root, encoding="unicode")
+
+        def define_and_start() -> None:
+            domain = self._libvirt_conn().defineXML(xml)
+            domain.createWithFlags(libvirt.VIR_DOMAIN_START_RESET_NVRAM)
+
+        self._guest_cache[instance_id] = guest.name
+        await asyncio.to_thread(define_and_start)
+
+    async def _await_windows_install(self, instance_id: str, progress_callback) -> None:
+        """Pass the installer's boot prompt, then await the unattended poweroff."""
+        domain = await asyncio.to_thread(self._get_domain, instance_id)
+        loop = asyncio.get_running_loop()
+        # UEFI asks to press a key before booting from the installation DVD.
+        prompt_deadline = loop.time() + 45
+        while loop.time() < prompt_deadline:
+            with contextlib.suppress(libvirt.libvirtError):
+                await asyncio.to_thread(
+                    domain.sendKey, libvirt.VIR_KEYCODE_SET_LINUX, 0, [57], 1, 0
+                )
+            await asyncio.sleep(1)
+        timeout = getattr(self._settings, "qemu_windows_install_timeout", 14400)
+        deadline = loop.time() + timeout
+        serial = self._serial_log_path(instance_id)
+        reported = 0
+        started = loop.time()
+        next_heartbeat = started + 300
+        while (await asyncio.to_thread(domain.state))[0] != libvirt.VIR_DOMAIN_SHUTOFF:
+            if loop.time() > deadline:
+                with contextlib.suppress(libvirt.libvirtError):
+                    await asyncio.to_thread(domain.destroy)
+                raise OperationError(
+                    BUILD_SCRIPT_TIMEOUT,
+                    f"Windows installation exceeded its {timeout:g}s limit",
+                )
+            lines = await asyncio.to_thread(self._serial_lines, serial, "opencuria-setup: ")
+            if progress_callback is not None:
+                for line in lines[reported:]:
+                    await progress_callback(line)
+                if loop.time() >= next_heartbeat:
+                    minutes = int((loop.time() - started) // 60)
+                    await progress_callback(f"Windows installation running ({minutes} min)")
+                    next_heartbeat += 300
+            reported = len(lines)
+            await asyncio.sleep(10)
+        log = await asyncio.to_thread(self._serial_lines, serial, "")
+        if not any("OPENCURIA_SETUP_OK" in line for line in log):
+            failure = next(
+                (line for line in log if "OPENCURIA_SETUP_FAILED" in line),
+                "no result reported",
+            )
+            raise OperationError(
+                BUILD_SCRIPT_FAILED, f"Windows base installation failed: {failure[-300:]}"
+            )
+
+    @staticmethod
+    def _serial_lines(path: Path, prefix: str) -> list[str]:
+        """Return the printable COM1 lines that start with ``prefix``."""
+        try:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            return []
+        lines = []
+        for raw in text.replace("\r", "\n").split("\n"):
+            line = "".join(ch for ch in raw if ch.isprintable()).strip()
+            if prefix in line:
+                lines.append(line[line.index(prefix) + len(prefix):] if prefix else line)
+        return lines
+
     @staticmethod
     def _build_instance_id(operation_id: str) -> str:
         """Map one durable operation to exactly one disposable build guest."""
@@ -2312,47 +2615,113 @@ class QemuRuntime(RuntimeBackend):
     async def recover_interrupted_build(self, operation_id: str) -> None:
         """Remove only the interrupted operation's exact temporary guest."""
         instance_id = self._build_instance_id(operation_id)
-        await self.remove_workspace(instance_id)
-        if not await self.workspace_removed(instance_id):
-            raise RuntimeError("Interrupted image build resources remain present")
+        for guest_id in (instance_id, f"{instance_id}-base"):
+            await self.remove_workspace(guest_id)
+            if not await self.workspace_removed(guest_id):
+                raise RuntimeError("Interrupted image build resources remain present")
+        identity = uuid.UUID(operation_id).hex
+
+        def remove_install_files() -> None:
+            (self._disk_dir / f"{instance_id}-base-setup.iso").unlink(missing_ok=True)
+            cache = self._windows.cache_dir
+            if cache.is_dir():
+                for path in cache.glob(f"windows-11-*.qcow2.tmp-{identity}"):
+                    path.unlink(missing_ok=True)
+
+        await asyncio.to_thread(remove_install_files)
 
     @storage_mutation
-    async def _prepare_build_instance(self, instance_id: str, base_image: Path) -> Path:
+    async def _prepare_build_instance(
+        self, instance_id: str, base_image: Path, guest: GuestOS | None = None
+    ) -> Path:
         """Allocate subnet, disk and domain atomically against storage scans."""
+        guest = guest or guest_for(LINUX)
+        disk_size_gb = self._settings.qemu_disk_size_gb
+        vcpus = getattr(self._settings, "qemu_build_vcpus", self._settings.qemu_vcpus)
+        memory_mb = getattr(
+            self._settings, "qemu_build_memory_mb", self._settings.qemu_memory_mb
+        )
+        if guest.name != LINUX:
+            info = await self._image_info(base_image)
+            base_gib = (int(info["virtual-size"]) + 1024**3 - 1) // 1024**3
+            disk_size_gb = max(disk_size_gb, base_gib, guest.min_disk_gb)
+            vcpus = max(vcpus, guest.min_vcpus)
+            memory_mb = max(memory_mb, guest.min_memory_mb)
         disk = await self._create_overlay_disk(
             instance_id,
-            disk_size_gb=self._settings.qemu_disk_size_gb,
+            disk_size_gb=disk_size_gb,
             base_image=str(base_image),
         )
-        gateway, vm_ip = await self._create_workspace_network(instance_id)
-        cloud_init_iso = await self._create_cloud_init_iso(
-            instance_id, vm_ip=vm_ip, gateway=gateway
+        await self._define_and_start_guest(
+            instance_id, guest=guest, disk=disk, vcpus=vcpus, memory_mb=memory_mb
         )
-        domain_xml = _domain_xml(
-            name=self._domain_name(instance_id),
-            vcpus=getattr(self._settings, "qemu_build_vcpus", self._settings.qemu_vcpus),
-            memory_mb=getattr(
-                self._settings, "qemu_build_memory_mb", self._settings.qemu_memory_mb
-            ),
-            disk_path=str(disk),
-            cloud_init_iso=str(cloud_init_iso),
-            network=self._workspace_network_name(instance_id),
-        )
-
-        def define_and_start() -> None:
-            domain = self._libvirt_conn().defineXML(domain_xml)
-            domain.create()
-
-        await asyncio.to_thread(define_and_start)
         return disk
 
     @workspace_mutation
     async def _finalize_build_image(
-        self, instance_id: str, disk: Path, target: Path, manifest: dict
+        self,
+        instance_id: str,
+        disk: Path,
+        target: Path,
+        manifest: dict,
+        guest: GuestOS | None = None,
     ) -> dict:
-        """Stop before taking the graph lock for immutable publication."""
+        """Stop (and generalize) before taking the graph lock for publication."""
+        guest = guest or guest_for(LINUX)
         await self.stop_workspace(instance_id)
+        if guest.generalize_on_publish:
+            await self._generalize_stopped_guest(instance_id)
+        if guest.name != LINUX:
+            manifest = {**manifest, "guest_os": guest.name}
         return await self._publish_image(disk, target, manifest)
+
+    async def _generalize_stopped_guest(self, instance_id: str) -> None:
+        """Boot a stopped guest once with a ``generalize`` seed and await poweroff.
+
+        The guest removes its per-instance state, generalizes and powers off;
+        its COM1 log carries the verdict. Only disposable guests are
+        generalized: build guests in place, capture copies on their overlay.
+        """
+        guest = await self._resolve_guest(instance_id)
+        await self._create_cloud_init_iso(instance_id, guest=guest, action="generalize")
+        await asyncio.to_thread(self._serial_log_path(instance_id).unlink, missing_ok=True)
+        domain = await asyncio.to_thread(self._get_domain, instance_id)
+        await asyncio.to_thread(domain.create)
+        await self._await_generalized(instance_id)
+
+    async def _await_generalized(self, instance_id: str) -> None:
+        """Wait for a generalizing guest to power off and verify its result."""
+        timeout = getattr(self._settings, "qemu_generalize_timeout", 3600)
+        domain = await asyncio.to_thread(self._get_domain, instance_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while (await asyncio.to_thread(domain.state))[0] != libvirt.VIR_DOMAIN_SHUTOFF:
+            if loop.time() > deadline:
+                with contextlib.suppress(libvirt.libvirtError):
+                    await asyncio.to_thread(domain.destroy)
+                raise OperationError(
+                    GENERALIZE_FAILED,
+                    f"Guest did not finish generalizing within {timeout:g}s",
+                )
+            await asyncio.sleep(5)
+
+        def verdict() -> str:
+            try:
+                text = self._serial_log_path(instance_id).read_text(errors="replace")
+            except FileNotFoundError:
+                return ""
+            return text
+
+        log = await asyncio.to_thread(verdict)
+        if "OPENCURIA_GENERALIZE_OK" in log:
+            logger.info("vm_guest_generalized", instance_id=instance_id)
+            return
+        reason = "no result reported"
+        for line in log.splitlines():
+            if "OPENCURIA_GENERALIZE_FAILED" in line:
+                reason = line.split("OPENCURIA_GENERALIZE_FAILED", 1)[1].strip()[:300]
+        logger.warning("vm_guest_generalize_failed", instance_id=instance_id, reason=reason)
+        raise OperationError(GENERALIZE_FAILED, f"Guest generalization failed: {reason}")
 
     async def build_image(
         self,
@@ -2416,10 +2785,21 @@ class QemuRuntime(RuntimeBackend):
         distro, separator, version = base_distro.strip().lower().partition(":")
         cache_key = f"{distro.strip()}:{version.strip()}" if separator else distro
         cache_lock = self._base_image_locks.setdefault(cache_key, asyncio.Lock())
+        guest = guest_for_distro(base_distro)
+        if guest.name != LINUX:
+            # One installation at a time: it is long and shares the ISO.
+            cache_lock = self._base_image_locks.setdefault("windows", asyncio.Lock())
         async with cache_lock:
-            base_image = await asyncio.to_thread(
-                self._resolve_build_base_image, base_distro
-            )
+            if guest.name == LINUX:
+                base_image = await asyncio.to_thread(
+                    self._resolve_build_base_image, base_distro
+                )
+            else:
+                base_image = await self._ensure_windows_base(
+                    base_distro,
+                    operation_id=operation_id,
+                    progress_callback=progress_callback,
+                )
         instance_id = self._build_instance_id(operation_id)
         await asyncio.to_thread(
             self._ensure_host_directory,
@@ -2433,19 +2813,26 @@ class QemuRuntime(RuntimeBackend):
             await progress_callback(f"Using base image {base_image.name}")
 
         try:
-            disk = await self._prepare_build_instance(instance_id, base_image)
+            if guest.name == LINUX:
+                disk = await self._prepare_build_instance(instance_id, base_image)
+            else:
+                disk = await self._prepare_build_instance(instance_id, base_image, guest)
             await self._wait_for_ssh(instance_id)
             await self._wait_for_cloud_init(instance_id)
 
             if progress_callback is not None:
                 await progress_callback("Temporary build VM is ready")
 
-            script_body = init_script.strip() or "#!/bin/bash\nset -euo pipefail\n"
-            remote_script = "/tmp/opencuria-image-build.sh"
+            build = guest.build_script()
+            script_body = init_script.strip() or (
+                "#!/bin/bash\nset -euo pipefail\n"
+                if guest.name == LINUX
+                else "$ErrorActionPreference = 'Stop'\n"
+            )
             archive = io.BytesIO()
             script_bytes = script_body.encode("utf-8")
             with tarfile.open(fileobj=archive, mode="w") as tar:
-                info = tarfile.TarInfo(name="opencuria-image-build.sh")
+                info = tarfile.TarInfo(name=build.filename)
                 info.mode = 0o700
                 info.size = len(script_bytes)
                 tar.addfile(info, io.BytesIO(script_bytes))
@@ -2454,7 +2841,7 @@ class QemuRuntime(RuntimeBackend):
                 await self.put_archive(instance_id, "/tmp", archive.getvalue())
                 await self._stream_ssh_process(
                     instance_id,
-                    f"sudo -E bash {remote_script}",
+                    build.command,
                     progress_callback,
                 )
 
@@ -2477,6 +2864,7 @@ class QemuRuntime(RuntimeBackend):
                     "artifact_id": image_instance_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
+                **({} if guest.name == LINUX else {"guest": guest}),
             )
 
             if progress_callback is not None:
@@ -3158,7 +3546,9 @@ class QemuRuntime(RuntimeBackend):
         await asyncio.to_thread(cleanup)
 
     @storage_mutation
-    async def _publish_image(self, disk: Path, target: Path, manifest: dict) -> dict:
+    async def _publish_image(
+        self, disk: Path, target: Path, manifest: dict, *, compress: bool | None = None
+    ) -> dict:
         """Publish an immutable image or roll back this attempt's owned files.
 
         A committed marker keeps its disk even if the final directory fsync
@@ -3258,6 +3648,10 @@ class QemuRuntime(RuntimeBackend):
 
         try:
             await asyncio.to_thread(reserve)
+            if compress is None:
+                compress = guest_for(manifest.get("guest_os")).compress_publication
+            # Large guests (Windows) are stored compressed; overlays stay raw.
+            compression = ["-c", "-o", "compression_type=zstd"] if compress else []
             proc = await asyncio.create_subprocess_exec(
                 "qemu-img",
                 "convert",
@@ -3265,6 +3659,7 @@ class QemuRuntime(RuntimeBackend):
                 "qcow2",
                 "-O",
                 "qcow2",
+                *compression,
                 str(disk),
                 str(temp),
                 stdout=asyncio.subprocess.PIPE,
@@ -3291,7 +3686,6 @@ class QemuRuntime(RuntimeBackend):
             await asyncio.to_thread(cleanup)
 
     @workspace_mutation
-    @storage_mutation
     async def create_image_artifact(
         self,
         instance_id: str,
@@ -3301,30 +3695,44 @@ class QemuRuntime(RuntimeBackend):
         operation_id: str | None = None,
         credential_clean: bool = False,
     ) -> ImageArtifactInfo:
-        """Capture only a proven scrubbed, fully shut off guest; no live freeze."""
+        """Capture only a proven scrubbed, fully shut off guest; no live freeze.
+
+        Guests that must be generalized (Windows) are never modified: a
+        disposable copy on an overlay of the stopped disk is generalized and
+        published instead, so the source keeps its identity and license.
+        """
         if not credential_clean or not artifact_id or not operation_id:
             raise RuntimeError(
                 "Capture requires deterministic identity and scrub proof"
             )
         artifact_id = str(uuid.UUID(artifact_id))
         target = self._managed_image_path(artifact_id)
-        domain = await asyncio.to_thread(self._get_domain, instance_id)
-        state, _ = await asyncio.to_thread(domain.state)
-        if state != libvirt.VIR_DOMAIN_SHUTOFF:
-            raise RuntimeError("Capture requires shut off guest")
-        manifest = await self._publish_image(
-            self._disk_path(instance_id),
-            target,
-            {
-                "operation_id": operation_id,
-                "artifact_id": artifact_id,
-                "instance_id": instance_id,
-                "name": name,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "credential_clean": True,
-                "kind": "capture",
-            },
-        )
+        guest = await self._resolve_guest(instance_id)
+        manifest_fields = {
+            "operation_id": operation_id,
+            "artifact_id": artifact_id,
+            "instance_id": instance_id,
+            "name": name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "credential_clean": True,
+            "kind": "capture",
+        }
+        if guest.name != LINUX:
+            manifest_fields["guest_os"] = guest.name
+        if not guest.generalize_on_publish:
+            manifest = await self._publish_capture(
+                instance_id, self._disk_path(instance_id), target, manifest_fields
+            )
+        else:
+            copy_id = self._capture_copy_id(operation_id)
+            try:
+                copy_disk = await self._prepare_capture_copy(instance_id, copy_id, guest)
+                await self._await_generalized(copy_id)
+                manifest = await self._publish_capture(
+                    instance_id, copy_disk, target, manifest_fields
+                )
+            finally:
+                await self._cleanup_build_instance(copy_id)
         return ImageArtifactInfo(
             artifact_id,
             instance_id,
@@ -3334,6 +3742,63 @@ class QemuRuntime(RuntimeBackend):
             min_disk_size_gb=manifest["min_disk_size_gb"],
             virtual_size_bytes=manifest["virtual_size_bytes"],
         )
+
+    @staticmethod
+    def _capture_copy_id(operation_id: str) -> str:
+        """Map one capture operation to exactly one disposable generalize guest."""
+        try:
+            identity = uuid.UUID(operation_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("Capture requires a valid operation UUID") from exc
+        return f"image-capture-{identity}"
+
+    async def _require_shut_off(self, instance_id: str) -> None:
+        domain = await asyncio.to_thread(self._get_domain, instance_id)
+        state, _ = await asyncio.to_thread(domain.state)
+        if state != libvirt.VIR_DOMAIN_SHUTOFF:
+            raise RuntimeError("Capture requires shut off guest")
+
+    @storage_mutation
+    async def _publish_capture(
+        self, instance_id: str, disk: Path, target: Path, manifest: dict
+    ) -> dict:
+        """Publish a capture while the source guest is proven shut off."""
+        await self._require_shut_off(instance_id)
+        return await self._publish_image(disk, target, manifest)
+
+    @storage_mutation
+    async def _prepare_capture_copy(
+        self, instance_id: str, copy_id: str, guest: GuestOS
+    ) -> Path:
+        """Boot a network-less copy of the stopped source that generalizes itself.
+
+        The overlay only reads the source disk; the inventory fence keeps the
+        source from being removed while the copy exists.
+        """
+        await self._require_shut_off(instance_id)
+        source = self._disk_path(instance_id)
+        info = await self._image_info(source)
+        size_gb = (int(info["virtual-size"]) + 1024**3 - 1) // 1024**3
+        copy_disk = await self._create_overlay_disk(
+            copy_id, disk_size_gb=size_gb, base_image=str(source)
+        )
+        await self._define_and_start_guest(
+            copy_id,
+            guest=guest,
+            disk=copy_disk,
+            vcpus=max(self._settings.qemu_build_vcpus, guest.min_vcpus),
+            memory_mb=max(self._settings.qemu_build_memory_mb, guest.min_memory_mb),
+            network=False,
+            seed_action="generalize",
+        )
+        return copy_disk
+
+    async def recover_interrupted_capture(self, operation_id: str) -> None:
+        """Remove only the interrupted capture's exact generalize copy."""
+        copy_id = self._capture_copy_id(operation_id)
+        await self.remove_workspace(copy_id)
+        if not await self.workspace_removed(copy_id):
+            raise RuntimeError("Interrupted capture resources remain present")
 
     @storage_mutation
     async def delete_image_artifact(self, artifact_id: str) -> None:
@@ -3390,6 +3855,7 @@ class QemuRuntime(RuntimeBackend):
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        guest_os: str | None = None,
     ) -> str:
         """Clone one guest, keeping readiness outside the storage graph lock."""
         instance_id = await self._create_workspace_from_image_artifact(
@@ -3398,6 +3864,7 @@ class QemuRuntime(RuntimeBackend):
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
+            guest_os=guest_os,
         )
         await self._wait_for_ssh(instance_id)
         await self._wait_for_cloud_init(instance_id)
@@ -3412,6 +3879,7 @@ class QemuRuntime(RuntimeBackend):
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
+        guest_os: str | None = None,
     ) -> str:
         """Create a workspace from an image artifact.
 
@@ -3460,6 +3928,7 @@ class QemuRuntime(RuntimeBackend):
             raise OperationRejectedError(
                 IMAGE_INVALID, "Published image must be self-contained"
             )
+        guest = await asyncio.to_thread(self._image_guest, snapshot_path, guest_os)
         # Use the same exclusive sparse overlay publication as fresh guests.
         # Too-small requests fail before allocating a disk or network.
         new_disk = await self._create_overlay_disk(
@@ -3467,31 +3936,14 @@ class QemuRuntime(RuntimeBackend):
             disk_size_gb=qemu_disk_size_gb,
             base_image=str(snapshot_path),
         )
-
-        # ── Dedicated isolated network for the clone ─────────────────
-        gateway, vm_ip = await self._create_workspace_network(new_instance_id)
-
-        # Create cloud-init ISO for the clone (with static network config)
-        cloud_init_iso = await self._create_cloud_init_iso(
-            new_instance_id, vm_ip=vm_ip, gateway=gateway
-        )
-
-        # Define and start the VM
-        domain_xml = _domain_xml(
-            name=self._domain_name(new_instance_id),
+        # Dedicated isolated network, fresh seed identity, guest-specific domain.
+        await self._define_and_start_guest(
+            new_instance_id,
+            guest=guest,
+            disk=new_disk,
             vcpus=qemu_vcpus,
             memory_mb=qemu_memory_mb,
-            disk_path=str(new_disk),
-            cloud_init_iso=str(cloud_init_iso),
-            network=self._workspace_network_name(new_instance_id),
         )
-
-        def _define_and_start() -> None:
-            conn = self._libvirt_conn()
-            dom = conn.defineXML(domain_xml)
-            dom.create()
-
-        await asyncio.to_thread(_define_and_start)
 
         logger.info(
             "vm_workspace_cloned",
