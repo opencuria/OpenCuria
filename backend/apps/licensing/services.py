@@ -365,6 +365,23 @@ class WindowsLicenseService:
             workspace_id, status=status, code=code, checked_at=timezone.now()
         )
 
+    # -- Workspace state -------------------------------------------------------
+
+    def workspace_states_many(
+        self, workspace_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, dict[str, str]]:
+        """Return the license state shown to workspace owners, per workspace."""
+        return {
+            workspace_id: {
+                "kind": row.kind,
+                "activation_status": row.activation_status,
+                "activation_code": row.activation_code,
+            }
+            for workspace_id, row in self.workspaces.states_many(
+                workspace_ids
+            ).items()
+        }
+
     # -- Administration --------------------------------------------------------
 
     def licensing(self, *, org_id: uuid.UUID, user: Any) -> WindowsLicensingView:

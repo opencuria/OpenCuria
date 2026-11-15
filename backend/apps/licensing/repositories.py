@@ -316,6 +316,20 @@ class WindowsWorkspaceLicenseRepository:
         )
 
     @staticmethod
+    def states_many(
+        workspace_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, WindowsWorkspaceLicense]:
+        """Return the license rows of the given workspaces."""
+        if not workspace_ids:
+            return {}
+        return {
+            row.workspace_id: row
+            for row in WindowsWorkspaceLicense.objects.filter(
+                workspace_id__in=workspace_ids
+            )
+        }
+
+    @staticmethod
     def record_activation(
         workspace_id: uuid.UUID, *, status: str, code: str, checked_at: datetime
     ) -> bool:
