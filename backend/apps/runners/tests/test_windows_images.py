@@ -15,7 +15,10 @@ from apps.runners.models import (
 from apps.runners.operations import OperationRepository
 from apps.runners.repositories import ImageGenerationRepository as Generations
 from apps.runners.services import RunnerService
+from apps.runners.services.capture import CaptureService
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_image_versions import make_line, qemu_workspace
+from common.exceptions import ConflictError
 
 
 def built_image(runner, user, base_distro: str = "windows:11") -> ImageInstance:
@@ -97,3 +100,27 @@ def test_workspace_reports_the_guest_os_of_its_image(runner, user, organization)
     assert by_id[str(linux.id)]["guest_os"] == "linux"
     detail = client.get(f"/api/v1/workspaces/{windows.id}/", **auth)
     assert detail.json()["guest_os"] == "windows"
+
+
+# ---------------------------------------------------------------------------
+# One guest OS per captured image line
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+def test_capture_keeps_one_guest_os_per_image_line(runner, user):
+    line, _ = make_line(runner, user, name="Linux line")
+    workspace = qemu_workspace(
+        runner, user, built_image(runner, user), status="stopped"
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        CaptureService.allocate(
+            workspace.id, has_busy_agent=has_busy_agent, captured_image_id=line.id
+        )
+
+    assert caught.value.code == "image_os_mismatch"
+    _, task = CaptureService.allocate(
+        workspace.id, "Windows line", has_busy_agent=has_busy_agent
+    )
+    assert task is not None

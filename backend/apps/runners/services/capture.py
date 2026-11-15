@@ -128,6 +128,13 @@ class CaptureService:
             raise ConflictError(
                 "New versions must be captured on the runner that stores the image"
             )
+        line_guest_os = CaptureRepository.line_guest_os(line)
+        if line_guest_os is not None and line_guest_os != ws.guest_os:
+            # Every version of an image line runs the same operating system.
+            raise ConflictError(
+                "New versions must run the same operating system as the image",
+                code="image_os_mismatch",
+            )
         if CaptureRepository.version_capturing(line):
             raise ConflictError("Another version of this image is being captured")
         return line
