@@ -96,14 +96,12 @@ EDITIONS: dict[str, tuple[str, str]] = {
 }
 _DISTRO = re.compile(r"windows:11(?:-(?P<edition>[a-z-]+))?")
 
-#: Guest scripts copied to the setup media (and into every base image).
-SETUP_SCRIPTS = (
-    "SetupComplete.cmd",
-    "setup.ps1",
-    "bootstrap.ps1",
-    "generalize.ps1",
-    "generalize-unattend.xml",
-)
+#: Scripts that install the base system; they decide what a base contains.
+INSTALL_SCRIPTS = ("SetupComplete.cmd", "setup.ps1")
+#: Scripts every guest runs later. Builds refresh them from the runner, so a
+#: change never requires a new base installation.
+GUEST_SCRIPTS = ("bootstrap.ps1", "generalize.ps1", "generalize-unattend.xml")
+SETUP_SCRIPTS = INSTALL_SCRIPTS + GUEST_SCRIPTS
 #: Virtual size of the installed system disk (Windows 11 requires 64 GB).
 BASE_DISK_GB = 64
 
@@ -129,7 +127,7 @@ def render_autounattend(edition: str) -> str:
 def assets_digest() -> str:
     """Hash every input that changes what a base installation contains."""
     digest = hashlib.sha256()
-    for name in ("autounattend.xml", *SETUP_SCRIPTS):
+    for name in ("autounattend.xml", *INSTALL_SCRIPTS):
         digest.update(name.encode())
         digest.update((ASSETS / name).read_bytes())
     digest.update(json.dumps([p.__dict__ for p in PINNED_FILES]).encode())
@@ -319,3 +317,24 @@ class WindowsMedia:
             return target
         finally:
             shutil.rmtree(stage, ignore_errors=True)
+
+
+def guest_scripts_archive() -> bytes:
+    """Return a tar of the current guest scripts for ``C:\\ProgramData\\opencuria``."""
+    import io
+    import tarfile
+
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        for name in GUEST_SCRIPTS:
+            data = (ASSETS / name).read_bytes()
+            entry = tarfile.TarInfo(name=name)
+            entry.mode = 0o644
+            entry.size = len(data)
+            tar.addfile(entry, io.BytesIO(data))
+    return archive.getvalue()
+
+
+def windows_configure_script() -> bytes:
+    """Return the idempotent guest configuration every Windows build applies."""
+    return (ASSETS / "configure.sh").read_bytes()

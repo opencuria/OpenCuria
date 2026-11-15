@@ -56,6 +56,7 @@ from .diagnostics import (
 )
 from .guest_os import (
     GUEST_OS_VALUES,
+    WINDOWS_STATE_DIR,
     LINUX,
     METADATA_NS,
     GuestBootstrapError,
@@ -91,6 +92,8 @@ from .windows_media import (
     BASE_DISK_GB,
     VIRTIO_WIN,
     WindowsMedia,
+    guest_scripts_archive,
+    windows_configure_script,
     windows_edition,
 )
 
@@ -1926,6 +1929,37 @@ class QemuRuntime(RuntimeBackend):
         output = (result.stdout or "") + (result.stderr or "")
         return exit_code, output
 
+    async def exec_with_input(
+        self,
+        instance_id: str,
+        command: list[str],
+        data: bytes,
+        workdir: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a command with ``data`` on stdin; return exit code, stdout, stderr.
+
+        For secrets that must not appear in a command line or a guest file.
+        """
+        ssh = await self._get_ssh(instance_id)
+        process = await ssh.create_process(
+            self._build_shell_command(command, workdir), encoding=None
+        )
+        try:
+            process.stdin.write(data)
+            process.stdin.write_eof()
+            stdout, stderr = await asyncio.gather(
+                process.stdout.read(), process.stderr.read()
+            )
+            await process.wait_closed()
+        finally:
+            process.close()
+        code = self._require_exit_status(process)
+        return (
+            code,
+            bytes(stdout).decode("utf-8", "replace"),
+            bytes(stderr).decode("utf-8", "replace"),
+        )
+
     @staticmethod
     def _require_exit_status(
         process: asyncssh.SSHClientProcess | asyncssh.SSHCompletedProcess,
@@ -2515,6 +2549,28 @@ class QemuRuntime(RuntimeBackend):
             await asyncio.to_thread(temp.unlink, missing_ok=True)
             await asyncio.to_thread(setup_iso.unlink, missing_ok=True)
 
+    async def _configure_windows_build(self, instance_id: str, progress_callback) -> None:
+        """Apply the runner's current guest configuration and scripts to a build.
+
+        Published images therefore carry this runner's bootstrap, generalize
+        and shell settings, whatever base installation they derive from.
+        """
+        code, stdout, stderr = await self.exec_with_input(
+            instance_id, ["bash", "-s"], windows_configure_script()
+        )
+        if progress_callback is not None:
+            for line in (stdout + stderr).splitlines():
+                if line.strip():
+                    await progress_callback(line.rstrip())
+        if code != 0:
+            raise OperationError(
+                BUILD_SCRIPT_FAILED, f"Windows guest configuration failed ({code})"
+            )
+        await self.put_archive(instance_id, WINDOWS_STATE_DIR, guest_scripts_archive())
+        # New SSH sessions pick up the changed machine environment (BASH_ENV).
+        await self._invalidate_ssh(instance_id)
+        await self._wait_for_ssh(instance_id)
+
     def _windows_install_files(self, operation_id: str, base: Path) -> tuple[Path, Path]:
         """Return the operation-owned temporary system disk and setup media."""
         identity = uuid.UUID(operation_id).hex
@@ -2860,6 +2916,8 @@ class QemuRuntime(RuntimeBackend):
 
             if progress_callback is not None:
                 await progress_callback("Temporary build VM is ready")
+            if guest.name != LINUX:
+                await self._configure_windows_build(instance_id, progress_callback)
 
             build = guest.build_script()
             script_body = init_script.strip() or (

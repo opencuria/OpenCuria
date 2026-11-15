@@ -28,6 +28,7 @@ from .services.sessions.background import BackgroundProcessManager
 from .services.sessions.desktop import DesktopManager
 from .services.sessions.streams import StreamManager
 from .services.sessions.terminals import TerminalManager
+from .services.windows_activation import WindowsActivationService
 from .services.workspace_helpers import sanitize_exec_workdir
 from .services.workspace_lifecycle import WorkspaceLifecycle
 from .services.workspace_registry import LifecycleMark, WorkspaceRegistry
@@ -92,6 +93,7 @@ class WorkspaceService:
         )
         self.git = GitService(get_cached, get_runtime)
         self.desktop = DesktopManager(runtime, get_cached, get_runtime)
+        self.windows_activation = WindowsActivationService(get_cached, get_runtime)
         self.lifecycle = WorkspaceLifecycle(
             self.registry,
             runtime,
@@ -125,6 +127,7 @@ class WorkspaceService:
             self.desktop,
             self.lifecycle,
             self.runtime_artifacts,
+            self.windows_activation,
         ):
             manager.capture_fence = self.capture_fence
 

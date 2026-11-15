@@ -205,6 +205,16 @@ class RuntimeBackend(abc.ABC):
         Returns (exit_code, combined_output).
         """
 
+    async def exec_with_input(
+        self,
+        instance_id: str,
+        command: list[str],
+        data: bytes,
+        workdir: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a command with ``data`` on stdin (secrets never in argv)."""
+        raise NotImplementedError("Runtime does not support stdin execution")
+
     @abc.abstractmethod
     async def put_archive(
         self,

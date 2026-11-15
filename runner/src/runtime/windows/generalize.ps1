@@ -12,7 +12,15 @@ $StateDir = 'C:\ProgramData\opencuria'
 function Write-Serial([string] $Line) {
     try {
         $port = New-Object System.IO.Ports.SerialPort 'COM1', 115200
-        $port.Open(); $port.WriteLine($Line); $port.Close()
+        $port.Open()
+        $port.Write($Line + "`r`n")
+        # Closing discards unsent bytes: drain the driver buffer and the UART.
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ($port.BytesToWrite -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 20
+        }
+        Start-Sleep -Milliseconds 100
+        $port.Close()
     } catch { }
 }
 

@@ -148,7 +148,8 @@ class LinuxGuest(GuestOS):
 
 
 #: Paths of the Windows guest contract (see ``runtime/windows/``).
-WINDOWS_BOOTSTRAP_STATUS = "/c/ProgramData/opencuria/bootstrap.json"
+WINDOWS_STATE_DIR = "/c/ProgramData/opencuria"
+WINDOWS_BOOTSTRAP_STATUS = f"{WINDOWS_STATE_DIR}/bootstrap.json"
 
 
 class WindowsGuest(GuestOS):

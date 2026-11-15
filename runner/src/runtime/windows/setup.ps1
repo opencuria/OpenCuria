@@ -10,7 +10,15 @@ $Log = Join-Path $StateDir 'setup.log'
 function Write-Serial([string] $Line) {
     try {
         $port = New-Object System.IO.Ports.SerialPort 'COM1', 115200
-        $port.Open(); $port.WriteLine($Line); $port.Close()
+        $port.Open()
+        $port.Write($Line + "`r`n")
+        # Closing discards unsent bytes: drain the driver buffer and the UART.
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        while ($port.BytesToWrite -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 20
+        }
+        Start-Sleep -Milliseconds 100
+        $port.Close()
     } catch { }
 }
 
@@ -79,10 +87,21 @@ try {
     Set-ItemProperty $nls -Name MACCP -Value '65001'
 
     $bash = "$msys\usr\bin\bash.exe"
+    function Invoke-Bash([string] $Script) {
+        # Windows PowerShell turns native stderr lines into terminating errors
+        # under 'Stop'; MSYS2 tools report progress and warnings there.
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $bash -lc $Script 2>&1 | ForEach-Object { Log "msys: $_" }
+        } finally {
+            $ErrorActionPreference = $previous
+        }
+        return $LASTEXITCODE
+    }
     function Invoke-Msys([string] $Script, [int] $Attempts = 1) {
         for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-            & $bash -lc $Script 2>&1 | ForEach-Object { Log "msys: $_" }
-            if ($LASTEXITCODE -eq 0) { return }
+            if ((Invoke-Bash $Script) -eq 0) { return }
             Log "msys command failed ($LASTEXITCODE), attempt $attempt of $Attempts"
             Start-Sleep -Seconds 15
         }
@@ -95,11 +114,11 @@ try {
     Log 'initializing MSYS2'
     Invoke-Msys 'true'
     # The first upgrade replaces the runtime and ends every MSYS2 process.
-    & $bash -lc 'pacman --noconfirm --noprogressbar -Syuu' 2>&1 | ForEach-Object { Log "msys: $_" }
+    Invoke-Bash 'pacman --noconfirm --noprogressbar -Syuu' | Out-Null
     Invoke-Msys 'pacman --noconfirm --noprogressbar -Syuu' 3
     Invoke-Msys ("pacman --noconfirm --noprogressbar -S --needed " + ($manifest.msys2_packages -join ' ')) 3
     Invoke-Msys 'pacman --noconfirm -Scc >/dev/null; rm -rf /var/cache/pacman/pkg/*'
-    Invoke-Msys 'command -v python3 git tar base64 pgrep setsid flock'
+    Invoke-Bash 'for tool in python3 git tar base64 pgrep setsid flock; do command -v "$tool" || echo "missing: $tool"; done' | Out-Null
 
     Log 'configuring sshd'
     $sshd = 'C:\ProgramData\ssh'
@@ -202,7 +221,7 @@ try {
     Dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
     compact.exe /CompactOS:always | Out-Null
     # Freed clusters become holes in the qcow2 disk (discard=unmap).
-    Optimize-Volume -DriveLetter C -ReTrim | Out-Null
+    Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue | Out-Null
     Log 'completed'
     Write-Serial 'OPENCURIA_SETUP_OK'
 } catch {
