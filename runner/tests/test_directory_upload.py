@@ -6,7 +6,6 @@ import asyncio
 import base64
 import io
 import tarfile
-import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -20,6 +19,7 @@ from src.services.capture_fence import CaptureFence
 from src.services.files import FileManager, convert_archive_to_tar
 from src.services.workspace_registry import WorkspaceRegistry
 
+from tests.directory_download_runtime import workspace_tempdir
 from tests.directory_upload_runtime import LocalUploadRuntime
 
 
@@ -71,8 +71,7 @@ def _manager() -> tuple[FileManager, SimpleNamespace, uuid.UUID]:
 
 
 async def test_directory_upload_uses_real_containment_and_tar_extraction() -> None:
-    repo = Path(__file__).resolve().parents[2]
-    with tempfile.TemporaryDirectory(prefix="upload-test-", dir=repo) as directory:
+    with workspace_tempdir("upload-test-") as directory:
         runtime = LocalUploadRuntime()
         workspace_id = uuid.uuid4()
         info = WorkspaceInfo(workspace_id, "local", "running")

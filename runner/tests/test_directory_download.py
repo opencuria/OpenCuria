@@ -10,7 +10,6 @@ import os
 import shlex
 import shutil
 import tarfile
-import tempfile
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,14 +24,13 @@ from src.services import files as files_module
 from src.services.directory_archive import directory_archive_command
 from src.services.files import FileManager
 
-from tests.directory_download_runtime import LocalFileRuntime
+from tests.directory_download_runtime import LocalFileRuntime, workspace_tempdir
 
 
 @pytest.fixture
 def directory() -> Iterator[Path]:
     """Keep fixtures within the service's real /workspace containment boundary."""
-    repo = Path(__file__).resolve().parents[2]
-    with tempfile.TemporaryDirectory(prefix="download-test-", dir=repo) as path:
+    with workspace_tempdir("download-test-") as path:
         source = Path(path) / "project"
         source.mkdir()
         (source / "hello.txt").write_bytes(b"hello\n")

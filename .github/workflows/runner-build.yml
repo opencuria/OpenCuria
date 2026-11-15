@@ -88,6 +88,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libvirt-dev qemu-utils
+      - name: Provide guest workspace root
+        # File-service tests run real guest commands against /workspace.
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /workspace
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

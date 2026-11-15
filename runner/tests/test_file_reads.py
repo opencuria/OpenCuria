@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import tempfile
 import tracemalloc
 import uuid
 from collections.abc import Iterator
@@ -15,15 +14,13 @@ import pytest
 from src.models import WorkspaceInfo
 from src.services.files import FILE_READ_ABSOLUTE_MAX_SIZE, FileManager
 
-from tests.directory_download_runtime import LocalFileRuntime
+from tests.directory_download_runtime import LocalFileRuntime, workspace_tempdir
 
 
 @pytest.fixture
 def directory() -> Iterator[Path]:
     """Exercise real containment and guest commands inside /workspace."""
-    with tempfile.TemporaryDirectory(
-        prefix="file-read-test-", dir=Path(__file__).resolve().parents[2]
-    ) as path:
+    with workspace_tempdir("file-read-test-") as path:
         yield Path(path)
 
 

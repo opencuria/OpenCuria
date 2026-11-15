@@ -8,7 +8,6 @@ import json
 import os
 import shlex
 import shutil
-import tempfile
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,14 +21,13 @@ from src.models import WorkspaceInfo
 from src.services import files as files_module
 from src.services.files import FileManager
 
-from tests.directory_download_runtime import LocalFileRuntime
+from tests.directory_download_runtime import LocalFileRuntime, workspace_tempdir
 
 
 @pytest.fixture
 def directory() -> Iterator[Path]:
     """Use real containment checks with disposable files inside /workspace."""
-    repo = Path(__file__).resolve().parents[2]
-    with tempfile.TemporaryDirectory(prefix="file-download-test-", dir=repo) as path:
+    with workspace_tempdir("file-download-test-") as path:
         yield Path(path)
 
 

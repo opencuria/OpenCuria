@@ -4,6 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
+
+import pytest
+
+GUEST_WORKSPACE = "/workspace"
+
+
+def workspace_tempdir(prefix: str) -> tempfile.TemporaryDirectory[str]:
+    """Create a disposable directory inside the real guest containment root.
+
+    File-service tests run the real guest commands locally, so fixtures must
+    live under the same ``/workspace`` boundary the service enforces. CI
+    provisions that directory; elsewhere the tests are skipped without it.
+    """
+    if not os.access(GUEST_WORKSPACE, os.W_OK | os.X_OK):
+        reason = f"requires a writable {GUEST_WORKSPACE} (guest containment root)"
+        if os.environ.get("CI"):
+            pytest.fail(reason)
+        pytest.skip(reason)
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=GUEST_WORKSPACE)
 
 
 class LocalFileRuntime:
