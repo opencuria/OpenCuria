@@ -991,6 +991,8 @@ class TaskRepository:
                         qemu_memory_mb=workspace.qemu_memory_mb,
                         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
                     )
+                    if task_type == TaskType.RESUME_WORKSPACE:
+                        payload["guest_os"] = workspace.guest_os
                 payload.update(operation_payload or {})
                 payload["task_id"] = str(task.id)
                 OperationRepository.prepare(

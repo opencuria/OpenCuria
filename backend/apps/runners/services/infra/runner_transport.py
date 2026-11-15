@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from ...exceptions import RunnerOfflineError
-from ...operations import LIFECYCLE_TYPES, OperationRepository
+from ...operations import LIFECYCLE_TYPES, SECRET_PAYLOAD_KEYS, OperationRepository
 
 if TYPE_CHECKING:
     from ...models import Runner
@@ -86,9 +86,7 @@ class RunnerTransportService:
             data["task_id"], event, data
         )
         durable = await sync_to_async(OperationRepository.delivery_payload)(command)
-        durable.update(
-            {k: data[k] for k in ("env_vars", "files", "ssh_keys") if k in data}
-        )
+        durable.update({k: data[k] for k in SECRET_PAYLOAD_KEYS if k in data})
         envelope = await sync_to_async(OperationRepository.envelope)(command, durable)
         if not runner.sid or self.sio is None:
             return None, envelope

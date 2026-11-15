@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 
 from django.db import connection, transaction
@@ -312,6 +313,20 @@ class WindowsWorkspaceLicenseRepository:
             )
             .select_related("workspace__created_by")
             .order_by("created_at", "workspace_id")
+        )
+
+    @staticmethod
+    def record_activation(
+        workspace_id: uuid.UUID, *, status: str, code: str, checked_at: datetime
+    ) -> bool:
+        """Store a reported activation result; return whether a row existed."""
+        return bool(
+            WindowsWorkspaceLicense.objects.filter(workspace_id=workspace_id).update(
+                activation_status=status,
+                activation_code=code,
+                checked_at=checked_at,
+                updated_at=checked_at,
+            )
         )
 
     @staticmethod

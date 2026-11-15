@@ -30,15 +30,17 @@ from datetime import datetime
 from typing import Any
 
 import structlog
+from django.utils import timezone
 
 from apps.organizations.services import OrganizationService
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.guest_os import WINDOWS, normalize_guest_os
 from common.exceptions import ConflictError, NotFoundError, ServiceError
 from common.user_labels import owner_label
-from common.utils import encrypt_value, hash_token
+from common.utils import decrypt_value, encrypt_value, hash_token
 
 from .models import (
+    WindowsActivationStatus,
     WindowsLicenseKind,
     WindowsLicenseMode,
     WindowsLicensePolicy,
@@ -57,6 +59,11 @@ _PRODUCT_KEY = re.compile(r"[A-Z0-9]{5}(?:-[A-Z0-9]{5}){4}")
 _HOST_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
 MAX_SEATS = 100_000
 MAX_LABEL_LENGTH = 255
+REPORTED_STATUSES = {
+    WindowsActivationStatus.ACTIVATED,
+    WindowsActivationStatus.FAILED,
+    WindowsActivationStatus.NOT_ACTIVATED,
+}
 
 
 class LicensingValidationError(ServiceError):
@@ -312,6 +319,51 @@ class WindowsLicenseService:
         if released:
             logger.info("windows_licenses_released", count=released)
         return released
+
+    # -- Activation ------------------------------------------------------------
+
+    def activation_payload(self, workspace: Any) -> dict[str, str] | None:
+        """Return the secret activation input of a delivery; None for Linux.
+
+        The product key is decrypted here and must never be persisted or
+        logged by callers.
+        """
+        if not is_windows(workspace):
+            return None
+        row = self.workspaces.get(workspace.id)
+        if row is None or row.kind == WindowsLicenseKind.UNLICENSED:
+            return {"mode": "none"}
+        if row.kind == WindowsLicenseKind.USER:
+            policy = self.policies.current(workspace.runner.organization_id)
+            return {"mode": "kms", "kms_host": policy.kms_host}
+        try:
+            product_key = decrypt_value(row.product_key.encrypted_key)
+        except Exception:  # noqa: BLE001 - a broken key must not block lifecycle
+            logger.error(
+                "windows_product_key_unreadable",
+                workspace_id=str(workspace.id),
+                product_key_id=str(row.product_key_id),
+            )
+            return {"mode": "none"}
+        return {"mode": "key", "product_key": product_key}
+
+    def record_activation(self, workspace_id: uuid.UUID, result: Any) -> None:
+        """Store an activation result reported by the runner; ignore bad input."""
+        if not isinstance(result, dict):
+            return
+        status = result.get("status")
+        if status not in REPORTED_STATUSES:
+            logger.warning(
+                "windows_activation_status_ignored",
+                workspace_id=str(workspace_id),
+                status=str(status)[:32],
+            )
+            return
+        code = result.get("code")
+        code = code.strip()[:32] if isinstance(code, str) else ""
+        self.workspaces.record_activation(
+            workspace_id, status=status, code=code, checked_at=timezone.now()
+        )
 
     # -- Administration --------------------------------------------------------
 
