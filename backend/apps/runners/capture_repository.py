@@ -103,6 +103,16 @@ class CaptureRepository:
         )
 
     @staticmethod
+    def line_guest_os(line: CapturedImage) -> str | None:
+        """Return the guest OS of a line's newest version, if it has one."""
+        return (
+            ImageInstance.objects.filter(captured_image=line)
+            .order_by("-generation")
+            .values_list("guest_os", flat=True)
+            .first()
+        )
+
+    @staticmethod
     def version_capturing(line: CapturedImage) -> bool:
         """Whether a line already has a capturing version."""
         return ImageInstance.objects.filter(

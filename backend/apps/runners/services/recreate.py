@@ -117,6 +117,12 @@ class RecreateService:
         image = RecreateRepository.lock_image(ws.runner_id, image_id)
         if image is None:
             raise NotFoundError("Image version", str(image_id))
+        if image.guest_os != ws.guest_os:
+            # The guest OS decides licensing; it never changes in place.
+            raise ConflictError(
+                "A workspace cannot change its operating system",
+                code="image_os_mismatch",
+            )
         own = {ws.base_image_instance_id, ws.pending_base_image_instance_id} - {None}
         if image.id not in own:
             source_line = RecreateRepository.source_line(ws)
