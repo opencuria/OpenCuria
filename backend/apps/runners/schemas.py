@@ -24,6 +24,9 @@ from .git_validation import (
     validate_repo_path,
 )
 
+#: Operating system of an image and the workspaces started from it.
+GuestOs = Literal["linux", "windows"]
+
 # ---------------------------------------------------------------------------
 # Runner schemas
 # ---------------------------------------------------------------------------
@@ -162,6 +165,7 @@ class WorkspaceOut(Schema):
     base_image_name: str | None = None
     base_image: ImageVersionRefOut | None = None
     pending_base_image: ImageVersionRefOut | None = None
+    guest_os: GuestOs = "linux"
     repos: list[str] = []
 
 
@@ -421,6 +425,14 @@ class ProcessOut(Schema):
 # ---------------------------------------------------------------------------
 
 
+class ImageMinimumsOut(Schema):
+    """Smallest workspace resources an image supports (its guest OS and disk)."""
+
+    vcpus: int = 1
+    memory_mb: int = 1
+    disk_size_gb: int = 1
+
+
 class ImageArtifactOut(Schema):
     """Response schema for a concrete image artifact (one image version).
 
@@ -455,6 +467,8 @@ class ImageArtifactOut(Schema):
     is_latest: bool = False
     retention: str | None = None
     workspace_count: int = 0
+    guest_os: GuestOs = "linux"
+    minimums: ImageMinimumsOut = ImageMinimumsOut()
 
 
 class ImageArtifactCreateIn(Schema):
@@ -479,6 +493,8 @@ class CapturedImageOut(Schema):
     latest_version: int | None = None
     total_size_bytes: int = 0
     workspace_count: int = 0
+    guest_os: GuestOs = "linux"
+    minimums: ImageMinimumsOut = ImageMinimumsOut()
     versions: list[ImageArtifactOut] = []
 
 
@@ -601,6 +617,8 @@ class ImageDefinitionOut(Schema):
     description: str
     is_standard: bool = False
     base_distro: str
+    guest_os: GuestOs = "linux"
+    minimums: ImageMinimumsOut = ImageMinimumsOut()
     packages: list[str] = []
     env_vars: dict[str, str] = {}
     custom_init_script: str = ""

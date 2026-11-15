@@ -40,9 +40,11 @@ from .exceptions import (
 )
 from .git_presenters import git_error_to_response
 from .git_validation import validate_commit_hash
+from .guest_os import distro_guest_os
 from .image_presenters import (
     captured_image_to_out,
     image_artifacts_to_out,
+    minimums_out,
 )
 from .schemas import (
     CapturedImageOut,
@@ -1648,6 +1650,7 @@ def _image_recipe_error(exc: Exception):
 
 def _image_definition_to_out(defn) -> ImageDefinitionOut:
     summary = ImageDefinitionService.build_summary(defn)
+    guest_os = distro_guest_os(defn.base_distro)
     return ImageDefinitionOut(
         id=defn.id,
         organization_id=defn.organization_id,
@@ -1788,7 +1791,13 @@ def duplicate_image_definition(
 
 @image_definition_router.patch(
     "/{definition_id}/",
-    response={200: ImageDefinitionOut, 403: ErrorOut, 404: ErrorOut},
+    response={
+        200: ImageDefinitionOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
     summary="Update image definition",
 )
 def update_image_definition(

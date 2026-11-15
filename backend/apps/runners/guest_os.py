@@ -9,7 +9,7 @@ workspace inherits it from its image. Missing values mean Linux.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 LINUX = "linux"
 WINDOWS = "windows"
@@ -80,3 +80,13 @@ def normalize_guest_os(value: str | None) -> str:
 def guest_minimums(guest_os: str | None) -> GuestMinimums:
     """Return the resource floor of a guest OS."""
     return GUEST_MINIMUMS[normalize_guest_os(guest_os)]
+
+
+def image_minimums(
+    guest_os: str | None, min_disk_size_gb: int | None = None
+) -> GuestMinimums:
+    """Resource floor of an image version: its guest OS and its virtual disk."""
+    floor = guest_minimums(guest_os)
+    if min_disk_size_gb and min_disk_size_gb > floor.disk_size_gb:
+        return replace(floor, disk_size_gb=min_disk_size_gb)
+    return floor

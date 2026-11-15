@@ -25,6 +25,7 @@ from apps.runners.models import (
 from common.utils import hash_token
 
 from .test_image_definitions_api import _auth_headers, _create_api_key
+from .test_windows_images import built_image
 
 _ALL_IMAGE_PERMISSIONS = [
     APIKeyPermission.IMAGE_DEFINITIONS_READ.value,
@@ -448,3 +449,49 @@ def test_members_cannot_create_windows_recipes(client, recipe_org):
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_windows_definition_reports_guest_os_and_minimums(client, recipe_org):
+    response = _post(
+        client,
+        "/api/v1/image-definitions/",
+        {"name": "Win", "base_distro": "windows:11", "packages": ["Git.Git"]},
+        recipe_org["admin_headers"],
+    )
+
+    assert response.status_code == 201, response.content
+    payload = response.json()
+    assert payload["guest_os"] == "windows"
+    assert payload["minimums"] == {"vcpus": 2, "memory_mb": 4096, "disk_size_gb": 64}
+    listed = client.get("/api/v1/image-definitions/", **recipe_org["member_headers"])
+    by_name = {entry["name"]: entry for entry in listed.json()}
+    assert by_name["Recipe"]["guest_os"] == "linux"
+    assert by_name["Recipe"]["minimums"] == {
+        "vcpus": 1,
+        "memory_mb": 1,
+        "disk_size_gb": 1,
+    }
+
+
+@pytest.mark.django_db
+def test_built_recipe_cannot_change_its_os(client, recipe_org, user):
+    image = built_image(recipe_org["runner"], user, "ubuntu:24.04")
+    url = f"/api/v1/image-definitions/{image.origin_definition_id}/"
+
+    response = _patch(
+        client,
+        url,
+        {"base_distro": "windows:11", "packages": []},
+        recipe_org["admin_headers"],
+    )
+    assert response.status_code == 409, response.content
+    assert response.json()["code"] == "image_os_immutable"
+    # Another Ubuntu release keeps the OS and stays allowed.
+    response = _patch(
+        client,
+        url,
+        {"base_distro": "ubuntu:22.04"},
+        recipe_org["admin_headers"],
+    )
+    assert response.status_code == 200
