@@ -6,6 +6,7 @@ import ImageDefinitionsTab from './ImageDefinitionsTab.vue'
 import { RunnerStatus, type ImageDefinition, type Runner, type RunnerImageBuild } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import * as runnersApi from '@/services/runners.api'
+import { ApiRequestError } from '@opencuria/client'
 
 const auth = vi.hoisted(() => ({ isAdmin: true }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => auth }))
@@ -55,6 +56,7 @@ const listImageDefinitions = vi.mocked(workspacesApi.listImageDefinitions)
 const listRunnerImageBuilds = vi.mocked(workspacesApi.listRunnerImageBuilds)
 const createRunnerImageBuild = vi.mocked(workspacesApi.createRunnerImageBuild)
 const updateRunnerImageBuild = vi.mocked(workspacesApi.updateRunnerImageBuild)
+const updateImageDefinition = vi.mocked(workspacesApi.updateImageDefinition)
 const listRunners = vi.mocked(runnersApi.listRunners)
 
 function makeDefinition(overrides: Partial<ImageDefinition> = {}): ImageDefinition {
@@ -218,6 +220,31 @@ describe('ImageDefinitionsTab', () => {
     await flushPromises()
     expect(wrapper.get('[role="alert"]').text()).toBe('Runner is offline')
     expect(buttonsNamed(wrapper, 'Build')[0]!.attributes('disabled')).toBeUndefined()
+  })
+
+  it('keeps the editor open with the error when a built image would change its OS', async () => {
+    updateImageDefinition.mockRejectedValue(
+      new ApiRequestError(
+        409,
+        'The operating system of a built image cannot change',
+        'image_os_immutable',
+      ),
+    )
+    const wrapper = await mountTab()
+
+    await wrapper.get('[data-testid="image-definition-edit"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('#image-definition-form').trigger('submit')
+    await flushPromises()
+
+    expect(updateImageDefinition).toHaveBeenCalledWith(
+      'def-1',
+      expect.objectContaining({ base_distro: 'ubuntu:24.04' }),
+    )
+    expect(wrapper.find('#image-definition-form').exists()).toBe(true)
+    expect(wrapper.get('[role="alert"]').text()).toBe(
+      'The operating system of a built image cannot change',
+    )
   })
 
   it('shows members the states but no create, build or definition actions', async () => {

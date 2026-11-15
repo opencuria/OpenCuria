@@ -268,6 +268,98 @@ describe('CreateWorkspaceDialog', () => {
   })
 })
 
+describe('CreateWorkspaceDialog with a Windows image', () => {
+  const slot = { template: '<div><slot /></div>' }
+  const stubs = {
+    Dialog: slot,
+    DialogTrigger: slot,
+    DialogContent: slot,
+    DialogHeader: slot,
+    DialogTitle: slot,
+    DialogDescription: slot,
+    DialogBody: slot,
+    DialogFooter: slot,
+    WorkspacePluginCredentialSelection: true,
+    Select: slot,
+    SelectTrigger: slot,
+    SelectValue: slot,
+    SelectContent: slot,
+    SelectItem: { props: ['value'], template: '<div role="option"><slot /></div>' },
+    SelectLabel: slot,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    createWorkspace.mockResolvedValue(true)
+    imageStore.imageDefinitions = [
+      {
+        id: 'windows',
+        name: 'Windows 11',
+        is_active: true,
+        status: 'active',
+        guest_os: 'windows',
+        minimums: { vcpus: 2, memory_mb: 4096, disk_size_gb: 64 },
+      },
+    ]
+    imageStore.runnerBuildsByDefinition = {
+      windows: [
+        {
+          id: 'build-windows',
+          image_definition_id: 'windows',
+          runner_id: 'runner-1',
+          image_artifact_id: 'artifact-windows',
+          status: 'active',
+        },
+      ],
+    }
+  })
+
+  afterEach(() => {
+    imageStore.imageDefinitions = []
+    imageStore.runnerBuildsByDefinition = {}
+  })
+
+  it('labels Windows images and raises untouched resources to their minimums', async () => {
+    const runner = runnerStore.runners[0]!
+    const original = { ...runner }
+    Object.assign(runner, { qemu_default_vcpus: 1, qemu_default_memory_mb: 2048 })
+    try {
+      const wrapper = mount(CreateWorkspaceDialog, {
+        props: { hideTrigger: true },
+        global: { stubs },
+      })
+      await flushPromises()
+      const vm = wrapper.vm as typeof wrapper.vm & {
+        open: boolean
+        name: string
+        pluginSelectionValid: boolean
+        handleSubmit: () => Promise<void>
+      }
+      vm.open = true
+      vm.name = 'Windows box'
+      vm.pluginSelectionValid = true
+      await flushPromises()
+
+      const options = wrapper.findAll('[role="option"]').map((option) => option.text())
+      expect(options).toContain('● Windows 11 Windows')
+      expect(options).toContain('○ Captured Workspace · v1')
+
+      await vm.handleSubmit()
+
+      expect(createWorkspace).toHaveBeenCalledWith(
+        expect.objectContaining({
+          image_id: 'artifact-windows',
+          qemu_vcpus: 2,
+          qemu_memory_mb: 4096,
+          qemu_disk_size_gb: 64,
+        }),
+      )
+    } finally {
+      Object.assign(runner, original)
+    }
+  })
+})
+
 describe('CreateWorkspaceDialog without a workspace image', () => {
   const slot = { template: '<div><slot /></div>' }
   const stubs = {
