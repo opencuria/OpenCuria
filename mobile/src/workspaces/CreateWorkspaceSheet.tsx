@@ -8,7 +8,9 @@ import {
   workspaceImageOptions,
   type QemuResourceLimits,
   type QemuResources,
+  type WorkspaceImageOption,
 } from "@opencuria/chat-core/workspaceCreation";
+import { imageOsBadge } from "@opencuria/chat-core/imageDefinitionLifecycle";
 import type { OpenCuriaClient } from "@opencuria/client";
 import { NativeForm } from "../ui/NativeForm";
 import type { NativeFormRow, NativeFormSection } from "../ui/NativeForm.types";
@@ -42,6 +44,18 @@ function repoName(url: string): string {
       .pop()
       ?.replace(/\.git$/, "") || url
   );
+}
+
+/** A picker entry for an image, e.g. "Windows 11 · Windows". */
+function imagePickerOption(option: WorkspaceImageOption): {
+  value: string;
+  label: string;
+} {
+  const badge = imageOsBadge(option.guestOs);
+  return {
+    value: option.value,
+    label: badge ? `${option.label} · ${badge}` : option.label,
+  };
 }
 
 /** "New workspace": name and image first; repositories, plugins and resources below. */
@@ -93,7 +107,8 @@ function CreateSheet({
   const runners = compatibleRunners(selected, catalog.runners);
   const runner =
     runners.find((entry) => entry.id === runnerId) ?? runners[0] ?? null;
-  const limits = qemuResourceLimits(runner);
+  // The image's minimums (e.g. Windows) raise the runner's minimums and defaults.
+  const limits = qemuResourceLimits(runner, undefined, selected?.minimums);
   const previousLimits = useRef<QemuResourceLimits>(limits);
   const effective = resources ?? {
     vcpus: limits.defaultVcpus,
@@ -198,10 +213,7 @@ function CreateSheet({
               ? [
                   {
                     title: "Organization images",
-                    options: options.definitions.map((option) => ({
-                      value: option.value,
-                      label: option.label,
-                    })),
+                    options: options.definitions.map(imagePickerOption),
                   },
                 ]
               : []),
@@ -209,10 +221,7 @@ function CreateSheet({
               ? [
                   {
                     title: "Captured images",
-                    options: options.captured.map((option) => ({
-                      value: option.value,
-                      label: option.label,
-                    })),
+                    options: options.captured.map(imagePickerOption),
                   },
                 ]
               : []),
