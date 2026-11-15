@@ -16,11 +16,9 @@ from datetime import datetime
 from typing import Any
 
 from django.db import connection, transaction
-from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet
+from django.db.models import Count, F, Q
 
-from apps.runners.enums import TaskStatus, TaskType, WorkspaceStatus
-from apps.runners.guest_os import WINDOWS
-from apps.runners.models import Workspace, WorkspaceRecreateRequest
+from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
 
 from .models import (
     WindowsActivationStatus,
@@ -31,32 +29,19 @@ from .models import (
     WindowsWorkspaceLicense,
 )
 
-
-def _windows_workspaces(organization_id: uuid.UUID) -> QuerySet[Workspace]:
-    """Workspaces of the organization whose image is a Windows guest."""
-    return Workspace.objects.filter(
-        runner__organization_id=organization_id,
-        base_image_instance__guest_os=WINDOWS,
-    )
-
-
-def _running() -> Q:
-    """A workspace counts as running while it is created, runs or starts.
-
-    Starting covers an unresolved start (resume) operation and an unfinished
-    reset/update/capture replacement, which boots the workspace again.
-    """
-    live_recreate = WorkspaceRecreateRequest.objects.filter(
-        workspace_id=OuterRef("pk")
-    ).exclude(phase__in=["completed", "failed"])
-    return (
-        Q(status__in=[WorkspaceStatus.CREATING, WorkspaceStatus.RUNNING])
-        | Q(
-            current_task__type=TaskType.RESUME_WORKSPACE,
-            current_task__status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
-        )
-        | Q(Exists(live_recreate))
-    )
+#: A Windows workspace counts as running while it is created or runs, and
+#: while an operation boots it again: a start, or a reset or update (which
+#: removes and recreates the guest with the same identity). Every Windows
+#: workspace holds a license row, so the rows are the workspaces.
+_RUNNING = Q(
+    workspace__status__in=[WorkspaceStatus.CREATING, WorkspaceStatus.RUNNING]
+) | Q(
+    workspace__active_operation__in=[
+        WorkspaceOperation.STARTING,
+        WorkspaceOperation.RESETTING,
+        WorkspaceOperation.UPDATING,
+    ]
+)
 
 
 class WindowsLicensePolicyRepository:
@@ -275,34 +260,29 @@ class WindowsWorkspaceLicenseRepository:
     def count_running(
         organization_id: uuid.UUID, *, exclude_workspace_id: uuid.UUID | None
     ) -> int:
-        """Count the organization's running Windows workspaces (see ``_running``).
-
-        Workspaces without a license row (created before licensing) count too.
-        """
-        query = _windows_workspaces(organization_id).filter(_running())
+        """Count the organization's running Windows workspaces (see ``_RUNNING``)."""
+        query = WindowsWorkspaceLicense.objects.filter(
+            _RUNNING, workspace__runner__organization_id=organization_id
+        )
         if exclude_workspace_id is not None:
-            query = query.exclude(pk=exclude_workspace_id)
+            query = query.exclude(workspace_id=exclude_workspace_id)
         return query.count()
 
     @staticmethod
     def usage(organization_id: uuid.UUID) -> dict[str, int]:
         """Count live Windows workspaces, running ones and each license kind."""
-        live = _windows_workspaces(organization_id).exclude(
-            status=WorkspaceStatus.DELETED
+        rows = WindowsWorkspaceLicense.objects.filter(
+            workspace__runner__organization_id=organization_id
+        ).exclude(workspace__status=WorkspaceStatus.DELETED)
+        counts = rows.aggregate(
+            windows_workspaces=Count("pk"),
+            running=Count("pk", filter=_RUNNING),
+            **{
+                kind.value: Count("pk", filter=Q(kind=kind))
+                for kind in WindowsLicenseKind
+            },
         )
-        kinds = dict(
-            WindowsWorkspaceLicense.objects.filter(
-                workspace__runner__organization_id=organization_id
-            )
-            .exclude(workspace__status=WorkspaceStatus.DELETED)
-            .values_list("kind")
-            .annotate(count=Count("pk"))
-        )
-        return {
-            "windows_workspaces": live.count(),
-            "running": live.filter(_running()).count(),
-            **{kind.value: kinds.get(kind.value, 0) for kind in WindowsLicenseKind},
-        }
+        return {name: int(value or 0) for name, value in counts.items()}
 
     @staticmethod
     def assignments(organization_id: uuid.UUID) -> list[WindowsWorkspaceLicense]:

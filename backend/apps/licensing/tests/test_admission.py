@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from importlib import import_module
 
 import pytest
+from django.apps import apps as django_apps
 from django.utils import timezone
 
 from apps.licensing.models import (
@@ -133,15 +135,37 @@ def test_running_cap_on_create(runner, member):
     assert _row(create(runner, member)).kind == "unlicensed"
 
 
-def test_running_cap_counts_workspaces_without_a_license_row(runner, member):
-    """Windows workspaces created before licensing still count as running."""
-    Workspace.objects.create(
+def test_existing_windows_workspaces_get_a_row_and_count_as_running(
+    runner, member
+):
+    """The licensing migration covers workspaces created before licensing."""
+    migration = import_module(
+        "apps.licensing.migrations.0002_license_existing_windows_workspaces"
+    )
+    legacy = {
+        status: Workspace.objects.create(
+            runner=runner,
+            created_by=member,
+            name="Legacy",
+            status=status,
+            base_image_instance=image(runner, member),
+        )
+        for status in (WorkspaceStatus.RUNNING, WorkspaceStatus.DELETED)
+    }
+    linux = Workspace.objects.create(
         runner=runner,
         created_by=member,
-        name="Legacy",
+        name="Linux",
         status=WorkspaceStatus.RUNNING,
-        base_image_instance=image(runner, member),
+        base_image_instance=image(runner, member, LINUX),
     )
+
+    migration.license_existing_windows_workspaces(django_apps, None)
+    migration.license_existing_windows_workspaces(django_apps, None)
+
+    assert _row(legacy[WorkspaceStatus.RUNNING]).kind == "unlicensed"
+    assert _row(legacy[WorkspaceStatus.DELETED]) is None
+    assert _row(linux) is None
     _policy(runner.organization, mode="unlicensed", max_running=1)
     with pytest.raises(ConflictError) as error:
         create(runner, member)
@@ -290,10 +314,11 @@ def test_recreate_checks_the_running_cap_only_for_a_stopped_workspace(
     RecreateService.allocate(
         running.id, running.base_image_instance_id, has_busy_agent=lambda _: False
     )
-    # The unfinished reset of the running workspace still occupies its slot.
-    settle(running, WorkspaceStatus.STOPPED)
-    with pytest.raises(ConflictError):
+    # The reset keeps the slot while the old guest is gone and the new one boots.
+    Workspace.objects.filter(pk=running.pk).update(status=WorkspaceStatus.STOPPED)
+    with pytest.raises(ConflictError) as error:
         start(stopped)
+    assert error.value.code == "windows_running_limit"
 
 
 def test_preflight_rejects_without_writes(runner, member, licenses):
