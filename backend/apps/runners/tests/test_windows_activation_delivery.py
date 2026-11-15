@@ -74,7 +74,7 @@ def _image(runner, owner, guest_os: str) -> ImageInstance:
 
 
 def _workspace(runner, owner, *, status=WorkspaceStatus.STOPPED, key=None):
-    """A Windows workspace holding a seat of ``key`` (or no license row)."""
+    """A Windows workspace holding a seat of ``key`` (or an unlicensed row)."""
     workspace = Workspace.objects.create(
         runner=runner,
         created_by=owner,
@@ -82,10 +82,11 @@ def _workspace(runner, owner, *, status=WorkspaceStatus.STOPPED, key=None):
         status=status,
         base_image_instance=_image(runner, owner, WINDOWS),
     )
-    if key is not None:
-        WindowsWorkspaceLicense.objects.create(
-            workspace=workspace, kind="device_key", product_key=key
-        )
+    WindowsWorkspaceLicense.objects.create(
+        workspace=workspace,
+        kind="unlicensed" if key is None else "device_key",
+        product_key=key,
+    )
     return workspace
 
 
