@@ -13,6 +13,7 @@ import {
   createRunnersApi,
   createScheduledTasksApi,
   createSkillsApi,
+  createWindowsLicensingApi,
 } from "./settings";
 import { createGitApi, createTerminalApi } from "./workspaceTools";
 import { createAppsApi } from "./apps";
@@ -123,6 +124,8 @@ export interface OpenCuriaClient {
   credentialServices: ReturnType<typeof createCredentialServicesApi>;
   /** Organization profile, creation and workspace policy. */
   organizations: ReturnType<typeof createOrganizationsApi>;
+  /** Windows license model, product keys and licensed members (admins only). */
+  windowsLicensing: ReturnType<typeof createWindowsLicensingApi>;
   /** Model provider accounts, selection and ChatGPT device login. */
   providerAccounts: ReturnType<typeof createProviderAccountsApi>;
   /** Subagent depth, Computer Use limits and voice models. */
@@ -296,6 +299,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     credentials: createCredentialsApi(() => api),
     credentialServices: createCredentialServicesApi(() => api),
     organizations: createOrganizationsApi(() => api),
+    windowsLicensing: createWindowsLicensingApi(() => api),
     providerAccounts: createProviderAccountsApi(() => api),
     agentSettings: createAgentSettingsApi(() => api),
     apiKeys: createApiKeysApi(() => api),

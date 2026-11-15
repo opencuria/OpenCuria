@@ -46,6 +46,11 @@ import type {
   SkillUpdateInput,
   SubagentConfig,
   VoiceSettings,
+  WindowsLicensing,
+  WindowsLicensingInput,
+  WindowsProductKey,
+  WindowsProductKeyCreateInput,
+  WindowsProductKeyUpdateInput,
   WorkspaceCreateResult,
   WorkspacePolicyInput,
 } from "./types";
@@ -89,6 +94,67 @@ export function createOrganizationsApi(getApi: () => ApiClient) {
         input,
         signal,
       ),
+  };
+}
+
+/** Windows license model, product key pool and licensed members (admins only). */
+export function createWindowsLicensingApi(getApi: () => ApiClient) {
+  const base = (organizationId: string) =>
+    `/licensing/organizations/${segment(organizationId)}/windows/`;
+  const key = (organizationId: string, keyId: string) =>
+    `${base(organizationId)}keys/${segment(keyId)}/`;
+  const user = (organizationId: string, userId: string) =>
+    `${base(organizationId)}users/${segment(userId)}/`;
+  return {
+    get: (organizationId: string, signal?: AbortSignal) =>
+      getApi().get<WindowsLicensing>(base(organizationId), signal),
+    update: (
+      organizationId: string,
+      input: WindowsLicensingInput,
+      signal?: AbortSignal,
+    ) => getApi().patch<WindowsLicensing>(base(organizationId), input, signal),
+    /** The key is sent once and never returned; only its suffix is listed. */
+    addKey: (
+      organizationId: string,
+      input: WindowsProductKeyCreateInput,
+      signal?: AbortSignal,
+    ) =>
+      getApi().post<WindowsProductKey>(
+        `${base(organizationId)}keys/`,
+        input,
+        signal,
+      ),
+    updateKey: (
+      organizationId: string,
+      keyId: string,
+      input: WindowsProductKeyUpdateInput,
+      signal?: AbortSignal,
+    ) =>
+      getApi().patch<WindowsProductKey>(
+        key(organizationId, keyId),
+        input,
+        signal,
+      ),
+    /** Rejected (409) while workspaces hold seats of the key. */
+    deleteKey: (organizationId: string, keyId: string, signal?: AbortSignal) =>
+      getApi().delete<void>(key(organizationId, keyId), signal),
+    /** Grant or revoke a member's Windows user license. */
+    setUserLicensed: (
+      organizationId: string,
+      userId: string,
+      licensed: boolean,
+      signal?: AbortSignal,
+    ) =>
+      licensed
+        ? getApi().put<WindowsLicensing>(
+            user(organizationId, userId),
+            undefined,
+            signal,
+          )
+        : getApi().delete<WindowsLicensing>(
+            user(organizationId, userId),
+            signal,
+          ),
   };
 }
 

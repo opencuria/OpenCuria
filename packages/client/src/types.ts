@@ -78,6 +78,92 @@ export interface WorkspacePolicyInput {
   image_versions_to_keep: number;
 }
 
+/**
+ * How an organization licenses its Windows workspaces: product key seats per
+ * workspace, licensed members activating through KMS, or no license at all.
+ */
+export type WindowsLicenseMode = "per_device" | "per_user" | "unlicensed";
+
+/** One workspace holding a product key seat; shows its owner, never its name. */
+export interface WindowsProductKeyAssignment {
+  owner_label: string;
+  /** A `WindowsActivationStatus` value. */
+  activation_status: string;
+}
+
+/** A product key of the pool. The key itself is write-only. */
+export interface WindowsProductKey {
+  id: string;
+  label: string;
+  /** Last characters of the key, as `slmgr /dli` shows them. */
+  key_suffix: string;
+  seats: number;
+  used_seats: number;
+  created_at: string;
+  assignments: WindowsProductKeyAssignment[];
+}
+
+export interface WindowsLicenseMember {
+  user_id: string;
+  label: string;
+  licensed: boolean;
+}
+
+/** Windows workspaces of the organization by license kind (counts only). */
+export interface WindowsLicenseUsage {
+  windows_workspaces: number;
+  running: number;
+  device_key: number;
+  user: number;
+  unlicensed: number;
+}
+
+/** Windows licensing of an organization (admins only). */
+export interface WindowsLicensing {
+  mode: WindowsLicenseMode;
+  /** Empty: KMS clients find the host through DNS. */
+  kms_host: string;
+  user_license_seats: number;
+  /** Cap on running Windows workspaces in every mode; `null` is unlimited. */
+  max_running: number | null;
+  product_keys: WindowsProductKey[];
+  members: WindowsLicenseMember[];
+  usage: WindowsLicenseUsage;
+}
+
+/** Partial update; `max_running: null` removes the cap. */
+export interface WindowsLicensingInput {
+  mode?: WindowsLicenseMode;
+  kms_host?: string;
+  user_license_seats?: number;
+  max_running?: number | null;
+}
+
+export interface WindowsProductKeyCreateInput {
+  product_key: string;
+  label?: string;
+  seats: number;
+}
+
+export interface WindowsProductKeyUpdateInput {
+  label?: string;
+  seats?: number;
+}
+
+export type WindowsActivationStatus =
+  | "pending"
+  | "activated"
+  | "failed"
+  | "not_activated";
+
+/** License state of one Windows workspace, visible to its owner. */
+export interface WorkspaceWindowsLicense {
+  kind: "device_key" | "user" | "unlicensed";
+  activation_status: WindowsActivationStatus;
+  /** Short diagnostic such as an HRESULT when activation failed. */
+  activation_code: string;
+}
+
 export interface AuthUser {
   id: number;
   email: string;
@@ -137,6 +223,10 @@ export interface Workspace {
   base_image?: ImageVersionRef | null;
   pending_base_image?: ImageVersionRef | null;
   repos?: string[];
+  /** Guest OS of the workspace's image; older servers omit it (Linux). */
+  guest_os?: "linux" | "windows";
+  /** License state of a Windows workspace; `null` for Linux. */
+  windows_license?: WorkspaceWindowsLicense | null;
   [key: string]: unknown;
 }
 
