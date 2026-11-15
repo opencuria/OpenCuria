@@ -707,6 +707,7 @@ async def _run_local_cli_fixture(
     effort: str = "high",
     responder: Callable[[dict[str, Any], int], bytes] | None = None,
     child_events: list[tuple[str, dict[str, Any]]] | None = None,
+    emit_delay: float = 0.0,
 ) -> tuple[
     Any,
     list[dict[str, Any]],
@@ -777,6 +778,9 @@ async def _run_local_cli_fixture(
 
     async def emit(event: dict[str, Any]) -> None:
         emitted.append(event)
+        if emit_delay:
+            # Persisting and fanning out each event takes time in production.
+            await asyncio.sleep(emit_delay)
 
     async def on_question(**kwargs: Any) -> list[str]:
         questions.append(str(kwargs.get("call_id") or ""))
@@ -997,6 +1001,116 @@ async def test_real_sdk_cli_local_bash_task_does_not_emit_subtask_events(
         event.get("type") in {"subtask_started", "subtask_updated", "subtask_finished"}
         for event in events
     )
+
+
+def _api_thinking_tool_message(
+    chunks: list[str], name: str, tool_id: str, arguments: dict[str, Any]
+) -> bytes:
+    """Stream one API message: a chunked thinking block, then a tool call."""
+
+    def block(event: str, index: int, **payload: Any) -> bytes:
+        return _sse(event, {"type": event, "index": index, **payload})
+
+    return b"".join(
+        [
+            _api_message_start(f"msg-{tool_id}"),
+            block(
+                "content_block_start",
+                0,
+                content_block={"type": "thinking", "thinking": ""},
+            ),
+            *(
+                block(
+                    "content_block_delta",
+                    0,
+                    delta={"type": "thinking_delta", "thinking": chunk},
+                )
+                for chunk in chunks
+            ),
+            block(
+                "content_block_delta",
+                0,
+                delta={"type": "signature_delta", "signature": "fixture"},
+            ),
+            block("content_block_stop", 0),
+            block(
+                "content_block_start",
+                1,
+                content_block={
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": name,
+                    "input": {},
+                },
+            ),
+            block(
+                "content_block_delta",
+                1,
+                delta={
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(arguments),
+                },
+            ),
+            block("content_block_stop", 1),
+            _sse(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                    "usage": {"output_tokens": 2},
+                },
+            ),
+            _sse("message_stop", {"type": "message_stop"}),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_cli_slow_sink_keeps_thinking_whole_before_tool(
+    tmp_path: Path,
+) -> None:
+    """Hook callbacks must not overtake thinking deltas still in the SDK buffer."""
+    require_pinned_cli()
+    chunks = [f"thought {index} " for index in range(60)]
+    sent = False
+
+    def responder(payload: dict[str, Any], _index: int) -> bytes:
+        nonlocal sent
+        tools = {str(tool.get("name") or "") for tool in payload.get("tools") or []}
+        # The CLI also sends tool-less side queries; answer only the agent turn.
+        if sent or "Read" not in tools:
+            return _api_final_message()
+        sent = True
+        return _api_thinking_tool_message(
+            chunks, "Read", "call-thinking", {"file_path": "/workspace/a.txt"}
+        )
+
+    result, events, *_rest = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Read",
+        tool_arguments={},
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(global_rules={"read": "allow"}),
+        fixture_files={"a.txt": b"fixture\n"},
+        responder=responder,
+        emit_delay=0.01,
+    )
+
+    assert result.output == "fixture answer"
+    reasoning = [
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "part_updated" and "reasoning" in event.get("delta", {})
+    ]
+    first_tool = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") in {"tool_queued", "tool_started"}
+    )
+    assert "".join(events[index]["delta"]["reasoning"] for index in reasoning) == (
+        "".join(chunks)
+    )
+    assert max(reasoning) < first_tool
 
 
 @pytest.mark.asyncio

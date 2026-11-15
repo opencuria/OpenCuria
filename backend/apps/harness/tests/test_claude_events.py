@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -871,37 +872,30 @@ async def test_final_message_flushes_cross_delta_redaction_without_duplicate_pre
     assert "".join(text) == "before [redacted] after"
 
 
-@pytest.mark.asyncio
-async def test_early_tool_queue_is_updated_by_policy_hook_without_duplicate_queue(
-    fake_accessor,
-) -> None:
-    from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
-
+def _policy_engine(
+    accessor: Any, rules: dict[str, str], on_permission: Any = None
+) -> tuple[ClaudeEngine, list[dict[str, Any]]]:
+    """Build an engine with the per-run permission bridge but no SDK process."""
     from apps.harness.agents.definitions import get_agent
     from apps.harness.engines.base import RunOptions
     from apps.harness.engines.claude.permissionbridge import PermissionBridge
     from apps.harness.permissions.evaluator import PermissionEvaluator
 
     events: list[dict[str, Any]] = []
-    approvals: list[str] = []
 
     async def emit(event: dict[str, Any]) -> None:
         events.append(event)
 
-    async def approve(**kwargs: Any) -> str:
-        approvals.append(str(kwargs["call_id"]))
-        return "once"
-
     engine = ClaudeEngine(
         tools=default_tool_registry(),
-        accessor=fake_accessor,
+        accessor=accessor,
         emit=emit,
-        evaluator=PermissionEvaluator(global_rules={"read": "ask"}),
+        evaluator=PermissionEvaluator(global_rules=rules),
     )
     options = RunOptions(
-        session_id="early-queue",
-        workspace_id=fake_accessor.workspace_id,
-        on_permission=approve,
+        session_id="policy-hook",
+        workspace_id=accessor.workspace_id,
+        on_permission=on_permission,
     )
     engine._options = options
     engine._agent = get_agent("build")
@@ -915,6 +909,22 @@ async def test_early_tool_queue_is_updated_by_policy_hook_without_duplicate_queu
         engine=engine,
     )
     engine._wire_to_registry = {"Read": "read"}
+    return engine, events
+
+
+@pytest.mark.asyncio
+async def test_early_tool_queue_is_updated_by_policy_hook_without_duplicate_queue(
+    fake_accessor,
+) -> None:
+    from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+
+    approvals: list[str] = []
+
+    async def approve(**kwargs: Any) -> str:
+        approvals.append(str(kwargs["call_id"]))
+        return "once"
+
+    engine, events = _policy_engine(fake_accessor, {"read": "ask"}, approve)
     await engine._emit_partial(
         _stream_event(
             {"type": "message_start", "message": {"id": "api-tool", "content": []}}
@@ -960,6 +970,105 @@ async def test_early_tool_queue_is_updated_by_policy_hook_without_duplicate_queu
     started = [event for event in events if event.get("type") == "tool_started"]
     assert len(started) == 1
     assert started[0]["arguments"] == '{"path": "/workspace/doc.md"}'
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_waits_until_buffered_reasoning_is_projected(
+    fake_accessor,
+) -> None:
+    """A hook overtaking buffered deltas must not split the thinking block."""
+    engine, events = _policy_engine(fake_accessor, {"read": "allow"})
+    chunks = ["The frontend opens a block per part_id th", "e backend sends."]
+
+    async def stream(event: dict[str, Any]) -> None:
+        await engine._emit_partial(_stream_event(event))
+
+    await stream({"type": "message_start", "message": {"id": "api-race"}})
+    await stream(
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        }
+    )
+    await stream(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": chunks[0]},
+        }
+    )
+    # The SDK dispatches the hook while later stream messages are still queued.
+    hook = engine._bridge.hooks(engine)["PreToolUse"][0].hooks[0]
+    pending = asyncio.create_task(
+        hook(
+            {"tool_name": "Read", "tool_input": {"file_path": "/workspace/a.txt"}},
+            "race-read",
+            None,
+        )
+    )
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not pending.done()
+    assert not [e for e in events if e["type"] in {"tool_queued", "tool_started"}]
+
+    await stream(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": chunks[1]},
+        }
+    )
+    await stream({"type": "content_block_stop", "index": 0})
+    await stream(
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "race-read",
+                "name": "Read",
+                "input": {},
+            },
+        }
+    )
+    result = await asyncio.wait_for(pending, 1)
+
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    kinds = [
+        "reasoning" if event["type"] == "part_updated" else event["type"]
+        for event in events
+        if event["type"] in {"part_updated", "tool_queued", "tool_started"}
+    ]
+    assert kinds == ["reasoning", "reasoning", "tool_queued", "tool_started"]
+    reasoning = [e["delta"]["reasoning"] for e in events if e["type"] == "part_updated"]
+    assert "".join(reasoning) == "".join(chunks)
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_proceeds_when_its_call_never_streams(
+    fake_accessor, monkeypatch
+) -> None:
+    from apps.harness.engines.claude import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "TOOL_PROJECTION_TIMEOUT_S", 0.01)
+    engine, events = _policy_engine(fake_accessor, {"read": "allow"})
+    await engine._emit_partial(
+        _stream_event({"type": "message_start", "message": {"id": "api-silent"}})
+    )
+    hook = engine._bridge.hooks(engine)["PreToolUse"][0].hooks[0]
+
+    result = await hook(
+        {"tool_name": "Read", "tool_input": {"file_path": "/workspace/a.txt"}},
+        "silent-read",
+        None,
+    )
+
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert [e["type"] for e in events if e["type"].startswith("tool_")] == [
+        "tool_queued",
+        "tool_started",
+    ]
 
 
 def _task_message(subtype: str, **data: Any) -> Any:

@@ -71,6 +71,8 @@ SDK_VERSION = CLAUDE_AGENT_SDK_VERSION
 MAX_RESTORED_TRANSCRIPT_BYTES = MAX_MANAGED_FILE_BYTES
 MAX_MANAGED_PROMPT_BYTES = 256 * 1024
 CANCEL_CLEANUP_TIMEOUT_S = 3.0
+# Upper bound for a tool hook waiting on the stream projection of its call.
+TOOL_PROJECTION_TIMEOUT_S = 5.0
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 BindingCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 ChildEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -161,6 +163,7 @@ class ClaudeEngine:
         self._stream_redactors: dict[tuple[str, str, int, str], StreamingRedactor] = {}
         self._pending_stream_text: dict[tuple[str, str, int, str], str] = {}
         self._early_queued_calls: set[str] = set()
+        self._projected_tool_calls: dict[str, asyncio.Event] = {}
         self._child_text: dict[str, str] = {}
         self._bound_session_ids: set[str] = set()
         self._managed_skill_names: set[str] = set()
@@ -1100,6 +1103,31 @@ class ClaudeEngine:
             if parent is None or key_parent == parent:
                 await self._flush_stream_redactor(key)
 
+    def _mark_tool_projected(self, call_id: str) -> None:
+        """Record that the projector has reached a call's ``tool_use`` block."""
+        if call_id:
+            self._projected_tool_calls.setdefault(call_id, asyncio.Event()).set()
+
+    async def _await_tool_projection(self, call_id: str, parent: str | None) -> None:
+        """Hold a tool hook until the stream projection has reached its call.
+
+        The SDK runs hook callbacks as soon as they arrive, while stream
+        messages wait in a buffer for the projector. Tool events published
+        early would close the reasoning or text part still being streamed and
+        split it mid-sentence. Scopes without partial stream events never
+        wait; a stalled projection delays the hook only boundedly.
+        """
+        state = self._step_states.get(parent or "")
+        if not call_id or state is None or not state.streams_partials:
+            return
+        projected = self._projected_tool_calls.setdefault(call_id, asyncio.Event())
+        if projected.is_set():
+            return
+        try:
+            await asyncio.wait_for(projected.wait(), TOOL_PROJECTION_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            log.warning("claude_tool_projection_timeout")
+
     async def _queue_stream_tool(
         self, *, parent: str, call_id: str, source_name: str
     ) -> None:
@@ -1149,6 +1177,7 @@ class ClaudeEngine:
             return
         parent = message.parent_tool_use_id or ""
         state = self._step_states.setdefault(parent, StepState())
+        state.streams_partials = True
         event_type = str(raw.get("type") or "")
 
         if event_type == "message_start":
@@ -1196,6 +1225,8 @@ class ClaudeEngine:
                 await self._queue_stream_tool(
                     parent=parent, call_id=call_id, source_name=tool_name
                 )
+                # Only now: a released hook must see the early queue entry.
+                self._mark_tool_projected(call_id)
             return
 
         if event_type == "content_block_stop":
@@ -1261,7 +1292,14 @@ class ClaudeEngine:
         parent, blocks = message.parent_tool_use_id or "", message.content
         state = self._step_states.setdefault(parent, StepState())
         message_id = message.message_id or message.uuid or ""
+        tool_call_ids = [
+            str(getattr(block, "id", "") or "")
+            for block in blocks
+            if ClaudeEventNormalizer.block_type(block) == "tool_use"
+        ]
         if message_id and message_id in state.completed_messages:
+            for call_id in tool_call_ids:
+                self._mark_tool_projected(call_id)
             return
         if message_id:
             state = await self._begin_message_turn(parent, message_id)
@@ -1349,6 +1387,8 @@ class ClaudeEngine:
             state.completed_messages.add(message_id)
             if len(state.completed_messages) > 2048:
                 state.completed_messages.pop()
+        for call_id in tool_call_ids:
+            self._mark_tool_projected(call_id)
 
     async def _can_use_tool(
         self, source_name: str, arguments: dict[str, Any], context: Any
@@ -1427,11 +1467,13 @@ class ClaudeEngine:
         if callable(bind_project_key):
             bind_project_key(self._project_key)
         self._steps = 0
-        self._step_states = {"": StepState()}
+        # Root partial messages are enabled for every run (see SDK options).
+        self._step_states = {"": StepState(streams_partials=True)}
         self._tool_events.clear()
         self._stream_redactors.clear()
         self._pending_stream_text.clear()
         self._early_queued_calls.clear()
+        self._projected_tool_calls.clear()
         self._wire_to_registry.clear()
         self._tool_results.clear()
         self._tool_arguments.clear()

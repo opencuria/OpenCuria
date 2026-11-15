@@ -60,6 +60,9 @@ class StepState:
 
     step: int = 0
     started: bool = False
+    #: Partial stream events arrive for this scope, so each of its tool calls
+    #: reaches the projector as a ``tool_use`` block before the call executes.
+    streams_partials: bool = False
     active_calls: set[str] = field(default_factory=set)
     awaiting_next_step: bool = False
     streamed: dict[tuple[str, int, str], str] = field(default_factory=dict)

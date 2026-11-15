@@ -337,6 +337,9 @@ class PermissionBridge:
                 return self.hook_decision("deny", "Unmapped Claude subagent identity")
             if not call_id:
                 return self.hook_decision("deny", "Missing OpenCuria tool call id")
+            # Keep stream order: text and reasoning streamed before this call
+            # must be projected before any of its tool events.
+            await engine._await_tool_projection(call_id, parent)
             is_task_call = source in {"Task", "Agent"}
             decision, event_tool, _action, title = self.decide(
                 policy_source, arguments, agent=agent, depth=depth
