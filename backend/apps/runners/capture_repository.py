@@ -129,6 +129,7 @@ class CaptureRepository:
             generation=ImageLineRepository.next_captured_version(line.id),
             message=message,
             min_disk_size_gb=ws.qemu_disk_size_gb,
+            guest_os=ws.guest_os,
             process_definitions=WorkspaceProcessRepository.snapshot_definitions(ws.id),
             status="capturing",
         )

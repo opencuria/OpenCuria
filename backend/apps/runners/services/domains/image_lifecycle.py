@@ -13,6 +13,7 @@ from asgiref.sync import sync_to_async
 from common.exceptions import ConflictError
 
 from ...exceptions import WorkspaceNotFoundError
+from ...guest_os import is_supported_base_distro
 from ..capture import CaptureService
 
 if TYPE_CHECKING:
@@ -60,11 +61,10 @@ class ImageLifecycleService:
     @staticmethod
     def _validate_qemu_base_distro(base_distro: str) -> None:
         """Ensure QEMU image definitions use a supported distro source."""
-        distro = (base_distro or "").strip().lower()
-        if distro.startswith("ubuntu:"):
+        if is_supported_base_distro(base_distro):
             return
         raise ConflictError(
-            "QEMU image definitions currently require an ubuntu:<version> base distro"
+            "Image definitions require an ubuntu:<version> or windows:11 base distro"
         )
 
     @staticmethod

@@ -19,6 +19,7 @@ from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
 from .disk_usage import WorkspaceDiskUsage
+from .guest_os import guest_os_for_distro
 from .enums import (
     RunnerStatus,
     TaskStatus,
@@ -1137,6 +1138,11 @@ class ImageDefinitionRepository:
         return ImageDefinition.objects.create(**fields)
 
     @staticmethod
+    def has_versions(definition_id) -> bool:
+        """Whether any image version was ever allocated for this definition."""
+        return ImageInstance.objects.filter(origin_definition_id=definition_id).exists()
+
+    @staticmethod
     def update_recipe(definition_id, values):
         """Serialize edits with generation rendering/allocation; never auto-build."""
         from common.exceptions import ConflictError
@@ -1529,6 +1535,7 @@ class ImageGenerationRepository:
                 origin_definition=definition,
                 build_job=job,
                 revision=revision,
+                guest_os=guest_os_for_distro(recipe["base_distro"]),
                 generation=number,
                 creating_task=task,
                 created_by=created_by,

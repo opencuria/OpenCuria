@@ -16,6 +16,7 @@ from asgiref.sync import sync_to_async
 from apps.organizations.services import OrganizationService
 from common.exceptions import ConflictError
 
+from ..guest_os import guest_os_for_distro, is_supported_base_distro
 from ..exceptions import (
     AdminRoleRequiredError,
     ImageRecipeNotFoundError,
@@ -109,7 +110,16 @@ class ImageDefinitionService:
         definition = self._owned_definition_for_admin(
             user, organization_id, definition_id
         )
-        self._validate_base_distro(values.get("base_distro") or definition.base_distro)
+        base_distro = values.get("base_distro") or definition.base_distro
+        self._validate_base_distro(base_distro)
+        if guest_os_for_distro(base_distro) != guest_os_for_distro(
+            definition.base_distro
+        ) and ImageDefinitionRepository.has_versions(definition.id):
+            # Every version of an image line runs the same operating system.
+            raise ConflictError(
+                "The operating system of a built image cannot change",
+                code="image_os_immutable",
+            )
         return ImageDefinitionRepository.update_recipe(
             definition.id,
             {field: values[field] for field in RECIPE_FIELDS if field in values},
@@ -270,9 +280,9 @@ class ImageDefinitionService:
 
     @staticmethod
     def _validate_base_distro(base_distro: str | None) -> None:
-        if not (base_distro or "").strip().lower().startswith("ubuntu:"):
+        if not is_supported_base_distro(base_distro):
             raise ConflictError(
-                "QEMU image definitions currently require an ubuntu:<version> "
+                "Image definitions require an ubuntu:<version> or windows:11 "
                 "base distro",
                 code="unsupported_base_distro",
             )
