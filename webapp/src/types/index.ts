@@ -79,7 +79,7 @@ export type {
   SkillUpdateInput,
   VmSystemMetrics,
 } from '@opencuria/client/types'
-import type { ImageArtifact } from '@opencuria/client/types'
+import type { ImageArtifact, WorkspaceWindowsLicense } from '@opencuria/client/types'
 
 // --- Auth ---
 
@@ -193,6 +193,10 @@ export interface Workspace {
   base_image?: ImageVersionRef | null
   pending_base_image?: ImageVersionRef | null
   repos?: string[]
+  /** Guest OS of the workspace's image; older servers omit it (Linux). */
+  guest_os?: 'linux' | 'windows'
+  /** License state of a Windows workspace; `null` for Linux. */
+  windows_license?: WorkspaceWindowsLicense | null
 }
 
 /** The image version a workspace is (or is being) based on. */

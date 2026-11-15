@@ -22,6 +22,7 @@ import {
   Key,
   KeyRound,
   Layers,
+  Monitor,
   Puzzle,
   Server,
   Settings2,
@@ -54,6 +55,7 @@ const RunnersPanel = defineAsyncComponent(() => import('./RunnersPanel.vue'))
 const ImageDefinitionsTab = defineAsyncComponent(
   () => import('@/components/images/ImageDefinitionsTab.vue'),
 )
+const WindowsLicensingTab = defineAsyncComponent(() => import('./WindowsLicensingTab.vue'))
 
 const authStore = useAuthStore()
 const flushChanges = provideAutosaveBoundary()
@@ -89,6 +91,7 @@ const navItems: SettingsNavItem[] = [
   { id: 'runners', label: 'Runners', icon: Server, adminOnly: true },
   { id: 'credential-services', label: 'Credential Services', icon: Shield, adminOnly: true },
   { id: 'image-definitions', label: 'Image Definitions', icon: Layers, adminOnly: true },
+  { id: 'windows', label: 'Windows', icon: Monitor, adminOnly: true },
 ]
 
 const visibleNavItems = computed(() => navItems.filter((item) => !item.adminOnly || isAdmin.value))
@@ -336,6 +339,7 @@ watch(
             />
             <CredentialServicesTab v-else-if="open && shownTab === 'credential-services'" />
             <ImageDefinitionsTab v-else-if="open && shownTab === 'image-definitions'" />
+            <WindowsLicensingTab v-else-if="open && shownTab === 'windows'" />
           </div>
         </ScrollArea>
       </div>
