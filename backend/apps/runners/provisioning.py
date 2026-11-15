@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .enums import TaskType
+from .guest_os import image_minimums
 
 
 @dataclass(frozen=True)
@@ -27,11 +28,16 @@ def uses_artifact_clone(image) -> bool:
 
 
 def disk_size_for(requested_gb: int | None, image) -> int | None:
-    """A workspace disk must be at least as large as its image's virtual disk."""
+    """A workspace disk must hold its image's virtual disk and fit its guest OS.
+
+    Without a request the image's virtual disk size (if known) is returned and
+    resource resolution applies the guest OS minimum to the runner default.
+    """
     minimum = getattr(image, "min_disk_size_gb", None)
-    if requested_gb is None or minimum is None:
-        return requested_gb if requested_gb is not None else minimum
-    return max(requested_gb, minimum)
+    if requested_gb is None:
+        return minimum
+    floor = image_minimums(getattr(image, "guest_os", None), minimum)
+    return max(requested_gb, floor.disk_size_gb)
 
 
 def provisioning_command(

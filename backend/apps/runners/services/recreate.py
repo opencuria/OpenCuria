@@ -44,11 +44,15 @@ class RecreateService:
         has_busy_agent: Callable[[uuid.UUID], bool],
         requested_by: object | None = None,
         qemu_disk_size_gb: int | None = None,
+        qemu_vcpus: int | None = None,
+        qemu_memory_mb: int | None = None,
     ) -> tuple[Workspace, Task, WorkspaceRecreateRequest]:
         """Validate and reserve recreation atomically with the first command.
 
         ``has_busy_agent`` is evaluated under the runner lock shared with
         agent admission, before destroying or changing any workspace state.
+        Given vCPU and RAM sizes (raised to the target's guest OS minimum)
+        replace the stored ones.
         """
         with RecreateRepository.lock_workspace(workspace_id) as ws:
             RecreateService._ensure_idle(ws, has_busy_agent)
@@ -69,6 +73,18 @@ class RecreateService:
                 RecreateRepository.save_workspace(
                     ws, ["qemu_disk_size_gb", "updated_at"]
                 )
+            raised = {
+                name: value
+                for name, value in (
+                    ("qemu_vcpus", qemu_vcpus),
+                    ("qemu_memory_mb", qemu_memory_mb),
+                )
+                if value is not None and value != getattr(ws, name)
+            }
+            if raised:
+                for name, value in raised.items():
+                    setattr(ws, name, value)
+                RecreateRepository.save_workspace(ws, [*raised, "updated_at"])
             request, task = RecreateService.begin(
                 ws,
                 target,
