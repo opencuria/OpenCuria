@@ -313,3 +313,19 @@ class WindowsWorkspaceLicenseRepository:
             .select_related("workspace__created_by")
             .order_by("created_at", "workspace_id")
         )
+
+    @staticmethod
+    def release(workspace_id: uuid.UUID) -> int:
+        """Delete the license of a workspace whose deletion is confirmed."""
+        deleted, _ = WindowsWorkspaceLicense.objects.filter(
+            workspace_id=workspace_id
+        ).delete()
+        return deleted
+
+    @staticmethod
+    def release_deleted() -> int:
+        """Delete licenses still held by workspaces already marked deleted."""
+        deleted, _ = WindowsWorkspaceLicense.objects.filter(
+            workspace__status=WorkspaceStatus.DELETED
+        ).delete()
+        return deleted

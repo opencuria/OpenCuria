@@ -304,6 +304,15 @@ class WindowsLicenseService:
                 code="windows_running_limit",
             )
 
+    # -- Release ---------------------------------------------------------------
+
+    def release_deleted(self) -> int:
+        """Free licenses of workspaces already deleted (idempotent safety net)."""
+        released = self.workspaces.release_deleted()
+        if released:
+            logger.info("windows_licenses_released", count=released)
+        return released
+
     # -- Administration --------------------------------------------------------
 
     def licensing(self, *, org_id: uuid.UUID, user: Any) -> WindowsLicensingView:

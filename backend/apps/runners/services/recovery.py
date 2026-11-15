@@ -6,6 +6,8 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from apps.licensing.services import WindowsLicenseService
+
 from ..deletion_repository import DeletionRepository
 from ..operations import OperationRepository
 from .capture import CaptureService
@@ -65,6 +67,7 @@ class RecoveryService:
                     failures.append(("notification", error))
                     logger.exception("lifecycle_recovery_notification_failed")
         await stage("retention", ImageRetentionService.tick)
+        await stage("windows_licenses", WindowsLicenseService().release_deleted)
         from ..inventory_repository import InventoryRepository
 
         refreshes = await stage("inventory", InventoryRepository.refresh_candidates)
