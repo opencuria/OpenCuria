@@ -11,11 +11,15 @@ import tarfile
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from src.runtime import computer_use_artifact as package
-from src.runtime.artifacts import ArtifactProvisionError, RuntimeArtifactManager
+from src.runtime.artifacts import (
+    ArtifactProvisionError,
+    ArtifactRequestError,
+    RuntimeArtifactManager,
+)
 
 
 @pytest.mark.parametrize(
@@ -51,6 +55,31 @@ def test_shipped_bundle_hash_and_layout():
     assert {k: v for k, v in hashes.items() if k != "manifest.json"} == manifest[
         "files"
     ]
+
+
+async def test_windows_guests_are_refused_before_any_download(tmp_path):
+    runtime = SimpleNamespace(
+        exec_command_wait=AsyncMock(return_value=(0, "win32-x64\n")),
+        put_archive=AsyncMock(),
+    )
+    info = SimpleNamespace(instance_id="windows-guest")
+    manager = RuntimeArtifactManager(
+        runtime, lambda _: info, lambda _: runtime, tmp_path / "state"
+    )
+    manager._download = AsyncMock()
+
+    with pytest.raises(
+        ArtifactRequestError, match="^Computer Use requires a Linux workspace$"
+    ):
+        await manager.ensure_runtime_artifact(
+            uuid.uuid4(), "computer-use", package.VERSION
+        )
+
+    runtime.exec_command_wait.assert_awaited_once()  # Only the platform probe.
+    assert "uname -s" in runtime.exec_command_wait.await_args.args[1][2]
+    manager._download.assert_not_awaited()
+    runtime.put_archive.assert_not_awaited()
+    assert not (tmp_path / "state").exists()
 
 
 @pytest.mark.parametrize(
