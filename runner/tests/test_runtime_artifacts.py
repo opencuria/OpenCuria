@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tarfile
 import uuid
 from pathlib import Path
@@ -134,6 +135,66 @@ async def test_rejects_unsupported_guest_platform_and_unapproved_artifact(setup_
     with pytest.raises(ValueError, match="Unapproved"):
         await manager.ensure_runtime_artifact(uuid.uuid4(), "anything", "2.1.321")
     manager._download.assert_not_awaited()
+
+
+def _run_platform_probe(tmp_path, system, machine):
+    """Run the real guest probe with a fake ``uname`` first on PATH."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uname = fake_bin / "uname"
+    uname.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in -s) printf "%s\\n" "{system}" ;; '
+        f'-m) printf "%s\\n" "{machine}" ;; *) exit 9 ;; esac\n'
+    )
+    uname.chmod(0o755)
+    result = subprocess.run(
+        ["sh", "-c", artifacts._GUEST_PLATFORM_PROBE],
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout
+
+
+@pytest.mark.parametrize(
+    "system,machine,expected",
+    [
+        ("MSYS_NT-10.0-26100", "x86_64", "win32-x64\n"),
+        ("CYGWIN_NT-10.0-26100", "x86_64", "win32-x64\n"),
+        ("MSYS_NT-10.0-26100", "aarch64", None),
+        ("MINGW64_NT-10.0-26100", "x86_64", None),
+        ("Darwin", "arm64", None),
+        ("Linux", "riscv64", None),
+    ],
+)
+def test_guest_platform_probe_reports_windows_msys_guests(
+    tmp_path, system, machine, expected
+):
+    code, output = _run_platform_probe(tmp_path, system, machine)
+    if expected is None:
+        assert code != 0 and output == ""
+    else:
+        assert (code, output) == (0, expected)
+        assert RuntimeArtifactManager._platform_key(output) == "win32-x64"
+
+
+@pytest.mark.parametrize(
+    "machine,arch", [("x86_64", "x64"), ("amd64", "x64"), ("aarch64", "arm64")]
+)
+def test_guest_platform_probe_linux_output_is_unchanged(tmp_path, machine, arch):
+    code, output = _run_platform_probe(tmp_path, "Linux", machine)
+    assert code == 0
+    assert output in {f"linux-{arch}\n", f"linux-{arch}-musl\n"}
+
+
+@pytest.mark.parametrize(
+    "output", ["win32-arm64", "windows-x64", "darwin-arm64", "win32-x64 extra", ""]
+)
+def test_platform_key_rejects_unpinned_values(output):
+    with pytest.raises(ValueError, match="Unsupported workspace platform"):
+        RuntimeArtifactManager._platform_key(output)
 
 
 @pytest.mark.asyncio

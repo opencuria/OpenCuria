@@ -59,9 +59,17 @@ CLAUDE_PLATFORM_PINS = {
     ),
 }
 
-# This is executed inside the guest; its only output is the installed version.
+# This is executed inside the guest; its only output is the platform key.
+# Windows guests run it in MSYS2 (Cygwin runtime), whose uname reports MSYS_NT-*.
 _GUEST_PLATFORM_PROBE = """\
 set -eu
+case "$(uname -s)" in
+    MSYS_NT-*|CYGWIN_NT-*)
+        [ "$(uname -m)" = x86_64 ] || exit 1
+        printf 'win32-x64\\n'
+        exit 0
+        ;;
+esac
 [ "$(uname -s)" = Linux ] || exit 1
 case "$(uname -m)" in
     x86_64|amd64) arch=x64 ;;
@@ -243,6 +251,7 @@ class RuntimeArtifactManager:
             "linux-arm64",
             "linux-x64-musl",
             "linux-arm64-musl",
+            "win32-x64",
         }:
             raise ArtifactRequestError("Unsupported workspace platform")
         return value
