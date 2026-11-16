@@ -68,11 +68,17 @@ sudo journalctl -u opencuria-runner -f
 
 The runner should then show up online in the backend.
 
+Windows 11 workspaces additionally need `sudo apt-get install -y ovmf swtpm-tools`
+and a Windows 11 ISO in `RUNNER_WINDOWS_ISO` (see [runner/README.md](runner/README.md)).
+
 ## First workspace
 
 No image is built during installation. Once the runner is online, an admin builds
 an image definition on it under **Settings → Image Definitions**: the bundled
-`Ubuntu 24.04` or a custom one. Workspaces can be created once the build is ready.
+`Ubuntu 24.04`, `Windows 11` or a custom one. Workspaces can be created once the
+build is ready. Windows workspaces follow the license model chosen under
+**Settings → Windows** (product keys, per-user licenses with KMS, or explicitly
+without license).
 
 ## Develop from source
 
