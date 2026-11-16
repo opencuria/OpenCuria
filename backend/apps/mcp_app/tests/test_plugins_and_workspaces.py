@@ -298,6 +298,12 @@ async def test_workspace_options_and_create_report_the_guest_os(world, monkeypat
         ImageInstance.objects.filter(pk=windows.pk).update(
             guest_os="windows", min_disk_size_gb=80
         )
+        from apps.licensing.models import WindowsLicensePolicy
+
+        WindowsLicensePolicy.objects.update_or_create(
+            organization_id=world.runner.organization_id,
+            defaults={"mode": "unlicensed"},
+        )
 
     await sync_to_async(captured_lines)()
     ctx = world.ctx()

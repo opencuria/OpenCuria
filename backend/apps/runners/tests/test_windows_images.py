@@ -239,7 +239,16 @@ def test_disk_size_for_applies_the_image_floor(guest_os, min_disk, requested, ex
 
 @pytest.fixture
 def lifecycle(runner):
-    """Runner service with an observed Socket.IO server."""
+    """Runner service with an observed Socket.IO server.
+
+    Resource rules are independent of licensing, so the organization runs
+    Windows without a license here.
+    """
+    from apps.licensing.models import WindowsLicensePolicy
+
+    WindowsLicensePolicy.objects.update_or_create(
+        organization_id=runner.organization_id, defaults={"mode": "unlicensed"}
+    )
     return RunnerService(sio_server=AsyncMock())
 
 
@@ -330,7 +339,7 @@ async def test_clone_raises_the_source_resources_to_the_guest_minimum(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_resume_raises_stored_resources_to_the_guest_minimum(runner, user):
+def test_resume_raises_stored_resources_to_the_guest_minimum(runner, user, lifecycle):
     image = built_image(runner, user)
     workspace = qemu_workspace(runner, user, image, status="stopped")
     Workspace.objects.filter(pk=workspace.pk).update(
