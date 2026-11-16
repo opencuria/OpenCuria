@@ -38,7 +38,7 @@ CLAUDE_RELEASE_MANIFEST_SHA256 = (
 )
 # Canonical hash of artifact_manifest.json with this field replaced by "x".
 CLAUDE_ARTIFACT_SPEC_SHA256 = (
-    "ed38148b14be87dcb84c0bf946ba3b3156370821b7582fdf08e2a7371c987aae"
+    "1bd56c51074c9a2a3d62ef82a7f072b0db8c74bb521f2732178118fe09ec74b0"
 )
 CLAUDE_PLATFORM_PINS = {
     "linux-x64": (
@@ -321,12 +321,10 @@ class RuntimeArtifactManager:
         self, url: str, expected_size: int, expected_digest: str, destination: Path
     ) -> None:
         """Stream one fixed URL to an atomic, checksum-verified cache file."""
-        codex_urls = {
-            s["url"] for s in codex_artifact.manifest_entry()["platforms"].values()
-        }
+        codex_limits = codex_artifact.archive_size_limits()
         if (
             not url.startswith("https://downloads.claude.ai/claude-code-releases/")
-            and url not in codex_urls
+            and url not in codex_limits
             and url
             not in {
                 s["url"]
@@ -334,7 +332,7 @@ class RuntimeArtifactManager:
             }
         ):
             raise ArtifactProvisionError("Artifact source is not approved")
-        if url in codex_urls and expected_size > codex_artifact.MAX_ARCHIVE_SIZE:
+        if url in codex_limits and expected_size > codex_limits[url]:
             raise ArtifactProvisionError("Artifact size is outside the allowed limit")
         if expected_size <= 0 or expected_size > ARTIFACT_MAX_DOWNLOAD_SIZE:
             raise ArtifactProvisionError("Artifact size is outside the allowed limit")
@@ -347,7 +345,7 @@ class RuntimeArtifactManager:
                 async with (
                     aiohttp.ClientSession(timeout=ARTIFACT_DOWNLOAD_TIMEOUT) as session,
                     self._download_response(
-                        session, url, url in codex_urls
+                        session, url, url in codex_limits
                     ) as response,
                 ):
                     if response.status != 200:
@@ -895,7 +893,13 @@ class RuntimeArtifactManager:
                     ) from exc
                 if code != 0 or output.strip() != version:
                     raise ArtifactProvisionError("Runtime artifact provisioning failed")
-                entrypoint = "bin/codex-app-server" if is_codex else claude_binary
+                entrypoint = (
+                    codex_artifact.target_spec(
+                        codex_artifact.target_for_platform(platform_key)
+                    ).entrypoint
+                    if is_codex
+                    else claude_binary
+                )
                 guest_path = (
                     f"{guest_runtime_root}/{artifact_id}/{version}/{entrypoint}"
                 )

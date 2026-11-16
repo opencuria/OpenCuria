@@ -6,7 +6,7 @@
       "manifest_url": "https://downloads.claude.ai/claude-code-releases/2.1.321/manifest.json",
       "signature_url": "https://downloads.claude.ai/claude-code-releases/2.1.321/manifest.json.sig",
       "signature_sha256": "0270d98c48cb12c9f956e55d3b0cbae10d7e239f1362bf0ccfaf16c59b20e8a6",
-      "manifest_sha256": "ed38148b14be87dcb84c0bf946ba3b3156370821b7582fdf08e2a7371c987aae",
+      "manifest_sha256": "1bd56c51074c9a2a3d62ef82a7f072b0db8c74bb521f2732178118fe09ec74b0",
       "release_manifest_sha256": "d073d63928081951b871b35780d7abc83c26fa9b8b97f1ace64fc90d4591d325",
       "signing_fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
       "platforms": {
@@ -59,6 +59,11 @@
           "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-aarch64-unknown-linux-musl.tar.gz",
           "sha256": "50bb0d5ce10faa13eb6e7b0b25e1fe9712d686c41b3c3fdff587512064630d5d",
           "size": 145150661
+        },
+        "win32-x64": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-app-server-package-x86_64-pc-windows-msvc.tar.gz",
+          "sha256": "2476ec968c64e9ae47f449446320e47a54d16f5436ce6eb95eec758584f12eb6",
+          "size": 165654104
         }
       }
     }

@@ -90,7 +90,8 @@ def install(archive_source: Path | None) -> Path:
     target = codex["target_for_platform"](
         "linux-x64" if machine in {"x86_64", "amd64"} else "linux-arm64"
     )
-    digest, size = codex["PINS"][target]
+    spec = codex["target_spec"](target)
+    digest, size = spec.sha256, spec.size
     codex["safe_directory"](DESTINATION, create=True)
     lock = os.open(
         DESTINATION / ".install-lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
@@ -111,10 +112,7 @@ def install(archive_source: Path | None) -> Path:
                         with archive_source.open("rb") as source:
                             copy_bounded(source, output, size)
                     else:
-                        url = (
-                            codex["RELEASE_URL"]
-                            + f"codex-app-server-package-{target}.tar.gz"
-                        )
+                        url = codex["package_url"](target)
                         opener = urllib.request.build_opener(ReleaseRedirects())
                         request = urllib.request.Request(
                             url, headers={"User-Agent": "OpenCuria-test-setup"}
@@ -154,7 +152,7 @@ def install(archive_source: Path | None) -> Path:
                 with tarfile.open(archive, "r:gz") as source:
                     for directory in codex["DIRECTORIES"]:
                         (stage / directory).mkdir()
-                    for name in sorted(codex["FILES"]):
+                    for name in sorted(spec.files):
                         with (
                             source.extractfile(name) as payload,
                             (stage / name).open("xb") as output,
@@ -176,7 +174,7 @@ def install(archive_source: Path | None) -> Path:
                             directory.chmod(0o755)
                     shutil.rmtree(stage)
         codex["verify_tree"](final, hashes)
-        binary = final / "bin/codex-app-server"
+        binary = final / spec.entrypoint
         with tempfile.TemporaryDirectory(prefix="opencuria-codex-version-") as home:
             result = subprocess.check_output(
                 [str(binary), "--version"],
