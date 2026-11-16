@@ -250,3 +250,20 @@ class WindowsDesktopSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_recording_is_refused(self):
         with self.assertRaises(ValueError):
             await self.desktop._managed_record_start(self.workspace_id, {})
+
+
+def test_isolated_windows_agents_keep_machine_variables() -> None:
+    """Native agents need SystemDrive & co.; the isolated home is their profile."""
+    from src.runtime.managed_process import MANAGED_CODE, WINDOWS_SYSTEM_ENV
+
+    for name in ("SYSTEMDRIVE", "SYSTEMROOT", "PROGRAMDATA", "PROGRAMFILES", "TEMP"):
+        assert name in WINDOWS_SYSTEM_ENV
+    assert not any(
+        marker in name
+        for name in WINDOWS_SYSTEM_ENV
+        for marker in ("KEY", "TOKEN", "SECRET", "PASSWORD", "PATH")
+        if name != "PATHEXT"
+    )
+    assert f"WINDOWS_SYSTEM_ENV = {WINDOWS_SYSTEM_ENV!r}" in MANAGED_CODE
+    assert "child_env.update(USERPROFILE=profile_dir" in MANAGED_CODE
+    compile(MANAGED_CODE, "managed", "exec")

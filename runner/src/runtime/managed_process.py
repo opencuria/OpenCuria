@@ -46,6 +46,18 @@ WINDOWS_AGENT_PATH = (
     ":/c/Windows/System32:/c/Windows:/c/Windows/System32/Wbem"
     ":/c/Windows/System32/WindowsPowerShell/v1.0"
 )
+#: Machine-wide Windows variables an isolated agent keeps (never secrets).
+#: Without them native programs misbehave, e.g. the shell creates
+#: ``%SystemDrive%\ProgramData`` literally below the working directory.
+WINDOWS_SYSTEM_ENV = (
+    "SYSTEMDRIVE", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "OS",
+    "PROGRAMDATA", "ALLUSERSPROFILE", "PUBLIC", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432", "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION",
+    "NUMBER_OF_PROCESSORS", "COMPUTERNAME", "USERNAME", "USERDOMAIN",
+    "TEMP", "TMP",
+)
 _AGENT_DESKTOP_ENV = {"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"}
 _AGENT_AUTH_ENV = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 _AGENT_FIXED_ENV = {
@@ -271,6 +283,7 @@ MANAGED_CODE = r"""
 import fcntl, json, os, re, shutil, signal, subprocess, sys, time
 """ + GUEST_TOKEN_CODE + f"""
 WINDOWS_AGENT_PATH = {WINDOWS_AGENT_PATH!r}
+WINDOWS_SYSTEM_ENV = {WINDOWS_SYSTEM_ENV!r}
 """ + r"""
 path, action = sys.argv[1:3]
 os.umask(0o077)
@@ -430,8 +443,19 @@ if action == 'start':
         child_env = {'PATH': expected_path, 'HOME': home}
         if sys.platform in ('cygwin', 'msys'):
             # Windows guests: native agents also need the system directories
-            # (PowerShell, cmd), and Claude Code runs its Bash tool in MSYS2.
+            # (PowerShell, cmd) and machine variables, and Claude Code runs its
+            # Bash tool in MSYS2. The isolated home is their user profile, as
+            # HOME is on Linux guests.
             child_env['PATH'] += WINDOWS_AGENT_PATH
+            system = {k.upper(): v for k, v in os.environ.items()}
+            child_env.update({k: system[k] for k in WINDOWS_SYSTEM_ENV if k in system})
+            profile_dir = subprocess.run(['/usr/bin/cygpath', '-w', home], capture_output=True,
+                                         text=True, check=True).stdout.strip()
+            for sub in ('AppData/Roaming', 'AppData/Local'):
+                os.makedirs(home + '/' + sub, mode=0o700, exist_ok=True)
+            child_env.update(USERPROFILE=profile_dir,
+                             APPDATA=profile_dir + '\\AppData\\Roaming',
+                             LOCALAPPDATA=profile_dir + '\\AppData\\Local')
             if profile == 'claude':
                 child_env['CLAUDE_CODE_GIT_BASH_PATH'] = 'C:\\msys64\\usr\\bin\\bash.exe'
         child_env.update(explicit)
