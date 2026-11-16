@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import dataclasses
 import hashlib
 import io
@@ -832,3 +833,128 @@ async def test_codex_windows_package_installs_with_exe_entrypoint(
     assert install[3] == "install" and install[7] == WINDOWS_TARGET
     assert set(json.loads(install[8])) == WINDOWS_FILES
     assert all(not source.exists() for source in runtime.uploads)
+
+
+def test_codex_version_environment_keeps_profile_temporary():
+    home = "/tmp/opencuria-codex-version-x"
+    linux = {"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"}
+    assert codex.version_environment(TARGET, home) == linux
+    windows = codex.version_environment(WINDOWS_TARGET, home)
+    assert windows == {
+        **linux,
+        "USERPROFILE": home,
+        "APPDATA": home,
+        "LOCALAPPDATA": home,
+        "TEMP": home,
+        "TMP": home,
+    }
+
+
+@pytest.fixture
+def cygwin_runtime(monkeypatch):
+    """Simulate MSYS2 Python: runtime DLL lookup, -2 AT_FDCWD, NTFS modes."""
+    loaded = []
+    real = ctypes.CDLL
+
+    def cdll(name, *args, **kwargs):
+        loaded.append(name)
+        if name == "msys-2.0.dll":
+            return real(None, *args, **kwargs)
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    monkeypatch.setattr(codex.ctypes, "CDLL", cdll)
+    return loaded
+
+
+def test_cygwin_publication_uses_the_runtime_dll_renameat2(tmp_path, cygwin_runtime):
+    stage, final = tmp_path / "stage", tmp_path / "final"
+    stage.mkdir()
+    (stage / "new").write_text("new")
+    codex.publish_directory(stage, final)
+    assert cygwin_runtime == ["msys-2.0.dll"]
+    assert (final / "new").read_text() == "new" and not stage.exists()
+
+
+@pytest.mark.parametrize("existing", ["empty", "poisoned"])
+def test_cygwin_publication_never_replaces_existing_directory(
+    tmp_path, cygwin_runtime, existing
+):
+    final = tmp_path / "final"
+    final.mkdir()
+    if existing == "poisoned":
+        (final / "poison").write_text("keep")
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (stage / "new").write_text("new")
+    with pytest.raises(ValueError, match="already exists"):
+        codex.publish_directory(stage, final)
+    assert (stage / "new").exists()
+    assert not (final / "new").exists()
+
+
+def test_cygwin_publication_fails_closed_without_renameat2(tmp_path, monkeypatch):
+    def cdll(name, *args, **kwargs):
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    monkeypatch.setattr(codex.ctypes, "CDLL", cdll)
+    stage, final = tmp_path / "stage", tmp_path / "final"
+    stage.mkdir()
+    with pytest.raises(OSError):
+        codex.publish_directory(stage, final)
+    assert stage.exists() and not final.exists()
+
+
+def _ntfs_like_install(tmp_path):
+    """A correct install as NTFS reports it: writable dirs, no exec bits."""
+    root = tmp_path / "installed"
+    hashes = {}
+    for directory in codex.DIRECTORIES:
+        (root / directory).mkdir(parents=True)
+    for name in sorted(WINDOWS_FILES):
+        data = name.encode()
+        (root / name).write_bytes(data)
+        (root / name).chmod(0o444)
+        hashes[name] = hashlib.sha256(data).hexdigest()
+    return root, hashes
+
+
+def test_ntfs_verification_accepts_synthesized_modes_but_not_changes(
+    tmp_path, monkeypatch
+):
+    root, hashes = _ntfs_like_install(tmp_path)
+    with pytest.raises(ValueError):
+        codex.verify_tree(root, hashes)  # Strict POSIX modes on Linux.
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    codex.verify_tree(root, hashes)
+    helper = root / "codex-path/rg.exe"
+    helper.chmod(0o644)
+    with pytest.raises(ValueError, match="Changed"):
+        codex.verify_tree(root, hashes)
+    helper.chmod(0o444)
+    os.link(helper, tmp_path / "second-link")
+    with pytest.raises(ValueError, match="Changed"):
+        codex.verify_tree(root, hashes)
+    (tmp_path / "second-link").unlink()
+    (root / "bin" / "extra.exe").write_bytes(b"x")
+    with pytest.raises(ValueError):
+        codex.verify_tree(root, hashes)
+    (root / "bin" / "extra.exe").unlink()
+    helper.chmod(0o644)
+    helper.write_bytes(b"poisoned")
+    helper.chmod(0o444)
+    with pytest.raises(ValueError, match="Changed"):
+        codex.verify_tree(root, hashes)
+
+
+def test_verify_tree_requires_hashes_of_a_complete_target_layout(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(codex, "cygwin_runtime", lambda: True)
+    root, hashes = _ntfs_like_install(tmp_path)
+    helper = root / "codex-resources/codex-windows-sandbox-setup.exe"
+    helper.unlink()
+    del hashes["codex-resources/codex-windows-sandbox-setup.exe"]
+    with pytest.raises(ValueError, match="Incomplete"):
+        codex.verify_tree(root, hashes)

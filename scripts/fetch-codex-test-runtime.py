@@ -178,7 +178,7 @@ def install(archive_source: Path | None) -> Path:
         with tempfile.TemporaryDirectory(prefix="opencuria-codex-version-") as home:
             result = subprocess.check_output(
                 [str(binary), "--version"],
-                env={"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"},
+                env=codex["version_environment"](target, home),
                 stderr=subprocess.DEVNULL,
                 timeout=20,
             )

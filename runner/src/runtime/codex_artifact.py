@@ -18,10 +18,12 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 VERSION = "0.166.0"
 RELEASE_URL = "https://github.com/openai/codex/releases/download/rust-v0.166.0/"
 DIRECTORIES = frozenset({"bin", "codex-path", "codex-resources"})
+RENAME_NOREPLACE = 1
 _MIB = 1024 * 1024
 
 
@@ -155,6 +157,23 @@ def manifest_entry() -> dict:
     return {"version": VERSION, "platforms": platforms}
 
 
+def cygwin_runtime() -> bool:
+    """Windows guests run this module in MSYS2 (Cygwin) Python on NTFS."""
+    return sys.platform in {"cygwin", "msys"}
+
+
+def version_environment(target: str, home: str) -> dict[str, str]:
+    """Minimal ``--version`` environment; profile and config stay in ``home``."""
+    env = {"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"}
+    if target_spec(target).executable_suffix == ".exe":
+        # Native Windows programs resolve profile and temp directories from
+        # these. The Cygwin runtime converts the paths and adds SYSTEMROOT and
+        # WINDIR itself.
+        for name in ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
+            env[name] = home
+    return env
+
+
 def sha_file(path: Path) -> str:
     """Hash a file without buffering its contents."""
     with path.open("rb") as source:
@@ -256,10 +275,14 @@ def safe_directory(path: Path, *, create: bool = False) -> None:
 def verify_tree(root: Path, hashes: dict[str, str]) -> None:
     """Reject missing, extra, linked, mutable or changed installed package bytes.
 
-    ``hashes`` holds every file of one target package.
+    ``hashes`` holds every package file. On NTFS the Cygwin runtime synthesizes
+    modes: directories always report owner-write and execute bits follow file
+    names, so there only the read-only state of files is checked. Entry set,
+    types, link counts and bytes stay exact everywhere.
     """
     if not any(set(hashes) == spec.files for spec in TARGETS.values()):
         raise ValueError("Incomplete Codex package hashes")
+    posix_modes = not cygwin_runtime()
     safe_directory(root)
     seen = set()
     for directory, dirs, files in os.walk(root, followlinks=False):
@@ -269,7 +292,7 @@ def verify_tree(root: Path, hashes: dict[str, str]) -> None:
             mode = path.lstat().st_mode
             seen.add(relative)
             if relative in DIRECTORIES:
-                if not stat.S_ISDIR(mode) or mode & 0o222:
+                if not stat.S_ISDIR(mode) or (posix_modes and mode & 0o222):
                     raise ValueError("Unsafe installed Codex directory")
             elif (
                 relative not in hashes
@@ -277,18 +300,44 @@ def verify_tree(root: Path, hashes: dict[str, str]) -> None:
                 or path.lstat().st_nlink != 1
                 or mode & 0o222
                 or sha_file(path) != hashes[relative]
-                or stat.S_IMODE(mode)
-                != (0o444 if relative.endswith(".json") else 0o555)
+                or (
+                    posix_modes
+                    and stat.S_IMODE(mode)
+                    != (0o444 if relative.endswith(".json") else 0o555)
+                )
             ):
                 raise ValueError("Changed installed Codex package")
-    if seen != set(hashes) | DIRECTORIES or root.stat().st_mode & 0o222:
+    if seen != set(hashes) | DIRECTORIES or (
+        posix_modes and root.stat().st_mode & 0o222
+    ):
         raise ValueError("Incomplete installed Codex package")
 
 
+def _renameat2() -> tuple[Any, int]:
+    """Return the C runtime's renameat2 and that runtime's AT_FDCWD."""
+    if not cygwin_runtime():
+        return ctypes.CDLL(None, use_errno=True).renameat2, -100
+    # dlopen(NULL) only exposes the Python executable on Cygwin; the runtime
+    # DLL itself exports renameat2.
+    for name in ("msys-2.0.dll", "cygwin1.dll"):
+        try:
+            return ctypes.CDLL(name, use_errno=True).renameat2, -2
+        except (OSError, AttributeError):
+            continue
+    raise OSError(errno.ENOSYS, "renameat2 is unavailable")
+
+
 def publish_directory(stage: Path, final: Path) -> None:
-    """Atomically publish without replacing even an empty concurrent directory."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename = libc.renameat2
+    """Atomically publish without replacing even an empty concurrent directory.
+
+    Invariant: ``final`` is absent or one complete verified tree, moved by a
+    single rename that fails if anything holds the name. A directory cannot be
+    created first and filled atomically, and plain rename() replaces an empty
+    directory, so both runtimes use renameat2(RENAME_NOREPLACE): Cygwin
+    implements it as an NTFS rename without ReplaceIfExists (EEXIST on
+    collision). The guest lock only serializes cooperating installers.
+    """
+    rename, at_fdcwd = _renameat2()
     rename.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -297,7 +346,8 @@ def publish_directory(stage: Path, final: Path) -> None:
         ctypes.c_uint,
     ]
     rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(stage), -100, os.fsencode(final), 1) != 0:
+    source, destination = os.fsencode(stage), os.fsencode(final)
+    if rename(at_fdcwd, source, at_fdcwd, destination, RENAME_NOREPLACE) != 0:
         error = ctypes.get_errno()
         if error == errno.EEXIST:
             raise ValueError("Codex installation already exists")
@@ -370,7 +420,7 @@ def guest_main() -> None:
         with tempfile.TemporaryDirectory(prefix="opencuria-codex-version-") as home:
             output = subprocess.check_output(
                 [str(final / spec.entrypoint), "--version"],
-                env={"HOME": home, "CODEX_HOME": home, "PATH": "/usr/bin:/bin"},
+                env=version_environment(target, home),
                 stderr=subprocess.DEVNULL,
                 timeout=20,
             )
