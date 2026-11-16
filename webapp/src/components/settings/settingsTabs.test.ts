@@ -14,6 +14,7 @@ describe('resolveSettingsTab', () => {
     'runners',
     'credential-services',
     'image-definitions',
+    'windows',
   ])('accepts the current tab %s', (tab) => {
     expect(resolveSettingsTab(tab)).toBe(tab)
   })

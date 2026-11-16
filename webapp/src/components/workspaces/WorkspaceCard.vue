@@ -18,6 +18,7 @@ import WorkspaceActions from './WorkspaceActions.vue'
 import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
 import WorkspaceRecreateDialog from './WorkspaceRecreateDialog.vue'
 import ImageVersionBadge from '@/components/images/ImageVersionBadge.vue'
+import WorkspaceGuestBadge from './WorkspaceGuestBadge.vue'
 import UsageMeter from '@/components/common/UsageMeter.vue'
 
 const props = withDefaults(
@@ -196,28 +197,31 @@ const disk = computed(() => {
       </div>
 
       <div class="flex min-w-0 items-center justify-between gap-2 border-t border-border/60 pt-3">
-        <Badge
-          :variant="statusVariant"
-          class="min-w-0 shrink gap-1.5 capitalize"
-          :class="
-            !isRunnerOfflineState &&
-            !workspace.intervention_required &&
-            workspace.status === WorkspaceStatus.RUNNING &&
-            !transitionLabel
-              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
-              : ''
-          "
-          :title="statusLabel"
-        >
-          <AlertTriangle v-if="workspace.intervention_required" :size="10" />
-          <WifiOff v-else-if="isRunnerOfflineState" :size="10" />
-          <Loader2 v-else-if="showStatusSpinner" :size="10" class="animate-spin" />
-          <span
-            v-else-if="workspace.status === WorkspaceStatus.RUNNING"
-            class="size-1.5 shrink-0 rounded-full bg-current"
-          />
-          <span class="truncate">{{ statusLabel }}</span>
-        </Badge>
+        <div class="flex min-w-0 items-center gap-1.5">
+          <Badge
+            :variant="statusVariant"
+            class="min-w-0 shrink gap-1.5 capitalize"
+            :class="
+              !isRunnerOfflineState &&
+              !workspace.intervention_required &&
+              workspace.status === WorkspaceStatus.RUNNING &&
+              !transitionLabel
+                ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+                : ''
+            "
+            :title="statusLabel"
+          >
+            <AlertTriangle v-if="workspace.intervention_required" :size="10" />
+            <WifiOff v-else-if="isRunnerOfflineState" :size="10" />
+            <Loader2 v-else-if="showStatusSpinner" :size="10" class="animate-spin" />
+            <span
+              v-else-if="workspace.status === WorkspaceStatus.RUNNING"
+              class="size-1.5 shrink-0 rounded-full bg-current"
+            />
+            <span class="truncate">{{ statusLabel }}</span>
+          </Badge>
+          <WorkspaceGuestBadge :workspace="workspace" />
+        </div>
         <WorkspaceActions
           :workspace="workspace"
           size="sm"

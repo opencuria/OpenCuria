@@ -21,6 +21,7 @@ const SETTINGS_TABS = [
   'runners',
   'credential-services',
   'image-definitions',
+  'windows',
 ] as const
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]

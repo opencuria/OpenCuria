@@ -1844,6 +1844,71 @@ describe("settings API", () => {
     ]);
   });
 
+  it("manages Windows licensing with encoded ids and write-only keys", async () => {
+    const fetch = recordingFetch((_url, init) =>
+      init?.method === "DELETE" && _url.includes("/keys/")
+        ? new Response(null, { status: 204 })
+        : jsonResponse({ mode: "per_user" }),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(client.windowsLicensing.get("org a")).resolves.toEqual({
+      mode: "per_user",
+    });
+    await client.windowsLicensing.update("org-a", {
+      mode: "per_device",
+      max_running: null,
+    });
+    await client.windowsLicensing.addKey("org-a", {
+      product_key: "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
+      label: "Office",
+      seats: 5,
+    });
+    await client.windowsLicensing.updateKey("org-a", "k/1", { seats: 3 });
+    await expect(
+      client.windowsLicensing.deleteKey("org-a", "k/1"),
+    ).resolves.toBeUndefined();
+    await client.windowsLicensing.setUserLicensed("org-a", "7", true);
+    await client.windowsLicensing.setUserLicensed("org-a", "7", false);
+    const base = "/licensing/organizations/org-a/windows/";
+    expect(calls(fetch)).toEqual([
+      ["/licensing/organizations/org%20a/windows/", "GET", undefined],
+      [base, "PATCH", { mode: "per_device", max_running: null }],
+      [
+        `${base}keys/`,
+        "POST",
+        {
+          product_key: "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE",
+          label: "Office",
+          seats: 5,
+        },
+      ],
+      [`${base}keys/k%2F1/`, "PATCH", { seats: 3 }],
+      [`${base}keys/k%2F1/`, "DELETE", undefined],
+      [`${base}users/7/`, "PUT", undefined],
+      [`${base}users/7/`, "DELETE", undefined],
+    ]);
+  });
+
+  it("surfaces Windows license conflicts with their detail and code", async () => {
+    const fetch = recordingFetch(() =>
+      jsonResponse(
+        {
+          detail: "2 workspaces still hold seats of this key.",
+          code: "windows_key_in_use",
+        },
+        409,
+      ),
+    );
+    const client = clientOptions().create(fetch);
+    await expect(
+      client.windowsLicensing.deleteKey("org-a", "k1"),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "windows_key_in_use",
+      message: "2 workspaces still hold seats of this key.",
+    });
+  });
+
   it("drives runners, image builds and deletions", async () => {
     const fetch = recordingFetch((url) =>
       url.endsWith("/metrics/latest/")

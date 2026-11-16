@@ -21,6 +21,10 @@ import {
   versionLabel,
   workspaceRecreateOptions,
 } from "@opencuria/chat-core/imageVersions";
+import {
+  workspaceWindowsView,
+  type WindowsLicenseTone,
+} from "@opencuria/chat-core/windowsLicense";
 import type { Workspace } from "@opencuria/client";
 import type { NativeSymbol } from "../ui/controls.types";
 import type { NativeMenuAction } from "../ui/NativeMenu";
@@ -197,6 +201,25 @@ export function workspaceImageLabel(workspace: Workspace): string | null {
   return (
     versionLabel(workspace.base_image) ?? workspace.base_image_name ?? null
   );
+}
+
+const LICENSE_TONES: Record<WindowsLicenseTone, NativeFormTone> = {
+  ok: "success",
+  busy: "accent",
+  attention: "warning",
+  muted: "muted",
+};
+
+/** "Windows · Activated" for Windows workspaces; null for Linux. */
+export function workspaceSystem(
+  workspace: Workspace,
+): { text: string; tone: NativeFormTone } | null {
+  const view = workspaceWindowsView(workspace);
+  if (!view) return null;
+  return {
+    text: view.text,
+    tone: view.license ? LICENSE_TONES[view.license.tone] : "muted",
+  };
 }
 
 /** Storage almost full, as a short warning; null when there is room. */
