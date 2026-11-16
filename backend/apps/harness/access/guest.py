@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from apps.runners.guest_os import LINUX, WINDOWS, normalize_guest_os
+from common.guest_os import LINUX, WINDOWS, normalize_guest_os
 
 #: Workspace root as seen by shells, runner RPCs and every harness tool.
 HARNESS_WORKSPACE_ROOT = "/workspace"
@@ -31,7 +31,7 @@ class GuestPlatform:
     """What the harness must know about a workspace's guest OS.
 
     Attributes:
-        name: Guest OS identifier (``apps.runners.guest_os``).
+        name: Guest OS identifier (``common.guest_os``).
         display_name: OS name shown to models.
         prompt_context: Environment sentences of the product context.
         native_workspace_root: Workspace root as native guest programs see it.

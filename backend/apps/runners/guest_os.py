@@ -11,9 +11,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
-LINUX = "linux"
-WINDOWS = "windows"
-GUEST_OS_CHOICES = ((LINUX, "Linux"), (WINDOWS, "Windows"))
+# The vocabulary is shared with layers that must not import this app.
+from common.guest_os import GUEST_OS_CHOICES as GUEST_OS_CHOICES
+from common.guest_os import LINUX as LINUX
+from common.guest_os import WINDOWS as WINDOWS
+from common.guest_os import normalize_guest_os as normalize_guest_os
 
 _UBUNTU = re.compile(r"ubuntu:(?P<version>\d{2}\.\d{2})")
 #: Supported Windows 11 recipe values and the edition the runner installs.
@@ -70,11 +72,6 @@ def is_supported_base_distro(base_distro: str | None) -> bool:
     except ValueError:
         return False
     return True
-
-
-def normalize_guest_os(value: str | None) -> str:
-    """Map stored or reported guest OS values to a known one (default Linux)."""
-    return WINDOWS if value == WINDOWS else LINUX
 
 
 def guest_minimums(guest_os: str | None) -> GuestMinimums:
