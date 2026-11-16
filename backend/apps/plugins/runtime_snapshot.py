@@ -13,7 +13,7 @@ No secret values are stored in the snapshot; credential resolution
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 
@@ -42,13 +42,31 @@ class PluginSkillSnapshot:
     position: int
 
 
+class McpServerUnavailableError(RuntimeError):
+    """The MCP server does not run on the workspace's guest OS."""
+
+
+@dataclass(frozen=True)
+class McpServerGuestOverride:
+    """How one guest OS deviates from an MCP server's base definition.
+
+    ``args`` replaces the argument list; a non-empty ``unavailable`` reason
+    means the server cannot run on that guest at all.
+    """
+
+    args: tuple[str, ...] | None = None
+    unavailable: str = ""
+
+
 @dataclass(frozen=True)
 class PluginMcpServerSnapshot:
     """One MCP server definition of an effective plugin.
 
     ``env``/``headers`` values may still contain
     ``{{credential.KEY}}`` placeholders; rendering happens in
-    :func:`apps.plugins.runtime.render_server_config`.
+    :func:`apps.plugins.runtime.render_server_config`. ``guest_overrides``
+    maps a guest OS (``apps.runners.guest_os``) to its deviations; resolve
+    them with :meth:`for_guest` before starting the server.
     """
 
     id: uuid.UUID
@@ -69,6 +87,29 @@ class PluginMcpServerSnapshot:
     request_timeout_seconds: int = 60
     tool_policy: dict = field(default_factory=dict)
     runtime_artifact: dict = field(default_factory=dict)
+    guest_overrides: dict[str, McpServerGuestOverride] = field(default_factory=dict)
+
+    def runs_on(self, guest_os: str) -> bool:
+        """Whether the server can run on *guest_os*."""
+        override = self.guest_overrides.get(guest_os)
+        return override is None or not override.unavailable
+
+    def for_guest(self, guest_os: str) -> PluginMcpServerSnapshot:
+        """Return this server as it runs on *guest_os*.
+
+        Raises:
+            McpServerUnavailableError: If the server does not run there.
+        """
+        override = self.guest_overrides.get(guest_os)
+        if override is None:
+            return self
+        if override.unavailable:
+            raise McpServerUnavailableError(override.unavailable)
+        return replace(
+            self,
+            args=self.args if override.args is None else override.args,
+            guest_overrides={},
+        )
 
 
 @dataclass(frozen=True)

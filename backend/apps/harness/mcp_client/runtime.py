@@ -14,9 +14,13 @@ import anyio
 import structlog
 
 from apps.plugins import runtime as plugin_runtime
-from apps.plugins.runtime_snapshot import PreparedPluginRuntime
+from apps.plugins.runtime_snapshot import (
+    McpServerUnavailableError,
+    PreparedPluginRuntime,
+)
 
 from ..access.environment import ExecutionEnvironmentAccessor
+from ..access.guest import guest_of
 from ..agent_desktop import AgentDesktop
 from ..tools.base import ToolRegistry
 from ..tools.desktop import DesktopTool
@@ -72,10 +76,7 @@ class McpRuntime:
             binding = await accessor.desktop_action("binding", {})
             if not binding.get("ok"):
                 raise RuntimeError("Runner desktop binding is unavailable")
-            environment = {
-                "DISPLAY": binding["display"],
-                "XAUTHORITY": binding["xauthority"],
-            }
+            environment = guest_of(accessor).desktop_environment(binding)
         else:
             environment = self.desktop.environment
         return ExecutionEnvironmentAccessor(accessor, environment)
@@ -99,12 +100,13 @@ class McpRuntime:
         wins deterministically, the colliding server is closed and skipped).
         """
         snapshot = prepared.snapshot
+        guest = guest_of(accessor)
         computer_use_declared = any(
             server.tool_policy.get("desktop_kind") == "computeruse"
             or (plugin.slug == "computer-use" and server.slug == "cua_repl")
             for plugin in snapshot.plugins
             for server in plugin.mcp_servers
-            if server.resources.desktop is not None
+            if server.resources.desktop is not None and server.runs_on(guest.name)
         )
         if self._scope_enabled:
             self.agent_scopes = DesktopAgentScopes(
@@ -128,7 +130,17 @@ class McpRuntime:
             core = {str(name).strip().lower() for name in (core_tool_names or [])}
             for plugin in snapshot.plugins:
                 plaintexts = prepared.plaintexts_for(plugin.id)
-                for server in plugin.mcp_servers:
+                for configured in plugin.mcp_servers:
+                    try:
+                        server = configured.for_guest(guest.name)
+                    except McpServerUnavailableError as exc:
+                        _record_skip(
+                            self.skipped,
+                            plugin=plugin.slug,
+                            server=configured.slug,
+                            error=exc,
+                        )
+                        continue
                     try:
                         rendered_env, rendered_headers = (
                             plugin_runtime.render_server_config(

@@ -66,6 +66,17 @@ PLAYWRIGHT_MCP_ARGS = [
     "--output-dir",
     "/workspace/.opencuria/playwright",
 ]
+#: Windows guests drive Microsoft Edge; the Linux Chrome path and sandbox
+#: flag do not apply there.
+PLAYWRIGHT_MCP_WINDOWS_ARGS = [
+    "-y",
+    "@playwright/mcp@latest",
+    "--isolated",
+    "--browser",
+    "msedge",
+    "--output-dir",
+    "/workspace/.opencuria/playwright",
+]
 #: Display bindings are supplied by the runner, never static environment.
 PLAYWRIGHT_MCP_ENV = {}
 PLAYWRIGHT_MCP_RESOURCES = {"desktop": {"activation": "first_tool"}}

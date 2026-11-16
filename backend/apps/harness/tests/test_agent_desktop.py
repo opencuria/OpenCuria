@@ -1019,3 +1019,193 @@ def test_desktop_tool_description_follows_the_guest() -> None:
     assert "DISPLAY" not in windows and "XAUTHORITY" not in windows
     assert "not visible" in windows
     assert windows.endswith("ends automatically when this agent run finishes.")
+
+
+def _windows_accessor(world):  # type: ignore[no-untyped-def]
+    """The fixture's runner ledger, addressed as a Windows workspace."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    class WindowsAccessor:
+        workspace_id = str(world.workspace)
+        guest = WINDOWS_GUEST
+
+        async def desktop_action(self, action, args=None):  # type: ignore[no-untyped-def]
+            return await world.manager.desktop_action(world.workspace, action, args)
+
+    return WindowsAccessor()
+
+
+def _guest_aware_plugins() -> tuple[EffectivePluginSnapshot, ...]:
+    from apps.plugins.runtime import GLOBAL_SERVER_GUEST_OVERRIDES
+    from apps.plugins.services import PLAYWRIGHT_MCP_ARGS
+
+    servers = {
+        "computer-use": ("cua_repl", ["--stdio"]),
+        "playwright": ("playwright", PLAYWRIGHT_MCP_ARGS),
+    }
+    return tuple(
+        EffectivePluginSnapshot(
+            id=uuid4(),
+            name=plugin,
+            slug=plugin,
+            description="",
+            organization_id=None,
+            is_global=True,
+            mcp_servers=(
+                PluginMcpServerSnapshot(
+                    id=uuid4(),
+                    name=plugin,
+                    slug=server,
+                    transport="stdio",
+                    command="npx",
+                    args=tuple(args),
+                    resources=PluginResourcesSnapshot(
+                        desktop=DesktopResourceSnapshot(activation="first_tool")
+                    ),
+                    guest_overrides=dict(
+                        GLOBAL_SERVER_GUEST_OVERRIDES[(plugin, server)]
+                    ),
+                ),
+            ),
+        )
+        for plugin, (server, args) in servers.items()
+    )
+
+
+async def test_windows_runtime_skips_computer_use_and_runs_edge_playwright(
+    desktop_workspace, monkeypatch
+):
+    """Windows: no Computer Use, Edge Playwright, no X11 env, working leases."""
+    from apps.plugins.services import PLAYWRIGHT_MCP_WINDOWS_ARGS
+
+    world = desktop_workspace
+    accessor = _windows_accessor(world)
+    opened = []
+
+    async def open_connection(conn, accessor):
+        opened.append(conn)
+        conn._accessor = accessor
+        conn._session = AsyncMock()
+        return []
+
+    monkeypatch.setattr(McpServerConnection, "open", open_connection)
+    prepared = PreparedPluginRuntime(
+        WorkspacePluginSnapshot(
+            workspace_id=world.workspace,
+            organization_id=uuid4(),
+            plugins=_guest_aware_plugins(),
+        )
+    )
+    runtime = McpRuntime()
+    try:
+        await runtime.setup(prepared=prepared, accessor=accessor)
+        assert runtime.skipped == [
+            {
+                "plugin": "computer-use",
+                "server": "cua_repl",
+                "error": "McpServerUnavailableError: skipped (Computer Use is "
+                "not available for Windows workspaces)",
+            }
+        ]
+        assert [conn.plugin_slug for conn in opened] == ["playwright"]
+        assert opened[0].command == ["npx", *PLAYWRIGHT_MCP_WINDOWS_ARGS]
+        assert "--no-sandbox" not in opened[0].command
+        assert "--executable-path" not in opened[0].command
+        assert runtime.desktop.kind == "mcp"
+        assert runtime.desktop.environment == {}
+        status = await runtime.desktop.action("start")
+        assert status["own_claim"] and "DISPLAY" not in status
+        assert DesktopTool.name not in runtime.register_tools(ToolRegistry())
+        execution = await runtime.execution_accessor(accessor)
+        assert execution._environment == {}
+    finally:
+        await runtime.aclose()
+    assert not await world.store.list_unfinished(str(world.workspace))
+
+
+async def test_linux_runtime_keeps_both_servers_and_the_x11_binding(
+    desktop_workspace, monkeypatch
+):
+    """The same seeded servers run unchanged on Linux workspaces."""
+    from apps.plugins.services import PLAYWRIGHT_MCP_ARGS
+
+    world = desktop_workspace
+    opened = []
+
+    async def open_connection(conn, accessor):
+        opened.append(conn)
+        conn._accessor = accessor
+        conn._session = AsyncMock()
+        return []
+
+    monkeypatch.setattr(McpServerConnection, "open", open_connection)
+    prepared = PreparedPluginRuntime(
+        WorkspacePluginSnapshot(
+            workspace_id=world.workspace,
+            organization_id=uuid4(),
+            plugins=_guest_aware_plugins(),
+        )
+    )
+    runtime = McpRuntime()
+    try:
+        await runtime.setup(prepared=prepared, accessor=world.accessor)
+        assert runtime.skipped == []
+        assert [conn.plugin_slug for conn in opened] == ["computer-use", "playwright"]
+        assert opened[1].command == ["npx", *PLAYWRIGHT_MCP_ARGS]
+        assert runtime.desktop.environment == {
+            "DISPLAY": ":1",
+            "XAUTHORITY": "/root/.Xauthority",
+        }
+    finally:
+        await runtime.aclose()
+
+
+async def test_windows_execution_accessor_without_plugins_has_no_x11_env(
+    desktop_workspace,
+):
+    """Agents in Windows guests get no DISPLAY/XAUTHORITY from the binding."""
+    world = desktop_workspace
+    runtime = McpRuntime(scope_enabled=False)
+    windows = await runtime.execution_accessor(_windows_accessor(world))
+    linux = await runtime.execution_accessor(world.accessor)
+    assert windows._environment == {}
+    assert windows.guest.name == "windows"
+    assert linux._environment == {"DISPLAY": ":1", "XAUTHORITY": "/root/.Xauthority"}
+
+
+async def test_windows_desktop_server_connection_gets_no_x11_env(
+    desktop_workspace, monkeypatch
+):
+    """A desktop MCP server in a Windows guest keeps only its declared env."""
+    world = desktop_workspace
+    accessor = _windows_accessor(world)
+    desktop = AgentDesktop(accessor, str(uuid4()), kind="mcp")
+    await desktop.prepare()
+    conn = McpServerConnection(
+        plugin_id="p",
+        plugin_slug="playwright",
+        plugin_name="playwright",
+        server_id="s",
+        server_slug="playwright",
+        server_name="s",
+        transport="stdio",
+        command=["npx"],
+        cwd="/workspace",
+        env={"FOO": "bar"},
+        agent_desktop=desktop,
+        desktop_lease=desktop.lease,
+        desktop_activation="first_tool",
+    )
+
+    async def nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(McpServerConnection, "_open_transport", nothing)
+    monkeypatch.setattr(McpServerConnection, "_open_session", nothing)
+    monkeypatch.setattr(McpServerConnection, "_discover", nothing)
+    try:
+        await conn.open(accessor)
+        assert conn.env == {"FOO": "bar"}
+    finally:
+        await conn.aclose()
+        await desktop.aclose()
