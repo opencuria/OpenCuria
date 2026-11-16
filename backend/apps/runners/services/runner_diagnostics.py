@@ -66,7 +66,8 @@ DIAGNOSTICS: dict[str, tuple[str, str]] = {
         "Set RUNNER_WINDOWS_ISO on the runner, then build again.",
     ),
     "windows_host_unsupported": (
-        "The runner host cannot run Windows guests (Secure Boot firmware or TPM missing).",
+        "The runner host cannot run Windows guests "
+        "(Secure Boot firmware or TPM missing).",
         "Install ovmf and swtpm on the runner host, then build again.",
     ),
 }

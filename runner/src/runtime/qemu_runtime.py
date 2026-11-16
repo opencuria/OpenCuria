@@ -57,10 +57,10 @@ from .diagnostics import (
 )
 from .guest_os import (
     GUEST_OS_VALUES,
-    WINDOWS,
-    WINDOWS_STATE_DIR,
     LINUX,
     METADATA_NS,
+    WINDOWS,
+    WINDOWS_STATE_DIR,
     GuestBootstrapError,
     GuestOS,
     SeedSpec,
@@ -71,18 +71,24 @@ from .guest_os import (
 from .inventory import RuntimeInventory, StorageResource
 from .linux_seed import (
     GUEST_SSH_MAX_SESSIONS as _GUEST_SSH_MAX_SESSIONS,
-    GUEST_SSH_SESSIONS_CONF as _GUEST_SSH_SESSIONS_CONF,
+)
+from .linux_seed import (
+    GUEST_SSH_SESSIONS_CONF as _GUEST_SSH_SESSIONS_CONF,  # noqa: F401 - kept name
+)
+from .linux_seed import (
     GUEST_SSH_SESSIONS_RELOADED as _GUEST_SSH_SESSIONS_RELOADED,
+)
+from .linux_seed import (
     GUEST_SSH_SESSIONS_SCRIPT as _GUEST_SSH_SESSIONS_SCRIPT,
 )
-from .recovery import RecoveryConflict
-from .rfb import RFBClient
 from .managed_process import (
     ProcessProfile,
     isolated_agent_env_preamble,
     managed_argv,
     managed_isolated_argv,
 )
+from .recovery import RecoveryConflict
+from .rfb import RFBClient
 from .storage import (
     drain_cancellation,
     sha256_digest,
@@ -1832,7 +1838,6 @@ class QemuRuntime(RuntimeBackend):
     @storage_mutation
     async def remove_workspace(self, instance_id: str) -> None:
         """Destroy and undefine the VM, its network, disk files and host key."""
-        disk = self._disk_path(instance_id)
         await self._assert_workspace_resources_unconsumed(instance_id)
 
         await self._invalidate_ssh(instance_id)

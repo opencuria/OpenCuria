@@ -79,9 +79,7 @@ def test_per_device_create_takes_oldest_key_with_a_free_seat(
         newer.id,
     ]
     assert {_row(ws).kind for ws in (first, second, third)} == {"device_key"}
-    assert {_row(ws).activation_status for ws in (first, second, third)} == {
-        "pending"
-    }
+    assert {_row(ws).activation_status for ws in (first, second, third)} == {"pending"}
     before = Workspace.objects.count()
     with pytest.raises(ConflictError) as error:
         create(runner, member)
@@ -100,9 +98,7 @@ def test_per_device_is_the_default_and_needs_a_key(runner, member):
     assert not Workspace.objects.exists()
 
 
-def test_per_user_create_requires_an_owner_license(
-    runner, admin, member, licenses
-):
+def test_per_user_create_requires_an_owner_license(runner, admin, member, licenses):
     _policy(runner.organization, mode="per_user")
     with pytest.raises(ConflictError) as error:
         create(runner, member)
@@ -135,9 +131,7 @@ def test_running_cap_on_create(runner, member):
     assert _row(create(runner, member)).kind == "unlicensed"
 
 
-def test_existing_windows_workspaces_get_a_row_and_count_as_running(
-    runner, member
-):
+def test_existing_windows_workspaces_get_a_row_and_count_as_running(runner, member):
     """The licensing migration covers workspaces created before licensing."""
     migration = import_module(
         "apps.licensing.migrations.0002_license_existing_windows_workspaces"
@@ -172,9 +166,7 @@ def test_existing_windows_workspaces_get_a_row_and_count_as_running(
     assert error.value.code == "windows_running_limit"
 
 
-def test_device_seat_always_starts_after_a_mode_change(
-    runner, admin, member, licenses
-):
+def test_device_seat_always_starts_after_a_mode_change(runner, admin, member, licenses):
     key = _key(licenses, runner.organization, admin, 1)
     workspace = settle(create(runner, member), WorkspaceStatus.STOPPED)
     licenses.update_policy(
@@ -273,9 +265,7 @@ def test_workspace_without_a_row_is_admitted_like_a_create(
     assert _row(legacy).product_key_id == key.id
 
 
-def test_recreate_keeps_the_license_of_the_workspace(
-    runner, admin, member, licenses
-):
+def test_recreate_keeps_the_license_of_the_workspace(runner, admin, member, licenses):
     """A reset never re-decides the license, even if a start would be refused."""
     _policy(runner.organization, mode="per_user")
     _grant(licenses, runner.organization, admin, member)
@@ -335,9 +325,7 @@ def test_preflight_rejects_without_writes(runner, member, licenses):
     assert not WindowsLicensePolicy.objects.exists()
 
 
-def test_preflight_workspace_allows_a_held_device_seat(
-    runner, admin, member, licenses
-):
+def test_preflight_workspace_allows_a_held_device_seat(runner, admin, member, licenses):
     _key(licenses, runner.organization, admin, 1)
     workspace = settle(create(runner, member), WorkspaceStatus.STOPPED)
     # The only seat is held by this workspace itself.

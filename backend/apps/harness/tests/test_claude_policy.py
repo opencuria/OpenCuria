@@ -401,7 +401,12 @@ def test_linux_guest_keeps_the_existing_canonical_paths() -> None:
         "Read", {"file_path": "C:\\workspace\\a"}, rules, LINUX_GUEST
     )
     assert action == "/workspace/C:\\workspace\\a"
-    assert _windows_decision(
-        "Bash", {"command": "ls /c/workspace"}, {**rules, "external_directory": "deny"},
-        LINUX_GUEST,
-    )[0] == "deny"
+    assert (
+        _windows_decision(
+            "Bash",
+            {"command": "ls /c/workspace"},
+            {**rules, "external_directory": "deny"},
+            LINUX_GUEST,
+        )[0]
+        == "deny"
+    )

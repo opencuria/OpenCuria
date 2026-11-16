@@ -104,9 +104,7 @@ def test_heartbeat_observed_removal_frees_the_seat(runner, member, seat):
     assert not _held(workspace)
 
 
-def test_heartbeat_observations_other_than_removal_keep_the_seat(
-    runner, member, seat
-):
+def test_heartbeat_observations_other_than_removal_keep_the_seat(runner, member, seat):
     workspace = settle(create(runner, member), WorkspaceStatus.STOPPED)
 
     assert WorkspaceRepository.reconcile_heartbeat_status(

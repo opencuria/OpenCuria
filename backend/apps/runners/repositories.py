@@ -21,7 +21,6 @@ from django.utils import timezone
 from apps.licensing.repositories import WindowsWorkspaceLicenseRepository
 
 from .disk_usage import WorkspaceDiskUsage
-from .guest_os import guest_os_for_distro
 from .enums import (
     RunnerStatus,
     TaskStatus,
@@ -29,6 +28,7 @@ from .enums import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .guest_os import guest_os_for_distro
 from .image_assignment_repository import ImageAssignmentRepository
 from .locking import lock_runner
 from .models import (

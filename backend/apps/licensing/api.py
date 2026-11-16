@@ -194,9 +194,7 @@ def grant_windows_user_license(request: HttpRequest, org_id: uuid.UUID, user_id:
     response={200: WindowsLicensingOut, **_ERRORS},
     summary="Revoke a Windows user license",
 )
-def revoke_windows_user_license(
-    request: HttpRequest, org_id: uuid.UUID, user_id: int
-):
+def revoke_windows_user_license(request: HttpRequest, org_id: uuid.UUID, user_id: int):
     """Revoke a user license; running workspaces keep running."""
     if not check_api_key_permission(request, APIKeyPermission.ORGANIZATIONS_WRITE):
         return api_key_permission_denied(APIKeyPermission.ORGANIZATIONS_WRITE)

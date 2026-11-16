@@ -48,9 +48,7 @@ def _row(workspace) -> WindowsWorkspaceLicense:
     return WindowsWorkspaceLicense.objects.get(workspace=workspace)
 
 
-def test_activation_payload_per_license_kind(
-    runner, admin, member, licenses
-):
+def test_activation_payload_per_license_kind(runner, admin, member, licenses):
     licenses.add_key(
         org_id=runner.organization_id, user=admin, product_key=product_key(7)
     )
@@ -118,9 +116,7 @@ def test_resumed_result_records_the_activation(service, runner, member):
 @pytest.mark.parametrize(
     "activation", [{"status": "licensed"}, {"code": "0x1"}, "activated", None, 7]
 )
-def test_unknown_activation_results_are_ignored(
-    service, runner, member, activation
-):
+def test_unknown_activation_results_are_ignored(service, runner, member, activation):
     _policy(runner.organization, mode="unlicensed")
     workspace = create(runner, member)
 

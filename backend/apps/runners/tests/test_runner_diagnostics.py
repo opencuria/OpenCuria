@@ -261,11 +261,16 @@ def test_every_runner_diagnostic_code_has_user_wording():
 
     from apps.runners.services.runner_diagnostics import DIAGNOSTICS
 
-    source = (
-        Path(__file__).resolve().parents[4] / "runner" / "src" / "runtime" / "diagnostics.py"
-    ).read_text()
+    runtime = Path(__file__).resolve().parents[4] / "runner" / "src" / "runtime"
+    source = (runtime / "diagnostics.py").read_text()
     codes = set(re.findall(r'^[A-Z_]+ = "([a-z_]+)"$', source, re.M))
     internal = {"workspace_unreachable", "interrupted", "handler_failed"}
     assert codes - internal <= DIAGNOSTICS.keys()
-    for code in ("generalize_failed", "windows_media_unavailable", "windows_host_unsupported"):
-        assert failure_message({"diagnostic_code": code}).startswith(DIAGNOSTICS[code][0])
+    windows = (
+        "generalize_failed",
+        "windows_media_unavailable",
+        "windows_host_unsupported",
+    )
+    for code in windows:
+        message = failure_message({"diagnostic_code": code})
+        assert message.startswith(DIAGNOSTICS[code][0])

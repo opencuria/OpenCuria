@@ -17,8 +17,6 @@ from typing import Any
 
 from .runtime.diagnostics import CODES, INTERRUPTED, failure_code
 
-
-
 #: Payload fields that carry secrets or recipe contents. They are resolved anew
 #: at delivery and never written to the journal.
 SECRET_FIELDS = frozenset(

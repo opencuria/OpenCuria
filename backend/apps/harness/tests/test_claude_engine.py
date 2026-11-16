@@ -1429,6 +1429,7 @@ async def test_native_edit_snapshots_map_windows_paths() -> None:
     assert NativeFileChangeTracker.safe_workspace_path("C:\\workspace\\a") == (
         "/workspace/C:\\workspace\\a"
     )
-    assert NativeFileChangeTracker.safe_workspace_path(
-        "/c/workspace/a", WINDOWS_GUEST
-    ) == "/workspace/a"
+    assert (
+        NativeFileChangeTracker.safe_workspace_path("/c/workspace/a", WINDOWS_GUEST)
+        == "/workspace/a"
+    )

@@ -1473,4 +1473,7 @@ def test_guest_os_selects_the_viewer_and_manifests_are_typed():
     assert {"vnc.html", "core/rfb.js", "app/ui.js", "defaults.json"} <= files.keys()
     for path in files:
         assert kasmvnc_client.lookup_client_file(f"/{path}", kasmvnc_client.NOVNC)
-    assert kasmvnc_client.lookup_client_file("/dist/main.bundle.js", kasmvnc_client.NOVNC) is None
+    missing = kasmvnc_client.lookup_client_file(
+        "/dist/main.bundle.js", kasmvnc_client.NOVNC
+    )
+    assert missing is None

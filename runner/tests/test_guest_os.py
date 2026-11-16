@@ -321,7 +321,7 @@ async def test_linux_capture_publishes_the_source_disk_unchanged(tmp_path) -> No
     )
     runtime._prepare_capture_copy.assert_not_awaited()
     source, disk, _, manifest = runtime._publish_capture.await_args.args
-    assert disk == runtime._disk_path("ws")
+    assert (source, disk) == ("ws", runtime._disk_path("ws"))
     assert "guest_os" not in manifest
 
 

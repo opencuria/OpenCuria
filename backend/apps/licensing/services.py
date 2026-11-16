@@ -377,9 +377,7 @@ class WindowsLicenseService:
                 "activation_status": row.activation_status,
                 "activation_code": row.activation_code,
             }
-            for workspace_id, row in self.workspaces.states_many(
-                workspace_ids
-            ).items()
+            for workspace_id, row in self.workspaces.states_many(workspace_ids).items()
         }
 
     # -- Administration --------------------------------------------------------

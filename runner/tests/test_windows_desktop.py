@@ -12,16 +12,16 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import aiohttp
 import pytest
 
 from src.config import RunnerSettings
 from src.interfaces.desktop_proxy import DesktopProxy
-from src.models import DesktopSession, WorkspaceInfo
+from src.models import WorkspaceInfo
 from src.runtime.display_stream import DisplayStream, novnc_file
 from src.runtime.rfb import RFBClient, RFBError
 from src.service import WorkspaceService
 from src.services.capture_fence import CaptureFence
+
 
 class FakeQemuDisplay:
     """An RFB 3.8 server speaking the handshake of QEMU's VNC display."""

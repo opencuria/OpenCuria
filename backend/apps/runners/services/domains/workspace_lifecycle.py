@@ -733,9 +733,7 @@ class WorkspaceLifecycleService:
                 exclude_workspace_id=workspace.id,
             )
             # The recreate boots a workspace that is not running.
-            await sync_to_async(WindowsLicenseService().preflight_recreate)(
-                workspace
-            )
+            await sync_to_async(WindowsLicenseService().preflight_recreate)(workspace)
 
         try:
             await sync_to_async(
