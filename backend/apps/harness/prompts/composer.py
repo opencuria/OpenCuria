@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ..access.base import HARNESS_WORKSPACE_ROOT
+from ..access.guest import guest_of
 from ..agents.definitions import AgentDefinition
 from .opencuria import opencuria_context
 
@@ -162,7 +163,8 @@ async def compose_system_prompt(
         tools: Filtered tool schemas offered to the model.
         subagents: Name -> description for the ``task`` tool.
         accessor: Workspace accessor for the ``AGENTS.md`` walk-up
-            (None skips project context).
+            (None skips project context); its guest OS shapes the
+            environment text.
         cwd: Working directory the walk-up starts from.
         now: Timestamp for the environment section (defaults to UTC).
         skills: Extension point (M5/M7): skill names/blobs to append.
@@ -195,7 +197,8 @@ async def compose_system_prompt(
             "question tool", "mcp__opencuria__question tool"
         )
     sections: list[str] = [agent_prompt]
-    product_context = opencuria_context(agent)
+    guest = guest_of(accessor)
+    product_context = opencuria_context(agent, guest)
     if product_context:
         sections.append(product_context)
     sources: list[str] = []
@@ -213,7 +216,7 @@ async def compose_system_prompt(
     env_lines = [
         "# Environment",
         f"Date: {moment.strftime('%Y-%m-%d')}",
-        "Platform: Linux",
+        f"Platform: {guest.display_name}",
         f"Working directory: {cwd}",
         f"Mode: {mode} (plan = scope and propose; "
         "build = implement intended changes directly)",

@@ -37,7 +37,9 @@ def test_linux_guest_reproduces_todays_values() -> None:
     assert LINUX_GUEST.native_shell == "/bin/sh"
     assert LINUX_GUEST.case_sensitive_paths is True
     assert (
-        LINUX_GUEST.artifact_executable("/opt/opencuria/runtimes/claude-agent/1", "claude")
+        LINUX_GUEST.artifact_executable(
+            "/opt/opencuria/runtimes/claude-agent/1", "claude"
+        )
         == "/opt/opencuria/runtimes/claude-agent/1/claude"
     )
     assert LINUX_GUEST.desktop_environment(
@@ -54,8 +56,10 @@ def test_linux_guest_reproduces_todays_values() -> None:
         ("C:\\workspace\\", "/workspace"),
         ("/c/workspace/a.py", "/workspace/a.py"),
         ("/C/workspace", "/workspace"),
-        ("C:/workspace/.opencuria\\config\\projects\\x.jsonl",
-         "/workspace/.opencuria/config/projects/x.jsonl"),
+        (
+            "C:/workspace/.opencuria\\config\\projects\\x.jsonl",
+            "/workspace/.opencuria/config/projects/x.jsonl",
+        ),
         ("C:\\\\workspace\\\\a", "/workspace/a"),
         ("C:\\workspace\\sub\\..\\a.py", "/workspace/a.py"),
         ("/workspace/a\\b", "/workspace/a/b"),
@@ -150,7 +154,9 @@ class _Service:
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_create_harness_accessor_serves_the_image_guest(harness_workspace) -> None:
+async def test_create_harness_accessor_serves_the_image_guest(
+    harness_workspace,
+) -> None:
     from asgiref.sync import sync_to_async
 
     from apps.runners.models import ImageInstance

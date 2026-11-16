@@ -16,6 +16,7 @@ from typing import Any, TypeVar
 import anyio
 
 from ...access.base import WorkspaceAccessor, sanitize_exec_workdir
+from ...access.guest import guest_of
 from ...agents.definitions import get_agent
 from ...desktop_leases import DesktopLease
 from ...mcp_client.scopes import close_desktop_agent_scope
@@ -420,6 +421,7 @@ class CodexEngine:
             )
         home = home_for(opts.session_id)
         cwd = sanitize_exec_workdir(opts.cwd)
+        guest = guest_of(self.accessor)
         opts.once_approved = set()
         self.terminal = asyncio.Event()
         self.turn_ready = asyncio.Event()
@@ -493,7 +495,7 @@ class CodexEngine:
         # This is an authorized disposable workspace. Let Codex discover its
         # native project instructions, skills, MCP servers and configuration.
         settings["projects"] = {cwd: {"trust_level": "trusted"}}
-        instructions = opencuria_context(self.agent)
+        instructions = opencuria_context(self.agent, guest)
         if opts.authorize_file_read is None:
             opts.authorize_file_read = self._authorize_read
         content = await user_input(

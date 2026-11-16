@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.access.guest import LINUX_GUEST
 from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.engines.claude.runtime_state import ClaudeRuntimeState
@@ -213,7 +214,7 @@ async def test_real_cli_reuses_binding_with_minimal_extension_in_plan(
     assert root_requests
     for request in root_requests:
         system = _system_text(request)
-        assert system.count(opencuria_context(get_agent("build"))) == 1
+        assert system.count(opencuria_context(get_agent("build"), LINUX_GUEST)) == 1
         assert "Claude Code" in system
         assert get_agent("build").system_prompt not in system
         assert get_agent("plan").system_prompt not in system
@@ -521,7 +522,7 @@ async def test_real_cli_keeps_native_read_and_mcp_schemas_without_prompt_duplica
     mcp_name = f"mcp__opencuria__{note.name}"
     assert names.count(mcp_name) == 1
     system = _system_text(provider_request)
-    assert system.count(opencuria_context(get_agent("build"))) == 1
+    assert system.count(opencuria_context(get_agent("build"), LINUX_GUEST)) == 1
     assert "# OpenCuria tools" not in system
     assert "# Available tools" not in system
     assert f"- {mcp_name}:" not in system
@@ -671,7 +672,7 @@ async def test_real_cli_task_child_gets_shared_context_and_scoped_tools(
     assert task_call["prompt"] == task_args["prompt"]
     assert task_call["subagent_type"] == subagent_type
     assert "CHILD_PROJECT_CONTEXT_MARKER" not in system
-    assert system.count(opencuria_context(get_agent(subagent_type))) == 1
+    assert system.count(opencuria_context(get_agent(subagent_type), LINUX_GUEST)) == 1
     assert "# OpenCuria tools" not in system
     assert "# Environment" not in system
 
