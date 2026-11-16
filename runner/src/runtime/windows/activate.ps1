@@ -4,6 +4,7 @@
 # a product key never appears in a command line. Prints one JSON line
 # {"status": "activated"|"failed"|"not_activated", "code": "<diagnostic>"}.
 # The key is removed from the registry after installation (slmgr /cpky).
+# Mode "none" removes a KMS setup key left by a former per-user license.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $WindowsApplication = '55c92734-d682-4d71-983e-d6ec3f16059f'
@@ -37,6 +38,10 @@ function Get-ErrorCode($ErrorRecord) {
     return ('0x{0:X8}' -f ($hresult -band 0xFFFFFFFF))
 }
 
+function Get-Edition {
+    (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
+}
+
 function Get-WindowsProduct {
     Get-CimInstance SoftwareLicensingProduct -Filter (
         "ApplicationID='$WindowsApplication' AND PartialProductKey IS NOT NULL"
@@ -49,12 +54,22 @@ try {
     switch ($config.mode) {
         'none' {
             $product = Get-WindowsProduct
+            $setupKey = $Gvlk[(Get-Edition)]
+            if ($product -and $setupKey -and $product.PartialProductKey -eq $setupKey.Substring(24)) {
+                # A former per-user license must not keep activating against
+                # the organization's KMS. Keys users entered themselves stay.
+                # Without any key, refreshing the license status fails.
+                Invoke-CimMethod -InputObject $service -MethodName ClearKeyManagementServiceMachine | Out-Null
+                Invoke-CimMethod -InputObject $service -MethodName ClearKeyManagementServicePort | Out-Null
+                Invoke-CimMethod -InputObject $product -MethodName UninstallProductKey | Out-Null
+                $product = Get-WindowsProduct
+            }
             if ($product -and $product.LicenseStatus -eq 1) { Write-Result 'activated' }
             Write-Result 'not_activated'
         }
         'key' { $key = [string] $config.product_key }
         'kms' {
-            $edition = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID
+            $edition = Get-Edition
             $key = $Gvlk[$edition]
             if (-not $key) { Write-Result 'failed' "edition_$edition" }
         }
