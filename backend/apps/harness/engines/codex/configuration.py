@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from ...access.guest import LINUX_GUEST, GuestPlatform
+
 if TYPE_CHECKING:
     from .auth import CodexAuthConfiguration
 
@@ -23,9 +25,16 @@ def _toml(value: Any) -> str:
 
 
 def runtime_settings(
-    auth: CodexAuthConfiguration, model: str, *, readonly: bool
+    auth: CodexAuthConfiguration,
+    model: str,
+    *,
+    readonly: bool,
+    guest: GuestPlatform = LINUX_GUEST,
 ) -> tuple[dict[str, Any], str, str]:
-    """Return authoritative pinned-CLI overrides and the provider wire model."""
+    """Return authoritative pinned-CLI overrides and the provider wire model.
+
+    Commands Codex spawns itself use the guest's native executable paths.
+    """
     provider = "openrouter" if auth.provider_id == "openrouter" else "openai"
     bare = model.split("/", 1)[1]
     # Official OpenRouter Codex guide requires ~ before the vendor/model slug.
@@ -64,7 +73,7 @@ def runtime_settings(
             "request_max_retries": 0,
             "stream_max_retries": 0,
             "auth": {
-                "command": "/bin/sh",
+                "command": guest.native_shell,
                 "args": ["-c", 'printf %s "$OPENCURIA_CODEX_API_KEY"'],
                 "timeout_ms": 5000,
             },

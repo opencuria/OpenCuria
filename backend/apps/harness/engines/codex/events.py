@@ -18,6 +18,38 @@ NON_TOOL_ITEMS = {
 }
 
 
+def workspace_paths(
+    item: dict[str, Any], to_workspace_path: Callable[[str], str | None]
+) -> dict[str, Any]:
+    """Return *item* with native guest paths of workspace files as /workspace.
+
+    Native Windows Codex reports ``C:\\workspace\\...`` in ``cwd``, command
+    actions, file changes and image paths. *to_workspace_path* is the guest's
+    translation; paths it cannot place in the workspace keep their spelling.
+    """
+
+    def mapped(value: Any) -> Any:
+        if not isinstance(value, str) or not value:
+            return value
+        path = to_workspace_path(value)
+        return value if path is None else path
+
+    result = dict(item)
+    for key in ("cwd", "path", "savedPath"):
+        if key in result:
+            result[key] = mapped(result[key])
+    for key in ("commandActions", "changes"):
+        entries = result.get(key)
+        if isinstance(entries, list):
+            result[key] = [
+                {**entry, "path": mapped(entry.get("path"))}
+                if isinstance(entry, dict) and "path" in entry
+                else entry
+                for entry in entries
+            ]
+    return result
+
+
 def presentation(item: dict[str, Any]) -> tuple[str, str, dict[str, Any], str]:
     """Return canonical display tool, title, arguments and bounded native result."""
     kind = item.get("type", "tool")
@@ -133,12 +165,14 @@ class CodexEventProjector:
         model: Callable[[], str],
         is_managed_tool: Callable[[str], bool],
         image_attachments: Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]],
+        to_workspace_path: Callable[[str], str | None] = lambda path: path,
     ) -> None:
         """Bind narrow ports; query run inputs when their events arrive."""
         self._emit = emit
         self._model = model
         self._is_managed_tool = is_managed_tool
         self._image_attachments = image_attachments
+        self._to_workspace_path = to_workspace_path
         self.calls: dict[str, tuple[str, str | None]] = {}
         self.finished: set[str] = set()
         self.children: dict[str, dict[str, Any]] = {}
@@ -175,6 +209,7 @@ class CodexEventProjector:
             return
         if len(self.calls) >= 4096:
             raise ValueError("Codex native tool count limit reached")
+        item = workspace_paths(item, self._to_workspace_path)
         tool, title, args, output = presentation(item)
         if key in self.finished:
             return

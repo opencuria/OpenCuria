@@ -191,6 +191,7 @@ class CodexEngine:
                 accessor=self.accessor,
                 authorize_read=self._authorize_read,
             ),
+            to_workspace_path=guest_of(self.accessor).to_workspace_path,
         )
 
     async def _send(self, event: dict[str, Any], parent: str | None = None) -> None:
@@ -422,6 +423,8 @@ class CodexEngine:
         home = home_for(opts.session_id)
         cwd = sanitize_exec_workdir(opts.cwd)
         guest = guest_of(self.accessor)
+        # JSON-RPC payloads reach native Codex unconverted: send its own cwd.
+        native_cwd = guest.to_native_path(cwd)
         opts.once_approved = set()
         self.terminal = asyncio.Event()
         self.turn_ready = asyncio.Event()
@@ -490,11 +493,11 @@ class CodexEngine:
             or restricted
         )
         settings, provider_name, wire_model = runtime_settings(
-            self.auth, model, readonly=readonly
+            self.auth, model, readonly=readonly, guest=guest
         )
         # This is an authorized disposable workspace. Let Codex discover its
         # native project instructions, skills, MCP servers and configuration.
-        settings["projects"] = {cwd: {"trust_level": "trusted"}}
+        settings["projects"] = {native_cwd: {"trust_level": "trusted"}}
         instructions = opencuria_context(self.agent, guest)
         if opts.authorize_file_read is None:
             opts.authorize_file_read = self._authorize_read
@@ -510,7 +513,11 @@ class CodexEngine:
         )
         if isinstance(binary, dict):
             binary = binary.get("path")
-        if not isinstance(binary, str) or not binary.startswith("/"):
+        if (
+            not isinstance(binary, str)
+            or not binary.startswith("/")
+            or not binary.endswith(guest.executable_suffix)
+        ):
             raise ValueError("Codex provisioner returned an invalid binary path")
         lease = DesktopLease(
             self.accessor,
@@ -605,12 +612,12 @@ class CodexEngine:
             params = {
                 "model": wire_model,
                 "modelProvider": provider_name,
-                "cwd": cwd,
+                "cwd": native_cwd,
                 "approvalPolicy": "never",
                 "sandbox": "read-only" if readonly else "danger-full-access",
                 "config": settings,
                 "developerInstructions": instructions,
-                "runtimeWorkspaceRoots": [cwd],
+                "runtimeWorkspaceRoots": [native_cwd],
             }
             if self.external_session_id:
                 response = await rpc.request(
@@ -651,7 +658,7 @@ class CodexEngine:
                     "sandboxPolicy": {
                         "type": "readOnly" if readonly else "dangerFullAccess"
                     },
-                    "cwd": cwd,
+                    "cwd": native_cwd,
                 },
             )
             self.turn_id = response["turn"]["id"]
