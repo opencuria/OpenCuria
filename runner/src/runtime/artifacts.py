@@ -586,6 +586,8 @@ class RuntimeArtifactManager:
         instance_id = info.instance_id
         runtime = self._get_runtime(workspace_id)
         platform = await self._guest_platform(runtime, instance_id)
+        if platform.startswith("win32-"):
+            raise ArtifactRequestError("Computer Use requires a Linux workspace")
         spec = package.manifest_entry()["platforms"].get(platform)
         if spec is None:
             raise ArtifactRequestError("Computer Use requires Linux glibc x64 or arm64")
