@@ -101,6 +101,9 @@ def test_windows_definition_meets_windows_11_requirements() -> None:
         == "com.redhat.spice.0"
     )
     assert root.find("./devices/serial/log").get("file") == "/disks/ws-serial.log"
+    # Memory usage comes from the balloon service, not the QEMU process size.
+    assert root.find("./devices/memballoon/stats").get("period") == "10"
+    assert root.find("./devices/memballoon").get("freePageReporting") == "on"
     assert root.findtext(f"./metadata/{_NS}workspace/{_NS}guest-os") == WINDOWS
     assert root.findtext(f"./metadata/{_NS}workspace/{_NS}workspace-id") == "ws"
 

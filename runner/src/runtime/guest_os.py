@@ -150,6 +150,8 @@ class LinuxGuest(GuestOS):
 #: Paths of the Windows guest contract (see ``runtime/windows/``).
 WINDOWS_STATE_DIR = "/c/ProgramData/opencuria"
 WINDOWS_BOOTSTRAP_STATUS = f"{WINDOWS_STATE_DIR}/bootstrap.json"
+#: Seconds between guest memory reports of the Windows balloon service.
+BALLOON_STATS_PERIOD = 10
 
 
 class WindowsGuest(GuestOS):
@@ -228,6 +230,11 @@ class WindowsGuest(GuestOS):
         ET.SubElement(video, "model", type="virtio", heads="1")
         tpm = ET.SubElement(devices, "tpm", model="tpm-crb")
         ET.SubElement(tpm, "backend", type="emulator", version="2.0")
+        balloon = devices.find("./memballoon")
+        if balloon is not None:
+            # Windows touches all of its memory at boot, so the QEMU process
+            # size says nothing; the balloon service reports free memory.
+            ET.SubElement(balloon, "stats", period=str(BALLOON_STATS_PERIOD))
 
     def seed_files(self, spec: SeedSpec) -> dict[str, str]:
         return {
