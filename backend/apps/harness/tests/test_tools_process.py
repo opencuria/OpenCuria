@@ -294,3 +294,37 @@ async def test_default_registry_contains_process_tools() -> None:
     assert registry.get("process_start").permission_key == "process"
     assert registry.get("process_restart").permission_key == "process"
     assert registry.get("process_delete").permission_key == "process"
+
+
+def test_process_stop_wording_follows_the_guest() -> None:
+    """Linux keeps the signal wording; Windows terminates the process tree."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    assert ProcessStopTool().description == (
+        "Stop a background process (SIGTERM, then SIGKILL after a short "
+        "grace period). Takes the process UUID or its exact name. "
+        "Already-finished processes are returned unchanged."
+    )
+    windows = default_tool_registry(WINDOWS_GUEST).get("process_stop")
+    assert "terminates the process tree" in windows.description
+    assert "SIGTERM" not in windows.description
+    assert "SIGTERM" in default_tool_registry().get("process_stop").description
+
+
+async def test_process_start_maps_windows_workdirs(fake_accessor) -> None:
+    """Background processes accept the native workspace spelling as workdir."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    fake_accessor.guest = WINDOWS_GUEST
+    await ProcessStartTool().execute(
+        {"command": "npm start", "name": "web", "workdir": "C:\\workspace\\web"},
+        _ctx(fake_accessor),
+    )
+    assert [p["workdir"] for p in fake_accessor.processes.values()] == [
+        "/workspace/web"
+    ]
+    with pytest.raises(ToolError, match="Invalid workdir"):
+        await ProcessStartTool().execute(
+            {"command": "npm start", "name": "web", "workdir": "D:\\web"},
+            _ctx(fake_accessor),
+        )

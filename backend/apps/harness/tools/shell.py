@@ -16,6 +16,7 @@ from ..access.base import (
     sanitize_harness_path,
     validate_harness_env,
 )
+from ..access.guest import LINUX_GUEST, GuestPlatform, guest_of
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
 from .truncate import MAX_BYTES, MAX_LINES
@@ -90,13 +91,22 @@ SAFE_DEVICE_PATHS = frozenset(
 #: Absolute-path token pattern inside shell command lines.
 _EXTERNAL_PATH_RE = re.compile(r"(?<![\w.~-])/[\w.~-]+(?:/[\w.~-]+)*")
 
+#: Windows drive (``C:\x``, ``C:/x``) and UNC (``\\host\share``) path tokens.
+_WINDOWS_PATH_RE = re.compile(
+    r"(?<![\w\\])(?:[A-Za-z]:[\\/]|\\\\)[^\s'\"`;|&<>()]*"
+)
 
-def _is_external_path(path: str) -> bool:
+
+def _is_external_path(path: str, guest: GuestPlatform = LINUX_GUEST) -> bool:
     """Return True when *path* escapes the /workspace sandbox."""
     if not path.startswith("/"):
         return False
     if path in SAFE_DEVICE_PATHS:
         return False
+    mapped = guest.to_workspace_path(path)
+    if mapped is None:
+        return True
+    path = mapped
     if path == HARNESS_WORKSPACE_ROOT or path.startswith(
         HARNESS_WORKSPACE_ROOT + "/"
     ):
@@ -108,25 +118,41 @@ def _is_external_path(path: str) -> bool:
     return True
 
 
-def detect_external_directory(command: str) -> bool:
+def detect_external_directory(
+    command: str, guest: GuestPlatform = LINUX_GUEST
+) -> bool:
     """Return True when *command* references paths outside /workspace.
 
     Conservative: any absolute path outside ``/workspace`` counts,
     including quoted strings and ``/workspace/../..`` escapes (resolved
     via ``normpath``). Safe device aliases (``/dev/null`` et al.) and
-    ``/workspace`` paths are ignored. Empty commands return False.
+    ``/workspace`` paths are ignored. Empty commands return False. On
+    Windows guests drive and UNC paths outside ``C:\\workspace`` count
+    too, while MSYS2 spellings of the workspace (``/c/workspace``) do not.
     """
     if not command or not command.strip():
         return False
-    for match in _EXTERNAL_PATH_RE.finditer(command):
-        if _is_external_path(match.group(0)):
+    # Linux guests return every spelling unchanged: no native spans there.
+    native_spans: list[tuple[int, int]] = []
+    for match in _WINDOWS_PATH_RE.finditer(command):
+        mapped = guest.to_workspace_path(match.group(0))
+        if mapped is None:
+            return True
+        if mapped != match.group(0):
+            native_spans.append(match.span())
+    posix_tokens = [
+        match.group(0)
+        for match in _EXTERNAL_PATH_RE.finditer(command)
+        if not any(start <= match.start() < end for start, end in native_spans)
+    ]
+    for token in posix_tokens:
+        if _is_external_path(token, guest):
             return True
     if ".." not in command:
         return False
-    for match in _EXTERNAL_PATH_RE.finditer(command):
-        candidate = match.group(0)
+    for candidate in posix_tokens:
         if candidate.startswith(HARNESS_WORKSPACE_ROOT + "/"):
-            if _is_external_path(candidate):
+            if _is_external_path(candidate, guest):
                 return True
     return False
 
@@ -201,7 +227,9 @@ class BashTool(Tool):
         if not args.command.strip():
             raise ToolError("command must not be empty", tool=self.name)
         try:
-            workdir = sanitize_exec_workdir(args.workdir or ctx.directory)
+            workdir = sanitize_exec_workdir(
+                args.workdir or ctx.directory, guest_of(ctx.accessor)
+            )
         except ValueError as exc:
             raise ToolError(str(exc), tool=self.name) from exc
         try:
@@ -266,7 +294,9 @@ class GlobTool(Tool):
         validated = self.coerce_args(args)
         assert isinstance(validated, GlobArgs)
         args = validated
-        base = sanitize_harness_path(args.path or ctx.directory)
+        base = sanitize_harness_path(
+            args.path or ctx.directory, guest_of(ctx.accessor)
+        )
         command = (
             "(command -v rg >/dev/null 2>&1 && "
             f"rg --files {shlex.quote(base)} "
@@ -319,7 +349,9 @@ class GrepTool(Tool):
         validated = self.coerce_args(args)
         assert isinstance(validated, GrepArgs)
         args = validated
-        base = sanitize_harness_path(args.path or ctx.directory)
+        base = sanitize_harness_path(
+            args.path or ctx.directory, guest_of(ctx.accessor)
+        )
         include_glob = f" --glob {shlex.quote(args.include)}" if args.include else ""
         command = (
             "(command -v rg >/dev/null 2>&1 && "
@@ -377,7 +409,9 @@ class ListTool(Tool):
         validated = self.coerce_args(args)
         assert isinstance(validated, ListArgs)
         args = validated
-        safe_path = sanitize_harness_path(args.path or ctx.directory)
+        safe_path = sanitize_harness_path(
+            args.path or ctx.directory, guest_of(ctx.accessor)
+        )
         try:
             entries = await ctx.accessor.list_dir(safe_path)
         except (RunnerAccessorError, TimeoutError) as exc:

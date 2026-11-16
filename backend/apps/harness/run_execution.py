@@ -88,6 +88,7 @@ class RunExecution:
         max_depth: int,
     ) -> None:
         """Run the loop, persist events, and finalize the assistant message."""
+        from .access.guest import guest_of
         from .providers.resolver import StaticModelResolver
         from .services import ProviderConfigService
         from .tools import default_tool_registry
@@ -201,7 +202,7 @@ class RunExecution:
             accessor = None
             if self.ports.accessor_factory is not None:
                 accessor = await self.ports.accessor_factory(str(session.workspace_id))
-            tools = default_tool_registry()
+            tools = default_tool_registry(guest_of(accessor))
             from .services import ComputerUseConfigService
 
             computer_options = await sync_to_async(

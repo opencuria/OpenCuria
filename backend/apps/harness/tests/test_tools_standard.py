@@ -561,3 +561,103 @@ async def test_read_missing_file_is_tool_error(fake_accessor) -> None:
 def test_base64_roundtrip_helper() -> None:
     """Sanity: runner file payloads survive base64 transport."""
     assert base64.b64decode(base64.b64encode(b"hi")) == b"hi"
+
+
+def test_detect_external_directory_windows_guest() -> None:
+    """Windows drive/UNC paths outside C:\\workspace gate; MSYS aliases do not."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+    from apps.harness.tools.shell import detect_external_directory
+
+    def external(command: str) -> bool:
+        return detect_external_directory(command, WINDOWS_GUEST)
+
+    assert external('type "C:\\Users\\root\\.ssh\\id_rsa"') is True
+    assert external("powershell.exe -c Get-Content D:/data/x") is True
+    assert external("dir '\\\\server\\share\\x'") is True
+    assert external('type "C:\\workspace\\..\\Windows\\win.ini"') is True
+    assert external("cat /c/Users/root/.bashrc") is True
+    assert external("cat /etc/passwd") is True
+    assert external("ls /c/workspace/src") is False
+    assert external('type "C:\\workspace\\src\\a.py"') is False
+    assert external("cat c:/Workspace/a.py /workspace/b.py") is False
+    assert external("git log --format=%H:%s") is False
+    # Linux guests keep today's detection.
+    assert detect_external_directory('type "C:\\Users\\root\\x"') is False
+    assert detect_external_directory("ls /c/workspace/src") is True
+
+
+def test_dispatcher_flags_windows_external_paths_for_the_guest() -> None:
+    """The permission gate detects external paths with the run's guest."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+    from apps.harness.tools.invocation import _detect_external_directory
+
+    args = {"command": 'type "C:\\Users\\root\\x"'}
+    assert _detect_external_directory("bash", args, WINDOWS_GUEST) is True
+    assert _detect_external_directory("process_start", args, WINDOWS_GUEST) is True
+    assert _detect_external_directory("read", args, WINDOWS_GUEST) is False
+    assert _detect_external_directory("bash", args) is False
+
+
+async def test_file_tools_map_windows_paths_on_windows_guests() -> None:
+    """Read/write/edit/list accept C:\\workspace spellings on Windows guests."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    accessor = FakeAccessor(files={"/workspace/src/a.txt": b"hello\n"})
+    accessor.guest = WINDOWS_GUEST
+    ctx = _ctx(accessor)
+    read = await ReadTool().execute({"path": "C:\\workspace\\src\\a.txt"}, ctx)
+    assert read.metadata["path"] == "/workspace/src/a.txt"
+    await WriteTool().execute({"path": "/c/workspace/b.txt", "content": "x"}, ctx)
+    assert accessor.written["/workspace/b.txt"] == b"x"
+    await EditTool().execute(
+        {
+            "path": "c:/workspace/src/a.txt",
+            "old_string": "hello",
+            "new_string": "bye",
+        },
+        ctx,
+    )
+    assert accessor.files["/workspace/src/a.txt"] == b"bye\n"
+    listed = await ListTool().execute({"path": "C:\\workspace\\src"}, ctx)
+    assert "a.txt" in listed.output
+
+
+async def test_file_tools_reject_windows_paths_outside_the_workspace() -> None:
+    """A Windows path outside C:\\workspace never reaches the runner."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    accessor = FakeAccessor(files={"/workspace/C:\\Users\\x": b"secret"})
+    accessor.guest = WINDOWS_GUEST
+    with pytest.raises(ValueError, match="outside /workspace"):
+        await ReadTool().execute({"path": "C:\\Users\\x"}, _ctx(accessor))
+    with pytest.raises(ValueError, match="outside /workspace"):
+        await WriteTool().execute(
+            {"path": "\\\\server\\share\\x", "content": "x"}, _ctx(accessor)
+        )
+    assert accessor.written == {}
+
+
+async def test_bash_maps_windows_workdirs_on_windows_guests() -> None:
+    """The bash workdir accepts the native workspace spelling."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    accessor = FakeAccessor()
+    accessor.guest = WINDOWS_GUEST
+    await BashTool().execute(
+        {"command": "ls", "workdir": "C:\\workspace\\app"}, _ctx(accessor)
+    )
+    assert accessor.exec_calls[-1][1] == "/workspace/app"
+    with pytest.raises(ToolError, match="Invalid workdir"):
+        await BashTool().execute(
+            {"command": "ls", "workdir": "C:\\Users"}, _ctx(accessor)
+        )
+
+
+def test_file_locks_fold_case_only_for_case_insensitive_guests() -> None:
+    """Windows paths differing in case share one read-modify-write lock."""
+    from apps.harness.tools.file_locks import get_lock
+
+    assert get_lock("/workspace/A.txt") is not get_lock("/workspace/a.txt")
+    assert get_lock("/workspace/B.txt", case_sensitive=False) is get_lock(
+        "/workspace/b.txt", case_sensitive=False
+    )

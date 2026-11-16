@@ -86,6 +86,7 @@ async def execute_external_run(
     max_depth: int,
 ) -> None:
     """Run an external engine under durable ownership and common persistence."""
+    from ..access.guest import guest_of
     from ..providers.base import Usage
     from ..tools import default_tool_registry
     from .external_runtime import prepare_external_runtime
@@ -134,7 +135,7 @@ async def execute_external_run(
         mcp_snapshot = await sync_to_async(ports.plugin_runtime.prepare)(
             session.workspace_id, organization_id
         )
-        tools = default_tool_registry()
+        tools = default_tool_registry(guest_of(accessor))
         from ..services import ComputerUseConfigService
 
         computer_options = await sync_to_async(

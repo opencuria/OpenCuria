@@ -7,8 +7,32 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..access.guest import guest_of
 from ..agent_desktop import AgentDesktop
 from .base import Tool, ToolContext, ToolError, ToolResult
+
+_DESKTOP_CLAIM = (
+    "Manage this agent's workspace desktop: start, stop, or status. "
+    "Start waits for readiness and acquires your own claim even if another "
+    "agent or viewer already keeps the display running. Computer Use and "
+    "managed headed Playwright share this claim. "
+)
+_X11_SHELL_GUI = (
+    "Before launching a GUI program with Bash, call start; DISPLAY and "
+    "XAUTHORITY are already configured for agent shell commands. "
+)
+_SESSION_ISOLATED_GUI = (
+    "GUI programs started from the shell run outside the desktop session and "
+    "are not visible on it. "
+)
+_DESKTOP_LIFECYCLE = (
+    "Stop releases only your claim; the desktop stays on while others hold "
+    "it. Actually stopping the display closes its GUI applications. Status "
+    "reports active, own_claim, own_claim_state, held_by_others, "
+    "other_claim_count, and needs_start. If needs_start is true, call start "
+    "before relying on the display. The claim ends automatically when this "
+    "agent run finishes."
+)
 
 
 class DesktopArgs(BaseModel):
@@ -31,22 +55,15 @@ class DesktopTool(Tool):
     execution_tool = True
     annotations = None
     args_schema = DesktopArgs
-    description = (
-        "Manage this agent's workspace desktop: start, stop, or status. "
-        "Start waits for readiness and acquires your own claim even if another "
-        "agent or viewer already keeps the display running. Computer Use and "
-        "managed headed Playwright share this claim. Before launching a GUI "
-        "program with Bash, call start; DISPLAY and XAUTHORITY are already "
-        "configured for agent shell commands. Stop releases only your claim; "
-        "the desktop stays on while others hold it. Actually stopping the "
-        "display closes its GUI applications. Status reports active, own_claim, "
-        "own_claim_state, held_by_others, other_claim_count, and needs_start. "
-        "If needs_start is true, call start before relying on the display. "
-        "The claim ends automatically when this agent run finishes."
-    )
 
     def __init__(self, desktop: AgentDesktop) -> None:
         self.desktop = desktop
+        shell_gui = (
+            _X11_SHELL_GUI
+            if guest_of(getattr(desktop, "accessor", None)).x11_desktop
+            else _SESSION_ISOLATED_GUI
+        )
+        self.description = _DESKTOP_CLAIM + shell_gui + _DESKTOP_LIFECYCLE
 
     def title(self, args: BaseModel) -> str:
         """Describe the concrete action for approvals and the timeline."""

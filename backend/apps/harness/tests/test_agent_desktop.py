@@ -991,3 +991,31 @@ async def test_failed_child_registration_closes_resources_and_preserves_parent(
     assert all(not connection._closed for connection in runtime.connections)
     assert registry.get(DesktopTool.name)
     assert (await runtime.desktop.action("start"))["own_claim"]
+
+
+def test_desktop_tool_description_follows_the_guest() -> None:
+    """Linux promises the X11 shell binding; Windows states the session limit."""
+    from types import SimpleNamespace
+
+    from apps.harness.access.guest import WINDOWS_GUEST
+
+    linux = DesktopTool(SimpleNamespace(accessor=object())).description
+    assert linux == (
+        "Manage this agent's workspace desktop: start, stop, or status. "
+        "Start waits for readiness and acquires your own claim even if another "
+        "agent or viewer already keeps the display running. Computer Use and "
+        "managed headed Playwright share this claim. Before launching a GUI "
+        "program with Bash, call start; DISPLAY and XAUTHORITY are already "
+        "configured for agent shell commands. Stop releases only your claim; "
+        "the desktop stays on while others hold it. Actually stopping the "
+        "display closes its GUI applications. Status reports active, own_claim, "
+        "own_claim_state, held_by_others, other_claim_count, and needs_start. "
+        "If needs_start is true, call start before relying on the display. "
+        "The claim ends automatically when this agent run finishes."
+    )
+    windows = DesktopTool(
+        SimpleNamespace(accessor=SimpleNamespace(guest=WINDOWS_GUEST))
+    ).description
+    assert "DISPLAY" not in windows and "XAUTHORITY" not in windows
+    assert "not visible" in windows
+    assert windows.endswith("ends automatically when this agent run finishes.")
