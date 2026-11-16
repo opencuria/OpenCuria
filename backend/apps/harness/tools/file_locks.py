@@ -13,9 +13,14 @@ import os
 _locks: dict[str, asyncio.Lock] = {}
 
 
-def get_lock(path: str) -> asyncio.Lock:
-    """Return the process-local lock for normalized *path*."""
+def get_lock(path: str, *, case_sensitive: bool = True) -> asyncio.Lock:
+    """Return the process-local lock for normalized *path*.
+
+    Paths on case-insensitive guests share one lock per case-folded spelling.
+    """
     key = os.path.normpath(path or "")
+    if not case_sensitive:
+        key = key.casefold()
     lock = _locks.get(key)
     if lock is None:
         lock = asyncio.Lock()

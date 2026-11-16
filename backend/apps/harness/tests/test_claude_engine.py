@@ -1331,3 +1331,104 @@ def test_legacy_media_rows_restore_within_the_transcript_limit(monkeypatch) -> N
     assert len(restored) < 1024
     assert encoded.encode() not in restored
     assert restored.count(OMITTED_MEDIA_NOTICE.encode()) == 2
+
+
+class _ArtifactAccessor:
+    """Runner seam returning one provisioned Claude executable path."""
+
+    def __init__(self, guest: Any, path: str) -> None:
+        self.workspace_id = str(uuid.uuid4())
+        self.guest = guest
+        self.path = path
+
+    async def ensure_runtime_artifact(self, artifact_id: str, version: str) -> dict:
+        assert (artifact_id, version) == ("claude-agent", CLAUDE_CODE_CLI_VERSION)
+        return {"ok": True, "path": self.path, "version": version}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("guest_name", "binary", "accepted"),
+    [
+        ("linux", "claude", True),
+        ("windows", "claude.exe", True),
+        ("windows", "claude", False),
+        ("linux", "claude.exe", False),
+    ],
+)
+async def test_cli_path_check_uses_the_guest_executable_name(
+    guest_name: str, binary: str, accepted: bool
+) -> None:
+    from apps.harness.access.guest import guest_for_os
+
+    path = f"/opt/opencuria/runtimes/claude-agent/{CLAUDE_CODE_CLI_VERSION}/{binary}"
+    engine = ClaudeEngine(
+        tools=ToolRegistry(),
+        accessor=_ArtifactAccessor(guest_for_os(guest_name), path),  # type: ignore[arg-type]
+    )
+    if accepted:
+        assert await engine._ensure_cli() == path
+    else:
+        with pytest.raises(RuntimeError, match="invalid Claude Code runtime path"):
+            await engine._ensure_cli()
+
+
+def test_project_key_follows_the_guest_native_cwd() -> None:
+    """Restore and the session mirror bind to the key the guest CLI uses."""
+    from claude_agent_sdk import project_key_for_directory
+
+    from apps.harness.access.guest import LINUX_GUEST, WINDOWS_GUEST
+    from apps.harness.engines.claude.engine import claude_project_key
+
+    assert claude_project_key("/workspace", LINUX_GUEST) == (
+        project_key_for_directory("/workspace")
+    )
+    assert claude_project_key("/workspace", WINDOWS_GUEST) == "C--workspace"
+    assert claude_project_key("/workspace/my app", WINDOWS_GUEST) == (
+        "C--workspace-my-app"
+    )
+    with pytest.raises(ValueError, match="outside"):
+        claude_project_key("/tmp", WINDOWS_GUEST)
+
+
+@pytest.mark.asyncio
+async def test_child_agents_get_the_guest_product_context() -> None:
+    """SDK children receive the Windows context on Windows workspaces."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+    from apps.harness.prompts.opencuria import opencuria_context
+
+    engine = ClaudeEngine(
+        tools=default_tool_registry(),
+        accessor=SimpleNamespace(guest=WINDOWS_GUEST),  # type: ignore[arg-type]
+    )
+    definitions = await engine._agent_definitions()
+    assert definitions["general"].prompt == opencuria_context(
+        get_agent("general"), WINDOWS_GUEST
+    )
+    assert "Windows 11 VM" in definitions["explore"].prompt
+
+
+@pytest.mark.asyncio
+async def test_native_edit_snapshots_map_windows_paths() -> None:
+    """Native Write/Edit diffs survive the Windows CLI's path spelling."""
+    from apps.harness.access.guest import WINDOWS_GUEST
+    from apps.harness.engines.claude.message_projection import (
+        NativeFileChangeTracker,
+    )
+    from apps.harness.tests.conftest import FakeAccessor
+
+    accessor = FakeAccessor(files={"/workspace/src/a.py": b"old"})
+    accessor.guest = WINDOWS_GUEST
+    tracker = NativeFileChangeTracker(accessor)
+    before = await tracker.capture_before(
+        "Edit", {"file_path": "C:\\workspace\\src\\a.py"}
+    )
+    assert before is not None and before.path == "/workspace/src/a.py"
+    assert before.text == "old"
+    assert await tracker.capture_before("Write", {"file_path": "C:\\a.py"}) is None
+    assert NativeFileChangeTracker.safe_workspace_path("C:\\workspace\\a") == (
+        "/workspace/C:\\workspace\\a"
+    )
+    assert NativeFileChangeTracker.safe_workspace_path(
+        "/c/workspace/a", WINDOWS_GUEST
+    ) == "/workspace/a"

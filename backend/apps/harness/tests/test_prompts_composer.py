@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from apps.harness.access.file_types import FileContent
+from apps.harness.access.guest import LINUX_GUEST, WINDOWS_GUEST
 from apps.harness.agents.definitions import get_agent
 from apps.harness.prompts.composer import (
     MAX_CONTEXT_FILE_BYTES,
@@ -126,7 +127,8 @@ async def test_composer_sections_and_metadata() -> None:
     assert "Working directory: /workspace" in composed.system
     assert "Mode: build" in composed.system
     assert "isolated OpenCuria workspace" in composed.system
-    assert composed.system.count(opencuria_context(get_agent("build"))) == 1
+    context = opencuria_context(get_agent("build"), LINUX_GUEST)
+    assert composed.system.count(context) == 1
     assert "- read: Read a file." in composed.system
     assert "- general: Delegated subtasks." in composed.system
     assert (
@@ -153,7 +155,8 @@ async def test_composer_encourages_local_testing_with_boundaries(
         mode=mode,
         native_tool_contracts=native_tool_contracts,
     )
-    assert composed.system.count(opencuria_context(get_agent(agent_name))) == 1
+    context = opencuria_context(get_agent(agent_name), LINUX_GUEST)
+    assert composed.system.count(context) == 1
     assert "starting development servers" in composed.system
     assert "installing dependencies" in composed.system
     assert "running migrations against workspace-local test data" in composed.system
@@ -252,3 +255,20 @@ async def test_plan_explore_prompt_keeps_read_only_restrictions() -> None:
     assert "Do not edit files, run tests or mutating commands, or delegate" in (
         composed.system
     )
+
+
+async def test_composer_environment_follows_the_workspace_guest() -> None:
+    """Windows workspaces get their platform and context; Linux stays as is."""
+    accessor = FakeAccessor()
+    linux = await compose_system_prompt(
+        agent=get_agent("build"), mode="build", accessor=accessor
+    )
+    assert "Platform: Linux" in linux.system
+    accessor.guest = WINDOWS_GUEST
+    windows = await compose_system_prompt(
+        agent=get_agent("build"), mode="build", accessor=accessor
+    )
+    assert "Platform: Windows 11" in windows.system
+    assert "Platform: Linux" not in windows.system
+    assert windows.system.count(opencuria_context(get_agent("build"), WINDOWS_GUEST))
+    assert "Linux container or VM" not in windows.system

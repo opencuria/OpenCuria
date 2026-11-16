@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ...access.base import WorkspaceAccessor
+from ...access.guest import guest_of
 
 MAX_LINE = 8 * 1024 * 1024
 
@@ -107,7 +108,11 @@ class ManagedMcpBridge:
     async def start(
         self, accessor: WorkspaceAccessor, cwd: str, owner: dict[str, Any]
     ) -> dict[str, Any]:
-        """Start the owned relay and return the native Codex MCP configuration."""
+        """Start the owned relay and return the native Codex MCP configuration.
+
+        The relay runs under the guest's POSIX shell environment; Codex spawns
+        the client itself, so it gets the guest's native path to that Python.
+        """
         self.stream = await accessor.open_process(
             ["/usr/bin/python3", "-I", "-u", "-c", RELAY_SERVER],
             cwd,
@@ -121,7 +126,7 @@ class ManagedMcpBridge:
             raise ValueError("Managed MCP relay returned an invalid socket path")
         self.task = asyncio.create_task(self._serve())
         return {
-            "command": "/usr/bin/python3",
+            "command": guest_of(accessor).native_python,
             "args": ["-I", "-u", "-c", RELAY_CLIENT, path],
             "omit_tools_from": ["code_mode", "deferred"],
             "startup_timeout_sec": 15,

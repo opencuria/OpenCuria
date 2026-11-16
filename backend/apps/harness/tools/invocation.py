@@ -11,6 +11,7 @@ import structlog
 from asgiref.sync import sync_to_async
 
 from ..access.base import WorkspaceAccessor
+from ..access.guest import LINUX_GUEST, GuestPlatform, guest_of
 from ..agents.definitions import AgentDefinition
 from ..media.attachments import build_tool_message_content
 from ..permissions.evaluator import (
@@ -89,14 +90,16 @@ def _action_for_registered_tool(tool: Any, tool_name: str) -> str:
     return ""
 
 
-def _detect_external_directory(tool_name: str, args: dict[str, Any]) -> bool:
+def _detect_external_directory(
+    tool_name: str, args: dict[str, Any], guest: GuestPlatform = LINUX_GUEST
+) -> bool:
     """Return True when a shell command touches paths outside /workspace."""
     key = (tool_name or "").strip().lower()
     if key not in EXTERNAL_PATH_TOOLS:
         return False
     from .shell import detect_external_directory
 
-    return detect_external_directory(str(args.get("command", "") or ""))
+    return detect_external_directory(str(args.get("command", "") or ""), guest)
 
 
 def _with_args(message: str, call: _PendingToolCall) -> str:
@@ -367,7 +370,9 @@ class AuthorizedToolDispatcher:
             return self._tool_error_outcome(
                 call, "todowrite is not available to subagents."
             )
-        external = _detect_external_directory(call.name, call.arguments)
+        external = _detect_external_directory(
+            call.name, call.arguments, guest_of(ctx.accessor)
+        )
         decision = self._decide(
             agent,
             call.name,

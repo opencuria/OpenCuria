@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...access.base import HARNESS_WORKSPACE_ROOT, sanitize_harness_path
+from ...access.guest import LINUX_GUEST, GuestPlatform, guest_of
 from ...access.runner_accessor import RunnerAccessorError
 
 MAX_NATIVE_FILE_SNAPSHOT_BYTES = 512 * 1024
@@ -29,12 +30,17 @@ class NativeFileChangeTracker:
         self.accessor = accessor
 
     @staticmethod
-    def safe_workspace_path(raw_path: Any) -> str | None:
-        """Normalize a path, declining anything outside the workspace root."""
+    def safe_workspace_path(
+        raw_path: Any, guest: GuestPlatform = LINUX_GUEST
+    ) -> str | None:
+        """Normalize a path, declining anything outside the workspace root.
+
+        Guest-native spellings (``C:\\workspace\\a``) map to ``/workspace``.
+        """
         if not isinstance(raw_path, str) or not raw_path.strip():
             return None
         try:
-            path = sanitize_harness_path(raw_path)
+            path = sanitize_harness_path(raw_path, guest)
         except ValueError:
             return None
         if path != HARNESS_WORKSPACE_ROOT and not path.startswith(
@@ -78,7 +84,8 @@ class NativeFileChangeTracker:
         if source_tool not in {"Write", "Edit"}:
             return None
         path = self.safe_workspace_path(
-            arguments.get("file_path") or arguments.get("path")
+            arguments.get("file_path") or arguments.get("path"),
+            guest_of(self.accessor),
         )
         return await self.capture(path) if path else None
 

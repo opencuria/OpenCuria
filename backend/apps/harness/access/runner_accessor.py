@@ -72,6 +72,7 @@ from .base import (
     sanitize_harness_path,
 )
 from .file_types import DirEntry, FileContent, guess_mime_type
+from .guest import LINUX_GUEST, GuestPlatform, guest_for_os
 
 log = structlog.get_logger(__name__)
 
@@ -405,8 +406,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         call: Callable[[str, dict[str, Any], float | None], Awaitable[dict[str, Any]]]
         | None = None,
         on_stderr: Callable[[str, bytes], None] | None = None,
+        guest: GuestPlatform = LINUX_GUEST,
     ) -> None:
         super().__init__(workspace_id)
+        self.guest = guest
         self._emit = emit
         self._default_timeout = default_timeout
         self._desktop_geometry = desktop_geometry
@@ -626,7 +629,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         timeout: float | None = None,
     ) -> ExecResult:
         """Execute a command and return the buffered result."""
-        safe_workdir = sanitize_exec_workdir(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir, self.guest)
         normalized = _normalize_command(command)
         timeout_s = self._resolve_timeout(timeout)
         request_id = uuid.uuid4().hex
@@ -664,7 +667,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         compatibility. Incomplete or invalid chunk streams fail closed
         and clean up routing state.
         """
-        safe_path = sanitize_harness_path(path)
+        safe_path = sanitize_harness_path(path, self.guest)
         request_id = uuid.uuid4().hex
         result = await self._await_chunked_read_result(
             request_id,
@@ -873,7 +876,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         All writes use start/chunk/finish with bounded base64 slices.
         Empty files announce zero chunks and finish without a chunk event.
         """
-        safe_path = sanitize_harness_path(path)
+        safe_path = sanitize_harness_path(path, self.guest)
         if not isinstance(content, (bytes, bytearray)):
             raise ValueError("content must be bytes")
         # Exact raw cap: len(content) decides, no base64 slack involved.
@@ -940,7 +943,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
 
     async def list_dir(self, path: str) -> list[DirEntry]:
         """List directory entries in the workspace VM."""
-        safe_path = sanitize_harness_path(path)
+        safe_path = sanitize_harness_path(path, self.guest)
         request_id = uuid.uuid4().hex
         result = await self._await_result(
             request_id,
@@ -1031,7 +1034,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         """
         if not (command or "").strip():
             raise ValueError("command must not be empty")
-        safe_workdir = sanitize_exec_workdir(workdir or "/workspace")
+        safe_workdir = sanitize_exec_workdir(workdir or "/workspace", self.guest)
         service = self._runner_service()
         try:
             process = await service.process_manager.start_process(
@@ -1728,7 +1731,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 raise ValueError("Process profiles require a managed owner")
             if process_profile == "helper" and env:
                 raise ValueError("Helper processes require an empty environment")
-        safe_workdir = sanitize_exec_workdir(workdir)
+        safe_workdir = sanitize_exec_workdir(workdir, self.guest)
         if not isinstance(command, list) or not command:
             raise ValueError("command must be a non-empty argv list")
         argv = [str(part) for part in command]
@@ -1832,6 +1835,8 @@ async def create_harness_accessor(
         allow_lease_cleanup: Let only lease release bypass interaction admission,
             so recovery can clean failed or lifecycle-fenced workspaces.
 
+    The accessor serves the guest OS of the workspace's image.
+
     Raises:
         WorkspaceNotFoundError: If the workspace does not exist.
         RunnerOfflineError: If the owning runner is offline.
@@ -1928,4 +1933,5 @@ async def create_harness_accessor(
         desktop_geometry=_desktop_geometry,
         call=_call,
         on_stderr=_on_stderr,
+        guest=guest_for_os(workspace.guest_os),
     )

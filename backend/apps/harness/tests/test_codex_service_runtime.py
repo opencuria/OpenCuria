@@ -275,8 +275,8 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
     service.conversation_events.emit_sync = lambda *_: None
     original_tools = harness_tools.default_tool_registry
 
-    def registered_mcp_tools():
-        registry = original_tools()
+    def registered_mcp_tools(*args, **kwargs):
+        registry = original_tools(*args, **kwargs)
         registry.register(McpWriteTool())
         return registry
 
@@ -1380,8 +1380,8 @@ async def test_real_native_codex_child_mcp_retains_separate_agent_scope(
 
     original_registry = harness_tools.default_tool_registry
 
-    def registry():
-        tools = original_registry()
+    def registry(*args, **kwargs):
+        tools = original_registry(*args, **kwargs)
         tools.register(ProbeDesktop(None))
         return tools
 

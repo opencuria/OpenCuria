@@ -7,6 +7,7 @@ import base64
 from pydantic import BaseModel, Field
 
 from ..access.base import sanitize_harness_path
+from ..access.guest import guest_of
 from ..access.runner_accessor import RunnerAccessorError
 from ..image_processing import image_path_notice, prepare_image
 from ..media.formats import (
@@ -226,7 +227,7 @@ class ReadTool(Tool):
         validated = self.coerce_args(args)
         assert isinstance(validated, ReadArgs)
         args = validated
-        safe_path = sanitize_harness_path(args.path)
+        safe_path = sanitize_harness_path(args.path, guest_of(ctx.accessor))
         try:
             stored = await ctx.accessor.read_file(
                 safe_path, max_size=READ_FETCH_MAX_BYTES
@@ -381,8 +382,10 @@ class WriteTool(Tool):
         validated = self.coerce_args(args)
         assert isinstance(validated, WriteArgs)
         args = validated
-        safe_path = sanitize_harness_path(args.path)
-        async with get_lock(safe_path):
+        safe_path = sanitize_harness_path(args.path, guest_of(ctx.accessor))
+        async with get_lock(
+            safe_path, case_sensitive=guest_of(ctx.accessor).case_sensitive_paths
+        ):
             old_text = ""
             try:
                 stored = await ctx.accessor.read_file(safe_path)
@@ -434,8 +437,10 @@ class EditTool(Tool):
         args = validated
         if not args.old_string:
             raise ToolError("old_string must not be empty", tool=self.name)
-        safe_path = sanitize_harness_path(args.path)
-        async with get_lock(safe_path):
+        safe_path = sanitize_harness_path(args.path, guest_of(ctx.accessor))
+        async with get_lock(
+            safe_path, case_sensitive=guest_of(ctx.accessor).case_sensitive_paths
+        ):
             try:
                 stored = await ctx.accessor.read_file(safe_path)
             except RunnerAccessorError as exc:

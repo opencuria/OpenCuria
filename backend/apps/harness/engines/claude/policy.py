@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from ...access.base import HARNESS_WORKSPACE_ROOT
+from ...access.guest import HARNESS_WORKSPACE_ROOT, LINUX_GUEST, GuestPlatform
 from ...agents.definitions import AgentDefinition, canonical_subagent_type
 from ...permissions.evaluator import (
     ASK,
@@ -45,11 +45,22 @@ NATIVE_TOOL_KEYS: dict[str, str] = {
 }
 
 
-def _canonical_path(path: Any, cwd: str | None = None) -> str:
-    """Canonicalize a workspace VM path before granular permission matching."""
+def _canonical_path(
+    path: Any, cwd: str | None = None, guest: GuestPlatform = LINUX_GUEST
+) -> str:
+    """Canonicalize a workspace VM path before granular permission matching.
+
+    Guest-native spellings of workspace files (``C:\\workspace\\a``) match
+    the same rules as ``/workspace/a``. Native paths outside the workspace
+    keep their spelling, so workspace rules never match them.
+    """
     value = str(path or "")
     if not value:
         return ""
+    mapped = guest.to_workspace_path(value)
+    if mapped is None:
+        return value
+    value = mapped
     if not os.path.isabs(value):
         value = os.path.join(cwd or HARNESS_WORKSPACE_ROOT, value)
     return os.path.normpath(value)
@@ -61,6 +72,7 @@ def tool_identity(
     tools: ToolRegistry,
     *,
     cwd: str | None = None,
+    guest: GuestPlatform = LINUX_GUEST,
 ) -> tuple[str, str, str]:
     """Return (event tool, permission key, action) for Claude tool calls."""
     raw_name = str(source_name or "")
@@ -136,7 +148,7 @@ def tool_identity(
                 or arguments.get("notebook_path")
                 or ""
             )
-            action = _canonical_path(path, cwd)
+            action = _canonical_path(path, cwd, guest)
         return event_tool, permission_key, action
 
     try:
@@ -248,17 +260,21 @@ def decide_tool(
     selected_skills: list[str] | None = None,
     cwd: str | None = None,
     ultracode: bool = False,
+    guest: GuestPlatform = LINUX_GUEST,
 ) -> tuple[str, str, str, str]:
     """Return decision, event tool, safe action and human-readable title.
 
     ``ultracode`` is true only for the root scope of an ultracode run, the one
-    place where the native Workflow tool is offered.
+    place where the native Workflow tool is offered. ``guest`` is the
+    workspace guest whose native paths the CLI reports.
     """
     raw_source = str(source_name or "")
     # Explicit hook routing prevents native names such as Write being treated
     # as similarly named registry tools, and MCP wire identities stay exact.
     if raw_source.startswith("mcp__opencuria__"):
-        event_tool, key, action = tool_identity(source_name, arguments, tools, cwd=cwd)
+        event_tool, key, action = tool_identity(
+            source_name, arguments, tools, cwd=cwd, guest=guest
+        )
     elif raw_source.startswith("mcp__"):
         parts = raw_source.split("__", 2)
         if len(parts) == 3:
@@ -269,7 +285,9 @@ def decide_tool(
         if key.startswith("__unknown_"):
             return DENY, event_tool, action, event_tool
     else:
-        event_tool, key, action = tool_identity(source_name, arguments, tools, cwd=cwd)
+        event_tool, key, action = tool_identity(
+            source_name, arguments, tools, cwd=cwd, guest=guest
+        )
     raw = str(source_name or "")
     if key.startswith("__unknown_"):
         return DENY, event_tool, action, event_tool
@@ -365,7 +383,7 @@ def decide_tool(
     if key in ("bash", "process") and action:
         from ...tools.shell import detect_external_directory
 
-        if detect_external_directory(action):
+        if detect_external_directory(action, guest):
             decision = combine_decisions(
                 decision,
                 policy.evaluate(key, action, mode=mode, external_directory=True),

@@ -12,6 +12,7 @@ from typing import Any
 
 from ...access.base import WorkspaceAccessor, sanitize_harness_path
 from ...access.file_types import guess_mime_type
+from ...access.guest import guest_of
 from ...media.context import _read_media_no_follow, build_user_content
 from ...media.formats import content_blocks, data_url_block
 from ...media.limits import MAX_CLAUDE_DOCUMENT_BYTES, MAX_USER_CONTENT_BYTES
@@ -174,7 +175,7 @@ async def image_attachments(
     if not accessor:
         return []
     try:
-        path = sanitize_harness_path(raw_path)
+        path = sanitize_harness_path(raw_path, guest_of(accessor))
         if not path.startswith("/workspace/"):
             return []
         if not await authorize_read(path):

@@ -7,6 +7,7 @@ import json
 from collections import defaultdict, deque
 from typing import Any
 
+from ...access.guest import guest_of
 from ...agents.definitions import AgentDefinition, canonical_subagent_type, get_agent
 from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
@@ -210,6 +211,7 @@ class PermissionBridge:
             max_depth=self.max_depth,
             selected_skills=selected,
             cwd=getattr(self.engine, "_cwd", None),
+            guest=guest_of(getattr(self.engine, "accessor", None)),
             # Workflow is a root-only tool of ultracode runs.
             ultracode=bool(getattr(self.engine, "_ultracode", False))
             and depth == self.options.depth,
@@ -263,7 +265,11 @@ class PermissionBridge:
             )
         elif source_name in NATIVE_TOOL_KEYS:
             _event_tool, _key, raw_action = tool_identity(
-                source_name, arguments, self.tools, cwd=cwd
+                source_name,
+                arguments,
+                self.tools,
+                cwd=cwd,
+                guest=guest_of(getattr(self.engine, "accessor", None)),
             )
         else:
             _event_tool, _key, raw_action = registry_tool_identity(

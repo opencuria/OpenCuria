@@ -7,13 +7,11 @@ and chat surface; it does not grant permissions.
 
 from __future__ import annotations
 
-from ..access.base import HARNESS_WORKSPACE_ROOT
+from ..access.guest import HARNESS_WORKSPACE_ROOT, GuestPlatform
 from ..agents.definitions import AgentDefinition
 
-WORKSPACE_CONTEXT = (
-    "You are working inside an isolated OpenCuria workspace "
-    f"(Linux container or VM) rooted at {HARNESS_WORKSPACE_ROOT}, "
-    "not on the user's machine. Preserve existing user work. "
+WORKSPACE_POLICY = (
+    "Preserve existing user work. "
     "Workspace isolation does not extend to external or production services."
 )
 
@@ -39,11 +37,14 @@ CHAT_MEDIA_INSTRUCTIONS = (
 )
 
 
-def opencuria_context(agent: AgentDefinition) -> str:
-    """Return product context, omitting setup guidance for read-only helpers."""
+def opencuria_context(agent: AgentDefinition, guest: GuestPlatform) -> str:
+    """Return product context, omitting setup guidance for read-only helpers.
+
+    The environment sentences come from the workspace's guest OS.
+    """
     if agent.mode == "hidden":
         return ""
-    sections = [WORKSPACE_CONTEXT]
+    sections = [f"{guest.prompt_context} {WORKSPACE_POLICY}"]
     if agent.name != "explore":
         sections.append(WORKSPACE_SETUP_INSTRUCTIONS)
     sections.append(CHAT_MEDIA_INSTRUCTIONS)
