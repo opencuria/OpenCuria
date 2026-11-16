@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError, NotFoundError
 from common.utils import generate_uuid
 
@@ -35,6 +36,7 @@ from ...provisioning import disk_size_for, provisioning_command, uses_artifact_c
 from ...workspace_operation_repository import WorkspaceOperationRepository
 from ..qemu_resources import resolve_qemu_resources, validate_runner_qemu_limits
 from ..recreate import RecreateService
+from ..windows_activation import windows_activation_payload
 from ..workspace_capacity import WorkspaceCapacityService
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
@@ -269,6 +271,11 @@ class WorkspaceLifecycleService:
             memory_mb=resolved_qemu_memory_mb,
             disk_size_gb=resolved_qemu_disk_size_gb,
         )
+        await sync_to_async(WindowsLicenseService().preflight)(
+            organization_id=runner.organization_id,
+            guest_os=selected_image.guest_os,
+            owner_id=getattr(user, "id", None),
+        )
 
         resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
             DEFAULT_DESKTOP_WIDTH if desktop_width is None else desktop_width,
@@ -332,6 +339,7 @@ class WorkspaceLifecycleService:
                 "task_id": str(task_id),
                 **command.payload,
                 **self.credential_sync.resolved_credentials_payload(resolved),
+                **await sync_to_async(windows_activation_payload)(workspace),
             },
         )
         logger.info(
@@ -644,6 +652,7 @@ class WorkspaceLifecycleService:
             disk_size_gb=qemu_disk_size_gb,
             exclude_workspace_id=workspace.id,
         )
+        await sync_to_async(WindowsLicenseService().preflight_workspace)(workspace)
 
         task_id = generate_uuid()
         workspace, task = await sync_to_async(WorkspaceCapacityService.resume)(
@@ -666,9 +675,11 @@ class WorkspaceLifecycleService:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
+                "guest_os": workspace.guest_os,
                 **self.credential_sync.resolved_credentials_payload(
                     workspace_credentials
                 ),
+                **await sync_to_async(windows_activation_payload)(workspace),
             },
         )
         return task
@@ -714,6 +725,10 @@ class WorkspaceLifecycleService:
                 memory_mb=memory_mb,
                 disk_size_gb=disk_size_gb,
                 exclude_workspace_id=workspace.id,
+            )
+            # The recreate boots a workspace that is not running.
+            await sync_to_async(WindowsLicenseService().preflight_recreate)(
+                workspace
             )
 
         try:
@@ -838,8 +853,9 @@ class WorkspaceLifecycleService:
         status: str,
         credentials_present: bool | None = None,
         runner_id: str | None = None,
+        windows_activation: dict | None = None,
     ) -> None:
-        """Handle workspace:created event from a runner."""
+        """Handle workspace:created event from a runner (create and clone)."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
             logger.warning("Received workspace:created for unknown task: %s", task_id)
@@ -872,6 +888,8 @@ class WorkspaceLifecycleService:
             self.workspaces.update_credentials_present(
                 workspace, bool(credentials_present)
             )
+        if windows_activation is not None:
+            WindowsLicenseService().record_activation(workspace.id, windows_activation)
         self.tasks.complete(task)
         logger.info("Workspace created: %s", workspace_id)
 
@@ -932,6 +950,7 @@ class WorkspaceLifecycleService:
         workspace_id: str,
         runner_id: str | None = None,
         credentials_present: bool | None = None,
+        windows_activation: dict | None = None,
     ) -> None:
         """Handle workspace:resumed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -961,6 +980,10 @@ class WorkspaceLifecycleService:
             if credentials_present is not None:
                 self.workspaces.update_credentials_present(
                     workspace, credentials_present
+                )
+            if windows_activation is not None:
+                WindowsLicenseService().record_activation(
+                    workspace.id, windows_activation
                 )
         self.tasks.complete(task)
         logger.info("Workspace resumed: %s", workspace_id)
@@ -1255,6 +1278,11 @@ class WorkspaceLifecycleService:
             memory_mb=qemu_memory_mb,
             disk_size_gb=qemu_disk_size_gb,
         )
+        await sync_to_async(WindowsLicenseService().preflight)(
+            organization_id=runner.organization_id,
+            guest_os=image.guest_os,
+            owner_id=getattr(user, "id", None),
+        )
 
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)
@@ -1294,6 +1322,7 @@ class WorkspaceLifecycleService:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
+                "guest_os": image.guest_os,
             },
         )
 
@@ -1312,7 +1341,9 @@ class WorkspaceLifecycleService:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
+                "guest_os": image.guest_os,
                 **self.credential_sync.resolved_credentials_payload(resolved),
+                **await sync_to_async(windows_activation_payload)(workspace),
             },
         )
         logger.info(

@@ -201,6 +201,10 @@ class OrganizationService:
             return None
         return membership
 
+    def list_active_members(self, org_id: uuid.UUID) -> list[Membership]:
+        """Return the memberships of the organization's active users."""
+        return self.memberships.list_active_for_organization(org_id)
+
     def require_active_membership(
         self, user_id: int, org_id: uuid.UUID, *, lock: bool = False
     ) -> Membership:

@@ -8,6 +8,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import APIKeyPermission
+from apps.licensing.services import WindowsLicenseService
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
@@ -295,6 +296,8 @@ class DispositionService:
                 observed_status=evidence.get("workspace_status"),
             )
             if action == "retry":
+                if current.task_type == "resume_workspace":
+                    WindowsLicenseService().admit(repository.workspace())
                 new_id = repository.create_retry(current.retry_count + 1)
                 return {
                     "operation_id": str(new_id),

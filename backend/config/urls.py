@@ -24,6 +24,7 @@ from apps.harness.commit_message_api import commit_message_router
 from apps.harness.engines.api import engines_router
 from apps.harness.provider_accounts_api import provider_accounts_router
 from apps.harness.voice_api import voice_router, voice_settings_router
+from apps.licensing.api import licensing_router
 from apps.mobile_apps.api import app_router
 from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
@@ -73,6 +74,7 @@ api.add_router("/auth/", auth_router)
 api.add_router("/notifications/", notification_router)
 api.add_router("/auth/", member_profile_router)
 api.add_router("/organizations/", org_router)
+api.add_router("/licensing/", licensing_router)
 api.add_router("/runners/", runner_router)
 api.add_router("/workspaces/", workspace_router)
 api.add_router("/workspaces/", workspace_image_artifact_router)

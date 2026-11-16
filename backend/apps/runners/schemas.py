@@ -127,6 +127,14 @@ class WorkspaceDiskUsageOut(Schema):
     observed_at: datetime
 
 
+class WorkspaceWindowsLicenseOut(Schema):
+    """License state of a Windows workspace, shown to its owner."""
+
+    kind: str
+    activation_status: str
+    activation_code: str = ""
+
+
 class WorkspaceOut(Schema):
     """Response schema for a workspace."""
 
@@ -163,6 +171,7 @@ class WorkspaceOut(Schema):
     base_image: ImageVersionRefOut | None = None
     pending_base_image: ImageVersionRefOut | None = None
     repos: list[str] = []
+    windows_license: WorkspaceWindowsLicenseOut | None = None
 
 
 class WorkspaceRecreateIn(Schema):

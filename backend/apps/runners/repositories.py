@@ -18,6 +18,8 @@ from django.db.models import Count, F, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
+from apps.licensing.repositories import WindowsWorkspaceLicenseRepository
+
 from .disk_usage import WorkspaceDiskUsage
 from .guest_os import guest_os_for_distro
 from .enums import (
@@ -527,16 +529,20 @@ class WorkspaceRepository:
         returning to the same status cannot be overwritten by that old scan.
         """
         now = timezone.now()
-        changed = Workspace.objects.filter(
-            pk=workspace.id,
-            status=workspace.status,
-            updated_at=workspace.updated_at,
-            current_task_id__isnull=True,
-            active_operation__isnull=True,
-            runner_id__in=Runner.objects.filter(
-                pk=workspace.runner_id, sid=runner_sid
-            ).values("pk"),
-        ).update(status=status, updated_at=now)
+        with transaction.atomic():
+            changed = Workspace.objects.filter(
+                pk=workspace.id,
+                status=workspace.status,
+                updated_at=workspace.updated_at,
+                current_task_id__isnull=True,
+                active_operation__isnull=True,
+                runner_id__in=Runner.objects.filter(
+                    pk=workspace.runner_id, sid=runner_sid
+                ).values("pk"),
+            ).update(status=status, updated_at=now)
+            if changed and status == WorkspaceStatus.DELETED:
+                # The runner observed the VM gone: its Windows license is free.
+                WindowsWorkspaceLicenseRepository.release(workspace.id)
         if changed:
             workspace.status = status
             workspace.updated_at = now
@@ -893,12 +899,17 @@ class WorkspaceRepository:
 
     @staticmethod
     def mark_deleted(workspace_id: uuid.UUID) -> None:
-        """Mark workspace as fully deleted after runner confirmation."""
-        Workspace.objects.filter(id=workspace_id).update(
-            status=WorkspaceStatus.DELETED,
-            active_operation=None,
-            delete_confirmed_at=timezone.now(),
-        )
+        """Mark workspace as fully deleted after runner confirmation.
+
+        The confirmed deletion also frees the workspace's Windows license.
+        """
+        with transaction.atomic():
+            Workspace.objects.filter(id=workspace_id).update(
+                status=WorkspaceStatus.DELETED,
+                active_operation=None,
+                delete_confirmed_at=timezone.now(),
+            )
+            WindowsWorkspaceLicenseRepository.release(workspace_id)
 
     @staticmethod
     def mark_delete_failed(workspace_id: uuid.UUID, *, error: str = "") -> None:
@@ -980,6 +991,8 @@ class TaskRepository:
                         qemu_memory_mb=workspace.qemu_memory_mb,
                         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
                     )
+                    if task_type == TaskType.RESUME_WORKSPACE:
+                        payload["guest_os"] = workspace.guest_os
                 payload.update(operation_payload or {})
                 payload["task_id"] = str(task.id)
                 OperationRepository.prepare(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+from apps.licensing.services import WindowsLicenseService
 from common.exceptions import ConflictError
 
 from ..enums import TaskType, WorkspaceStatus
@@ -130,6 +131,7 @@ class WorkspaceCapacityService:
                 disk_size_gb=effective["disk_size_gb"],
                 exclude_workspace_id=workspace.id,
             )
+            WindowsLicenseService().admit(workspace)
             workspace = WorkspaceRepository.update_qemu_resources(
                 workspace,
                 qemu_vcpus=effective["vcpus"],

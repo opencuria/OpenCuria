@@ -13,10 +13,12 @@ from datetime import timedelta
 from typing import Any
 
 from apps.credentials.services import CredentialSvc
+from apps.licensing.services import WindowsLicenseService
 from apps.plugins.services import PluginService
 
 from ..disk_usage import WorkspaceDiskUsage
 from ..enums import RunnerStatus, WorkspaceStatus
+from ..guest_os import WINDOWS
 from ..models import Workspace
 from ..workspace_read_repository import WorkspaceReadRelations, WorkspaceReadRepository
 from .image_versions import ImageVersionService
@@ -32,12 +34,14 @@ class WorkspaceReadService:
         credentials: CredentialSvc | None = None,
         plugins: PluginService | None = None,
         versions: ImageVersionService | None = None,
+        licenses: WindowsLicenseService | None = None,
     ) -> None:
         """Inject read boundaries without constructing runner execution."""
         self.repository = repository or WorkspaceReadRepository
         self.credentials = credentials or CredentialSvc()
         self.plugins = plugins or PluginService()
         self.versions = versions or ImageVersionService()
+        self.licenses = licenses or WindowsLicenseService()
 
     @staticmethod
     def _summary_values(
@@ -80,6 +84,15 @@ class WorkspaceReadService:
                 if image is not None
             ]
         )
+        # Only Windows workspaces hold licenses; Linux-only lists skip the read.
+        licenses = self.licenses.workspace_states_many(
+            [
+                workspace.id
+                for workspace in workspaces
+                if getattr(related[workspace.id].base_image, "guest_os", None)
+                == WINDOWS
+            ]
+        )
         return [
             self._describe(
                 workspace,
@@ -87,6 +100,7 @@ class WorkspaceReadService:
                 credential_ids=credentials[workspace.id],
                 plugin_ids=plugins[workspace.id],
                 versions=versions,
+                windows_license=licenses.get(workspace.id),
             )
             for workspace in workspaces
         ]
@@ -99,6 +113,7 @@ class WorkspaceReadService:
         credential_ids: list[uuid.UUID],
         plugin_ids: list[uuid.UUID],
         versions: dict[uuid.UUID, dict],
+        windows_license: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Compose one workspace from request-local metadata without I/O."""
         timeout = related.auto_stop_timeout_minutes
@@ -153,4 +168,5 @@ class WorkspaceReadService:
                 else None
             ),
             "repos": list(getattr(workspace, "repos", None) or []),
+            "windows_license": windows_license,
         }
