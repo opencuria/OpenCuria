@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .guest import GuestPlatform, guest_of
+
 
 class ExecutionEnvironmentAccessor:
     """Delegate workspace access, adding defaults only to agent execution paths.
@@ -19,6 +21,11 @@ class ExecutionEnvironmentAccessor:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._accessor, name)
+
+    @property
+    def guest(self) -> GuestPlatform:
+        """Guest OS of the wrapped workspace accessor."""
+        return guest_of(self._accessor)
 
     async def exec_wait(
         self,

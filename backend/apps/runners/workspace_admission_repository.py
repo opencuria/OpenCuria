@@ -53,12 +53,14 @@ class WorkspaceAdmissionRepository:
     ) -> Workspace | None:
         """Read a workspace with its runner and apply the live interaction fence.
 
-        One query serves both the fence and the routing target of a live
-        runner call. ``fenced=False`` skips only the fence. Returns None when
-        the workspace is gone.
+        One query serves the fence, the routing target of a live runner call
+        and the guest OS of the workspace image. ``fenced=False`` skips only
+        the fence. Returns None when the workspace is gone.
         """
         workspace = (
-            Workspace.objects.select_related("runner").filter(id=workspace_id).first()
+            Workspace.objects.select_related("runner", "base_image_instance")
+            .filter(id=workspace_id)
+            .first()
         )
         if workspace is not None and fenced:
             _raise_if_interactions_blocked(workspace)

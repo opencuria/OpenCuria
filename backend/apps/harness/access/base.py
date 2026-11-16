@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from . import file_types
+from .guest import HARNESS_WORKSPACE_ROOT, LINUX_GUEST, GuestPlatform
 from .safe_files import read_file_no_follow
 
-HARNESS_WORKSPACE_ROOT = "/workspace"
 ProcessProfile = Literal["agent", "helper"]
 
 #: Env vars never forwarded to the workspace (injected shell/runtime
@@ -70,39 +70,48 @@ def validate_harness_env(env: dict[str, str] | None) -> dict[str, str]:
     return dict(env)
 
 
-def sanitize_harness_path(path: str) -> str:
+def sanitize_harness_path(path: str, guest: GuestPlatform = LINUX_GUEST) -> str:
     """Normalize a harness file path in the workspace VM.
 
     Args:
         path: Absolute or workspace-relative path requested by a tool.
+        guest: Guest whose native path spellings map to ``/workspace``.
 
     Returns:
         The normalized absolute path (relative paths start at ``/workspace``).
 
     Raises:
-        ValueError: If the path is empty or contains control characters.
+        ValueError: If the path is empty, contains control characters, or is
+            a guest-native path outside the workspace.
     """
     if not path or not path.strip() or "\x00" in path or "\n" in path:
         raise ValueError(f"Invalid path: {path}")
-    candidate = path if os.path.isabs(path) else f"/workspace/{path}"
+    mapped = guest.to_workspace_path(path)
+    if mapped is None:
+        raise ValueError(f"Path is outside {HARNESS_WORKSPACE_ROOT}: {path}")
+    candidate = mapped if os.path.isabs(mapped) else f"/workspace/{mapped}"
     return os.path.normpath(candidate)
 
 
-def sanitize_exec_workdir(path: str) -> str:
+def sanitize_exec_workdir(path: str, guest: GuestPlatform = LINUX_GUEST) -> str:
     """Normalize an exec working directory (not sandboxed to /workspace).
 
     Relative paths resolve against ``/workspace`` and may escape it
     after ``normpath``. Absolute paths anywhere in the workspace
     filesystem are allowed. Empty input defaults to ``/workspace``.
+    Guest-native spellings of workspace paths map to ``/workspace``.
 
     Raises:
         ValueError: If the path is empty after normalize, not absolute,
-            or contains a NUL/newline.
+            contains a NUL/newline, or is a guest-native path outside the
+            workspace.
     """
     raw_input = path or ""
     if "\x00" in raw_input or "\n" in raw_input:
         raise ValueError(f"Invalid workdir: {path}")
-    raw = raw_input.strip() or HARNESS_WORKSPACE_ROOT
+    raw = guest.to_workspace_path(raw_input.strip() or HARNESS_WORKSPACE_ROOT)
+    if raw is None:
+        raise ValueError(f"Invalid workdir: {path}")
     candidate = raw if os.path.isabs(raw) else f"{HARNESS_WORKSPACE_ROOT}/{raw}"
     normalized = os.path.normpath(candidate)
     if not os.path.isabs(normalized):
@@ -164,6 +173,9 @@ class WorkspaceByteStream(abc.ABC):
 
 class WorkspaceAccessor(abc.ABC):
     """Abstract workspace access for the agent harness."""
+
+    #: Guest OS of the workspace; implementations without one serve Linux.
+    guest: GuestPlatform = LINUX_GUEST
 
     def __init__(self, workspace_id: str) -> None:
         self.workspace_id = workspace_id
