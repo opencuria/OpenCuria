@@ -70,7 +70,8 @@ def test_windows_context_states_only_the_guest_constraints() -> None:
     assert "C:\\workspace for native Windows programs" in environment
     assert "Shell commands run in bash (MSYS2) with GNU tools" in environment
     assert "PowerShell is available as powershell.exe" in environment
-    assert "Write files as UTF-8" in environment
+    assert "switches with a double slash (cmd //c ver" in environment
+    assert "Write files as UTF-8 without a byte order mark" in environment
     assert "GUI programs started from the shell are not visible" in environment
     assert "Linux" not in context
     assert "Preserve existing user work" in environment

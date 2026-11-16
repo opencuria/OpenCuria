@@ -154,8 +154,11 @@ WINDOWS_GUEST = GuestPlatform(
         f"rooted at {HARNESS_WORKSPACE_ROOT} (C:\\workspace for native Windows "
         "programs), not on the user's machine. Shell commands run in bash "
         "(MSYS2) with GNU tools; PowerShell is available as powershell.exe. "
-        "Write files as UTF-8. GUI programs started from the shell are not "
-        "visible on the desktop."
+        "As in Git Bash, arguments that look like POSIX paths are converted "
+        "for native Windows programs, so write their switches with a double "
+        "slash (cmd //c ver, ipconfig //all). Write files as UTF-8 without a "
+        "byte order mark (Windows PowerShell's -Encoding UTF8 adds one). GUI "
+        "programs started from the shell are not visible on the desktop."
     ),
     native_workspace_root="C:\\workspace",
     native_python="C:\\msys64\\usr\\bin\\python3.exe",

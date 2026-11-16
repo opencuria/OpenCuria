@@ -27,6 +27,10 @@ session_task() {
 session_task 'OpenCuria Display' display.ps1 /sc onlogon
 session_task 'OpenCuria Clipboard' clipboard.ps1 /sc once /st 00:00
 
+# Local PowerShell scripts run like shell scripts; downloaded ones stay signed.
+powershell.exe -NoProfile -NonInteractive -Command \
+  'Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force'
+
 # No OneDrive or backup prompts on the desktop agents and users share.
 reg.exe add 'HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive' /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f >/dev/null
 echo "opencuria-configure: done"
