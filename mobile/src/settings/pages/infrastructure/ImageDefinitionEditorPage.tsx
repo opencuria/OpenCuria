@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from "react";
 import {
   BASE_DISTRO_PRESETS,
+  baseDistroLabel,
   envVarsTextValid,
+  formBaseDistro,
   imageDefinitionForm,
   imageDefinitionPayload,
   isImageDefinitionFormValid,
+  recipeFieldHints,
   type ImageDefinitionForm,
   visibleImageDefinitions,
 } from "@opencuria/chat-core/imageDefinitionLifecycle";
@@ -79,12 +82,14 @@ export function ImageDefinitionEditorPage({
   };
 
   const envValid = form ? envVarsTextValid(form.envVars) : true;
+  // Package and script hints follow the selected OS (apt/bash or winget/PowerShell).
+  const hints = recipeFieldHints(form ? formBaseDistro(form) : "");
   const sections: NativeFormSection[] = form
     ? [
         {
           id: "definition",
           footer:
-            "QEMU image builds currently support Ubuntu cloud images only.",
+            "QEMU image builds start from Ubuntu cloud images or Windows 11.",
           rows: [
             {
               kind: "text",
@@ -116,7 +121,7 @@ export function ImageDefinitionEditorPage({
                   options: [
                     ...BASE_DISTRO_PRESETS.map((value) => ({
                       value,
-                      label: value,
+                      label: baseDistroLabel(value),
                     })),
                     { value: "custom", label: "Custom…" },
                   ],
@@ -144,7 +149,7 @@ export function ImageDefinitionEditorPage({
           id: "packages",
           title: "Packages and environment",
           footer: envValid
-            ? "Packages are comma-separated. One KEY=VALUE per line for the environment."
+            ? `${hints.packagesHint} One KEY=VALUE per line for the environment.`
             : "Each environment line needs a KEY before its “=”.",
           footerTone: envValid ? "muted" : "danger",
           rows: [
@@ -152,7 +157,7 @@ export function ImageDefinitionEditorPage({
               kind: "text",
               id: "packages",
               label: "Pre-installed packages",
-              placeholder: "python3, nodejs, ffmpeg",
+              placeholder: hints.packages,
               value: form.packages,
               onChange: (packages) => edit({ packages }),
             },
@@ -178,7 +183,7 @@ export function ImageDefinitionEditorPage({
               kind: "text",
               id: "init-script",
               label: "Custom init script",
-              placeholder: "#!/bin/bash",
+              placeholder: hints.initScript,
               multiline: true,
               monospace: true,
               lines: [4, 14],

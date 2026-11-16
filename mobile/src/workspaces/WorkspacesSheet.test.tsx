@@ -428,3 +428,40 @@ it("captures the next version of the workspace's own image", async () => {
   );
   tree.unmount();
 });
+
+it("creates Windows workspaces with at least the image minimums", async () => {
+  const client = mockClient();
+  client.images.listDefinitions.mockResolvedValue([
+    {
+      id: "def-ubuntu",
+      name: "Windows 11",
+      is_active: true,
+      status: "active",
+      guest_os: "windows",
+      minimums: { vcpus: 2, memory_mb: 8192, disk_size_gb: 64 },
+    },
+  ]);
+  const { tree } = renderSheet(client);
+  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
+  const sheet = await screen.findByTestId("create-workspace-sheet");
+  await waitFor(() =>
+    expect(
+      within(sheet).getByRole("button", { name: "Windows 11 · Windows" }),
+    ).toBeTruthy(),
+  );
+
+  fireEvent.changeText(within(sheet).getByLabelText("Name"), "windows");
+  fireEvent.press(screen.getByTestId("workspace-create"));
+  await waitFor(() =>
+    expect(client.workspaces.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        image_id: "artifact-ubuntu",
+        qemu_vcpus: 2,
+        qemu_memory_mb: 8192,
+        qemu_disk_size_gb: 64,
+      }),
+    ),
+  );
+  tree.unmount();
+});

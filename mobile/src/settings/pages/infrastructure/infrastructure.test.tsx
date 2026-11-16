@@ -300,6 +300,47 @@ describe("image definitions", () => {
     );
     expect(navigation.replace).toHaveBeenCalledWith("image-definition:d3");
   });
+
+  it("offers Windows 11 with winget and PowerShell hints", async () => {
+    const createDefinition = jest.fn(async () => ({ ...definition, id: "d4" }));
+    renderSettingsPage(<ImageDefinitionEditorPage definitionId={null} />, {
+      client: mockClient({
+        images: { listDefinitions: jest.fn(async () => []), createDefinition },
+      }),
+    });
+    expect(
+      screen.getByText(
+        "Packages are comma-separated. One KEY=VALUE per line for the environment.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.press(screen.getByRole("button", { name: "Windows 11 Pro" }));
+    expect(
+      screen.getByText(
+        "Packages are comma-separated winget IDs. One KEY=VALUE per line for the environment.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText("Pre-installed packages").props.placeholder,
+    ).toBe("Git.Git, Python.Python.3.12");
+    expect(screen.getByLabelText("Custom init script").props.placeholder).toBe(
+      "# PowerShell",
+    );
+    fireEvent.changeText(screen.getByLabelText("Name"), "Windows");
+    fireEvent.changeText(
+      screen.getByLabelText("Pre-installed packages"),
+      "Git.Git",
+    );
+    fireEvent.press(screen.getByTestId("save-image-definition"));
+    await waitFor(() =>
+      expect(createDefinition).toHaveBeenCalledWith(
+        expect.objectContaining({
+          base_distro: "windows:11",
+          packages: ["Git.Git"],
+        }),
+      ),
+    );
+  });
 });
 
 describe("runners", () => {

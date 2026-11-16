@@ -38,6 +38,7 @@ import {
   qemuResourceLimits,
   type WorkspaceImageOption,
 } from '@opencuria/chat-core/workspaceCreation'
+import { imageOsBadge } from '@opencuria/chat-core/imageDefinitionLifecycle'
 import { CloudAlert, Layers, Plus, X } from '@lucide/vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { OPEN_SETTINGS_EVENT, type SettingsTabId } from '@/components/settings/settingsTabs'
@@ -148,19 +149,33 @@ const imageOptions = computed(() => {
   const definitionOptions = groupedImageOptions.value.definitions.map((option) => ({
     ...option,
     label: `● ${option.label}`,
+    osBadge: imageOsBadge(option.guestOs),
   }))
   const capturedOptions = groupedImageOptions.value.captured.map((option) => ({
     ...option,
     label: `○ ${option.label}`,
+    osBadge: imageOsBadge(option.guestOs),
   }))
 
   const options = [
     ...(definitionOptions.length
-      ? [{ value: '__group_definitions__', label: '── Organization Images ──────────────' }]
+      ? [
+          {
+            value: '__group_definitions__',
+            label: '── Organization Images ──────────────',
+            osBadge: null,
+          },
+        ]
       : []),
     ...definitionOptions,
     ...(capturedOptions.length
-      ? [{ value: '__group_captured__', label: '── Captured Images ──────────────────' }]
+      ? [
+          {
+            value: '__group_captured__',
+            label: '── Captured Images ──────────────────',
+            osBadge: null,
+          },
+        ]
       : []),
     ...capturedOptions,
   ]
@@ -267,7 +282,10 @@ const advancedRunnerOptions = computed(() => {
   }))
 })
 
-const qemuLimits = computed(() => qemuResourceLimits(effectiveQemuRunner.value))
+// The selected image's minimums (e.g. Windows) raise the runner's minimums and defaults.
+const qemuLimits = computed(() =>
+  qemuResourceLimits(effectiveQemuRunner.value, undefined, selectedImageOption.value?.minimums),
+)
 
 watch(
   [() => open.value, qemuLimits, selectedImageValue],
@@ -565,7 +583,12 @@ const isValid = computed(
               <SelectContent>
                 <template v-for="opt in imageOptions" :key="opt.value">
                   <SelectLabel v-if="opt.value.startsWith('__group_')">{{ opt.label }}</SelectLabel>
-                  <SelectItem v-else :value="opt.value">{{ opt.label }}</SelectItem>
+                  <SelectItem v-else :value="opt.value">
+                    {{ opt.label }}
+                    <span v-if="opt.osBadge" class="text-xs text-muted-foreground">{{
+                      opt.osBadge
+                    }}</span>
+                  </SelectItem>
                 </template>
               </SelectContent>
             </Select>

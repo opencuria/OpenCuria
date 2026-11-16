@@ -244,6 +244,62 @@ describe("workspace images and resources", () => {
     ).toEqual({ vcpus: 4, memoryMb: 8192, diskSizeGb: 100 });
   });
 
+  it("raises defaults and minimums to the image minimums within runner maximums", () => {
+    const windows = workspaceImageOptions({
+      definitions: [
+        {
+          id: "win",
+          name: "Windows 11",
+          is_active: true,
+          status: "active",
+          guest_os: "windows",
+          minimums: { vcpus: 2, memory_mb: 4096, disk_size_gb: 64 },
+        },
+      ],
+      buildsByDefinition: {
+        win: [{ runner_id: "r1", status: "active", image_artifact_id: "a" }],
+      },
+      capturedImages: [],
+      runners: [runner("r1")],
+    }).definitions[0]!;
+    expect(windows.guestOs).toBe("windows");
+    expect(options.definitions[0]!).toMatchObject({
+      guestOs: "linux",
+      minimums: null,
+    });
+
+    const small = { ...runner("r1"), qemu_default_vcpus: 1 };
+    const limits = qemuResourceLimits(small, undefined, windows.minimums);
+    expect(limits).toMatchObject({
+      minVcpus: 2,
+      defaultVcpus: 2,
+      minMemoryMb: 4096,
+      defaultMemoryMb: 8192,
+      minDiskSizeGb: 64,
+      defaultDiskSizeGb: 80,
+      maxDiskSizeGb: 500,
+    });
+    // Switching from a Linux image follows the raised defaults.
+    expect(
+      fitQemuResources(
+        { vcpus: 1, memoryMb: 8192, diskSizeGb: 30 },
+        qemuResourceLimits(small),
+        limits,
+      ),
+    ).toEqual({ vcpus: 2, memoryMb: 8192, diskSizeGb: 80 });
+    // The server explains runners whose maximums are below the image minimums.
+    expect(
+      qemuResourceLimits(
+        { ...small, qemu_max_disk_size_gb: 50, qemu_default_disk_size_gb: 40 },
+        undefined,
+        windows.minimums,
+      ),
+    ).toMatchObject({ minDiskSizeGb: 50, defaultDiskSizeGb: 50 });
+    expect(qemuResourceLimits(null, undefined, windows.minimums)).toMatchObject(
+      { minDiskSizeGb: 64, defaultDiskSizeGb: 64, defaultMemoryMb: 4096 },
+    );
+  });
+
   it("patches only changed resources", () => {
     const current = {
       name: "demo",

@@ -18,7 +18,7 @@ from apps.plugins.services import PluginService
 
 from ..disk_usage import WorkspaceDiskUsage
 from ..enums import RunnerStatus, WorkspaceStatus
-from ..guest_os import WINDOWS
+from ..guest_os import WINDOWS, normalize_guest_os
 from ..models import Workspace
 from ..workspace_read_repository import WorkspaceReadRelations, WorkspaceReadRepository
 from .image_versions import ImageVersionService
@@ -166,6 +166,9 @@ class WorkspaceReadService:
                 versions[related.pending_base_image.id]
                 if related.pending_base_image
                 else None
+            ),
+            "guest_os": normalize_guest_os(
+                getattr(related.base_image, "guest_os", None)
             ),
             "repos": list(getattr(workspace, "repos", None) or []),
             "windows_license": windows_license,

@@ -104,7 +104,7 @@ class CaptureRepository:
 
     @staticmethod
     def line_guest_os(line: CapturedImage) -> str | None:
-        """Return the guest OS of a line's newest version, if it has one."""
+        """Guest OS of a line's versions; ``None`` while it has no version."""
         return (
             ImageInstance.objects.filter(captured_image=line)
             .order_by("-generation")

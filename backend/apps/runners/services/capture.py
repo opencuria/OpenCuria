@@ -129,16 +129,16 @@ class CaptureService:
             raise ConflictError(
                 "New versions must be captured on the runner that stores the image"
             )
-        if CaptureRepository.version_capturing(line):
-            raise ConflictError("Another version of this image is being captured")
-        line_os = CaptureRepository.line_guest_os(line)
-        if line_os is not None and line_os != ws.guest_os:
+        line_guest_os = CaptureRepository.line_guest_os(line)
+        if line_guest_os is not None and line_guest_os != ws.guest_os:
             # Workspaces update within a line, so its OS (and license) is fixed.
             raise ConflictError(
                 "New versions must use the operating system of the image; "
                 "capture a new image instead",
                 code="image_os_mismatch",
             )
+        if CaptureRepository.version_capturing(line):
+            raise ConflictError("Another version of this image is being captured")
         return line
 
     @staticmethod

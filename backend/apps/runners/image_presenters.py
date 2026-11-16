@@ -5,9 +5,28 @@ Pure mapping for REST image payloads.
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from .enums import RunnerStatus
-from .schemas import CapturedImageOut, ImageArtifactOut
+from .guest_os import image_minimums, normalize_guest_os
+from .schemas import CapturedImageOut, ImageArtifactOut, ImageMinimumsOut
 from .services.image_versions import ImageVersionService
+
+
+def minimums_out(
+    guest_os: str | None, min_disk_size_gb: int | None = None
+) -> ImageMinimumsOut:
+    """Smallest workspace resources of a guest OS, raised to an image's disk."""
+    return ImageMinimumsOut(**asdict(image_minimums(guest_os, min_disk_size_gb)))
+
+
+def _version_guest_facts(version) -> dict:
+    """Guest OS and resource floor of one image version (or none: Linux)."""
+    guest_os = normalize_guest_os(getattr(version, "guest_os", None))
+    return {
+        "guest_os": guest_os,
+        "minimums": minimums_out(guest_os, getattr(version, "min_disk_size_gb", None)),
+    }
 
 
 def image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifactOut:
@@ -75,6 +94,7 @@ def image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifact
         is_latest=extras["is_latest"],
         retention=extras["retention"],
         workspace_count=extras["workspace_count"],
+        **_version_guest_facts(artifact),
     )
 
 
@@ -101,6 +121,8 @@ def captured_image_to_out(view: dict) -> CapturedImageOut:
         latest_version=latest.generation if latest else None,
         total_size_bytes=view["total_size_bytes"],
         workspace_count=view["workspace_count"],
+        # New workspaces start from the latest version.
+        **_version_guest_facts(latest),
         versions=[
             image_artifact_to_out(v, view["extras"][v.id]) for v in view["versions"]
         ],

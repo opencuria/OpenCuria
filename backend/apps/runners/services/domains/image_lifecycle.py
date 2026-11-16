@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
@@ -14,6 +13,7 @@ from common.exceptions import ConflictError
 
 from ...exceptions import WorkspaceNotFoundError
 from ...guest_os import is_supported_base_distro
+from ...image_recipes import render_init_script
 from ..capture import CaptureService
 
 if TYPE_CHECKING:
@@ -64,65 +64,14 @@ class ImageLifecycleService:
         if is_supported_base_distro(base_distro):
             return
         raise ConflictError(
-            "Image definitions require an ubuntu:<version> or windows:11 base distro"
+            "Image definitions require an ubuntu:<version> or windows:11 base distro",
+            code="unsupported_base_distro",
         )
 
     @staticmethod
-    def _desktop_session_init_script_block() -> str:
-        """Return shell script lines that install the QEMU KasmVNC desktop."""
-        script_path = (
-            Path(__file__).resolve().parent.parent.parent
-            / "scripts"
-            / "qemu_desktop_session.sh"
-        )
-        return "\n" + script_path.read_text(encoding="utf-8").strip() + "\n"
-
-    @classmethod
-    def _build_qemu_init_script_content(cls, definition) -> str:
-        """Build a shell init script for QEMU image definitions."""
-        lines = [
-            "#!/bin/bash",
-            "set -euo pipefail",
-            "",
-        ]
-
-        packages = [p.strip() for p in list(definition.packages or []) if p.strip()]
-        if packages:
-            lines += [
-                "export DEBIAN_FRONTEND=noninteractive",
-                "apt-get update",
-                f"apt-get install -y {' '.join(packages)}",
-                "rm -rf /var/lib/apt/lists/*",
-                "",
-            ]
-
-        env_vars = dict(definition.env_vars or {})
-        if env_vars:
-            lines += [
-                "cat >/etc/profile.d/opencuria-image-env.sh <<'EOF'",
-                "#!/bin/sh",
-            ]
-            for key, value in env_vars.items():
-                if key:
-                    escaped = str(value).replace('"', '\\"')
-                    lines.append(f'export {key}="{escaped}"')
-            lines += [
-                "EOF",
-                "chmod 644 /etc/profile.d/opencuria-image-env.sh",
-                "",
-            ]
-
-        custom_script = (definition.custom_init_script or "").strip()
-        if custom_script:
-            lines += [
-                "# Custom image definition steps",
-                custom_script,
-                "",
-            ]
-
-        lines += [cls._desktop_session_init_script_block(), ""]
-
-        return "\n".join(lines).strip() + "\n"
+    def _build_qemu_init_script_content(definition) -> str:
+        """Render the build init script with the definition's guest OS renderer."""
+        return render_init_script(definition)
 
     def _ensure_definition_mutable(self, definition) -> None:
         """Reject runner mutations while a definition is deleted or being removed."""

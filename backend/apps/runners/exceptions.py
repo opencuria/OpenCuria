@@ -28,8 +28,8 @@ class ImageRecipeNotFoundError(NotFoundError):
 class ImageRecipeValidationError(ServiceError):
     """Raised when an image recipe request carries invalid input."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message=message, code="validation_error")
+    def __init__(self, message: str, code: str = "validation_error") -> None:
+        super().__init__(message=message, code=code)
 
 
 class RunnerNotFoundError(NotFoundError):
