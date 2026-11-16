@@ -51,10 +51,11 @@ vi.mock('@/components/chat/HarnessNoticeSheet.vue', () => ({
 
 vi.mock('@/components/chat/HarnessQueueSheet.vue', () => ({
   default: {
-    props: ['steers'],
-    emits: ['withdraw'],
+    name: 'HarnessQueueSheet',
+    props: ['steers', 'scheduled'],
+    emits: ['withdraw', 'send-scheduled', 'withdraw-scheduled', 'reschedule-scheduled'],
     template:
-      '<button data-testid="queue-stub" @click="$emit(\'withdraw\', steers[0].id)">{{ steers.length }}</button>',
+      '<button data-testid="queue-stub" @click="$emit(\'withdraw\', steers[0].id)">{{ steers.length }}:{{ scheduled.length }}</button>',
   },
 }))
 
@@ -271,5 +272,39 @@ describe('HarnessSheetStack', () => {
     expect(wrapper.find('[data-testid="todo-stub"]').exists()).toBe(false)
     await wrapper.get('[data-testid="queue-stub"]').trigger('click')
     expect(wrapper.emitted('withdraw-steer')).toEqual([['steer-1']])
+  })
+
+  it('renders the queue sheet for scheduled messages alone and forwards their actions', () => {
+    const at = new Date('2026-11-17T08:00:00Z')
+    const wrapper = mount(HarnessSheetStack, {
+      props: {
+        sheets: [
+          {
+            kind: 'queue',
+            queue: [],
+            scheduled: [
+              {
+                id: 'later-1',
+                session_id: 's-1',
+                content: 'Check CI',
+                send_at: at.toISOString(),
+                status: 'pending',
+                created_at: '2026-11-16T10:00:00Z',
+              },
+            ],
+          },
+        ],
+      },
+    })
+
+    expect(wrapper.get('[data-testid="queue-stub"]').text()).toBe('0:1')
+    const queue = wrapper.getComponent({ name: 'HarnessQueueSheet' })
+    queue.vm.$emit('send-scheduled', 'later-1')
+    queue.vm.$emit('withdraw-scheduled', 'later-1')
+    queue.vm.$emit('reschedule-scheduled', 'later-1', at)
+
+    expect(wrapper.emitted('send-scheduled')).toEqual([['later-1']])
+    expect(wrapper.emitted('withdraw-scheduled')).toEqual([['later-1']])
+    expect(wrapper.emitted('reschedule-scheduled')).toEqual([['later-1', at]])
   })
 })

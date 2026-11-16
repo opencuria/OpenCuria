@@ -16,6 +16,8 @@ const props = defineProps<{
   sheets: ComposerSheet[]
   questionSubmitting?: boolean
   permissionResolving?: boolean
+  /** Scheduled messages cannot be sent now (the chat takes no messages). */
+  scheduledSendDisabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -28,6 +30,9 @@ const emit = defineEmits<{
   'close-processes': []
   'dismiss-notice': [messageId: string]
   'withdraw-steer': [steerId: string]
+  'send-scheduled': [messageId: string]
+  'withdraw-scheduled': [messageId: string]
+  'reschedule-scheduled': [messageId: string, at: Date]
 }>()
 
 const todoOpen = ref(false)
@@ -93,10 +98,15 @@ function peekOffset(index: number): number {
             @resolve="(requestId, response) => emit('resolve', requestId, response)"
           />
         </template>
-        <template v-else-if="sheets[0]?.kind === 'queue' && sheets[0]?.queue">
+        <template v-else-if="sheets[0]?.kind === 'queue'">
           <HarnessQueueSheet
-            :steers="sheets[0].queue!"
+            :steers="sheets[0].queue ?? []"
+            :scheduled="sheets[0].scheduled ?? []"
+            :send-disabled="scheduledSendDisabled"
             @withdraw="(steerId) => emit('withdraw-steer', steerId)"
+            @send-scheduled="(messageId) => emit('send-scheduled', messageId)"
+            @withdraw-scheduled="(messageId) => emit('withdraw-scheduled', messageId)"
+            @reschedule-scheduled="(messageId, at) => emit('reschedule-scheduled', messageId, at)"
           />
         </template>
         <template v-else-if="sheets[0]?.kind === 'notice' && sheets[0]?.notice">

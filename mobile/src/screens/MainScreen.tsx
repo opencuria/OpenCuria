@@ -18,6 +18,10 @@ import { KeyboardController } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
+import {
+  formatSendTime,
+  sendLaterTaskInput,
+} from "@opencuria/chat-core/sendLater";
 import type { ResolvedChatMedia } from "../components/useWorkspaceMedia";
 import {
   filterMentionCandidates,
@@ -51,6 +55,8 @@ import {
   ChatMessages,
   type ComposerAttachment,
 } from "../components";
+import type { ComposerSubmission } from "../components/ChatComposer";
+import type { ComposerQueue } from "../components/ComposerSheets";
 import {
   ModelSheet,
   modelSheetEngines,
@@ -113,6 +119,8 @@ const EMPTY: ChatControllerSnapshot = {
   todos: [],
   permissions: [],
   questions: [],
+  steers: [],
+  scheduled: [],
   activeSessionId: null,
   activeSession: null,
   activeSessionLineage: [],
@@ -306,6 +314,11 @@ export function MainScreen(): React.JSX.Element {
   );
   /** The chat cannot take a message, as opposed to one being on its way. */
   const chatUnavailable = !navigationReady || !ready || activeIsSubtask;
+  /** The agent is working: a message goes into its running turn. */
+  const steering =
+    navigationReady &&
+    !activeIsSubtask &&
+    chat.activeSession?.status === "busy";
   const runOptions = () => ({
     harnessId: harness,
     mode,
@@ -952,13 +965,31 @@ export function MainScreen(): React.JSX.Element {
         const prompt = appendUploadMentions(text, paths);
         if (!prompt.trim())
           throw new Error("Attach a file or enter a message first.");
-        const accepted = await controller.send(prompt, {
+        const options = {
           harnessId: harness,
           mode,
           model,
           reasoningEffort: effort,
           skillIds: usedSkills,
-        });
+        };
+        // A running agent receives the message in its current turn.
+        if (controller.getSnapshot().activeSession?.status === "busy") {
+          await controller.steer(prompt, options);
+          if (
+            ownerGeneration === generation.current &&
+            selectedWorkspaceRef.current === ownerWorkspace
+          ) {
+            setDraft((current) =>
+              current === submittedDraft || current.trim() === text
+                ? ""
+                : current,
+            );
+            setAttachments([]);
+            setError(null);
+          }
+          return;
+        }
+        const accepted = await controller.send(prompt, options);
         if (
           ownerGeneration !== generation.current ||
           selectedWorkspaceRef.current !== ownerWorkspace
@@ -994,6 +1025,160 @@ export function MainScreen(): React.JSX.Element {
       navigationReady,
     ],
   );
+
+  const upsertSchedule = schedules.upsert;
+  /**
+   * "Send later": an open chat gets a scheduled message; a new chat becomes a
+   * one-time scheduled task that starts it.
+   */
+  const scheduleDraft = useCallback(
+    async (
+      { text, skillIds: usedSkills, attachments: files }: ComposerSubmission,
+      sendAt: Date,
+    ) => {
+      if (
+        !client ||
+        !controller ||
+        !workspace ||
+        !navigationReady ||
+        !ready ||
+        activeIsSubtask
+      )
+        throw new Error(
+          "Choose an available, running workspace before scheduling a message.",
+        );
+      if (files.length && !client.realtime.isConnected)
+        throw new Error(
+          "Connect to the workspace before uploading attachments.",
+        );
+      const ownerGeneration = generation.current;
+      const ownerWorkspace = workspace.id;
+      const ownerSession = chat.activeSessionId;
+      const paths = files.length
+        ? await uploadAttachments(client, ownerWorkspace, files)
+        : [];
+      if (
+        ownerGeneration !== generation.current ||
+        selectedWorkspaceRef.current !== ownerWorkspace ||
+        controller.getSnapshot().activeSessionId !== ownerSession
+      )
+        throw new Error(
+          "The workspace or conversation changed before scheduling. Please try again.",
+        );
+      const prompt = appendUploadMentions(text, paths);
+      if (!prompt.trim())
+        throw new Error("Attach a file or enter a message first.");
+      if (ownerSession) {
+        await controller.schedule(prompt, sendAt, {
+          harnessId: harness,
+          mode,
+          model,
+          reasoningEffort: effort,
+          skillIds: usedSkills,
+        });
+      } else {
+        const task = await client.scheduledTasks.create(
+          sendLaterTaskInput({
+            workspaceId: ownerWorkspace,
+            prompt,
+            at: sendAt,
+            mode,
+            harnessId: harness,
+            model,
+            reasoningEffort: effort,
+            skillIds: usedSkills,
+          }),
+        );
+        upsertSchedule(task);
+        showToast({
+          title: "New chat scheduled",
+          message: formatSendTime(sendAt),
+          tone: "success",
+        });
+      }
+      if (ownerGeneration === generation.current) {
+        setAttachments([]);
+        setError(null);
+      }
+    },
+    [
+      client,
+      controller,
+      workspace,
+      ready,
+      activeIsSubtask,
+      chat.activeSessionId,
+      harness,
+      mode,
+      model,
+      effort,
+      navigationReady,
+      upsertSchedule,
+    ],
+  );
+
+  /** Puts withdrawn text back below what the user is typing. */
+  const restoreToDraft = useCallback((texts: string[], skills?: string[]) => {
+    const restored = texts.filter((text) => text.trim()).join("\n\n");
+    if (restored)
+      setDraft((current) =>
+        current.trim()
+          ? `${current.replace(/\s+$/, "")}\n\n${restored}`
+          : restored,
+      );
+    if (skills?.length)
+      setSkillIds((current) => [
+        ...current,
+        ...skills.filter((id) => !current.includes(id)),
+      ]);
+  }, []);
+
+  /** Runs an outgoing-message action; a failure becomes a toast. */
+  const queueAction = useCallback(
+    async (title: string, action: () => Promise<void>) => {
+      try {
+        await action();
+      } catch (cause) {
+        showToast({
+          title,
+          message: errorMessage(cause, "Please try again."),
+          tone: "error",
+        });
+      }
+    },
+    [],
+  );
+
+  const outgoing: ComposerQueue | undefined =
+    controller && navigationReady && !offline
+      ? {
+          steers: chat.steers,
+          scheduled: chat.scheduled,
+          canSendNow: !chatUnavailable,
+          onWithdrawSteer: (id) =>
+            queueAction("Couldn’t withdraw the message", async () => {
+              const text = await controller.withdrawSteer(id);
+              if (text) restoreToDraft([text]);
+            }),
+          onSendNow: (id) =>
+            queueAction("Couldn’t send the message", () =>
+              controller.sendScheduledNow(id),
+            ),
+          onReschedule: (id, sendAt) =>
+            queueAction("Couldn’t change the time", () =>
+              controller.reschedule(id, sendAt),
+            ),
+          onEdit: (id) =>
+            queueAction("Couldn’t edit the message", async () => {
+              const message = await controller.withdrawScheduled(id);
+              if (message) restoreToDraft([message.content], message.skill_ids);
+            }),
+          onDelete: (id) =>
+            queueAction("Couldn’t delete the message", async () => {
+              await controller.withdrawScheduled(id);
+            }),
+        }
+      : undefined;
 
   const requestNavigation = (
     workspaceId: string,
@@ -1451,14 +1636,18 @@ export function MainScreen(): React.JSX.Element {
               draft={draft}
               onDraftChange={(value) => setDraft(value)}
               onSend={send}
+              onSchedule={offline ? undefined : scheduleDraft}
               onStop={async () => {
-                await controller?.abort();
+                // Stopping drops queued messages; give them back to the draft.
+                const restored = (await controller?.stop()) ?? [];
+                restoreToDraft(restored);
               }}
               busy={navigationReady && chat.busy}
+              steering={steering}
               // Offline a prompt can be written, not sent.
               disabled={offline ? false : chatUnavailable}
               canSend={!offline}
-              placeholder="Ask OpenCuria"
+              placeholder={steering ? "Steer the agent…" : "Ask OpenCuria"}
               workspace={newChatWorkspace}
               settings={
                 offline
@@ -1508,6 +1697,7 @@ export function MainScreen(): React.JSX.Element {
                     controller!.resolvePermission(id, response),
                   ),
               }}
+              queue={outgoing}
               testID="chat-composer"
             />
           }

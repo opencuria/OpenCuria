@@ -17,6 +17,7 @@ import {
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
+import { scheduleNewChat } from '@/lib/scheduledChat'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
 import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
@@ -136,6 +137,7 @@ const composerSheets = computed(() =>
     questions: activeQuestions.value,
     permissions: activeRequests.value,
     queue: harness.activeQueuedSteers,
+    scheduled: harness.activeScheduledMessages,
     notice: activeNotice.value,
     todos: harness.activeTodos,
     processesOpen: Boolean(props.processesOpen),
@@ -366,6 +368,14 @@ function setupSocketListeners(): void {
     onEvent('harness.steer_queue', (data) => {
       if (data.workspace_id === props.workspaceId) {
         harness.handleSteerQueue(data.session_id, data.steers)
+      }
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('harness.scheduled_messages', (data) => {
+      if (data.workspace_id === props.workspaceId) {
+        harness.handleScheduledMessages(data.session_id, data.messages)
       }
     }),
   )
@@ -651,13 +661,59 @@ async function handleSend(
     } else {
       accepted = await harness.sendMessage(sessionId, prompt, options)
     }
-    // The composer already cleared itself; give the draft back on failure
-    // unless the user moved on to another chat meanwhile.
-    if (!accepted && harness.activeSessionId === sessionId && props.workspaceId === workspaceId) {
-      chatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
-    }
+    if (!accepted) restoreDraft(prompt, skillIds, sessionId, workspaceId)
   } finally {
     sending.value = false
+  }
+}
+
+/**
+ * "Send later": an open chat gets a scheduled message; a new chat becomes a
+ * one-time scheduled task that starts it.
+ */
+async function handleSchedule(
+  prompt: string,
+  mode: HarnessSessionMode,
+  model: string,
+  skillIds: string[],
+  effort: string,
+  harnessId: HarnessId,
+  at: Date,
+): Promise<void> {
+  if (!props.canPrompt || isSubagentSession.value) return
+  sending.value = true
+  try {
+    const workspaceId = props.workspaceId
+    const sessionId = harness.activeSessionId
+    const accepted = sessionId
+      ? await harness.scheduleMessage(sessionId, prompt, at, {
+          mode,
+          model,
+          skillIds,
+          reasoningEffort: effort,
+        })
+      : await scheduleNewChat(
+          { workspaceId, prompt, mode, model, skillIds, reasoningEffort: effort, harnessId },
+          at,
+        )
+    if (!accepted) restoreDraft(prompt, skillIds, sessionId, workspaceId)
+  } finally {
+    sending.value = false
+  }
+}
+
+/**
+ * The composer already cleared itself: give a failed draft back unless the
+ * user moved on to another chat meanwhile.
+ */
+function restoreDraft(
+  prompt: string,
+  skillIds: string[],
+  sessionId: string | null,
+  workspaceId: string,
+): void {
+  if (harness.activeSessionId === sessionId && props.workspaceId === workspaceId) {
+    chatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
   }
 }
 
@@ -678,6 +734,32 @@ async function handleWithdrawSteer(steerId: string): Promise<void> {
   if (text && harness.activeSessionId === sessionId) {
     chatInputRef.value?.setPrompt(text, { append: true, focus: true })
   }
+}
+
+async function handleSendScheduled(messageId: string): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  await harness.sendScheduledMessageNow(sessionId, messageId)
+}
+
+/** Withdraw a scheduled message back into the composer to edit it. */
+async function handleWithdrawScheduled(messageId: string): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  const message = await harness.withdrawScheduledMessage(sessionId, messageId)
+  if (message && harness.activeSessionId === sessionId) {
+    chatInputRef.value?.setPrompt(message.content, {
+      append: true,
+      focus: true,
+      skillIds: message.skillIds,
+    })
+  }
+}
+
+async function handleRescheduleScheduled(messageId: string, at: Date): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  await harness.rescheduleMessage(sessionId, messageId, at)
 }
 
 async function handleResolve(
@@ -789,6 +871,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :sheets="composerSheets"
           :question-submitting="answeringQuestion || !canPrompt"
           :permission-resolving="resolving || !canPrompt"
+          :scheduled-send-disabled="!canPrompt"
           @mention-select="handleMentionSelect"
           @mention-hover="handleMentionHover"
           @question-submit="handleQuestionSubmit"
@@ -798,6 +881,9 @@ async function handleForkMessage(messageId: string): Promise<void> {
           @close-processes="handleCloseProcesses"
           @dismiss-notice="handleDismissNotice"
           @withdraw-steer="handleWithdrawSteer"
+          @send-scheduled="handleSendScheduled"
+          @withdraw-scheduled="handleWithdrawScheduled"
+          @reschedule-scheduled="handleRescheduleScheduled"
         />
         <HarnessChatInput
           ref="chatInputRef"
@@ -830,6 +916,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           @update:model="harness.setComposerModel($event)"
           @update:effort="harness.setComposerEffort($event)"
           @send="handleSend"
+          @schedule="handleSchedule"
           @stop="handleStop"
           @toggle-context="handleToggleContext"
           @context-metrics="handleContextMetrics"

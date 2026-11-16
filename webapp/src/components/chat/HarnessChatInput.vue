@@ -14,6 +14,7 @@ import VoiceInputControl from '@/components/chat/VoiceInputControl.vue'
 import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
 import HarnessMentionImages from '@/components/chat/HarnessMentionImages.vue'
 import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
+import SendLaterMenu from '@/components/chat/SendLaterMenu.vue'
 import { imageMentionTokens, removeComposerToken } from '@opencuria/chat-core/composerTokens'
 import {
   BookText,
@@ -157,6 +158,16 @@ const emit = defineEmits<{
     effort: string,
     harnessId: HarnessId,
   ]
+  /** "Send later": the same draft as `send`, delivered at `at`. */
+  schedule: [
+    prompt: string,
+    mode: HarnessSessionMode,
+    model: string,
+    skillIds: string[],
+    effort: string,
+    harnessId: HarnessId,
+    at: Date,
+  ]
   stop: []
   'update:model': [value: string]
   'update:effort': [value: string]
@@ -270,11 +281,13 @@ const steering = computed(
 )
 /** Empty composer while steering: the primary action is Stop. */
 const primaryIsStop = computed(() => steering.value && !hasText.value)
-const primaryEnabled = computed(() => (primaryIsStop.value ? canStop.value : canSend.value))
-const primaryTitle = computed(() => {
-  if (primaryIsStop.value) return stopTitle.value
-  return steering.value ? 'Steer the agent' : 'Send'
-})
+const sendTitle = computed(() => (steering.value ? 'Steer the agent' : 'Send'))
+/** Both halves of the send pill share one look: primary, or muted while unavailable. */
+const sendTone = computed(() =>
+  canSend.value
+    ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+    : 'bg-muted text-muted-foreground',
+)
 const pickersLocked = computed(() => Boolean(props.disabled) || steering.value)
 const composerPlaceholder = computed(() => {
   if (isScheduledTask.value) {
@@ -738,16 +751,23 @@ watch(selectedSkillIds, (ids) => {
 })
 
 function handleSend(): void {
+  submitDraft()
+}
+
+/** "Send later": hand the draft over with its time instead of sending it now. */
+function handleSchedule(at: Date): void {
+  submitDraft(at)
+}
+
+/** Emit the draft (now, or at `at`) and clear the composer for the next one. */
+function submitDraft(at?: Date): void {
   if (isScheduledTask.value || !canSend.value) return
-  emit(
-    'send',
-    prompt.value.trim(),
-    localMode.value,
-    localModel.value.trim(),
-    [...selectedSkillIds.value],
-    localEffort.value.trim(),
-    localHarnessId.value,
-  )
+  const text = prompt.value.trim()
+  const model = localModel.value.trim()
+  const skillIds = [...selectedSkillIds.value]
+  const effort = localEffort.value.trim()
+  if (at) emit('schedule', text, localMode.value, model, skillIds, effort, localHarnessId.value, at)
+  else emit('send', text, localMode.value, model, skillIds, effort, localHarnessId.value)
   prompt.value = ''
   selectedSkillIds.value = []
   clearCache()
@@ -1692,26 +1712,61 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 <Loader2 v-if="stopping" :size="14" class="animate-spin" />
                 <Square v-else :size="14" />
               </Button>
-              <Button
-                v-if="!isScheduledTask && !voiceBusy"
-                :disabled="!primaryEnabled"
-                size="icon"
-                class="h-8 w-8 shrink-0 rounded-full transition-all"
-                :class="
-                  primaryEnabled
-                    ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                    : 'bg-muted text-muted-foreground'
-                "
-                :title="primaryTitle"
-                :aria-label="primaryTitle"
-                :aria-busy="primaryIsStop && stopping"
-                :data-testid="primaryIsStop ? 'composer-stop' : 'composer-send'"
-                @click="primaryIsStop ? emit('stop') : handleSend()"
-              >
-                <Loader2 v-if="primaryIsStop && stopping" :size="14" class="animate-spin" />
-                <Square v-else-if="primaryIsStop" :size="14" />
-                <Send v-else :size="16" />
-              </Button>
+              <template v-if="!isScheduledTask && !voiceBusy">
+                <Button
+                  v-if="primaryIsStop"
+                  :disabled="!canStop"
+                  size="icon"
+                  class="h-8 w-8 shrink-0 rounded-full transition-all"
+                  :class="
+                    canStop
+                      ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                      : 'bg-muted text-muted-foreground'
+                  "
+                  :title="stopTitle"
+                  :aria-label="stopTitle"
+                  :aria-busy="stopping"
+                  data-testid="composer-stop"
+                  @click="emit('stop')"
+                >
+                  <Loader2 v-if="stopping" :size="14" class="animate-spin" />
+                  <Square v-else :size="14" />
+                </Button>
+                <!-- One pill: send now, or pick a time from the chevron. -->
+                <div
+                  v-else
+                  role="group"
+                  class="flex shrink-0 items-center rounded-full"
+                  :class="canSend ? 'shadow-sm shadow-primary/25' : ''"
+                  data-testid="composer-send-group"
+                >
+                  <Button
+                    :disabled="!canSend"
+                    size="icon"
+                    class="h-8 w-8 rounded-l-full rounded-r-none border-r-0 shadow-none transition-all active:not-aria-[haspopup]:translate-y-0"
+                    :class="sendTone"
+                    :title="sendTitle"
+                    :aria-label="sendTitle"
+                    data-testid="composer-send"
+                    @click="handleSend()"
+                  >
+                    <Send :size="16" />
+                  </Button>
+                  <SendLaterMenu :disabled="!canSend" @pick="handleSchedule">
+                    <Button
+                      :disabled="!canSend"
+                      size="icon"
+                      class="relative h-8 w-6 rounded-l-none rounded-r-full border-l-0 shadow-none transition-all before:absolute before:inset-y-2 before:left-0 before:w-px before:bg-current before:opacity-30"
+                      :class="sendTone"
+                      title="Send later"
+                      aria-label="Send later"
+                      data-testid="composer-send-later"
+                    >
+                      <ChevronDown :size="14" />
+                    </Button>
+                  </SendLaterMenu>
+                </div>
+              </template>
             </div>
           </div>
         </div>

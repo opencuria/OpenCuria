@@ -4,6 +4,7 @@ import { buildComposerSheets, optionLetter } from "../src/composerSheets";
 import type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSteer,
   HarnessTodo,
 } from "../src/harness";
@@ -34,6 +35,17 @@ function makeTodo(id: string): HarnessTodo {
 
 function makeSteer(id: string): HarnessSteer {
   return { id, content: `Steer ${id}`, created_at: "2026-10-16T10:00:00Z" };
+}
+
+function makeScheduled(id: string, sendAt: string): HarnessScheduledMessage {
+  return {
+    id,
+    session_id: "session-1",
+    content: `Later ${id}`,
+    send_at: sendAt,
+    status: "pending",
+    created_at: "2026-10-16T10:00:00Z",
+  };
 }
 
 describe("buildComposerSheets", () => {
@@ -187,7 +199,25 @@ describe("buildComposerSheets queue", () => {
 
   it("contributes no sheet for an empty or absent queue", () => {
     expect(buildComposerSheets({ queue: [] })).toEqual([]);
+    expect(buildComposerSheets({ queue: [], scheduled: [] })).toEqual([]);
     expect(buildComposerSheets({})).toEqual([]);
+  });
+
+  it("carries scheduled messages in the queue sheet, earliest first", () => {
+    const sheets = buildComposerSheets({
+      todos: [makeTodo("t1")],
+      scheduled: [
+        makeScheduled("late", "2026-10-18T09:00:00Z"),
+        makeScheduled("soon", "2026-10-16T11:00:00Z"),
+      ],
+    });
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(["queue", "todos"]);
+    expect(sheets[0]?.queue).toEqual([]);
+    expect(sheets[0]?.scheduled?.map((message) => message.id)).toEqual([
+      "soon",
+      "late",
+    ]);
   });
 });
 

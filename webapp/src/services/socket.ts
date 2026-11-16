@@ -22,6 +22,7 @@ import type {
   HarnessPartUpdatedEvent,
   HarnessPermissionRequiredEvent,
   HarnessQuestionRequiredEvent,
+  HarnessScheduledMessagesEvent,
   HarnessSessionStatusEvent,
   HarnessSessionSummaryEvent,
   HarnessSteerQueueEvent,
@@ -150,6 +151,7 @@ type EventMap = {
   'harness.conversations_changed': { workspace_id: string }
   'harness.todo_updated': HarnessTodoUpdatedEvent
   'harness.steer_queue': HarnessSteerQueueEvent
+  'harness.scheduled_messages': HarnessScheduledMessagesEvent
   'harness.subtask_started': HarnessSubtaskStartedEvent
   'harness.subtask_finished': HarnessSubtaskFinishedEvent
   'terminal:started': TerminalStartedEvent

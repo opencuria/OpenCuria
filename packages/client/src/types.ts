@@ -5,6 +5,7 @@ import type {
   HarnessPartsOut,
   HarnessPermissionRequest,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSession,
   HarnessSessionMode,
   HarnessSteer,
@@ -934,6 +935,8 @@ export interface HarnessTimeline {
   questions?: HarnessQuestionRequest[];
   /** Queued (not yet delivered) steers; absent on older backends. */
   steers?: HarnessSteer[];
+  /** Messages scheduled for later; absent on older backends. */
+  scheduled_messages?: HarnessScheduledMessage[];
 }
 
 export interface Todo extends HarnessTodo {}
@@ -943,6 +946,7 @@ export type {
   HarnessPartsOut,
   HarnessPermissionRequest,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSession,
   HarnessSteer,
   HarnessTodo,

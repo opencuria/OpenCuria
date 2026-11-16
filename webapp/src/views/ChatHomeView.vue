@@ -20,6 +20,7 @@ import WorkspaceSetupCard from '@/components/workspaces/WorkspaceSetupCard.vue'
 import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
 import { buildComposerSheets } from '@opencuria/chat-core/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
+import { scheduleNewChat } from '@/lib/scheduledChat'
 import type { MentionCandidate } from '@opencuria/chat-core/harnessMentions'
 import type { HarnessId, HarnessSessionMode } from '@opencuria/chat-core/harness'
 import { WorkspaceStatus } from '@/types'
@@ -330,6 +331,39 @@ async function handleSend(
   }
 }
 
+/** "Send later" from home: a one-time scheduled task starts the chat. */
+async function handleSchedule(
+  prompt: string,
+  mode: HarnessSessionMode,
+  model: string,
+  skillIds: string[],
+  effort: string,
+  harnessId: HarnessId,
+  at: Date,
+): Promise<void> {
+  const workspace = readyWorkspace.value
+  if (!workspace || sending.value) return
+  sending.value = true
+  try {
+    const scheduled = await scheduleNewChat(
+      {
+        workspaceId: workspace.id,
+        prompt,
+        mode,
+        model,
+        skillIds,
+        reasoningEffort: effort,
+        harnessId,
+      },
+      at,
+    )
+    // The composer already cleared itself; give the draft back.
+    if (!scheduled) homeChatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
+  } finally {
+    sending.value = false
+  }
+}
+
 onMounted(async () => {
   if (workspaceStore.workspaces.length === 0) {
     await workspaceStore.fetchWorkspaces()
@@ -455,6 +489,7 @@ watch(
               @update:model="harnessStore.setComposerModel($event)"
               @update:effort="harnessStore.setComposerEffort($event)"
               @send="handleSend"
+              @schedule="handleSchedule"
               @mention-change="
                 (open, query, candidates, index) =>
                   handleMentionMirror(open, query, candidates, index)

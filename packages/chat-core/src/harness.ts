@@ -222,6 +222,20 @@ export interface HarnessMessageIn {
   skill_ids?: string[];
 }
 
+/**
+ * Schedule payload (`HarnessScheduledMessageIn` in the backend). Run options
+ * apply when the message starts a new turn.
+ */
+export interface HarnessScheduledMessageIn {
+  prompt: string;
+  /** ISO timestamp in the future, at most a year ahead. */
+  send_at: string;
+  mode?: HarnessSessionMode | "";
+  model?: string;
+  reasoning_effort?: string;
+  skill_ids?: string[];
+}
+
 /** Fork payload (`HarnessForkIn` in the backend). Omit message_id for full-session fork. */
 export interface HarnessForkIn {
   /** Include this assistant answer; omit to copy the entire session. */
@@ -250,6 +264,27 @@ export interface HarnessPartsOut {
 export interface HarnessSteer {
   id: string;
   content: string;
+  created_at: string;
+}
+
+/** Delivery state of a scheduled message; delivered ones disappear. */
+export type HarnessScheduledMessageStatus = "pending" | "sending" | "failed";
+
+/**
+ * A user message the server sends into its chat at `send_at`: a new turn
+ * while the agent is idle, a steer of the running turn otherwise. A failed
+ * message keeps its text and `error` until the user retries or edits it.
+ */
+export interface HarnessScheduledMessage {
+  id: string;
+  session_id: string;
+  content: string;
+  /** ISO timestamp of the delivery. */
+  send_at: string;
+  status: HarnessScheduledMessageStatus;
+  error?: string;
+  /** Skills applied when the message starts a new turn. */
+  skill_ids?: string[];
   created_at: string;
 }
 
@@ -379,6 +414,13 @@ export interface HarnessSteerQueueEvent {
   workspace_id: string;
   session_id: string;
   steers: HarnessSteer[];
+}
+
+/** Full snapshot of the scheduled (not yet delivered) messages of a session. */
+export interface HarnessScheduledMessagesEvent {
+  workspace_id: string;
+  session_id: string;
+  messages: HarnessScheduledMessage[];
 }
 
 export interface HarnessTodoUpdatedEvent {

@@ -15,6 +15,7 @@ import type {
   HarnessPermissionRequest,
   HarnessPermissionResponse,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSession,
   HarnessSessionMode,
   HarnessId,
@@ -33,11 +34,15 @@ import {
   listHarnessSessions,
   listHarnessTodos,
   patchHarnessSession,
+  rescheduleHarnessMessage,
   resolveHarnessPermission,
   resolveHarnessQuestion,
+  scheduleHarnessMessage,
   sendHarnessMessage,
+  sendHarnessScheduledMessage,
   setSessionMode,
   steerHarnessSession,
+  withdrawHarnessScheduledMessage,
   withdrawHarnessSteer,
 } from '@/services/harness.api'
 import { ApiRequestError } from '@/services/api'
@@ -110,6 +115,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const pendingQuestions = ref<Record<string, HarnessQuestionRequest>>({})
   /** Queued (not yet delivered) steers keyed by session id, FIFO. */
   const queuedSteers = ref<Record<string, HarnessSteer[]>>({})
+  /** Messages scheduled for later keyed by session id, as the server lists them. */
+  const scheduledMessages = ref<Record<string, HarnessScheduledMessage[]>>({})
   const stoppingSessionIds = ref<string[]>([])
   const activeSessionId = ref<string | null>(null)
   /** Session currently open in the chat panel; cleared when the panel unmounts. */
@@ -146,6 +153,8 @@ export const useHarnessStore = defineStore('harness', () => {
    * flight while a newer socket snapshot landed must not overwrite it.
    */
   const steerRevisions = new Map<string, number>()
+  /** The same guard for each session's scheduled messages. */
+  const scheduledRevisions = new Map<string, number>()
   /** Sessions with a user-initiated turn request in flight (they fetch themselves). */
   const userTurnRequests = new Map<string, number>()
 
@@ -164,6 +173,10 @@ export const useHarnessStore = defineStore('harness', () => {
 
   const activeQueuedSteers = computed<HarnessSteer[]>(() =>
     activeSessionId.value ? (queuedSteers.value[activeSessionId.value] ?? []) : [],
+  )
+
+  const activeScheduledMessages = computed<HarnessScheduledMessage[]>(() =>
+    activeSessionId.value ? (scheduledMessages.value[activeSessionId.value] ?? []) : [],
   )
 
   const activeLineageIds = computed(() => {
@@ -276,6 +289,8 @@ export const useHarnessStore = defineStore('harness', () => {
     delete todosBySession.value[sessionId]
     delete queuedSteers.value[sessionId]
     steerRevisions.delete(sessionId)
+    delete scheduledMessages.value[sessionId]
+    scheduledRevisions.delete(sessionId)
   }
 
   function trimInactiveTranscripts(): void {
@@ -298,6 +313,8 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingQuestions.value = {}
     queuedSteers.value = {}
     steerRevisions.clear()
+    scheduledMessages.value = {}
+    scheduledRevisions.clear()
     dismissedNoticeIds.value = {}
     readFlights.clear()
   }
@@ -485,6 +502,7 @@ export const useHarnessStore = defineStore('harness', () => {
         const auth = useAuthStore()
         const identity = { userId: auth.user?.id, organizationId: auth.activeOrganizationId }
         const steerRevision = steerRevisions.get(sessionId) ?? 0
+        const scheduledRevision = scheduledRevisions.get(sessionId) ?? 0
         const knownGateIds = new Set([
           ...Object.keys(pendingPermissions.value),
           ...Object.keys(pendingQuestions.value),
@@ -522,6 +540,12 @@ export const useHarnessStore = defineStore('harness', () => {
           // newer than the response; an absent field (older backend) is no news.
           if (response.steers && (steerRevisions.get(sessionId) ?? 0) === steerRevision) {
             setQueuedSteers(sessionId, response.steers)
+          }
+          if (
+            response.scheduled_messages &&
+            (scheduledRevisions.get(sessionId) ?? 0) === scheduledRevision
+          ) {
+            setScheduledMessages(sessionId, response.scheduled_messages)
           }
           if (hydrateChildren) {
             const childIds = collectRunningChildSessionIds(messagesBySession.value[sessionId] ?? [])
@@ -752,6 +776,151 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  /** Replace a session's scheduled messages (idempotent snapshot semantics). */
+  function setScheduledMessages(sessionId: string, messages: HarnessScheduledMessage[]): void {
+    scheduledRevisions.set(sessionId, (scheduledRevisions.get(sessionId) ?? 0) + 1)
+    if (messages.length === 0) delete scheduledMessages.value[sessionId]
+    else scheduledMessages.value[sessionId] = messages.map((message) => ({ ...message }))
+  }
+
+  /** Forget a scheduled message the server no longer holds. */
+  function dropScheduledMessage(sessionId: string, messageId: string): void {
+    const messages = scheduledMessages.value[sessionId] ?? []
+    if (messages.some((item) => item.id === messageId)) {
+      setScheduledMessages(
+        sessionId,
+        messages.filter((item) => item.id !== messageId),
+      )
+    }
+  }
+
+  /**
+   * Schedule a message for `sendAt`. The server then sends it like a typed
+   * message: it steers a running turn or starts one with `options`. Resolves
+   * `false` when it failed so the composer can keep the text.
+   */
+  async function scheduleMessage(
+    sessionId: string,
+    prompt: string,
+    sendAt: Date,
+    options: SendOptions = {},
+  ): Promise<boolean> {
+    if (sessionTransitioning(sessionId)) return false
+    const notifications = useNotificationStore()
+    const revision = scheduledRevisions.get(sessionId) ?? 0
+    try {
+      const message = await scheduleHarnessMessage(sessionId, {
+        prompt,
+        send_at: sendAt.toISOString(),
+        mode: options.mode,
+        model: options.model,
+        reasoning_effort: options.reasoningEffort,
+        skill_ids: options.skillIds,
+      })
+      const messages = scheduledMessages.value[sessionId] ?? []
+      // The socket snapshot normally lands first; only fill the gap. A newer
+      // snapshot (sent, withdrawn) must never be overwritten by this response.
+      if (
+        revision === (scheduledRevisions.get(sessionId) ?? 0) &&
+        sessions.value.some((item) => item.id === sessionId) &&
+        !messages.some((item) => item.id === message.id)
+      ) {
+        setScheduledMessages(sessionId, [...messages, message])
+      }
+      return true
+    } catch (e: unknown) {
+      notifications.error('Scheduling failed', e instanceof Error ? e.message : 'Unknown error')
+      return false
+    }
+  }
+
+  /** Move a scheduled message to `sendAt`; a failed one becomes pending again. */
+  async function rescheduleMessage(
+    sessionId: string,
+    messageId: string,
+    sendAt: Date,
+  ): Promise<boolean> {
+    if (sessionTransitioning(sessionId)) return false
+    const notifications = useNotificationStore()
+    const revision = scheduledRevisions.get(sessionId) ?? 0
+    try {
+      const updated = await rescheduleHarnessMessage(sessionId, messageId, sendAt.toISOString())
+      const messages = scheduledMessages.value[sessionId] ?? []
+      if (
+        revision === (scheduledRevisions.get(sessionId) ?? 0) &&
+        messages.some((item) => item.id === messageId)
+      ) {
+        setScheduledMessages(
+          sessionId,
+          messages.map((item) => (item.id === messageId ? updated : item)),
+        )
+      }
+      return true
+    } catch (e: unknown) {
+      if (e instanceof ApiRequestError && e.status === 404) {
+        // Sent or withdrawn in the meantime.
+        dropScheduledMessage(sessionId, messageId)
+        notifications.error('Rescheduling failed', 'The message is no longer scheduled.')
+        return false
+      }
+      notifications.error('Rescheduling failed', e instanceof Error ? e.message : 'Unknown error')
+      return false
+    }
+  }
+
+  /**
+   * Withdraw a scheduled message. Resolves with its text and skills to put
+   * back into the composer, or `null` when it is gone (or the call failed).
+   */
+  async function withdrawScheduledMessage(
+    sessionId: string,
+    messageId: string,
+  ): Promise<{ content: string; skillIds: string[] } | null> {
+    if (sessionTransitioning(sessionId)) return null
+    const notifications = useNotificationStore()
+    try {
+      const message = await withdrawHarnessScheduledMessage(sessionId, messageId)
+      dropScheduledMessage(sessionId, messageId)
+      return { content: message.content, skillIds: message.skill_ids ?? [] }
+    } catch (e: unknown) {
+      if (e instanceof ApiRequestError && e.status === 404) {
+        // Sent in the meantime: it is part of the chat now, not scheduled.
+        dropScheduledMessage(sessionId, messageId)
+        return null
+      }
+      notifications.error('Withdraw failed', e instanceof Error ? e.message : 'Unknown error')
+      return null
+    }
+  }
+
+  /**
+   * Send a scheduled message now, exactly as at its time. A refused delivery
+   * keeps the message with its reason (the server publishes it).
+   */
+  function sendScheduledMessageNow(sessionId: string, messageId: string): Promise<boolean> {
+    return trackUserTurn(sessionId, async () => {
+      if (sessionTransitioning(sessionId)) return false
+      const notifications = useNotificationStore()
+      try {
+        const session = await sendHarnessScheduledMessage(sessionId, messageId)
+        upsertSession(session)
+        dropScheduledMessage(sessionId, messageId)
+        await fetchParts(sessionId)
+        return true
+      } catch (e: unknown) {
+        if (e instanceof ApiRequestError && e.status === 404) {
+          // Sent or withdrawn in the meantime: nothing left to send.
+          dropScheduledMessage(sessionId, messageId)
+          return false
+        }
+        // Already on its way (its own time or a second click): not a failure.
+        if (e instanceof ApiRequestError && e.code === 'scheduled_message_sending') return false
+        notifications.error('Sending failed', e instanceof Error ? e.message : 'Unknown error')
+        return false
+      }
+    })
+  }
+
   async function renameSession(sessionId: string, title: string): Promise<void> {
     if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
@@ -973,6 +1142,14 @@ export const useHarnessStore = defineStore('harness', () => {
   /** `harness.steer_queue`: full snapshot of the queued steers. */
   function handleSteerQueue(sessionId: string, steers: HarnessSteer[] | undefined): void {
     setQueuedSteers(sessionId, steers ?? [])
+  }
+
+  /** `harness.scheduled_messages`: full snapshot of the scheduled messages. */
+  function handleScheduledMessages(
+    sessionId: string,
+    messages: HarnessScheduledMessage[] | undefined,
+  ): void {
+    setScheduledMessages(sessionId, messages ?? [])
   }
 
   function handleSubtaskStarted(
@@ -1299,6 +1476,7 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingPermissions,
     pendingQuestions,
     queuedSteers,
+    scheduledMessages,
     stoppingSessionIds,
     activeSessionId,
     viewingSessionId,
@@ -1316,6 +1494,7 @@ export const useHarnessStore = defineStore('harness', () => {
     activeMessages,
     activeTodos,
     activeQueuedSteers,
+    activeScheduledMessages,
     activePermissionRequests,
     activeQuestionRequests,
     activeSessionLineage,
@@ -1334,6 +1513,10 @@ export const useHarnessStore = defineStore('harness', () => {
     sendMessage,
     steerSession,
     withdrawSteer,
+    scheduleMessage,
+    rescheduleMessage,
+    withdrawScheduledMessage,
+    sendScheduledMessageNow,
     ensureUserTurnLoaded,
     forkSession,
     editMessage,
@@ -1358,6 +1541,7 @@ export const useHarnessStore = defineStore('harness', () => {
     handleTodoUpdated,
     handleSessionSummary,
     handleSteerQueue,
+    handleScheduledMessages,
     handleSubtaskStarted,
     handleSubtaskFinished,
     handleSessionStatus,

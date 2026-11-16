@@ -13,6 +13,7 @@ import type {
   HarnessPermissionResolvedEvent,
   HarnessQuestionRequiredEvent,
   HarnessQuestionResolvedEvent,
+  HarnessScheduledMessagesEvent,
   HarnessSessionStatusEvent,
   HarnessSessionSummaryEvent,
   HarnessSteerQueueEvent,
@@ -51,6 +52,7 @@ export interface RealtimeEventMap {
   "harness.session_summary": HarnessSessionSummaryEvent;
   "harness.conversations_changed": { workspace_id: string };
   "harness.steer_queue": HarnessSteerQueueEvent;
+  "harness.scheduled_messages": HarnessScheduledMessagesEvent;
   "harness.todo_updated": HarnessTodoUpdatedEvent;
   "harness.subtask_started": HarnessSubtaskStartedEvent;
   "harness.subtask_finished": HarnessSubtaskFinishedEvent;

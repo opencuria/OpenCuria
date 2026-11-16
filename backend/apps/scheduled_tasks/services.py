@@ -6,9 +6,10 @@ import asyncio
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from asgiref.sync import sync_to_async
@@ -27,7 +28,18 @@ from .recovery import ScheduledTaskRecoveryService
 from .recurrence import next_occurrence, normalize_cron_expression, valid_timezone
 from .repositories import ScheduledTaskRepository
 
+if TYPE_CHECKING:
+    from .messages import ScheduledMessageDispatcher
+
 log = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class WorkspaceSkip:
+    """Why unattended work could not start in its workspace."""
+
+    reason: str
+    error: str
 
 
 class ScheduledTaskService:
@@ -506,6 +518,128 @@ class ScheduledTaskService:
                 await self._maybe_stop_workspace(workspace_id)
             await sync_to_async(self.repository.clear_completion_check)(run.id)
 
+    async def prepare_workspace(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        owner_id: int,
+        organization_id: uuid.UUID,
+    ) -> WorkspaceSkip | None:
+        """Resume the owner's workspace for unattended work.
+
+        Returns why the work cannot start, or ``None`` once the workspace runs
+        cleanly. A resume refused by lifecycle admission raises
+        ``ConflictError``; :meth:`classify_workspace_conflict` explains it.
+        """
+        (
+            status,
+            active_operation,
+            runner_status,
+            owner_is_active,
+            current_task_id,
+        ) = await sync_to_async(
+            self._runner().workspace_lifecycle.get_workspace_launch_state
+        )(workspace_id)
+        owned = await sync_to_async(
+            self._runner().workspace_access.is_active_workspace_owner
+        )(
+            owner_id,
+            workspace_id,
+            organization_id=organization_id,
+        )
+        if status is None or not owned or not owner_is_active:
+            return WorkspaceSkip(
+                "workspace_unavailable", "Workspace is no longer available"
+            )
+        if current_task_id and not active_operation:
+            return WorkspaceSkip(
+                "workspace_lifecycle_unresolved",
+                "Workspace lifecycle outcome unresolved; intervention required",
+            )
+        if status == WorkspaceStatus.RUNNING:
+            if runner_status != "online" or active_operation:
+                return WorkspaceSkip(
+                    "workspace_operation_active",
+                    "Workspace runner is offline or a lifecycle operation is active",
+                )
+        elif status == WorkspaceStatus.STOPPED:
+            if active_operation == WorkspaceOperation.STARTING:
+                if not await self._wait_for_workspace_running(workspace_id):
+                    return WorkspaceSkip(
+                        "workspace_resume_failed",
+                        "Workspace did not finish resuming before timeout",
+                    )
+            elif active_operation or runner_status != "online":
+                return WorkspaceSkip(
+                    "workspace_resume_failed",
+                    "Workspace operation is active or its runner is offline",
+                )
+            else:
+                try:
+                    await self._runner().workspace_lifecycle.resume_workspace(
+                        workspace_id
+                    )
+                    if not await self._wait_for_workspace_running(workspace_id):
+                        return WorkspaceSkip(
+                            "workspace_resume_failed",
+                            "Workspace did not finish resuming before timeout",
+                        )
+                except ConflictError:
+                    raise
+                except Exception as exc:
+                    return WorkspaceSkip("workspace_resume_failed", str(exc))
+        elif status == "resuming":
+            if runner_status != "online" or active_operation not in {
+                None,
+                WorkspaceOperation.STARTING,
+            }:
+                return WorkspaceSkip(
+                    "workspace_resume_failed",
+                    "Workspace runner is offline or another operation is active",
+                )
+            if not await self._wait_for_workspace_running(workspace_id):
+                return WorkspaceSkip(
+                    "workspace_resume_failed",
+                    "Workspace did not finish resuming before timeout",
+                )
+        elif status != WorkspaceStatus.RUNNING:
+            return WorkspaceSkip("workspace_not_running", f"Workspace is {status}")
+        (
+            status,
+            active_operation,
+            runner_status,
+            owner_is_active,
+            current_task_id,
+        ) = await sync_to_async(
+            self._runner().workspace_lifecycle.get_workspace_launch_state
+        )(workspace_id)
+        owned = await sync_to_async(
+            self._runner().workspace_access.is_active_workspace_owner
+        )(
+            owner_id,
+            workspace_id,
+            organization_id=organization_id,
+        )
+        if not owner_is_active or not owned:
+            return WorkspaceSkip(
+                "workspace_unavailable", "Workspace is no longer available"
+            )
+        if current_task_id and not active_operation:
+            return WorkspaceSkip(
+                "workspace_lifecycle_unresolved",
+                "Workspace lifecycle outcome unresolved; intervention required",
+            )
+        if (
+            status != WorkspaceStatus.RUNNING
+            or runner_status != "online"
+            or active_operation
+        ):
+            return WorkspaceSkip(
+                "workspace_operation_active",
+                "Workspace is not running cleanly or a lifecycle operation is active",
+            )
+        return None
+
     async def _launch(
         self,
         task: ScheduledTask,
@@ -518,124 +652,16 @@ class ScheduledTaskService:
             task, scheduled_for
         )
         task = self._task_for_run(task, run)
-        (
-            status,
-            active_operation,
-            runner_status,
-            owner_is_active,
-            current_task_id,
-        ) = await sync_to_async(
-            self._runner().workspace_lifecycle.get_workspace_launch_state
-        )(task.workspace_id)
-        owned = await sync_to_async(
-            self._runner().workspace_access.is_active_workspace_owner
-        )(
-            task.owner_id,
-            task.workspace_id,
-            organization_id=task.organization_id,
-        )
-        if status is None or not owned or not owner_is_active:
-            return await self._skip(
-                run, "workspace_unavailable", "Workspace is no longer available"
+        try:
+            skip = await self.prepare_workspace(
+                workspace_id=task.workspace_id,
+                owner_id=task.owner_id,
+                organization_id=task.organization_id,
             )
-        if current_task_id and not active_operation:
-            return await self._skip(
-                run,
-                "workspace_lifecycle_unresolved",
-                "Workspace lifecycle outcome unresolved; intervention required",
-            )
-        if status == WorkspaceStatus.RUNNING:
-            if runner_status != "online" or active_operation:
-                return await self._skip(
-                    run,
-                    "workspace_operation_active",
-                    "Workspace runner is offline or a lifecycle operation is active",
-                )
-        elif status == WorkspaceStatus.STOPPED:
-            if active_operation == WorkspaceOperation.STARTING:
-                if not await self._wait_for_workspace_running(task.workspace_id):
-                    return await self._skip(
-                        run,
-                        "workspace_resume_failed",
-                        "Workspace did not finish resuming before timeout",
-                    )
-            elif active_operation or runner_status != "online":
-                return await self._skip(
-                    run,
-                    "workspace_resume_failed",
-                    "Workspace operation is active or its runner is offline",
-                )
-            else:
-                try:
-                    await self._runner().workspace_lifecycle.resume_workspace(
-                        task.workspace_id
-                    )
-                    if not await self._wait_for_workspace_running(task.workspace_id):
-                        return await self._skip(
-                            run,
-                            "workspace_resume_failed",
-                            "Workspace did not finish resuming before timeout",
-                        )
-                except ConflictError as exc:
-                    return await self._skip_admission_conflict(task, run, exc)
-                except Exception as exc:
-                    return await self._skip(run, "workspace_resume_failed", str(exc))
-        elif status == "resuming":
-            if runner_status != "online" or active_operation not in {
-                None,
-                WorkspaceOperation.STARTING,
-            }:
-                return await self._skip(
-                    run,
-                    "workspace_resume_failed",
-                    "Workspace runner is offline or another operation is active",
-                )
-            if not await self._wait_for_workspace_running(task.workspace_id):
-                return await self._skip(
-                    run,
-                    "workspace_resume_failed",
-                    "Workspace did not finish resuming before timeout",
-                )
-        elif status != WorkspaceStatus.RUNNING:
-            return await self._skip(
-                run, "workspace_not_running", f"Workspace is {status}"
-            )
-        (
-            status,
-            active_operation,
-            runner_status,
-            owner_is_active,
-            current_task_id,
-        ) = await sync_to_async(
-            self._runner().workspace_lifecycle.get_workspace_launch_state
-        )(task.workspace_id)
-        owned = await sync_to_async(
-            self._runner().workspace_access.is_active_workspace_owner
-        )(
-            task.owner_id,
-            task.workspace_id,
-            organization_id=task.organization_id,
-        )
-        if not owner_is_active or not owned:
-            return await self._skip(
-                run, "workspace_unavailable", "Workspace is no longer available"
-            )
-        if current_task_id and not active_operation:
-            return await self._skip(
-                run,
-                "workspace_lifecycle_unresolved",
-                "Workspace lifecycle outcome unresolved; intervention required",
-            )
-        if (
-            status != WorkspaceStatus.RUNNING
-            or runner_status != "online"
-            or active_operation
-        ):
-            return await self._skip(
-                run,
-                "workspace_operation_active",
-                "Workspace is not running cleanly or a lifecycle operation is active",
-            )
+        except ConflictError as exc:
+            return await self._skip_admission_conflict(task, run, exc)
+        if skip is not None:
+            return await self._skip(run, skip.reason, skip.error)
         launch = asyncio.create_task(
             self._create_and_start_run(task, run, self._harness())
         )
@@ -779,8 +805,15 @@ class ScheduledTaskService:
     async def _skip_admission_conflict(
         self, task: ScheduledTask, run: ScheduledTaskRun, exc: ConflictError
     ) -> ScheduledTaskRun:
-        """Classify admission races from persisted lifecycle state, not error text."""
+        """Skip a run whose admission lost a race (see the classification)."""
         task = self._task_for_run(task, run)
+        skip = await self.classify_workspace_conflict(task.workspace_id, exc)
+        return await self._skip(run, skip.reason, skip.error)
+
+    async def classify_workspace_conflict(
+        self, workspace_id: uuid.UUID, exc: ConflictError
+    ) -> WorkspaceSkip:
+        """Classify admission races from persisted lifecycle state, not error text."""
         (
             status,
             operation,
@@ -789,7 +822,7 @@ class ScheduledTaskService:
             current_task_id,
         ) = await sync_to_async(
             self._runner().workspace_lifecycle.get_workspace_launch_state
-        )(task.workspace_id)
+        )(workspace_id)
         if status is None or not owner_active:
             reason = "workspace_unavailable"
         elif current_task_id and not operation:
@@ -800,7 +833,7 @@ class ScheduledTaskService:
             reason = "workspace_not_running" if status else "workspace_unavailable"
         else:
             reason = "other_chat_active"
-        return await self._skip(run, reason, str(exc))
+        return WorkspaceSkip(reason, str(exc))
 
     async def _skip(
         self, run: ScheduledTaskRun, reason: str, error: str
@@ -916,11 +949,17 @@ class ScheduledTaskScheduler:
         *,
         interval: float = 5.0,
         recovery: ScheduledTaskRecoveryService | None = None,
+        messages: ScheduledMessageDispatcher | None = None,
     ) -> None:
         self.service = service or ScheduledTaskService()
         self.recovery = recovery or ScheduledTaskRecoveryService(
             repository=self.service.repository
         )
+        if messages is None:
+            from .messages import ScheduledMessageDispatcher
+
+            messages = ScheduledMessageDispatcher(self.service)
+        self.messages = messages
         self.interval = interval
         self._task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
@@ -1035,6 +1074,15 @@ class ScheduledTaskScheduler:
         self._launch_tasks.add(launch)
         launch.add_done_callback(self._launch_tasks.discard)
 
+    def _supervise_message(self, message: Any) -> None:
+        """Deliver a fenced chat message without blocking the scheduler loop."""
+        launch = asyncio.create_task(
+            self.messages.deliver(message),
+            name=f"scheduled-message-delivery-{message.id}",
+        )
+        self._launch_tasks.add(launch)
+        launch.add_done_callback(self._launch_tasks.discard)
+
     async def _run(self) -> None:
         while True:
             try:
@@ -1044,4 +1092,10 @@ class ScheduledTaskScheduler:
                 raise
             except Exception:
                 log.exception("scheduled_task_scheduler_iteration_failed")
+            try:
+                await self.messages.dispatch_due(on_claim=self._supervise_message)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("scheduled_message_scheduler_iteration_failed")
             await asyncio.sleep(self.interval)

@@ -7,7 +7,7 @@
  * snapshot is never mutated and unrelated transcript rows retain their identity.
  */
 
-import type { OpenCuriaClient } from "@opencuria/client";
+import { ApiRequestError, type OpenCuriaClient } from "@opencuria/client";
 import type {
   HarnessId,
   HarnessMessage,
@@ -15,8 +15,12 @@ import type {
   HarnessPermissionRequest,
   HarnessPermissionResponse,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
+  HarnessScheduledMessagesEvent,
   HarnessSession,
   HarnessSessionMode,
+  HarnessSteer,
+  HarnessSteerQueueEvent,
   HarnessTodo,
   HarnessPartUpdatedEvent,
   HarnessSessionStatusEvent,
@@ -32,6 +36,7 @@ import {
   applySubtaskStarted,
   applyTodoUpdate,
   ensureBusyAssistant,
+  hasDeliveredSteer,
   routeAssistantMessage,
   sortHarnessParts,
 } from "@opencuria/chat-core/harnessReducer";
@@ -63,6 +68,10 @@ export interface ChatControllerSnapshot {
   /** Pending gates for the active session and its descendants. */
   permissions: HarnessPermissionRequest[];
   questions: HarnessQuestionRequest[];
+  /** Messages queued for the active session's running turn (FIFO). */
+  steers: HarnessSteer[];
+  /** Messages scheduled for the active session, earliest first. */
+  scheduled: HarnessScheduledMessage[];
   activeSessionId: string | null;
   activeSession: HarnessSession | null;
   /** Root-to-active-session breadcrumb, inclusive. */
@@ -175,6 +184,15 @@ function cloneTodo(todo: HarnessTodo): HarnessTodo {
   return { ...todo };
 }
 
+function cloneScheduledMessage(
+  message: HarnessScheduledMessage,
+): HarnessScheduledMessage {
+  return {
+    ...message,
+    ...(message.skill_ids ? { skill_ids: [...message.skill_ids] } : {}),
+  };
+}
+
 function cloneQuestionRequest(
   request: HarnessQuestionRequest,
 ): HarnessQuestionRequest {
@@ -207,6 +225,15 @@ export class ChatController {
     HarnessPermissionRequest
   >();
   private readonly questionsById = new Map<string, HarnessQuestionRequest>();
+  /** Queued steers and scheduled messages per session (server snapshots). */
+  private readonly steersBySession = new Map<string, HarnessSteer[]>();
+  private readonly scheduledBySession = new Map<
+    string,
+    HarnessScheduledMessage[]
+  >();
+  /** Bumped per snapshot so late responses never resurrect a newer state. */
+  private readonly steerRevisions = new Map<string, number>();
+  private readonly scheduledRevisions = new Map<string, number>();
   private readonly timeline: ChatTimelineController<HarnessTimeline>;
   private readonly todoFlights = new Map<string, TodoFlight>();
   private readonly sessionRevisions = new Map<string, number>();
@@ -305,6 +332,20 @@ export class ChatController {
           .filter((request) => descendantIds.has(request.session_id))
           .map(cloneQuestionRequest),
       ),
+      steers: this.activeSessionId
+        ? freezeTree(
+            (this.steersBySession.get(this.activeSessionId) ?? []).map(
+              (steer) => ({ ...steer }),
+            ),
+          )
+        : EMPTY_STEERS,
+      scheduled: this.activeSessionId
+        ? freezeTree(
+            (this.scheduledBySession.get(this.activeSessionId) ?? []).map(
+              cloneScheduledMessage,
+            ),
+          )
+        : EMPTY_SCHEDULED,
       activeSessionId: this.activeSessionId,
       activeSession: activeSession
         ? freezeTree(cloneSession(activeSession))
@@ -367,6 +408,10 @@ export class ChatController {
       ),
       on("harness.question_resolved", (event) =>
         this.onQuestionResolved(event),
+      ),
+      on("harness.steer_queue", (event) => this.onSteerQueue(event)),
+      on("harness.scheduled_messages", (event) =>
+        this.onScheduledMessages(event),
       ),
       on("harness.conversations_changed", (event) => {
         if (event.workspace_id === this.workspaceId)
@@ -550,6 +595,10 @@ export class ChatController {
   private forgetSession(sessionId: string): void {
     this.messagesBySession.delete(sessionId);
     this.todosBySession.delete(sessionId);
+    this.steersBySession.delete(sessionId);
+    this.scheduledBySession.delete(sessionId);
+    this.steerRevisions.delete(sessionId);
+    this.scheduledRevisions.delete(sessionId);
     this.timeline.forget(sessionId);
     this.todoRevisions.set(
       sessionId,
@@ -603,6 +652,10 @@ export class ChatController {
       this.todosBySession.clear();
       this.permissionsById.clear();
       this.questionsById.clear();
+      this.steersBySession.clear();
+      this.scheduledBySession.clear();
+      this.steerRevisions.clear();
+      this.scheduledRevisions.clear();
       this.todoFlights.clear();
       this.sendFlights.clear();
       this.createFlights.clear();
@@ -1045,6 +1098,194 @@ export class ChatController {
     }
   }
 
+  /**
+   * Stop the running turn. The server drops queued steers on stop; their
+   * texts (unless delivered meanwhile) are returned for the composer.
+   */
+  async stop(sessionId = this.activeSessionId): Promise<string[]> {
+    if (!sessionId) return [];
+    const queued = [...(this.steersBySession.get(sessionId) ?? [])];
+    const updated = await this.abort(sessionId);
+    if (!updated || this.disposed) return [];
+    if (this.steersBySession.has(sessionId)) this.setSteers(sessionId, []);
+    const messages = this.messagesBySession.get(sessionId) ?? [];
+    return queued
+      .filter((steer) => !hasDeliveredSteer(messages, steer.id))
+      .map((steer) => steer.content);
+  }
+
+  /**
+   * Send a message into the running turn ("steering"). The server queues it
+   * for the turn's next step; when the run already ended it is sent as a
+   * regular turn with `options` instead.
+   */
+  async steer(prompt: string, options: ChatRunOptions = {}): Promise<void> {
+    this.assertLive();
+    if (!prompt.trim()) throw new Error("Prompt cannot be empty");
+    const sessionId = this.activeSessionId;
+    const context = this.captureSelection();
+    if (!sessionId || !context)
+      throw new Error("Open a running chat before steering it");
+    const revision = this.steerRevisions.get(sessionId) ?? 0;
+    try {
+      const steer = await this.client.harness.steer(sessionId, prompt);
+      const queue = this.steersBySession.get(sessionId) ?? [];
+      // The socket snapshot normally lands first; only fill the gap.
+      if (
+        this.selectionIsCurrent(context) &&
+        revision === (this.steerRevisions.get(sessionId) ?? 0) &&
+        !queue.some((item) => item.id === steer.id) &&
+        !hasDeliveredSteer(
+          this.messagesBySession.get(sessionId) ?? [],
+          steer.id,
+        )
+      )
+        this.setSteers(sessionId, [...queue, steer]);
+    } catch (error) {
+      if (
+        error instanceof ApiRequestError &&
+        error.status === 409 &&
+        error.code === "no_active_run"
+      ) {
+        await this.send(prompt, options);
+        return;
+      }
+      if (this.selectionIsCurrent(context))
+        this.setError(error, "Failed to send message");
+      throw error;
+    }
+  }
+
+  /** Withdraw a queued steer; its text, or `null` once it was delivered. */
+  async withdrawSteer(
+    steerId: string,
+    sessionId = this.activeSessionId,
+  ): Promise<string | null> {
+    if (!sessionId) return null;
+    const drop = () => {
+      const queue = this.steersBySession.get(sessionId) ?? [];
+      if (queue.some((item) => item.id === steerId))
+        this.setSteers(
+          sessionId,
+          queue.filter((item) => item.id !== steerId),
+        );
+    };
+    try {
+      const steer = await this.client.harness.withdraw(sessionId, steerId);
+      drop();
+      return steer.content;
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 404) {
+        drop();
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /** Schedule a message for the open chat; it is sent at `sendAt`. */
+  async schedule(
+    prompt: string,
+    sendAt: Date,
+    options: ChatRunOptions = {},
+  ): Promise<HarnessScheduledMessage> {
+    this.assertLive();
+    if (!prompt.trim()) throw new Error("Prompt cannot be empty");
+    const sessionId = this.activeSessionId;
+    const context = this.captureSelection();
+    if (!sessionId || !context)
+      throw new Error("Open a chat before scheduling a message");
+    const session = this.sessions.find((row) => row.id === sessionId);
+    if (session) assertHarnessSessionSelection(session, options);
+    const revision = this.scheduledRevisions.get(sessionId) ?? 0;
+    const message = await this.client.harness.scheduleMessage(sessionId, {
+      prompt,
+      send_at: sendAt.toISOString(),
+      mode: options.mode,
+      model: options.model,
+      reasoning_effort: options.reasoningEffort,
+      skill_ids: options.skillIds,
+    });
+    const scheduled = this.scheduledBySession.get(sessionId) ?? [];
+    if (
+      this.selectionIsCurrent(context) &&
+      revision === (this.scheduledRevisions.get(sessionId) ?? 0) &&
+      !scheduled.some((item) => item.id === message.id)
+    )
+      this.setScheduled(sessionId, [...scheduled, message]);
+    return message;
+  }
+
+  /** Move a scheduled message to another time (a failed one is retried then). */
+  async reschedule(
+    messageId: string,
+    sendAt: Date,
+    sessionId = this.activeSessionId,
+  ): Promise<void> {
+    if (!sessionId) return;
+    const updated = await this.client.harness.rescheduleMessage(
+      sessionId,
+      messageId,
+      sendAt.toISOString(),
+    );
+    const scheduled = this.scheduledBySession.get(sessionId) ?? [];
+    if (scheduled.some((item) => item.id === messageId))
+      this.setScheduled(
+        sessionId,
+        scheduled.map((item) => (item.id === messageId ? updated : item)),
+      );
+  }
+
+  /** Withdraw a scheduled message, e.g. to edit it; `null` once it is gone. */
+  async withdrawScheduled(
+    messageId: string,
+    sessionId = this.activeSessionId,
+  ): Promise<HarnessScheduledMessage | null> {
+    if (!sessionId) return null;
+    const drop = () => {
+      const scheduled = this.scheduledBySession.get(sessionId) ?? [];
+      if (scheduled.some((item) => item.id === messageId))
+        this.setScheduled(
+          sessionId,
+          scheduled.filter((item) => item.id !== messageId),
+        );
+    };
+    try {
+      const message = await this.client.harness.withdrawScheduledMessage(
+        sessionId,
+        messageId,
+      );
+      drop();
+      return message;
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 404) {
+        drop();
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Send a scheduled message now. A refused delivery keeps the message with
+   * its reason (published by the server) and rejects.
+   */
+  async sendScheduledNow(
+    messageId: string,
+    sessionId = this.activeSessionId,
+  ): Promise<void> {
+    if (!sessionId) return;
+    const context = this.captureSelection();
+    const updated = await this.client.harness.sendScheduledMessage(
+      sessionId,
+      messageId,
+    );
+    if (!context || !this.selectionIsCurrent(context)) return;
+    this.upsertSession(updated);
+    if (this.activeSessionId === sessionId)
+      await this.fetchTimeline(sessionId, context, true).catch(() => undefined);
+  }
+
   /** Edit a persisted user message and reconcile its server timeline. */
   async edit(
     messageId: string,
@@ -1456,8 +1697,23 @@ export class ChatController {
             ...this.permissionsById.keys(),
             ...this.questionsById.keys(),
           ]);
-          return (snapshot) =>
+          const steerRevision = this.steerRevisions.get(sessionId) ?? 0;
+          const scheduledRevision = this.scheduledRevisions.get(sessionId) ?? 0;
+          return (snapshot) => {
+            // Socket snapshots that landed during the request are newer.
+            if (
+              snapshot.steers &&
+              steerRevision === (this.steerRevisions.get(sessionId) ?? 0)
+            )
+              this.setSteers(sessionId, snapshot.steers);
+            if (
+              snapshot.scheduled_messages &&
+              scheduledRevision ===
+                (this.scheduledRevisions.get(sessionId) ?? 0)
+            )
+              this.setScheduled(sessionId, snapshot.scheduled_messages);
             this.applyTimelineGates(sessionId, snapshot, knownGates);
+          };
         },
       });
     } catch (error) {
@@ -1759,12 +2015,26 @@ export class ChatController {
           event.session_id,
           event.message_id,
         );
+        const unknownTurn = Boolean(
+          event.user_message_id &&
+          !messages.some((message) => message.id === event.user_message_id) &&
+          !this.turnRequestInFlight(event.session_id),
+        );
         ensureBusyAssistant(
           messages,
           event.session_id,
           event.message_id,
           event.user_message_id,
         );
+        if (unknownTurn && this.isInActiveLineage(event.session_id)) {
+          // A run this client did not ask for (a steer follow-up, a scheduled
+          // message, another device) brings a user message to load.
+          const context = this.captureSelection();
+          if (context)
+            void this.fetchTimeline(event.session_id, context, true).catch(
+              () => undefined,
+            );
+        }
         const target = messages.find(
           (message) => message.id === event.message_id,
         );
@@ -1826,6 +2096,57 @@ export class ChatController {
       return;
     }
     this.publish();
+  }
+
+  private onSteerQueue(event: HarnessSteerQueueEvent): void {
+    if (!this.ownsEvent(event)) return;
+    this.setSteers(event.session_id, event.steers ?? []);
+  }
+
+  private onScheduledMessages(event: HarnessScheduledMessagesEvent): void {
+    if (!this.ownsEvent(event)) return;
+    this.setScheduled(event.session_id, event.messages ?? []);
+  }
+
+  /** Replace a session's steer queue (snapshot semantics). */
+  private setSteers(sessionId: string, steers: HarnessSteer[]): void {
+    this.steerRevisions.set(
+      sessionId,
+      (this.steerRevisions.get(sessionId) ?? 0) + 1,
+    );
+    if (steers.length) this.steersBySession.set(sessionId, [...steers]);
+    else this.steersBySession.delete(sessionId);
+    this.publish();
+  }
+
+  /** Replace a session's scheduled messages (snapshot semantics). */
+  private setScheduled(
+    sessionId: string,
+    messages: HarnessScheduledMessage[],
+  ): void {
+    this.scheduledRevisions.set(
+      sessionId,
+      (this.scheduledRevisions.get(sessionId) ?? 0) + 1,
+    );
+    if (messages.length)
+      this.scheduledBySession.set(
+        sessionId,
+        [...messages].sort(
+          (a, b) => Date.parse(a.send_at) - Date.parse(b.send_at),
+        ),
+      );
+    else this.scheduledBySession.delete(sessionId);
+    this.publish();
+  }
+
+  /** This client is sending or creating a turn for the session right now. */
+  private turnRequestInFlight(sessionId: string): boolean {
+    return (
+      this.pendingSends.has(sessionId) ||
+      Boolean(
+        this.workspaceId && this.pendingSends.has(`new:${this.workspaceId}`),
+      )
+    );
   }
 
   private onPermissionRequired(event: PermissionEvent): void {
@@ -1935,6 +2256,8 @@ export class ChatController {
     for (const detach of this.detachRealtime.splice(0)) detach();
     this.listeners.clear();
     this.timeline.clear();
+    this.steersBySession.clear();
+    this.scheduledBySession.clear();
     this.todoFlights.clear();
     this.trustedChildSessionIds.clear();
     this.sendFlights.clear();
@@ -1945,3 +2268,7 @@ export class ChatController {
 }
 
 const EMPTY_TODOS = Object.freeze([]) as unknown as HarnessTodo[];
+const EMPTY_STEERS = Object.freeze([]) as unknown as HarnessSteer[];
+const EMPTY_SCHEDULED = Object.freeze(
+  [],
+) as unknown as HarnessScheduledMessage[];

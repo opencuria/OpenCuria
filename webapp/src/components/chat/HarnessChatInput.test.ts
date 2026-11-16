@@ -1706,6 +1706,132 @@ describe('HarnessChatInput', () => {
       expect(editorText(remounted)).toBe('half-typed steer')
     })
   })
+
+  describe('send later (split send button)', () => {
+    beforeEach(() => {
+      sessionStorage.clear()
+      vi.useFakeTimers({ toFake: ['Date'] })
+      // Wednesday, 18 Nov 2026, 14:20 local time.
+      vi.setSystemTime(new Date(2026, 10, 18, 14, 20))
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    const linear = {
+      id: 'skill-1',
+      name: 'Linear',
+      body: '',
+      scope: 'personal' as const,
+      created_by_email: null,
+      created_at: '',
+      updated_at: '',
+    }
+
+    it('joins send and send later in one pill that is disabled without text', async () => {
+      const wrapper = mountInput()
+      await flushPromises()
+
+      const group = wrapper.get('[data-testid="composer-send-group"]')
+      const send = group.get('[data-testid="composer-send"]')
+      const later = group.get('[data-testid="composer-send-later"]')
+      expect(group.classes()).toContain('rounded-full')
+      expect(later.attributes('aria-label')).toBe('Send later')
+      expect(send.attributes('disabled')).toBeDefined()
+      expect(later.attributes('disabled')).toBeDefined()
+      expect(later.classes()).toContain('bg-muted')
+
+      await setEditorText(wrapper, 'Ship it')
+      expect(send.attributes('disabled')).toBeUndefined()
+      expect(later.attributes('disabled')).toBeUndefined()
+      for (const half of [send, later]) expect(half.classes()).toContain('bg-primary')
+      wrapper.unmount()
+    })
+
+    it('opens the send later menu from the chevron', async () => {
+      const wrapper = mount(HarnessChatInput, {
+        props: { workspaceId: 'ws-1' },
+        attachTo: document.body,
+      })
+      await flushPromises()
+      await setEditorText(wrapper, 'Ship it')
+
+      await wrapper.get('[data-testid="composer-send-later"]').trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+
+      const menu = document.querySelector('[data-testid="send-later-menu"]')
+      expect(menu?.textContent).toContain('Tomorrow')
+      expect(menu?.textContent).toContain('Choose date & time…')
+      wrapper.unmount()
+    })
+
+    it('schedules the draft with its run options and clears the composer', async () => {
+      const wrapper = mountInput({ sessionId: 'session-1', skillOptions: [linear] })
+      await flushPromises()
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { skillIds?: string[] }): void
+      }
+      vm.setPrompt('Ship it', { skillIds: ['skill-1'] })
+      await flushPromises()
+
+      await wrapper.get('[data-testid="send-later-tomorrow"]').trigger('click')
+
+      expect(wrapper.emitted('schedule')).toEqual([
+        [
+          'Ship it',
+          'build',
+          'openrouter/model-big',
+          ['skill-1'],
+          'high',
+          'native',
+          new Date(2026, 10, 19, 9, 0),
+        ],
+      ])
+      expect(wrapper.emitted('send')).toBeUndefined()
+      expect(editorText(wrapper)).toBe('')
+      expect(wrapper.find('[data-testid="composer-skill-chip-skill-1"]').exists()).toBe(false)
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBeNull()
+      wrapper.unmount()
+    })
+
+    it('does not schedule an empty draft', async () => {
+      const wrapper = mountInput()
+      await flushPromises()
+
+      await wrapper.get('[data-testid="send-later-tomorrow"]').trigger('click')
+
+      expect(wrapper.emitted('schedule')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('keeps the steering controls: Stop while empty, compact Stop plus the pill with text', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      await flushPromises()
+      expect(wrapper.find('[data-testid="composer-send-group"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="composer-send-later"]').exists()).toBe(false)
+      expect(wrapper.findAll('[data-testid="composer-stop"]')).toHaveLength(1)
+
+      await setEditorText(wrapper, 'Use pnpm instead')
+      expect(wrapper.findAll('[data-testid="composer-stop"]')).toHaveLength(1)
+      expect(wrapper.get('[data-testid="composer-send"]').attributes('title')).toBe(
+        'Steer the agent',
+      )
+      await wrapper.get('[data-testid="send-later-in-1-hour"]').trigger('click')
+      expect(wrapper.emitted('schedule')?.[0]?.[0]).toBe('Use pnpm instead')
+      expect(wrapper.emitted('schedule')?.[0]?.[6]).toEqual(new Date(2026, 10, 18, 15, 20))
+      wrapper.unmount()
+    })
+
+    it('is not offered in the scheduled-task editor', async () => {
+      const wrapper = mountInput({ variant: 'scheduled-task', prompt: 'Daily review' })
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="composer-send-group"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="composer-send-later"]').exists()).toBe(false)
+      wrapper.unmount()
+    })
+  })
 })
 
 /** Build a FileList-like with real File objects (jsdom has File but no DataTransfer). */

@@ -5,6 +5,8 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
+import { useNotificationStore } from '@/stores/notifications'
+import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import {
   listHarnessParts,
   listHarnessSessions,
@@ -12,7 +14,8 @@ import {
 } from '@/services/harness.api'
 import { onEvent } from '@/services/socket'
 import { armComposerTransition, clearComposerTransition } from '@/lib/composerTransition'
-import type { HarnessSession } from '@opencuria/chat-core/harness'
+import type { HarnessScheduledMessage, HarnessSession } from '@opencuria/chat-core/harness'
+import type { ScheduledTask } from '@opencuria/chat-core/scheduledTasks'
 
 enableAutoUnmount(afterEach)
 
@@ -71,7 +74,7 @@ const HarnessChatInputStub = {
     'contextUsed',
     'contextLimit',
   ],
-  emits: ['prefill', 'send', 'stop', 'update:harnessId', 'update:mode'],
+  emits: ['prefill', 'send', 'schedule', 'stop', 'update:harnessId', 'update:mode'],
   methods: {
     setPrompt(prompt: string, options?: { append?: boolean; focus?: boolean }) {
       ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
@@ -1773,6 +1776,203 @@ describe('HarnessChatPanel', () => {
         delta: { compaction: true },
       })
       expect(fetchParts).toHaveBeenCalledWith('session-root')
+    })
+  })
+
+  describe('send later', () => {
+    /** Local wall-clock time, so the task fields do not depend on the zone. */
+    const at = new Date(2026, 10, 19, 9, 0)
+
+    function makeScheduled(
+      id: string,
+      overrides: Partial<HarnessScheduledMessage> = {},
+    ): HarnessScheduledMessage {
+      return {
+        id,
+        session_id: 'session-root',
+        content: `Later ${id}`,
+        send_at: at.toISOString(),
+        status: 'pending',
+        error: '',
+        skill_ids: [],
+        created_at: '2026-11-16T10:00:00Z',
+        ...overrides,
+      }
+    }
+
+    async function mountPanel(sessions: HarnessSession[] = []) {
+      vi.mocked(listHarnessSessions).mockResolvedValueOnce(sessions)
+      if (sessions.length) await router.push('/workspaces/ws-1?session=session-root')
+      const wrapper = mount(HarnessChatPanel, {
+        props: { workspaceId: 'ws-1', canPrompt: true },
+        global: { plugins: [router], stubs },
+      })
+      await flushPromises()
+      return {
+        wrapper,
+        store: useHarnessStore(),
+        input: wrapper.findComponent(HarnessChatInputStub),
+        stack: () => wrapper.findComponent({ name: 'HarnessSheetStack' }),
+      }
+    }
+
+    it('schedules a message with the run options in the open chat', async () => {
+      const { store, input } = await mountPanel([makeSession()])
+      const schedule = vi.spyOn(store, 'scheduleMessage').mockResolvedValue(true)
+      const send = vi.spyOn(store, 'sendMessage')
+
+      input.vm.$emit('schedule', 'Check CI', 'plan', 'm', ['skill-1'], 'high', 'native', at)
+      await flushPromises()
+
+      expect(schedule).toHaveBeenCalledWith('session-root', 'Check CI', at, {
+        mode: 'plan',
+        model: 'm',
+        skillIds: ['skill-1'],
+        reasoningEffort: 'high',
+      })
+      expect(send).not.toHaveBeenCalled()
+      expect(input.emitted('prefill')).toBeUndefined()
+    })
+
+    it('gives the draft back when scheduling failed', async () => {
+      const { store, input } = await mountPanel([makeSession()])
+      vi.spyOn(store, 'scheduleMessage').mockResolvedValue(false)
+
+      input.vm.$emit('schedule', 'Check CI', 'build', 'm', ['skill-1'], '', 'native', at)
+      await flushPromises()
+
+      expect(input.emitted('prefill')).toEqual([
+        ['Check CI', { append: true, skillIds: ['skill-1'] }],
+      ])
+    })
+
+    it('turns a new chat into a one-time scheduled task', async () => {
+      const { store, input } = await mountPanel()
+      const create = vi
+        .spyOn(useScheduledTaskStore(), 'create')
+        .mockResolvedValue({ id: 'task-1' } as ScheduledTask)
+      const success = vi.spyOn(useNotificationStore(), 'success')
+      const createSession = vi.spyOn(store, 'createSession')
+
+      input.vm.$emit(
+        'schedule',
+        'Nightly review\nCheck the open pull requests',
+        'plan',
+        'opus',
+        ['skill-1'],
+        'low',
+        'claude',
+        at,
+      )
+      await flushPromises()
+
+      expect(create).toHaveBeenCalledWith({
+        name: 'Nightly review',
+        workspace_id: 'ws-1',
+        prompt: 'Nightly review\nCheck the open pull requests',
+        mode: 'plan',
+        harness_id: 'claude',
+        model: 'opus',
+        reasoning_effort: 'low',
+        skill_ids: ['skill-1'],
+        recurrence: 'once',
+        weekdays: [],
+        run_date: '2026-11-19',
+        local_time: '09:00',
+        timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        enabled: true,
+      })
+      expect(success).toHaveBeenCalledWith('New chat scheduled', expect.stringContaining(', '))
+      expect(createSession).not.toHaveBeenCalled()
+      expect(input.emitted('prefill')).toBeUndefined()
+    })
+
+    it('gives a new chat draft back when the task could not be created', async () => {
+      const { input } = await mountPanel()
+      vi.spyOn(useScheduledTaskStore(), 'create').mockRejectedValue(new Error('Quota reached'))
+      const error = vi.spyOn(useNotificationStore(), 'error')
+
+      input.vm.$emit('schedule', 'Nightly review', 'build', 'm', [], '', 'native', at)
+      await flushPromises()
+
+      expect(error).toHaveBeenCalledWith('Scheduling failed', 'Quota reached')
+      expect(input.emitted('prefill')).toEqual([['Nightly review', { append: true, skillIds: [] }]])
+    })
+
+    it('ignores scheduling while the workspace cannot take prompts', async () => {
+      const { wrapper, store, input } = await mountPanel([makeSession()])
+      const schedule = vi.spyOn(store, 'scheduleMessage')
+      await wrapper.setProps({ canPrompt: false })
+
+      input.vm.$emit('schedule', 'Check CI', 'build', 'm', [], '', 'native', at)
+      await flushPromises()
+
+      expect(schedule).not.toHaveBeenCalled()
+    })
+
+    it('shows scheduled messages in the composer queue sheet', async () => {
+      const { store, stack } = await mountPanel([makeSession()])
+      store.handleScheduledMessages('session-root', [makeScheduled('a')])
+      await flushPromises()
+
+      const sheets = stack().props('sheets') as Array<{ kind: string; scheduled?: unknown[] }>
+      expect(sheets.map((sheet) => sheet.kind)).toEqual(['queue'])
+      expect(sheets[0]!.scheduled).toEqual([makeScheduled('a')])
+    })
+
+    it('sends now, reschedules and withdraws scheduled messages from the queue sheet', async () => {
+      const { store, input, stack } = await mountPanel([makeSession()])
+      const sendNow = vi.spyOn(store, 'sendScheduledMessageNow').mockResolvedValue(true)
+      const reschedule = vi.spyOn(store, 'rescheduleMessage').mockResolvedValue(true)
+      const withdraw = vi
+        .spyOn(store, 'withdrawScheduledMessage')
+        .mockResolvedValueOnce({ content: 'Check CI', skillIds: ['skill-1'] })
+        .mockResolvedValueOnce(null)
+
+      stack().vm.$emit('send-scheduled', 'a')
+      stack().vm.$emit('reschedule-scheduled', 'b', at)
+      stack().vm.$emit('withdraw-scheduled', 'c')
+      await flushPromises()
+      stack().vm.$emit('withdraw-scheduled', 'd')
+      await flushPromises()
+
+      expect(sendNow).toHaveBeenCalledWith('session-root', 'a')
+      expect(reschedule).toHaveBeenCalledWith('session-root', 'b', at)
+      expect(withdraw).toHaveBeenCalledWith('session-root', 'c')
+      // Only the withdrawn text comes back; a message sent meanwhile leaves the composer alone.
+      expect(input.emitted('prefill')).toEqual([
+        ['Check CI', { append: true, focus: true, skillIds: ['skill-1'] }],
+      ])
+    })
+
+    it('applies scheduled-message snapshots from the workspace socket only', async () => {
+      const handlers: Record<string, (data: unknown) => void> = {}
+      vi.mocked(onEvent).mockImplementation(((event: string, handler: (data: unknown) => void) => {
+        handlers[event] = handler
+        return () => {}
+      }) as unknown as typeof onEvent)
+      const { store } = await mountPanel([makeSession()])
+
+      handlers['harness.scheduled_messages']!({
+        workspace_id: 'ws-other',
+        session_id: 'session-root',
+        messages: [makeScheduled('nope')],
+      })
+      expect(store.activeScheduledMessages).toEqual([])
+
+      handlers['harness.scheduled_messages']!({
+        workspace_id: 'ws-1',
+        session_id: 'session-root',
+        messages: [makeScheduled('a', { status: 'sending' })],
+      })
+      expect(store.activeScheduledMessages).toEqual([makeScheduled('a', { status: 'sending' })])
+
+      handlers['harness.scheduled_messages']!({
+        workspace_id: 'ws-1',
+        session_id: 'session-root',
+        messages: [],
+      })
+      expect(store.activeScheduledMessages).toEqual([])
     })
   })
 })

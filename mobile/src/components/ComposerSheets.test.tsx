@@ -227,3 +227,112 @@ describe("ComposerSheetStack in the chat layout", () => {
     expect(screen.getByTestId("dock-offset")).toHaveTextContent("116");
   });
 });
+
+describe("ComposerSheetStack outgoing messages", () => {
+  function outgoing(
+    overrides: Partial<React.ComponentProps<typeof ChatComposer>["queue"]> = {},
+  ) {
+    return {
+      steers: [
+        {
+          id: "steer-1",
+          content: "Use\npnpm",
+          created_at: "2099-01-01T00:00:00Z",
+        },
+      ],
+      scheduled: [
+        {
+          id: "later-1",
+          session_id: "session-1",
+          content: "Check the deploy",
+          send_at: "2099-01-05T09:00:00.000Z",
+          status: "pending" as const,
+          created_at: "2099-01-01T00:00:00.000Z",
+        },
+        {
+          id: "failed-1",
+          session_id: "session-1",
+          content: "Run the migration",
+          send_at: "2099-01-04T09:00:00.000Z",
+          status: "failed" as const,
+          error: "Workspace is no longer available",
+          created_at: "2099-01-01T00:00:00.000Z",
+        },
+        {
+          id: "sending-1",
+          session_id: "session-1",
+          content: "Summarize",
+          send_at: "2099-01-03T09:00:00.000Z",
+          status: "sending" as const,
+          created_at: "2099-01-01T00:00:00.000Z",
+        },
+      ],
+      onWithdrawSteer: jest.fn(),
+      onSendNow: jest.fn(),
+      onReschedule: jest.fn(),
+      onEdit: jest.fn(),
+      onDelete: jest.fn(),
+      ...overrides,
+    };
+  }
+
+  function renderQueue(queue: ReturnType<typeof outgoing>) {
+    return render(
+      <ThemeProvider>
+        <ChatComposer
+          draft=""
+          onDraftChange={jest.fn()}
+          onSend={jest.fn()}
+          queue={queue}
+        />
+      </ThemeProvider>,
+    );
+  }
+
+  it("lists queued steers before scheduled messages with their state", () => {
+    renderQueue(outgoing());
+    expect(screen.getByTestId("composer-queue-sheet")).toBeTruthy();
+    expect(screen.getByText("Use pnpm")).toBeTruthy();
+    expect(screen.getByText("Queued for the next step")).toBeTruthy();
+    expect(screen.getAllByTestId("composer-scheduled-row")).toHaveLength(3);
+    expect(screen.getByText("Sending…")).toBeTruthy();
+    expect(
+      screen.getByText("Not sent · Workspace is no longer available"),
+    ).toBeTruthy();
+    // A message on its way has no actions.
+    expect(
+      screen.queryByTestId("composer-scheduled-menu-sending-1"),
+    ).toBeNull();
+  });
+
+  it("withdraws steers and runs scheduled message actions", async () => {
+    const queue = outgoing({ canSendNow: false });
+    renderQueue(queue);
+
+    fireEvent.press(screen.getByTestId("composer-queue-withdraw"));
+    await waitFor(() =>
+      expect(queue.onWithdrawSteer).toHaveBeenCalledWith("steer-1"),
+    );
+
+    fireEvent.press(screen.getByTestId("composer-scheduled-menu-later-1"));
+    expect(screen.getByRole("button", { name: "Send now" })).toBeDisabled();
+    fireEvent.press(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(queue.onEdit).toHaveBeenCalledWith("later-1"));
+
+    fireEvent.press(screen.getByTestId("composer-scheduled-menu-failed-1"));
+    fireEvent.press(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(queue.onDelete).toHaveBeenCalledWith("failed-1"),
+    );
+  });
+
+  it("retries a failed message now when the chat can take it", async () => {
+    const queue = outgoing({ canSendNow: true });
+    renderQueue(queue);
+    fireEvent.press(screen.getByTestId("composer-scheduled-menu-failed-1"));
+    fireEvent.press(screen.getByRole("button", { name: "Try again now" }));
+    await waitFor(() =>
+      expect(queue.onSendNow).toHaveBeenCalledWith("failed-1"),
+    );
+  });
+});

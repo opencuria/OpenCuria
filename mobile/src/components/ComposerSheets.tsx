@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Platform,
   ScrollView,
   StyleSheet,
@@ -10,22 +11,30 @@ import {
 import Reanimated, { useAnimatedStyle } from "react-native-reanimated";
 import {
   AtSign,
+  CalendarClock,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  CircleAlert,
+  Clock,
+  Ellipsis,
   FileText,
   MessageCircleQuestion,
   Plus,
   ShieldAlert,
   Sparkles,
+  X,
 } from "lucide-react-native";
 import type { ComposerSheet } from "@opencuria/chat-core/composerSheets";
 import type {
   HarnessPermissionRequest,
   HarnessPermissionResponse,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
+  HarnessSteer,
 } from "@opencuria/chat-core/harness";
+import { formatSendTime } from "@opencuria/chat-core/sendLater";
 import type { MentionCandidate } from "@opencuria/chat-core/harnessMentions";
 import {
   collectQuestionAnswers,
@@ -37,6 +46,7 @@ import {
 } from "@opencuria/chat-core/harnessQuestion";
 import { gateSourceLabel } from "@opencuria/chat-core/harnessSubtaskActivity";
 import { ComposerSheetSurface } from "../ui/ComposerSurface";
+import { NativeMenu } from "../ui/NativeMenu";
 import { NativeTextField } from "../ui/NativeTextField";
 import { Button, IconButton, NativeAction } from "../ui/primitives";
 import { NativeOption } from "../ui/selection";
@@ -62,10 +72,30 @@ export interface ComposerGates {
   ) => void | Promise<void>;
 }
 
+/** Actions on outgoing messages; the host owns their transport. */
+export interface ComposerQueue {
+  /** Messages queued for the running turn (FIFO). */
+  steers: HarnessSteer[];
+  /** Messages scheduled for later, earliest first. */
+  scheduled: HarnessScheduledMessage[];
+  /** False while the chat cannot take a message, e.g. a stopped workspace. */
+  canSendNow?: boolean;
+  /** Puts a queued message back into the composer. */
+  onWithdrawSteer: (steerId: string) => void | Promise<void>;
+  onSendNow: (messageId: string) => void | Promise<void>;
+  onReschedule: (messageId: string, sendAt: Date) => void | Promise<void>;
+  /** Puts a scheduled message back into the composer. */
+  onEdit: (messageId: string) => void | Promise<void>;
+  onDelete: (messageId: string) => void | Promise<void>;
+}
+
 export interface ComposerSheetStackProps {
   /** Ordered by `buildComposerSheets`; only the first sheet is interactive. */
   sheets: ComposerSheet[];
   gates?: ComposerGates;
+  queue?: ComposerQueue;
+  /** Opens a date and time picker for a scheduled message. */
+  onChangeTime?: (message: HarnessScheduledMessage) => void;
   onSelectCandidate: (candidate: MentionCandidate) => void;
   testID?: string;
 }
@@ -91,6 +121,8 @@ const MONOSPACE = Platform.select({ ios: "Menlo", default: "monospace" });
 export function ComposerSheetStack({
   sheets,
   gates,
+  queue,
+  onChangeTime,
   onSelectCandidate,
   testID = "composer-sheet-stack",
 }: ComposerSheetStackProps): React.JSX.Element {
@@ -141,6 +173,15 @@ export function ComposerSheetStack({
         onResolve={gates.onResolvePermission}
         collapsed={collapsed}
         onToggleCollapsed={toggleCollapsed}
+      />
+    );
+  else if (top?.kind === "queue" && queue)
+    content = (
+      <QueueSheet
+        steers={top.queue ?? []}
+        scheduled={top.scheduled ?? []}
+        queue={queue}
+        onChangeTime={onChangeTime}
       />
     );
 
@@ -653,6 +694,169 @@ function PermissionSheet({
   );
 }
 
+/** Single-line preview: line breaks and runs of whitespace collapse. */
+function preview(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Outgoing messages: steers waiting for the agent's next step, then messages
+ * scheduled for later. A scheduled row opens its actions as a native menu.
+ */
+function QueueSheet({
+  steers,
+  scheduled,
+  queue,
+  onChangeTime,
+}: {
+  steers: HarnessSteer[];
+  scheduled: HarnessScheduledMessage[];
+  queue: ComposerQueue;
+  onChangeTime?: (message: HarnessScheduledMessage) => void;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <ScrollView
+      accessibilityLabel="Outgoing messages"
+      testID="composer-queue-sheet"
+      style={[styles.shrink, { maxHeight: 216 }]}
+      contentContainerStyle={styles.queue}
+      keyboardShouldPersistTaps="handled"
+      nestedScrollEnabled
+      scrollsToTop={false}
+    >
+      {steers.map((steer) => (
+        <View
+          key={steer.id}
+          testID="composer-queue-row"
+          style={styles.queueRow}
+        >
+          <Clock size={17} color={theme.mutedText} />
+          <QueueText caption="Queued for the next step" text={steer.content} />
+          <IconButton
+            symbol="xmark"
+            icon={<X size={17} color={theme.mutedText} />}
+            label="Withdraw queued message"
+            tone="quiet"
+            size={40}
+            onPress={() => {
+              void settle(() => queue.onWithdrawSteer(steer.id));
+            }}
+            testID="composer-queue-withdraw"
+          />
+        </View>
+      ))}
+      {scheduled.map((message) => (
+        <ScheduledRow
+          key={message.id}
+          message={message}
+          queue={queue}
+          onChangeTime={onChangeTime}
+        />
+      ))}
+    </ScrollView>
+  );
+}
+
+function ScheduledRow({
+  message,
+  queue,
+  onChangeTime,
+}: {
+  message: HarnessScheduledMessage;
+  queue: ComposerQueue;
+  onChangeTime?: (message: HarnessScheduledMessage) => void;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const sending = message.status === "sending";
+  const failed = message.status === "failed";
+  const when = formatSendTime(message.send_at);
+  const caption = sending
+    ? "Sending…"
+    : failed
+      ? `Not sent · ${message.error || when}`
+      : when;
+  const icon = sending ? (
+    <ActivityIndicator size="small" color={theme.mutedText} />
+  ) : failed ? (
+    <CircleAlert size={17} color={theme.danger} />
+  ) : (
+    <CalendarClock size={17} color={theme.mutedText} />
+  );
+  const content = (
+    <View testID="composer-scheduled-row" style={styles.queueRow}>
+      {icon}
+      <QueueText
+        caption={caption}
+        captionColor={failed ? theme.danger : undefined}
+        text={message.content}
+      />
+      {sending ? null : (
+        <View style={styles.queueMore}>
+          <Ellipsis size={18} color={theme.mutedText} />
+        </View>
+      )}
+    </View>
+  );
+  if (sending) return content;
+  return (
+    <NativeMenu
+      label={failed ? "Not sent" : `Scheduled · ${when}`}
+      accessibilityLabel={`${caption}: ${preview(message.content)}`}
+      testID={`composer-scheduled-menu-${message.id}`}
+      actions={[
+        {
+          id: "send",
+          title: failed ? "Try again now" : "Send now",
+          symbol: "paperplane",
+          disabled: queue.canSendNow === false,
+        },
+        ...(onChangeTime
+          ? [{ id: "time", title: "Change time", symbol: "clock" }]
+          : []),
+        { id: "edit", title: "Edit", symbol: "pencil" },
+        { id: "delete", title: "Delete", symbol: "trash", destructive: true },
+      ]}
+      onSelect={(id) => {
+        if (id === "send") void settle(() => queue.onSendNow(message.id));
+        else if (id === "time") onChangeTime?.(message);
+        else if (id === "edit") void settle(() => queue.onEdit(message.id));
+        else if (id === "delete") void settle(() => queue.onDelete(message.id));
+      }}
+    >
+      {content}
+    </NativeMenu>
+  );
+}
+
+function QueueText({
+  caption,
+  captionColor,
+  text,
+}: {
+  caption: string;
+  captionColor?: string;
+  text: string;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <View style={styles.queueText}>
+      <Text
+        numberOfLines={1}
+        style={[
+          styles.queueCaption,
+          { color: captionColor ?? theme.mutedText },
+        ]}
+      >
+        {caption}
+      </Text>
+      <Text numberOfLines={1} style={[styles.queueBody, { color: theme.text }]}>
+        {preview(text)}
+      </Text>
+    </View>
+  );
+}
+
 function MentionSheet({
   candidates,
   onSelect,
@@ -800,5 +1004,23 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
     paddingHorizontal: 16,
+  },
+  queue: { paddingVertical: 2 },
+  queueRow: {
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingLeft: 16,
+    paddingRight: 6,
+  },
+  queueText: { flex: 1, minWidth: 0, gap: 1 },
+  queueCaption: { fontSize: 12, lineHeight: 16, fontVariant: ["tabular-nums"] },
+  queueBody: { fontSize: 15, lineHeight: 20 },
+  queueMore: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

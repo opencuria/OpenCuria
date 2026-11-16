@@ -50,6 +50,26 @@ const authStore = {
   user: { email: 'Ada@example.com' },
 }
 
+const scheduledTaskStore = {
+  create: vi.fn(),
+}
+
+const notificationStore = {
+  add: vi.fn(),
+  success: vi.fn(),
+  error: vi.fn(),
+  warning: vi.fn(),
+  info: vi.fn(),
+}
+
+vi.mock('@/stores/scheduledTasks', () => ({
+  useScheduledTaskStore: () => scheduledTaskStore,
+}))
+
+vi.mock('@/stores/notifications', () => ({
+  useNotificationStore: () => notificationStore,
+}))
+
 vi.mock('@/stores/workspaces', () => ({
   useWorkspaceStore: () => workspaceStore,
 }))
@@ -226,6 +246,7 @@ describe('ChatHomeView', () => {
     workspaceStore.activeWorkspace = null
     harnessStore.activeSessionId = null
     harnessStore.createSession.mockReset()
+    scheduledTaskStore.create.mockReset()
   })
 
   it('does not subscribe or fetch file listings when workspace loading resolves after unmount', async () => {
@@ -399,6 +420,57 @@ describe('ChatHomeView', () => {
     // The composer cleared itself on send: the draft must come back.
     expect(wrapper.findComponent({ name: 'HarnessChatInput' }).emitted('prefill')).toEqual([
       ['hello', { append: true, skillIds: ['skill-1'] }],
+    ])
+  })
+
+  it('schedules a new chat as a one-time task and stays home', async () => {
+    const { wrapper, router } = await mountHome()
+    const pushSpy = vi.spyOn(router, 'push')
+    scheduledTaskStore.create.mockResolvedValue({ id: 'task-1' })
+    const at = new Date(2026, 10, 19, 9, 0)
+
+    wrapper
+      .findComponent({ name: 'HarnessChatInput' })
+      .vm.$emit('schedule', 'Weekly digest', 'build', 'm', ['skill-1'], 'high', 'codex', at)
+    await flushPromises()
+
+    expect(scheduledTaskStore.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Weekly digest',
+        workspace_id: 'ws-1',
+        prompt: 'Weekly digest',
+        mode: 'build',
+        harness_id: 'codex',
+        model: 'm',
+        reasoning_effort: 'high',
+        skill_ids: ['skill-1'],
+        recurrence: 'once',
+        run_date: '2026-11-19',
+        local_time: '09:00',
+        enabled: true,
+      }),
+    )
+    expect(notificationStore.success).toHaveBeenCalledWith(
+      'New chat scheduled',
+      expect.stringContaining(', '),
+    )
+    expect(harnessStore.createSession).not.toHaveBeenCalled()
+    expect(pushSpy).not.toHaveBeenCalled()
+    expect(wrapper.findComponent({ name: 'HarnessChatInput' }).emitted('prefill')).toBeUndefined()
+  })
+
+  it('gives the draft back when the new chat could not be scheduled', async () => {
+    const { wrapper } = await mountHome()
+    scheduledTaskStore.create.mockRejectedValue(new Error('Quota reached'))
+
+    wrapper
+      .findComponent({ name: 'HarnessChatInput' })
+      .vm.$emit('schedule', 'Weekly digest', 'build', '', ['skill-1'], '', 'native', new Date())
+    await flushPromises()
+
+    expect(notificationStore.error).toHaveBeenCalledWith('Scheduling failed', 'Quota reached')
+    expect(wrapper.findComponent({ name: 'HarnessChatInput' }).emitted('prefill')).toEqual([
+      ['Weekly digest', { append: true, skillIds: ['skill-1'] }],
     ])
   })
 

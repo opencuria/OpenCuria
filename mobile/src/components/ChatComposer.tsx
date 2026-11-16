@@ -35,13 +35,22 @@ import {
   type MentionCandidate,
 } from "@opencuria/chat-core/harnessMentions";
 import { buildComposerSheets } from "@opencuria/chat-core/composerSheets";
+import type { HarnessScheduledMessage } from "@opencuria/chat-core/harness";
+import { sendLaterOptions } from "@opencuria/chat-core/sendLater";
 import { Banner, NativeAction } from "../ui/primitives";
+import { NativeContextMenu } from "../ui/ContextMenu";
+import { gestureThresholdHaptic } from "../ui/haptics";
 import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerAction, ComposerActionContent } from "../ui/ComposerAction";
 import { ComposerEditor } from "./ComposerEditor";
-import { ComposerSheetStack, type ComposerGates } from "./ComposerSheets";
+import {
+  ComposerSheetStack,
+  type ComposerGates,
+  type ComposerQueue,
+} from "./ComposerSheets";
+import { SendLaterSheet } from "./SendLaterSheet";
 import {
   COMPOSER_INPUT_NATIVE_ID,
   ComposerDismissArea,
@@ -76,19 +85,36 @@ export interface ComposerWorkspace {
   onSelect: (id: string) => void;
 }
 
+/** What the composer hands to its host when sending or scheduling. */
+export interface ComposerSubmission {
+  text: string;
+  skillIds: string[];
+  attachments: ComposerAttachment[];
+}
+
 export interface ChatComposerProps {
   draft: string;
   onDraftChange: (
     draft: string,
     selection: { start: number; end: number },
   ) => void;
-  onSend: (value: {
-    text: string;
-    skillIds: string[];
-    attachments: ComposerAttachment[];
-  }) => void | Promise<void>;
+  onSend: (value: ComposerSubmission) => void | Promise<void>;
+  /**
+   * Schedules the draft like `onSend` sends it. Enables "Send later" on a
+   * long press of the send button.
+   */
+  onSchedule?: (
+    value: ComposerSubmission,
+    sendAt: Date,
+  ) => void | Promise<void>;
   onStop?: () => void | Promise<void>;
+  /** A run or a send is in progress: Stop is available. */
   busy?: boolean;
+  /**
+   * The agent is working: a message steers the running turn, so the composer
+   * offers Send next to a compact Stop while there is a draft.
+   */
+  steering?: boolean;
   disabled?: boolean;
   /**
    * False keeps the draft editable but neither sends it nor adds attachments,
@@ -122,8 +148,17 @@ export interface ChatComposerProps {
   >;
   /** Pending questions and permissions, shown as sheets above the editor. */
   gates?: ComposerGates;
+  /** Queued steers and scheduled messages, shown as a sheet above the editor. */
+  queue?: ComposerQueue;
   testID?: string;
 }
+
+/** Native symbols of the "Send later" presets. */
+const SEND_LATER_SYMBOLS: Record<string, string> = {
+  "in-1-hour": "clock",
+  tomorrow: "sunrise",
+  monday: "calendar",
+};
 
 interface ActiveQuery {
   kind: "mention" | "skill";
@@ -143,8 +178,10 @@ export function ChatComposer({
   draft,
   onDraftChange,
   onSend,
+  onSchedule,
   onStop,
   busy = false,
+  steering = false,
   disabled = false,
   canSend = true,
   placeholder = "Ask OpenCuria",
@@ -163,6 +200,7 @@ export function ChatComposer({
   onChoosePhotos,
   onChooseFiles,
   gates,
+  queue,
   testID = "chat-composer",
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -193,6 +231,12 @@ export function ChatComposer({
   // Text the mounted editor shows natively, and its mount generation.
   const editorTextRef = useRef(draft);
   const [editorKey, setEditorKey] = useState(0);
+  // The draft or a scheduled message waiting for a custom send time.
+  const [timePicker, setTimePicker] = useState<
+    | { kind: "draft" }
+    | { kind: "reschedule"; message: HarnessScheduledMessage }
+    | null
+  >(null);
 
   attachmentsRef.current = attachments;
 
@@ -226,8 +270,17 @@ export function ChatComposer({
             : null,
         questions: gates?.questions,
         permissions: gates?.permissions,
+        queue: queue?.steers,
+        scheduled: queue?.scheduled,
       }),
-    [candidates, gates?.permissions, gates?.questions, query],
+    [
+      candidates,
+      gates?.permissions,
+      gates?.questions,
+      query,
+      queue?.scheduled,
+      queue?.steers,
+    ],
   );
 
   const cancelSearch = useCallback(() => {
@@ -260,7 +313,8 @@ export function ChatComposer({
         }
         return;
       }
-      const slash = detectSlashQuery(text, cursor);
+      // Skills apply when a turn starts; a steer cannot carry them.
+      const slash = steering ? null : detectSlashQuery(text, cursor);
       if (slash !== null) {
         setSearched(NO_CANDIDATES);
         setQuery({ kind: "skill", query: slash });
@@ -269,7 +323,7 @@ export function ChatComposer({
         setSearched(NO_CANDIDATES);
       }
     },
-    [cancelSearch, onSearchMentions],
+    [cancelSearch, onSearchMentions, steering],
   );
 
   const changeText = useCallback(
@@ -353,6 +407,7 @@ export function ChatComposer({
     setQuery(null);
     setSearched(NO_CANDIDATES);
     setError(null);
+    setTimePicker(null);
     cancelSearch();
   }, [cancelSearch, contextKey]);
 
@@ -455,100 +510,141 @@ export function ChatComposer({
     [canSend, disabled, onAttachmentsChange],
   );
 
-  const send = useCallback(async () => {
-    // Stop is an independent control, not a variant of sending. It must work
-    // even when the draft is empty or the host has temporarily disabled input.
-    if (busy) {
-      if (!onStop || stopInFlight.current) return;
-      const generation = operationGeneration.current;
-      stopInFlight.current = true;
-      setStopping(true);
-      setError(null);
-      try {
-        await onStop();
-      } catch {
-        if (mounted.current && generation === operationGeneration.current)
-          setError("Could not stop the current run. Please try again.");
-      } finally {
-        stopInFlight.current = false;
-        if (mounted.current && generation === operationGeneration.current)
-          setStopping(false);
-      }
-      return;
-    }
-    if (sendingRef.current) return;
-    const originalDraft = draftRef.current;
-    const text = originalDraft.trim();
-    const currentAttachments = [...attachmentsRef.current];
-    if (
-      disabled ||
-      !canSend ||
-      pickerInFlight.current ||
-      (!text && currentAttachments.length === 0)
-    )
-      return;
+  // Stop is an independent control, not a variant of sending. It must work
+  // even when the draft is empty or the host has temporarily disabled input.
+  const stop = useCallback(async () => {
+    if (!onStop || stopInFlight.current) return;
     const generation = operationGeneration.current;
-    nativeSelectionRef.current = false;
-    nativeEditTextRef.current = null;
-    const originalSelection = selectionRef.current;
-    dismissKeyboard({ revealLatest: true });
-    sendingRef.current = true;
-    setSending(true);
+    stopInFlight.current = true;
+    setStopping(true);
     setError(null);
-    // Clear at once, as messengers do; a failed send restores the draft.
-    const cleared = { start: 0, end: 0 };
-    draftRef.current = "";
-    selectionRef.current = cleared;
-    setQuery(null);
-    setSearched(NO_CANDIDATES);
-    cancelSearch();
-    onDraftChange("", cleared);
     try {
-      await onSend({
-        text,
-        skillIds: [...selectedSkillIds],
-        attachments: currentAttachments,
-      });
+      await onStop();
     } catch {
-      if (
-        mounted.current &&
-        generation === operationGeneration.current &&
-        (draftRef.current === "" || draftRef.current === originalDraft)
-      ) {
-        const restoredSelection = {
-          start: Math.min(originalSelection.start, originalDraft.length),
-          end: Math.min(originalSelection.end, originalDraft.length),
-        };
-        nativeSelectionRef.current = false;
-        nativeEditTextRef.current = null;
-        draftRef.current = originalDraft;
-        selectionRef.current = restoredSelection;
-        onDraftChange(originalDraft, restoredSelection);
-        setError(
-          "Your message could not be sent. Your draft is still here. Please try again.",
-        );
-      }
-    } finally {
-      if (generation === operationGeneration.current)
-        sendingRef.current = false;
       if (mounted.current && generation === operationGeneration.current)
-        setSending(false);
+        setError("Could not stop the current run. Please try again.");
+    } finally {
+      stopInFlight.current = false;
+      if (mounted.current && generation === operationGeneration.current)
+        setStopping(false);
     }
-  }, [
-    busy,
-    canSend,
-    cancelSearch,
-    disabled,
-    dismissKeyboard,
-    onDraftChange,
-    onSend,
-    onStop,
-    selectedSkillIds,
-  ]);
+  }, [onStop]);
+
+  /** Hands the draft to `deliver`; a failure gives the draft back. */
+  const submit = useCallback(
+    async (
+      deliver: (value: ComposerSubmission) => void | Promise<void>,
+      failure: string,
+    ) => {
+      if (sendingRef.current) return;
+      const originalDraft = draftRef.current;
+      const text = originalDraft.trim();
+      const currentAttachments = [...attachmentsRef.current];
+      if (
+        disabled ||
+        !canSend ||
+        (busy && !steering) ||
+        pickerInFlight.current ||
+        (!text && currentAttachments.length === 0)
+      )
+        return;
+      const generation = operationGeneration.current;
+      nativeSelectionRef.current = false;
+      nativeEditTextRef.current = null;
+      const originalSelection = selectionRef.current;
+      dismissKeyboard({ revealLatest: true });
+      sendingRef.current = true;
+      setSending(true);
+      setError(null);
+      // Clear at once, as messengers do; a failed send restores the draft.
+      const cleared = { start: 0, end: 0 };
+      draftRef.current = "";
+      selectionRef.current = cleared;
+      setQuery(null);
+      setSearched(NO_CANDIDATES);
+      cancelSearch();
+      onDraftChange("", cleared);
+      try {
+        await deliver({
+          text,
+          skillIds: [...selectedSkillIds],
+          attachments: currentAttachments,
+        });
+      } catch {
+        if (
+          mounted.current &&
+          generation === operationGeneration.current &&
+          (draftRef.current === "" || draftRef.current === originalDraft)
+        ) {
+          const restoredSelection = {
+            start: Math.min(originalSelection.start, originalDraft.length),
+            end: Math.min(originalSelection.end, originalDraft.length),
+          };
+          nativeSelectionRef.current = false;
+          nativeEditTextRef.current = null;
+          draftRef.current = originalDraft;
+          selectionRef.current = restoredSelection;
+          onDraftChange(originalDraft, restoredSelection);
+          setError(failure);
+        }
+      } finally {
+        if (generation === operationGeneration.current)
+          sendingRef.current = false;
+        if (mounted.current && generation === operationGeneration.current)
+          setSending(false);
+      }
+    },
+    [
+      busy,
+      canSend,
+      cancelSearch,
+      disabled,
+      dismissKeyboard,
+      onDraftChange,
+      selectedSkillIds,
+      steering,
+    ],
+  );
+
+  const send = useCallback(
+    () =>
+      submit(
+        onSend,
+        "Your message could not be sent. Your draft is still here. Please try again.",
+      ),
+    [onSend, submit],
+  );
+
+  const schedule = useCallback(
+    (sendAt: Date) => {
+      if (!onSchedule) return;
+      void submit(
+        (value) => onSchedule(value, sendAt),
+        "Your message could not be scheduled. Your draft is still here. Please try again.",
+      );
+    },
+    [onSchedule, submit],
+  );
+
+  const chooseSendLater = useCallback(
+    (id: string) => {
+      if (id === "custom") {
+        dismissKeyboard();
+        setTimePicker({ kind: "draft" });
+        return;
+      }
+      // Recomputed on selection, so "In 1 hour" counts from now.
+      const option = sendLaterOptions().find((item) => item.id === id);
+      if (option) schedule(option.at);
+    },
+    [dismissKeyboard, schedule],
+  );
 
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
-  const canSubmit =
-    !disabled && canSend && (draft.trim().length > 0 || attachments.length > 0);
+  const hasDraft = draft.trim().length > 0 || attachments.length > 0;
+  // While the agent works a draft steers it; a send still on its way blocks.
+  const canSubmit = !disabled && canSend && hasDraft && (!busy || steering);
+  const primaryIsStop = busy && !(steering && hasDraft);
   const attachDisabled = disabled || !canSend;
   const attachmentButton = hasPicker ? (
     <NativeMenu
@@ -640,20 +736,73 @@ export function ChatComposer({
       />
     </View>
   ) : null;
-  const sendDisabled = busy ? !onStop || stopping : !canSubmit || sending;
-  const sendButton = (
+  const stopDisabled = !onStop || stopping;
+  const stopButton = (
     <ComposerAction
-      label={busy ? "Stop OpenCuria" : "Send message"}
-      icon={busy ? Square : ArrowUp}
+      label="Stop OpenCuria"
+      icon={Square}
+      primary={primaryIsStop}
+      iconSize={primaryIsStop ? 14 : 13}
+      filledIcon
+      busy={!primaryIsStop && stopping}
+      disabled={stopDisabled}
+      onPress={() => {
+        void stop();
+      }}
+      testID="chat-composer-stop"
+    />
+  );
+  const sendDisabled = !canSubmit || sending;
+  const canSchedule = Boolean(onSchedule) && !sendDisabled;
+  const sendAction = (showMenu?: () => void) => (
+    <ComposerAction
+      label="Send message"
+      icon={ArrowUp}
       primary
-      iconSize={busy ? 14 : 22}
-      filledIcon={busy}
+      iconSize={22}
       disabled={sendDisabled}
       onPress={() => {
         void send();
       }}
-      testID={busy ? "chat-composer-stop" : "chat-composer-send"}
+      onLongPress={
+        showMenu
+          ? () => {
+              gestureThresholdHaptic();
+              showMenu();
+            }
+          : undefined
+      }
+      accessibilityHint={canSchedule ? "Hold to send later" : undefined}
+      testID="chat-composer-send"
     />
+  );
+  const sendButton = primaryIsStop ? (
+    stopButton
+  ) : canSchedule ? (
+    <NativeContextMenu
+      label="Send later"
+      fitContent
+      actions={[
+        ...sendLaterOptions().map((option) => ({
+          id: option.id,
+          title:
+            option.id === "in-1-hour"
+              ? option.label
+              : `${option.label}, ${option.detail}`,
+          symbol: SEND_LATER_SYMBOLS[option.id],
+        })),
+        {
+          id: "custom",
+          title: "Choose date & time…",
+          symbol: "calendar.badge.clock",
+        },
+      ]}
+      onSelect={chooseSendLater}
+    >
+      {sendAction}
+    </NativeContextMenu>
+  ) : (
+    sendAction()
   );
 
   return (
@@ -670,6 +819,11 @@ export function ChatComposer({
       <ComposerSheetStack
         sheets={sheets}
         gates={gates}
+        queue={queue}
+        onChangeTime={(message) => {
+          dismissKeyboard();
+          setTimePicker({ kind: "reschedule", message });
+        }}
         onSelectCandidate={selectCandidate}
       />
       <ComposerDismissArea enabled={!inputScrolls}>
@@ -796,11 +950,33 @@ export function ChatComposer({
             <View style={styles.toolbar}>
               {attachmentButton}
               <View style={styles.settings}>{settingsButton}</View>
+              {busy && !primaryIsStop ? stopButton : null}
               {sendButton}
             </View>
           </ComposerSurface>
         </View>
       </ComposerDismissArea>
+      <SendLaterSheet
+        visible={timePicker !== null}
+        initial={
+          timePicker?.kind === "reschedule"
+            ? new Date(timePicker.message.send_at)
+            : null
+        }
+        actionTitle={
+          timePicker?.kind === "reschedule" ? "Reschedule" : "Schedule"
+        }
+        onClose={() => setTimePicker(null)}
+        onConfirm={(sendAt) => {
+          const picked = timePicker;
+          setTimePicker(null);
+          if (picked?.kind === "reschedule")
+            void Promise.resolve(
+              queue?.onReschedule(picked.message.id, sendAt),
+            ).catch(() => undefined);
+          else schedule(sendAt);
+        }}
+      />
     </View>
   );
 }

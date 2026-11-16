@@ -614,6 +614,18 @@ describe("REST endpoint wrappers", () => {
     await client.harness.timeline("session-id");
     await client.harness.steer("session-id", "Use pnpm");
     await client.harness.withdraw("session-id", "steer-id");
+    await client.harness.scheduleMessage("session-id", {
+      prompt: "Check CI",
+      send_at: "2026-11-17T08:00:00.000Z",
+      model: "m-1",
+    });
+    await client.harness.rescheduleMessage(
+      "session-id",
+      "later id",
+      "2026-11-18T08:00:00.000Z",
+    );
+    await client.harness.sendScheduledMessage("session-id", "later id");
+    await client.harness.withdrawScheduledMessage("session-id", "later id");
     expect(
       calls.map(({ url, method }) => [
         url.replace("https://api.example/api/v1", ""),
@@ -628,6 +640,13 @@ describe("REST endpoint wrappers", () => {
       ["/harness/sessions/session-id/timeline", "GET"],
       ["/harness/sessions/session-id/steer", "POST"],
       ["/harness/sessions/session-id/steer/steer-id", "DELETE"],
+      ["/harness/sessions/session-id/scheduled-messages", "POST"],
+      ["/harness/sessions/session-id/scheduled-messages/later%20id", "PATCH"],
+      [
+        "/harness/sessions/session-id/scheduled-messages/later%20id/send",
+        "POST",
+      ],
+      ["/harness/sessions/session-id/scheduled-messages/later%20id", "DELETE"],
     ]);
     expect(JSON.parse(calls[3].body!)).toEqual({ response: "once" });
     expect(JSON.parse(calls[4].body!)).toEqual({
@@ -635,6 +654,14 @@ describe("REST endpoint wrappers", () => {
       reject: false,
     });
     expect(JSON.parse(calls[6].body!)).toEqual({ prompt: "Use pnpm" });
+    expect(JSON.parse(calls[8].body!)).toEqual({
+      prompt: "Check CI",
+      send_at: "2026-11-17T08:00:00.000Z",
+      model: "m-1",
+    });
+    expect(JSON.parse(calls[9].body!)).toEqual({
+      send_at: "2026-11-18T08:00:00.000Z",
+    });
   });
 
   it("manages workspaces, images and their catalogs over the webapp's REST contract", async () => {

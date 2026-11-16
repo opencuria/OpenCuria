@@ -429,3 +429,165 @@ describe("ChatComposer", () => {
     expect(onAttachmentsChange).not.toHaveBeenCalled();
   });
 });
+
+describe("ChatComposer steering and send later", () => {
+  /** A local date a few days ahead, inside the one-year scheduling window. */
+  const soon = new Date();
+  soon.setDate(soon.getDate() + 3);
+  soon.setHours(9, 0, 0, 0);
+  const soonDate = [
+    soon.getFullYear(),
+    String(soon.getMonth() + 1).padStart(2, "0"),
+    String(soon.getDate()).padStart(2, "0"),
+  ].join("-");
+  const scheduled = {
+    id: "later-1",
+    session_id: "session-1",
+    content: "Check the deploy",
+    send_at: soon.toISOString(),
+    status: "pending" as const,
+    created_at: new Date().toISOString(),
+  };
+
+  function queue(
+    overrides: Partial<
+      NonNullable<React.ComponentProps<typeof ChatComposer>["queue"]>
+    > = {},
+  ) {
+    return {
+      steers: [],
+      scheduled: [],
+      onWithdrawSteer: jest.fn(),
+      onSendNow: jest.fn(),
+      onReschedule: jest.fn(),
+      onEdit: jest.fn(),
+      onDelete: jest.fn(),
+      ...overrides,
+    };
+  }
+
+  it("steers with a draft while the agent works and keeps Stop at hand", async () => {
+    const onStop = jest.fn();
+    const { onSend, rerenderComposer } = renderComposer({
+      busy: true,
+      steering: true,
+      onStop,
+    });
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
+    expect(screen.queryByTestId("chat-composer-send")).toBeNull();
+
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Use pnpm");
+    expect(screen.getByTestId("chat-composer-send")).toBeEnabled();
+    fireEvent.press(screen.getByTestId("chat-composer-stop"));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Use pnpm" }),
+      ),
+    );
+
+    // A send that is still on its way cannot be followed up yet.
+    rerenderComposer({ busy: true, steering: false, onStop });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Again");
+    expect(screen.queryByTestId("chat-composer-send")).toBeNull();
+    expect(screen.getByTestId("chat-composer-stop")).toBeTruthy();
+  });
+
+  it("schedules the draft from the send button's long-press menu", async () => {
+    const onSchedule = jest.fn(async () => undefined);
+    const { onDraftChange, onSend } = renderComposer({ onSchedule });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Check CI");
+
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: /^Tomorrow, / }));
+
+    await waitFor(() =>
+      expect(onSchedule).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Check CI" }),
+        expect.any(Date),
+      ),
+    );
+    const sendAt = (onSchedule.mock.calls[0] as unknown[])[1] as Date;
+    expect([sendAt.getHours(), sendAt.getMinutes()]).toEqual([9, 0]);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onDraftChange).toHaveBeenLastCalledWith("", { start: 0, end: 0 });
+  });
+
+  it("gives the draft back when scheduling fails", async () => {
+    const onSchedule = jest.fn(async () => {
+      throw new Error("offline");
+    });
+    renderComposer({ onSchedule });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Ship it");
+
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: "In 1 hour" }));
+
+    expect(await screen.findByText(/could not be scheduled/i)).toBeTruthy();
+    expect(screen.getByTestId("chat-composer-input").props.value).toBe(
+      "Ship it",
+    );
+  });
+
+  it("offers no send-later menu without a draft", () => {
+    renderComposer({ onSchedule: jest.fn() });
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    expect(screen.queryByRole("button", { name: "In 1 hour" })).toBeNull();
+  });
+
+  it("schedules at a custom date and time from native pickers", async () => {
+    const onSchedule = jest.fn(async () => undefined);
+    renderComposer({ onSchedule });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Report");
+
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(
+      screen.getByRole("button", { name: "Choose date & time…" }),
+    );
+    fireEvent.changeText(screen.getByTestId("send-later-date"), soonDate);
+    fireEvent.changeText(screen.getByTestId("send-later-time"), "07:45");
+    expect(screen.getByText(/^Sends /)).toBeTruthy();
+    fireEvent.press(screen.getByTestId("send-later-confirm"));
+
+    await waitFor(() =>
+      expect(onSchedule).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "Report" }),
+        new Date(soon.getFullYear(), soon.getMonth(), soon.getDate(), 7, 45),
+      ),
+    );
+  });
+
+  it("refuses a past custom time", () => {
+    renderComposer({ onSchedule: jest.fn() });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Report");
+    fireEvent(screen.getByTestId("chat-composer-send"), "longPress");
+    fireEvent.press(
+      screen.getByRole("button", { name: "Choose date & time…" }),
+    );
+    fireEvent.changeText(screen.getByTestId("send-later-date"), "2001-03-04");
+    expect(screen.getByText("Choose a time in the future.")).toBeTruthy();
+    expect(screen.getByTestId("send-later-confirm")).toBeDisabled();
+  });
+
+  it("reschedules a scheduled message from its menu", async () => {
+    const outgoing = queue({ scheduled: [scheduled] });
+    renderComposer({ queue: outgoing });
+
+    fireEvent.press(screen.getByTestId("composer-scheduled-menu-later-1"));
+    fireEvent.press(screen.getByRole("button", { name: "Change time" }));
+    fireEvent.changeText(screen.getByTestId("send-later-time"), "10:30");
+    fireEvent.press(screen.getByTestId("send-later-confirm"));
+
+    await waitFor(() =>
+      expect(outgoing.onReschedule).toHaveBeenCalledWith(
+        "later-1",
+        expect.any(Date),
+      ),
+    );
+    const sendAt = (
+      outgoing.onReschedule.mock.calls[0] as unknown[]
+    )[1] as Date;
+    expect([sendAt.getHours(), sendAt.getMinutes()]).toEqual([10, 30]);
+  });
+});

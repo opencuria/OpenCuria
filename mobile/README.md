@@ -7,7 +7,8 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
 ## Features
 
 - Workspaces and chats: live output, subtasks, permission/question gates, Markdown,
-  mentions, skills, model choice, photo/camera/document attachments.
+  mentions, skills, model choice, photo/camera/document attachments. Messages sent
+  while the agent works steer its turn; holding Send schedules a message for later.
 - Workspace tools: Git, the KasmVNC desktop (trackpad and keyboard), terminal, files.
 - Apps published by agents (`app_publish`): installed and run inside OpenCuria like
   in Expo Go, also offline, with an app menu (shake, three fingers or menu button)

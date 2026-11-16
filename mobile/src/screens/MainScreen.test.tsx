@@ -120,6 +120,13 @@ const mockController = {
   resolveQuestion: jest.fn().mockResolvedValue(undefined),
   rename: jest.fn().mockResolvedValue({}),
   delete: jest.fn().mockResolvedValue(undefined),
+  steer: jest.fn().mockResolvedValue(undefined),
+  stop: jest.fn().mockResolvedValue([]),
+  withdrawSteer: jest.fn().mockResolvedValue(null),
+  schedule: jest.fn().mockResolvedValue({}),
+  reschedule: jest.fn().mockResolvedValue(undefined),
+  withdrawScheduled: jest.fn().mockResolvedValue(null),
+  sendScheduledNow: jest.fn().mockResolvedValue(undefined),
 };
 const mockUseSession = useSession as jest.MockedFunction<typeof useSession>;
 
@@ -165,6 +172,13 @@ jest.mock("../components", () => {
         skillIds: string[];
         attachments: [];
       }) => Promise<void>;
+      onSchedule?: (
+        value: { text: string; skillIds: string[]; attachments: [] },
+        sendAt: Date,
+      ) => Promise<void>;
+      onStop?: () => Promise<void>;
+      steering?: boolean;
+      queue?: { onEdit: (id: string) => Promise<void> };
     }) {
       const [menuOpen, setMenuOpen] = ReactRuntime.useState(false);
       return ReactRuntime.createElement(
@@ -248,6 +262,32 @@ jest.mock("../components", () => {
           },
           ReactRuntime.createElement(Text, null, "Send"),
         ),
+        ReactRuntime.createElement(
+          Text,
+          { testID: "composer-steering" },
+          props.steering ? "steering" : "idle",
+        ),
+        ReactRuntime.createElement(Pressable, {
+          testID: "test-schedule",
+          onPress: () => {
+            void props.onSchedule?.(
+              { text: "later please", skillIds: [], attachments: [] },
+              new Date("2099-01-02T08:00:00.000Z"),
+            );
+          },
+        }),
+        ReactRuntime.createElement(Pressable, {
+          testID: "test-stop",
+          onPress: () => {
+            void props.onStop?.();
+          },
+        }),
+        ReactRuntime.createElement(Pressable, {
+          testID: "test-queue-edit",
+          onPress: () => {
+            void props.queue?.onEdit("later-1");
+          },
+        }),
       );
     },
     ChatLayout: ({
@@ -1881,6 +1921,130 @@ describe("offline", () => {
       ),
     );
     expect(screen.queryByTestId("offline-notice")).toBeNull();
+    tree.unmount();
+  });
+});
+
+describe("steering and send later", () => {
+  async function renderOpenChat(status: "busy" | "idle") {
+    const client = mockClient();
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+    await act(async () => {
+      snapshot = {
+        ...snapshot,
+        activeSessionId: "session-a",
+        activeSession: {
+          id: "session-a",
+          workspace_id: runningWorkspace.id,
+          title: "Release notes",
+          harness_id: "native",
+          model: "native-model",
+          reasoning_effort: "medium",
+          mode: "build",
+          status,
+          skill_ids: [],
+        } as never,
+        busy: status === "busy",
+      };
+      listeners.forEach((listener) => listener());
+    });
+    return { client, tree };
+  }
+
+  it("steers a running chat and gives queued messages back on stop", async () => {
+    const { tree } = await renderOpenChat("busy");
+    expect(screen.getByTestId("composer-steering")).toHaveTextContent(
+      "steering",
+    );
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Steer the agent…|ready",
+    );
+
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() =>
+      expect(mockController.steer).toHaveBeenCalledWith(
+        "hello from mobile",
+        expect.objectContaining({ harnessId: "native", skillIds: [] }),
+      ),
+    );
+    expect(mockController.send).not.toHaveBeenCalled();
+
+    mockController.stop.mockResolvedValueOnce(["Use pnpm", "Add tests"]);
+    fireEvent.press(screen.getByTestId("test-stop"));
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-draft")).toHaveTextContent(
+        "Use pnpm Add tests",
+      ),
+    );
+    tree.unmount();
+  });
+
+  it("schedules into an open chat and edits a scheduled message back into the draft", async () => {
+    const { tree } = await renderOpenChat("idle");
+    expect(screen.getByTestId("composer-steering")).toHaveTextContent("idle");
+
+    fireEvent.press(screen.getByTestId("test-schedule"));
+    await waitFor(() =>
+      expect(mockController.schedule).toHaveBeenCalledWith(
+        "later please",
+        new Date("2099-01-02T08:00:00.000Z"),
+        expect.objectContaining({ harnessId: "native", mode: "build" }),
+      ),
+    );
+
+    mockController.withdrawScheduled.mockResolvedValueOnce({
+      id: "later-1",
+      content: "Check the deploy",
+      skill_ids: [],
+    });
+    fireEvent.press(screen.getByTestId("test-queue-edit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-draft")).toHaveTextContent(
+        "Check the deploy",
+      ),
+    );
+    expect(mockController.withdrawScheduled).toHaveBeenCalledWith("later-1");
+    tree.unmount();
+  });
+
+  it("schedules a new chat as a one-time scheduled task", async () => {
+    const client = mockClient();
+    client.scheduledTasks.create.mockResolvedValue({
+      id: "task-1",
+      next_run_at: "2099-01-02T08:00:00.000Z",
+    });
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-state")).toHaveTextContent(
+        "Ask OpenCuria|ready",
+      ),
+    );
+
+    fireEvent.press(screen.getByTestId("test-schedule"));
+    await waitFor(() =>
+      expect(client.scheduledTasks.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace_id: runningWorkspace.id,
+          prompt: "later please",
+          name: "later please",
+          recurrence: "once",
+          enabled: true,
+        }),
+      ),
+    );
+    expect(mockController.schedule).not.toHaveBeenCalled();
     tree.unmount();
   });
 });

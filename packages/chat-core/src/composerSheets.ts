@@ -1,6 +1,7 @@
 import type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
+  HarnessScheduledMessage,
   HarnessSteer,
   HarnessTodo,
 } from "./harness";
@@ -13,7 +14,8 @@ import type { MentionCandidate } from "./harnessMentions";
  * `processes` > `question` > `permission` > `queue` > `notice` > `context` >
  * `todos`. User-opened inputs (mention suggestions, processes panel) stay on
  * top; agent gates (questions, permissions) follow; the ambient queue of
- * messages steering the running turn comes next; passive notices come last.
+ * outgoing messages (steers of the running turn, then scheduled messages)
+ * comes next; passive notices come last.
  * Only the topmost sheet is interactive; lower sheets render as
  * non-interactive peek edges, iOS sheet-stack style.
  */
@@ -58,6 +60,8 @@ export interface ComposerSheet {
   permissions?: HarnessPermissionRequest[];
   /** Messages queued for the running turn (FIFO). */
   queue?: HarnessSteer[];
+  /** Messages scheduled for later, earliest first (same sheet as `queue`). */
+  scheduled?: HarnessScheduledMessage[];
   notice?: NoticeSheetState;
   todos?: HarnessTodo[];
   context?: ContextSheetState;
@@ -68,6 +72,7 @@ export interface ComposerSheetInput {
   questions?: HarnessQuestionRequest[];
   permissions?: HarnessPermissionRequest[];
   queue?: HarnessSteer[];
+  scheduled?: HarnessScheduledMessage[];
   notice?: NoticeSheetState | null;
   todos?: HarnessTodo[];
   processesOpen?: boolean;
@@ -112,8 +117,14 @@ export function buildComposerSheets(
       permissions,
     });
   }
-  if ((input.queue ?? []).length > 0) {
-    sheets.push({ kind: "queue", queue: input.queue });
+  const queue = input.queue ?? [];
+  const scheduled = [...(input.scheduled ?? [])].sort(
+    (a, b) =>
+      Date.parse(a.send_at) - Date.parse(b.send_at) ||
+      Date.parse(a.created_at) - Date.parse(b.created_at),
+  );
+  if (queue.length > 0 || scheduled.length > 0) {
+    sheets.push({ kind: "queue", queue, scheduled });
   }
   if (input.notice) {
     sheets.push({ kind: "notice", notice: input.notice });
