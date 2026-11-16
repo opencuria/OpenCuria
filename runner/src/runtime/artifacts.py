@@ -845,9 +845,11 @@ class RuntimeArtifactManager:
                         install_command = self._codex_guest_command(
                             "install", source, digest, platform_key, hashes
                         )
+                    # A first launch of a large native binary can wait for an
+                    # antivirus scan (Windows guests), so both share one bound.
                     code, output = await self._complete_guest_operation(
                         runtime.exec_command_wait(instance_id, install_command),
-                        timeout=180 if is_codex else 60,
+                        timeout=180,
                     )
                     if code != 0 or output.strip() != version:
                         raise ArtifactProvisionError(
