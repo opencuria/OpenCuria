@@ -59,11 +59,25 @@ function Wait-SetupComplete {
 
 function Find-Seed {
     for ($i = 0; $i -lt 60; $i++) {
-        $volume = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'cidata' -and $_.DriveLetter } | Select-Object -First 1
-        if ($volume) { return '{0}:\' -f $volume.DriveLetter }
+        $volume = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'cidata' } | Select-Object -First 1
+        if ($volume) { return $volume }
         Start-Sleep -Seconds 1
     }
     throw 'Seed volume cidata not found'
+}
+
+function Read-SeedFile($Volume, [string] $Name) {
+    # The volume path works with or without a drive letter.
+    return [IO.File]::ReadAllText($Volume.Path + $Name)
+}
+
+function Hide-Seed($Volume) {
+    # Like the seed device of Linux guests, the volume is not a user drive.
+    try {
+        if ($Volume.DriveLetter) {
+            mountvol.exe ('{0}:' -f $Volume.DriveLetter) /D | Out-Null
+        }
+    } catch { Log "seed drive stays visible: $($_.Exception.Message)" }
 }
 
 function Set-ConsoleSession {
@@ -104,11 +118,12 @@ function Initialize-Instance([string] $InstanceId, $Seed) {
 $instanceId = ''
 try {
     Wait-SetupComplete
-    $seedRoot = Find-Seed
-    $meta = Get-Content -Path (Join-Path $seedRoot 'meta-data')
+    $seedVolume = Find-Seed
+    $meta = (Read-SeedFile $seedVolume 'meta-data') -split "\r?\n"
     $instanceId = (($meta | Where-Object { $_ -match '^instance-id:' }) -replace '^instance-id:\s*', '').Trim()
     if (-not $instanceId) { throw 'Seed has no instance-id' }
-    $seed = Get-Content -Raw -Path (Join-Path $seedRoot 'opencuria.json') | ConvertFrom-Json
+    $seed = Read-SeedFile $seedVolume 'opencuria.json' | ConvertFrom-Json
+    Hide-Seed $seedVolume
 
     if ($seed.action -eq 'generalize') {
         Log 'generalizing for capture'

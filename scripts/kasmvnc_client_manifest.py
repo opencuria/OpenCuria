@@ -42,6 +42,7 @@ _PATTERNS = {
     ),
     "novnc": (
         "vnc.html",
+        "package.json",
         "defaults.json",
         "mandatory.json",
         "app/**/*",
