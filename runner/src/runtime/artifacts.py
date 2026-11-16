@@ -38,7 +38,7 @@ CLAUDE_RELEASE_MANIFEST_SHA256 = (
 )
 # Canonical hash of artifact_manifest.json with this field replaced by "x".
 CLAUDE_ARTIFACT_SPEC_SHA256 = (
-    "c32595914a31ba15d0c1a287f214658355994fcb2c2d42ca3883ec8aff4c485d"
+    "ed38148b14be87dcb84c0bf946ba3b3156370821b7582fdf08e2a7371c987aae"
 )
 CLAUDE_PLATFORM_PINS = {
     "linux-x64": (
@@ -57,7 +57,17 @@ CLAUDE_PLATFORM_PINS = {
         "d223ea603b4fe8521d35a47f1972fbb36f1028a40927f16160e6258e0b92d597",
         325808392,
     ),
+    "win32-x64": (
+        "e6dae5fc45902b15751f2591a02f51760351c4788c5fd8291b3f1443d40c13a4",
+        346487456,
+    ),
 }
+
+
+def claude_binary_name(platform_key: str) -> str:
+    """Name of the release binary; native Windows programs need ``.exe``."""
+    return "claude.exe" if platform_key.startswith("win32-") else "claude"
+
 
 # This is executed inside the guest; its only output is the platform key.
 # Windows guests run it in MSYS2 (Cygwin runtime), whose uname reports MSYS_NT-*.
@@ -87,9 +97,12 @@ printf 'linux-%s%s\\n' "$arch" "$libc"
 # Fixed shell installer; paths and expected values are manager-generated.
 # It hashes a staged file, validates the real version and publishes through a
 # same-directory hard-link so a concurrent/active binary is never replaced.
+# The binary name is "claude" or, on Windows guests, "claude.exe": Windows only
+# executes native programs whose name ends in .exe, so the stage keeps it too.
 _GUEST_VERIFY = r"""\
 set -eu
-runtime_root=$1 digest=$2 version=$3
+runtime_root=$1 digest=$2 version=$3 binary=$4
+case "$binary" in claude|claude.exe) ;; *) exit 4 ;; esac
 case "$runtime_root" in /*) ;; *) exit 4 ;; esac
 case "$runtime_root" in *[!A-Za-z0-9/_-]*|*/../*|*/..) exit 4 ;; esac
 path=$runtime_root
@@ -101,7 +114,7 @@ while [ "$path" != / ]; do
 done
 root=$runtime_root/claude-agent
 version_dir=$root/$version
-final=$version_dir/claude
+final=$version_dir/$binary
 [ -d "$root" ] && [ ! -L "$root" ] || exit 4
 [ -d "$version_dir" ] && [ ! -L "$version_dir" ] || exit 4
 [ -f "$final" ] && [ ! -L "$final" ] || exit 4
@@ -113,7 +126,9 @@ printf '%s\n' "$version"
 
 _GUEST_INSTALLER = r"""\
 set -eu
-source=$1 digest=$2 version=$3 stage_name=$4 runtime_root=$5
+source=$1 digest=$2 version=$3 stage_name=$4 runtime_root=$5 binary=$6
+case "$binary" in claude|claude.exe) ;; *) exit 2 ;; esac
+suffix=${binary#claude}
 case "$runtime_root" in /*) ;; *) exit 2 ;; esac
 case "$runtime_root" in *[!A-Za-z0-9/_-]*|*/../*|*/..) exit 2 ;; esac
 case "$version" in 2.1.321) ;; *) exit 2 ;; esac
@@ -138,7 +153,7 @@ for directory in "$root" "$version_dir"; do
     if [ ! -e "$directory" ]; then mkdir "$directory"; chmod 755 "$directory"; fi
     [ -d "$directory" ] && [ ! -L "$directory" ] || exit 3
 done
-final=$version_dir/claude
+final=$version_dir/$binary
 sha() { sha256sum "$1" | cut -d ' ' -f 1; }
 valid() {
     [ -f "$1" ] && [ ! -L "$1" ] && [ "$(sha "$1")" = "$digest" ] || return 1
@@ -151,7 +166,7 @@ if [ -e "$final" ] || [ -L "$final" ]; then
     exit 0
 fi
 [ -f "$source" ] && [ ! -L "$source" ] && [ "$(sha "$source")" = "$digest" ] || exit 5
-stage=$version_dir/$stage_name
+stage=$version_dir/$stage_name$suffix
 ( set -C; : > "$stage" ) || exit 6
 cat "$source" > "$stage"
 chmod 555 "$stage"
@@ -749,7 +764,8 @@ class RuntimeArtifactManager:
                 and (
                     CLAUDE_PLATFORM_PINS.get(platform_key) != (digest, size)
                     or url
-                    != f"https://downloads.claude.ai/claude-code-releases/2.1.321/{platform_key}/claude"
+                    != "https://downloads.claude.ai/claude-code-releases/2.1.321/"
+                    f"{platform_key}/{claude_binary_name(platform_key)}"
                 )
             )
             or (
@@ -811,6 +827,7 @@ class RuntimeArtifactManager:
                     raise
                 stage_name = ".claude-stage-" + uuid.uuid4().hex
                 guest_runtime_root = self._guest_runtime_root
+                claude_binary = claude_binary_name(platform_key)
                 try:
                     install_command = [
                         "sh",
@@ -822,6 +839,7 @@ class RuntimeArtifactManager:
                         version,
                         stage_name,
                         guest_runtime_root,
+                        claude_binary,
                     ]
                     if is_codex:
                         install_command = self._codex_guest_command(
@@ -858,6 +876,7 @@ class RuntimeArtifactManager:
                     guest_runtime_root,
                     digest,
                     version,
+                    claude_binary,
                 ]
                 if is_codex:
                     verify_command = self._codex_guest_command(
@@ -876,7 +895,7 @@ class RuntimeArtifactManager:
                     ) from exc
                 if code != 0 or output.strip() != version:
                     raise ArtifactProvisionError("Runtime artifact provisioning failed")
-                entrypoint = "bin/codex-app-server" if is_codex else "claude"
+                entrypoint = "bin/codex-app-server" if is_codex else claude_binary
                 guest_path = (
                     f"{guest_runtime_root}/{artifact_id}/{version}/{entrypoint}"
                 )
