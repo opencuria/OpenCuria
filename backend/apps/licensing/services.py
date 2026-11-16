@@ -478,7 +478,7 @@ class WindowsLicenseService:
                 used = self.keys.used_seats(key.id)
                 if values["seats"] < used:
                     raise ConflictError(
-                        f"{used} workspaces use this key, so it needs at least "
+                        f"{_workspaces_use(used)} this key, so it needs at least "
                         f"{used} seats.",
                         code="windows_key_seats_in_use",
                     )
@@ -495,7 +495,7 @@ class WindowsLicenseService:
             used = self.keys.used_seats(key.id)
             if used:
                 raise ConflictError(
-                    f"{used} workspace{'s' if used != 1 else ''} use this key. "
+                    f"{_workspaces_use(used)} this key. "
                     "It can be removed once they are deleted.",
                     code="windows_key_in_use",
                 )
@@ -635,3 +635,8 @@ class WindowsLicenseService:
         if not 1 <= seats <= MAX_SEATS:
             raise LicensingValidationError(f"seats must be between 1 and {MAX_SEATS}")
         return seats
+
+
+def _workspaces_use(count: int) -> str:
+    """``1 workspace uses`` / ``2 workspaces use``."""
+    return f"{count} workspace uses" if count == 1 else f"{count} workspaces use"

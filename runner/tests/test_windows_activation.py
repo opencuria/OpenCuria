@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.commands import LifecycleCommands
-from src.journal import SECRET_FIELDS
+from src.journal import SECRET_FIELDS, Journal
 from src.services.windows_activation import (
     WindowsActivationService,
     _parse_result,
@@ -127,6 +127,40 @@ async def test_failures_are_reported_never_raised(monkeypatch) -> None:
 
 def test_activation_requests_are_never_journaled() -> None:
     assert "windows_activation" in SECRET_FIELDS
+    assert "windows_activation_result" not in SECRET_FIELDS
+
+
+def test_journal_keeps_the_outcome_but_not_the_request(tmp_path) -> None:
+    journal = Journal(str(tmp_path), defer_recovery=True)
+    operation = str(uuid.uuid4())
+    request = {
+        "operation_id": operation,
+        "workspace_id": str(uuid.uuid4()),
+        "windows_activation": {"mode": "key", "product_key": KEY},
+    }
+    try:
+        assert journal.begin("task:resume_workspace", request)
+        journal.finish(
+            operation,
+            "workspace:resumed",
+            {
+                **request,
+                "windows_activation_result": {"status": "failed", "code": "0x803F7001"},
+            },
+        )
+        identity, event, result = journal.lookup(operation)
+        assert event == "workspace:resumed"
+        assert result["windows_activation_result"] == {
+            "status": "failed",
+            "code": "0x803F7001",
+        }
+        assert "windows_activation" not in result
+        journal.db.commit()
+        for stored in tmp_path.glob("operations.sqlite3*"):
+            assert KEY.encode() not in stored.read_bytes()
+        assert KEY not in json.dumps(identity)
+    finally:
+        journal.close()
 
 
 async def test_lifecycle_results_carry_the_activation_outcome() -> None:
@@ -151,7 +185,7 @@ async def test_lifecycle_results_carry_the_activation_outcome() -> None:
             "windows_activation": {"mode": "kms", "kms_host": ""},
         }
     )
-    assert created.data["windows_activation"] == {
+    assert created.data["windows_activation_result"] == {
         "status": "failed",
         "code": "0xC004F074",
     }
@@ -160,5 +194,5 @@ async def test_lifecycle_results_carry_the_activation_outcome() -> None:
     resumed = await commands.on_resume_workspace(
         {"task_id": "t", "workspace_id": str(workspace_id)}
     )
-    assert "windows_activation" not in resumed.data
+    assert "windows_activation_result" not in resumed.data
     activation.activate.assert_awaited_once()

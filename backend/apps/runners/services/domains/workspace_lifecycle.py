@@ -864,7 +864,7 @@ class WorkspaceLifecycleService:
         status: str,
         credentials_present: bool | None = None,
         runner_id: str | None = None,
-        windows_activation: dict | None = None,
+        windows_activation_result: dict | None = None,
     ) -> None:
         """Handle workspace:created event from a runner (create and clone)."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -899,8 +899,10 @@ class WorkspaceLifecycleService:
             self.workspaces.update_credentials_present(
                 workspace, bool(credentials_present)
             )
-        if windows_activation is not None:
-            WindowsLicenseService().record_activation(workspace.id, windows_activation)
+        if windows_activation_result is not None:
+            WindowsLicenseService().record_activation(
+                workspace.id, windows_activation_result
+            )
         self.tasks.complete(task)
         logger.info("Workspace created: %s", workspace_id)
 
@@ -961,7 +963,7 @@ class WorkspaceLifecycleService:
         workspace_id: str,
         runner_id: str | None = None,
         credentials_present: bool | None = None,
-        windows_activation: dict | None = None,
+        windows_activation_result: dict | None = None,
     ) -> None:
         """Handle workspace:resumed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -992,9 +994,9 @@ class WorkspaceLifecycleService:
                 self.workspaces.update_credentials_present(
                     workspace, credentials_present
                 )
-            if windows_activation is not None:
+            if windows_activation_result is not None:
                 WindowsLicenseService().record_activation(
-                    workspace.id, windows_activation
+                    workspace.id, windows_activation_result
                 )
         self.tasks.complete(task)
         logger.info("Workspace resumed: %s", workspace_id)

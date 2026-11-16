@@ -144,12 +144,18 @@ class LifecycleCommands:
         return evidence
 
     async def _activation(self, workspace_id: uuid.UUID, data: dict) -> dict:
-        """Apply a requested Windows license; the result travels with the event."""
+        """Apply a requested Windows license; the result travels with the event.
+
+        The request may carry a product key and is never journaled; the result
+        is ``{status, code}`` only and uses its own key so it is kept.
+        """
         service = getattr(self._service, "windows_activation", None)
         request = data.get("windows_activation")
         if service is None or request is None:
             return {}
-        return {"windows_activation": await service.activate(workspace_id, request)}
+        return {
+            "windows_activation_result": await service.activate(workspace_id, request)
+        }
 
     async def on_create_workspace(self, data: dict) -> CommandResult:
         """Create workspace and return one terminal outcome."""

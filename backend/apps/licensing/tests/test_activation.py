@@ -38,7 +38,7 @@ def _report(service, runner, workspace, event: str, activation) -> None:
             "task_id": str(task.id),
             "workspace_id": str(workspace.id),
             "status": "running",
-            "windows_activation": activation,
+            "windows_activation_result": activation,
         },
     )
     assert apply_result(service, str(runner.id), event, data)
