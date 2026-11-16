@@ -161,7 +161,7 @@ def test_openrouter_auth_command_uses_the_guest_shell() -> None:
         auth("openrouter"),
         "openrouter/openai/gpt-5",
         readonly=False,
-        guest=WINDOWS_GUEST,
+        native_shell=WINDOWS_GUEST.native_shell,
     )
     linux_auth = linux["model_providers.openrouter"]["auth"]
     windows_auth = windows["model_providers.openrouter"]["auth"]

@@ -7,6 +7,7 @@ cloning.  All command execution is performed over SSH.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import io
 import ipaddress
@@ -56,6 +57,7 @@ from .diagnostics import (
 )
 from .guest_os import (
     GUEST_OS_VALUES,
+    WINDOWS,
     WINDOWS_STATE_DIR,
     LINUX,
     METADATA_NS,
@@ -161,6 +163,13 @@ class _SSHState:
 _GUEST_SSH_SESSIONS_TIMEOUT = 15.0
 _GUEST_SSH_RELOAD_DIAL_ATTEMPTS = 5
 _GUEST_SSH_RELOAD_DIAL_DELAY = 0.5
+#: Longest transport command for Windows guests: Win32-OpenSSH truncates exec
+#: commands near 8 KiB (measured), far below the CreateProcess limit.
+_WINDOWS_COMMAND_LIMIT = 7500
+_UPLOAD_SCRIPT = (
+    'export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\n'
+    "umask 077 && cat > {path} && chmod 700 {path}\n"
+)
 
 
 def _domain_xml(
@@ -677,7 +686,7 @@ class QemuRuntime(RuntimeBackend):
         """Run an SSH command and stream combined output line-by-line."""
         ssh = await self._get_ssh(instance_id)
         process = await ssh.create_process(
-            command,
+            await self._guest_command(instance_id, command),
             stdin=asyncssh.DEVNULL,
             stderr=asyncssh.STDOUT,
         )
@@ -1105,6 +1114,9 @@ class QemuRuntime(RuntimeBackend):
         transport is replaced once.
         """
         conn = await self._dial_ssh(instance_id, state, generation, timeout)
+        if (await self._resolve_guest(instance_id)).name == WINDOWS:
+            # Windows images carry the cap in their sshd configuration.
+            return conn
         try:
             reloaded = await self._ensure_guest_session_cap(instance_id, conn)
             self._check_ssh_generation(state, generation)
@@ -1953,7 +1965,9 @@ class QemuRuntime(RuntimeBackend):
         to completion in the VM. Cancelling only stops waiting for the result.
         """
         ssh = await self._get_ssh(instance_id)
-        cmd_str = self._build_shell_command(command, workdir, env)
+        cmd_str = await self._guest_command(
+            instance_id, self._build_shell_command(command, workdir, env)
+        )
 
         result = await ssh.run(cmd_str, check=False)
         exit_code = self._require_exit_status(result)
@@ -1973,7 +1987,10 @@ class QemuRuntime(RuntimeBackend):
         """
         ssh = await self._get_ssh(instance_id)
         process = await ssh.create_process(
-            self._build_shell_command(command, workdir), encoding=None
+            await self._guest_command(
+                instance_id, self._build_shell_command(command, workdir)
+            ),
+            encoding=None,
         )
         try:
             process.stdin.write(data)
@@ -1990,6 +2007,43 @@ class QemuRuntime(RuntimeBackend):
             bytes(stdout).decode("utf-8", "replace"),
             bytes(stderr).decode("utf-8", "replace"),
         )
+
+    async def _guest_command(self, instance_id: str, cmd_str: str) -> str:
+        """Return the transport form of a shell command for this guest.
+
+        Linux guests receive the command unchanged. Win32-OpenSSH passes a
+        command through a Windows command line that mangles quotes and
+        backslashes in larger scripts, so Windows guests receive a base64
+        payload run through process substitution (stdin stays the command's
+        own) with the GNU tools ahead of System32's find, sort and tar.
+        Commands beyond the command-line limit are uploaded as a script first.
+        """
+        if (await self._resolve_guest(instance_id)).name != WINDOWS:
+            return cmd_str
+        script = f'export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\n{cmd_str}\n'
+        encoded = base64.b64encode(script.encode()).decode("ascii")
+        wrapped = f"bash <(printf %s {encoded}|base64 -d)"
+        if len(wrapped) <= _WINDOWS_COMMAND_LIMIT:
+            return wrapped
+        return await self._guest_script(instance_id, script)
+
+    async def _guest_script(self, instance_id: str, script: str) -> str:
+        """Upload a self-deleting script over stdin; return its single-token path."""
+        path = f"/tmp/opencuria-cmd-{uuid.uuid4().hex}.sh"
+        ssh = await self._get_ssh(instance_id)
+        upload = await ssh.create_process(
+            f"bash <(printf %s {base64.b64encode(_UPLOAD_SCRIPT.format(path=path).encode()).decode()}|base64 -d)",
+            encoding=None,
+        )
+        try:
+            upload.stdin.write(f'#!/bin/bash\nrm -f "$0"\n{script}'.encode())
+            upload.stdin.write_eof()
+            await upload.wait_closed()
+        finally:
+            upload.close()
+        if self._require_exit_status(upload) != 0:
+            raise RuntimeError("Guest command could not be uploaded")
+        return path
 
     @staticmethod
     def _require_exit_status(
@@ -2049,7 +2103,9 @@ class QemuRuntime(RuntimeBackend):
         if (await self._resolve_guest(instance_id)).name != LINUX:
             # Win32-OpenSSH appends a PTY command to the shell's command line
             # without quoting; a single-token launcher keeps it intact.
-            cmd_str = await self._pty_launcher(instance_id, cmd_str)
+            cmd_str = await self._guest_script(
+                instance_id, f'export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\n{cmd_str}\n'
+            )
         process = await ssh.create_process(
             cmd_str,
             term_type="xterm-256color",
@@ -2062,18 +2118,6 @@ class QemuRuntime(RuntimeBackend):
             handle=process,
             metadata={"cols": cols, "rows": rows},
         )
-
-    async def _pty_launcher(self, instance_id: str, cmd_str: str) -> str:
-        """Store a PTY command as a self-deleting script; return its path."""
-        path = f"/tmp/opencuria-pty-{uuid.uuid4().hex}.sh"
-        script = f'#!/bin/bash\nrm -f "$0"\n{cmd_str}\n'.encode()
-        code, _, _ = await self.exec_with_input(
-            instance_id, ["sh", "-c", f"umask 077 && cat > {path} && chmod 700 {path}"],
-            script,
-        )
-        if code != 0:
-            raise RuntimeError("Terminal launcher could not be written")
-        return path
 
     def is_transport_failure(self, error: BaseException) -> bool:
         """Refused SSH channels and lost connections are transport failures."""
@@ -2162,7 +2206,9 @@ class QemuRuntime(RuntimeBackend):
         try:
             ssh = await self._get_ssh(instance_id)
             kill_cmd = self._build_stream_kill_command(pidfile)
-            proc = await ssh.create_process(kill_cmd)
+            proc = await ssh.create_process(
+                await self._guest_command(instance_id, kill_cmd)
+            )
             await proc.wait_closed()
         except Exception:
             logger.warning("qemu_stream_kill_failed")
@@ -2217,7 +2263,7 @@ class QemuRuntime(RuntimeBackend):
             argv = stream_wrapper_argv(pidfile, workdir, env, list(command))
         # Same quoting discipline as _build_shell_command: every argv
         # word is single-quoted so user values stay opaque to the shell.
-        cmd_str = shell_quote_argv(argv)
+        cmd_str = await self._guest_command(instance_id, shell_quote_argv(argv))
         process = await ssh.create_process(
             cmd_str,
             stdin=asyncssh.PIPE,
@@ -2532,11 +2578,14 @@ class QemuRuntime(RuntimeBackend):
         ssh = await self._get_ssh(instance_id)
         quoted_path = shlex.quote(path)
         # Ensure target directory exists
-        await ssh.run(f"mkdir -p {quoted_path}", check=True)
+        await ssh.run(
+            await self._guest_command(instance_id, f"mkdir -p {quoted_path}"),
+            check=True,
+        )
         # Upload and extract via stdin pipe
         # encoding=None is required to write raw bytes (binary mode)
         process = await ssh.create_process(
-            f"tar xf - -C {quoted_path}",
+            await self._guest_command(instance_id, f"tar xf - -C {quoted_path}"),
             stdin=asyncssh.PIPE,
             encoding=None,
         )

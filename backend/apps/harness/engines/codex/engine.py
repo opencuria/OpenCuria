@@ -493,7 +493,7 @@ class CodexEngine:
             or restricted
         )
         settings, provider_name, wire_model = runtime_settings(
-            self.auth, model, readonly=readonly, guest=guest
+            self.auth, model, readonly=readonly, native_shell=guest.native_shell
         )
         # This is an authorized disposable workspace. Let Codex discover its
         # native project instructions, skills, MCP servers and configuration.

@@ -400,22 +400,75 @@ def test_linux_guest_token_is_unchanged() -> None:
     assert namespace["guest_token"]() == {"boot_id": "boot", "init_starttime": "42"}
 
 
+def _upload_ssh():
+    """An SSH connection whose processes record their command and stdin."""
+    calls = []
+
+    def create_process(command, **kwargs):
+        process = MagicMock()
+        process.exit_status = 0
+        process.wait_closed = AsyncMock()
+        written = bytearray()
+        process.stdin.write.side_effect = written.extend
+        calls.append((command, written))
+        return process
+
+    ssh = MagicMock()
+    ssh.create_process = AsyncMock(side_effect=create_process)
+    return ssh, calls
+
+
+def _decoded(wrapped: str) -> str:
+    import base64
+
+    prefix, rest = wrapped.split("printf %s ", 1)
+    assert prefix == "bash <(" and rest.endswith("|base64 -d)")
+    return base64.b64decode(rest[: -len("|base64 -d)")]).decode()
+
+
+async def test_windows_commands_travel_as_base64_with_gnu_tools_first(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._guest_cache["ws"] = WINDOWS
+    wrapped = await runtime._guest_command("ws", "find /workspace -name '*.py' \"x\"")
+    assert set(wrapped) <= set("bash <(printf%s|64-d)") | set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+    )
+    assert _decoded(wrapped) == (
+        'export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\n'
+        "find /workspace -name '*.py' \"x\"\n"
+    )
+    runtime._guest_cache["linux-ws"] = LINUX
+    assert await runtime._guest_command("linux-ws", "find /x") == "find /x"
+
+
+async def test_oversized_windows_commands_are_uploaded_first(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._guest_cache["ws"] = WINDOWS
+    ssh, calls = _upload_ssh()
+    runtime._get_ssh = AsyncMock(return_value=ssh)
+    command = "python3 -c '" + "x" * 9000 + "'"
+
+    path = await runtime._guest_command("ws", command)
+
+    assert path.startswith("/tmp/opencuria-cmd-") and " " not in path
+    ((upload, stdin),) = calls
+    assert path in _decoded(upload)
+    script = bytes(stdin).decode()
+    assert script.startswith('#!/bin/bash\nrm -f "$0"\n')
+    assert command in script
+
+
 async def test_windows_terminals_start_through_a_single_token_launcher(tmp_path) -> None:
     runtime = _runtime(tmp_path)
     runtime._guest_cache["ws"] = WINDOWS
-    process = MagicMock()
-    ssh = MagicMock()
-    ssh.create_process = AsyncMock(return_value=process)
+    ssh, calls = _upload_ssh()
     runtime._get_ssh = AsyncMock(return_value=ssh)
-    runtime.exec_with_input = AsyncMock(return_value=(0, "", ""))
 
     await runtime.exec_pty("ws", 100, 30, command=["/bin/bash", "-lc", "echo 'a b'"])
 
-    launcher = ssh.create_process.await_args.args[0]
-    assert launcher.startswith("/tmp/opencuria-pty-") and " " not in launcher
-    command, script = runtime.exec_with_input.await_args.args[1:]
-    assert launcher in command[-1]
-    text = script.decode()
+    (_, script), (launcher, _) = calls
+    assert launcher.startswith("/tmp/opencuria-cmd-") and " " not in launcher
+    text = bytes(script).decode()
     assert text.startswith('#!/bin/bash\nrm -f "$0"\n')
     assert "'/bin/bash' '-lc' 'echo '\\''a b'\\'''" in text
 
