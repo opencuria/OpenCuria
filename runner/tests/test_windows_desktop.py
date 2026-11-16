@@ -267,3 +267,36 @@ def test_isolated_windows_agents_keep_machine_variables() -> None:
     assert f"WINDOWS_SYSTEM_ENV = {WINDOWS_SYSTEM_ENV!r}" in MANAGED_CODE
     assert "child_env.update(USERPROFILE=profile_dir" in MANAGED_CODE
     compile(MANAGED_CODE, "managed", "exec")
+
+
+@pytest.mark.asyncio
+async def test_session_task_requests_run_one_at_a_time() -> None:
+    """A task has one request file: concurrent requests must not overlap."""
+    from src.runtime.qemu_runtime import QemuRuntime
+
+    runtime = QemuRuntime.__new__(QemuRuntime)
+    active = 0
+    peak = 0
+
+    async def exec_with_input(instance_id, command, data, workdir=None):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        if "display.json" in command[-1]:
+            return 0, "0", ""
+        return 0, '{"ok": true, "text": "", "error": ""}', ""
+
+    async def resolve_guest(instance_id):
+        return SimpleNamespace(desktop="qemu")
+
+    runtime.exec_with_input = exec_with_input
+    runtime._resolve_guest = resolve_guest
+    results = await asyncio.gather(
+        *(runtime.guest_clipboard("ws-1", "read") for _ in range(4)),
+        runtime.set_display_size("ws-1", 1280, 720),
+    )
+    assert results == ["", "", "", "", True]
+    # Clipboard requests queue behind each other; the display task is separate.
+    assert peak == 2

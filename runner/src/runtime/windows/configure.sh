@@ -15,8 +15,8 @@ mkdir -p /workspace /c/ProgramData/opencuria
 # MSYS2 would rewrite "/tn"-style switches as paths for native programs.
 export MSYS2_ARG_CONV_EXCL='*'
 
-# Desktop size and clipboard belong to root's console session: the runner
-# starts these tasks there (the display task also runs at every logon).
+# Desktop size and clipboard belong to root's console session: both tasks
+# start at every logon, and the runner starts them there on demand.
 session_task() {
   name=$1 script=$2
   shift 2
@@ -25,7 +25,10 @@ session_task() {
     >/dev/null 2>&1
 }
 session_task 'OpenCuria Display' display.ps1 /sc onlogon
-session_task 'OpenCuria Clipboard' clipboard.ps1 /sc once /st 00:00
+session_task 'OpenCuria Clipboard' clipboard.ps1 /sc onlogon
+# The clipboard agent stays for the whole session (no 72 hour task limit).
+powershell.exe -NoProfile -NonInteractive -Command \
+  "Set-ScheduledTask -TaskName 'OpenCuria Clipboard' -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries) | Out-Null"
 
 # Local PowerShell scripts run like shell scripts; downloaded ones stay signed.
 powershell.exe -NoProfile -NonInteractive -Command \

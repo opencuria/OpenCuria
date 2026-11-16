@@ -427,7 +427,8 @@ class DesktopManager:
         """Return the runtime when QEMU serves this workspace's desktop.
 
         Windows guests show QEMU's own display: there is no desktop process in
-        the guest to start, stop or probe, and the clipboard travels over RFB.
+        the guest to start, stop or probe, and the clipboard is served by an
+        agent in the guest's console session.
         """
         runtime = self._get_runtime(workspace_id)
         kind = getattr(runtime, "desktop_kind", None)

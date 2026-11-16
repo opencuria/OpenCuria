@@ -1364,8 +1364,21 @@ class QemuRuntime(RuntimeBackend):
 
         Desktop size and clipboard belong to the logged-on session, which SSH
         commands cannot reach. The request travels on stdin (clipboard text is
-        never part of a command line); the task writes its result file.
+        never part of a command line); the task writes its result file. Each
+        task has one request file, so its requests run one at a time.
         """
+        if not hasattr(self, "_session_task_locks"):
+            self._session_task_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        lock = self._session_task_locks.setdefault((instance_id, task), asyncio.Lock())
+        async with lock:
+            return await self._run_session_task(
+                instance_id, task, request_name, request, result_name, timeout
+            )
+
+    async def _run_session_task(
+        self, instance_id: str, task: str, request_name: str, request: bytes,
+        result_name: str, timeout: float,
+    ) -> str:
         state = WINDOWS_STATE_DIR
         polls = int(timeout / 0.2)
         command = (
