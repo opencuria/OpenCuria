@@ -140,3 +140,19 @@ def test_setup_media_layout(tmp_path, monkeypatch) -> None:
     ).stdout
     assert json.loads(manifest)["msys2_packages"] == list(windows_media.MSYS2_PACKAGES)
     assert not (tmp_path / "setup.iso.stage").exists()
+
+
+def test_cached_base_serves_builds_without_the_iso(tmp_path) -> None:
+    media = _media(tmp_path)
+    assert media.cached_base("pro") is None
+    base = media.base_path("pro", "c" * 64)
+    base.parent.mkdir(parents=True, exist_ok=True)
+    base.write_bytes(b"disk")
+    media.record_base(base, {"edition": "pro", "iso_sha256": "c" * 64})
+    assert media.cached_base("pro") == base
+    assert media.cached_base("enterprise") is None
+    # A base installed with other assets (renamed key) is never reused.
+    stale = base.with_name("windows-11-pro-0000000000000000.qcow2")
+    base.rename(stale)
+    base.with_suffix(".base.json").rename(stale.with_suffix(".base.json"))
+    assert media.cached_base("pro") is None

@@ -179,6 +179,26 @@ class WindowsMedia:
             return False
         return record.get("size_bytes") == stat.st_size and record.get("path") == str(base)
 
+    def cached_base(self, edition: str) -> Path | None:
+        """Return a ready base of ``edition`` built with the current assets.
+
+        Lets builds continue after the administrator removed the ISO.
+        """
+        if not self._cache.is_dir():
+            return None
+        for marker in sorted(self._cache.glob(f"windows-11-{edition}-*.base.json")):
+            try:
+                record = json.loads(marker.read_text())
+            except (OSError, ValueError):
+                continue
+            iso_sha256 = record.get("iso_sha256")
+            if record.get("edition") != edition or not isinstance(iso_sha256, str):
+                continue
+            base = self.base_path(edition, iso_sha256)
+            if base.with_suffix(".base.json") == marker and self.base_ready(base):
+                return base
+        return None
+
     def record_base(self, base: Path, details: dict[str, Any]) -> None:
         """Mark a base disk as completely installed."""
         marker = self.base_marker(base)

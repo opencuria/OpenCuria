@@ -2569,7 +2569,14 @@ class QemuRuntime(RuntimeBackend):
         media = self._windows
         edition = windows_edition(base_distro)
         await asyncio.to_thread(self._require_windows_host)
-        iso, iso_sha256 = await asyncio.to_thread(media.resolve_iso)
+        try:
+            iso, iso_sha256 = await asyncio.to_thread(media.resolve_iso)
+        except OperationRejectedError:
+            # Without installation media, a base built earlier still serves.
+            cached = await asyncio.to_thread(media.cached_base, edition)
+            if cached is None:
+                raise
+            return cached
         base = media.base_path(edition, iso_sha256)
         if await asyncio.to_thread(media.base_ready, base):
             return base

@@ -45,6 +45,9 @@ try {
         Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction SilentlyContinue
     }
 
+    # Windows runs SetupComplete.cmd again after every sysprep OOBE: the base
+    # installation's script must never run on a workspace.
+    Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 'C:\Windows\Setup\Scripts'
     Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 'C:\Windows\System32\Sysprep\Panther'
     # Freed clusters become holes in the published qcow2 disk (discard=unmap).
     Optimize-Volume -DriveLetter C -ReTrim -ErrorAction SilentlyContinue | Out-Null
