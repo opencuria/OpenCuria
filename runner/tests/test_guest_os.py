@@ -398,3 +398,37 @@ def test_linux_guest_token_is_unchanged() -> None:
         }
     )
     assert namespace["guest_token"]() == {"boot_id": "boot", "init_starttime": "42"}
+
+
+async def test_windows_terminals_start_through_a_single_token_launcher(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._guest_cache["ws"] = WINDOWS
+    process = MagicMock()
+    ssh = MagicMock()
+    ssh.create_process = AsyncMock(return_value=process)
+    runtime._get_ssh = AsyncMock(return_value=ssh)
+    runtime.exec_with_input = AsyncMock(return_value=(0, "", ""))
+
+    await runtime.exec_pty("ws", 100, 30, command=["/bin/bash", "-lc", "echo 'a b'"])
+
+    launcher = ssh.create_process.await_args.args[0]
+    assert launcher.startswith("/tmp/opencuria-pty-") and " " not in launcher
+    command, script = runtime.exec_with_input.await_args.args[1:]
+    assert launcher in command[-1]
+    text = script.decode()
+    assert text.startswith('#!/bin/bash\nrm -f "$0"\n')
+    assert "'/bin/bash' '-lc' 'echo '\\''a b'\\'''" in text
+
+
+async def test_linux_terminals_keep_the_inline_command(tmp_path) -> None:
+    runtime = _runtime(tmp_path)
+    runtime._guest_cache["ws"] = LINUX
+    ssh = MagicMock()
+    ssh.create_process = AsyncMock(return_value=MagicMock())
+    runtime._get_ssh = AsyncMock(return_value=ssh)
+    runtime.exec_with_input = AsyncMock()
+
+    await runtime.exec_pty("ws", 80, 24)
+
+    assert "'/bin/bash' '-l'" in ssh.create_process.await_args.args[0]
+    runtime.exec_with_input.assert_not_awaited()

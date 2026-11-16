@@ -2046,6 +2046,10 @@ class QemuRuntime(RuntimeBackend):
             workdir=workdir or "/workspace",
             env=env,
         )
+        if (await self._resolve_guest(instance_id)).name != LINUX:
+            # Win32-OpenSSH appends a PTY command to the shell's command line
+            # without quoting; a single-token launcher keeps it intact.
+            cmd_str = await self._pty_launcher(instance_id, cmd_str)
         process = await ssh.create_process(
             cmd_str,
             term_type="xterm-256color",
@@ -2058,6 +2062,18 @@ class QemuRuntime(RuntimeBackend):
             handle=process,
             metadata={"cols": cols, "rows": rows},
         )
+
+    async def _pty_launcher(self, instance_id: str, cmd_str: str) -> str:
+        """Store a PTY command as a self-deleting script; return its path."""
+        path = f"/tmp/opencuria-pty-{uuid.uuid4().hex}.sh"
+        script = f'#!/bin/bash\nrm -f "$0"\n{cmd_str}\n'.encode()
+        code, _, _ = await self.exec_with_input(
+            instance_id, ["sh", "-c", f"umask 077 && cat > {path} && chmod 700 {path}"],
+            script,
+        )
+        if code != 0:
+            raise RuntimeError("Terminal launcher could not be written")
+        return path
 
     def is_transport_failure(self, error: BaseException) -> bool:
         """Refused SSH channels and lost connections are transport failures."""
