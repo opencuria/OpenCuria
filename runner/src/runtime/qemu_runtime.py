@@ -1356,36 +1356,84 @@ class QemuRuntime(RuntimeBackend):
             sock.close()
             raise
 
+    async def _session_task(
+        self, instance_id: str, task: str, request_name: str, request: bytes,
+        result_name: str, timeout: float = 15,
+    ) -> str:
+        """Run a guest task in root's console session and return its result.
+
+        Desktop size and clipboard belong to the logged-on session, which SSH
+        commands cannot reach. The request travels on stdin (clipboard text is
+        never part of a command line); the task writes its result file.
+        """
+        state = WINDOWS_STATE_DIR
+        polls = int(timeout / 0.2)
+        command = (
+            f"umask 077 && rm -f {state}/{result_name}"
+            f" && cat > {state}/{request_name}.tmp"
+            f" && mv -f {state}/{request_name}.tmp {state}/{request_name}"
+            f" && MSYS2_ARG_CONV_EXCL='*' schtasks.exe /run /tn '{task}' >/dev/null"
+            f" && for _ in $(seq {polls}); do [ -s {state}/{result_name} ] && break;"
+            " sleep 0.2; done"
+            f" && cat {state}/{result_name} && rm -f {state}/{result_name}"
+        )
+        code, stdout, _ = await asyncio.wait_for(
+            self.exec_with_input(instance_id, ["sh", "-c", command], request),
+            timeout + 15,
+        )
+        if code != 0 or not stdout.strip():
+            raise RuntimeError(f"Guest session task {task!r} did not answer")
+        return stdout.strip()
+
     async def set_display_size(self, instance_id: str, width: int, height: int) -> bool:
         """Ask a Windows guest to switch its console to ``width`` x ``height``.
 
-        Best effort: the change runs in the logged-on session and reports back
-        through ``display.result``; unsupported modes keep the current size.
+        Best effort: unsupported modes keep the current size.
         """
         if (await self._resolve_guest(instance_id)).desktop != "qemu":
             return False
-        command = (
-            f"printf '{{\"width\": %d, \"height\": %d}}' {int(width)} {int(height)}"
-            f" > {WINDOWS_STATE_DIR}/display.json"
-            f" && rm -f {WINDOWS_STATE_DIR}/display.result"
-            " && MSYS2_ARG_CONV_EXCL='*' schtasks.exe /run /tn 'OpenCuria Display' >/dev/null"
-            f" && for _ in $(seq 50); do [ -s {WINDOWS_STATE_DIR}/display.result ] && break;"
-            " sleep 0.2; done"
-            f" && cat {WINDOWS_STATE_DIR}/display.result"
-        )
         try:
-            code, output = await asyncio.wait_for(
-                self.exec_command_wait(instance_id, ["sh", "-c", command]), 30
+            result = await self._session_task(
+                instance_id, "OpenCuria Display", "display.json",
+                json.dumps({"width": int(width), "height": int(height)}).encode(),
+                "display.result",
+                timeout=45,
             )
-        except Exception:
-            logger.warning("vm_display_size_failed", instance_id=instance_id, exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "vm_display_size_failed", instance_id=instance_id, error=type(exc).__name__
+            )
             return False
-        applied = code == 0 and output.strip() == "0"
+        applied = result == "0"
         logger.info(
             "vm_display_size", instance_id=instance_id, width=width, height=height,
             applied=applied,
         )
         return applied
+
+    async def guest_clipboard(
+        self, instance_id: str, action: str, text: str = "", *, shift: bool = False
+    ) -> str:
+        """Read, write or copy-and-read the console clipboard of a Windows guest."""
+        if action not in ("read", "write", "copy"):
+            raise ValueError("Unknown clipboard action")
+        request = json.dumps(
+            {
+                "action": action,
+                "text": base64.b64encode(text.encode()).decode("ascii"),
+                "shift": bool(shift),
+            }
+        ).encode()
+        raw = await self._session_task(
+            instance_id, "OpenCuria Clipboard", "clipboard.request", request,
+            "clipboard.result",
+        )
+        result = json.loads(raw)
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise RuntimeError("Guest clipboard operation failed")
+        return base64.b64decode(result.get("text") or "").decode("utf-8", "replace").replace(
+            "\r\n", "\n"
+        )
 
     @contextlib.asynccontextmanager
     async def display_client(self, instance_id: str):

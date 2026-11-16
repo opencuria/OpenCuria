@@ -1373,10 +1373,7 @@ class DesktopManager:
         if (display := await self._qemu_display(workspace_id)) is not None:
             info = self._get_cached(workspace_id)
             try:
-                async with display.display_client(info.instance_id) as client:
-                    await client.write_clipboard(text)
-            except ValueError:
-                raise
+                await display.guest_clipboard(info.instance_id, "write", text)
             except Exception:
                 raise RuntimeError("Failed to write desktop clipboard") from None
             return
@@ -1436,8 +1433,9 @@ class DesktopManager:
             if (display := await self._qemu_display(workspace_id)) is not None:
                 info = self._get_cached(workspace_id)
                 try:
-                    async with display.display_client(info.instance_id) as client:
-                        return await client.copy_selection(timeout=3.0)
+                    return await display.guest_clipboard(
+                        info.instance_id, "copy", shift=shift
+                    )
                 except Exception:
                     raise RuntimeError("Failed to copy desktop selection") from None
             if not await self._is_desktop_session_live(workspace_id):
@@ -1480,8 +1478,7 @@ class DesktopManager:
         if (display := await self._qemu_display(workspace_id)) is not None:
             info = self._get_cached(workspace_id)
             try:
-                async with display.display_client(info.instance_id) as client:
-                    return await client.read_clipboard(timeout=3.0)
+                return await display.guest_clipboard(info.instance_id, "read")
             except Exception:
                 raise RuntimeError("Failed to read desktop clipboard") from None
         if not await self._is_desktop_session_live(workspace_id):

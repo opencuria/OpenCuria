@@ -485,3 +485,27 @@ async def test_linux_terminals_keep_the_inline_command(tmp_path) -> None:
 
     assert "'/bin/bash' '-l'" in ssh.create_process.await_args.args[0]
     runtime.exec_with_input.assert_not_awaited()
+
+
+async def test_clipboard_text_travels_on_stdin_to_the_session_task(tmp_path) -> None:
+    import base64 as b64
+
+    runtime = _runtime(tmp_path)
+    runtime._guest_cache["ws"] = WINDOWS
+    answer = json.dumps({"ok": True, "text": b64.b64encode("zurück\r\nok".encode()).decode()})
+    runtime.exec_with_input = AsyncMock(return_value=(0, answer + "\n", ""))
+
+    text = await runtime.guest_clipboard("ws", "write", "geheim 🧪")
+
+    command, stdin = runtime.exec_with_input.await_args.args[1:]
+    assert "geheim" not in command[-1] and "OpenCuria Clipboard" in command[-1]
+    request = json.loads(stdin)
+    assert request["action"] == "write"
+    assert b64.b64decode(request["text"]).decode() == "geheim 🧪"
+    assert text == "zurück\nok"
+
+    runtime.exec_with_input = AsyncMock(return_value=(0, '{"ok": false, "error": "x"}', ""))
+    with pytest.raises(RuntimeError):
+        await runtime.guest_clipboard("ws", "read")
+    with pytest.raises(ValueError):
+        await runtime.guest_clipboard("ws", "paste")

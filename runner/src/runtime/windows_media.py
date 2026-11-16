@@ -105,6 +105,7 @@ GUEST_SCRIPTS = (
     "generalize.ps1",
     "generalize-unattend.xml",
     "display.ps1",
+    "clipboard.ps1",
 )
 SETUP_SCRIPTS = INSTALL_SCRIPTS + GUEST_SCRIPTS
 #: Virtual size of the installed system disk (Windows 11 requires 64 GB).

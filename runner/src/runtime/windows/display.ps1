@@ -4,6 +4,8 @@
 # logon and on demand), because display modes belong to the console session.
 # Reads C:\ProgramData\opencuria\display.json {"width": W, "height": H}.
 $ErrorActionPreference = 'Stop'
+$result = 'error'
+try {
 $config = Get-Content -Raw 'C:\ProgramData\opencuria\display.json' | ConvertFrom-Json
 Add-Type -TypeDefinition @'
 using System;
@@ -43,4 +45,6 @@ public static class OpenCuriaDisplay {
 }
 '@
 $result = [OpenCuriaDisplay]::Apply([int] $config.width, [int] $config.height)
+} catch { }
+# 0 = applied; other values are DISP_CHANGE codes (e.g. -2: unsupported mode).
 Set-Content -Encoding ascii -Path 'C:\ProgramData\opencuria\display.result' -Value $result

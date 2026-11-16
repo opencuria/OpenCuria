@@ -12,10 +12,21 @@ git config --system init.defaultBranch main
 
 mkdir -p /workspace /c/ProgramData/opencuria
 
-# The desktop size belongs to root's console session: the runner asks this
-# task (also run at every logon) to apply display.json there.
 # MSYS2 would rewrite "/tn"-style switches as paths for native programs.
-MSYS2_ARG_CONV_EXCL='*' schtasks.exe /create /f /tn 'OpenCuria Display' /sc onlogon /ru root /it /rl highest \
-  /tr 'powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\opencuria\display.ps1' \
-  >/dev/null
+export MSYS2_ARG_CONV_EXCL='*'
+
+# Desktop size and clipboard belong to root's console session: the runner
+# starts these tasks there (the display task also runs at every logon).
+session_task() {
+  name=$1 script=$2
+  shift 2
+  schtasks.exe /create /f /tn "$name" /ru root /it /rl highest "$@" \
+    /tr "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\ProgramData\\opencuria\\$script" \
+    >/dev/null 2>&1
+}
+session_task 'OpenCuria Display' display.ps1 /sc onlogon
+session_task 'OpenCuria Clipboard' clipboard.ps1 /sc once /st 00:00
+
+# No OneDrive or backup prompts on the desktop agents and users share.
+reg.exe add 'HKLM\SOFTWARE\Policies\Microsoft\Windows\OneDrive' /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f >/dev/null
 echo "opencuria-configure: done"

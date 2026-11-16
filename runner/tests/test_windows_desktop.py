@@ -8,7 +8,6 @@ import struct
 import tempfile
 import unittest
 import uuid
-import zlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -24,30 +23,11 @@ from src.runtime.rfb import RFBClient, RFBError
 from src.service import WorkspaceService
 from src.services.capture_fence import CaptureFence
 
-_TEXT, _CAPS, _REQUEST, _NOTIFY, _PROVIDE = 1, 1 << 24, 1 << 25, 1 << 27, 1 << 28
-
-
-def _provide(text: str) -> bytes:
-    data = text.encode() + b"\x00"
-    body = struct.pack(">I", _PROVIDE | _TEXT) + zlib.compress(
-        struct.pack(">I", len(data)) + data
-    )
-    return struct.pack(">Bxxxi", 3, -len(body)) + body
-
-
-def _ext(flags: int) -> bytes:
-    body = struct.pack(">I", flags)
-    return struct.pack(">Bxxxi", 3, -len(body)) + body
-
-
 class FakeQemuDisplay:
-    """An RFB 3.8 server speaking the parts of QEMU's VNC the runner uses."""
+    """An RFB 3.8 server speaking the handshake of QEMU's VNC display."""
 
-    def __init__(self, *, guest_text: str = "from windows", security: bytes = b"\x01"):
-        self.guest_text = guest_text
+    def __init__(self, *, security: bytes = b"\x01"):
         self.security = security
-        self.received_text: str | None = None
-        self.keys: list[tuple[int, int]] = []
 
     async def serve(self, reader, writer) -> None:
         writer.write(b"RFB 003.008\n")
@@ -62,33 +42,10 @@ class FakeQemuDisplay:
         await reader.readexactly(1)
         name = b"windows"
         writer.write(struct.pack(">HH16xI", 1280, 800, len(name)) + name)
-        kind, = struct.unpack(">B", await reader.readexactly(1))
-        assert kind == 2
-        count, = struct.unpack(">xH", await reader.readexactly(3))
-        encodings = struct.unpack(f">{count}i", await reader.readexactly(4 * count))
-        assert -1063131698 in encodings
-        writer.write(_ext(_CAPS | _TEXT) + b"\x02")  # caps and a bell first
         await writer.drain()
         try:
-            while True:
-                kind = (await reader.readexactly(1))[0]
-                if kind == 4:
-                    down, key = struct.unpack(">BxxI", await reader.readexactly(7))
-                    self.keys.append((key, down))
-                    if key == 0x63 and down == 0:
-                        writer.write(_ext(_NOTIFY | _TEXT))
-                elif kind == 6:
-                    length = struct.unpack(">xxxi", await reader.readexactly(7))[0]
-                    body = await reader.readexactly(-length)
-                    flags = struct.unpack(">I", body[:4])[0]
-                    if flags & _PROVIDE:
-                        data = zlib.decompress(body[4:])
-                        size = struct.unpack(">I", data[:4])[0]
-                        self.received_text = data[4 : 4 + size].rstrip(b"\x00").decode()
-                    elif flags & _REQUEST:
-                        writer.write(_provide(self.guest_text))
-                await writer.drain()
-        except asyncio.IncompleteReadError:
+            await reader.read()
+        finally:
             writer.close()
 
 
@@ -105,24 +62,11 @@ async def _connected(server: FakeQemuDisplay):
         await listener.wait_closed()
 
 
-async def test_clipboard_round_trip_through_extended_clipboard() -> None:
-    server = FakeQemuDisplay(guest_text="héllo\r\nwelt")
-    async with _connected(server) as (reader, writer):
+async def test_handshake_reads_the_display_geometry() -> None:
+    async with _connected(FakeQemuDisplay()) as (reader, writer):
         client = RFBClient(reader, writer)
         await client.handshake()
         assert (client.width, client.height, client.name) == (1280, 800, "windows")
-        await client.write_clipboard("päste 🧪")
-        assert await client.read_clipboard(timeout=2) == "héllo\nwelt"
-        assert server.received_text == "päste 🧪"
-
-
-async def test_copy_selection_presses_ctrl_c_and_returns_the_new_text() -> None:
-    server = FakeQemuDisplay(guest_text="selected")
-    async with _connected(server) as (reader, writer):
-        client = RFBClient(reader, writer)
-        await client.handshake()
-        assert await client.copy_selection(timeout=2) == "selected"
-    assert server.keys == [(0xFFE3, 1), (0x63, 1), (0x63, 0), (0xFFE3, 0)]
 
 
 async def test_display_that_requires_authentication_is_refused() -> None:
@@ -130,14 +74,6 @@ async def test_display_that_requires_authentication_is_refused() -> None:
         async with _connected(FakeQemuDisplay(security=security)) as (reader, writer):
             with pytest.raises(RFBError):
                 await RFBClient(reader, writer).handshake()
-
-
-async def test_oversized_clipboard_text_is_refused() -> None:
-    async with _connected(FakeQemuDisplay()) as (reader, writer):
-        client = RFBClient(reader, writer)
-        await client.handshake()
-        with pytest.raises(ValueError):
-            await client.write_clipboard("x" * (1024 * 1024 + 1))
 
 
 def test_pinned_novnc_files_are_served_by_path_only() -> None:
@@ -222,6 +158,9 @@ class _Runtime:
         self.exec_command_wait = AsyncMock(side_effect=AssertionError("no guest exec"))
         self.server = server
         self.display_sizes: list[tuple[int, int]] = []
+        self.clipboard = "guest clipboard"
+        self.clipboard_calls: list[tuple[str, str, bool]] = []
+        self.clipboard_fails = False
 
     async def desktop_kind(self, instance_id: str) -> str:
         return "qemu"
@@ -229,6 +168,15 @@ class _Runtime:
     async def set_display_size(self, instance_id: str, width: int, height: int) -> bool:
         self.display_sizes.append((width, height))
         return True
+
+    async def guest_clipboard(self, instance_id, action, text="", *, shift=False):
+        self.clipboard_calls.append((action, text, shift))
+        if self.clipboard_fails:
+            raise RuntimeError("Guest session task did not answer")
+        if action == "write":
+            self.clipboard = text
+            return ""
+        return self.clipboard
 
     @asynccontextmanager
     async def display_client(self, instance_id: str):
@@ -242,7 +190,7 @@ class _Runtime:
 
 class WindowsDesktopSessionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.server = FakeQemuDisplay(guest_text="guest clipboard")
+        self.server = FakeQemuDisplay()
         self.runtime = _Runtime(self.server)
         self.state_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.state_dir.cleanup)
@@ -278,24 +226,26 @@ class WindowsDesktopSessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.desktop._ensure_desktop_process_locked(self.workspace_id)
 
-    async def test_clipboard_uses_the_display_not_the_guest(self):
-        await self.desktop.write_desktop_clipboard(self.workspace_id, "to windows")
-        for _ in range(100):
-            if self.server.received_text is not None:
-                break
-            await asyncio.sleep(0.01)
-        self.assertEqual(self.server.received_text, "to windows")
+    async def test_clipboard_runs_in_the_guest_session(self):
+        await self.desktop.write_desktop_clipboard(self.workspace_id, "to windows 🧪")
         self.assertEqual(
-            await self.desktop.read_desktop_clipboard(self.workspace_id),
-            "guest clipboard",
+            await self.desktop.read_desktop_clipboard(self.workspace_id), "to windows 🧪"
+        )
+        await self.desktop.read_desktop_clipboard(
+            self.workspace_id, copy_selection=True, shift=True
         )
         self.assertEqual(
-            await self.desktop.read_desktop_clipboard(
-                self.workspace_id, copy_selection=True
-            ),
-            "guest clipboard",
+            self.runtime.clipboard_calls,
+            [("write", "to windows 🧪", False), ("read", "", False), ("copy", "", True)],
         )
         self.runtime.exec_command_wait.assert_not_awaited()
+
+    async def test_clipboard_failures_are_reported_without_details(self):
+        self.runtime.clipboard_fails = True
+        with self.assertRaisesRegex(RuntimeError, "^Failed to write desktop clipboard$"):
+            await self.desktop.write_desktop_clipboard(self.workspace_id, "x")
+        with self.assertRaisesRegex(RuntimeError, "^Failed to read desktop clipboard$"):
+            await self.desktop.read_desktop_clipboard(self.workspace_id)
 
     async def test_recording_is_refused(self):
         with self.assertRaises(ValueError):
