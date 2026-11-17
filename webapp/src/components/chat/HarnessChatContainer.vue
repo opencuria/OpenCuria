@@ -3,7 +3,8 @@ import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 
 import { Skeleton } from '@/components/ui/skeleton'
 import { MessageSquare } from '@lucide/vue'
 import type { HarnessMessage } from '@opencuria/chat-core/harness'
-import { sortHarnessMessages } from '@opencuria/chat-core/harnessReducer'
+import { isOptimisticPrompt, sortHarnessMessages } from '@opencuria/chat-core/harnessReducer'
+import { messageRenderKey } from '@opencuria/chat-core/optimisticPrompts'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
 import HarnessMessageView from './HarnessMessageView.vue'
 
@@ -55,8 +56,10 @@ function rebuildHeightPrefix(): void {
   heightPrefix = prefix
 }
 
+// Rows are identified by render key: a sent prompt keeps its row (height,
+// pin, scroll anchor) when the server's copy replaces the optimistic one.
 function syncMessageIndex(messages: HarnessMessage[]): void {
-  const nextIds = messages.map((message) => message.id)
+  const nextIds = messages.map(messageRenderKey)
   if (
     nextIds.length === indexedMessageIds.length &&
     nextIds.every((id, index) => id === indexedMessageIds[index])
@@ -401,6 +404,18 @@ watch(
     if (stickToBottom.value) void scrollToBottom()
   },
 )
+// A prompt just sent is always revealed, even when the reader scrolled up.
+watch(
+  () => {
+    const last = sortedMessages.value[sortedMessages.value.length - 1]
+    return last && isOptimisticPrompt(last) ? messageRenderKey(last) : null
+  },
+  (key) => {
+    if (!key) return
+    stickToBottom.value = true
+    void scrollToBottom(true)
+  },
+)
 </script>
 
 <template>
@@ -419,7 +434,7 @@ watch(
     <div v-else-if="sortedMessages.length" class="mx-auto flex w-full max-w-3xl flex-col gap-6">
       <template
         v-for="entry in renderEntries"
-        :key="entry.kind === 'message' ? entry.message.id : entry.id"
+        :key="entry.kind === 'message' ? messageRenderKey(entry.message) : entry.id"
       >
         <div
           v-if="entry.kind === 'spacer'"
@@ -429,7 +444,7 @@ watch(
         />
         <HarnessMessageView
           v-else
-          :data-message-id="entry.message.id"
+          :data-message-id="messageRenderKey(entry.message)"
           :message="entry.message"
           :streaming="entry.message.id === resolvedStreamingId"
           :summary="entry.message.id === lastMessageId ? summary : ''"

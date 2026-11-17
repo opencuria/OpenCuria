@@ -35,7 +35,6 @@ import {
   GitBranch,
   LoaderCircle,
   MessageSquareText,
-  Sparkles,
 } from "lucide-react-native";
 import type {
   HarnessMessage,
@@ -52,10 +51,13 @@ import {
 import { elapsedMs, formatElapsed } from "@opencuria/chat-core/formatElapsed";
 import { getMessageCopyText } from "@opencuria/chat-core/harnessMessageCopy";
 import { HARNESS_PAGE_SIZE } from "@opencuria/chat-core/harnessPagination";
-import { sortHarnessMessages } from "@opencuria/chat-core/harnessReducer";
+import {
+  isOptimisticPrompt,
+  sortHarnessMessages,
+} from "@opencuria/chat-core/harnessReducer";
+import { messageRenderKey } from "@opencuria/chat-core/optimisticPrompts";
 import { toolAttachments } from "@opencuria/chat-core/harnessAttachments";
 import { resolveChildSessionId } from "@opencuria/chat-core/harnessSubtaskActivity";
-import { parseComposerSegments } from "@opencuria/chat-core/composerTokens";
 import {
   formatMessageUsage,
   resolveMessageUsage,
@@ -64,7 +66,6 @@ import {
   parseToolArguments,
   toolDisplayLabel,
 } from "@opencuria/chat-core/toolDisplay";
-import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import {
   messagePublishedApps,
   type PublishedAppReference,
@@ -90,6 +91,9 @@ import {
   NativeAction,
 } from "../ui/primitives";
 import { ChatMarkdown, type ResolvedChatMedia } from "./ChatMarkdown";
+import { PromptImages, PromptParagraph } from "./PromptContent";
+import { PromptFlight, TranscriptReadyContext } from "./PromptFlight";
+import { promptLayout, type PromptLayout } from "./promptBlocks";
 import {
   chatImages,
   galleryFor,
@@ -217,7 +221,7 @@ export function ChatMessages({
       const next = new Set(
         viewableItems
           .filter((item) => item.isViewable)
-          .map((item) => item.item.id),
+          .map((item) => messageRenderKey(item.item)),
       );
       visibleMessageIds.current = next;
       setVisibleMessageIdsState((previous) =>
@@ -272,7 +276,7 @@ export function ChatMessages({
     ({ item }: { item: HarnessMessage }) => (
       <MessageRow
         message={item}
-        mediaVisible={visibleMessageIds.current.has(item.id)}
+        mediaVisible={visibleMessageIds.current.has(messageRenderKey(item))}
         mediaScopeKey={mediaScopeKey ?? item.session_id}
         disabled={disabled || busy}
         streaming={
@@ -315,10 +319,18 @@ export function ChatMessages({
       mediaScopeKey,
     ],
   );
-  const keyExtractor = useCallback((message: HarnessMessage) => message.id, []);
+  // A sent prompt keeps its row when the server's copy replaces it.
+  const keyExtractor = useCallback(
+    (message: HarnessMessage) => messageRenderKey(message),
+    [],
+  );
   // "Scroll to latest" follows the list's own end tracking, which includes the
   // keyboard and composer insets and also reacts to content growing below.
   const hasMessages = !loading && ordered.length > 0;
+  // A list mounting with its first rows hides them until they are placed.
+  const [listReady, setListReady] = useState(false);
+  if (!hasMessages && listReady) setListReady(false);
+  const onListReady = useCallback(() => setListReady(true), []);
   /**
    * The pull arms at the end with a little slack: the list's own flag is
    * exact to a point, while insets and fractional offsets keep a resting list
@@ -396,6 +408,7 @@ export function ChatMessages({
   return (
     <MediaGalleryContext.Provider value={openGallery}>
       <PublishedAppContext.Provider value={renderPublishedApp ?? null}>
+      <TranscriptReadyContext.Provider value={listReady}>
       <View style={styles.listRoot}>
         <EndPullArea gesture={pull.gesture}>
           <View style={styles.listRoot} collapsable={false}>
@@ -414,6 +427,7 @@ export function ChatMessages({
               onViewableItemsChanged={onViewableItemsChanged}
               viewabilityConfig={VIEWABILITY}
               initialScrollAtEnd
+              onReady={onListReady}
               maintainScrollAtEnd={FOLLOW_END}
               maintainVisibleContentPosition
               recycleItems={false}
@@ -442,6 +456,7 @@ export function ChatMessages({
         <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
         {pullHint}
       </View>
+      </TranscriptReadyContext.Provider>
       </PublishedAppContext.Provider>
       {viewer}
     </MediaGalleryContext.Provider>
@@ -621,6 +636,10 @@ const MessageRow = memo(function MessageRow({
   const [actionsOpen, setActionsOpen] = useState(false);
   const [editText, setEditText] = useState(message.content);
   const isUser = message.role === "user";
+  const prompt = useMemo(
+    () => (isUser ? promptLayout(message.content) : null),
+    [isUser, message.content],
+  );
   const showTodos = Boolean(todos?.length);
   const blocks = useMemo(
     () =>
@@ -721,6 +740,7 @@ const MessageRow = memo(function MessageRow({
       ) : (
         <UserMessageContent
           markdown={message.content}
+          layout={prompt ?? undefined}
           mediaScopeKey={mediaScopeKey}
           mediaVisible={mediaVisible}
           resolveMedia={resolveMedia}
@@ -732,13 +752,7 @@ const MessageRow = memo(function MessageRow({
   ) : null;
 
   return (
-    <View
-      testID={`chat-message-${message.id}`}
-      style={[
-        styles.messageFrame,
-        isUser ? styles.userFrame : styles.assistantFrame,
-      ]}
-    >
+    <MessageFrame message={message}>
       {isUser ? (
         editing ? (
           userBubble
@@ -843,6 +857,15 @@ const MessageRow = memo(function MessageRow({
           ))}
         </View>
       )}
+      {isUser && prompt?.images.length && !editing ? (
+        <PromptImages
+          images={prompt.images}
+          resolveMedia={resolveMedia}
+          mediaVisible={mediaVisible}
+          mediaScopeKey={mediaScopeKey}
+          testID={`chat-message-images-${message.id}`}
+        />
+      ) : null}
       {!isUser && !streaming ? (
         <View style={styles.messageActions}>
           <IconButton
@@ -960,12 +983,44 @@ const MessageRow = memo(function MessageRow({
           </Text>
         ) : null}
       </NativeModal>
-    </View>
+    </MessageFrame>
   );
 });
 
+/** A row's frame; a prompt just sent flies into it from the composer. */
+function MessageFrame({
+  message,
+  children,
+}: React.PropsWithChildren<{ message: HarnessMessage }>): React.JSX.Element {
+  const testID = `chat-message-${message.id}`;
+  if (message.role !== "user")
+    return (
+      <View
+        testID={testID}
+        style={[styles.messageFrame, styles.assistantFrame]}
+      >
+        {children}
+      </View>
+    );
+  return (
+    <PromptFlight
+      testID={testID}
+      fly={isOptimisticPrompt(message)}
+      flightKey={messageRenderKey(message)}
+      style={[styles.messageFrame, styles.userFrame]}
+    >
+      {children}
+    </PromptFlight>
+  );
+}
+
+/**
+ * Text of a prompt. Mentions are chips in the flow of their paragraph, as in
+ * the webapp; pictures it mentions show as `PromptImages` below the bubble.
+ */
 export function UserMessageContent({
   markdown,
+  layout,
   resolveMedia,
   onOpenFile,
   mediaVisible = true,
@@ -973,63 +1028,88 @@ export function UserMessageContent({
   testID = "chat-user-message-content",
 }: {
   markdown: string;
+  /** `promptLayout(markdown)`, when the host already has it. */
+  layout?: PromptLayout;
   resolveMedia?: ChatMessagesProps["resolveMedia"];
   onOpenFile?: ChatMessagesProps["onOpenFile"];
   mediaVisible?: boolean;
   mediaScopeKey?: string | number;
   testID?: string;
 }): React.JSX.Element {
-  const { theme } = useTheme();
-  const segments = parseComposerSegments(markdown);
+  const blocks = useMemo(
+    () => (layout ?? promptLayout(markdown)).blocks,
+    [layout, markdown],
+  );
   return (
     <View testID={testID} style={styles.userMessageContent}>
-      {segments.map((segment, index) =>
-        segment.kind === "text" ? (
-          segment.text ? (
-            <ChatMarkdown
-              key={`text:${index}`}
-              markdown={segment.text}
-              variant="prompt"
-              mediaVisible={mediaVisible}
-              mediaScopeKey={mediaScopeKey}
-              resolveMedia={resolveMedia}
-              onOpenFile={onOpenFile}
-            />
-          ) : null
-        ) : segment.kind === "agent" ? (
-          <View
-            key={`agent:${segment.start}`}
-            style={[styles.mentionChip, { backgroundColor: theme.surface }]}
-          >
-            <Sparkles size={13} color={theme.mutedText} />
-            <Text style={{ color: theme.text, fontSize: 13 }}>
-              {segment.name}
-            </Text>
-          </View>
-        ) : classifyWorkspaceFile(segment.path) === "image" ? (
-          <MentionImage
-            key={`image:${segment.start}`}
-            path={segment.path}
-            name={segment.name}
-            mediaScopeKey={mediaScopeKey}
-            mediaVisible={mediaVisible}
-            resolveMedia={resolveMedia}
+      {blocks.map((block, index) =>
+        block.kind === "paragraph" ? (
+          <PromptParagraph
+            key={`paragraph:${index}`}
+            runs={block.runs}
+            onOpenFile={onOpenFile}
           />
         ) : (
-          <NativeAction
-            key={`file:${segment.start}`}
-            accessibilityRole="button"
-            accessibilityLabel={`Open file ${segment.path}`}
-            onPress={() => onOpenFile?.(segment.path)}
-            style={[styles.mentionChip, { backgroundColor: theme.surface }]}
-          >
-            <FileCode2 size={13} color={theme.mutedText} />
-            <Text numberOfLines={1} style={{ color: theme.text, fontSize: 13 }}>
-              {segment.name}
-            </Text>
-          </NativeAction>
+          <ChatMarkdown
+            key={`markdown:${index}`}
+            markdown={block.markdown}
+            variant="prompt"
+            mediaVisible={mediaVisible}
+            mediaScopeKey={mediaScopeKey}
+            resolveMedia={resolveMedia}
+            onOpenFile={onOpenFile}
+          />
         ),
       )}
+    </View>
+  );
+}
+
+/** A message the user sent while the agent worked, inside its turn. */
+function SteerBubble({
+  partId,
+  markdown,
+  resolveMedia,
+  onOpenFile,
+  mediaVisible,
+  mediaScopeKey,
+}: {
+  partId: string;
+  markdown: string;
+  resolveMedia?: ChatMessagesProps["resolveMedia"];
+  onOpenFile?: ChatMessagesProps["onOpenFile"];
+  mediaVisible: boolean;
+  mediaScopeKey?: string | number;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const layout = useMemo(() => promptLayout(markdown), [markdown]);
+  return (
+    <View testID={`chat-steer-${partId}`} style={styles.steerRow}>
+      <View
+        style={[styles.userBubble, { backgroundColor: theme.surfaceMuted }]}
+      >
+        <UserMessageContent
+          markdown={markdown}
+          layout={layout}
+          mediaScopeKey={mediaScopeKey}
+          mediaVisible={mediaVisible}
+          resolveMedia={resolveMedia}
+          onOpenFile={onOpenFile}
+          testID={`chat-steer-content-${partId}`}
+        />
+      </View>
+      {layout.images.length ? (
+        <PromptImages
+          images={layout.images}
+          resolveMedia={resolveMedia}
+          mediaVisible={mediaVisible}
+          mediaScopeKey={mediaScopeKey}
+          testID={`chat-steer-images-${partId}`}
+        />
+      ) : null}
+      <Text style={[styles.steerCaption, { color: theme.subtleText }]}>
+        Sent while working
+      </Text>
     </View>
   );
 }
@@ -1105,23 +1185,14 @@ function BlockView({
     );
   if (block.kind === "steer")
     return (
-      <View testID={`chat-steer-${block.part.id}`} style={styles.steerRow}>
-        <View
-          style={[styles.userBubble, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <UserMessageContent
-            markdown={block.part.output}
-            mediaScopeKey={mediaScopeKey}
-            mediaVisible={mediaVisible}
-            resolveMedia={resolveMedia}
-            onOpenFile={onOpenFile}
-            testID={`chat-steer-content-${block.part.id}`}
-          />
-        </View>
-        <Text style={[styles.steerCaption, { color: theme.subtleText }]}>
-          Sent while working
-        </Text>
-      </View>
+      <SteerBubble
+        partId={block.part.id}
+        markdown={block.part.output}
+        mediaScopeKey={mediaScopeKey}
+        mediaVisible={mediaVisible}
+        resolveMedia={resolveMedia}
+        onOpenFile={onOpenFile}
+      />
     );
   if (block.kind === "text")
     return (
@@ -1869,21 +1940,7 @@ const styles = StyleSheet.create({
     paddingVertical: 13,
     paddingHorizontal: 16,
   },
-  userMessageContent: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    alignItems: "center",
-    gap: 4,
-  },
-  mentionChip: {
-    minHeight: 30,
-    maxWidth: 240,
-    borderRadius: 15,
-    paddingHorizontal: 9,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-  },
+  userMessageContent: { gap: 10 },
   assistantBody: { width: "100%", gap: 6 },
   steerRow: { alignSelf: "flex-end", alignItems: "flex-end", maxWidth: "94%" },
   steerCaption: { fontSize: 11, lineHeight: 16, marginTop: 3 },

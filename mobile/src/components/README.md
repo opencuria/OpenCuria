@@ -18,6 +18,11 @@ labels and stable `testID`s.
 - `ChatComposer`: controlled draft. It clears on send and restores the draft when
   `onSend` rejects; `contextKey` discards late picker, search and send results.
   It hosts the sheet stack; `gates` passes pending questions and permissions.
+  The field shows file mentions by name while the draft keeps their tokens
+  (`composerDisplay`); a mention is deleted whole.
+- Prompts (`PromptContent`, `promptBlocks`): mentions are chips in the flow of their
+  paragraph and mentioned pictures thumbnails below the bubble, as in the webapp. A
+  prompt just sent flies in from the composer (`PromptFlight`).
 - `ComposerSheets`: the sheet stack behind the composer top, as in the webapp (shared
   `composerSheets` order: mentions, questions, permissions). Only the top sheet is
   interactive; gate sheets fold into their header and shrink with the keyboard.

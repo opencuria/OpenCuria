@@ -949,6 +949,20 @@ export function MainScreen(): React.JSX.Element {
       const ownerWorkspace = workspace.id;
       const ownerSession = chat.activeSessionId;
       const submittedDraft = draft;
+      const options = {
+        harnessId: harness,
+        mode,
+        model,
+        reasoningEffort: effort,
+        skillIds: usedSkills,
+      };
+      // The text shows while attachments upload; their mentions follow. A
+      // steer goes to the queue instead.
+      const dropPreview =
+        files.length &&
+        controller.getSnapshot().activeSession?.status !== "busy"
+          ? controller.previewPrompt(text, options)
+          : undefined;
       try {
         const paths = files.length
           ? await uploadAttachments(client, ownerWorkspace, files)
@@ -965,13 +979,6 @@ export function MainScreen(): React.JSX.Element {
         const prompt = appendUploadMentions(text, paths);
         if (!prompt.trim())
           throw new Error("Attach a file or enter a message first.");
-        const options = {
-          harnessId: harness,
-          mode,
-          model,
-          reasoningEffort: effort,
-          skillIds: usedSkills,
-        };
         // A running agent receives the message in its current turn.
         if (controller.getSnapshot().activeSession?.status === "busy") {
           await controller.steer(prompt, options);
@@ -1006,6 +1013,8 @@ export function MainScreen(): React.JSX.Element {
           loadOverview(true),
         ]);
       } finally {
+        // Sent prompts were taken over; this only takes back an unsent one.
+        dropPreview?.();
         sendingRef.current = false;
       }
     },

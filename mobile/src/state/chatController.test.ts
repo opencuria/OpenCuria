@@ -853,6 +853,149 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().sessions).toEqual([]);
   });
 
+  it("shows a follow-up at once and keeps its row through the server echo", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [{ ...message("u1", "user", "existing"), position: 0 }]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const accepted = deferred<HarnessSession>();
+    vi.mocked(client.harness.send).mockReturnValueOnce(accepted.promise);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(session("root", { status: "busy" }), [
+        { ...message("u1", "user", "existing"), position: 0 },
+        { ...message("u2", "user", "next step"), position: 1 },
+        {
+          ...message("a2", "assistant", ""),
+          position: 2,
+          completed_at: null,
+        },
+      ]),
+    );
+
+    const sending = controller.send("next step ", { skillIds: ["skill"] });
+
+    const shown = controller.getSnapshot().messages;
+    expect(shown.map((row) => row.content)).toEqual(["existing", "next step"]);
+    const prompt = shown[1]!;
+    expect(prompt.id).toMatch(/^local-user-/);
+    expect(prompt.skill_ids).toEqual(["skill"]);
+    expect(Object.isFrozen(prompt)).toBe(true);
+
+    accepted.resolve(session("root", { status: "busy" }));
+    await sending;
+
+    const rows = controller.getSnapshot().messages;
+    expect(rows.map((row) => row.id)).toEqual(["u1", "u2", "a2"]);
+    expect(rows[1]?.client_key).toBe(prompt.id);
+    controller.dispose();
+  });
+
+  it("shows a new chat's first prompt while the chat is created", async () => {
+    const { client, rows } = makeClient();
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a");
+    const created = deferred<HarnessSession>();
+    vi.mocked(client.harness.createSession).mockImplementationOnce(
+      () => created.promise,
+    );
+    vi.mocked(client.harness.timeline).mockImplementation(async (id) =>
+      timeline(rows.get(id)!, [
+        { ...message("u1", "user", "build it"), session_id: id, position: 0 },
+      ]),
+    );
+
+    const sending = controller.send("build it");
+
+    const pending = controller.getSnapshot().messages;
+    expect(controller.getSnapshot().activeSessionId).toBeNull();
+    expect(pending.map((row) => row.content)).toEqual(["build it"]);
+    const key = pending[0]!.client_key;
+
+    const result = session("created-1", { status: "busy" });
+    rows.set(result.id, result);
+    created.resolve(result);
+    await sending;
+
+    const transcript = controller.getSnapshot().messages;
+    expect(transcript.map((row) => row.id)).toEqual(["u1"]);
+    expect(transcript[0]?.client_key).toBe(key);
+    controller.dispose();
+  });
+
+  it("shows a prompt while its attachments upload and sends the same row", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [{ ...message("u1", "user", "existing"), position: 0 }]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    const dropPreview = controller.previewPrompt("What is this?");
+    const preview = controller.getSnapshot().messages.at(-1)!;
+    expect(preview.content).toBe("What is this?");
+
+    const prompt =
+      "What is this?\n@file:/workspace/.opencuria/user-uploaded/a.png";
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(session("root", { status: "busy" }), [
+        { ...message("u1", "user", "existing"), position: 0 },
+        { ...message("u2", "user", prompt), position: 1 },
+      ]),
+    );
+    const sending = controller.send(prompt);
+    const sent = controller.getSnapshot().messages;
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({ id: preview.id, content: prompt });
+    await sending;
+    dropPreview();
+
+    const rows = controller.getSnapshot().messages;
+    expect(rows.map((row) => row.id)).toEqual(["u1", "u2"]);
+    expect(rows[1]?.client_key).toBe(preview.id);
+    controller.dispose();
+  });
+
+  it("takes back a previewed prompt that is not sent", async () => {
+    const root = session("root");
+    const { client } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [{ ...message("u1", "user", "existing"), position: 0 }]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const before = controller.getSnapshot().messages;
+
+    const dropPreview = controller.previewPrompt("upload fails");
+    expect(controller.getSnapshot().messages).toHaveLength(2);
+    dropPreview();
+
+    expect(controller.getSnapshot().messages).toEqual(before);
+    await controller.newChat("workspace-a");
+    const dropNew = controller.previewPrompt("new chat upload fails");
+    expect(controller.getSnapshot().messages).toHaveLength(1);
+    dropNew();
+    expect(controller.getSnapshot().messages).toEqual([]);
+    controller.dispose();
+  });
+
+  it("clears a new chat's prompt when the chat cannot be created", async () => {
+    const { client } = makeClient();
+    const controller = new ChatController(client);
+    await controller.openWorkspace("workspace-a");
+    vi.mocked(client.harness.createSession).mockRejectedValueOnce(
+      new Error("No provider"),
+    );
+
+    await expect(controller.send("build it")).rejects.toThrow("No provider");
+
+    expect(controller.getSnapshot().messages).toEqual([]);
+    controller.dispose();
+  });
+
   it("keeps failed-send transcripts server-owned and does not add a duplicate prompt", async () => {
     const root = session("root");
     const { client } = makeClient([root]);

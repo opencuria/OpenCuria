@@ -16,6 +16,7 @@ import {
 } from '@opencuria/chat-core/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
+import { armPromptTransition } from '@/lib/promptTransition'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import { scheduleNewChat } from '@/lib/scheduledChat'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
@@ -75,8 +76,15 @@ const streamingMessageId = computed(() => {
   return null
 })
 
+/** The open chat, or a new chat's prompt while the server creates the chat. */
+const transcriptMessages = computed(() => {
+  if (harness.activeSessionId) return harness.activeMessages
+  const pending = harness.pendingPrompts[props.workspaceId]
+  return pending ? [pending] : []
+})
+
 /** Skeleton only for the true initial workspace load (never over chat). */
-const chatLoading = computed(() => harness.loading && harness.activeMessages.length === 0)
+const chatLoading = computed(() => harness.loading && transcriptMessages.value.length === 0)
 
 const activeRequests = computed(() => harness.activePermissionRequests)
 const activeQuestions = computed(() => harness.activeQuestionRequests)
@@ -644,6 +652,15 @@ async function handleSend(
     const workspaceId = props.workspaceId
     const sessionId = harness.activeSessionId
     const options = { mode, model, skillIds, reasoningEffort: effort }
+    // The composer still shows the text: the prompt's bubble flies from it.
+    // A steer goes to the queue above the composer instead.
+    if (activeSession.value?.status !== 'busy') {
+      armPromptTransition(
+        composerMorphEl.value
+          ?.querySelector('[data-testid="composer-textarea"]')
+          ?.getBoundingClientRect(),
+      )
+    }
     let accepted: boolean
     if (!sessionId) {
       const session = await harness.createSession(
@@ -849,7 +866,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
   >
     <HarnessChatContainer
       :key="harness.activeSessionId ?? 'new-session'"
-      :messages="harness.activeMessages"
+      :messages="transcriptMessages"
       :loading="chatLoading"
       :streaming-message-id="streamingMessageId"
       :summary="activeSession?.status === 'idle' ? activeSession.summary : ''"

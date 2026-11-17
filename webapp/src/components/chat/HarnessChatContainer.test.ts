@@ -155,6 +155,34 @@ describe('HarnessChatContainer', () => {
     wrapper.unmount()
   })
 
+  it("keeps a sent prompt's row when the server copy replaces it", async () => {
+    const prompt = makeMessage({
+      id: 'local-user-1',
+      client_key: 'local-user-1',
+      content: 'ship it',
+      created_at: '2026-11-17T10:00:00.000Z',
+    })
+    const wrapper = mount(HarnessChatContainer, {
+      props: { messages: [makeMessage({ id: 'u1', position: 0 }), prompt] },
+      global: { stubs: { HarnessMessageView: HarnessMessageViewStub } },
+    })
+    const before = wrapper.findAllComponents({ name: 'HarnessMessageView' })[1]!
+    expect(before.props('message').id).toBe('local-user-1')
+
+    await wrapper.setProps({
+      messages: [
+        makeMessage({ id: 'u1', position: 0 }),
+        { ...prompt, id: 'u2', position: 1 },
+        makeMessage({ id: 'a2', role: 'assistant', content: '', position: 2 }),
+      ],
+    })
+
+    const after = wrapper.findAllComponents({ name: 'HarnessMessageView' })[1]!
+    expect(after.props('message').id).toBe('u2')
+    expect(after.vm).toBe(before.vm)
+    wrapper.unmount()
+  })
+
   it('mounts a fresh transcript when the history session changes', async () => {
     const wrapper = mount(HarnessChatContainer, {
       props: {
@@ -486,7 +514,8 @@ describe('HarnessChatContainer', () => {
     const SummaryStub = {
       name: 'HarnessMessageView',
       props: ['message', 'streaming', 'summary'],
-      template: '<div :data-message-id="message.id" :data-summary="summary">{{ message.content }}</div>',
+      template:
+        '<div :data-message-id="message.id" :data-summary="summary">{{ message.content }}</div>',
     }
     const messages = [
       makeMessage({ id: 'user-1', created_at: '2026-03-29T10:00:00.000Z' }),

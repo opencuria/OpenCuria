@@ -45,6 +45,10 @@ import {
   collectDescendantSessionIds,
 } from "@opencuria/chat-core/harnessSubtaskActivity";
 import { assertHarnessSessionSelection } from "@opencuria/chat-core/harnessModels";
+import {
+  createOptimisticPrompt,
+  withoutOptimisticPrompt,
+} from "@opencuria/chat-core/optimisticPrompts";
 import { ChatTimelineController } from "@opencuria/chat-core/chatTimelineController";
 import type { HarnessTimeline } from "@opencuria/client";
 
@@ -242,6 +246,17 @@ export class ChatController {
   /** Child ids explicitly announced by an owned parent, before list refresh commits them. */
   private readonly trustedChildSessionIds = new Set<string>();
   private readonly pendingSends = new Set<string>();
+  /** The first prompt of a chat being created, shown until the chat exists. */
+  private pendingPrompt: {
+    workspaceId: string;
+    message: HarnessMessage;
+  } | null = null;
+  /** A prompt shown before it is sent (`previewPrompt`); sending takes it over. */
+  private preview: {
+    workspaceGeneration: number;
+    sessionId: string | null;
+    message: HarnessMessage;
+  } | null = null;
   private readonly sendFlights = new Map<string, Promise<HarnessSession>>();
   private readonly createFlights = new Map<string, Promise<HarnessSession>>();
   private readonly readFlights = new Map<string, Promise<void>>();
@@ -314,7 +329,9 @@ export class ChatController {
             ...(this.messagesBySession.get(this.activeSessionId) ??
               EMPTY_MESSAGES),
           ])
-        : EMPTY_MESSAGES,
+        : this.pendingPrompt?.workspaceId === this.workspaceId
+          ? freezeMessages([this.pendingPrompt.message])
+          : EMPTY_MESSAGES,
       todos: this.activeSessionId
         ? freezeTree(
             (this.todosBySession.get(this.activeSessionId) ?? EMPTY_TODOS).map(
@@ -671,6 +688,8 @@ export class ChatController {
       this.ownedSessionIds.clear();
       this.todoRevisions.clear();
       this.pendingSends.clear();
+      this.pendingPrompt = null;
+      this.preview = null;
       this.dismissedNotices.clear();
       this.activeWorkspaceSessionsLoaded = false;
       this.sessionListGeneration += 1;
@@ -926,6 +945,18 @@ export class ChatController {
       harnessId: HarnessId;
     },
   ): Promise<HarnessSession> {
+    // The new chat shows its prompt while the server creates it.
+    const optimistic =
+      this.takePreview(null, prompt) ??
+      freezeTree(
+        createOptimisticPrompt({
+          sessionId: "",
+          content: prompt,
+          skillIds: options.skillIds,
+          harnessId: options.harnessId,
+        }),
+      );
+    this.pendingPrompt = { workspaceId, message: optimistic };
     this.pendingSends.add(`new:${workspaceId}`);
     this.publish();
     try {
@@ -947,21 +978,18 @@ export class ChatController {
       }
       this.upsertSession(session);
       this.selectSession(session.id);
+      // The same row moves into the chat; its echo inherits the render key.
       this.messagesBySession.set(
         session.id,
         freezeMessages([
           {
-            id: `local-user-${session.id}`,
+            ...optimistic,
             session_id: session.id,
             harness_id: session.harness_id,
-            role: "user",
-            content: prompt,
-            skill_ids: [...(options.skillIds ?? [])],
-            parts: [],
-            created_at: new Date().toISOString(),
           },
-        ]) as HarnessMessage[],
+        ]),
       );
+      this.clearPendingPrompt(optimistic.id);
       this.touchTranscript(session.id, true);
       this.publish();
       const context = this.captureSelection()!;
@@ -987,9 +1015,85 @@ export class ChatController {
       }
       throw error;
     } finally {
+      this.clearPendingPrompt(optimistic.id);
       this.pendingSends.delete(`new:${workspaceId}`);
       this.publish();
     }
+  }
+
+  /**
+   * Show a prompt before it can be sent, e.g. while its attachments upload.
+   * `send` takes the row over with the final text; the returned function takes
+   * it back when sending is given up, and does nothing once it was sent.
+   */
+  previewPrompt(text: string, options: ChatRunOptions = {}): () => void {
+    this.assertLive();
+    const workspaceId = this.workspaceId;
+    if (!workspaceId || !text.trim()) return () => undefined;
+    const sessionId = this.activeSessionId;
+    const session = this.sessions.find((row) => row.id === sessionId);
+    const message = freezeTree(
+      createOptimisticPrompt({
+        sessionId: sessionId ?? "",
+        content: text,
+        skillIds: options.skillIds,
+        harnessId: session?.harness_id ?? options.harnessId,
+      }),
+    );
+    if (sessionId) {
+      this.messagesBySession.set(
+        sessionId,
+        freezeMessages([
+          ...(this.messagesBySession.get(sessionId) ?? EMPTY_MESSAGES),
+          message,
+        ]),
+      );
+      this.touchTranscript(sessionId);
+    } else {
+      this.pendingPrompt = { workspaceId, message };
+    }
+    this.preview = {
+      workspaceGeneration: this.workspaceGeneration,
+      sessionId,
+      message,
+    };
+    this.publish();
+    return () => {
+      if (this.disposed || this.preview?.message.id !== message.id) return;
+      this.preview = null;
+      if (sessionId) this.dropOptimisticPrompt(sessionId, message.id);
+      else this.clearPendingPrompt(message.id);
+      this.publish();
+    };
+  }
+
+  /** The previewed row for this send, now with its final text. */
+  private takePreview(
+    sessionId: string | null,
+    prompt: string,
+  ): HarnessMessage | null {
+    const preview = this.preview;
+    if (
+      !preview ||
+      preview.sessionId !== sessionId ||
+      preview.workspaceGeneration !== this.workspaceGeneration
+    )
+      return null;
+    this.preview = null;
+    return freezeTree({ ...preview.message, content: prompt.trim() });
+  }
+
+  private clearPendingPrompt(promptId: string): void {
+    if (this.pendingPrompt?.message.id === promptId) this.pendingPrompt = null;
+  }
+
+  /** A prompt the server rejected leaves the transcript. */
+  private dropOptimisticPrompt(sessionId: string, promptId: string): void {
+    const current = this.messagesBySession.get(sessionId);
+    if (!current) return;
+    const next = withoutOptimisticPrompt(current, promptId);
+    if (next !== current)
+      this.messagesBySession.set(sessionId, freezeMessages(next));
   }
 
   /** Send to the selected session, creating one when the composer is in new-chat mode. */
@@ -1031,7 +1135,30 @@ export class ChatController {
     const session = this.sessions.find((row) => row.id === sessionId);
     if (!session) throw new Error("The active session no longer exists");
     assertHarnessSessionSelection(session, options);
-    const context = this.captureSelection()!;
+    // The prompt shows at once. The send endpoint persists it before
+    // returning; the snapshot fetched then hands the row over to the server's
+    // copy (never to an identical older prompt).
+    const previewed = this.takePreview(sessionId, prompt);
+    const optimistic =
+      previewed ??
+      freezeTree(
+        createOptimisticPrompt({
+          sessionId,
+          content: prompt,
+          skillIds: options.skillIds,
+          harnessId: session.harness_id,
+        }),
+      );
+    const shown = this.messagesBySession.get(sessionId) ?? EMPTY_MESSAGES;
+    this.messagesBySession.set(
+      sessionId,
+      freezeMessages(
+        previewed
+          ? shown.map((row) => (row.id === previewed.id ? previewed : row))
+          : [...shown, optimistic],
+      ),
+    );
+    this.touchTranscript(sessionId);
     this.pendingSends.add(sessionId);
     this.publish();
     try {
@@ -1050,8 +1177,6 @@ export class ChatController {
         return updated;
       }
       this.upsertSession(updated);
-      // The send endpoint persists the user row before returning. Do not add a
-      // local prompt: retries after uncertain POST failures must not duplicate it.
       const reconcile = this.captureSelection();
       if (reconcile && this.activeSessionId === sessionId) {
         try {
@@ -1065,6 +1190,8 @@ export class ChatController {
       return updated;
     } catch (error) {
       if (!this.disposed && this.workspaceGeneration === workspaceGeneration) {
+        // The composer gets the text back; the bubble must not stay.
+        this.dropOptimisticPrompt(sessionId, optimistic.id);
         this.setError(error, "Failed to send message");
       }
       throw error;

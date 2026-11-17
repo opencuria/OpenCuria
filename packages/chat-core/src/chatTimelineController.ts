@@ -8,6 +8,7 @@
 import type { HarnessMessage, HarnessPart, HarnessSession } from "./harness";
 import {
   mergeBusyFetchedMessages,
+  reconcileOptimisticPrompts,
   settleOpenStreamParts,
   sortHarnessMessages,
   sortHarnessParts,
@@ -269,12 +270,16 @@ export class ChatTimelineController<T extends ChatTimelineSnapshot> {
           return { ...message, content, session_id: sessionId, parts };
         }),
     );
+    // Prompts still on their way survive every snapshot until echoed.
     const reconciled =
       this.status(sessionId) === "busy"
         ? mergeBusyFetchedMessages(previous.map(cloneMessage), incoming)
-        : statusAtRequest === "busy"
-          ? preserveLatestStream(previous, incoming)
-          : settleOpenStreamParts(incoming);
+        : reconcileOptimisticPrompts(
+            previous,
+            statusAtRequest === "busy"
+              ? preserveLatestStream(previous, incoming)
+              : settleOpenStreamParts(incoming),
+          );
     for (const message of reconciled) {
       message.session_id = sessionId;
       for (const part of message.parts) {

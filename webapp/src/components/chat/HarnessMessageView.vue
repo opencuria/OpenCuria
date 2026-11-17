@@ -3,6 +3,8 @@ import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
 import { BookText, CornerDownRight } from '@lucide/vue'
 import type { HarnessMessage } from '@opencuria/chat-core/harness'
+import { isClientPrompt, messageRenderKey } from '@opencuria/chat-core/optimisticPrompts'
+import { consumePromptTransition, playPromptTransition } from '@/lib/promptTransition'
 import {
   buildMessageBlocks,
   type MessageRenderBlock,
@@ -51,14 +53,24 @@ const emit = defineEmits<{
 
 const pinMessage = inject(pinHarnessMessageKey, null)
 const messageRoot = ref<HTMLElement | null>(null)
+// The container identifies rows by render key; a sent prompt keeps it.
+const renderKey = computed(() => messageRenderKey(props.message))
 function onMessageFocusIn(): void {
-  pinMessage?.(props.message.id, true)
+  pinMessage?.(renderKey.value, true)
 }
 function onMessageFocusOut(event: FocusEvent): void {
   const next = event.relatedTarget as Node | null
-  if (!messageRoot.value?.contains(next)) pinMessage?.(props.message.id, false)
+  if (!messageRoot.value?.contains(next)) pinMessage?.(renderKey.value, false)
 }
-onUnmounted(() => pinMessage?.(props.message.id, false))
+onUnmounted(() => pinMessage?.(renderKey.value, false))
+
+/** A prompt just sent from the composer flies from there into its place. */
+const promptColumn = ref<HTMLElement | null>(null)
+onMounted(() => {
+  if (!isClientPrompt(props.message) || !promptColumn.value) return
+  const from = consumePromptTransition()
+  if (from) playPromptTransition(promptColumn.value, from)
+})
 
 const finished = computed(() => props.streaming !== true)
 const copyText = computed(() => getMessageCopyText(props.message, props.streaming === true))
@@ -297,7 +309,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
     @focusin="onMessageFocusIn"
     @focusout="onMessageFocusOut"
   >
-    <div class="min-w-0" :class="editing ? 'w-full max-w-3xl' : 'max-w-[85%]'">
+    <div ref="promptColumn" class="min-w-0" :class="editing ? 'w-full max-w-3xl' : 'max-w-[85%]'">
       <HarnessUserBubble v-if="!editing" :text="message.content" />
       <HarnessMessageEditCard
         v-else

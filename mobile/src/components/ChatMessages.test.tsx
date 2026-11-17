@@ -976,17 +976,61 @@ describe("ChatMessages", () => {
 });
 
 describe("user message context", () => {
-  it("turns workspace file mentions into ordered chips instead of raw tokens", () => {
+  it("shows mentions as chips in the flow of their paragraph", () => {
+    const onOpenFile = jest.fn();
     render(
       <ThemeProvider>
         <UserMessageContent
-          markdown={"Open @file:/workspace/src/main.ts after this."}
+          markdown={
+            "Open @file:/workspace/src/main.ts with **care**, ask @agent:explore!\n\n```\n@file:/workspace/raw.ts\n```"
+          }
+          onOpenFile={onOpenFile}
         />
       </ThemeProvider>,
     );
+    // One paragraph: the chips flow with the words around them.
+    expect(screen.getByTestId("chat-user-message-content")).toHaveTextContent(
+      /Open main\.ts with care, ask @agent:explore!/,
+    );
+    fireEvent.press(
+      screen.getByRole("button", { name: "Open file src/main.ts" }),
+    );
+    expect(onOpenFile).toHaveBeenCalledWith("/workspace/src/main.ts");
+    expect(screen.getByTestId("prompt-mention-agent")).toBeTruthy();
+    // Code keeps a mention as typed.
+    expect(screen.getByText(/@file:\/workspace\/raw\.ts/)).toBeTruthy();
+    expect(screen.queryByText(/@file:\/workspace\/src/)).toBeNull();
+  });
+
+  it("shows mentioned pictures as thumbnails below the bubble", async () => {
+    const resolveMedia = jest.fn(
+      async (path: string) => `file:///cache${path}`,
+    );
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              id: "u1",
+              session_id: "s1",
+              role: "user",
+              content: "Compare @file:/workspace/shots/login.png please",
+              parts: [],
+              position: 0,
+            },
+          ]}
+          resolveMedia={resolveMedia}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("chat-message-markdown-u1")).toHaveTextContent(
+      "Compare login.png please",
+    );
     expect(
-      screen.getByRole("button", { name: "Open file /workspace/src/main.ts" }),
+      await screen.findByRole("button", {
+        name: "Open image preview login.png",
+      }),
     ).toBeTruthy();
-    expect(screen.queryByText(/@file:/)).toBeNull();
+    expect(resolveMedia).toHaveBeenCalledWith("/workspace/shots/login.png");
   });
 });

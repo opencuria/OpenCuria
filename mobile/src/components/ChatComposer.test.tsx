@@ -71,6 +71,20 @@ function renderComposer(
   };
 }
 
+/** The text the native field shows: plain runs and mention names. */
+function shownText(input: { props: { children?: unknown } }): string {
+  const collect = (node: unknown): string => {
+    if (typeof node === "string") return node;
+    if (Array.isArray(node)) return node.map(collect).join("");
+    if (node && typeof node === "object" && "props" in node)
+      return collect(
+        (node as { props: { children?: unknown } }).props.children,
+      );
+    return "";
+  };
+  return collect(input.props.children);
+}
+
 describe("ChatComposer", () => {
   it("keeps the same editor and layout through loading, unavailable and running states", () => {
     const { rerenderComposer } = renderComposer({ contextKey: "new" });
@@ -203,6 +217,51 @@ describe("ChatComposer", () => {
     );
   });
 
+  it("lets attachments leave with the text and gives them back when sending fails", async () => {
+    const photo = {
+      id: "photo",
+      uri: "file:///photo.jpg",
+      name: "photo.jpg",
+      kind: "image" as const,
+    };
+    let fail: (error: Error) => void = () => undefined;
+    const onSend = jest.fn(
+      () => new Promise<void>((_resolve, reject) => (fail = reject)),
+    );
+    function Host(): React.JSX.Element {
+      const [draft, setDraft] = React.useState("What is this?");
+      const [files, setFiles] = React.useState([photo]);
+      return (
+        <ThemeProvider>
+          <ChatComposer
+            draft={draft}
+            onDraftChange={setDraft}
+            attachments={files}
+            onAttachmentsChange={setFiles}
+            onSend={onSend}
+          />
+        </ThemeProvider>
+      );
+    }
+    render(<Host />);
+    expect(screen.getByText("photo.jpg")).toBeTruthy();
+
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    expect(onSend).toHaveBeenCalledWith({
+      text: "What is this?",
+      skillIds: [],
+      attachments: [photo],
+    });
+    expect(screen.queryByText("photo.jpg")).toBeNull();
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe("");
+
+    await act(async () => fail(new Error("upload failed")));
+    expect(screen.getByText("photo.jpg")).toBeTruthy();
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "What is this?",
+    );
+  });
+
   it("stops a busy run even when the composer is disabled and empty", async () => {
     const onStop = jest.fn().mockResolvedValue(undefined);
     renderComposer({ busy: true, disabled: true, onStop });
@@ -230,12 +289,42 @@ describe("ChatComposer", () => {
       "@file:/workspace/src/main.ts ",
       { start: 29, end: 29 },
     );
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe(
-      "@file:/workspace/src/main.ts ",
+    // The field shows the file by name; the draft keeps the token.
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "main.ts ",
     );
+    expect(screen.getByText("main.ts")).toBeTruthy();
     expect(
       screen.getByTestId("chat-composer-input").props.selection,
     ).toBeUndefined();
+  });
+
+  it("edits around a mention by its name and deletes it whole", async () => {
+    const { onDraftChange } = renderComposer({
+      draft: "Read @file:/workspace/src/main.ts now",
+    });
+    const input = screen.getByTestId("chat-composer-input");
+    expect(shownText(input)).toBe("Read main.ts now");
+
+    // "R" became "Please r": the caret follows the edited range.
+    fireEvent.changeText(input, "Please read main.ts now");
+    expect(onDraftChange).toHaveBeenLastCalledWith(
+      "Please read @file:/workspace/src/main.ts now",
+      { start: 8, end: 8 },
+    );
+
+    // Backspace at the end of the name removes the mention.
+    fireEvent(input, "selectionChange", {
+      nativeEvent: { selection: { start: 19, end: 19 } },
+    });
+    fireEvent.changeText(input, "Please read main.t now");
+    expect(onDraftChange).toHaveBeenLastCalledWith("Please read  now", {
+      start: 12,
+      end: 12,
+    });
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
+      "Please read  now",
+    );
   });
 
   it("uses native cursor updates for typing in the middle without pinning TextInput selection", () => {
@@ -248,7 +337,7 @@ describe("ChatComposer", () => {
     fireEvent.changeText(input, "aXb");
 
     expect(onDraftChange).toHaveBeenLastCalledWith("aXb", { start: 1, end: 1 });
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe("aXb");
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe("aXb");
     expect(
       screen.getByTestId("chat-composer-input").props.selection,
     ).toBeUndefined();
@@ -267,7 +356,7 @@ describe("ChatComposer", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chat-composer-error")).toBeTruthy(),
     );
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe(
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
       "keep this draft",
     );
     expect(onSend).toHaveBeenCalledWith({
@@ -293,7 +382,7 @@ describe("ChatComposer", () => {
 
     fireEvent.press(screen.getByTestId("chat-composer-send"));
 
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe("");
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe("");
     expect(KeyboardController.dismiss).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenCalledWith({
       text: "ship it",
@@ -317,7 +406,7 @@ describe("ChatComposer", () => {
 
     const cleared = screen.getByTestId("chat-composer-input");
     expect(cleared).not.toBe(input);
-    expect(cleared.props.value).toBe("");
+    expect(shownText(cleared)).toBe("");
     await waitFor(() =>
       expect(screen.getByTestId("chat-composer-send")).toBeTruthy(),
     );
@@ -337,7 +426,7 @@ describe("ChatComposer", () => {
     fireEvent.press(await screen.findByRole("button", { name: "Add explore" }));
 
     expect(screen.getByTestId("chat-composer-input")).toBe(input);
-    expect(input.props.value).toBe("first\nsecond @agent:explore ");
+    expect(shownText(input)).toBe("first\nsecond @agent:explore ");
   });
 
   it("replaces the editor when the host resets a long draft", () => {
@@ -363,7 +452,7 @@ describe("ChatComposer", () => {
 
     const cleared = screen.getByTestId("chat-composer-input");
     expect(cleared).not.toBe(input);
-    expect(cleared.props.value).toBe("");
+    expect(shownText(cleared)).toBe("");
   });
 
   it("clears a confirmed draft without invalidating an in-flight native picker", async () => {
@@ -382,7 +471,7 @@ describe("ChatComposer", () => {
     render(<Host />);
     fireEvent.press(screen.getByTestId("chat-composer-send"));
     await waitFor(() =>
-      expect(screen.getByTestId("chat-composer-input").props.value).toBe(""),
+      expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(""),
     );
   });
 
@@ -525,7 +614,7 @@ describe("ChatComposer steering and send later", () => {
     fireEvent.press(screen.getByRole("button", { name: "In 1 hour" }));
 
     expect(await screen.findByText(/could not be scheduled/i)).toBeTruthy();
-    expect(screen.getByTestId("chat-composer-input").props.value).toBe(
+    expect(shownText(screen.getByTestId("chat-composer-input"))).toBe(
       "Ship it",
     );
   });

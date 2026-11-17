@@ -45,6 +45,14 @@ import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerAction, ComposerActionContent } from "../ui/ComposerAction";
 import { ComposerEditor } from "./ComposerEditor";
+import { armPromptFlight } from "./PromptFlight";
+import {
+  applyDisplayEdit,
+  composerDisplay,
+  displayOffset,
+  draftSelection,
+  type ComposerDisplay,
+} from "./composerDisplay";
 import {
   ComposerSheetStack,
   type ComposerGates,
@@ -220,6 +228,8 @@ export function ChatComposer({
   const selectionRef = useRef({ start: draft.length, end: draft.length });
   const nativeSelectionRef = useRef(false);
   const nativeEditTextRef = useRef<string | null>(null);
+  // The last native selection, in the coordinates of the shown text.
+  const nativeShownSelectionRef = useRef({ start: 0, end: 0 });
   const draftRef = useRef(draft);
   const attachmentsRef = useRef(attachments);
   const pickerInFlight = useRef(false);
@@ -239,6 +249,15 @@ export function ChatComposer({
   >(null);
 
   attachmentsRef.current = attachments;
+
+  // The field shows file mentions by name; the draft keeps their tokens.
+  const display = useMemo(() => composerDisplay(draft), [draft]);
+  const displayCache = useRef(display);
+  const displayOf = useCallback((text: string): ComposerDisplay => {
+    if (displayCache.current.source !== text)
+      displayCache.current = composerDisplay(text);
+    return displayCache.current;
+  }, []);
 
   const activeSkills = useMemo(
     () =>
@@ -327,27 +346,42 @@ export function ChatComposer({
   );
 
   const changeText = useCallback(
-    (text: string) => {
+    (shown: string) => {
+      const previous = displayOf(draftRef.current);
+      const edit = applyDisplayEdit(
+        draftRef.current,
+        shown,
+        displayOffset(previous, selectionRef.current.start),
+      );
+      const next = displayOf(edit.draft);
+      // Android reports the caret before the text, so it already belongs to
+      // this edit; otherwise the caret follows the edited range.
       const nativeSelectionIsForThisEdit =
         nativeSelectionRef.current &&
-        nativeEditTextRef.current === draftRef.current;
+        nativeEditTextRef.current === draftRef.current &&
+        next.text === shown;
+      const native = nativeShownSelectionRef.current;
       const nextSelection = nativeSelectionIsForThisEdit
-        ? selectionRef.current
-        : estimateSelectionAfterEdit(
-            draftRef.current,
-            text,
-            selectionRef.current,
-          );
+        ? draftSelection(next, native)
+        : { start: edit.cursor, end: edit.cursor };
       nativeSelectionRef.current = false;
       nativeEditTextRef.current = null;
-      draftRef.current = text;
-      editorTextRef.current = text;
+      draftRef.current = edit.draft;
+      editorTextRef.current = edit.draft;
       selectionRef.current = nextSelection;
       setError(null);
-      onDraftChange(text, nextSelection);
-      refreshQuery(text, nextSelection.end);
+      onDraftChange(edit.draft, nextSelection);
+      refreshQuery(edit.draft, nextSelection.end);
+      if (next.text !== shown) {
+        // A mention went away whole or got a separator: the field shows the
+        // draft again, with the caret where the edit left it.
+        const caret = displayOffset(next, edit.cursor);
+        requestAnimationFrame(() =>
+          inputRef.current?.setSelection(caret, caret),
+        );
+      }
     },
-    [onDraftChange, refreshQuery],
+    [displayOf, onDraftChange, refreshQuery],
   );
 
   const selectCandidate = useCallback(
@@ -380,13 +414,17 @@ export function ChatComposer({
       setError(null);
       cancelSearch();
       onDraftChange(result.text, nextSelection);
+      const caret = displayOffset(displayOf(result.text), result.cursor);
+      // A command, not `setNativeProps`: Fabric would keep re-applying a
+      // selection prop on every later render and pull the caret back.
       requestAnimationFrame(() => {
         inputRef.current?.focus();
-        inputRef.current?.setNativeProps({ selection: nextSelection });
+        inputRef.current?.setSelection(caret, caret);
       });
     },
     [
       cancelSearch,
+      displayOf,
       onDraftChange,
       onSelectedSkillIdsChange,
       query,
@@ -460,13 +498,15 @@ export function ChatComposer({
 
   const onSelectionChange = useCallback(
     (event: NativeSyntheticEvent<TextInputSelectionChangeEventData>) => {
-      const next = event.nativeEvent.selection;
+      const shown = event.nativeEvent.selection;
       nativeSelectionRef.current = true;
       nativeEditTextRef.current = draftRef.current;
+      nativeShownSelectionRef.current = shown;
+      const next = draftSelection(displayOf(draftRef.current), shown);
       selectionRef.current = next;
       refreshQuery(draftRef.current, next.end);
     },
-    [refreshQuery],
+    [displayOf, refreshQuery],
   );
 
   const addAttachments = useCallback(
@@ -564,6 +604,11 @@ export function ChatComposer({
       setSearched(NO_CANDIDATES);
       cancelSearch();
       onDraftChange("", cleared);
+      // Attachments leave with the text; a failed send gives both back.
+      if (currentAttachments.length) {
+        attachmentsRef.current = [];
+        onAttachmentsChange?.([]);
+      }
       try {
         await deliver({
           text,
@@ -585,6 +630,16 @@ export function ChatComposer({
           draftRef.current = originalDraft;
           selectionRef.current = restoredSelection;
           onDraftChange(originalDraft, restoredSelection);
+          // Keep anything picked meanwhile.
+          const missing = currentAttachments.filter(
+            (file) =>
+              !attachmentsRef.current.some((item) => item.id === file.id),
+          );
+          if (missing.length) {
+            const next = [...missing, ...attachmentsRef.current];
+            attachmentsRef.current = next;
+            onAttachmentsChange?.(next);
+          }
           setError(failure);
         }
       } finally {
@@ -600,20 +655,27 @@ export function ChatComposer({
       cancelSearch,
       disabled,
       dismissKeyboard,
+      onAttachmentsChange,
       onDraftChange,
       selectedSkillIds,
       steering,
     ],
   );
 
-  const send = useCallback(
-    () =>
-      submit(
-        onSend,
-        "Your message could not be sent. Your draft is still here. Please try again.",
-      ),
-    [onSend, submit],
-  );
+  const send = useCallback(() => {
+    // A prompt's bubble rises from where its text is now; a steer goes to the
+    // queue above the composer instead.
+    if (!steering)
+      armPromptFlight((report) => {
+        const input = inputRef.current;
+        if (!input) return report(null);
+        input.measureInWindow((_x, y) => report(y));
+      });
+    return submit(
+      onSend,
+      "Your message could not be sent. Your draft is still here. Please try again.",
+    );
+  }, [onSend, steering, submit]);
 
   const schedule = useCallback(
     (sendAt: Date) => {
@@ -925,7 +987,6 @@ export function ChatComposer({
             <ComposerEditor
               key={`message-input-${editorKey}`}
               ref={inputRef}
-              value={draft}
               onChangeText={changeText}
               onSelectionChange={onSelectionChange}
               onContentSizeChange={({ nativeEvent }) => {
@@ -946,7 +1007,26 @@ export function ChatComposer({
               blurOnSubmit={false}
               textAlignVertical="top"
               style={[styles.input, { color: theme.text }]}
-            />
+            >
+              {display.pieces.map((piece, index) =>
+                piece.segment.kind === "text" ? (
+                  piece.text
+                ) : (
+                  <Text
+                    key={`mention:${index}`}
+                    style={[
+                      styles.mention,
+                      {
+                        color: theme.primary,
+                        backgroundColor: mentionTint(theme.primary),
+                      },
+                    ]}
+                  >
+                    {piece.text}
+                  </Text>
+                ),
+              )}
+            </ComposerEditor>
             <View style={styles.toolbar}>
               {attachmentButton}
               <View style={styles.settings}>{settingsButton}</View>
@@ -981,24 +1061,12 @@ export function ChatComposer({
   );
 }
 
-function estimateSelectionAfterEdit(
-  previous: string,
-  next: string,
-  selection: { start: number; end: number },
-): { start: number; end: number } {
-  let prefix = 0;
-  const sharedLimit = Math.min(previous.length, next.length);
-  while (prefix < sharedLimit && previous[prefix] === next[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < sharedLimit - prefix &&
-    previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]
-  )
-    suffix += 1;
-  const changedStart = Math.min(selection.start, prefix);
-  const insertedLength = Math.max(0, next.length - prefix - suffix);
-  const cursor = Math.min(next.length, changedStart + insertedLength);
-  return { start: cursor, end: cursor };
+/** The accent at low opacity: the background of a mention in the field. */
+function mentionTint(color: string): string {
+  const hex = /^#([0-9a-f]{6})$/i.exec(color)?.[1];
+  if (!hex) return "transparent";
+  const value = parseInt(hex, 16);
+  return `rgba(${value >> 16}, ${(value >> 8) & 255}, ${value & 255}, 0.16)`;
 }
 
 function isImage(attachment: ComposerAttachment): boolean {
@@ -1067,6 +1135,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#777777",
   },
   skillName: { maxWidth: 170, fontSize: 13, fontWeight: "500" },
+  mention: { fontWeight: "600" },
   chipRemove: {
     width: 30,
     height: 30,

@@ -1,6 +1,7 @@
 export * from "./harness";
 export * from "./types";
 export * from "./harnessReducer";
+export * from "./optimisticPrompts";
 export * from "./harnessAttachments";
 export * from "./harnessMentions";
 export * from "./composerTokens";

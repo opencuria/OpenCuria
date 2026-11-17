@@ -61,6 +61,10 @@ import {
   sortHarnessParts,
 } from '@opencuria/chat-core/harnessReducer'
 import {
+  createOptimisticPrompt,
+  withoutOptimisticPrompt,
+} from '@opencuria/chat-core/optimisticPrompts'
+import {
   collectAncestorSessions,
   collectDescendantSessionIds,
   collectRunningChildSessionIds,
@@ -117,6 +121,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const queuedSteers = ref<Record<string, HarnessSteer[]>>({})
   /** Messages scheduled for later keyed by session id, as the server lists them. */
   const scheduledMessages = ref<Record<string, HarnessScheduledMessage[]>>({})
+  /** The first prompt of a chat being created, keyed by workspace id. */
+  const pendingPrompts = ref<Record<string, HarnessMessage>>({})
   const stoppingSessionIds = ref<string[]>([])
   const activeSessionId = ref<string | null>(null)
   /** Session currently open in the chat panel; cleared when the panel unmounts. */
@@ -315,6 +321,7 @@ export const useHarnessStore = defineStore('harness', () => {
     steerRevisions.clear()
     scheduledMessages.value = {}
     scheduledRevisions.clear()
+    pendingPrompts.value = {}
     dismissedNoticeIds.value = {}
     readFlights.clear()
   }
@@ -599,6 +606,14 @@ export const useHarnessStore = defineStore('harness', () => {
   ): Promise<HarnessSession | null> {
     if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return null
     const notifications = useNotificationStore()
+    // The new chat shows its prompt while the server creates it.
+    const optimistic = createOptimisticPrompt({
+      sessionId: '',
+      content: prompt,
+      skillIds,
+      harnessId,
+    })
+    pendingPrompts.value[workspaceId] = optimistic
     try {
       const session = await createHarnessSession(workspaceId, {
         prompt,
@@ -611,24 +626,29 @@ export const useHarnessStore = defineStore('harness', () => {
       })
       sessions.value.unshift(session)
       setActiveSession(session.id)
-      messagesBySession.value[session.id] = [
-        {
-          id: `local-user-${session.id}`,
-          session_id: session.id,
-          role: 'user',
-          content: prompt,
-          skill_ids: [...skillIds],
-          parts: [],
-          created_at: new Date().toISOString(),
-        },
-      ]
+      messagesBySession.value[session.id] = [{ ...optimistic, session_id: session.id }]
+      clearPendingPrompt(workspaceId, optimistic.id)
       await fetchParts(session.id)
       recordComposerModelUsage(session, model, reasoningEffort, harnessId)
       return session
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
       return null
+    } finally {
+      clearPendingPrompt(workspaceId, optimistic.id)
     }
+  }
+
+  function clearPendingPrompt(workspaceId: string, promptId: string): void {
+    if (pendingPrompts.value[workspaceId]?.id === promptId) delete pendingPrompts.value[workspaceId]
+  }
+
+  /** A prompt the server rejected leaves the transcript; its text goes back to the composer. */
+  function dropOptimisticPrompt(sessionId: string, promptId: string): void {
+    const messages = messagesBySession.value[sessionId]
+    if (!messages) return
+    const next = withoutOptimisticPrompt(messages, promptId)
+    if (next !== messages) messagesBySession.value[sessionId] = next
   }
 
   /** Mark a user-initiated turn request so the matching busy event skips its own fetch. */
@@ -672,8 +692,18 @@ export const useHarnessStore = defineStore('harness', () => {
   ): Promise<boolean> {
     if (sessionTransitioning(sessionId)) return false
     const notifications = useNotificationStore()
+    const previousSession = sessions.value.find((item) => item.id === sessionId)
+    // The prompt shows at once. The send endpoint persists the user and the
+    // fresh assistant before returning; the snapshot fetched then hands the
+    // prompt over to the server's copy (never to an identical older prompt).
+    const optimistic = createOptimisticPrompt({
+      sessionId,
+      content: prompt,
+      skillIds: options.skillIds,
+      harnessId: previousSession?.harness_id,
+    })
+    messagesFor(sessionId).push(optimistic)
     try {
-      const previousSession = sessions.value.find((item) => item.id === sessionId)
       const session = await sendHarnessMessage(sessionId, {
         prompt,
         mode: options.mode,
@@ -682,9 +712,6 @@ export const useHarnessStore = defineStore('harness', () => {
         reasoning_effort: options.reasoningEffort,
       })
       upsertSession(session)
-      // The send endpoint persists both the user and the fresh assistant
-      // before returning. Fetch their authoritative ids/positions instead
-      // of inventing a local user that can collide with an identical prompt.
       await fetchParts(sessionId)
       recordComposerModelUsage(
         session,
@@ -694,6 +721,7 @@ export const useHarnessStore = defineStore('harness', () => {
       )
       return true
     } catch (e: unknown) {
+      dropOptimisticPrompt(sessionId, optimistic.id)
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
       return false
     }
@@ -1477,6 +1505,7 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingQuestions,
     queuedSteers,
     scheduledMessages,
+    pendingPrompts,
     stoppingSessionIds,
     activeSessionId,
     viewingSessionId,

@@ -18,6 +18,7 @@ import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
 import WorkspaceSetupCard from '@/components/workspaces/WorkspaceSetupCard.vue'
 import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
+import { armPromptTransition } from '@/lib/promptTransition'
 import { buildComposerSheets } from '@opencuria/chat-core/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import { scheduleNewChat } from '@/lib/scheduledChat'
@@ -285,6 +286,10 @@ async function handleSend(
   sending.value = true
   const animate = !prefersReducedMotion()
   const sendStartedAt = performance.now()
+  // Where the text sits now: the chat's first bubble flies up from here.
+  const promptRect = composerWrapRef.value
+    ?.querySelector('[data-testid="composer-textarea"]')
+    ?.getBoundingClientRect()
   if (animate) leaving.value = true
   try {
     const session = await harnessStore.createSession(
@@ -311,6 +316,7 @@ async function handleSend(
         composerWrapRef.value
       const rect = card?.getBoundingClientRect()
       if (rect) armComposerTransition(rect)
+      armPromptTransition(promptRect)
       // Let the exit animation finish before unmounting (the network wait
       // usually covers it already).
       const remaining = HOME_EXIT_MS - (performance.now() - sendStartedAt)

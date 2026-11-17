@@ -106,6 +106,11 @@ export interface HarnessMessage {
   message_position?: number;
   created_at?: string;
   completed_at?: string | null;
+  /**
+   * Client-only render identity of a prompt sent from this client: the
+   * server's copy inherits it from the optimistic row it replaces.
+   */
+  client_key?: string;
 }
 
 /** Harness engine selected for a conversation. */

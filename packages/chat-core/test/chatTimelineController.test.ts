@@ -170,6 +170,62 @@ describe.each([false, true])(
       expect(h.messages.get("session")?.[0]?.parts[0]?.state).toBe("completed");
     });
 
+    it("keeps a prompt on its way through idle snapshots and hands over its key", async () => {
+      const h = harness(immutable);
+      h.statuses.set("session", "idle");
+      const answered = message("done", {
+        id: "answer",
+        position: 1,
+        completed_at: "done",
+        parts: [part({ output: "done", state: "completed" })],
+      });
+      const asked: HarnessMessage = {
+        id: "question",
+        session_id: "session",
+        role: "user",
+        content: "hi",
+        parts: [],
+        position: 0,
+      };
+      const prompt: HarnessMessage = {
+        id: "local-user-1",
+        client_key: "local-user-1",
+        session_id: "session",
+        role: "user",
+        content: "next",
+        parts: [],
+        created_at: "2026-11-17T10:00:00.000Z",
+      };
+      h.messages.set("session", freeze([asked, answered, prompt]));
+
+      // A snapshot from before the send must not hide the prompt.
+      const stale = h.controller.fetch("session");
+      h.loads[0]!.resolve({ messages: [asked, answered] });
+      await stale;
+      expect(h.messages.get("session")?.map((row) => row.id)).toEqual([
+        "question",
+        "answer",
+        "local-user-1",
+      ]);
+
+      const echoed = h.controller.fetch("session");
+      h.loads[1]!.resolve({
+        messages: [
+          asked,
+          answered,
+          { ...prompt, id: "server-user", client_key: undefined, position: 2 },
+        ],
+      });
+      await echoed;
+      const rows = h.messages.get("session")!;
+      expect(rows.map((row) => row.id)).toEqual([
+        "question",
+        "answer",
+        "server-user",
+      ]);
+      expect(rows[2]?.client_key).toBe("local-user-1");
+    });
+
     it("captures gate/request metadata after waiting for a pre-idle fetch", async () => {
       const h = harness(immutable);
       let revision = 1;
