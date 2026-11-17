@@ -25,6 +25,7 @@
   },
   "overrides": {
     "@expo/ui": "57.0.26",
+    "react-native-reanimated": "4.5.5",
     "dompurify": "^3.4.17",
     "shell-quote": "^1.8.5",
     "tinypool": "^2.1.2",

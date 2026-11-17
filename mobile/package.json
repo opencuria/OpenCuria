@@ -99,7 +99,7 @@
     "react-native-keyboard-controller": "1.22.9",
     "react-native-maps": "1.27.2",
     "react-native-pager-view": "8.0.2",
-    "react-native-reanimated": "4.5.1",
+    "react-native-reanimated": "4.5.5",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
     "react-native-svg": "15.15.4",
@@ -119,6 +119,11 @@
     "typescript": "~6.0.3"
   },
   "expo": {
+    "install": {
+      "exclude": [
+        "react-native-reanimated"
+      ]
+    },
     "autolinking": {
       "android": {
         "buildFromSource": [

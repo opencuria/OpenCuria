@@ -34,6 +34,10 @@ npm run dev:mobile                    # Metro for the dev client, not Expo Go
 Use `npx expo run:ios` on a Mac. Rebuild the development client after native
 dependency changes.
 
+Reanimated stays at 4.5.5, above SDK 57's 4.5.1, whose settled animations can snap
+back to stale values. The root `overrides` keep one copy and `expo.install.exclude`
+stops `expo install --fix` from downgrading it; drop both with the next SDK upgrade.
+
 `EXPO_PUBLIC_DEFAULT_SERVER_URL` only prefills the sign-in screen and is public; never
 put secrets in it. `10.0.2.2` reaches the host from the Android emulator; for a USB
 device use `adb reverse tcp:8000 tcp:8000` and `adb reverse tcp:8081 tcp:8081`
