@@ -316,27 +316,46 @@ exports.Drawer = ({
   canOpenTools,
   menuActions,
   onMenuAction,
+  detail,
 }) =>
   h(
     View,
     null,
-    h(exports.IconButton, {
-      label: 'Open sidebar',
-      onPress: onOpen,
-      testID: 'main-menu',
-    }),
-    h(exports.Button, {
-      title: 'New chat',
-      onPress: onCreate,
-      disabled: !canCreate,
-      testID: 'new-chat',
-    }),
-    h(exports.IconButton, {
-      label: 'Git, Terminal & Files',
-      onPress: onTools,
-      disabled: !canOpenTools,
-      testID: 'workspace-tools',
-    }),
+    detail
+      ? h(exports.IconButton, {
+          label: `Back to ${detail.backTitle}`,
+          onPress: detail.onBack,
+          testID: 'chat-back',
+        })
+      : h(exports.IconButton, {
+          label: 'Open sidebar',
+          onPress: onOpen,
+          testID: 'main-menu',
+        }),
+    detail
+      ? h(
+          View,
+          { testID: 'chat-detail-title' },
+          h(Text, null, detail.title),
+          h(Text, null, detail.subtitle),
+        )
+      : null,
+    detail
+      ? null
+      : h(exports.Button, {
+          title: 'New chat',
+          onPress: onCreate,
+          disabled: !canCreate,
+          testID: 'new-chat',
+        }),
+    detail
+      ? null
+      : h(exports.IconButton, {
+          label: 'Git, Terminal & Files',
+          onPress: onTools,
+          disabled: !canOpenTools,
+          testID: 'workspace-tools',
+        }),
     h(
       exports.NativeMenu,
       {

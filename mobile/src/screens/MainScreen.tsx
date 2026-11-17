@@ -11,7 +11,6 @@ import {
   Alert,
   Platform,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { KeyboardController } from "react-native-keyboard-controller";
@@ -56,6 +55,7 @@ import {
   type ComposerAttachment,
 } from "../components";
 import type { ComposerSubmission } from "../components/ChatComposer";
+import { subagentHeader } from "../components/subagentHeader";
 import type { ComposerQueue } from "../components/ComposerSheets";
 import {
   ModelSheet,
@@ -73,7 +73,7 @@ import {
   pickPhoto,
   uploadAttachments,
 } from "../platform";
-import { Banner, Button, NativeModal, NativeAction } from "../ui/primitives";
+import { Banner, Button, NativeModal } from "../ui/primitives";
 import { Drawer } from "../ui/Drawer";
 import { useChromeTopInset } from "../ui/chromeInset";
 import type { NativeMenuAction } from "../ui/NativeMenu";
@@ -1499,47 +1499,76 @@ export function MainScreen(): React.JSX.Element {
     workspace.runner_online &&
     !isTransitioning,
   );
+  /** A subagent's conversation opens like a page pushed onto its parent chat. */
+  const subagent = subagentHeader(
+    chat.activeSession,
+    chat.activeSessionLineage,
+  );
+  const openRelatedChat = (sessionId: string) => {
+    if (workspaceId) requestNavigation(workspaceId, { sessionId });
+  };
+  const switchWorkspaceAction: NativeMenuAction = {
+    id: "workspace",
+    title: "Switch workspace",
+    symbol: "square.stack.3d.up",
+  };
   const chatMenuActions: NativeMenuAction[] = offline
     ? []
-    : [
-        {
-          id: "workspace",
-          title: "Switch workspace",
-          symbol: "square.stack.3d.up",
-        },
-        ...(chat.activeSession && !activeIsSubtask
-          ? [
-              {
-                id: "rename",
-                title: "Rename chat",
-                symbol: "pencil",
-                disabled: isTransitioning,
-              },
-            ]
-          : []),
-        ...(workspace && !activeIsSubtask
-          ? [
-              {
-                id: "schedule",
-                title: draft.trim()
-                  ? "Schedule this prompt"
-                  : "New scheduled task",
-                symbol: "calendar.badge.clock",
-              },
-            ]
-          : []),
-        ...(activeConversation
-          ? [
-              {
-                id: "delete",
-                title: "Delete chat",
-                symbol: "trash",
-                destructive: true,
-                disabled: isTransitioning || actionBusy,
-              },
-            ]
-          : []),
-      ];
+    : subagent
+      ? [
+          // The subagent header has no tools button of its own.
+          {
+            id: "tools",
+            title: "Git, Desktop, Terminal & Files",
+            symbol: "arrow.triangle.branch",
+            disabled: !toolsAvailable,
+          },
+          ...(subagent.rootId
+            ? [
+                {
+                  id: "root",
+                  title: "Back to main chat",
+                  symbol: "arrow.uturn.backward",
+                },
+              ]
+            : []),
+          switchWorkspaceAction,
+        ]
+      : [
+          switchWorkspaceAction,
+          ...(chat.activeSession
+            ? [
+                {
+                  id: "rename",
+                  title: "Rename chat",
+                  symbol: "pencil",
+                  disabled: isTransitioning,
+                },
+              ]
+            : []),
+          ...(workspace
+            ? [
+                {
+                  id: "schedule",
+                  title: draft.trim()
+                    ? "Schedule this prompt"
+                    : "New scheduled task",
+                  symbol: "calendar.badge.clock",
+                },
+              ]
+            : []),
+          ...(activeConversation
+            ? [
+                {
+                  id: "delete",
+                  title: "Delete chat",
+                  symbol: "trash",
+                  destructive: true,
+                  disabled: isTransitioning || actionBusy,
+                },
+              ]
+            : []),
+        ];
   /** Sheets cover the chat, so the keyboard closes before one opens. */
   const openSheet = (name: Exclude<SheetName, null>) => {
     void KeyboardController.dismiss().catch(() => undefined);
@@ -1559,6 +1588,10 @@ export function MainScreen(): React.JSX.Element {
   const chatMenuAction = (id: string) => {
     if (id === "workspace") {
       openSheet("workspaces");
+    } else if (id === "tools") {
+      openSheet("tools");
+    } else if (id === "root" && subagent?.rootId) {
+      openRelatedChat(subagent.rootId);
     } else if (id === "schedule") {
       openSheet("schedule-prompt");
     } else if (id === "rename" && chat.activeSession) {
@@ -1590,6 +1623,16 @@ export function MainScreen(): React.JSX.Element {
         canOpenTools={toolsAvailable}
         menuActions={chatMenuActions}
         onMenuAction={chatMenuAction}
+        detail={
+          subagent
+            ? {
+                title: subagent.title,
+                subtitle: subagent.subtitle,
+                backTitle: subagent.backTitle,
+                onBack: () => openRelatedChat(subagent.parentId),
+              }
+            : undefined
+        }
         navigation={
           <WorkspaceSidebar
             workspaces={workspaces}
@@ -1733,41 +1776,6 @@ export function MainScreen(): React.JSX.Element {
                       }}
                       testID="chat-error"
                     />
-                  </View>
-                ) : null}
-                {navigationReady && chat.activeSessionLineage.length > 1 ? (
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      flexWrap: "wrap",
-                      paddingHorizontal: 18,
-                      gap: 4,
-                      backgroundColor: theme.background,
-                    }}
-                  >
-                    {chat.activeSessionLineage.map((ancestor, index) => (
-                      <NativeAction
-                        key={ancestor.id}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Open parent conversation ${ancestor.title}`}
-                        onPress={() => {
-                          if (workspaceId)
-                            requestNavigation(workspaceId, {
-                              sessionId: ancestor.id,
-                            });
-                        }}
-                        style={{
-                          minHeight: 44,
-                          justifyContent: "center",
-                          paddingHorizontal: 6,
-                        }}
-                      >
-                        <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-                          {index ? "› " : "‹ "}
-                          {ancestor.title || ancestor.agent_name}
-                        </Text>
-                      </NativeAction>
-                    ))}
                   </View>
                 ) : null}
               </ChromeOverlay>

@@ -1,5 +1,5 @@
 import React, { useRef } from "react";
-import { Platform, View } from "react-native";
+import { Platform, View, useWindowDimensions } from "react-native";
 import {
   Button as SwiftButton,
   Host,
@@ -26,6 +26,7 @@ import {
 import type { NativeSymbol } from "./controls.types";
 import type { DrawerProps } from "./Drawer.types";
 import { HeaderChromeInset, navigationTheme } from "./NativeScreen";
+import { NavigationTitle } from "./NavigationTitle";
 import { SlideDrawer } from "./SlideDrawer";
 import { useTheme } from "./theme";
 
@@ -33,6 +34,8 @@ type Routes = { chat: undefined };
 const Stack = createNativeStackNavigator<Routes>();
 /** iOS 26 bar items float as liquid glass above content; older systems blur the bar. */
 const LIQUID_GLASS = Number.parseInt(String(Platform.Version), 10) >= 26;
+/** Room a centered title leaves on each side for one bar button and its margins. */
+const TITLE_SIDE_INSET = 68;
 
 /**
  * iPhone: the sidebar slides in beneath the chat, whose transparent native bar
@@ -56,10 +59,29 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
 /** A single native-stack screen supplies the transparent bar and scroll edge. */
 function ChatStack(props: DrawerProps): React.JSX.Element {
   const { theme } = useTheme();
+  const { width } = useWindowDimensions();
   const latest = useRef(props);
   latest.current = props;
+  const { detail } = props;
 
-  const rightItems = (): NativeStackHeaderItem[] => [
+  const leftItems = (): NativeStackHeaderItem[] => [
+    detail
+      ? {
+          type: "button",
+          label: "Back",
+          icon: { type: "sfSymbol", name: "chevron.backward" },
+          accessibilityLabel: `Back to ${detail.backTitle}`,
+          onPress: () => latest.current.detail?.onBack(),
+        }
+      : {
+          type: "button",
+          label: "Open sidebar",
+          icon: { type: "sfSymbol", name: "line.3.horizontal" },
+          onPress: () => latest.current.onOpen(),
+        },
+  ];
+
+  const chatItems = (): NativeStackHeaderItem[] => [
     {
       type: "button",
       label: "New chat",
@@ -74,6 +96,11 @@ function ChatStack(props: DrawerProps): React.JSX.Element {
       disabled: !props.canOpenTools,
       onPress: () => latest.current.onTools(),
     },
+  ];
+
+  const rightItems = (): NativeStackHeaderItem[] => [
+    // A subagent page keeps only its overflow menu, like a pushed detail view.
+    ...(detail ? [] : chatItems()),
     // An empty menu (offline) is left out.
     ...(props.menuActions.length
       ? [
@@ -126,14 +153,17 @@ function ChatStack(props: DrawerProps): React.JSX.Element {
                 ? undefined
                 : "systemChromeMaterial",
               scrollEdgeEffects: { top: "soft" },
-              unstable_headerLeftItems: () => [
-                {
-                  type: "button",
-                  label: "Open sidebar",
-                  icon: { type: "sfSymbol", name: "line.3.horizontal" },
-                  onPress: () => latest.current.onOpen(),
-                },
-              ],
+              headerTitle: detail
+                ? () => (
+                    <NavigationTitle
+                      title={detail.title}
+                      subtitle={detail.subtitle}
+                      maxWidth={width - 2 * TITLE_SIDE_INSET}
+                      testID="chat-detail-title"
+                    />
+                  )
+                : undefined,
+              unstable_headerLeftItems: leftItems,
               unstable_headerRightItems: rightItems,
             }}
           >
@@ -148,6 +178,7 @@ function ChatStack(props: DrawerProps): React.JSX.Element {
 /** UIKit manages adaptive sidebar columns and gestures on iPad. */
 function SplitDrawer(props: DrawerProps): React.JSX.Element {
   const { theme } = useTheme();
+  const { detail } = props;
   return (
     <Host
       style={{ flex: 1 }}
@@ -181,7 +212,7 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
         <NavigationSplitView.Detail>
           <Toolbar
             modifiers={[
-              navigationTitle(""),
+              navigationTitle(detail?.title ?? ""),
               navigationBarTitleDisplayMode("inline"),
             ]}
           >
@@ -198,30 +229,46 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
                   modifiers={[labelStyle("iconOnly")]}
                 />
               </ToolbarItem>
-              <ToolbarItem placement="topBarTrailing">
-                <SwiftButton
-                  label="New chat"
-                  systemImage="plus.bubble"
-                  onPress={props.onCreate}
-                  testID="new-chat"
-                  modifiers={[
-                    labelStyle("iconOnly"),
-                    disabled(!props.canCreate),
-                  ]}
-                />
-              </ToolbarItem>
-              <ToolbarItem placement="topBarTrailing">
-                <SwiftButton
-                  label="Git, Desktop, Terminal & Files"
-                  systemImage="arrow.triangle.branch"
-                  onPress={props.onTools}
-                  testID="workspace-tools"
-                  modifiers={[
-                    labelStyle("iconOnly"),
-                    disabled(!props.canOpenTools),
-                  ]}
-                />
-              </ToolbarItem>
+              {detail ? (
+                <ToolbarItem placement="topBarLeading">
+                  <SwiftButton
+                    label={`Back to ${detail.backTitle}`}
+                    systemImage="chevron.backward"
+                    onPress={detail.onBack}
+                    testID="chat-back"
+                    modifiers={[labelStyle("iconOnly")]}
+                  />
+                </ToolbarItem>
+              ) : null}
+              {/* A subagent page keeps only its overflow menu. */}
+              {detail ? null : (
+                <ToolbarItem placement="topBarTrailing">
+                  <SwiftButton
+                    label="New chat"
+                    systemImage="plus.bubble"
+                    onPress={props.onCreate}
+                    testID="new-chat"
+                    modifiers={[
+                      labelStyle("iconOnly"),
+                      disabled(!props.canCreate),
+                    ]}
+                  />
+                </ToolbarItem>
+              )}
+              {detail ? null : (
+                <ToolbarItem placement="topBarTrailing">
+                  <SwiftButton
+                    label="Git, Desktop, Terminal & Files"
+                    systemImage="arrow.triangle.branch"
+                    onPress={props.onTools}
+                    testID="workspace-tools"
+                    modifiers={[
+                      labelStyle("iconOnly"),
+                      disabled(!props.canOpenTools),
+                    ]}
+                  />
+                </ToolbarItem>
+              )}
               {props.menuActions.length ? (
                 <ToolbarItem placement="topBarTrailing">
                   <Menu

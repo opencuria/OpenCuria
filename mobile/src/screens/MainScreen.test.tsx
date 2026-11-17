@@ -1531,6 +1531,113 @@ it("puts workspace and chat actions in the header menu", async () => {
   tree.unmount();
 });
 
+describe("subagent conversations", () => {
+  const root = {
+    id: "root",
+    parent_id: null,
+    title: "Audit auth flow",
+    agent_name: "build",
+    status: "busy",
+  };
+  const explorer = {
+    id: "explorer",
+    parent_id: "root",
+    title: "Map the auth middleware",
+    agent_name: "explore",
+    status: "busy",
+    harness_id: "native",
+    model: "native-model",
+    mode: "build",
+    skill_ids: [],
+  };
+
+  async function openSubagent(lineage: Array<Record<string, unknown>>) {
+    const client = mockClient();
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+    const active = lineage.at(-1)!;
+    await act(async () => {
+      snapshot = {
+        ...snapshot,
+        workspaceId: runningWorkspace.id,
+        activeSessionId: active.id as string,
+        activeSession: active as never,
+        activeSessionLineage: lineage as never[],
+      };
+      listeners.forEach((listener) => listener());
+    });
+    return tree;
+  }
+
+  it("opens like a pushed page whose Back returns to the parent chat", async () => {
+    const tree = await openSubagent([root, explorer]);
+    expect(screen.getByTestId("chat-detail-title")).toHaveTextContent(
+      "Map the auth middlewareExplorer · Working…",
+    );
+    // Sidebar, New chat and tools give way to Back and the overflow menu.
+    expect(screen.queryByTestId("main-menu")).toBeNull();
+    expect(screen.queryByTestId("new-chat")).toBeNull();
+    expect(screen.queryByTestId("workspace-tools")).toBeNull();
+    expect(screen.queryByText(/‹ Audit auth flow/)).toBeNull();
+
+    fireEvent.press(screen.getByTestId("chat-menu"));
+    expect(screen.queryByRole("button", { name: "Rename chat" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Back to main chat" }),
+    ).toBeNull();
+    fireEvent.press(
+      screen.getByRole("button", { name: "Git, Desktop, Terminal & Files" }),
+    );
+    expect(screen.getByTestId("workspace-tools-sheet")).toBeTruthy();
+
+    mockController.openWorkspace.mockClear();
+    fireEvent.press(
+      screen.getByRole("button", { name: "Back to Audit auth flow" }),
+    );
+    await waitFor(() =>
+      expect(mockController.openWorkspace).toHaveBeenCalledWith(
+        runningWorkspace.id,
+        "root",
+      ),
+    );
+    tree.unmount();
+  });
+
+  it("offers the main chat from a nested subagent", async () => {
+    const nested = {
+      ...explorer,
+      id: "nested",
+      parent_id: "explorer",
+      title: "Check token refresh tests",
+      agent_name: "general",
+      status: "idle",
+    };
+    const tree = await openSubagent([root, explorer, nested]);
+    expect(screen.getByTestId("chat-detail-title")).toHaveTextContent(
+      "Check token refresh testsGeneral",
+    );
+    expect(
+      screen.getByRole("button", { name: "Back to Map the auth middleware" }),
+    ).toBeTruthy();
+
+    mockController.openWorkspace.mockClear();
+    fireEvent.press(screen.getByTestId("chat-menu"));
+    fireEvent.press(screen.getByRole("button", { name: "Back to main chat" }));
+    await waitFor(() =>
+      expect(mockController.openWorkspace).toHaveBeenCalledWith(
+        runningWorkspace.id,
+        "root",
+      ),
+    );
+    tree.unmount();
+  });
+});
+
 it("opens Git, Desktop, Terminal and Files by pulling up at the end or from the header button", async () => {
   const client = mockClient();
   mockUseSession.mockReturnValue(sessionValue(client) as never);
