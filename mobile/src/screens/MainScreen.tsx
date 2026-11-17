@@ -1727,7 +1727,10 @@ export function MainScreen(): React.JSX.Element {
                       onAction={() => {
                         void refresh();
                       }}
-                      onDismiss={() => setError(null)}
+                      onDismiss={() => {
+                        setError(null);
+                        controller?.dismissError();
+                      }}
                       testID="chat-error"
                     />
                   </View>

@@ -384,6 +384,11 @@ export class ChatController {
     }
   }
 
+  /** Hide the current error, e.g. when the user dismisses its banner. */
+  dismissError(): void {
+    this.clearError();
+  }
+
   private bindRealtime(): void {
     const on = this.client.realtime.on.bind(this.client.realtime);
     this.detachRealtime.push(

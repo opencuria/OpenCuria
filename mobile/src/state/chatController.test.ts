@@ -876,6 +876,8 @@ describe("ChatController", () => {
         .messages.some((row) => row.content === "possibly persisted"),
     ).toBe(false);
     expect(controller.getSnapshot().error).toBe("network timeout");
+    controller.dismissError();
+    expect(controller.getSnapshot().error).toBeNull();
     controller.dispose();
   });
 

@@ -127,6 +127,7 @@ const mockController = {
   reschedule: jest.fn().mockResolvedValue(undefined),
   withdrawScheduled: jest.fn().mockResolvedValue(null),
   sendScheduledNow: jest.fn().mockResolvedValue(undefined),
+  dismissError: jest.fn(),
 };
 const mockUseSession = useSession as jest.MockedFunction<typeof useSession>;
 
@@ -591,6 +592,34 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
       }),
     ),
   );
+  tree.unmount();
+});
+
+it("dismisses an error the chat controller reports", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  mockController.dismissError.mockImplementation(() => {
+    snapshot = { ...snapshot, error: null };
+    listeners.forEach((listener) => listener());
+  });
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+  );
+  await act(async () => {
+    snapshot = { ...snapshot, error: "Provider 'openrouter' is not connected" };
+    listeners.forEach((listener) => listener());
+  });
+
+  fireEvent.press(
+    within(screen.getByTestId("chat-error")).getByLabelText("Dismiss message"),
+  );
+  expect(mockController.dismissError).toHaveBeenCalledTimes(1);
+  expect(screen.queryByTestId("chat-error")).toBeNull();
   tree.unmount();
 });
 
