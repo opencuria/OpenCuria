@@ -200,7 +200,7 @@ const disk = computed(() => {
         <div class="flex min-w-0 items-center gap-1.5">
           <Badge
             :variant="statusVariant"
-            class="min-w-0 shrink gap-1.5 capitalize"
+            class="gap-1.5 capitalize"
             :class="
               !isRunnerOfflineState &&
               !workspace.intervention_required &&
@@ -220,7 +220,9 @@ const disk = computed(() => {
             />
             <span class="truncate">{{ statusLabel }}</span>
           </Badge>
-          <WorkspaceGuestBadge :workspace="workspace" />
+          <!-- During a transition the status owns the footer; the license state
+               returns once the workspace is at rest. -->
+          <WorkspaceGuestBadge v-if="!transitionLabel" :workspace="workspace" compact />
         </div>
         <WorkspaceActions
           :workspace="workspace"

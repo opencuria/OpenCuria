@@ -3,10 +3,11 @@ import { describe, expect, it } from 'vitest'
 import WorkspaceGuestBadge from './WorkspaceGuestBadge.vue'
 import { WorkspaceStatus, type Workspace } from '@/types'
 
-function render(patch: Partial<Workspace>) {
+function render(patch: Partial<Workspace>, compact = false) {
   return mount(WorkspaceGuestBadge, {
     props: {
       workspace: { id: 'ws', status: WorkspaceStatus.RUNNING, ...patch } as Workspace,
+      compact,
     },
   })
 }
@@ -38,6 +39,20 @@ describe('WorkspaceGuestBadge', () => {
   it('shows only the OS without a license state', () => {
     expect(
       render({ guest_os: 'windows', windows_license: null })
+        .get('[data-testid="workspace-guest-badge"]')
+        .text(),
+    ).toBe('Windows')
+  })
+
+  it('drops the OS when compact but keeps it in the tooltip', () => {
+    const compact = render(
+      { guest_os: 'windows', windows_license: license('failed', '0xC004F074') },
+      true,
+    ).get('[data-testid="workspace-guest-badge"]')
+    expect(compact.text()).toBe('Activation failed (0xC004F074)')
+    expect(compact.attributes('title')).toBe('Windows · Activation failed (0xC004F074)')
+    expect(
+      render({ guest_os: 'windows', windows_license: null }, true)
         .get('[data-testid="workspace-guest-badge"]')
         .text(),
     ).toBe('Windows')
