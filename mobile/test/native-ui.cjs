@@ -205,6 +205,7 @@ exports.NativeContextMenu = ({ children, label, actions, onSelect, fitContent })
     View,
     null,
     children(() => setOpen(true)),
+    open ? h(Text, { accessibilityRole: 'header' }, label) : null,
     ...(open ? actions.map((action) => h(
       Pressable,
       {

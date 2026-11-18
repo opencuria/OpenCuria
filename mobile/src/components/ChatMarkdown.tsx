@@ -47,6 +47,8 @@ export interface ChatMarkdownProps {
   /** Parent list viewability gate; offscreen rows do not fetch workspace media. */
   mediaVisible?: boolean;
   onOpenFile?: (workspacePath: string) => void;
+  /** Native text selection; off where holding the text opens a menu. */
+  selectable?: boolean;
   testID?: string;
 }
 
@@ -59,6 +61,7 @@ export function ChatMarkdown({
   mediaScopeKey = "",
   mediaVisible = true,
   onOpenFile,
+  selectable = true,
   testID,
 }: ChatMarkdownProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -265,7 +268,7 @@ export function ChatMarkdown({
             markdownStyle={markdownStyle}
             onLinkPress={onLinkPress}
             enableTaskListItemToggle={false}
-            selectable
+            selectable={selectable}
           />
         ) : (
           <InlineMedia

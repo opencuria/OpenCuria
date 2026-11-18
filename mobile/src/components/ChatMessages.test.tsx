@@ -13,7 +13,7 @@ import {
   getByGestureTestId,
 } from "react-native-gesture-handler/jest-utils";
 import { ChatMessages, UserMessageContent } from "./ChatMessages";
-import { Animated, Text } from "react-native";
+import { Animated, Platform, Share, Text } from "react-native";
 import { ThemeProvider } from "../ui/theme";
 import type {
   HarnessMessage,
@@ -110,6 +110,14 @@ jest.mock("expo-sharing", () => ({
   isAvailableAsync: jest.fn().mockResolvedValue(true),
   shareAsync: jest.fn().mockResolvedValue(undefined),
 }));
+
+const prompt = (content: string): HarnessMessage => ({
+  id: "prompt",
+  session_id: "s1",
+  role: "user",
+  content,
+  parts: [],
+});
 
 const message = (parts: HarnessPart[]): HarnessMessage => ({
   id: "m1",
@@ -335,7 +343,7 @@ describe("ChatMessages", () => {
     );
     expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
     fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
-    fireEvent.press(screen.getByRole("button", { name: "Edit and run again" }));
+    fireEvent.press(screen.getByRole("button", { name: "Edit" }));
     fireEvent.changeText(
       screen.getByTestId("chat-edit-prompt"),
       "Updated prompt",
@@ -366,9 +374,93 @@ describe("ChatMessages", () => {
       </ThemeProvider>,
     );
     fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
-    expect(screen.getByRole("button", { name: "Copy message" })).toBeEnabled();
-    expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Select text" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Share" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
     expect(onEdit).not.toHaveBeenCalled();
+  });
+
+  it("titles a prompt's menu with its send time and shares its text", () => {
+    const share = jest
+      .spyOn(Share, "share")
+      .mockResolvedValue({ action: Share.sharedAction });
+    const sentAt = new Date();
+    sentAt.setHours(7, 20, 0, 0);
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[
+            {
+              ...prompt("What does sed do?"),
+              created_at: sentAt.toISOString(),
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    expect(screen.getByRole("header").props.children).toMatch(/^Today, 0?7:20/);
+    fireEvent.press(screen.getByRole("button", { name: "Share" }));
+    expect(share).toHaveBeenCalledWith({ message: "What does sed do?" });
+    share.mockRestore();
+  });
+
+  it("selects a prompt's text in place until the reader clears it", async () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={[prompt("Read @file:/workspace/src/app.ts please")]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    fireEvent.press(screen.getByRole("button", { name: "Select text" }));
+
+    // In the bubble, not in a sheet: a read-only native text view, all
+    // selected, showing mentions by name as the bubble does.
+    const text = await screen.findByTestId("chat-select-text-prompt");
+    expect(screen.queryByTestId("chat-message-menu-prompt")).toBeNull();
+    expect(text.props).toEqual(
+      expect.objectContaining({
+        value: "Read app.ts please",
+        editable: false,
+        autoFocus: true,
+        selection: { start: 0, end: 18 },
+      }),
+    );
+    // Testing Library drops events on read-only fields; native sends them.
+    const select = (start: number, end: number) =>
+      act(() =>
+        text.props.onSelectionChange({
+          nativeEvent: { selection: { start, end } },
+        }),
+      );
+    select(0, 18);
+    // The handles own the selection from now on.
+    select(5, 11);
+    expect(text.props.selection).toBeUndefined();
+
+    select(7, 7);
+    expect(screen.queryByTestId("chat-select-text-prompt")).toBeNull();
+    expect(screen.getByTestId("chat-message-menu-prompt")).toBeTruthy();
+  });
+
+  it("offers no text selection on Android, which cannot start one", () => {
+    const os = Platform.OS;
+    Platform.OS = "android";
+    try {
+      render(
+        <ThemeProvider>
+          <ChatMessages messages={[prompt("What does sed do?")]} />
+        </ThemeProvider>,
+      );
+      fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+      expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Select text" })).toBeNull();
+    } finally {
+      Platform.OS = os;
+    }
   });
 
   it("renders ordered work details and fetches omitted heavy detail only when expanded", async () => {

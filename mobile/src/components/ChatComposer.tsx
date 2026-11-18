@@ -39,7 +39,6 @@ import type { HarnessScheduledMessage } from "@opencuria/chat-core/harness";
 import { sendLaterOptions } from "@opencuria/chat-core/sendLater";
 import { Banner, NativeAction } from "../ui/primitives";
 import { NativeContextMenu } from "../ui/ContextMenu";
-import { gestureThresholdHaptic } from "../ui/haptics";
 import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
 import { ComposerSurface } from "../ui/ComposerSurface";
@@ -826,14 +825,7 @@ export function ChatComposer({
       onPress={() => {
         void send();
       }}
-      onLongPress={
-        showMenu
-          ? () => {
-              gestureThresholdHaptic();
-              showMenu();
-            }
-          : undefined
-      }
+      onLongPress={showMenu}
       accessibilityHint={canSchedule ? "Hold to send later" : undefined}
       testID="chat-composer-send"
     />
