@@ -4,16 +4,9 @@ import { Image } from "expo-image";
 import { LayoutGrid } from "lucide-react-native";
 import type { PublishedAppReference } from "@opencuria/chat-core/publishedApps";
 import { Button } from "../ui/primitives";
-import { tileColor } from "../ui/tileColors";
 import { useTheme } from "../ui/theme";
-import { appSubtitle } from "./appPresentation";
+import { appActionTitle, appSubtitle, downloadLabel } from "./appPresentation";
 import { runPrimaryAction, type AppsState } from "./useApps";
-
-const ACTIONS = {
-  available: "Install",
-  update: "Update",
-  installed: "Open",
-} as const;
 
 /**
  * An app the agent sent to the phone, in the transcript: its name and
@@ -30,31 +23,22 @@ export function PublishedAppCard({
   const row = apps.rows.find((item) => item.appId === reference.appId);
   const progress = apps.progress[reference.appId];
   const icon = apps.icons[reference.appId];
-  const action =
-    row && apps.supported && row.state in ACTIONS
-      ? ACTIONS[row.state as keyof typeof ACTIONS]
-      : null;
-  const subtitle =
-    progress !== undefined
-      ? `Downloading… ${Math.round(progress * 100)}%`
-      : row
-        ? appSubtitle(row, apps.platform)
-        : apps.loaded
-          ? "No longer available"
-          : reference.versionName
-            ? `Version ${reference.versionName}`
-            : "";
+  const action = row && apps.supported ? appActionTitle(row.state) : null;
+  const subtitle = row
+    ? appSubtitle(row, apps.platform, progress)
+    : progress !== undefined
+      ? downloadLabel(progress)
+      : apps.loaded
+        ? "No longer available"
+        : reference.versionName
+          ? `Version ${reference.versionName}`
+          : "";
   return (
     <View
       testID={`published-app-${reference.appId}`}
-      style={[
-        styles.card,
-        { borderColor: theme.border, backgroundColor: theme.surfaceMuted },
-      ]}
+      style={[styles.card, { backgroundColor: theme.card }]}
     >
-      <View
-        style={[styles.tile, { backgroundColor: tileColor("indigo", theme) }]}
-      >
+      <View style={[styles.tile, { backgroundColor: theme.controlFill }]}>
         {icon ? (
           <Image
             source={{ uri: icon }}
@@ -62,7 +46,7 @@ export function PublishedAppCard({
             accessibilityIgnoresInvertColors
           />
         ) : (
-          <LayoutGrid size={22} color="#FFFFFF" />
+          <LayoutGrid size={22} color={theme.text} />
         )}
       </View>
       <View style={styles.text}>
@@ -101,7 +85,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 18,
     padding: 12,
   },

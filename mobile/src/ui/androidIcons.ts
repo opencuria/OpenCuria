@@ -3,6 +3,9 @@ import type { ImageSourcePropType } from "react-native";
 /**
  * Material vector icons for the SF Symbols used by shared row models, so
  * one row description renders with native icons on both platforms.
+ *
+ * `@expo/ui` parses these files itself and ignores `<group>` transforms, so
+ * every path must use absolute coordinates inside its viewport.
  */
 const ICONS: Record<string, ImageSourcePropType> = {
   plus: require("../../assets/native-icons/add.xml"),
@@ -20,9 +23,15 @@ const ICONS: Record<string, ImageSourcePropType> = {
   "info.circle": require("../../assets/native-icons/info.xml"),
   checkmark: require("../../assets/native-icons/check.xml"),
   "exclamationmark.triangle.fill": require("../../assets/native-icons/warning.xml"),
+  "exclamationmark.triangle": require("../../assets/native-icons/warning-amber.xml"),
+  "exclamationmark.circle.fill": require("../../assets/native-icons/error.xml"),
+  "wifi.slash": require("../../assets/native-icons/wifi-off.xml"),
   "server.rack": require("../../assets/native-icons/workspace.xml"),
   ellipsis: require("../../assets/native-icons/more-vert.xml"),
   "chevron.right": require("../../assets/native-icons/chevron-right.xml"),
+  "chevron.left": require("../../assets/native-icons/chevron-left.xml"),
+  "chevron.up": require("../../assets/native-icons/expand-less.xml"),
+  "chevron.down": require("../../assets/native-icons/expand-more.xml"),
   xmark: require("../../assets/native-icons/close.xml"),
   "calendar.badge.clock": require("../../assets/native-icons/schedule.xml"),
   clock: require("../../assets/native-icons/schedule.xml"),
@@ -31,9 +40,45 @@ const ICONS: Record<string, ImageSourcePropType> = {
   "checkmark.circle.fill": require("../../assets/native-icons/check-circle.xml"),
   "xmark.circle.fill": require("../../assets/native-icons/cancel.xml"),
   "minus.circle.fill": require("../../assets/native-icons/remove-circle.xml"),
+  "circle.dashed": require("../../assets/native-icons/pending.xml"),
   // Apps agents publish.
   "square.grid.2x2.fill": require("../../assets/native-icons/apps.xml"),
+  "square.grid.2x2": require("../../assets/native-icons/apps.xml"),
   "arrow.down.circle": require("../../assets/native-icons/download.xml"),
+  // Git, Terminal, Files, Desktop and the composer (Material Icons).
+  "arrow.down": require("../../assets/native-icons/arrow-downward.xml"),
+  "arrow.up": require("../../assets/native-icons/arrow-upward.xml"),
+  "arrow.up.circle": require("../../assets/native-icons/arrow-circle-up.xml"),
+  "arrow.up.arrow.down": require("../../assets/native-icons/swap-vert.xml"),
+  "arrow.uturn.backward": require("../../assets/native-icons/undo.xml"),
+  "arrow.triangle.branch": require("../../assets/native-icons/call-split.xml"),
+  "arrow.triangle.merge": require("../../assets/native-icons/call-merge.xml"),
+  "arrow.down.right.and.arrow.up.left": require("../../assets/native-icons/close-fullscreen.xml"),
+  "icloud.and.arrow.up": require("../../assets/native-icons/cloud-upload.xml"),
+  "tray.and.arrow.up": require("../../assets/native-icons/unarchive.xml"),
+  "smallcircle.filled.circle": require("../../assets/native-icons/radio-button-checked.xml"),
+  "doc.text.magnifyingglass": require("../../assets/native-icons/find-in-page.xml"),
+  "text.word.spacing": require("../../assets/native-icons/wrap-text.xml"),
+  "text.alignleft": require("../../assets/native-icons/format-align-left.xml"),
+  tablecells: require("../../assets/native-icons/table-chart.xml"),
+  "text.bubble": require("../../assets/native-icons/textsms.xml"),
+  "textformat.size.larger": require("../../assets/native-icons/text-increase.xml"),
+  "textformat.size.smaller": require("../../assets/native-icons/text-decrease.xml"),
+  doc: require("../../assets/native-icons/insert-drive-file.xml"),
+  "doc.on.clipboard": require("../../assets/native-icons/content-paste.xml"),
+  at: require("../../assets/native-icons/alternate-email.xml"),
+  eraser: require("../../assets/native-icons/clear-all.xml"),
+  keyboard: require("../../assets/native-icons/keyboard.xml"),
+  "keyboard.chevron.compact.down": require("../../assets/native-icons/keyboard-hide.xml"),
+  "stop.circle": require("../../assets/native-icons/stop-circle.xml"),
+  link: require("../../assets/native-icons/link.xml"),
+  paperplane: require("../../assets/native-icons/send.xml"),
+  "photo.on.rectangle": require("../../assets/native-icons/photo-library.xml"),
+  "envelope.badge": require("../../assets/native-icons/mark-email-unread.xml"),
+  "envelope.open": require("../../assets/native-icons/drafts.xml"),
+  "eye.slash": require("../../assets/native-icons/visibility-off.xml"),
+  calendar: require("../../assets/native-icons/calendar-today.xml"),
+  sunrise: require("../../assets/native-icons/wb-twilight.xml"),
   // Settings (Material Symbols, rounded).
   cpu: require("../../assets/native-icons/memory.xml"),
   sparkles: require("../../assets/native-icons/auto-awesome.xml"),

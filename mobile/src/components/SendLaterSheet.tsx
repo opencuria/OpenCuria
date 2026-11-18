@@ -6,7 +6,6 @@ import {
   sendLaterFields,
   sendLaterFromFields,
 } from "@opencuria/chat-core/sendLater";
-import { NativeForm } from "../ui/NativeForm";
 import { NativeModal } from "../ui/primitives";
 
 export interface SendLaterSheetProps {
@@ -50,7 +49,6 @@ function SendLaterForm({
       visible
       onClose={onClose}
       title="Send later"
-      scrollable={false}
       primaryAction={{
         title: actionTitle,
         disabled: Boolean(error),
@@ -59,10 +57,8 @@ function SendLaterForm({
         },
         testID: "send-later-confirm",
       }}
-      testID="send-later-sheet"
-    >
-      <NativeForm
-        sections={[
+      form={{
+        sections: [
           {
             id: "when",
             rows: [
@@ -91,8 +87,9 @@ function SendLaterForm({
               `Sends ${formatSendTime(at!)}. A busy agent receives it while it works.`,
             footerTone: error ? "danger" : undefined,
           },
-        ]}
-      />
-    </NativeModal>
+        ],
+      }}
+      testID="send-later-sheet"
+    />
   );
 }

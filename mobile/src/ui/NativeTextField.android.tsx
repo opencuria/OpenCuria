@@ -2,13 +2,68 @@ import React, { useEffect, useImperativeHandle, useRef } from "react";
 import {
   Host,
   OutlinedTextField,
+  Shape,
   Text,
   useNativeState,
+  type ShapeJSXElement,
+  type TextFieldColors,
   type TextFieldRef,
 } from "@expo/ui/jetpack-compose";
 import { fillMaxWidth, semantics } from "@expo/ui/jetpack-compose/modifiers";
 import type { NativeTextFieldProps } from "./NativeTextField.types";
-import { useTheme } from "./theme";
+import { useTheme, type OpenCuriaTheme } from "./theme";
+
+const TRANSPARENT = "#00000000";
+const RADIUS = 12;
+
+/** Ink outlined field: border and label ink when focused, neutral otherwise. */
+export function outlinedFieldColors(theme: OpenCuriaTheme): TextFieldColors {
+  return {
+    focusedTextColor: theme.text,
+    unfocusedTextColor: theme.text,
+    disabledTextColor: theme.subtleText,
+    focusedContainerColor: TRANSPARENT,
+    unfocusedContainerColor: TRANSPARENT,
+    disabledContainerColor: TRANSPARENT,
+    cursorColor: theme.text,
+    errorCursorColor: theme.danger,
+    focusedIndicatorColor: theme.text,
+    unfocusedIndicatorColor: theme.separator,
+    disabledIndicatorColor: theme.separator,
+    errorIndicatorColor: theme.danger,
+    focusedLabelColor: theme.text,
+    unfocusedLabelColor: theme.mutedText,
+    disabledLabelColor: theme.subtleText,
+    errorLabelColor: theme.danger,
+    focusedPlaceholderColor: theme.subtleText,
+    unfocusedPlaceholderColor: theme.subtleText,
+    focusedLeadingIconColor: theme.mutedText,
+    unfocusedLeadingIconColor: theme.mutedText,
+    focusedTrailingIconColor: theme.mutedText,
+    unfocusedTrailingIconColor: theme.mutedText,
+    disabledTrailingIconColor: theme.subtleText,
+  };
+}
+
+/** Rounded 12dp outline shared by text and picker fields. */
+export function outlinedFieldShape(): ShapeJSXElement {
+  return Shape.RoundedCorner({
+    cornerRadii: {
+      topStart: RADIUS,
+      topEnd: RADIUS,
+      bottomStart: RADIUS,
+      bottomEnd: RADIUS,
+    },
+  });
+}
+
+/** Ink caret handles over a neutral highlight instead of the seed color. */
+export function fieldSelectionColors(theme: OpenCuriaTheme): {
+  handleColor: string;
+  backgroundColor: string;
+} {
+  return { handleColor: theme.text, backgroundColor: theme.separator };
+}
 
 export function NativeTextField(
   props: NativeTextFieldProps,
@@ -33,7 +88,7 @@ export function NativeTextField(
     <Host
       matchContents={{ vertical: true }}
       colorScheme={theme.scheme}
-      seedColor={theme.primary}
+      seedColor={theme.seed}
       ignoreSafeAreaKeyboardInsets
     >
       <OutlinedTextField
@@ -41,6 +96,9 @@ export function NativeTextField(
         autoFocus={props.autoFocus}
         value={text}
         singleLine
+        shape={outlinedFieldShape()}
+        colors={outlinedFieldColors(theme)}
+        textSelectionColors={fieldSelectionColors(theme)}
         visualTransformation={props.secureTextEntry ? "password" : "none"}
         onValueChange={(value) => {
           latest.current = value;

@@ -4,7 +4,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { usePolling } from "../../usePolling";
@@ -90,29 +90,33 @@ export function CapturedImagesPage(): React.JSX.Element {
         },
       ]
     : [];
+  const failure = images.data
+    ? undefined
+    : loadFailure("captured images", images);
+  const captureAction = {
+    title: "Capture image",
+    symbol: "camera" as const,
+    onPress: capture,
+  };
 
   return (
     <SettingsPage
       title="Captured images"
       sections={
-        images.error && !images.data
-          ? loadErrorSections(images.error, () => void images.reload())
-          : sections
+        failure ? [] : [...refreshError("captured-images", images), ...sections]
       }
       loading={!images.data && !images.error}
       onRefresh={images.reload}
-      empty={{
-        title: "No captured images yet",
-        description:
-          "Capture a workspace to reuse its filesystem for new workspaces.",
-        symbol: "camera",
-      }}
-      primaryAction={{
-        title: "Capture image",
-        symbol: "camera",
-        onPress: capture,
-        testID: "capture-image",
-      }}
+      empty={
+        failure ?? {
+          title: "No captured images yet",
+          description:
+            "Capture a workspace to reuse its filesystem for new workspaces.",
+          symbol: "camera",
+          action: { ...captureAction, testID: "empty-capture-image" },
+        }
+      }
+      primaryAction={{ ...captureAction, testID: "capture-image" }}
       testID="settings-captured-images"
     />
   );

@@ -5,6 +5,7 @@ import type {
   NativeFormSection,
 } from "../../ui/NativeForm.types";
 import { useNotifications } from "../../notifications/NotificationContext";
+import { errorRows } from "../../ui/formStates";
 import { SettingsPage } from "../SettingsPage";
 
 /** Push notifications and, on iOS, Live Activities; permission is only asked on opt-in. */
@@ -80,17 +81,12 @@ export function NotificationsPage(): React.JSX.Element {
       ? [
           {
             id: "error",
-            footer: state.error,
-            footerTone: "danger" as const,
-            rows: [
-              {
-                kind: "button" as const,
-                id: "retry",
-                title: "Retry notifications",
-                symbol: "arrow.clockwise" as const,
-                onPress: () => void controller?.refresh(),
-              },
-            ],
+            rows: errorRows(
+              "notifications",
+              state.error,
+              () => void controller?.refresh(),
+              state.busy,
+            ),
           },
         ]
       : []),

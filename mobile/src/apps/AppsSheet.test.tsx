@@ -121,11 +121,14 @@ describe("AppsSheet", () => {
     expect(screen.getByText("Installed")).toBeTruthy();
     expect(screen.getByText("Ready to install")).toBeTruthy();
     expect(screen.getByText("Version 1.1.0 → 1.2.0")).toBeTruthy();
-    expect(screen.getByText("Update")).toBeTruthy();
-    expect(screen.getByText("Install")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Update Tip" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Install Game" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open Todo" })).toBeTruthy();
 
     await act(async () =>
-      fireEvent.press(screen.getByRole("button", { name: "Todo, Version 1.1.0" })),
+      fireEvent.press(
+        screen.getByRole("button", { name: "Todo, Version 1.1.0" }),
+      ),
     );
     expect(apps.open).toHaveBeenCalledWith("todo");
 
@@ -150,6 +153,65 @@ describe("AppsSheet", () => {
     expect(apps.open).toHaveBeenCalledWith("tip");
   });
 
+  it("runs each app's action from its capsule", async () => {
+    const apps = state();
+    renderSheet(apps);
+    await act(async () =>
+      fireEvent.press(screen.getByTestId("app-action-game")),
+    );
+    expect(apps.install).toHaveBeenCalledWith("game");
+    expect(apps.open).not.toHaveBeenCalled();
+
+    await act(async () =>
+      fireEvent.press(screen.getByTestId("app-action-todo")),
+    );
+    expect(apps.open).toHaveBeenCalledWith("todo");
+    expect(apps.install).not.toHaveBeenCalledWith("todo");
+
+    await act(async () =>
+      fireEvent.press(screen.getByTestId("app-action-tip")),
+    );
+    expect(apps.install).toHaveBeenCalledWith("tip");
+    expect(apps.open).toHaveBeenCalledWith("tip");
+  });
+
+  it("offers no action for apps this device cannot run", () => {
+    renderSheet(
+      state(
+        {},
+        appRows(
+          [
+            published("todo", "Todo"),
+            {
+              ...published("future", "Future"),
+              latest_version: {
+                ...published("future", "Future").latest_version!,
+                sdk_version: "58.0.0",
+              },
+            },
+          ],
+          [],
+          { scope: SCOPE, platform: "android", hostSdk: 57 },
+        ),
+      ),
+    );
+    expect(screen.getByTestId("app-action-todo")).toBeTruthy();
+    expect(screen.queryByTestId("app-action-future")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /^Future, Needs Expo SDK 58/ }).props
+        .accessibilityState.disabled,
+    ).toBe(true);
+  });
+
+  it("explains a build that cannot open apps", () => {
+    renderSheet(state({ supported: false }));
+    expect(
+      screen.getByText("This build of OpenCuria cannot open apps."),
+    ).toBeTruthy();
+    expect(screen.queryByTestId("app-action-todo")).toBeNull();
+    expect(screen.queryByTestId("app-action-game")).toBeNull();
+  });
+
   it("confirms before removing an app from the device", () => {
     const alert = jest
       .spyOn(Alert, "alert")
@@ -168,11 +230,14 @@ describe("AppsSheet", () => {
     expect(apps.uninstall).toHaveBeenCalledWith("todo");
   });
 
-  it("keeps installed apps usable while the server is unreachable", () => {
+  it("keeps installed apps usable while the server is unreachable", async () => {
     const apps = state({ error: "Network request failed" });
     renderSheet(apps);
     expect(screen.getByText(/Installed apps still open/)).toBeTruthy();
     expect(screen.getByText("Installed")).toBeTruthy();
+    expect(screen.queryByText("Couldn’t load apps")).toBeNull();
+    await act(async () => fireEvent.press(screen.getByTestId("apps-retry")));
+    expect(apps.refresh).toHaveBeenCalledTimes(2);
   });
 
   it("shows each app's icon, installed or not, and the symbol without one", () => {
@@ -203,8 +268,10 @@ describe("AppsSheet", () => {
       }),
     );
     renderSheet(apps);
-    expect(screen.getByText(/You’re offline\. Installed apps still open/)).toBeTruthy();
-    expect(screen.queryByText("Loading apps…")).toBeNull();
+    expect(
+      screen.getByText(/You’re offline\. Installed apps still open/),
+    ).toBeTruthy();
+    expect(screen.queryByText("Loading")).toBeNull();
     expect(screen.queryByText("Retry")).toBeNull();
     expect(screen.getByText("Todo")).toBeTruthy();
   });
@@ -213,9 +280,30 @@ describe("AppsSheet", () => {
     const busy = state({ progress: { game: 0.42 } });
     const { unmount } = renderSheet(busy);
     expect(screen.getByText("Downloading… 42%")).toBeTruthy();
+    expect(
+      screen.getByTestId("app-action-game").props.accessibilityState.busy,
+    ).toBe(true);
     unmount();
     renderSheet(state({}, []));
     expect(screen.getByText("No apps yet")).toBeTruthy();
+  });
+
+  it("shows a spinner while the first load runs", () => {
+    renderSheet(state({ loaded: false, loading: true }, []));
+    expect(screen.getByText("Loading")).toBeTruthy();
+    expect(screen.queryByText("No apps yet")).toBeNull();
+  });
+
+  it("offers a retry when apps could not load and none are installed", async () => {
+    const apps = state({ loaded: false, error: "Network request failed" }, []);
+    renderSheet(apps);
+    expect(screen.getByText("Couldn’t load apps")).toBeTruthy();
+    expect(screen.getByText("Network request failed")).toBeTruthy();
+    expect(apps.refresh).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      fireEvent.press(screen.getByRole("button", { name: "Retry" })),
+    );
+    expect(apps.refresh).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -241,6 +329,18 @@ describe("PublishedAppCard", () => {
     );
     expect(apps.install).toHaveBeenCalledWith("tip");
     expect(apps.open).toHaveBeenCalledWith("tip");
+  });
+
+  it("shows the download progress before the app is listed", () => {
+    render(
+      <ThemeProvider initialMode="light">
+        <PublishedAppCard
+          reference={reference}
+          apps={state({ loaded: false, progress: { tip: 0.42 } }, [])}
+        />
+      </ThemeProvider>,
+    );
+    expect(screen.getByText("Downloading… 42%")).toBeTruthy();
   });
 
   it("says when the app is gone", () => {
@@ -404,7 +504,10 @@ describe("useApps", () => {
       expect(results).toEqual([true, false]);
     });
     await act(async () => {
-      await Promise.all([result.current.open("game"), result.current.open("game")]);
+      await Promise.all([
+        result.current.open("game"),
+        result.current.open("game"),
+      ]);
     });
 
     expect(local.install).toHaveBeenCalledTimes(1);
@@ -442,7 +545,10 @@ describe("useApps", () => {
     const icons = {
       icons: jest.fn(async (sources: Array<{ appId: string }>) =>
         Object.fromEntries(
-          sources.map((source) => [source.appId, `file:///small/${source.appId}`]),
+          sources.map((source) => [
+            source.appId,
+            `file:///small/${source.appId}`,
+          ]),
         ),
       ),
     };
@@ -460,9 +566,11 @@ describe("useApps", () => {
         todo: "file:///small/todo",
       }),
     );
-    const sources = icons.icons.mock.lastCall![0] as Array<
-      { appId: string; file?: string; request?: () => unknown }
-    >;
+    const sources = icons.icons.mock.lastCall![0] as Array<{
+      appId: string;
+      file?: string;
+      request?: () => unknown;
+    }>;
     expect(sources.find((source) => source.appId === "todo")?.file).toBe(
       "file:///docs/todo/icon.png",
     );

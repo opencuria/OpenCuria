@@ -3,6 +3,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { deletionRoute } from "../DeletionPage";
@@ -34,11 +35,13 @@ export function CapturedImagePage({
         title="Captured image"
         sections={[]}
         loading={!images.data && !images.error}
-        empty={{
-          title: "Image unavailable",
-          description: images.error ?? "This image no longer exists.",
-          symbol: "exclamationmark.triangle.fill",
-        }}
+        empty={
+          loadFailure("captured image", images) ?? {
+            title: "Image unavailable",
+            description: "This image no longer exists.",
+            symbol: "exclamationmark.triangle",
+          }
+        }
         testID="settings-captured-image"
       />
     );

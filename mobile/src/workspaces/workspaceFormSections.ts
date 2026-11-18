@@ -13,6 +13,7 @@ import {
   type QemuResources,
 } from "@opencuria/chat-core/workspaceCreation";
 import type { Credential, Plugin } from "@opencuria/client";
+import { errorRows } from "../ui/formStates";
 import type { NativeFormRow, NativeFormSection } from "../ui/NativeForm.types";
 import type { WorkspaceCatalog } from "./useWorkspaceCatalog";
 import {
@@ -68,7 +69,7 @@ function pluginSubtitle(
     text:
       available.length === missing.length
         ? `Select a ${names} credential below`
-        : `Needs a ${names} credential – add it in the web app`,
+        : `Needs a ${names} credential – add it in Settings → Credentials`,
     tone: "warning",
   };
 }
@@ -98,24 +99,12 @@ export function pluginCredentialSections({
         {
           id: "catalog",
           title: "Plugins & credentials",
-          rows: [
-            {
-              kind: "note",
-              id: "catalog-error",
-              text: `Could not load plugins or credentials: ${catalog.error}`,
-              tone: "danger",
-            },
-            {
-              kind: "button",
-              id: "catalog-retry",
-              title: "Retry",
-              symbol: "arrow.counterclockwise",
-              busy: catalog.loading,
-              onPress: () => {
-                void catalog.reload();
-              },
-            },
-          ],
+          rows: errorRows(
+            "catalog",
+            catalog.error,
+            () => void catalog.reload(),
+            catalog.loading,
+          ),
         },
       ],
     };
@@ -131,6 +120,7 @@ export function pluginCredentialSections({
               kind: "note",
               id: "catalog-loading",
               text: "Loading plugins and credentials…",
+              busy: true,
             },
           ],
         },
@@ -243,7 +233,7 @@ export function pluginCredentialSections({
           {
             kind: "note",
             id: "credentials-empty",
-            text: "No credentials yet. Add them in the web app.",
+            text: "No credentials yet. Add them in Settings → Credentials.",
           },
         ],
     footer: selection.duplicateServiceIds.length

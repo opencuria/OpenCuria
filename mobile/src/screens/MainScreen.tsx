@@ -73,12 +73,11 @@ import {
   pickPhoto,
   uploadAttachments,
 } from "../platform";
-import { Banner, Button, NativeModal } from "../ui/primitives";
+import { Banner, NativeModal } from "../ui/primitives";
 import { Drawer } from "../ui/Drawer";
 import { useChromeTopInset } from "../ui/chromeInset";
 import type { NativeMenuAction } from "../ui/NativeMenu";
 import { WorkspaceSidebar } from "../components/WorkspaceSidebar";
-import { NativeTextField } from "../ui/NativeTextField";
 import { useTheme } from "../ui/theme";
 import { useSession } from "./SessionContext";
 import { useNotifications } from "../notifications/NotificationContext";
@@ -258,6 +257,8 @@ export function MainScreen(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Why the workspace list could not load; cleared by the next success. */
+  const [workspacesError, setWorkspacesError] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -437,6 +438,7 @@ export function MainScreen(): React.JSX.Element {
         )
           return;
         setWorkspaces(ws);
+        setWorkspacesError(null);
         setConversations(rows);
         setSkills(loadedSkills);
         void savedRef.current?.saveOverview(ws, rows).catch(() => undefined);
@@ -480,8 +482,12 @@ export function MainScreen(): React.JSX.Element {
         if (
           mountedRef.current &&
           requestGeneration === overviewGeneration.current
-        )
+        ) {
           setError(errorMessage(cause, "Could not load workspace data."));
+          setWorkspacesError(
+            errorMessage(cause, "Check your connection and try again."),
+          );
+        }
       } finally {
         if (
           mountedRef.current &&
@@ -514,6 +520,7 @@ export function MainScreen(): React.JSX.Element {
       (overview?.conversations ?? []).map((row) => [row.session_id, row]),
     );
     setWorkspaces(overview?.workspaces ?? []);
+    setWorkspacesError(null);
     setConversations(
       savedConversations(
         chats.map((chat) => ({
@@ -627,6 +634,7 @@ export function MainScreen(): React.JSX.Element {
     setSkillIds([]);
     setConversations([]);
     setWorkspaces([]);
+    setWorkspacesError(null);
     setCatalogError(null);
     setEngines([]);
     setModels([]);
@@ -1894,6 +1902,8 @@ export function MainScreen(): React.JSX.Element {
         client={client}
         organizationId={session?.organizationId ?? null}
         workspaces={workspaces}
+        loading={loading}
+        error={workspacesError}
         activeWorkspaceId={workspaceId}
         onOpenWorkspace={chooseWorkspace}
         onRefresh={() => loadOverview(true)}
@@ -2005,24 +2015,36 @@ export function MainScreen(): React.JSX.Element {
         onClose={() => setSheet(null)}
         title="Rename conversation"
         testID="rename-session-sheet"
-      >
-        <NativeTextField
-          label="Conversation name"
-          value={renameText}
-          onChangeText={setRenameText}
-          autoFocus
-        />
-        <Button
-          title="Save name"
-          variant="primary"
-          onPress={() => {
+        primaryAction={{
+          title: "Save",
+          onPress: () => {
             void saveRename();
-          }}
-          disabled={!renameText.trim()}
-          busy={renaming}
-          style={{ alignSelf: "stretch" }}
-        />
-      </NativeModal>
+          },
+          disabled: !renameText.trim(),
+          busy: renaming,
+          testID: "rename-save",
+        }}
+        form={{
+          sections: [
+            {
+              id: "rename",
+              rows: [
+                {
+                  kind: "text",
+                  id: "rename-title",
+                  label: "Name",
+                  value: renameText,
+                  onChange: setRenameText,
+                  autoFocus: true,
+                  onSubmit: () => {
+                    void saveRename();
+                  },
+                },
+              ],
+            },
+          ],
+        }}
+      />
       {workspace && sheet === "file" ? (
         <FileViewerSheet
           key={contextKey}

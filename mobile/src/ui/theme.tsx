@@ -13,13 +13,22 @@ import * as SecureStore from "expo-secure-store";
 export type ThemeMode = "system" | "light" | "dark";
 export type ColorScheme = "light" | "dark";
 
-/** Semantic colors for the native chat, controls, and message surfaces. */
+/**
+ * Semantic colors of the app's one design language: ink on a white or black
+ * canvas, as in the chat. Color only marks status (see `statusColors.ts`) and
+ * destructive actions; the accent (`primary`) is the ink itself.
+ */
 export interface OpenCuriaTheme {
   scheme: ColorScheme;
+  /** Canvas of the chat and of every sheet and page. */
   background: string;
   surface: string;
   raised: string;
   surfaceMuted: string;
+  /** Grouped rows and cards on the canvas. */
+  card: string;
+  /** Hairline between rows of a card. */
+  separator: string;
   /** Navigation revealed beneath the chat when the sidebar slides open. */
   sidebar: string;
   userBubble: string;
@@ -31,14 +40,21 @@ export interface OpenCuriaTheme {
   mutedText: string;
   subtleText: string;
   border: string;
+  /** Ink for the one prominent action, selection and control tint. */
   primary: string;
+  /** Label on a `primary` fill. */
   primaryForeground: string;
+  /**
+   * Seed of the Material palette that Compose hosts generate on Android.
+   * Components there set explicit ink colors; the seed only keeps the
+   * generated palette stable for system details such as ripples.
+   */
+  seed: string;
   brand: string;
   danger: string;
   dangerSurface: string;
   success: string;
   warning: string;
-  info: string;
   overlay: string;
   codeBackground: string;
 }
@@ -50,6 +66,8 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     surface: "#FFFFFF",
     raised: "#FFFFFF",
     surfaceMuted: "#F2F2F7",
+    card: "#F2F2F7",
+    separator: "#D8D8DC",
     sidebar: "#F4F4F5",
     userBubble: "#E9E9EB",
     composer: "#FFFFFF",
@@ -59,14 +77,14 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     mutedText: "#606060",
     subtleText: "#909090",
     border: "#E4E4E4",
-    primary: "#007AFF",
+    primary: "#0D0D0D",
     primaryForeground: "#FFFFFF",
+    seed: "#007AFF",
     brand: "#534AB7",
     danger: "#B42318",
     dangerSurface: "#FEF3F2",
     success: "#18794E",
     warning: "#8A5A00",
-    info: "#3159A5",
     overlay: "rgba(15, 15, 20, 0.42)",
     codeBackground: "#F3F3F3",
   },
@@ -76,6 +94,8 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     surface: "#1C1C1E",
     raised: "#303030",
     surfaceMuted: "#262626",
+    card: "#1C1C1E",
+    separator: "#38383A",
     sidebar: "#151517",
     userBubble: "#2C2C2E",
     composer: "#303030",
@@ -85,14 +105,14 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     mutedText: "#B4B4B4",
     subtleText: "#969696",
     border: "#414141",
-    primary: "#0A84FF",
-    primaryForeground: "#FFFFFF",
+    primary: "#F5F5F5",
+    primaryForeground: "#000000",
+    seed: "#0A84FF",
     brand: "#A49BFF",
     danger: "#FF8A80",
     dangerSurface: "#351D20",
     success: "#79D5A6",
     warning: "#F2C66D",
-    info: "#9BB9FF",
     overlay: "rgba(0, 0, 0, 0.68)",
     codeBackground: "#202020",
   },

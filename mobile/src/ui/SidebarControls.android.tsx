@@ -2,22 +2,21 @@ import React from "react";
 import { View } from "react-native";
 import {
   Button,
-  DockedSearchBar,
   FilledTonalIconButton,
   Host,
   Icon,
   IconButton,
-  Row,
   Spacer,
   Text,
 } from "@expo/ui/jetpack-compose";
 import {
+  fillMaxWidth,
   semantics,
   size,
-  weight,
   width,
 } from "@expo/ui/jetpack-compose/modifiers";
 import { androidIcon } from "./androidIcons";
+import { SearchField } from "./SearchField.android";
 import type {
   AccountButtonProps,
   NewChatButtonProps,
@@ -39,7 +38,7 @@ export function SidebarIconButton({
       <Host
         style={{ width: 48, height: 48 }}
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <FilledTonalIconButton
@@ -70,7 +69,7 @@ export function AccountButton({
       <Host
         style={{ width: 48, height: 48 }}
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <FilledTonalIconButton
@@ -102,7 +101,7 @@ export function NewChatButton({
       <Host
         matchContents
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <Button
@@ -126,8 +125,9 @@ export function NewChatButton({
   );
 }
 
-/** Material 3 docked search bar with a close button beside it. */
+/** The shared monochrome search pill with a close button beside it. */
 export function SidebarSearchField({
+  value,
   onChange,
   onCancel,
   placeholder,
@@ -136,35 +136,31 @@ export function SidebarSearchField({
 }: SidebarSearchFieldProps): React.JSX.Element {
   const { theme } = useTheme();
   return (
-    <View testID={testID} style={{ flex: 1 }}>
+    <View
+      testID={testID}
+      style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 4 }}
+    >
+      <View style={{ flex: 1 }}>
+        <SearchField
+          search={{ value, onChange, placeholder }}
+          accessibilityLabel={accessibilityLabel}
+          autoFocus
+          modifiers={[fillMaxWidth()]}
+        />
+      </View>
       <Host
-        matchContents={{ vertical: true }}
+        matchContents
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
-        <Row verticalAlignment="center">
-          <DockedSearchBar
-            onQueryChange={onChange}
-            modifiers={[
-              weight(1),
-              semantics({ contentDescription: accessibilityLabel }),
-            ]}
-          >
-            <DockedSearchBar.LeadingIcon>
-              <Icon source={androidIcon("magnifyingglass")!} size={24} />
-            </DockedSearchBar.LeadingIcon>
-            <DockedSearchBar.Placeholder>
-              <Text>{placeholder}</Text>
-            </DockedSearchBar.Placeholder>
-          </DockedSearchBar>
-          <IconButton
-            onClick={onCancel}
-            modifiers={[semantics({ contentDescription: "Cancel" })]}
-          >
-            <Icon source={androidIcon("xmark")!} size={24} />
-          </IconButton>
-        </Row>
+        <IconButton
+          onClick={onCancel}
+          colors={{ contentColor: theme.text }}
+          modifiers={[semantics({ contentDescription: "Cancel" })]}
+        >
+          <Icon source={androidIcon("xmark")!} size={24} />
+        </IconButton>
       </Host>
     </View>
   );

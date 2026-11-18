@@ -23,9 +23,10 @@ export function PluginSkillViewPage({
       label="Markdown"
       text={plugins.data ? (skill?.body ?? "") : undefined}
       monospace={false}
-      loading={!plugins.data}
+      loading={!plugins.data && !plugins.error}
       error={plugins.error}
       onRetry={() => void plugins.reload()}
+      things="skill"
       emptyText="This skill no longer exists."
       testID="settings-plugin-skill-view"
     />

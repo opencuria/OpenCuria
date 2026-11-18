@@ -172,7 +172,13 @@ export function ModelSheet({
               title: "All models",
               rows: matching.length
                 ? matching.map(modelRow)
-                : [{ id: "no-models-found", title: "No models found" }],
+                : [
+                    {
+                      id: "no-models-found",
+                      title: "No results",
+                      subtitle: `Nothing matches “${query.trim()}”.`,
+                    },
+                  ],
             },
           ]}
         />
@@ -267,7 +273,7 @@ export function ModelSheet({
               Effort
             </Text>
             {effort ? (
-              <Text style={[styles.effortValue, { color: theme.primary }]}>
+              <Text style={[styles.effortValue, { color: theme.mutedText }]}>
                 {formatEffort(effort)}
               </Text>
             ) : null}

@@ -102,7 +102,7 @@ internal class AppIcons(private val context: Context) {
   }
 
   private companion object {
-    /** `tileColor("indigo")` of OpenCuria's app tiles (UIKit system indigo). */
+    /** Fallback tile of app shortcuts without an icon (UIKit system indigo). */
     val APP_TILE_COLOR = Color.rgb(0x58, 0x56, 0xD6)
     const val APP_TILE_GLYPH = 0.5f
     const val PREVIEW_INSET = 0.17f

@@ -176,7 +176,11 @@ function mockClient() {
   };
 }
 
-function renderSheet(client = mockClient(), workspaces = [api, docs]) {
+function renderSheet(
+  client = mockClient(),
+  workspaces = [api, docs],
+  { loading = false, error = null as string | null } = {},
+) {
   const onOpenWorkspace = jest.fn();
   const onRefresh = jest.fn().mockResolvedValue(undefined);
   const tree = render(
@@ -187,6 +191,8 @@ function renderSheet(client = mockClient(), workspaces = [api, docs]) {
         client={client as unknown as OpenCuriaClient}
         organizationId="org"
         workspaces={workspaces}
+        loading={loading}
+        error={error}
         activeWorkspaceId="ws-api"
         onOpenWorkspace={onOpenWorkspace}
         onRefresh={onRefresh}
@@ -206,8 +212,12 @@ afterEach(() => jest.restoreAllMocks());
 
 it("lists workspaces by status, searches and opens a workspace's chats", async () => {
   const { onOpenWorkspace, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
-  expect(screen.getByText("Stopped · 1")).toBeTruthy();
+  // Group titles alone, without counts.
+  const running = await screen.findByTestId("form-section-running");
+  expect(within(running).getByText("Running")).toBeTruthy();
+  expect(
+    within(screen.getByTestId("form-section-stopped")).getAllByText("Stopped"),
+  ).toHaveLength(2);
   const row = screen.getByRole("button", {
     name: /^api, Running · node-dev · v3/,
   });
@@ -221,13 +231,89 @@ it("lists workspaces by status, searches and opens a workspace's chats", async (
 
   fireEvent.changeText(screen.getByLabelText("Search workspaces"), "zzz");
   expect(screen.getByText("No results")).toBeTruthy();
+  expect(screen.getByText("Nothing matches “zzz”.")).toBeTruthy();
+  expect(screen.queryByTestId("empty-new-workspace")).toBeNull();
+  tree.unmount();
+});
+
+it("offers a new workspace when there is none yet", async () => {
+  const { tree } = renderSheet(mockClient(), []);
+  expect(screen.getByText("No workspaces yet")).toBeTruthy();
+  // One main action: the empty state's button replaces the toolbar's.
+  expect(screen.queryByTestId("new-workspace")).toBeNull();
+  fireEvent.press(screen.getByTestId("empty-new-workspace"));
+  expect(await screen.findByTestId("create-workspace-sheet")).toBeTruthy();
+  tree.unmount();
+});
+
+it("shows a spinner, not an empty list, while workspaces load", () => {
+  const { tree } = renderSheet(mockClient(), [], { loading: true });
+  expect(screen.getByText("Loading")).toBeTruthy();
+  expect(screen.queryByText("No workspaces yet")).toBeNull();
+  tree.unmount();
+});
+
+it("offers a retry when workspaces could not load", async () => {
+  const { onRefresh, tree } = renderSheet(mockClient(), [], {
+    error: "Network request failed",
+  });
+  expect(screen.getByText("Couldn’t load workspaces")).toBeTruthy();
+  expect(screen.getByText("Network request failed")).toBeTruthy();
+  expect(screen.queryByText("No workspaces yet")).toBeNull();
+  // Retry is not the same action, so creating stays available.
+  expect(screen.getByTestId("new-workspace")).toBeTruthy();
+  await act(async () =>
+    fireEvent.press(screen.getByRole("button", { name: "Retry" })),
+  );
+  expect(onRefresh).toHaveBeenCalledTimes(1);
+  tree.unmount();
+});
+
+it("keeps the last workspaces above a failed refresh", async () => {
+  const { onRefresh, tree } = renderSheet(mockClient(), [api, docs], {
+    error: "Network request failed",
+  });
+  expect(
+    within(screen.getByTestId("form-section-error")).getByText(
+      "Network request failed",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByTestId("form-section-running")).toBeTruthy();
+  await act(async () =>
+    fireEvent.press(screen.getByTestId("workspaces-retry")),
+  );
+  expect(onRefresh).toHaveBeenCalledTimes(1);
+  tree.unmount();
+});
+
+it("asks before discarding a new workspace's entries", async () => {
+  const alert = jest.spyOn(Alert, "alert").mockImplementation(() => undefined);
+  const { tree } = renderSheet();
+  await screen.findByTestId("form-section-running");
+  const closeNewWorkspace = () =>
+    fireEvent.press(screen.getAllByRole("button", { name: "Close" }).at(-1)!);
+
+  fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
+  await screen.findByTestId("create-workspace-sheet");
+  closeNewWorkspace();
+  expect(alert).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("create-workspace-sheet")).toBeNull();
+
+  fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
+  const sheet = await screen.findByTestId("create-workspace-sheet");
+  fireEvent.changeText(within(sheet).getByLabelText("Name"), "billing");
+  closeNewWorkspace();
+  expect(alert.mock.calls.at(-1)?.[0]).toBe("Discard changes?");
+  expect(screen.getByTestId("create-workspace-sheet")).toBeTruthy();
+  act(() => alertButton(alert, "Discard").onPress?.());
+  expect(screen.queryByTestId("create-workspace-sheet")).toBeNull();
   tree.unmount();
 });
 
 it("starts, stops and removes workspaces from their row menu", async () => {
   const alert = jest.spyOn(Alert, "alert").mockImplementation(() => undefined);
   const { client, onRefresh, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
 
   fireEvent.press(screen.getByRole("button", { name: "Actions for docs" }));
   fireEvent.press(screen.getByRole("button", { name: "Start" }));
@@ -254,7 +340,7 @@ it("starts, stops and removes workspaces from their row menu", async () => {
 it("resets or updates a workspace only after confirming the data loss", async () => {
   const alert = jest.spyOn(Alert, "alert").mockImplementation(() => undefined);
   const { client, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "Actions for api" }));
   fireEvent.press(screen.getByRole("button", { name: "Update to v4" }));
   expect(alert.mock.calls.at(-1)?.[1]).toContain("permanently deleted");
@@ -269,7 +355,7 @@ it("resets or updates a workspace only after confirming the data loss", async ()
 
 it("edits a workspace and saves only what changed", async () => {
   const { client, onRefresh, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "Details for api" }));
   const sheet = await screen.findByTestId("workspace-detail-sheet");
   await waitFor(() =>
@@ -279,10 +365,7 @@ it("edits a workspace and saves only what changed", async () => {
     screen.getByTestId("workspace-save").props.accessibilityState.disabled,
   ).toBe(true);
 
-  fireEvent.changeText(
-    within(sheet).getByLabelText("Workspace name"),
-    "api-renamed",
-  );
+  fireEvent.changeText(within(sheet).getByLabelText("Name"), "api-renamed");
   fireEvent.press(
     within(sheet).getByRole("button", { name: "Increase Memory" }),
   );
@@ -314,7 +397,7 @@ it("shows the license state of a Windows workspace in its details", async () => 
     },
   });
   const { tree } = renderSheet(mockClient(), [windows, docs]);
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "Details for win" }));
   const sheet = await screen.findByTestId("workspace-detail-sheet");
   expect(
@@ -323,7 +406,7 @@ it("shows the license state of a Windows workspace in its details", async () => 
   tree.unmount();
 
   const linux = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "Details for api" }));
   const linuxSheet = await screen.findByTestId("workspace-detail-sheet");
   expect(within(linuxSheet).getByText("Image: node-dev · v3")).toBeTruthy();
@@ -333,7 +416,7 @@ it("shows the license state of a Windows workspace in its details", async () => 
 
 it("blocks creation until required plugin credentials are selected", async () => {
   const { client, onRefresh, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
   const sheet = await screen.findByTestId("create-workspace-sheet");
   await waitFor(() =>
@@ -379,9 +462,32 @@ it("blocks creation until required plugin credentials are selected", async () =>
   tree.unmount();
 });
 
+it("retries plugins and credentials that could not load", async () => {
+  const client = mockClient();
+  client.plugins.list.mockRejectedValueOnce(new Error("Plugins unavailable"));
+  const { tree } = renderSheet(client);
+  await screen.findByTestId("form-section-running");
+  fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
+  const sheet = await screen.findByTestId("create-workspace-sheet");
+  expect(await within(sheet).findByText("Plugins unavailable")).toBeTruthy();
+  fireEvent.changeText(within(sheet).getByLabelText("Name"), "billing");
+  expect(
+    screen.getByTestId("workspace-create").props.accessibilityState.disabled,
+  ).toBe(true);
+
+  await act(async () =>
+    fireEvent.press(within(sheet).getByTestId("catalog-retry")),
+  );
+  await waitFor(() =>
+    expect(within(sheet).getByRole("switch", { name: "GitHub" })).toBeTruthy(),
+  );
+  expect(within(sheet).queryByText("Plugins unavailable")).toBeNull();
+  tree.unmount();
+});
+
 it("clones captured images without runner or resource choices", async () => {
   const { client, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
   const sheet = await screen.findByTestId("create-workspace-sheet");
   await waitFor(() =>
@@ -405,7 +511,7 @@ it("clones captured images without runner or resource choices", async () => {
 
 it("captures the next version of the workspace's own image", async () => {
   const { client, tree } = renderSheet();
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "Actions for api" }));
   fireEvent.press(screen.getByRole("button", { name: "Capture image" }));
   const sheet = await screen.findByTestId("capture-image-sheet");
@@ -442,7 +548,7 @@ it("creates Windows workspaces with at least the image minimums", async () => {
     },
   ]);
   const { tree } = renderSheet(client);
-  await waitFor(() => expect(screen.getByText("Running · 1")).toBeTruthy());
+  await screen.findByTestId("form-section-running");
   fireEvent.press(screen.getByRole("button", { name: "New workspace" }));
   const sheet = await screen.findByTestId("create-workspace-sheet");
   await waitFor(() =>

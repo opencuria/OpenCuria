@@ -3,6 +3,7 @@ import { Alert } from "react-native";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { TextPage } from "../TextPage";
@@ -195,18 +196,24 @@ export function SkillPage({
       title={skill ? skill.name : "New skill"}
       sections={sections}
       loading={!form && !skills.data && !skills.error}
-      empty={{
-        title: "Skill unavailable",
-        description: skills.error ?? "This skill no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
-      }}
-      primaryAction={{
-        title: skill ? "Save" : "Create",
-        onPress: save,
-        busy: busy === "save",
-        disabled: !valid || Boolean(busy),
-        testID: "save-skill",
-      }}
+      empty={
+        (form ? undefined : loadFailure("skill", skills)) ?? {
+          title: "Skill unavailable",
+          description: "This skill no longer exists.",
+          symbol: "exclamationmark.triangle",
+        }
+      }
+      primaryAction={
+        form
+          ? {
+              title: skill ? "Save" : "Create",
+              onPress: save,
+              busy: busy === "save",
+              disabled: !valid || Boolean(busy),
+              testID: "save-skill",
+            }
+          : undefined
+      }
       testID="settings-skill"
     />
   );

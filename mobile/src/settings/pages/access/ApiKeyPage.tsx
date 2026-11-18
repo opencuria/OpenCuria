@@ -3,7 +3,7 @@ import { Alert } from "react-native";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
-import { autosaveSection } from "../../sections";
+import { autosaveSection, loadFailure, pendingSection } from "../../sections";
 import { useSettings } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { useAutosave } from "../../useAutosave";
@@ -58,11 +58,13 @@ export function ApiKeyPage({ keyId }: { keyId: string }): React.JSX.Element {
         title="API key"
         sections={[]}
         loading={!keys.data && !keys.error}
-        empty={{
-          title: "API key unavailable",
-          description: keys.error ?? "This key no longer exists.",
-          symbol: "exclamationmark.triangle.fill",
-        }}
+        empty={
+          loadFailure("API key", keys) ?? {
+            title: "API key unavailable",
+            description: "This key no longer exists.",
+            symbol: "exclamationmark.triangle",
+          }
+        }
         testID="settings-api-key"
       />
     );
@@ -142,10 +144,21 @@ export function ApiKeyPage({ keyId }: { keyId: string }): React.JSX.Element {
         },
       ],
     },
-    ...(active && access && permissions.data
+    ...(active
       ? [
-          ...permissionSections(access, permissions.data, setAccess),
-          autosaveSection(autosave),
+          ...(access && permissions.data
+            ? [
+                ...permissionSections(access, permissions.data, setAccess),
+                autosaveSection(autosave),
+              ]
+            : [
+                pendingSection("permissions", {
+                  loading: "Loading permissions…",
+                  error: permissions.error,
+                  retry: () => void permissions.reload(),
+                }),
+              ]),
+          // Revoking does not depend on the permissions.
           {
             id: "revoke",
             rows: [
@@ -162,24 +175,13 @@ export function ApiKeyPage({ keyId }: { keyId: string }): React.JSX.Element {
             ],
           },
         ]
-      : active
-        ? [
-            {
-              id: "permissions",
-              footer: permissions.error ?? "Loading permissions…",
-              footerTone: permissions.error
-                ? ("danger" as const)
-                : ("muted" as const),
-              rows: [],
-            },
-          ]
-        : [
-            {
-              id: "revoked",
-              footer: "Revoked keys cannot be used or changed.",
-              rows: [],
-            },
-          ]),
+      : [
+          {
+            id: "revoked",
+            footer: "Revoked keys cannot be used or changed.",
+            rows: [],
+          },
+        ]),
   ];
 
   return (

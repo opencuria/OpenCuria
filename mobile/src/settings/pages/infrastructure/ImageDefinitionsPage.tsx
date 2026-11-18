@@ -8,7 +8,7 @@ import type { ImageDefinition } from "@opencuria/client";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { usePolling } from "../../usePolling";
@@ -61,34 +61,37 @@ export function ImageDefinitionsPage(): React.JSX.Element {
         },
       ]
     : [];
+  const failure = definitions.data
+    ? undefined
+    : loadFailure("image definitions", definitions);
+  // Creating definitions is an admin setting.
+  const create = isAdmin
+    ? {
+        title: "New definition",
+        symbol: "plus" as const,
+        onPress: () => navigation.push(route("image-definition-editor", "new")),
+      }
+    : undefined;
   return (
     <SettingsPage
       title="Image definitions"
       sections={
-        definitions.error && !definitions.data
-          ? loadErrorSections(
-              definitions.error,
-              () => void definitions.reload(),
-            )
-          : sections
+        failure
+          ? []
+          : [...refreshError("image-definitions", definitions), ...sections]
       }
       loading={!definitions.data && !definitions.error}
       onRefresh={definitions.reload}
-      empty={{
-        title: "No image definitions yet",
-        symbol: "square.stack.3d.up",
-      }}
-      primaryAction={
-        isAdmin
-          ? {
-              title: "New definition",
-              symbol: "plus",
-              onPress: () =>
-                navigation.push(route("image-definition-editor", "new")),
-              testID: "new-image-definition",
-            }
-          : undefined
+      empty={
+        failure ?? {
+          title: "No image definitions yet",
+          description:
+            "Define a base distro and packages to build workspace images.",
+          symbol: "square.stack.3d.up",
+          action: create && { ...create, testID: "empty-new-image-definition" },
+        }
       }
+      primaryAction={create && { ...create, testID: "new-image-definition" }}
       testID="settings-image-definitions"
     />
   );

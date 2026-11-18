@@ -48,7 +48,10 @@ hosts; public hosts need `https://`.
 
 - `app/`: Expo Router routes only. Screens live in `src/screens/`; never add `src/app/`.
 - `src/state/chatController.ts`: REST hydration, live subscriptions, immutable chat snapshots.
-- `src/components/`, `src/ui/`: chat presentation and native controls.
+- `src/components/`, `src/ui/`: chat presentation and native controls. One design
+  language everywhere: ink on a white/black canvas (`theme.primary` is the text
+  color), color only for status (`ui/statusColors.ts`) and destructive actions,
+  shared list states in `ui/formStates.ts`.
 - `src/tools/`: workspace tools sheet (Git, desktop, terminal, files).
 - `src/settings/`: settings sheet and pages.
 - `src/apps/`: installing and opening published apps. After adding or upgrading a

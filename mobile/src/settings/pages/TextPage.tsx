@@ -6,8 +6,8 @@ import type {
   NativeFormSection,
   NativeFormTone,
 } from "../../ui/NativeForm.types";
+import { loadErrorState } from "../../ui/formStates";
 import { showToast } from "../../ui/toast";
-import { loadErrorSections } from "../sections";
 import { SettingsPage } from "../SettingsPage";
 
 export interface TextPageProps {
@@ -18,6 +18,8 @@ export interface TextPageProps {
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
+  /** What failed to load, e.g. "build log"; defaults to the label. */
+  things?: string;
   /** Code-like text in a monospaced font (default). */
   monospace?: boolean;
   /** Shown above the text, e.g. a one-time secret warning. */
@@ -39,6 +41,7 @@ export function TextPage({
   loading,
   error,
   onRetry,
+  things = label.toLowerCase(),
   monospace = true,
   notice,
   noticeTone = "warning",
@@ -107,15 +110,16 @@ export function TextPage({
             ],
           },
         ];
+  const failure =
+    error && text === undefined
+      ? loadErrorState(things, error, () => onRetry?.())
+      : undefined;
   return (
     <SettingsPage
       title={title}
-      sections={
-        error && text === undefined
-          ? loadErrorSections(error, () => onRetry?.())
-          : sections
-      }
-      loading={loading && text === undefined}
+      sections={failure ? [] : sections}
+      empty={failure}
+      loading={Boolean(loading) && text === undefined && !failure}
       primaryAction={primaryAction}
       testID={testID}
     />

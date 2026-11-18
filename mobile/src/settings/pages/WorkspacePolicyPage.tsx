@@ -8,7 +8,7 @@ import type {
 import { useResource } from "../resources";
 import { useSettings } from "../SettingsContext";
 import { SettingsPage } from "../SettingsPage";
-import { autosaveSection, loadErrorSections } from "../sections";
+import { autosaveSection, loadFailure } from "../sections";
 import { useAutosave } from "../useAutosave";
 
 const MAX_TIMEOUT_MINUTES = 10080;
@@ -182,15 +182,13 @@ export function WorkspacePolicyPage(): React.JSX.Element {
         autosaveSection(autosave),
       ]
     : [];
+  const failure = form ? undefined : loadFailure("workspace policy", policy);
 
   return (
     <SettingsPage
       title="Workspace policy"
-      sections={
-        policy.error && !form
-          ? loadErrorSections(policy.error, () => void policy.reload())
-          : sections
-      }
+      sections={failure ? [] : sections}
+      empty={failure}
       loading={!form && !policy.error}
       testID="settings-policy"
     />

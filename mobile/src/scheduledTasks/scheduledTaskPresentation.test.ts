@@ -3,7 +3,6 @@ import type {
   ScheduledTask,
   ScheduledTaskRun,
 } from "@opencuria/chat-core/scheduledTasks";
-import type { OpenCuriaTheme } from "../ui/theme";
 import {
   activeTaskCount,
   agendaDayTitle,
@@ -14,8 +13,10 @@ import {
   runPresentation,
   scheduleAgenda,
   taskState,
+  taskStatus,
   taskStatusLine,
   taskSubtitle,
+  taskSymbol,
 } from "./scheduledTaskPresentation";
 
 /** Tuesday, 3 November 2026, 11:00 on the test machine's clock. */
@@ -157,44 +158,79 @@ describe("scheduled task agenda", () => {
       tone: "muted",
     });
     expect(taskStatusLine(task({ enabled: false }), NOW).text).toBe("Paused");
+    // The green status dot carries the color; the text stays muted.
+    expect(taskStatusLine(task({ is_running: true }), NOW)).toEqual({
+      text: "Running now",
+      tone: "muted",
+    });
+  });
+
+  it("marks idle states with neutral symbols and running or failing with a status", () => {
+    expect(taskSymbol("running")).toEqual({ symbol: "play.fill" });
+    expect(taskSymbol("paused")).toEqual({
+      symbol: "pause.fill",
+      symbolStatus: "neutral",
+    });
+    expect(taskSymbol("ended")).toEqual({
+      symbol: "checkmark",
+      symbolStatus: "neutral",
+    });
+    expect(taskSymbol("scheduled")).toEqual({
+      symbol: "calendar.badge.clock",
+    });
+    expect(taskStatus("running")).toBe("positive");
+    expect(taskStatus("running", true)).toBe("positive");
+    expect(taskStatus("scheduled", true)).toBe("critical");
+    expect(taskStatus("paused")).toBeUndefined();
   });
 });
 
 describe("scheduled task runs", () => {
-  const theme = { scheme: "light", primary: "#007AFF" } as OpenCuriaTheme;
-
   it("shows why a run failed or was skipped and marks manual runs", () => {
     const failed = runPresentation(
       run({ status: "error", error: "Workspace did not start." }),
-      theme,
       NOW,
     );
     expect(failed).toMatchObject({
       title: "Failed",
       subtitleTone: "danger",
       symbol: "xmark.circle.fill",
+      symbolStatus: "critical",
       busy: false,
     });
     expect(failed.subtitle).toMatch(/· Workspace did not start\.$/);
     expect(
       runPresentation(
         run({ status: "skipped", reason: "workspace_busy", session_id: null }),
-        theme,
         NOW,
       ).subtitle,
     ).toMatch(/· workspace busy$/);
-    expect(
-      runPresentation(run({ trigger: "manual" }), theme, NOW).subtitle,
-    ).toMatch(/· Run now$/);
+    expect(runPresentation(run({ trigger: "manual" }), NOW).subtitle).toMatch(
+      /· Run now$/,
+    );
     const today = runPresentation(
       run({ status: "running", started_at: at(3, 10) }),
-      theme,
       NOW,
     );
     expect(today).toMatchObject({ title: "Running", busy: true });
+    expect(today.symbolStatus).toBeUndefined();
     expect(today.subtitle).toBe(
       `Today, ${formatRunClock(new Date(at(3, 10)))}`,
     );
+  });
+
+  it("colors each outcome by its status", () => {
+    const outcome = (status: ScheduledTaskRun["status"]) => {
+      const view = runPresentation(run({ status }), NOW);
+      return [view.symbol, view.symbolStatus];
+    };
+    expect(outcome("succeeded")).toEqual(["checkmark.circle.fill", "positive"]);
+    expect(outcome("interrupted")).toEqual([
+      "exclamationmark.triangle.fill",
+      "attention",
+    ]);
+    expect(outcome("skipped")).toEqual(["minus.circle.fill", "neutral"]);
+    expect(outcome("claimed")).toEqual(["clock", undefined]);
   });
 
   it("finds the newest settled run", () => {

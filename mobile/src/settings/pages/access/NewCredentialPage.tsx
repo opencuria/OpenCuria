@@ -3,6 +3,7 @@ import { Linking } from "react-native";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { BROWSER_HANDOFF_NOTE } from "./CredentialPage";
@@ -195,13 +196,11 @@ export function NewCredentialPage({
       title="New credential"
       sections={sections}
       loading={!services.data && !services.error}
-      empty={{
-        title: "Services unavailable",
-        description: services.error ?? undefined,
-        symbol: "exclamationmark.triangle.fill",
-      }}
+      empty={
+        services.data ? undefined : loadFailure("credential services", services)
+      }
       primaryAction={{
-        title: type === "mcp_oauth" ? "Continue" : "Save",
+        title: type === "mcp_oauth" ? "Continue" : "Add",
         onPress: () => void save(),
         busy,
         disabled: !valid || busy,

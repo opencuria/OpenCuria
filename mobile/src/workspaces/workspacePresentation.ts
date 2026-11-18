@@ -1,6 +1,6 @@
 /**
  * How workspaces read in the native list and detail screens: grouping, status
- * colors, subtitles, menus and resource formatting. Lifecycle rules come from
+ * dots, subtitles, menus and resource formatting. Lifecycle rules come from
  * `@opencuria/chat-core`; this file only decides presentation.
  */
 import {
@@ -28,9 +28,7 @@ import {
 import type { Workspace } from "@opencuria/client";
 import type { NativeSymbol } from "../ui/controls.types";
 import type { NativeMenuAction } from "../ui/NativeMenu";
-import type { NativeFormTone } from "../ui/NativeForm.types";
-import type { OpenCuriaTheme } from "../ui/theme";
-import { tileColor } from "../ui/tileColors";
+import type { NativeFormStatus, NativeFormTone } from "../ui/NativeForm.types";
 
 export type WorkspaceGroupId =
   | "running"
@@ -165,28 +163,30 @@ export function workspacePickerActions(
   );
 }
 
-/** Tile color per status; muted tones stay neutral so problems stand out. */
-export function workspaceTint(
+/**
+ * Status dot of a workspace: running, needs attention, failed or idle.
+ * Transitions and busy chats show a spinner instead, so they get none.
+ */
+export function workspaceStatus(
   tone: WorkspaceStatusTone,
-  theme: OpenCuriaTheme,
-): string {
+): NativeFormStatus | undefined {
   switch (tone) {
     case "running":
-      return tileColor("green", theme);
-    case "busy":
-      return theme.primary;
+      return "positive";
     case "attention":
-      return tileColor("orange", theme);
+      return "attention";
     case "error":
-      return tileColor("red", theme);
+      return "critical";
+    case "busy":
+      return undefined;
     default:
-      return tileColor("gray", theme);
+      return "neutral";
   }
 }
 
 export function workspaceSymbol(tone: WorkspaceStatusTone): NativeSymbol {
   return tone === "error" || tone === "attention"
-    ? "exclamationmark.triangle.fill"
+    ? "exclamationmark.triangle"
     : "server.rack";
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PublishedApp } from "@opencuria/client";
 import type { InstalledApp } from "./appInstaller";
 import {
+  appActionTitle,
   appRows,
   appScope,
   appSections,
@@ -122,9 +123,13 @@ describe("appSubtitle", () => {
       "Version 1.0.0",
     ]);
     const update = appRows([published("c", "C")], [installed("c", 1)], options);
-    expect(appSubtitle(update[0]!, "android")).toBe(
-      "Version 1.0.0 → 1.1.0",
-    );
+    expect(appSubtitle(update[0]!, "android")).toBe("Version 1.0.0 → 1.1.0");
+  });
+
+  it("shows the download progress while an app installs", () => {
+    const [row] = appRows([published("a", "A")], [], options);
+    expect(appSubtitle(row!, "android", 0.416)).toBe("Downloading… 42%");
+    expect(appSubtitle(row!, "android", 0)).toBe("Downloading… 0%");
   });
 
   it("formats sizes and SDK versions", () => {
@@ -132,5 +137,15 @@ describe("appSubtitle", () => {
     expect(formatBytes(3 * 1024 * 1024)).toBe("3.0 MB");
     expect(sdkMajor("57.0.0")).toBe(57);
     expect(sdkMajor(undefined)).toBeNull();
+  });
+});
+
+describe("appActionTitle", () => {
+  it("offers install, update or open, and nothing the device cannot run", () => {
+    expect(appActionTitle("available")).toBe("Install");
+    expect(appActionTitle("update")).toBe("Update");
+    expect(appActionTitle("installed")).toBe("Open");
+    expect(appActionTitle("incompatible")).toBeNull();
+    expect(appActionTitle("unsupported")).toBeNull();
   });
 });

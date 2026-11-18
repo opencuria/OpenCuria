@@ -15,6 +15,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { loadFailure } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { IMAGE_DEFINITIONS } from "./ImageDefinitionsPage";
@@ -200,11 +201,13 @@ export function ImageDefinitionEditorPage({
       title={definition ? "Edit definition" : "New definition"}
       sections={sections}
       loading={!form && !definitions.data && !definitions.error}
-      empty={{
-        title: "Definition unavailable",
-        description: definitions.error ?? "This definition no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
-      }}
+      empty={
+        (form ? undefined : loadFailure("image definition", definitions)) ?? {
+          title: "Definition unavailable",
+          description: "This definition no longer exists.",
+          symbol: "exclamationmark.triangle",
+        }
+      }
       primaryAction={{
         title: definition ? "Save" : "Create",
         onPress: () => void save(),

@@ -35,9 +35,13 @@ export function NativeContextMenu({
           <Host
             style={StyleSheet.absoluteFill}
             colorScheme={theme.scheme}
-            seedColor={theme.primary}
+            seedColor={theme.seed}
           >
-            <DropdownMenu expanded onDismissRequest={() => setOpen(false)}>
+            <DropdownMenu
+              expanded
+              color={theme.raised}
+              onDismissRequest={() => setOpen(false)}
+            >
               <DropdownMenu.Trigger>
                 <Box modifiers={[fillMaxSize()]} />
               </DropdownMenu.Trigger>
@@ -46,11 +50,10 @@ export function NativeContextMenu({
                   <DropdownMenuItem
                     key={action.id}
                     enabled={!action.disabled}
-                    elementColors={
-                      action.destructive
-                        ? { textColor: theme.danger }
-                        : undefined
-                    }
+                    elementColors={{
+                      textColor: action.destructive ? theme.danger : theme.text,
+                      disabledTextColor: theme.subtleText,
+                    }}
                     onClick={() => {
                       setOpen(false);
                       onSelect(action.id);

@@ -52,7 +52,7 @@ function apps(installed: InstalledApp[]): AppsState {
     }),
     loaded: false,
     loading: false,
-    error: "Could not load apps.",
+    error: "Check your connection and try again.",
     progress: {},
     supported: true,
     offline: false,

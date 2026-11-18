@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { isLiquidGlassAvailable } from "expo-glass-effect";
 import {
   Button,
-  ContentUnavailableView,
+  Circle,
   ContextMenu,
   DatePicker,
   Form,
@@ -28,6 +28,7 @@ import {
 } from "@expo/ui/swift-ui";
 import {
   accessibilityAddTraits,
+  accessibilityHidden,
   accessibilityLabel,
   aspectRatio,
   autocorrectionDisabled,
@@ -35,6 +36,7 @@ import {
   buttonBorderShape,
   buttonStyle,
   clipShape,
+  contentShape,
   controlSize,
   disabled,
   font,
@@ -48,6 +50,7 @@ import {
   listRowBackground,
   listRowInsets,
   menuStyle,
+  minimumScaleFactor,
   monospacedDigit,
   multilineTextAlignment,
   onSubmit,
@@ -55,6 +58,7 @@ import {
   pickerStyle,
   refreshable,
   resizable,
+  scrollContentBackground,
   scrollDismissesKeyboard,
   shapes,
   submitLabel,
@@ -62,11 +66,15 @@ import {
   textInputAutocapitalization,
   textSelection,
   tint,
+  type ModifierConfig,
 } from "@expo/ui/swift-ui/modifiers";
+import { ProminentLabel } from "./controls.ios";
 import type { NativeSymbol } from "./controls.types";
 import type {
+  NativeFormAccessory,
   NativeFormCardRow,
   NativeFormDateRow,
+  NativeFormEmptyState,
   NativeFormHeaderRow,
   NativeFormItemRow,
   NativeFormLinkRow,
@@ -74,11 +82,13 @@ import type {
   NativeFormProps,
   NativeFormRow,
   NativeFormSection,
+  NativeFormStatus,
   NativeFormSwipeAction,
   NativeFormTextRow,
   NativeFormTone,
   NativeFormWeekdaysRow,
 } from "./NativeForm.types";
+import { actionFill, statusColor, switchOnColor } from "./statusColors";
 import { useTheme, type OpenCuriaTheme } from "./theme";
 import {
   WEEKDAY_TOGGLES,
@@ -87,8 +97,16 @@ import {
   wallClockValue,
 } from "./wallClock";
 
-/** Quick actions are interactive liquid glass on iOS 26 and bordered before it. */
-const QUICK_ACTION_STYLE = isLiquidGlassAvailable() ? "glass" : "bordered";
+/** Glass on iOS 26 for floating controls; bordered styles before it. */
+const GLASS = isLiquidGlassAvailable();
+const QUICK_ACTION_STYLE = GLASS ? "glass" : "bordered";
+const PROMINENT_STYLE = GLASS ? "glassProminent" : "borderedProminent";
+
+/** Row background of hero and profile rows, which sit on the canvas. */
+const CLEAR = "#00000000";
+
+/** Modifiers every row adds at its top level, e.g. the card background. */
+type RowSurface = ModifierConfig[];
 
 function toneColor(theme: OpenCuriaTheme, tone: NativeFormTone = "muted") {
   switch (tone) {
@@ -105,6 +123,132 @@ function toneColor(theme: OpenCuriaTheme, tone: NativeFormTone = "muted") {
     default:
       return theme.mutedText;
   }
+}
+
+/**
+ * A symbol on a neutral rounded tile, or a small image filling it: the
+ * identity of a workspace or app in a row (40 pt) or a hero header (72 pt).
+ */
+function Tile({
+  symbol,
+  image,
+  size,
+  radius,
+  fill,
+  symbolSize,
+}: {
+  symbol?: NativeSymbol;
+  image?: string;
+  size: number;
+  radius: number;
+  fill: string;
+  symbolSize: number;
+}): React.JSX.Element | null {
+  const { theme } = useTheme();
+  const shape = shapes.roundedRectangle({
+    cornerRadius: radius,
+    roundedCornerStyle: "continuous",
+  });
+  if (image)
+    return (
+      <Image
+        uiImage={image}
+        modifiers={[
+          resizable(),
+          aspectRatio({ contentMode: "fill" }),
+          frame({ width: size, height: size }),
+          background(fill, shape),
+          clipShape("roundedRectangle", radius),
+        ]}
+      />
+    );
+  if (!symbol) return null;
+  return (
+    <Image
+      systemName={symbol}
+      modifiers={[
+        font({ size: symbolSize, weight: "medium" }),
+        foregroundStyle(theme.text),
+        frame({ width: size, height: size }),
+        background(fill, shape),
+      ]}
+    />
+  );
+}
+
+/** A plain glyph in a fixed column, ink unless a status colors it. */
+function LeadingSymbol({
+  symbol,
+  color,
+}: {
+  symbol: NativeSymbol;
+  color?: string;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Image
+      systemName={symbol}
+      modifiers={[
+        font({ textStyle: "body" }),
+        foregroundStyle(color ?? theme.text),
+        frame({ width: 28 }),
+      ]}
+    />
+  );
+}
+
+/** The small colored dot before a status line; the text names the status. */
+function StatusDot({
+  status,
+}: {
+  status: NativeFormStatus;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <Circle
+      modifiers={[
+        foregroundStyle(statusColor(status, theme)),
+        frame({ width: 7, height: 7 }),
+        accessibilityHidden(true),
+      ]}
+    />
+  );
+}
+
+/** Secondary line led by a status dot, or by a small spinner while busy. */
+function StatusLine({
+  text,
+  tone,
+  status,
+  busy,
+  centered,
+}: {
+  text: string;
+  tone?: NativeFormTone;
+  status?: NativeFormStatus;
+  busy?: boolean;
+  centered?: boolean;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  return (
+    <HStack spacing={6}>
+      {busy ? (
+        <ProgressView modifiers={[controlSize("small")]} />
+      ) : status ? (
+        <StatusDot status={status} />
+      ) : null}
+      <Text
+        modifiers={[
+          font({ textStyle: "subheadline" }),
+          foregroundStyle(toneColor(theme, tone)),
+          lineLimit(centered ? 2 : 1),
+          ...(centered ? [multilineTextAlignment("center")] : []),
+        ]}
+      >
+        {text}
+      </Text>
+    </HStack>
+  );
 }
 
 function SwipeButtons({
@@ -125,21 +269,115 @@ function SwipeButtons({
       modifiers={
         action.destructive
           ? []
-          : [tint(toneColor(theme, action.tone ?? "accent"))]
+          : [
+              tint(
+                actionFill(
+                  !action.tone || action.tone === "default"
+                    ? "accent"
+                    : action.tone,
+                  theme,
+                ),
+              ),
+            ]
       }
     />
   ));
 }
 
-function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
+/**
+ * A trailing capsule with its own tap target, as in the App Store: ink for
+ * the action that changes state, a neutral fill otherwise.
+ */
+function AccessoryButton({
+  accessory,
+  inactive,
+}: {
+  accessory: NativeFormAccessory;
+  inactive?: boolean;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const label = accessory.accessibilityLabel ?? accessory.title;
+  if (accessory.busy)
+    return (
+      <ProgressView
+        testID={accessory.testID}
+        modifiers={[accessibilityLabel(label)]}
+      />
+    );
+  const off = Boolean(inactive || accessory.disabled);
+  const fill = off
+    ? theme.controlFill
+    : accessory.prominent
+      ? theme.primary
+      : theme.controlFill;
+  const color = off
+    ? theme.subtleText
+    : accessory.prominent
+      ? theme.primaryForeground
+      : theme.text;
+  return (
+    <Button
+      onPress={accessory.onPress}
+      testID={accessory.testID}
+      modifiers={[
+        buttonStyle("borderless"),
+        disabled(off),
+        accessibilityLabel(label),
+      ]}
+    >
+      <Text
+        modifiers={[
+          font({ textStyle: "subheadline", weight: "semibold" }),
+          foregroundStyle(color),
+          lineLimit(1),
+          padding({ horizontal: 14, vertical: 6 }),
+          background(fill, shapes.capsule()),
+          // The capsule stays compact; the 44 pt frame around it is the target.
+          frame({ minHeight: 44 }),
+          contentShape(shapes.rectangle()),
+        ]}
+      >
+        {accessory.title}
+      </Text>
+    </Button>
+  );
+}
+
+function ItemRow({
+  row,
+  surface,
+}: {
+  row: NativeFormItemRow;
+  surface: RowSurface;
+}): React.JSX.Element {
   const { theme } = useTheme();
   const leading = [row.leadingText, row.leadingCaption]
     .filter(Boolean)
     .join(" ");
   const label = [leading, row.title, row.subtitle].filter(Boolean).join(", ");
   const leadingColor = toneColor(theme, row.leadingTone ?? "default");
+  // [busy] [badge] [accessory] [✓] [ⓘ]: without an accessory the checkmark
+  // stays inside the row's button, so it is part of the tap target.
+  const checkmark = row.selected ? (
+    <Image
+      systemName="checkmark"
+      modifiers={[
+        font({ textStyle: "body", weight: "semibold" }),
+        foregroundStyle(theme.text),
+        // The row's button announces the selection.
+        accessibilityHidden(true),
+      ]}
+    />
+  ) : null;
   const content = (
-    <HStack spacing={12}>
+    // The label fills the row so its whole width and height is the target.
+    <HStack
+      spacing={12}
+      modifiers={[
+        frame({ maxWidth: Infinity, alignment: "leading", minHeight: 44 }),
+        contentShape(shapes.rectangle()),
+      ]}
+    >
       {row.leadingText ? (
         // Tabular figures in a minimum width keep an agenda's times aligned;
         // larger Dynamic Type sizes may widen the column.
@@ -175,31 +413,21 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
             </Text>
           ) : null}
         </HStack>
-      ) : row.image ? (
-        <Image
-          uiImage={row.image}
-          modifiers={[
-            resizable(),
-            aspectRatio({ contentMode: "fill" }),
-            frame({ width: 30, height: 30 }),
-            clipShape("roundedRectangle", 8),
-          ]}
+      ) : row.image || (row.symbol && row.tile) ? (
+        <Tile
+          symbol={row.symbol}
+          image={row.image}
+          size={40}
+          radius={10}
+          fill={theme.controlFill}
+          symbolSize={18}
         />
       ) : row.symbol ? (
-        <Image
-          systemName={row.symbol}
-          size={15}
-          color="#FFFFFF"
-          modifiers={[
-            frame({ width: 30, height: 30 }),
-            background(
-              row.tint ?? theme.primary,
-              shapes.roundedRectangle({
-                cornerRadius: 8,
-                roundedCornerStyle: "continuous",
-              }),
-            ),
-          ]}
+        <LeadingSymbol
+          symbol={row.symbol}
+          color={
+            row.symbolStatus ? statusColor(row.symbolStatus, theme) : undefined
+          }
         />
       ) : null}
       <VStack alignment="leading" spacing={2}>
@@ -216,36 +444,36 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
           {row.title}
         </Text>
         {row.subtitle ? (
-          <Text
-            modifiers={[
-              font({ textStyle: "subheadline" }),
-              foregroundStyle(toneColor(theme, row.subtitleTone)),
-              lineLimit(1),
-            ]}
-          >
-            {row.subtitle}
-          </Text>
+          <StatusLine
+            text={row.subtitle}
+            tone={row.subtitleTone}
+            status={row.status}
+          />
         ) : null}
       </VStack>
       <Spacer />
       {row.busy ? <ProgressView /> : null}
-      {row.badge ? (
+      {row.badge && !row.accessory ? (
         <Text
           modifiers={[
             font({ textStyle: "caption", weight: "semibold" }),
-            foregroundStyle(theme.primary),
+            foregroundStyle(theme.text),
+            lineLimit(1),
+            padding({ horizontal: 8, vertical: 3 }),
+            background(theme.controlFill, shapes.capsule()),
           ]}
         >
           {row.badge}
         </Text>
       ) : null}
-      {row.selected ? (
-        <Image systemName="checkmark" size={15} color={theme.primary} />
-      ) : null}
+      {row.accessory ? null : checkmark}
     </HStack>
   );
+  const swipes = Boolean(row.leadingSwipe?.length || row.trailingSwipe?.length);
+  const menus = Boolean(row.actions?.length);
+  // Only the outermost view carries the row background, so List reads it.
   const body = (
-    <HStack spacing={8}>
+    <HStack spacing={8} modifiers={swipes || menus ? [] : surface}>
       <Button
         onPress={row.onPress}
         testID={row.testID ?? row.id}
@@ -253,11 +481,17 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
           buttonStyle("borderless"),
           disabled(Boolean(row.disabled || !row.onPress)),
           accessibilityLabel(label),
-          frame({ maxWidth: Infinity, alignment: "leading", minHeight: 44 }),
+          accessibilityAddTraits(row.selected ? ["isSelected"] : []),
         ]}
       >
         {content}
       </Button>
+      {row.accessory ? (
+        <>
+          <AccessoryButton accessory={row.accessory} inactive={row.disabled} />
+          {checkmark}
+        </>
+      ) : null}
       {row.onInfo ? (
         <Button
           onPress={row.onInfo}
@@ -266,13 +500,23 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
             accessibilityLabel(row.infoLabel ?? `Details for ${row.title}`),
           ]}
         >
-          <Image systemName="info.circle" size={20} color={theme.primary} />
+          <Image
+            systemName="info.circle"
+            size={20}
+            color={theme.text}
+            // The glyph stays 20 pt at the trailing edge; the 44 pt frame
+            // around it is the target.
+            modifiers={[
+              frame({ minWidth: 44, minHeight: 44, alignment: "trailing" }),
+              contentShape(shapes.rectangle()),
+            ]}
+          />
         </Button>
       ) : null}
     </HStack>
   );
   const menu = row.actions?.length ? (
-    <ContextMenu>
+    <ContextMenu modifiers={swipes ? [] : surface}>
       <ContextMenu.Trigger>{body}</ContextMenu.Trigger>
       <ContextMenu.Items>
         {row.actions.map((action) => (
@@ -294,9 +538,9 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
   ) : (
     body
   );
-  if (!row.leadingSwipe?.length && !row.trailingSwipe?.length) return menu;
+  if (!swipes) return menu;
   return (
-    <SwipeActions>
+    <SwipeActions modifiers={surface}>
       {menu}
       {row.leadingSwipe?.length ? (
         <SwipeActions.Actions edge="leading">
@@ -315,7 +559,7 @@ function ItemRow({ row }: { row: NativeFormItemRow }): React.JSX.Element {
   );
 }
 
-/** Hero header with liquid-glass quick actions, as in Contacts or Maps. */
+/** Hero header on the canvas with liquid-glass quick actions, as in Contacts. */
 function HeaderRow({ row }: { row: NativeFormHeaderRow }): React.JSX.Element {
   const { theme } = useTheme();
   return (
@@ -323,24 +567,17 @@ function HeaderRow({ row }: { row: NativeFormHeaderRow }): React.JSX.Element {
       spacing={14}
       modifiers={[
         frame({ maxWidth: Infinity }),
-        listRowBackground("#00000000"),
+        listRowBackground(CLEAR),
         listRowInsets({ top: 4, leading: 0, bottom: 4, trailing: 0 }),
       ]}
     >
-      <Image
-        systemName={row.symbol}
-        size={30}
-        color="#FFFFFF"
-        modifiers={[
-          frame({ width: 64, height: 64 }),
-          background(
-            row.tint,
-            shapes.roundedRectangle({
-              cornerRadius: 16,
-              roundedCornerStyle: "continuous",
-            }),
-          ),
-        ]}
+      <Tile
+        symbol={row.symbol}
+        image={row.image}
+        size={72}
+        radius={18}
+        fill={theme.card}
+        symbolSize={30}
       />
       <VStack spacing={4}>
         <Text
@@ -354,65 +591,64 @@ function HeaderRow({ row }: { row: NativeFormHeaderRow }): React.JSX.Element {
           {row.title}
         </Text>
         {row.subtitle ? (
-          <HStack spacing={6}>
-            {row.busy ? (
-              <ProgressView modifiers={[controlSize("small")]} />
-            ) : null}
-            <Text
-              modifiers={[
-                font({ textStyle: "subheadline" }),
-                foregroundStyle(toneColor(theme, row.subtitleTone)),
-              ]}
-            >
-              {row.subtitle}
-            </Text>
-          </HStack>
+          <StatusLine
+            text={row.subtitle}
+            tone={row.subtitleTone}
+            status={row.status}
+            busy={row.busy}
+            centered
+          />
         ) : null}
       </VStack>
       {row.actions.length ? (
         <GlassEffectContainer spacing={10}>
           <HStack spacing={10}>
-            {row.actions.map((action) => (
-              <Button
-                key={action.id}
-                onPress={() => row.onAction(action.id)}
-                testID={`${row.id}-${action.id}`}
-                role={action.destructive ? "destructive" : undefined}
-                modifiers={[
-                  buttonStyle(QUICK_ACTION_STYLE),
-                  disabled(Boolean(action.disabled)),
-                  accessibilityLabel(action.title),
-                ]}
-              >
-                <VStack
-                  spacing={4}
-                  modifiers={[frame({ width: 64, height: 46 })]}
+            {row.actions.map((action) => {
+              const color = action.disabled
+                ? theme.subtleText
+                : action.destructive
+                  ? theme.danger
+                  : theme.text;
+              return (
+                <Button
+                  key={action.id}
+                  onPress={() => row.onAction(action.id)}
+                  testID={`${row.id}-${action.id}`}
+                  role={action.destructive ? "destructive" : undefined}
+                  modifiers={[
+                    buttonStyle(QUICK_ACTION_STYLE),
+                    tint(theme.text),
+                    disabled(Boolean(action.disabled)),
+                    accessibilityLabel(action.title),
+                  ]}
                 >
-                  <Image
-                    systemName={action.symbol}
-                    size={19}
-                    color={
-                      action.destructive
-                        ? theme.danger
-                        : action.disabled
-                          ? theme.subtleText
-                          : theme.primary
-                    }
-                  />
-                  <Text
-                    modifiers={[
-                      font({ textStyle: "caption2", weight: "medium" }),
-                      foregroundStyle(
-                        action.disabled ? theme.subtleText : theme.text,
-                      ),
-                      lineLimit(1),
-                    ]}
+                  <VStack
+                    spacing={4}
+                    modifiers={[frame({ width: 64, height: 46 })]}
                   >
-                    {action.title}
-                  </Text>
-                </VStack>
-              </Button>
-            ))}
+                    <Image
+                      systemName={action.symbol}
+                      modifiers={[
+                        font({ size: 19, weight: "medium" }),
+                        foregroundStyle(color),
+                      ]}
+                    />
+                    <Text
+                      modifiers={[
+                        font({ textStyle: "caption", weight: "medium" }),
+                        foregroundStyle(
+                          action.disabled ? theme.subtleText : theme.text,
+                        ),
+                        lineLimit(1),
+                        minimumScaleFactor(0.8),
+                      ]}
+                    >
+                      {action.title}
+                    </Text>
+                  </VStack>
+                </Button>
+              );
+            })}
           </HStack>
         </GlassEffectContainer>
       ) : null}
@@ -427,7 +663,13 @@ const KEYBOARDS = {
   number: "numeric",
 } as const;
 
-function TextRow({ row }: { row: NativeFormTextRow }): React.JSX.Element {
+function TextRow({
+  row,
+  surface,
+}: {
+  row: NativeFormTextRow;
+  surface: RowSurface;
+}): React.JSX.Element {
   const text = useNativeState(row.value);
   const latest = useRef(row.value);
   useEffect(() => {
@@ -455,6 +697,7 @@ function TextRow({ row }: { row: NativeFormTextRow }): React.JSX.Element {
           disabled(Boolean(row.disabled)),
           submitLabel("done"),
           onSubmit(() => row.onSubmit?.()),
+          ...surface,
         ]}
       />
     );
@@ -476,52 +719,20 @@ function TextRow({ row }: { row: NativeFormTextRow }): React.JSX.Element {
         ...(row.multiline
           ? [lineLimit({ min: row.lines?.[0] ?? 2, max: row.lines?.[1] ?? 6 })]
           : []),
-      ]}
-    />
-  );
-}
-
-/** A plain symbol in the text color, or a white symbol on a colored tile. */
-function LeadingSymbol({
-  symbol,
-  tint: color,
-}: {
-  symbol: NativeSymbol;
-  tint?: string;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  if (color)
-    return (
-      <Image
-        systemName={symbol}
-        size={15}
-        color="#FFFFFF"
-        modifiers={[
-          frame({ width: 30, height: 30 }),
-          background(
-            color,
-            shapes.roundedRectangle({
-              cornerRadius: 8,
-              roundedCornerStyle: "continuous",
-            }),
-          ),
-        ]}
-      />
-    );
-  return (
-    <Image
-      systemName={symbol}
-      modifiers={[
-        font({ textStyle: "body" }),
-        foregroundStyle(theme.text),
-        frame({ width: 28 }),
+        ...surface,
       ]}
     />
   );
 }
 
 /** Pushes the row's page onto the settings navigation stack. */
-function LinkRow({ row }: { row: NativeFormLinkRow }): React.JSX.Element {
+function LinkRow({
+  row,
+  surface,
+}: {
+  row: NativeFormLinkRow;
+  surface: RowSurface;
+}): React.JSX.Element {
   const { theme } = useTheme();
   return (
     <NavigationLink
@@ -532,12 +743,11 @@ function LinkRow({ row }: { row: NativeFormLinkRow }): React.JSX.Element {
         accessibilityLabel(
           [row.title, row.subtitle, row.value].filter(Boolean).join(", "),
         ),
+        ...surface,
       ]}
     >
       <HStack spacing={14} modifiers={[frame({ minHeight: 36 })]}>
-        {row.symbol ? (
-          <LeadingSymbol symbol={row.symbol} tint={row.tint} />
-        ) : null}
+        {row.symbol ? <LeadingSymbol symbol={row.symbol} /> : null}
         <VStack alignment="leading" spacing={2}>
           <Text modifiers={[foregroundStyle(theme.text), lineLimit(1)]}>
             {row.title}
@@ -571,7 +781,7 @@ function LinkRow({ row }: { row: NativeFormLinkRow }): React.JSX.Element {
   );
 }
 
-/** The account's large initials avatar and name, centered above the sections. */
+/** The account's initials on a neutral circle and name, above the sections. */
 function ProfileRow({ row }: { row: NativeFormProfileRow }): React.JSX.Element {
   const { theme } = useTheme();
   return (
@@ -579,7 +789,7 @@ function ProfileRow({ row }: { row: NativeFormProfileRow }): React.JSX.Element {
       spacing={12}
       modifiers={[
         frame({ maxWidth: Infinity }),
-        listRowBackground("#00000000"),
+        listRowBackground(CLEAR),
         listRowInsets({ top: 4, leading: 0, bottom: 8, trailing: 0 }),
         accessibilityLabel(
           [row.title, row.subtitle].filter(Boolean).join(", "),
@@ -589,9 +799,9 @@ function ProfileRow({ row }: { row: NativeFormProfileRow }): React.JSX.Element {
       <Text
         modifiers={[
           font({ size: 34, weight: "medium" }),
-          foregroundStyle("#FFFFFF"),
+          foregroundStyle(theme.text),
           frame({ width: 88, height: 88 }),
-          background(row.tint, shapes.circle()),
+          background(theme.card, shapes.circle()),
         ]}
       >
         {row.initials}
@@ -622,30 +832,33 @@ function ProfileRow({ row }: { row: NativeFormProfileRow }): React.JSX.Element {
   );
 }
 
-/** A promoted card with a capsule button (or menu), like ChatGPT's plan card. */
-function CardRow({ row }: { row: NativeFormCardRow }): React.JSX.Element {
+/** A promoted card with an ink capsule (or menu), like ChatGPT's plan card. */
+function CardRow({
+  row,
+  surface,
+}: {
+  row: NativeFormCardRow;
+  surface: RowSurface;
+}): React.JSX.Element {
   const { theme } = useTheme();
   const capsule = [
     buttonStyle("borderedProminent"),
     buttonBorderShape("capsule"),
     controlSize("large"),
-    tint(theme.text),
+    tint(theme.primary),
     disabled(Boolean(row.disabled)),
   ];
   const label = (
-    <Text
-      modifiers={[
-        font({ textStyle: "body", weight: "semibold" }),
-        foregroundStyle(theme.background),
-      ]}
-    >
-      {row.actionTitle}
-    </Text>
+    <ProminentLabel title={row.actionTitle} enabled={!row.disabled} />
   );
   return (
     <HStack
       spacing={12}
-      modifiers={[padding({ vertical: 6 }), frame({ minHeight: 64 })]}
+      modifiers={[
+        padding({ vertical: 6 }),
+        frame({ minHeight: 64 }),
+        ...surface,
+      ]}
     >
       <VStack alignment="leading" spacing={3}>
         <Text
@@ -711,12 +924,14 @@ function CardRow({ row }: { row: NativeFormCardRow }): React.JSX.Element {
 /** Seven round day toggles below the label, as in Clock and Reminders. */
 function WeekdaysRow({
   row,
+  surface,
 }: {
   row: NativeFormWeekdaysRow;
+  surface: RowSurface;
 }): React.JSX.Element {
   const { theme } = useTheme();
   return (
-    <VStack alignment="leading" spacing={10}>
+    <VStack alignment="leading" spacing={10} modifiers={surface}>
       <HStack>
         <Text modifiers={[foregroundStyle(theme.text)]}>{row.label}</Text>
         <Spacer />
@@ -765,9 +980,18 @@ function WeekdaysRow({
 }
 
 /** Compact SwiftUI date or time picker; a red minus removes a listed entry. */
-function DateRow({ row }: { row: NativeFormDateRow }): React.JSX.Element {
+function DateRow({
+  row,
+  surface,
+}: {
+  row: NativeFormDateRow;
+  surface: RowSurface;
+}): React.JSX.Element {
   const { theme } = useTheme();
-  const picker = (
+  // The calendar draws the selected day in white on the tint; near-white ink
+  // would hide it in dark mode.
+  const pickerTint = theme.scheme === "dark" ? "#8E8E93" : theme.primary;
+  const picker = (extra: ModifierConfig[]) => (
     <DatePicker
       title={row.label}
       selection={wallClockDate(row.mode, row.value)}
@@ -782,12 +1006,12 @@ function DateRow({ row }: { row: NativeFormDateRow }): React.JSX.Element {
         if (value !== row.value) row.onChange(value);
       }}
       testID={row.testID ?? row.id}
-      modifiers={[disabled(Boolean(row.disabled))]}
+      modifiers={[tint(pickerTint), disabled(Boolean(row.disabled)), ...extra]}
     />
   );
-  if (!row.onRemove) return picker;
+  if (!row.onRemove) return picker(surface);
   return (
-    <HStack spacing={12}>
+    <HStack spacing={12} modifiers={surface}>
       <Button
         onPress={row.onRemove}
         testID={`${row.testID ?? row.id}-remove`}
@@ -797,28 +1021,34 @@ function DateRow({ row }: { row: NativeFormDateRow }): React.JSX.Element {
           accessibilityLabel(`Remove ${row.label}`),
         ]}
       >
-        <Image systemName="minus.circle.fill" size={20} color={theme.danger} />
+        <Image
+          systemName="minus.circle.fill"
+          size={20}
+          color={statusColor("critical", theme)}
+        />
       </Button>
-      {picker}
+      {picker([])}
     </HStack>
   );
 }
 
 function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
   const { theme } = useTheme();
+  // Grouped rows sit on a card on the canvas; hero and profile rows do not.
+  const surface: RowSurface = [listRowBackground(theme.card)];
   switch (row.kind) {
     case "item":
-      return <ItemRow row={row} />;
+      return <ItemRow row={row} surface={surface} />;
     case "header":
       return <HeaderRow row={row} />;
     case "link":
-      return <LinkRow row={row} />;
+      return <LinkRow row={row} surface={surface} />;
     case "profile":
       return <ProfileRow row={row} />;
     case "card":
-      return <CardRow row={row} />;
+      return <CardRow row={row} surface={surface} />;
     case "text":
-      return <TextRow row={row} />;
+      return <TextRow row={row} surface={surface} />;
     case "toggle":
       return (
         <Toggle
@@ -826,10 +1056,13 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
           testID={row.testID ?? row.id}
           onIsOnChange={row.onChange}
           modifiers={[
+            // An ink tint would put the white knob on white in dark mode.
+            tint(switchOnColor(theme)),
             disabled(Boolean(row.disabled)),
             accessibilityLabel(
               [row.label, row.subtitle].filter(Boolean).join(", "),
             ),
+            ...surface,
           ]}
         >
           <HStack spacing={14}>
@@ -875,8 +1108,10 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
           }}
           modifiers={[
             pickerStyle("menu"),
+            tint(theme.primary),
             disabled(Boolean(row.disabled)),
             accessibilityLabel(row.label),
+            ...surface,
           ]}
         >
           {row.groups.map((group, index) =>
@@ -912,7 +1147,7 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
       );
     case "stepper":
       return (
-        <HStack>
+        <HStack modifiers={surface}>
           <Text modifiers={[foregroundStyle(theme.text)]}>{row.label}</Text>
           <Spacer />
           <Text
@@ -951,7 +1186,10 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
           <VStack
             alignment="leading"
             spacing={6}
-            modifiers={[accessibilityLabel(`${row.label}, ${row.value}`)]}
+            modifiers={[
+              accessibilityLabel(`${row.label}, ${row.value}`),
+              ...surface,
+            ]}
           >
             {label}
             <Text
@@ -982,6 +1220,7 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
             modifiers={[
               disabled(Boolean(row.disabled)),
               accessibilityLabel(`${row.label}, ${row.value}`),
+              ...surface,
             ]}
           >
             <HStack spacing={8}>
@@ -997,8 +1236,10 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
               </Text>
               <Image
                 systemName="chevron.right"
-                size={13}
-                color={theme.subtleText}
+                modifiers={[
+                  font({ textStyle: "footnote", weight: "semibold" }),
+                  foregroundStyle(theme.subtleText),
+                ]}
               />
             </HStack>
           </Button>
@@ -1006,7 +1247,10 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
       return (
         <HStack
           spacing={8}
-          modifiers={[accessibilityLabel(`${row.label}, ${row.value}`)]}
+          modifiers={[
+            accessibilityLabel(`${row.label}, ${row.value}`),
+            ...surface,
+          ]}
         >
           {label}
           <Spacer />
@@ -1035,6 +1279,7 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
             pickerStyle("segmented"),
             labelsHidden(),
             disabled(Boolean(row.disabled)),
+            ...surface,
           ]}
         >
           {row.options.map((option) => (
@@ -1053,12 +1298,12 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
         </Picker>
       );
     case "weekdays":
-      return <WeekdaysRow row={row} />;
+      return <WeekdaysRow row={row} surface={surface} />;
     case "date":
-      return <DateRow row={row} />;
+      return <DateRow row={row} surface={surface} />;
     case "gauge":
       return (
-        <VStack alignment="leading" spacing={6}>
+        <VStack alignment="leading" spacing={6} modifiers={surface}>
           <HStack>
             <Text modifiers={[foregroundStyle(theme.text)]}>{row.label}</Text>
             <Spacer />
@@ -1078,16 +1323,23 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
             modifiers={[
               gaugeStyle("linearCapacity"),
               tint(
-                row.tone === "danger" || row.tone === "warning"
-                  ? toneColor(theme, row.tone)
-                  : theme.primary,
+                row.tone === "danger"
+                  ? statusColor("critical", theme)
+                  : row.tone === "warning"
+                    ? statusColor("attention", theme)
+                    : theme.primary,
               ),
               accessibilityLabel(`${row.label}, ${row.valueLabel}`),
             ]}
           />
         </VStack>
       );
-    case "button":
+    case "button": {
+      const color = row.disabled
+        ? theme.subtleText
+        : row.destructive
+          ? theme.danger
+          : theme.text;
       return (
         <Button
           onPress={row.onPress}
@@ -1096,29 +1348,20 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
           modifiers={[
             disabled(Boolean(row.disabled || row.busy)),
             accessibilityLabel(row.title),
+            ...surface,
           ]}
         >
           <HStack spacing={8}>
             {row.symbol ? (
               <Image
                 systemName={row.symbol}
-                size={17}
-                color={row.destructive ? theme.danger : theme.primary}
+                modifiers={[
+                  font({ textStyle: "body" }),
+                  foregroundStyle(color),
+                ]}
               />
             ) : null}
-            <Text
-              modifiers={[
-                foregroundStyle(
-                  row.disabled
-                    ? theme.subtleText
-                    : row.destructive
-                      ? theme.danger
-                      : theme.primary,
-                ),
-              ]}
-            >
-              {row.title}
-            </Text>
+            <Text modifiers={[foregroundStyle(color)]}>{row.title}</Text>
             {row.busy ? (
               <>
                 <Spacer />
@@ -1128,17 +1371,33 @@ function Row({ row }: { row: NativeFormRow }): React.JSX.Element {
           </HStack>
         </Button>
       );
-    case "note":
+    }
+    case "note": {
+      const color = toneColor(theme, row.tone);
+      const text = [font({ textStyle: "footnote" }), foregroundStyle(color)];
+      if (!row.busy && !row.symbol)
+        return <Text modifiers={[...text, ...surface]}>{row.text}</Text>;
       return (
-        <Text
-          modifiers={[
-            font({ textStyle: "footnote" }),
-            foregroundStyle(toneColor(theme, row.tone)),
-          ]}
+        <HStack
+          spacing={8}
+          alignment={row.busy ? "center" : "firstTextBaseline"}
+          modifiers={surface}
         >
-          {row.text}
-        </Text>
+          {row.busy ? (
+            <ProgressView modifiers={[controlSize("small")]} />
+          ) : row.symbol ? (
+            <Image
+              systemName={row.symbol}
+              modifiers={[
+                font({ textStyle: "footnote", weight: "semibold" }),
+                foregroundStyle(color),
+              ]}
+            />
+          ) : null}
+          <Text modifiers={text}>{row.text}</Text>
+        </HStack>
       );
+    }
   }
 }
 
@@ -1151,7 +1410,8 @@ function FormSection({
   return (
     <Section
       title={section.title}
-      modifiers={section.prominent ? [headerProminence("increased")] : []}
+      // Every header is the sentence-case, bold ink header of the sheet.
+      modifiers={[headerProminence("increased")]}
       footer={
         section.footer ? (
           <Text
@@ -1172,28 +1432,108 @@ function FormSection({
 }
 
 /**
+ * Empty, no-results or load-failure state: a quiet symbol, a title, a
+ * description and at most one prominent ink action.
+ */
+function EmptyState({
+  empty,
+}: {
+  empty: NativeFormEmptyState;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const { action } = empty;
+  return (
+    <VStack spacing={8} modifiers={[padding({ horizontal: 32 })]}>
+      <Image
+        systemName={empty.symbol}
+        modifiers={[
+          font({ size: 44 }),
+          foregroundStyle(theme.subtleText),
+          padding({ bottom: 6 }),
+          accessibilityHidden(true),
+        ]}
+      />
+      <Text
+        modifiers={[
+          font({ textStyle: "title3", weight: "semibold" }),
+          foregroundStyle(theme.text),
+          multilineTextAlignment("center"),
+        ]}
+      >
+        {empty.title}
+      </Text>
+      {empty.description ? (
+        <Text
+          modifiers={[
+            font({ textStyle: "subheadline" }),
+            foregroundStyle(theme.mutedText),
+            multilineTextAlignment("center"),
+          ]}
+        >
+          {empty.description}
+        </Text>
+      ) : null}
+      {action ? (
+        action.busy ? (
+          <ProgressView
+            testID={action.testID}
+            modifiers={[accessibilityLabel(action.title), padding({ top: 14 })]}
+          />
+        ) : (
+          <Button
+            onPress={action.onPress}
+            testID={action.testID}
+            modifiers={[
+              buttonStyle(PROMINENT_STYLE),
+              buttonBorderShape("capsule"),
+              controlSize("large"),
+              tint(theme.primary),
+              accessibilityLabel(action.title),
+              padding({ top: 14 }),
+            ]}
+          >
+            <ProminentLabel title={action.title} symbol={action.symbol} />
+          </Button>
+        )
+      ) : null}
+    </VStack>
+  );
+}
+
+/**
  * The SwiftUI Form without a host, for screens that already run inside
- * SwiftUI, e.g. a page of the settings navigation stack.
+ * SwiftUI: a page of the settings navigation stack or a sheet's form.
  */
 export function NativeFormContent({
   sections,
   onRefresh,
   empty,
+  loading,
+  testID,
 }: Pick<
   NativeFormProps,
-  "sections" | "onRefresh" | "empty"
+  "sections" | "onRefresh" | "empty" | "loading" | "testID"
 >): React.JSX.Element {
-  if (!sections.length && empty)
+  const { theme } = useTheme();
+  if (!sections.length && (loading || empty))
     return (
-      <ContentUnavailableView
-        title={empty.title}
-        systemImage={empty.symbol}
-        description={empty.description}
-      />
+      // Fills the host or page so the state sits in the middle of the canvas.
+      <VStack
+        testID={testID}
+        modifiers={[
+          frame({ maxWidth: Infinity, maxHeight: Infinity }),
+          background(theme.background),
+        ]}
+      >
+        {loading || !empty ? <ProgressView /> : <EmptyState empty={empty} />}
+      </VStack>
     );
   return (
     <Form
+      testID={testID}
       modifiers={[
+        scrollContentBackground("hidden"),
+        background(theme.background),
         scrollDismissesKeyboard("interactively"),
         ...(onRefresh ? [refreshable(onRefresh)] : []),
       ]}
@@ -1210,6 +1550,7 @@ export function NativeForm({
   sections,
   onRefresh,
   empty,
+  loading,
   testID,
 }: NativeFormProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -1224,6 +1565,7 @@ export function NativeForm({
         sections={sections}
         onRefresh={onRefresh}
         empty={empty}
+        loading={loading}
       />
     </Host>
   );

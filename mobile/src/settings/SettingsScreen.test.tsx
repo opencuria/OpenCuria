@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react-native";
 import type { Organization } from "@opencuria/client";
 import { ThemeProvider } from "../ui/theme";
@@ -89,6 +90,12 @@ it("shows the profile, organization and every settings area like ChatGPT's setti
     ).toBeTruthy();
   expect(screen.getByText("Email: ada@example.com")).toBeTruthy();
   expect(screen.getByText("Server: curia.example")).toBeTruthy();
+  // Sign out stands alone in the last section, below the account.
+  const sections = screen.getAllByTestId(/^form-section-/);
+  expect(sections.at(-1)!.props.testID).toBe("form-section-session");
+  expect(
+    within(sections.at(-1)!).getByRole("button", { name: "Sign out" }),
+  ).toBeTruthy();
 });
 
 it("shows members only the areas they can change something in", () => {
@@ -241,7 +248,8 @@ describe("workspace policy", () => {
       client: mockClient({ organizations: { get } }),
     });
     expect(await screen.findByText("Server unavailable")).toBeTruthy();
-    fireEvent.press(screen.getByRole("button", { name: "Try again" }));
+    expect(screen.getByText("Couldn’t load workspace policy")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
     expect(
       await screen.findByRole("switch", { name: "Stop inactive workspaces" }),
     ).toBeTruthy();
@@ -300,7 +308,11 @@ describe("deletion", () => {
         deletions: { list: jest.fn(async () => []), request, cancel },
       }),
     });
-    fireEvent.press(await screen.findByTestId("request-deletion"));
+    // Requesting waits until a pending request is ruled out.
+    await waitFor(() =>
+      expect(screen.getByTestId("request-deletion")).toBeEnabled(),
+    );
+    fireEvent.press(screen.getByTestId("request-deletion"));
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith(target, "deferred"),
     );
@@ -312,6 +324,28 @@ describe("deletion", () => {
       screen.getByRole("button", { name: "Cancel pending request" }),
     );
     await waitFor(() => expect(cancel).toHaveBeenCalledWith("del-1"));
+  });
+
+  it("retries requests that cannot load before offering a new one", async () => {
+    const list = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce([pending]);
+    renderSettingsPage(<DeletionPage target={target} name="node-dev" />, {
+      admin: false,
+      client: mockClient({ deletions: { list } }),
+    });
+    expect(await screen.findByText("Server unavailable")).toBeTruthy();
+    // The target might already have a pending request.
+    expect(screen.getByTestId("request-deletion")).toBeDisabled();
+    await act(async () =>
+      fireEvent.press(screen.getByRole("button", { name: "Retry" })),
+    );
+    expect(
+      await screen.findByText("Deletion: Waiting dependency"),
+    ).toBeTruthy();
+    expect(screen.queryByText("Server unavailable")).toBeNull();
+    expect(screen.queryByTestId("request-deletion")).toBeNull();
   });
 
   it("lets admins force exactly the previewed deletion after approval", async () => {

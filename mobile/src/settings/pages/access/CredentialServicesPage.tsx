@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { serviceSubtitle } from "./credentialServices";
@@ -59,29 +59,35 @@ export function CredentialServicesPage(): React.JSX.Element {
         },
       ]
     : [];
+  const failure = services.data
+    ? undefined
+    : loadFailure("credential services", services);
+  const create = {
+    title: "New service",
+    symbol: "plus" as const,
+    onPress: () => navigation.push("credential-service-new"),
+  };
 
   return (
     <SettingsPage
       title="Credential services"
       sections={
-        services.error && !services.data
-          ? loadErrorSections(services.error, () => void services.reload())
-          : sections
+        failure
+          ? []
+          : [...refreshError("credential-services", services), ...sections]
       }
       loading={!services.data && !services.error}
       onRefresh={services.reload}
-      empty={{
-        title: "No credential services",
-        description:
-          "Create an organization service or activate a global service.",
-        symbol: "checkmark.shield",
-      }}
-      primaryAction={{
-        title: "New service",
-        symbol: "plus",
-        onPress: () => navigation.push("credential-service-new"),
-        testID: "new-credential-service",
-      }}
+      empty={
+        failure ?? {
+          title: "No credential services yet",
+          description:
+            "Create an organization service or activate a global service.",
+          symbol: "checkmark.shield",
+          action: { ...create, testID: "empty-new-credential-service" },
+        }
+      }
+      primaryAction={{ ...create, testID: "new-credential-service" }}
       testID="settings-credential-services"
     />
   );

@@ -954,7 +954,10 @@ export function ChatComposer({
                       <Image
                         source={{ uri: attachment.uri }}
                         contentFit="cover"
-                        style={styles.attachmentThumbnail}
+                        style={[
+                          styles.attachmentThumbnail,
+                          { backgroundColor: theme.controlFill },
+                        ]}
                         accessibilityLabel={`${attachment.name} preview`}
                       />
                     ) : (
@@ -1132,7 +1135,6 @@ const styles = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 10,
-    backgroundColor: "#777777",
   },
   skillName: { maxWidth: 170, fontSize: 13, fontWeight: "500" },
   mention: { fontWeight: "600" },

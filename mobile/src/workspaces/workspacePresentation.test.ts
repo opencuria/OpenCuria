@@ -8,8 +8,10 @@ import {
   workspaceMenuActions,
   workspacePickerActions,
   workspaceState,
+  workspaceStatus,
   workspaceStorage,
   workspaceSubtitle,
+  workspaceSymbol,
   workspaceSystem,
 } from "./workspacePresentation";
 
@@ -109,6 +111,24 @@ describe("workspace list presentation", () => {
       { id: "zeta", title: "zeta", subtitle: undefined, selected: true },
       { id: "idle", title: "idle", subtitle: "Stopped", selected: false },
     ]);
+  });
+
+  it("maps each state to a status dot and a symbol", () => {
+    expect(workspaceStatus("running")).toBe("positive");
+    expect(workspaceStatus("attention")).toBe("attention");
+    expect(workspaceStatus("error")).toBe("critical");
+    // Transitions show a spinner instead of a dot.
+    expect(workspaceStatus("busy")).toBeUndefined();
+    expect(workspaceStatus("stopped")).toBe("neutral");
+    expect(workspaceStatus("offline")).toBe("neutral");
+    expect(workspaceStatus("removed")).toBe("neutral");
+    expect(
+      workspaceStatus(workspaceState(workspace({ status: "failed" })).tone),
+    ).toBe("critical");
+    expect(workspaceSymbol("error")).toBe("exclamationmark.triangle");
+    expect(workspaceSymbol("attention")).toBe("exclamationmark.triangle");
+    expect(workspaceSymbol("running")).toBe("server.rack");
+    expect(workspaceSymbol("stopped")).toBe("server.rack");
   });
 
   it("marks transitions and busy chats as busy", () => {

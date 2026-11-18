@@ -2,7 +2,7 @@ import React from "react";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { keyStatus, keySubtitle } from "./apiKeys";
@@ -40,28 +40,28 @@ export function ApiKeysPage(): React.JSX.Element {
         },
       ]
     : [];
+  const failure = keys.data ? undefined : loadFailure("API keys", keys);
+  const create = {
+    title: "New API key",
+    symbol: "plus" as const,
+    onPress: () => navigation.push("api-key-new"),
+  };
   return (
     <SettingsPage
       title="API keys"
-      sections={
-        keys.error && !keys.data
-          ? loadErrorSections(keys.error, () => void keys.reload())
-          : sections
-      }
+      sections={failure ? [] : [...refreshError("api-keys", keys), ...sections]}
       loading={!keys.data && !keys.error}
       onRefresh={keys.reload}
-      empty={{
-        title: "No API keys yet",
-        description:
-          "Create your first API key to start integrating with external tools.",
-        symbol: "key.horizontal",
-      }}
-      primaryAction={{
-        title: "New API key",
-        symbol: "plus",
-        onPress: () => navigation.push("api-key-new"),
-        testID: "new-api-key",
-      }}
+      empty={
+        failure ?? {
+          title: "No API keys yet",
+          description:
+            "Create your first API key to start integrating with external tools.",
+          symbol: "key.horizontal",
+          action: { ...create, testID: "empty-new-api-key" },
+        }
+      }
+      primaryAction={{ ...create, testID: "new-api-key" }}
       testID="settings-api-keys"
     />
   );

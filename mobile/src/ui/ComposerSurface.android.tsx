@@ -15,7 +15,7 @@ export function ComposerSurface({
         pointerEvents="none"
         style={StyleSheet.absoluteFill}
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <Surface
@@ -55,7 +55,7 @@ export function ComposerSheetSurface({
         pointerEvents="none"
         style={StyleSheet.absoluteFill}
         colorScheme={theme.scheme}
-        seedColor={theme.primary}
+        seedColor={theme.seed}
         ignoreSafeAreaKeyboardInsets
       >
         <Surface

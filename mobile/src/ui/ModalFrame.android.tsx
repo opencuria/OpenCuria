@@ -1,38 +1,17 @@
 import React from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { DockedSearchBar, Host, Icon, Text } from "@expo/ui/jetpack-compose";
-import { fillMaxWidth, padding } from "@expo/ui/jetpack-compose/modifiers";
-import { androidIcon } from "./androidIcons";
-import type { ModalFrameProps, ModalSearch } from "./ModalFrame.types";
+import type { ModalFrameProps } from "./ModalFrame.types";
 import { NativeToolbar } from "./NativeToolbar.android";
+import { SearchField } from "./SearchField.android";
 import { useTheme } from "./theme";
 
-/** Material 3 docked search bar below the toolbar. */
-function SearchBar({ search }: { search: ModalSearch }): React.JSX.Element {
-  const { theme } = useTheme();
-  return (
-    <Host
-      matchContents={{ vertical: true }}
-      colorScheme={theme.scheme}
-      seedColor={theme.primary}
-      ignoreSafeAreaKeyboardInsets
-    >
-      <DockedSearchBar
-        onQueryChange={search.onChange}
-        modifiers={[fillMaxWidth(), padding(16, 4, 16, 8)]}
-      >
-        <DockedSearchBar.LeadingIcon>
-          <Icon source={androidIcon("magnifyingglass")!} size={24} />
-        </DockedSearchBar.LeadingIcon>
-        <DockedSearchBar.Placeholder>
-          <Text>{search.placeholder}</Text>
-        </DockedSearchBar.Placeholder>
-      </DockedSearchBar>
-    </Host>
-  );
-}
-
+/**
+ * Sheets share the chat's canvas: the toolbar and content sit on
+ * `theme.background`, close leading, overflow trailing. `form`,
+ * `primaryAction` and `largeTitle` are iOS toolbar concerns: on Android
+ * `NativeModal` renders the form and the bottom action as `children`.
+ */
 export function ModalFrame({
   title,
   subtitle,
@@ -49,15 +28,16 @@ export function ModalFrame({
       style={{
         flex: 1,
         paddingTop: insets.top,
-        backgroundColor: theme.surface,
+        backgroundColor: theme.background,
       }}
     >
+      {/* The native toolbar parses colors with Color.parseColor: hex only. */}
       <NativeToolbar
         title={title}
         subtitle={subtitle ?? ""}
         titleColor={theme.text}
         subtitleColor={theme.mutedText}
-        surfaceColor={theme.surface}
+        surfaceColor={theme.background}
         tintColor={theme.text}
         showClose={Boolean(onClose)}
         menuItems={(actions ?? []).map((action) => ({
@@ -70,7 +50,7 @@ export function ModalFrame({
         onMenuAction={({ nativeEvent }) => onAction?.(nativeEvent.id)}
         style={{ height: 56, width: "100%" }}
       />
-      {search ? <SearchBar search={search} /> : null}
+      {search ? <SearchField search={search} /> : null}
       {children}
     </View>
   );

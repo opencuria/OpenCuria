@@ -796,6 +796,39 @@ it.each([
   tree.unmount();
 });
 
+it("says why the workspace list is empty after a failed load and retries", async () => {
+  const client = mockClient();
+  client.workspaces.list.mockRejectedValueOnce(
+    new Error("Network request failed"),
+  );
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByText("Network request failed")).toBeTruthy(),
+  );
+  fireEvent.press(screen.getByTestId("main-menu"));
+  fireEvent.press(
+    within(screen.getByTestId("conversation-drawer")).getByTestId(
+      "all-workspaces",
+    ),
+  );
+  const sheet = within(screen.getByTestId("workspace-picker-sheet"));
+  expect(sheet.getByText("Couldn’t load workspaces")).toBeTruthy();
+  expect(sheet.queryByText("No workspaces yet")).toBeNull();
+  await act(async () =>
+    fireEvent.press(sheet.getByRole("button", { name: "Retry" })),
+  );
+  await waitFor(() =>
+    expect(sheet.getByTestId("form-section-running")).toBeTruthy(),
+  );
+  expect(sheet.queryByText("Couldn’t load workspaces")).toBeNull();
+  tree.unmount();
+});
+
 it("keeps the composer mounted through initial loading, empty and existing chats", async () => {
   const client = mockClient();
   let finishOverview!: (value: Workspace[]) => void;
@@ -1527,7 +1560,21 @@ it("puts workspace and chat actions in the header menu", async () => {
   fireEvent.press(screen.getByTestId("chat-menu"));
   fireEvent.press(screen.getByRole("button", { name: "Rename chat" }));
   expect(screen.getByTestId("rename-session-sheet")).toBeTruthy();
-  expect(screen.getByDisplayValue("Release notes")).toBeTruthy();
+  const name = screen.getByLabelText("Name");
+  expect(name.props.value).toBe("Release notes");
+  fireEvent.changeText(name, "  ");
+  expect(
+    screen.getByTestId("rename-save").props.accessibilityState.disabled,
+  ).toBe(true);
+  fireEvent.changeText(name, "Release notes v2 ");
+  await act(async () => fireEvent.press(screen.getByTestId("rename-save")));
+  expect(mockController.rename).toHaveBeenCalledWith(
+    "session-a",
+    "Release notes v2",
+  );
+  await waitFor(() =>
+    expect(screen.queryByTestId("rename-session-sheet")).toBeNull(),
+  );
   tree.unmount();
 });
 

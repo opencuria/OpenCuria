@@ -1,6 +1,12 @@
 import React from "react";
 import { Alert, Linking, type AlertButton } from "react-native";
-import { act, fireEvent, screen, waitFor } from "@testing-library/react-native";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react-native";
 import {
   emptyPluginForm,
   formToCreateIn,
@@ -17,6 +23,7 @@ import type { SettingsChoice } from "../../SettingsContext";
 import { mockClient, renderSettingsPage, testUser } from "../../testUtils";
 import { ApiKeyCreatedPage } from "./ApiKeyCreatedPage";
 import { ApiKeyPage } from "./ApiKeyPage";
+import { ApiKeysPage } from "./ApiKeysPage";
 import { CredentialPage } from "./CredentialPage";
 import { CredentialServicesPage } from "./CredentialServicesPage";
 import { CredentialsPage } from "./CredentialsPage";
@@ -133,11 +140,53 @@ describe("credentials", () => {
     await waitFor(() =>
       expect(update).toHaveBeenCalledWith("cred-1", { value: "ghp_new" }),
     );
+    // Destructive actions stand alone in the last section.
+    const sections = screen.getAllByTestId(/^form-section-/);
+    expect(sections.at(-1)!.props.testID).toBe("form-section-danger");
     const alert = confirmAlert("Delete");
-    fireEvent.press(screen.getByRole("button", { name: "Delete credential" }));
+    fireEvent.press(
+      within(sections.at(-1)!).getByRole("button", {
+        name: "Delete credential",
+      }),
+    );
     await alert.press();
     expect(remove).toHaveBeenCalledWith("cred-1");
     expect(navigation.pop).toHaveBeenCalled();
+  });
+
+  it("offers Retry when the credential cannot load", async () => {
+    const list = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce([credential({})]);
+    renderSettingsPage(<CredentialPage credentialId="cred-1" />, {
+      client: mockClient({ credentials: { list } }),
+    });
+    expect(await screen.findByText("Server unavailable")).toBeTruthy();
+    expect(screen.getByText("Couldn’t load credential")).toBeTruthy();
+    expect(screen.queryByText("Credential unavailable")).toBeNull();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Service: GitHub")).toBeTruthy();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("explains services that cannot load and retries", async () => {
+    const listServices = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce([service({})]);
+    renderSettingsPage(<NewCredentialPage />, {
+      client: mockClient({
+        credentials: { list: jest.fn(async () => []), listServices },
+      }),
+    });
+    expect(
+      await screen.findByText("Couldn’t load credential services"),
+    ).toBeTruthy();
+    expect(screen.getByText("Server unavailable")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByTestId("credential-service")).toBeTruthy();
+    expect(listServices).toHaveBeenCalledTimes(2);
   });
 
   it("keeps organization credentials read-only for members", async () => {
@@ -394,13 +443,50 @@ describe("plugins", () => {
       screen.getByRole("button", { name: "GitHub, Required · ENV" }),
     );
     expect(navigation.push).toHaveBeenCalledWith("credential-new:svc-env");
+    // Deleting sits in its own last section, not in the overflow menu.
     fireEvent.press(
       screen.getByRole("button", { name: "More for Playwright" }),
     );
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
     const alert = confirmAlert("Delete");
-    fireEvent.press(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.press(screen.getByRole("button", { name: "Delete plugin" }));
     await alert.press();
     expect(remove).toHaveBeenCalledWith("p1");
+  });
+
+  it("explains credential services that cannot load and retries", async () => {
+    const resources = new ResourceStore();
+    resources.set<PluginDraft>("plugin-draft:d1", {
+      pluginId: null,
+      form: { ...emptyPluginForm(), name: "Tools" },
+    });
+    const listServices = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce([]);
+    renderSettingsPage(<PluginEditorPage draftKey="d1" />, {
+      client: mockClient({
+        credentials: { listServices },
+        plugins: { list: jest.fn(async () => []) },
+      }),
+      environment: { resources },
+    });
+    expect(
+      await screen.findByText(
+        "Couldn’t load credential services: Server unavailable",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByTestId("save-plugin")).toBeDisabled();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Couldn’t load credential services/),
+      ).toBeNull(),
+    );
+    expect(listServices).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(screen.getByTestId("save-plugin")).toBeEnabled(),
+    );
   });
 
   it("creates a plugin from the shared draft", async () => {
@@ -474,6 +560,97 @@ describe("API keys", () => {
     expires_at: null,
     permissions: ["skills:read", "skills:write"],
     ...overrides,
+  });
+
+  it("explains a list that cannot load and retries", async () => {
+    const list = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce([key()]);
+    renderSettingsPage(<ApiKeysPage />, {
+      client: mockClient({
+        apiKeys: { list, permissions: jest.fn(async () => permissions) },
+      }),
+    });
+    expect(await screen.findByText("Couldn’t load API keys")).toBeTruthy();
+    expect(screen.getByText("Server unavailable")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByTestId("key-k1")).toBeTruthy();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the keys and offers Retry when a refresh fails", async () => {
+    const list = jest
+      .fn()
+      .mockResolvedValueOnce([key()])
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce([key()]);
+    const client = mockClient({
+      apiKeys: { list, permissions: jest.fn(async () => permissions) },
+    });
+    const { environment } = renderSettingsPage(<ApiKeysPage />, { client });
+    expect(await screen.findByTestId("key-k1")).toBeTruthy();
+    await act(() =>
+      environment.resources.load("api-keys", () => client.apiKeys.list(), true),
+    );
+    expect(screen.getByText("Server unavailable")).toBeTruthy();
+    expect(screen.getByTestId("key-k1")).toBeTruthy();
+    expect(screen.queryByText("Couldn’t load API keys")).toBeNull();
+    await act(async () =>
+      fireEvent.press(screen.getByRole("button", { name: "Retry" })),
+    );
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(screen.queryByText("Server unavailable")).toBeNull();
+  });
+
+  it("offers New API key in the empty state", async () => {
+    const { navigation } = renderSettingsPage(<ApiKeysPage />, {
+      client: mockClient({
+        apiKeys: {
+          list: jest.fn(async () => []),
+          permissions: jest.fn(async () => permissions),
+        },
+      }),
+    });
+    expect(await screen.findByText("No API keys yet")).toBeTruthy();
+    fireEvent.press(screen.getByTestId("empty-new-api-key"));
+    expect(navigation.push).toHaveBeenCalledWith("api-key-new");
+  });
+
+  it("retries permissions that cannot load and still offers revocation", async () => {
+    const load = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce(permissions);
+    renderSettingsPage(<ApiKeyPage keyId="k1" />, {
+      client: mockClient({
+        apiKeys: { list: jest.fn(async () => [key()]), permissions: load },
+      }),
+    });
+    expect(await screen.findByText("Server unavailable")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revoke key" })).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByRole("switch", { name: "Full access" }),
+    ).toBeTruthy();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries permissions of a new key that cannot load", async () => {
+    const load = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Server unavailable"))
+      .mockResolvedValueOnce(permissions);
+    renderSettingsPage(<NewApiKeyPage />, {
+      client: mockClient({
+        apiKeys: { list: jest.fn(async () => []), permissions: load },
+      }),
+    });
+    expect(await screen.findByText("Server unavailable")).toBeTruthy();
+    fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+    expect(
+      await screen.findByRole("switch", { name: "Full access" }),
+    ).toBeTruthy();
   });
 
   it("creates a restricted key only with a selection and shows the secret once", async () => {

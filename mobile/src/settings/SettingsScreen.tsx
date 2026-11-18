@@ -98,7 +98,7 @@ function unavailablePage(): React.ReactNode {
       empty={{
         title: "Page unavailable",
         description: "This page no longer exists.",
-        symbol: "exclamationmark.triangle.fill",
+        symbol: "exclamationmark.triangle",
       }}
     />
   );

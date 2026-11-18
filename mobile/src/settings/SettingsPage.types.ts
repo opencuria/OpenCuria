@@ -10,12 +10,10 @@ export interface SettingsPageProps {
   title: string;
   sections: NativeFormSection[];
   /**
-   * The first page: closes Settings with a liquid-glass × instead of going
-   * back, and shows no bar title above the profile.
+   * The first page: closes Settings with a liquid-glass × at the leading
+   * edge (as every sheet does) instead of going back.
    */
   root?: boolean;
-  /** A large title that collapses while scrolling, for section pages. */
-  largeTitle?: boolean;
   /** "Save", "Add" (+) and similar: navigation bar on iOS, button or FAB on Android. */
   primaryAction?: ModalPrimaryAction;
   /** Overflow ("…") menu. */

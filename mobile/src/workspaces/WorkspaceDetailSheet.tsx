@@ -12,14 +12,12 @@ import {
 } from "@opencuria/chat-core/workspaceCreation";
 import { formatTimeAgo } from "@opencuria/chat-core/conversationGroups";
 import type { OpenCuriaClient, Workspace } from "@opencuria/client";
-import { NativeForm } from "../ui/NativeForm";
 import type {
   NativeFormQuickAction,
   NativeFormRow,
   NativeFormSection,
 } from "../ui/NativeForm.types";
 import { NativeModal } from "../ui/primitives";
-import { useTheme } from "../ui/theme";
 import { showToast } from "../ui/toast";
 import { CaptureImageSheet } from "./CaptureImageSheet";
 import type { WorkspaceCatalog } from "./useWorkspaceCatalog";
@@ -46,10 +44,10 @@ import {
   statusTextTone,
   workspaceImageLabel,
   workspaceState,
+  workspaceStatus,
   workspaceStorage,
   workspaceSymbol,
   workspaceSystem,
-  workspaceTint,
 } from "./workspacePresentation";
 
 export interface WorkspaceDetailSheetProps {
@@ -104,7 +102,6 @@ function DetailSheet({
   onOpenChat,
   onChanged,
 }: WorkspaceDetailSheetProps & { workspace: Workspace }): React.JSX.Element {
-  const { theme } = useTheme();
   const runner = catalog.runners.find(
     (entry) => entry.id === workspace.runner_id,
   );
@@ -287,6 +284,7 @@ function DetailSheet({
             id: "problem",
             text: problem,
             tone: "danger" as const,
+            symbol: "exclamationmark.triangle" as const,
           },
         ]
       : []),
@@ -364,8 +362,8 @@ function DetailSheet({
           title: workspace.name,
           subtitle: [state.label, stopsSoon].filter(Boolean).join(" · "),
           subtitleTone: statusTextTone(state.tone),
+          status: workspaceStatus(state.tone),
           symbol: workspaceSymbol(state.tone),
-          tint: workspaceTint(state.tone, theme),
           busy: state.busy,
           actions: quickActions,
           onAction: onQuickAction,
@@ -375,13 +373,12 @@ function DetailSheet({
     { id: "status", title: "Status", rows: statusRows },
     {
       id: "general",
-      title: "Name",
       rows: [
         {
           kind: "text",
           id: "name",
-          label: "Workspace name",
-          placeholder: "Workspace name",
+          label: "Name",
+          placeholder: "Name, e.g. billing-service",
           value: form.name,
           onChange: (name) => edit({ name }),
           disabled: !editable,
@@ -444,7 +441,6 @@ function DetailSheet({
       visible
       onClose={close}
       title="Workspace"
-      scrollable={false}
       swipeToDismiss={!dirty}
       primaryAction={{
         title: "Save",
@@ -456,8 +452,8 @@ function DetailSheet({
         testID: "workspace-save",
       }}
       testID="workspace-detail-sheet"
+      form={{ sections }}
     >
-      <NativeForm sections={sections} />
       <CaptureImageSheet
         workspace={capturing ? workspace : null}
         client={client}

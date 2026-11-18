@@ -22,9 +22,10 @@ export function BuildLogPage({
       title="Build log"
       label="Latest output"
       text={log.data?.build_log}
-      loading={log.loading}
+      loading={log.data === undefined && !log.error}
       error={log.error}
       onRetry={() => void log.reload()}
+      things="build log"
       emptyText="No build log available."
       testID="settings-build-log"
     />

@@ -5,9 +5,10 @@ import {
   DropdownMenuItem,
   ExposedDropdownMenu,
   ExposedDropdownMenuBox,
-  TextField,
+  OutlinedTextField,
   useNativeState,
   Host,
+  Icon,
   ListItem,
   RadioButton,
   Row,
@@ -31,6 +32,12 @@ import {
   tween,
   weight,
 } from "@expo/ui/jetpack-compose/modifiers";
+import { androidIcon } from "./androidIcons";
+import {
+  fieldSelectionColors,
+  outlinedFieldColors,
+  outlinedFieldShape,
+} from "./NativeTextField.android";
 import type {
   NativeOptionProps,
   NativePickerProps,
@@ -133,7 +140,7 @@ export function NativeSegmentedPicker(
     <Host
       matchContents={{ vertical: true }}
       colorScheme={theme.scheme}
-      seedColor={theme.primary}
+      seedColor={theme.seed}
       ignoreSafeAreaKeyboardInsets
     >
       <SegmentedChoiceRow {...props} />
@@ -152,43 +159,73 @@ export function NativePicker(props: NativePickerProps): React.JSX.Element {
     <Host
       matchContents={{ vertical: true }}
       colorScheme={theme.scheme}
-      seedColor={theme.primary}
+      seedColor={theme.seed}
       ignoreSafeAreaKeyboardInsets
     >
       <ExposedDropdownMenuBox
         expanded={expanded}
         onExpandedChange={props.disabled ? undefined : setExpanded}
       >
-        <TextField
+        <OutlinedTextField
           value={value}
           readOnly
           enabled={!props.disabled}
+          shape={outlinedFieldShape()}
+          colors={outlinedFieldColors(theme)}
+          textSelectionColors={fieldSelectionColors(theme)}
           modifiers={[
             fillMaxWidth(),
             menuAnchor(),
             semantics({ contentDescription: props.label }),
           ]}
         >
-          <TextField.Label>
+          <OutlinedTextField.Label>
             <Text>{props.label}</Text>
-          </TextField.Label>
-        </TextField>
+          </OutlinedTextField.Label>
+          <OutlinedTextField.TrailingIcon>
+            <Icon
+              source={
+                expanded
+                  ? require("../../assets/native-icons/expand-less.xml")
+                  : require("../../assets/native-icons/expand-more.xml")
+              }
+              size={24}
+            />
+          </OutlinedTextField.TrailingIcon>
+        </OutlinedTextField>
         <ExposedDropdownMenu
           expanded={expanded}
+          containerColor={theme.raised}
           onDismissRequest={() => setExpanded(false)}
         >
           {props.options.map((option) => (
             <DropdownMenuItem
               key={option.value}
               enabled={!option.disabled}
+              elementColors={{
+                textColor: theme.text,
+                disabledTextColor: theme.subtleText,
+                trailingIconColor: theme.text,
+              }}
               onClick={() => {
                 setExpanded(false);
                 props.onChange(option.value);
               }}
             >
               <DropdownMenuItem.Text>
-                <Text>{option.label}</Text>
+                <Text
+                  style={{
+                    fontWeight: option.value === props.value ? "600" : "400",
+                  }}
+                >
+                  {option.label}
+                </Text>
               </DropdownMenuItem.Text>
+              {option.value === props.value ? (
+                <DropdownMenuItem.TrailingIcon>
+                  <Icon source={androidIcon("checkmark")!} size={20} />
+                </DropdownMenuItem.TrailingIcon>
+              ) : null}
             </DropdownMenuItem>
           ))}
         </ExposedDropdownMenu>
@@ -203,10 +240,16 @@ export function NativeOption(props: NativeOptionProps): React.JSX.Element {
     <Host
       matchContents={{ vertical: true }}
       colorScheme={theme.scheme}
-      seedColor={theme.primary}
+      seedColor={theme.seed}
       ignoreSafeAreaKeyboardInsets
     >
       <ListItem
+        colors={{
+          containerColor: TRANSPARENT,
+          contentColor: props.disabled ? theme.subtleText : theme.text,
+          supportingContentColor: theme.mutedText,
+          leadingContentColor: theme.text,
+        }}
         modifiers={[
           fillMaxWidth(),
           semantics({
@@ -227,9 +270,28 @@ export function NativeOption(props: NativeOptionProps): React.JSX.Element {
       >
         <ListItem.LeadingContent>
           {props.multiple ? (
-            <Checkbox value={props.selected} enabled={!props.disabled} />
+            <Checkbox
+              value={props.selected}
+              enabled={!props.disabled}
+              colors={{
+                checkedColor: theme.primary,
+                checkmarkColor: theme.primaryForeground,
+                uncheckedColor: theme.mutedText,
+                disabledCheckedColor: theme.subtleText,
+                disabledUncheckedColor: theme.subtleText,
+              }}
+            />
           ) : (
-            <RadioButton selected={props.selected} enabled={!props.disabled} />
+            <RadioButton
+              selected={props.selected}
+              enabled={!props.disabled}
+              colors={{
+                selectedColor: theme.primary,
+                unselectedColor: theme.mutedText,
+                disabledSelectedColor: theme.subtleText,
+                disabledUnselectedColor: theme.subtleText,
+              }}
+            />
           )}
         </ListItem.LeadingContent>
         <ListItem.HeadlineContent>

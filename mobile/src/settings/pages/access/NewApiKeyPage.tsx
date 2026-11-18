@@ -3,6 +3,7 @@ import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { showToast } from "../../../ui/toast";
 import { errorMessage, useResource } from "../../resources";
 import { route } from "../../routes";
+import { pendingSection } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import {
@@ -110,14 +111,11 @@ export function NewApiKeyPage(): React.JSX.Element {
             payload === null ? "Select at least one permission." : undefined,
         })
       : [
-          {
-            id: "permissions",
-            footer: permissions.error ?? "Loading permissions…",
-            footerTone: permissions.error
-              ? ("danger" as const)
-              : ("muted" as const),
-            rows: [],
-          },
+          pendingSection("permissions", {
+            loading: "Loading permissions…",
+            error: permissions.error,
+            retry: () => void permissions.reload(),
+          }),
         ]),
   ];
 

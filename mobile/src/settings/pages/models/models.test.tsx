@@ -125,9 +125,10 @@ describe("provider & models", () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Speech models could not be loaded. You can enter a model ID manually.",
+        "Couldn’t load speech models. You can enter a model ID manually.",
       ),
     ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
   it("chooses the small model, snaps its effort and saves automatically", async () => {

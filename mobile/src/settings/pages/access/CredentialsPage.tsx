@@ -2,7 +2,7 @@ import React from "react";
 import type { NativeFormSection } from "../../../ui/NativeForm.types";
 import { useResource } from "../../resources";
 import { route } from "../../routes";
-import { loadErrorSections } from "../../sections";
+import { loadFailure, refreshError } from "../../sections";
 import { useSettings, useSettingsNavigation } from "../../SettingsContext";
 import { SettingsPage } from "../../SettingsPage";
 import { useForegroundReload } from "../../useForegroundReload";
@@ -46,30 +46,33 @@ export function CredentialsPage(): React.JSX.Element {
         },
       ]
     : [];
+  const failure = credentials.data
+    ? undefined
+    : loadFailure("credentials", credentials);
+  const add = {
+    title: "Add credential",
+    symbol: "plus" as const,
+    onPress: () => navigation.push("credential-new"),
+  };
   return (
     <SettingsPage
       title="Credentials"
       sections={
-        credentials.error && !credentials.data
-          ? loadErrorSections(
-              credentials.error,
-              () => void credentials.reload(),
-            )
-          : sections
+        failure
+          ? []
+          : [...refreshError("credentials", credentials), ...sections]
       }
       loading={!credentials.data && !credentials.error}
       onRefresh={credentials.reload}
-      empty={{
-        title: "No credentials",
-        description: "Add a credential for an active service.",
-        symbol: "key",
-      }}
-      primaryAction={{
-        title: "Add credential",
-        symbol: "plus",
-        onPress: () => navigation.push("credential-new"),
-        testID: "add-credential",
-      }}
+      empty={
+        failure ?? {
+          title: "No credentials yet",
+          description: "Add a credential for an active service.",
+          symbol: "key",
+          action: { ...add, testID: "empty-add-credential" },
+        }
+      }
+      primaryAction={{ ...add, testID: "add-credential" }}
       testID="settings-credentials"
     />
   );

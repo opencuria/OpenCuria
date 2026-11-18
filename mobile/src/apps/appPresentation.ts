@@ -114,8 +114,21 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** One line under the app's name: version and what can happen next. */
-export function appSubtitle(row: AppRow, platform: AppPlatform): string {
+/** Download progress (0–1) of an install, e.g. "Downloading… 42%". */
+export function downloadLabel(progress: number): string {
+  return `Downloading… ${Math.round(progress * 100)}%`;
+}
+
+/**
+ * One line under the app's name: version and what can happen next, or the
+ * download progress (0–1) while it installs.
+ */
+export function appSubtitle(
+  row: AppRow,
+  platform: AppPlatform,
+  progress?: number,
+): string {
+  if (progress !== undefined) return downloadLabel(progress);
   const latest = row.published?.latest_version ?? null;
   const version = (name: string | undefined) => (name ? `Version ${name}` : "");
   switch (row.state) {
@@ -126,7 +139,9 @@ export function appSubtitle(row: AppRow, platform: AppPlatform): string {
     case "incompatible":
       return `Needs Expo SDK ${sdkMajor(latest?.sdk_version) ?? "?"}; update OpenCuria`;
     case "unsupported":
-      return platform === "ios" ? "Not built for iPhone" : "Not built for Android";
+      return platform === "ios"
+        ? "Not built for iPhone"
+        : "Not built for Android";
     case "available": {
       const size = latest?.platforms[platform];
       return [version(latest?.version_name), size ? formatBytes(size) : ""]
@@ -136,8 +151,28 @@ export function appSubtitle(row: AppRow, platform: AppPlatform): string {
   }
 }
 
+/**
+ * The one action an app offers, as in the App Store: install, update (then
+ * open) or open. Apps this device cannot run offer none.
+ */
+export function appActionTitle(
+  state: AppState,
+): "Install" | "Update" | "Open" | null {
+  switch (state) {
+    case "available":
+      return "Install";
+    case "update":
+      return "Update";
+    case "installed":
+      return "Open";
+    default:
+      return null;
+  }
+}
+
 /** Number of apps that wait for the user: new ones and updates. */
 export function pendingAppCount(rows: AppRow[]): number {
-  return rows.filter((row) => row.state === "available" || row.state === "update")
-    .length;
+  return rows.filter(
+    (row) => row.state === "available" || row.state === "update",
+  ).length;
 }
