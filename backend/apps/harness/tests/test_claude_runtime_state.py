@@ -137,6 +137,79 @@ async def test_managed_write_accepts_long_resumed_transcripts(tmp_path: Path) ->
     assert target.stat().st_size == len(payload)
 
 
+# Emulates Cygwin (MSYS2 Python of Windows guests): fchmod on a directory
+# descriptor fails with EACCES, chmod through the parent works.
+_DIRECTORY_FCHMOD_DENIED = """
+import os, stat, sys
+real_fchmod = os.fchmod
+def fchmod(fd, mode):
+    if stat.S_ISDIR(os.fstat(fd).st_mode):
+        raise PermissionError(13, "Permission denied")
+    real_fchmod(fd, mode)
+os.fchmod = fchmod
+sys.platform = PLATFORM
+script = sys.argv[1]
+sys.argv = [sys.argv[0], *sys.argv[2:]]
+exec(compile(script, "<managed>", "exec"), {"__name__": "__main__"})
+"""
+
+
+class _DirectoryFchmodDeniedAccessor(_LocalAccessor):
+    """Run the managed scripts where directory fchmod is denied."""
+
+    def __init__(self, platform: str) -> None:
+        super().__init__()
+        self.shim = _DIRECTORY_FCHMOD_DENIED.replace("PLATFORM", repr(platform))
+
+    async def open_process(
+        self,
+        command: list[str],
+        workdir: str = "/workspace",
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> _LocalProcessStream:
+        python, flag, script, *args = command
+        assert (python, flag) == ("python3", "-c")
+        return await super().open_process(
+            [python, flag, self.shim, script, *args], workdir, env, timeout
+        )
+
+
+@pytest.mark.asyncio
+async def test_managed_dirs_are_private_on_windows_guests(tmp_path: Path) -> None:
+    """Cygwin denies directory fchmod; the mode is set through the parent."""
+    root = tmp_path / "managed"
+    state = ClaudeRuntimeState(
+        accessor=_DirectoryFchmodDeniedAccessor("cygwin"),  # type: ignore[arg-type]
+        auth_env={"ANTHROPIC_API_KEY": "not-a-real-secret"},
+        root=str(root),
+        sdk_version="test",
+    )
+    target = root / "session" / "skills"
+
+    await state.ensure_managed_dir(str(target))
+
+    for directory in (root, root / "session", target):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_denied_directory_fchmod_still_fails_outside_cygwin(
+    tmp_path: Path,
+) -> None:
+    """Only Cygwin may fall back; elsewhere a denied chmod stops the run."""
+    root = tmp_path / "managed"
+    state = ClaudeRuntimeState(
+        accessor=_DirectoryFchmodDeniedAccessor("linux"),  # type: ignore[arg-type]
+        auth_env={"ANTHROPIC_API_KEY": "not-a-real-secret"},
+        root=str(root),
+        sdk_version="test",
+    )
+
+    with pytest.raises(RuntimeError, match="managed workspace operation failed"):
+        await state.ensure_managed_dir(str(root / "session"))
+
+
 @pytest.mark.asyncio
 async def test_managed_write_over_limit_is_rejected(tmp_path: Path) -> None:
     """Both the backend and the workspace script enforce the managed bound."""
