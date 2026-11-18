@@ -176,6 +176,26 @@ _UPLOAD_SCRIPT = (
     'export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"\n'
     "umask 077 && cat > {path} && chmod 700 {path}\n"
 )
+#: libvirt releases (``virConnect.getLibVersion`` encoding) that added features
+#: of non-Linux guests; older hosts such as Ubuntu 22.04 (8.0) run without them.
+LIBVIRT_RESET_NVRAM = 8_001_000
+LIBVIRT_QEMU_VDAGENT = 8_004_000
+
+
+def _start_with_fresh_nvram(
+    conn: libvirt.virConnect, domain: libvirt.virDomain
+) -> None:
+    """Start a newly defined domain from the firmware variable template (blocking).
+
+    libvirt before 8.1 cannot reset NVRAM on start. A new definition still
+    starts from the template there: the runner always undefines with
+    ``VIR_DOMAIN_UNDEFINE_NVRAM``, so no variables survive a former domain.
+    """
+    flag = getattr(libvirt, "VIR_DOMAIN_START_RESET_NVRAM", None)
+    if flag is not None and conn.getLibVersion() >= LIBVIRT_RESET_NVRAM:
+        domain.createWithFlags(flag)
+    else:
+        domain.create()
 
 
 def _domain_xml(
@@ -188,6 +208,7 @@ def _domain_xml(
     *,
     guest: GuestOS | None = None,
     serial_log: str | None = None,
+    vdagent: bool = True,
 ) -> str:
     """Build a libvirt domain XML definition.
 
@@ -202,7 +223,9 @@ def _domain_xml(
     if guest is None or guest.name == LINUX:
         return xml
     root = ET.fromstring(xml)
-    guest.customize_domain(root, vcpus=vcpus, serial_log=serial_log or "")
+    guest.customize_domain(
+        root, vcpus=vcpus, serial_log=serial_log or "", vdagent=vdagent
+    )
     owner = root.find(f"./metadata/{{{METADATA_NS}}}workspace")
     assert owner is not None
     ET.SubElement(owner, f"{{{METADATA_NS}}}guest-os").text = guest.name
@@ -388,6 +411,11 @@ class QemuRuntime(RuntimeBackend):
         if self._conn is None or not self._conn.isAlive():
             self._conn = libvirt.open("qemu:///system")
         return self._conn
+
+    async def _libvirt_at_least(self, version: int) -> bool:
+        """Whether the host's libvirt is at least ``version`` (``getLibVersion``)."""
+        current = await asyncio.to_thread(lambda: self._libvirt_conn().getLibVersion())
+        return current >= version
 
     def _domain_name(self, instance_id: str) -> str:
         """Canonical libvirt domain name for a workspace."""
@@ -1592,6 +1620,10 @@ class QemuRuntime(RuntimeBackend):
             serial_log=(
                 None if guest.name == LINUX else str(self._serial_log_path(instance_id))
             ),
+            vdagent=(
+                guest.name != LINUX
+                and await self._libvirt_at_least(LIBVIRT_QEMU_VDAGENT)
+            ),
         )
 
         def _define_and_start() -> None:
@@ -1599,7 +1631,7 @@ class QemuRuntime(RuntimeBackend):
             dom = conn.defineXML(domain_xml)
             # A fresh definition never inherits stale firmware variables.
             if guest.name != LINUX:
-                dom.createWithFlags(libvirt.VIR_DOMAIN_START_RESET_NVRAM)
+                _start_with_fresh_nvram(conn, dom)
             else:
                 dom.create()  # start the VM
 
@@ -2778,6 +2810,7 @@ class QemuRuntime(RuntimeBackend):
                 network=self._workspace_network_name(instance_id),
                 guest=guest,
                 serial_log=str(self._serial_log_path(instance_id)),
+                vdagent=await self._libvirt_at_least(LIBVIRT_QEMU_VDAGENT),
             )
         )
         # Boot the installer once; afterwards the installed disk boots first.
@@ -2800,8 +2833,8 @@ class QemuRuntime(RuntimeBackend):
         xml = ET.tostring(root, encoding="unicode")
 
         def define_and_start() -> None:
-            domain = self._libvirt_conn().defineXML(xml)
-            domain.createWithFlags(libvirt.VIR_DOMAIN_START_RESET_NVRAM)
+            conn = self._libvirt_conn()
+            _start_with_fresh_nvram(conn, conn.defineXML(xml))
 
         self._guest_cache[instance_id] = guest.name
         await asyncio.to_thread(define_and_start)

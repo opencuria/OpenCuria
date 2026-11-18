@@ -31,12 +31,14 @@ from src.runtime.guest_os import (
     validate_guest_os,
 )
 from src.runtime.managed_process import GUEST_TOKEN_CODE
-from src.runtime.qemu_runtime import QemuRuntime, _domain_xml
+from src.runtime.qemu_runtime import QemuRuntime, _domain_xml, _start_with_fresh_nvram
 
 _NS = f"{{{METADATA_NS}}}"
 
 
-def _xml(guest=None, network: str | None = "net0", vcpus: int = 4) -> ET.Element:
+def _xml(
+    guest=None, network: str | None = "net0", vcpus: int = 4, vdagent: bool = True
+) -> ET.Element:
     return ET.fromstring(
         _domain_xml(
             name="opencuria-workspace-ws",
@@ -47,6 +49,7 @@ def _xml(guest=None, network: str | None = "net0", vcpus: int = 4) -> ET.Element
             network=network,
             guest=guest,
             serial_log="/disks/ws-serial.log",
+            vdagent=vdagent,
         )
     )
 
@@ -106,6 +109,80 @@ def test_windows_definition_meets_windows_11_requirements() -> None:
     assert root.find("./devices/memballoon").get("freePageReporting") == "on"
     assert root.findtext(f"./metadata/{_NS}workspace/{_NS}guest-os") == WINDOWS
     assert root.findtext(f"./metadata/{_NS}workspace/{_NS}workspace-id") == "ws"
+
+
+def test_windows_definition_omits_vdagent_where_libvirt_lacks_it() -> None:
+    with_agent = _xml(guest_for(WINDOWS))
+    root = _xml(guest_for(WINDOWS), vdagent=False)
+
+    assert root.find("./devices/channel[@type='qemu-vdagent']") is None
+    # Everything else stays: pointer, display, TPM and Secure Boot.
+    with_agent.find("./devices").remove(
+        with_agent.find("./devices/channel[@type='qemu-vdagent']")
+    )
+    assert ET.tostring(root) == ET.tostring(with_agent)
+
+
+@pytest.mark.parametrize(
+    ("version", "resets"), [(8_000_000, False), (8_001_000, True), (10_000_000, True)]
+)
+def test_new_domains_reset_nvram_where_libvirt_supports_it(
+    monkeypatch: pytest.MonkeyPatch, version: int, resets: bool
+) -> None:
+    monkeypatch.setattr(libvirt, "VIR_DOMAIN_START_RESET_NVRAM", 16, raising=False)
+    conn, domain = MagicMock(), MagicMock()
+    conn.getLibVersion.return_value = version
+
+    _start_with_fresh_nvram(conn, domain)
+
+    if resets:
+        domain.createWithFlags.assert_called_once_with(16)
+        domain.create.assert_not_called()
+    else:
+        domain.create.assert_called_once_with()
+        domain.createWithFlags.assert_not_called()
+
+
+def test_bindings_without_the_reset_flag_start_domains_plainly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(libvirt, "VIR_DOMAIN_START_RESET_NVRAM", raising=False)
+    conn, domain = MagicMock(), MagicMock()
+    conn.getLibVersion.return_value = 10_000_000
+
+    _start_with_fresh_nvram(conn, domain)
+
+    domain.create.assert_called_once_with()
+    domain.createWithFlags.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("version", "vdagent", "resets"),
+    [(8_000_000, False, False), (8_001_000, False, True), (8_004_000, True, True)],
+)
+async def test_windows_guests_follow_the_host_libvirt(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, version: int, vdagent: bool, resets: bool
+) -> None:
+    monkeypatch.setattr(libvirt, "VIR_DOMAIN_START_RESET_NVRAM", 16, raising=False)
+    runtime = _runtime(tmp_path)
+    conn = MagicMock()
+    conn.getLibVersion.return_value = version
+    runtime._libvirt_conn = MagicMock(return_value=conn)
+    runtime._create_workspace_network = AsyncMock(return_value=("10.0.0.1", "10.0.0.2"))
+    runtime._create_cloud_init_iso = AsyncMock(return_value=tmp_path / "seed.iso")
+
+    await runtime._define_and_start_guest(
+        "ws", guest=guest_for(WINDOWS), disk=tmp_path / "ws.qcow2", vcpus=2,
+        memory_mb=4096,
+    )
+
+    root = ET.fromstring(conn.defineXML.call_args.args[0])
+    channel = root.find("./devices/channel[@type='qemu-vdagent']")
+    assert (channel is not None) is vdagent
+    assert root.find("./devices/tpm/backend").get("type") == "emulator"
+    domain = conn.defineXML.return_value
+    assert domain.createWithFlags.called is resets
+    assert domain.create.called is not resets
 
 
 def test_guests_without_network_have_no_interface() -> None:

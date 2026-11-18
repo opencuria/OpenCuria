@@ -78,8 +78,13 @@ class GuestOS(ABC):
     min_disk_gb: int
 
     @abstractmethod
-    def customize_domain(self, root: ET.Element, *, vcpus: int, serial_log: str) -> None:
-        """Add guest-specific firmware and devices to a new domain definition."""
+    def customize_domain(
+        self, root: ET.Element, *, vcpus: int, serial_log: str, vdagent: bool = True
+    ) -> None:
+        """Add guest-specific firmware and devices to a new domain definition.
+
+        ``vdagent`` is false on hosts whose libvirt lacks the qemu-vdagent channel.
+        """
 
     @abstractmethod
     def seed_files(self, spec: SeedSpec) -> dict[str, str]:
@@ -113,8 +118,10 @@ class LinuxGuest(GuestOS):
     min_memory_mb = 1
     min_disk_gb = 1
 
-    def customize_domain(self, root: ET.Element, *, vcpus: int, serial_log: str) -> None:
-        del root, vcpus, serial_log
+    def customize_domain(
+        self, root: ET.Element, *, vcpus: int, serial_log: str, vdagent: bool = True
+    ) -> None:
+        del root, vcpus, serial_log, vdagent
 
     def seed_files(self, spec: SeedSpec) -> dict[str, str]:
         return cloud_init_files(
@@ -175,7 +182,9 @@ class WindowsGuest(GuestOS):
     min_memory_mb = 4096
     min_disk_gb = 64
 
-    def customize_domain(self, root: ET.Element, *, vcpus: int, serial_log: str) -> None:
+    def customize_domain(
+        self, root: ET.Element, *, vcpus: int, serial_log: str, vdagent: bool = True
+    ) -> None:
         os_node = root.find("./os")
         assert os_node is not None
         os_node.set("firmware", "efi")
@@ -219,11 +228,14 @@ class WindowsGuest(GuestOS):
             ET.SubElement(serial, "log", file=serial_log, append="off")
         ET.SubElement(devices, "controller", type="usb", model="qemu-xhci")
         ET.SubElement(devices, "input", type="tablet", bus="usb")
-        vdagent = ET.SubElement(devices, "channel", type="qemu-vdagent")
-        source = ET.SubElement(vdagent, "source")
-        ET.SubElement(source, "clipboard", copypaste="yes")
-        ET.SubElement(source, "mouse", mode="client")
-        ET.SubElement(vdagent, "target", type="virtio", name="com.redhat.spice.0")
+        if vdagent:
+            # Optional: the guest clipboard runs in the console session, and the
+            # USB tablet already reports absolute pointer positions.
+            channel = ET.SubElement(devices, "channel", type="qemu-vdagent")
+            source = ET.SubElement(channel, "source")
+            ET.SubElement(source, "clipboard", copypaste="yes")
+            ET.SubElement(source, "mouse", mode="client")
+            ET.SubElement(channel, "target", type="virtio", name="com.redhat.spice.0")
         graphics = ET.SubElement(devices, "graphics", type="vnc", sharePolicy="force-shared")
         ET.SubElement(graphics, "listen", type="none")
         video = ET.SubElement(devices, "video")
