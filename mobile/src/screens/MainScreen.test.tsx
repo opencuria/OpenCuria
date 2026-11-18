@@ -52,6 +52,8 @@ jest.mock("../notifications/native", () => ({
   setViewedNotificationSession: jest.fn(),
 }));
 const mockSavedAccount = {
+  loadDrafts: jest.fn(),
+  saveDrafts: jest.fn(),
   loadOverview: jest.fn(),
   saveOverview: jest.fn(),
   chats: jest.fn(),
@@ -67,6 +69,8 @@ jest.mock("../offline/offlineStore", () => ({
 jest.mock("../offline/useSavedChatCleanup", () => ({
   useSavedChatCleanup: jest.fn(),
 }));
+/** The composer's last draft handler, to type any text. */
+const mockComposer: { onDraftChange?: (value: string) => void } = {};
 /** The props the transcript got last, to call its handlers directly. */
 const mockTranscript: {
   props?: {
@@ -182,6 +186,7 @@ jest.mock("../components", () => {
       queue?: { onEdit: (id: string) => Promise<void> };
     }) {
       const [menuOpen, setMenuOpen] = ReactRuntime.useState(false);
+      mockComposer.onDraftChange = props.onDraftChange;
       return ReactRuntime.createElement(
         View,
         null,
@@ -487,6 +492,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   listeners.clear();
   mockTranscript.props = undefined;
+  mockSavedAccount.loadDrafts.mockResolvedValue([]);
+  mockSavedAccount.saveDrafts.mockResolvedValue(undefined);
   mockSavedAccount.loadOverview.mockResolvedValue(null);
   mockSavedAccount.saveOverview.mockResolvedValue(undefined);
   mockSavedAccount.chats.mockResolvedValue([]);
@@ -1057,6 +1064,198 @@ it("moves a new chat's draft and model choice to the workspace picked in the com
   });
   expect(screen.queryByTestId("composer-workspace")).toBeNull();
   tree.unmount();
+});
+
+describe("drafts", () => {
+  const idleChat = {
+    ...busySession,
+    id: "idle-chat",
+    title: "Idle chat",
+    status: "idle",
+  } as HarnessSession;
+  const claudeChat = {
+    ...idleChat,
+    id: "claude-chat",
+    title: "Claude chat",
+    harness_id: "claude",
+  } as HarnessSession;
+
+  function conversationRow(chat: HarnessSession): HarnessConversation {
+    return {
+      session_id: chat.id,
+      workspace_id: runningWorkspace.id,
+      workspace_name: runningWorkspace.name,
+      title: chat.title,
+      status: "idle",
+      unread: false,
+      needs_attention: false,
+      updated_at: "2026-01-01T00:00:00Z",
+      last_message_at: "2026-01-01T00:00:00Z",
+    } as HarnessConversation;
+  }
+
+  async function renderWithChats() {
+    const client = mockClient();
+    client.conversations.list.mockResolvedValue([
+      conversationRow(idleChat),
+      conversationRow(claudeChat),
+    ]);
+    mockController.openWorkspace.mockImplementation(
+      async (workspaceId: string, sessionId?: string) => {
+        const active = [idleChat, claudeChat].find(
+          (chat) => chat.id === sessionId,
+        );
+        snapshot = {
+          ...snapshot,
+          workspaceId,
+          sessions: [idleChat, claudeChat] as never[],
+          activeSessionId: active?.id ?? null,
+          activeSession: (active ?? null) as never,
+        };
+        listeners.forEach((listener) => listener());
+      },
+    );
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+    );
+    return tree;
+  }
+
+  async function openChat(id: string) {
+    fireEvent.press(screen.getByTestId("main-menu"));
+    fireEvent.press(screen.getByTestId(id));
+    await waitFor(() =>
+      expect(mockController.openWorkspace).toHaveBeenLastCalledWith(
+        runningWorkspace.id,
+        id,
+      ),
+    );
+  }
+
+  const shownDraft = () => screen.getByTestId("composer-draft");
+  const type = (text: string) => act(() => mockComposer.onDraftChange!(text));
+
+  it("keeps a draft per chat and brings it back, as in the webapp", async () => {
+    const tree = await renderWithChats();
+    type("New chat idea");
+
+    await openChat(claudeChat.id);
+    await waitFor(() => expect(shownDraft()).toHaveTextContent(""));
+    type("Answer for Claude");
+
+    await openChat(idleChat.id);
+    await waitFor(() => expect(shownDraft()).toHaveTextContent(""));
+    type("Answer for the idle chat");
+
+    fireEvent.press(screen.getByTestId("new-chat"));
+    await waitFor(() =>
+      expect(shownDraft()).toHaveTextContent("New chat idea"),
+    );
+    await openChat(claudeChat.id);
+    await waitFor(() =>
+      expect(shownDraft()).toHaveTextContent("Answer for Claude"),
+    );
+
+    // Leaving saves the drafts on the device, keyed like the webapp's.
+    tree.unmount();
+    await waitFor(() =>
+      expect(mockSavedAccount.saveDrafts).toHaveBeenLastCalledWith(
+        expect.arrayContaining([
+          expect.objectContaining({
+            key: "chat-input-workspace-a-default",
+            text: "New chat idea",
+          }),
+          expect.objectContaining({
+            key: "chat-input-workspace-a-claude-chat-claude",
+            text: "Answer for Claude",
+          }),
+          expect.objectContaining({
+            key: "chat-input-workspace-a-idle-chat",
+            text: "Answer for the idle chat",
+          }),
+        ]),
+      ),
+    );
+    expect(mockSavedAccount.saveDrafts.mock.lastCall?.[0]).toHaveLength(3);
+  });
+
+  it("forgets a chat's draft once it is sent", async () => {
+    const tree = await renderWithChats();
+    await openChat(idleChat.id);
+    type("hello from mobile");
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() => expect(mockController.send).toHaveBeenCalled());
+    await waitFor(() => expect(shownDraft()).toHaveTextContent(""));
+
+    fireEvent.press(screen.getByTestId("new-chat"));
+    await waitFor(() =>
+      expect(mockController.newChat).toHaveBeenCalledTimes(2),
+    );
+    await openChat(idleChat.id);
+    await waitFor(() => expect(shownDraft()).toHaveTextContent(""));
+    tree.unmount();
+  });
+
+  it("shows the drafts saved on this device", async () => {
+    mockSavedAccount.loadDrafts.mockResolvedValue([
+      {
+        key: "chat-input-workspace-a-default",
+        text: "Saved new chat",
+        editedAt: new Date().toISOString(),
+      },
+      {
+        key: "chat-input-workspace-a-claude-chat-claude",
+        text: "Saved Claude reply",
+        editedAt: new Date().toISOString(),
+      },
+    ]);
+    const tree = await renderWithChats();
+    await waitFor(() =>
+      expect(shownDraft()).toHaveTextContent("Saved new chat"),
+    );
+
+    await openChat(claudeChat.id);
+    await waitFor(() =>
+      expect(shownDraft()).toHaveTextContent("Saved Claude reply"),
+    );
+    tree.unmount();
+  });
+
+  it("keeps what is typed while a new chat is created with that chat", async () => {
+    let created!: () => void;
+    mockController.send.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          created = () => {
+            snapshot = {
+              ...snapshot,
+              sessions: [idleChat] as never[],
+              activeSessionId: idleChat.id,
+              activeSession: idleChat as never,
+            };
+            listeners.forEach((listener) => listener());
+            resolve({ mode: "build" });
+          };
+        }),
+    );
+    const tree = await renderWithChats();
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() => expect(mockController.send).toHaveBeenCalled());
+    type("Next question");
+
+    await act(async () => created());
+    expect(shownDraft()).toHaveTextContent("Next question");
+
+    fireEvent.press(screen.getByTestId("new-chat"));
+    await waitFor(() => expect(shownDraft()).toHaveTextContent(""));
+    tree.unmount();
+  });
 });
 
 it.each([

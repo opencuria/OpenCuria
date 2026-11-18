@@ -66,6 +66,7 @@ import {
   ChatController,
   type ChatControllerSnapshot,
 } from "../state/chatController";
+import { useChatDraft } from "../state/useChatDraft";
 import {
   MediaCache,
   clearPickedPhotoCache,
@@ -247,13 +248,29 @@ export function MainScreen(): React.JSX.Element {
   const sendingRef = useRef(false);
   const workspaceRef = useRef<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
-  const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [mode, setMode] = useState<HarnessSessionMode>("build");
   const [harness, setHarness] = useState<HarnessId>("native");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  // Each chat, new chat and engine keeps its own draft, as in the webapp.
+  const {
+    draft,
+    setDraft,
+    followNext: followDraft,
+  } = useChatDraft(
+    saved,
+    chat.workspaceId
+      ? {
+          workspaceId: chat.workspaceId,
+          sessionId: chat.activeSessionId,
+          harnessId: chat.activeSessionId
+            ? (chat.activeSession?.harness_id ?? "native")
+            : harness,
+        }
+      : null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [drawerError, setDrawerError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -629,7 +646,6 @@ export function MainScreen(): React.JSX.Element {
     selectedWorkspaceRef.current = null;
     setWorkspaceId(null);
     setNavigation(null);
-    setDraft("");
     setAttachments([]);
     setSkillIds([]);
     setConversations([]);
@@ -882,6 +898,10 @@ export function MainScreen(): React.JSX.Element {
     )
       return;
     selectionDirty.current = false;
+    // The draft on screen stays, as in the webapp.
+    followDraft(
+      (from, to) => !from.sessionId && !to.sessionId && to.harnessId === next,
+    );
     setHarness(next);
     setMode(nextMode);
     const defaults = harnessAgentDefaults(next, nextMode, {
@@ -971,6 +991,15 @@ export function MainScreen(): React.JSX.Element {
         controller.getSnapshot().activeSession?.status !== "busy"
           ? controller.previewPrompt(text, options)
           : undefined;
+      // What is typed while a new chat is created stays with that chat.
+      const stopFollowing = ownerSession
+        ? undefined
+        : followDraft(
+            (from, to) =>
+              !from.sessionId &&
+              Boolean(to.sessionId) &&
+              to.workspaceId === ownerWorkspace,
+          );
       try {
         const paths = files.length
           ? await uploadAttachments(client, ownerWorkspace, files)
@@ -1023,6 +1052,7 @@ export function MainScreen(): React.JSX.Element {
       } finally {
         // Sent prompts were taken over; this only takes back an unsent one.
         dropPreview?.();
+        stopFollowing?.();
         sendingRef.current = false;
       }
     },
@@ -1038,6 +1068,8 @@ export function MainScreen(): React.JSX.Element {
       model,
       effort,
       draft,
+      setDraft,
+      followDraft,
       loadOverview,
       navigationReady,
     ],
@@ -1206,6 +1238,8 @@ export function MainScreen(): React.JSX.Element {
     } = {},
   ) => {
     if (!options.notificationTarget) notifications.controller?.consumeTarget();
+    // The chat opened next shows its own draft.
+    followDraft(null);
     const revision = ++navigationRevision.current;
     generation.current += 1;
     selectedWorkspaceRef.current = workspaceId;
@@ -1256,7 +1290,6 @@ export function MainScreen(): React.JSX.Element {
           rows.some((item) => item.id === owner.id) ? rows : [...rows, owner],
         );
         setSheet(null);
-        setDraft("");
         setAttachments([]);
         requestNavigation(owner.id, {
           sessionId: target.sessionId,
@@ -1301,7 +1334,6 @@ export function MainScreen(): React.JSX.Element {
       setDrawerError("This conversation’s workspace is no longer available.");
       return;
     }
-    setDraft("");
     setAttachments([]);
     setSheet(null);
     setDrawerError(null);
@@ -1319,7 +1351,6 @@ export function MainScreen(): React.JSX.Element {
       });
       return;
     }
-    setDraft("");
     setAttachments([]);
     setSheet(null);
     setError(null);
@@ -1338,7 +1369,6 @@ export function MainScreen(): React.JSX.Element {
   };
 
   const chooseWorkspace = (chosen: Workspace) => {
-    setDraft("");
     setAttachments([]);
     setSkillIds([]);
     setSheet(null);
@@ -1351,11 +1381,14 @@ export function MainScreen(): React.JSX.Element {
     if (!chosen || chosen.id === workspaceId) return;
     keepSelection.current = true;
     openWorkspace(chosen);
+    followDraft(
+      (from, to) =>
+        !from.sessionId && !to.sessionId && to.workspaceId === chosen.id,
+    );
   };
 
   const newChat = () => {
     if (!workspace || !ready) return;
-    setDraft("");
     setAttachments([]);
     setSkillIds([]);
     setError(null);
@@ -1847,7 +1880,6 @@ export function MainScreen(): React.JSX.Element {
                   }
             }
             onOpenSubtask={(id) => {
-              setDraft("");
               setAttachments([]);
               setSkillIds([]);
               if (workspaceId)

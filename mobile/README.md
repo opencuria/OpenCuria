@@ -17,7 +17,9 @@ on Android (`@expo/ui`, native menus, native navigation and text editing).
 - Scheduled tasks, push notifications, iOS Live Activities and every webapp setting.
   MCP OAuth connections finish in the browser.
 - Offline mode: opened chats and their pictures are cached per account
-  (`src/offline/`) and shown read-only when the server is unreachable.
+  (`src/offline/`) and shown read-only when the server is unreachable. Composer
+  drafts (one per chat and engine, as in the webapp) are kept there too, never in
+  AsyncStorage, which installed apps share; sign out deletes both.
 
 ## Local development
 

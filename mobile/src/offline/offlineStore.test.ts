@@ -246,6 +246,24 @@ describe("OfflineStore", () => {
     expect(await account.loadChat("s0")).toBeNull();
   });
 
+  it("keeps composer drafts per account and deletes them on sign out", async () => {
+    const offline = store();
+    const draft = {
+      key: "chat-input-ws-1-s1",
+      text: "secret plan",
+      editedAt: "2026-11-07T11:59:00.000Z",
+    };
+    await offline.account(SCOPE).saveDrafts([draft]);
+
+    expect(await offline.account(SCOPE).loadDrafts()).toEqual([draft]);
+    expect(await offline.account(OTHER).loadDrafts()).toEqual([]);
+    for (const uri of __files.keys())
+      if (uri.startsWith(ROOT)) expect(uri).not.toMatch(/ws-1|s1/);
+
+    await offline.clear();
+    expect(await offline.account(SCOPE).loadDrafts()).toEqual([]);
+  });
+
   it("deletes everything on sign out and saves again afterwards", async () => {
     const offline = store();
     await offline.account(SCOPE).saveProfile(user, []);
