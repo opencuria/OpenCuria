@@ -113,6 +113,24 @@ def test_base_cache_key_follows_edition_iso_and_assets(tmp_path) -> None:
     assert not media.base_ready(pro)
 
 
+def test_generalize_survives_packages_that_refuse_removal() -> None:
+    """A package refusing removal (0x80073CFA) never skips sysprep."""
+    script = (windows_media.ASSETS / "generalize.ps1").read_text()
+    lines = [line.strip() for line in script.splitlines()]
+    removals = [
+        i for i, line in enumerate(lines) if line.startswith("Remove-AppxPackage")
+    ]
+
+    # All users first, then this user; each attempt fails on its own.
+    assert len(removals) == 2
+    assert all(lines[i - 1] == "try {" for i in removals)
+    assert all("SilentlyContinue" not in lines[i] for i in removals)
+    assert "kept: " in script
+    # Guest scripts refresh on every build: changing them never reinstalls a base.
+    assert "generalize.ps1" in windows_media.GUEST_SCRIPTS
+    assert "generalize.ps1" not in windows_media.INSTALL_SCRIPTS
+
+
 @pytest.mark.skipif(
     not (shutil.which("genisoimage") or shutil.which("mkisofs")) or not shutil.which("isoinfo"),
     reason="ISO tools are not installed",

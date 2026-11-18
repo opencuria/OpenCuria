@@ -36,13 +36,25 @@ try {
     cscript.exe //Nologo $slmgr /cpky | Out-Null
     cscript.exe //Nologo $slmgr /ckms | Out-Null
 
-    # Per-user Store packages that are not provisioned make sysprep fail.
+    # Per-user Store packages that are not provisioned make sysprep fail. Some
+    # refuse removal for all users (0x80073CFA); those are removed for this
+    # user, and packages that stay are named if sysprep fails.
     $provisioned = @(Get-AppxProvisionedPackage -Online | ForEach-Object { $_.PackageName })
-    Get-AppxPackage -AllUsers | Where-Object {
+    $removable = @(Get-AppxPackage -AllUsers | Where-Object {
         -not $_.IsFramework -and -not $_.NonRemovable -and
         $_.SignatureKind -eq 'Store' -and $_.PackageFullName -notin $provisioned
-    } | ForEach-Object {
-        Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction SilentlyContinue
+    })
+    $kept = @()
+    foreach ($package in $removable) {
+        try {
+            Remove-AppxPackage -Package $package.PackageFullName -AllUsers
+        } catch {
+            try {
+                Remove-AppxPackage -Package $package.PackageFullName
+            } catch {
+                $kept += $package.Name
+            }
+        }
     }
 
     # Windows runs SetupComplete.cmd again after every sysprep OOBE: the base
@@ -60,7 +72,8 @@ try {
     if ($process.ExitCode -ne 0 -or -not (Test-Path $tag)) {
         $errors = Get-Content -ErrorAction SilentlyContinue 'C:\Windows\System32\Sysprep\Panther\setuperr.log' |
             Select-Object -Last 5
-        throw "sysprep failed ($($process.ExitCode)): $($errors -join ' | ')"
+        $keptNote = if ($kept) { "; kept: $($kept -join ', ')" } else { '' }
+        throw "sysprep failed ($($process.ExitCode)$keptNote): $($errors -join ' | ')"
     }
     Write-Serial 'OPENCURIA_GENERALIZE_OK'
 } catch {
