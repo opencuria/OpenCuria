@@ -60,6 +60,7 @@ import {
   routeAssistantMessage,
   sortHarnessParts,
 } from '@opencuria/chat-core/harnessReducer'
+import { shouldMarkViewedSessionRead } from '@opencuria/chat-core/harnessReadState'
 import {
   createOptimisticPrompt,
   withoutOptimisticPrompt,
@@ -455,9 +456,7 @@ export const useHarnessStore = defineStore('harness', () => {
     trimInactiveTranscripts()
     if (!sessionId) return
     const session = sessions.value.find((row) => row.id === sessionId)
-    if (session?.status === 'idle' && !session.manual_unread && session.unread) {
-      void markSessionRead(sessionId)
-    }
+    if (shouldMarkViewedSessionRead(session)) void markSessionRead(sessionId)
   }
 
   async function markSessionRead(sessionId: string, force = false): Promise<void> {

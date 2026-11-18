@@ -40,6 +40,7 @@ import {
   routeAssistantMessage,
   sortHarnessParts,
 } from "@opencuria/chat-core/harnessReducer";
+import { shouldMarkViewedSessionRead } from "@opencuria/chat-core/harnessReadState";
 import {
   collectAncestorSessions,
   collectDescendantSessionIds,
@@ -869,6 +870,8 @@ export class ChatController {
         !activeSessionId
       )
         return;
+      // A run that finished while the app was away is read once it is shown.
+      this.maybeMarkRead(activeSessionId);
       const context = { workspaceId, workspaceGeneration, selectionGeneration };
       const lineageIds = collectDescendantSessionIds(
         activeSessionId,
@@ -1665,13 +1668,8 @@ export class ChatController {
 
   private maybeMarkRead(sessionId: string): void {
     const session = this.sessions.find((item) => item.id === sessionId);
-    if (
-      session?.status === "idle" &&
-      session.unread &&
-      !session.manual_unread
-    ) {
+    if (shouldMarkViewedSessionRead(session))
       void this.markRead(sessionId).catch(() => undefined);
-    }
   }
 
   /** Dismiss the selected session's error/abort notice for one message. */

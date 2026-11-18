@@ -1066,6 +1066,42 @@ describe("ChatController", () => {
     expect(client.harness.markRead).not.toHaveBeenCalled();
     controller.dispose();
   });
+
+  it("marks the open chat read when a reconnect finds its run finished meanwhile", async () => {
+    const { client, realtime, rows } = makeClient([
+      session("root", { status: "busy" }),
+    ]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    expect(client.harness.markRead).not.toHaveBeenCalled();
+
+    // The run finished while the app was in the background.
+    rows.set("root", session("root", { status: "idle", unread: true }));
+    realtime.reconnect!();
+    await vi.waitFor(() =>
+      expect(client.harness.markRead).toHaveBeenCalledWith("root"),
+    );
+    expect(controller.getSnapshot().sessions[0]).toMatchObject({
+      status: "idle",
+      unread: false,
+    });
+    controller.dispose();
+  });
+
+  it("keeps a manual-unread marker when a refresh reconciles the open chat", async () => {
+    const { client, rows } = makeClient([session("root", { status: "busy" })]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+
+    rows.set(
+      "root",
+      session("root", { status: "idle", unread: true, manual_unread: true }),
+    );
+    await controller.refresh();
+    expect(client.harness.markRead).not.toHaveBeenCalled();
+    expect(controller.getSnapshot().sessions[0]?.unread).toBe(true);
+    controller.dispose();
+  });
 });
 
 describe("ChatController steering and scheduled messages", () => {
