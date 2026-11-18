@@ -123,7 +123,13 @@ export interface ChatMessagesProps {
   streamingMessageId?: string | null;
   disabled?: boolean;
   resolveMedia?: (path: string) => Promise<ResolvedChatMedia>;
-  onEdit?: (messageId: string, text: string) => void | Promise<void>;
+  /** Edits a sent prompt; the host moves it into the composer. */
+  onEdit?: (message: HarnessMessage) => void;
+  /**
+   * The prompt being edited. The transcript ends with it and notes that
+   * sending the edit restarts the chat from there.
+   */
+  editingMessageId?: string | null;
   onFork?: (messageId: string) => void | Promise<void>;
   onDismissNotice?: (messageId: string) => void | Promise<void>;
   onCopy?: (message: HarnessMessage, text: string) => void | Promise<void>;
@@ -206,6 +212,7 @@ export function ChatMessages({
   disabled = false,
   resolveMedia,
   onEdit,
+  editingMessageId = null,
   onFork,
   onCopy,
   onDismissNotice,
@@ -267,7 +274,22 @@ export function ChatMessages({
     [],
   );
   // Live replies have no server position yet; the shared rule keeps them last.
-  const ordered = useMemo(() => sortHarnessMessages(messages), [messages]);
+  // An edit replaces everything after its prompt, so that is hidden meanwhile.
+  const ordered = useMemo(() => {
+    const sorted = sortHarnessMessages(messages);
+    const edited = editingMessageId
+      ? sorted.findIndex((message) => message.id === editingMessageId)
+      : -1;
+    return edited < 0 ? sorted : sorted.slice(0, edited + 1);
+  }, [editingMessageId, messages]);
+  // The prompt being edited becomes the end of the transcript.
+  useEffect(() => {
+    if (!editingMessageId) return;
+    const frame = requestAnimationFrame(() => {
+      void listRef.current?.scrollToEnd({ animated: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editingMessageId]);
   // A tapped picture opens in a gallery of every picture in the chat, read
   // from the messages so it also reaches rows that are not rendered.
   const orderedRef = useRef(ordered);
@@ -323,6 +345,7 @@ export function ChatMessages({
         resolveMedia={resolveMedia}
         todos={item.id === todoMessageId ? liveTodos : undefined}
         todoPartId={item.id === todoMessageId ? todoPartId : undefined}
+        editing={item.id === editingMessageId}
         onEdit={handleEdit}
         onFork={handleFork}
         onCopy={handleCopy}
@@ -336,6 +359,7 @@ export function ChatMessages({
     [
       busy,
       disabled,
+      editingMessageId,
       handleCopy,
       handleDismissNotice,
       handleEdit,
@@ -647,6 +671,8 @@ interface MessageRowProps extends Omit<
   todos?: HarnessTodo[];
   /** The hosting `todowrite` part; null appends the card after the message. */
   todoPartId?: string | null;
+  /** This prompt is being edited in the composer. */
+  editing: boolean;
 }
 
 const MessageRow = memo(function MessageRow({
@@ -656,6 +682,7 @@ const MessageRow = memo(function MessageRow({
   resolveMedia,
   todos,
   todoPartId,
+  editing,
   onEdit,
   onFork,
   onCopy,
@@ -668,9 +695,7 @@ const MessageRow = memo(function MessageRow({
   mediaScopeKey,
 }: MessageRowProps): React.JSX.Element {
   const { theme } = useTheme();
-  const [editing, setEditing] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
-  const [editText, setEditText] = useState(message.content);
   const isUser = message.role === "user";
   const prompt = useMemo(
     () => (isUser ? promptLayout(message.content) : null),
@@ -695,16 +720,6 @@ const MessageRow = memo(function MessageRow({
   const duration = elapsedMs(message.created_at, message.completed_at);
   const elapsedLabel = duration === null ? "" : formatElapsed(duration);
   const copyText = getMessageCopyText(message, streaming);
-  const editUserMessage = useCallback(
-    async (messageId: string, text: string) => {
-      try {
-        await onEdit?.(messageId, text);
-      } catch {
-        /* The host owns surfacing edit/rerun failures. */
-      }
-    },
-    [onEdit],
-  );
   const forkMessage = useCallback(
     async (messageId: string) => {
       try {
@@ -730,89 +745,40 @@ const MessageRow = memo(function MessageRow({
     }
   }, [copyText, message, onCopy]);
 
-  const userBubble = isUser ? (
-    <View
-      style={
-        editing
-          ? [styles.userBubble, { backgroundColor: theme.userBubble }]
-          : undefined
-      }
-    >
-      {editing ? (
-        <>
-          <TextInput
-            multiline
-            value={editText}
-            onChangeText={setEditText}
-            accessibilityLabel="Edit message"
-            testID={`chat-edit-${message.id}`}
-            style={[
-              styles.editInput,
-              { color: theme.text, borderColor: theme.border },
-            ]}
-          />
-          <View style={styles.inlineActions}>
-            <Button
-              title="Cancel"
-              variant="ghost"
-              compact
-              onPress={() => {
-                setEditing(false);
-                setEditText(message.content);
-              }}
-            />
-            <Button
-              title="Save & run"
-              variant="primary"
-              compact
-              onPress={() => {
-                setEditing(false);
-                void editUserMessage(message.id, editText.trim());
-              }}
-              disabled={!editText.trim() || editText.trim() === message.content}
-            />
-          </View>
-        </>
-      ) : (
-        <UserMessageContent
-          markdown={message.content}
-          layout={prompt ?? undefined}
-          mediaScopeKey={mediaScopeKey}
-          mediaVisible={mediaVisible}
-          resolveMedia={resolveMedia}
-          onOpenFile={onOpenFile}
-          selectable={false}
-          testID={`chat-message-markdown-${message.id}`}
-        />
-      )}
-    </View>
-  ) : null;
+  // A prompt already being edited is not offered again; a local echo has no
+  // server copy to edit yet.
+  const editPrompt =
+    isUser &&
+    !editing &&
+    !disabled &&
+    !message.id.startsWith("local-user-") &&
+    onEdit
+      ? () => onEdit(message)
+      : undefined;
 
   return (
     <MessageFrame message={message}>
       {isUser ? (
-        editing ? (
-          userBubble
-        ) : (
-          <PromptBubble
-            messageId={message.id}
-            text={copyText}
-            sentAt={message.created_at}
-            onCopy={() => {
-              void doCopy();
-            }}
-            onEdit={
-              !disabled && !message.id.startsWith("local-user-") && onEdit
-                ? () => {
-                    setEditText(message.content);
-                    setEditing(true);
-                  }
-                : undefined
-            }
-          >
-            {userBubble}
-          </PromptBubble>
-        )
+        <PromptBubble
+          messageId={message.id}
+          text={copyText}
+          sentAt={message.created_at}
+          onCopy={() => {
+            void doCopy();
+          }}
+          onEdit={editPrompt}
+        >
+          <UserMessageContent
+            markdown={message.content}
+            layout={prompt ?? undefined}
+            mediaScopeKey={mediaScopeKey}
+            mediaVisible={mediaVisible}
+            resolveMedia={resolveMedia}
+            onOpenFile={onOpenFile}
+            selectable={false}
+            testID={`chat-message-markdown-${message.id}`}
+          />
+        </PromptBubble>
       ) : (
         <View style={styles.assistantBody}>
           {message.error && !message.notice_dismissed_at ? (
@@ -877,7 +843,7 @@ const MessageRow = memo(function MessageRow({
           ))}
         </View>
       )}
-      {isUser && prompt?.images.length && !editing ? (
+      {isUser && prompt?.images.length ? (
         <PromptImages
           images={prompt.images}
           resolveMedia={resolveMedia}
@@ -885,6 +851,14 @@ const MessageRow = memo(function MessageRow({
           mediaScopeKey={mediaScopeKey}
           testID={`chat-message-images-${message.id}`}
         />
+      ) : null}
+      {editing ? (
+        <Text
+          style={[styles.editHint, { color: theme.mutedText }]}
+          testID={`chat-edit-hint-${message.id}`}
+        >
+          Editing this message restarts the chat from here.
+        </Text>
       ) : null}
       {!isUser && !streaming ? (
         <View style={styles.messageActions}>
@@ -959,19 +933,14 @@ const MessageRow = memo(function MessageRow({
           }}
           testID={isUser ? `chat-copy-${message.id}` : undefined}
         />
-        {isUser &&
-        !editing &&
-        !disabled &&
-        !message.id.startsWith("local-user-") &&
-        onEdit ? (
+        {editPrompt ? (
           <Button
             symbol="pencil"
             title="Edit and run again"
             variant="ghost"
             onPress={() => {
               setActionsOpen(false);
-              setEditText(message.content);
-              setEditing(true);
+              editPrompt();
             }}
             testID={`chat-edit-action-${message.id}`}
           />
@@ -1148,8 +1117,12 @@ function PromptBubble({
   }, [activeSelection, selecting]);
   const select = (action: string) => {
     if (action === "copy") onCopy();
-    else if (action === "edit") onEdit?.();
-    else if (action === "select") {
+    else if (action === "edit") {
+      // The composer only takes focus once the iOS menu is gone.
+      if (Platform.OS === "ios")
+        selectTimer.current = setTimeout(() => onEdit?.(), MENU_DISMISS_MS);
+      else onEdit?.();
+    } else if (action === "select") {
       // The text view only keeps its selection once the menu is gone.
       selectTimer.current = setTimeout(
         () => setSelecting(true),
@@ -2167,21 +2140,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginLeft: -(ACTION_SIZE - ACTION_ICON) / 2,
   },
-  inlineActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: 8,
-    marginTop: 8,
-  },
-  editInput: {
-    minHeight: 88,
-    maxHeight: 240,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
-    padding: 10,
-    fontSize: 16,
-    lineHeight: 23,
-    textAlignVertical: "top",
+  editHint: {
+    maxWidth: "92%",
+    marginTop: 6,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: "right",
   },
   streamingCursor: {
     flexDirection: "row",

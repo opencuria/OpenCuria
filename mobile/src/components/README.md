@@ -19,7 +19,9 @@ labels and stable `testID`s.
   `onSend` rejects; `contextKey` discards late picker, search and send results.
   It hosts the sheet stack; `gates` passes pending questions and permissions.
   The field shows file mentions by name while the draft keeps their tokens
-  (`composerDisplay`); a mention is deleted whole.
+  (`composerDisplay`); a mention is deleted whole. A sent prompt is edited in
+  the field (`editing`), never in its bubble; meanwhile the transcript ends with
+  it (`editingMessageId`) and the host keeps the chat's own draft aside.
 - Prompts (`PromptContent`, `promptBlocks`): mentions are chips in the flow of their
   paragraph and mentioned pictures thumbnails below the bubble, as in the webapp. A
   prompt just sent flies in from the composer (`PromptFlight`).

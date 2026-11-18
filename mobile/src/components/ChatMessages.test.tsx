@@ -327,8 +327,8 @@ describe("ChatMessages", () => {
     );
   });
 
-  it("opens user actions on long press and keeps edit-and-run available", async () => {
-    const onEdit = jest.fn().mockResolvedValue(undefined);
+  it("hands a prompt to the host for editing from its long-press menu", async () => {
+    const onEdit = jest.fn();
     const prompt: HarnessMessage = {
       id: "prompt",
       session_id: "s1",
@@ -344,14 +344,70 @@ describe("ChatMessages", () => {
     expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
     fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
     fireEvent.press(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.changeText(
-      screen.getByTestId("chat-edit-prompt"),
-      "Updated prompt",
+    // The bubble stays as it is; the composer takes the text.
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(prompt));
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("ends the transcript with the prompt being edited and notes the restart", async () => {
+    const onEdit = jest.fn();
+    const row = (
+      id: string,
+      role: HarnessMessage["role"],
+      position: number,
+    ): HarnessMessage => ({
+      id,
+      session_id: "s1",
+      role,
+      content: id,
+      parts: [],
+      position,
+      completed_at: "2026-10-27T10:00:00Z",
+    });
+    const rows = [
+      row("first", "user", 0),
+      row("first-answer", "assistant", 1),
+      row("edited", "user", 2),
+      row("edited-answer", "assistant", 3),
+      row("later", "user", 4),
+    ];
+    const view = render(
+      <ThemeProvider>
+        <ChatMessages
+          messages={rows}
+          onEdit={onEdit}
+          editingMessageId="edited"
+        />
+      </ThemeProvider>,
     );
-    fireEvent.press(screen.getByRole("button", { name: "Save & run" }));
+    expect(
+      screen
+        .getAllByTestId(
+          /^chat-message-(first|first-answer|edited|edited-answer|later)$/,
+        )
+        .map((row) => row.props.testID),
+    ).toEqual([
+      "chat-message-first",
+      "chat-message-first-answer",
+      "chat-message-edited",
+    ]);
+    expect(screen.getByTestId("chat-edit-hint-edited")).toHaveTextContent(
+      "Editing this message restarts the chat from here.",
+    );
     await waitFor(() =>
-      expect(onEdit).toHaveBeenCalledWith("prompt", "Updated prompt"),
+      expect(mockScrollToEnd).toHaveBeenCalledWith({ animated: true }),
     );
+    // Only other prompts can be taken for editing meanwhile.
+    fireEvent(screen.getByTestId("chat-message-menu-edited"), "longPress");
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+
+    view.rerender(
+      <ThemeProvider>
+        <ChatMessages messages={rows} onEdit={onEdit} />
+      </ThemeProvider>,
+    );
+    expect(screen.getByTestId("chat-message-later")).toBeTruthy();
+    expect(screen.queryByTestId("chat-edit-hint-edited")).toBeNull();
   });
 
   it("allows inspecting a user message while editing is unavailable", () => {

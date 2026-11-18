@@ -10,6 +10,7 @@ import { Image } from "expo-image";
 import {
   ArrowUp,
   FileText,
+  Pencil,
   Plus,
   Sparkles,
   Square,
@@ -37,7 +38,7 @@ import {
 import { buildComposerSheets } from "@opencuria/chat-core/composerSheets";
 import type { HarnessScheduledMessage } from "@opencuria/chat-core/harness";
 import { sendLaterOptions } from "@opencuria/chat-core/sendLater";
-import { Banner, NativeAction } from "../ui/primitives";
+import { Banner, IconButton, NativeAction } from "../ui/primitives";
 import { NativeContextMenu } from "../ui/ContextMenu";
 import { NativeMenu, type NativeMenuAction } from "../ui/NativeMenu";
 import { PickerPill } from "../ui/PickerPill";
@@ -90,6 +91,13 @@ export interface ComposerWorkspace {
   /** One action per workspace; `selected` marks the current one. */
   actions: NativeMenuAction[];
   onSelect: (id: string) => void;
+}
+
+/** A sent prompt the field holds for editing. */
+export interface ComposerEditing {
+  /** The edited message; a new id focuses the field again. */
+  id: string;
+  onCancel: () => void;
 }
 
 /** What the composer hands to its host when sending or scheduling. */
@@ -157,6 +165,11 @@ export interface ChatComposerProps {
   gates?: ComposerGates;
   /** Queued steers and scheduled messages, shown as a sheet above the editor. */
   queue?: ComposerQueue;
+  /**
+   * The draft is a sent prompt being edited: a banner above the field cancels
+   * it, and `onSend` receives the edit.
+   */
+  editing?: ComposerEditing;
   testID?: string;
 }
 
@@ -208,6 +221,7 @@ export function ChatComposer({
   onChooseFiles,
   gates,
   queue,
+  editing,
   testID = "chat-composer",
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
@@ -484,6 +498,21 @@ export function ChatComposer({
     setEditorKey((key) => key + 1);
   }, [draft]);
 
+  // A prompt taken in for editing opens the keyboard, the caret at its end.
+  // The frame lets the editor that measures the new draft mount first.
+  const editingId = editing?.id;
+  useEffect(() => {
+    if (!editingId) return;
+    const frame = requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input) return;
+      const end = displayOf(draftRef.current).text.length;
+      input.focus();
+      input.setSelection(end, end);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [displayOf, editingId]);
+
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -661,10 +690,11 @@ export function ChatComposer({
     ],
   );
 
+  const isEditing = Boolean(editing);
   const send = useCallback(() => {
     // A prompt's bubble rises from where its text is now; a steer goes to the
-    // queue above the composer instead.
-    if (!steering)
+    // queue above the composer instead, and an edit replaces its prompt.
+    if (!steering && !isEditing)
       armPromptFlight((report) => {
         const input = inputRef.current;
         if (!input) return report(null);
@@ -674,7 +704,7 @@ export function ChatComposer({
       onSend,
       "Your message could not be sent. Your draft is still here. Please try again.",
     );
-  }, [onSend, steering, submit]);
+  }, [isEditing, onSend, steering, submit]);
 
   const schedule = useCallback(
     (sendAt: Date) => {
@@ -887,6 +917,28 @@ export function ChatComposer({
           style={styles.core}
         >
           <ComposerSurface>
+            {editing ? (
+              <View
+                testID="chat-composer-editing"
+                style={[styles.editing, { backgroundColor: theme.controlFill }]}
+              >
+                <Pencil size={18} strokeWidth={1.8} color={theme.mutedText} />
+                <Text
+                  numberOfLines={1}
+                  style={[styles.editingLabel, { color: theme.mutedText }]}
+                >
+                  Editing message
+                </Text>
+                <IconButton
+                  symbol="xmark"
+                  icon={<X size={18} color={theme.mutedText} />}
+                  label="Cancel editing"
+                  tone="quiet"
+                  onPress={editing.onCancel}
+                  testID="chat-composer-cancel-edit"
+                />
+              </View>
+            ) : null}
             {workspacePicker}
             {activeSkills.length ? (
               <ScrollView
@@ -1079,6 +1131,18 @@ const styles = StyleSheet.create({
   core: { paddingTop: 6 },
   // The name lines up with the editor's text below it.
   workspace: { flexDirection: "row", marginHorizontal: 8, marginBottom: -6 },
+  // Its corners follow the surface's, inset by the surface padding.
+  editing: {
+    minHeight: 44,
+    borderRadius: 22,
+    borderCurve: "continuous",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingLeft: 14,
+    marginBottom: 2,
+  },
+  editingLabel: { flex: 1, fontSize: 15 },
   input: {
     minWidth: 0,
     minHeight: 36,

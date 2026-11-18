@@ -370,6 +370,51 @@ describe("ChatComposer", () => {
     });
   });
 
+  it("edits a sent prompt in the field below a banner that cancels it", async () => {
+    const { TextInput } = require("react-native");
+    const focus = jest
+      .spyOn(TextInput.prototype, "focus")
+      .mockImplementation(() => undefined);
+    const setSelection = TextInput.prototype.setSelection as jest.Mock;
+    setSelection.mockClear();
+    const onCancel = jest.fn();
+    const onSend = jest.fn().mockResolvedValue(undefined);
+    renderComposer({
+      draft: "Original prompt",
+      onSend,
+      editing: { id: "prompt", onCancel },
+    });
+
+    expect(screen.getByTestId("chat-composer-editing")).toHaveTextContent(
+      "Editing message",
+    );
+    // The keyboard opens with the caret after the prompt.
+    await waitFor(() => expect(focus).toHaveBeenCalled());
+    expect(setSelection).toHaveBeenLastCalledWith(15, 15);
+
+    fireEvent.changeText(
+      screen.getByTestId("chat-composer-input"),
+      "Original prompt, updated",
+    );
+    await act(async () => {
+      fireEvent.press(screen.getByTestId("chat-composer-send"));
+    });
+    expect(onSend).toHaveBeenCalledWith({
+      text: "Original prompt, updated",
+      skillIds: [],
+      attachments: [],
+    });
+
+    fireEvent.press(screen.getByRole("button", { name: "Cancel editing" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    focus.mockRestore();
+  });
+
+  it("shows no editing banner for a new message", () => {
+    renderComposer({ draft: "Hello" });
+    expect(screen.queryByTestId("chat-composer-editing")).toBeNull();
+  });
+
   it("clears the draft at once and closes the keyboard while a message is sent", async () => {
     const { KeyboardController } = require("react-native-keyboard-controller");
     (KeyboardController.dismiss as jest.Mock).mockClear();

@@ -37,6 +37,7 @@ import {
 } from "@opencuria/chat-core/harnessModels";
 import type {
   HarnessId,
+  HarnessMessage,
   HarnessSession,
   HarnessSessionMode,
 } from "@opencuria/chat-core/harness";
@@ -163,6 +164,13 @@ type NavigationRequest = {
   newChat?: boolean;
   notificationTarget?: NotificationTarget;
 };
+/** A sent prompt edited in the composer; the chat's own draft waits meanwhile. */
+type PromptEdit = {
+  messageId: string;
+  sessionId: string;
+  text: string;
+  attachments: ComposerAttachment[];
+};
 
 export function MainScreen(): React.JSX.Element {
   const notifications = useNotifications();
@@ -249,6 +257,7 @@ export function MainScreen(): React.JSX.Element {
   const workspaceRef = useRef<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [editing, setEditing] = useState<PromptEdit | null>(null);
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [mode, setMode] = useState<HarnessSessionMode>("build");
   const [harness, setHarness] = useState<HarnessId>("native");
@@ -344,6 +353,36 @@ export function MainScreen(): React.JSX.Element {
     reasoningEffort: effort,
     skillIds,
   });
+  /**
+   * The prompt edit on screen. It ends with its chat, offline, or once its
+   * prompt is gone, e.g. edited elsewhere.
+   */
+  const activeEdit =
+    editing &&
+    !offline &&
+    editing.sessionId === chat.activeSessionId &&
+    (!navigationReady ||
+      chat.messages.some((message) => message.id === editing.messageId))
+      ? editing
+      : null;
+  useEffect(() => {
+    if (editing && !activeEdit) setEditing(null);
+  }, [activeEdit, editing]);
+  /** Text typed into the composer: the edit on screen or the chat's draft. */
+  const setComposerText = (update: string | ((current: string) => string)) => {
+    if (!activeEdit) return setDraft(update);
+    setEditing(
+      (current) =>
+        current && {
+          ...current,
+          text: typeof update === "function" ? update(current.text) : update,
+        },
+    );
+  };
+  const setComposerAttachments = (files: ComposerAttachment[]) => {
+    if (!activeEdit) return setAttachments(files);
+    setEditing((current) => current && { ...current, attachments: files });
+  };
 
   // Terminal shells and Git state outlive the tools sheet, not the client.
   useEffect(() => {
@@ -1075,6 +1114,60 @@ export function MainScreen(): React.JSX.Element {
     ],
   );
 
+  /** Moves a sent prompt into the composer; the transcript ends with it. */
+  const startEdit = (message: HarnessMessage) => {
+    if (!chat.activeSessionId) return;
+    setEditing({
+      messageId: message.id,
+      sessionId: chat.activeSessionId,
+      text: message.content,
+      attachments: [],
+    });
+  };
+
+  /** Sends the edited prompt: the chat restarts from it. */
+  const submitEdit = async ({
+    text,
+    skillIds: usedSkills,
+    attachments: files,
+  }: ComposerSubmission) => {
+    const target = activeEdit;
+    if (!client || !controller || !workspace || !target || chatUnavailable)
+      throw new Error(
+        "Choose an available, running workspace before editing a message.",
+      );
+    if (files.length && !client.realtime.isConnected)
+      throw new Error("Connect to the workspace before uploading attachments.");
+    const ownerGeneration = generation.current;
+    const paths = files.length
+      ? await uploadAttachments(client, workspace.id, files)
+      : [];
+    if (
+      ownerGeneration !== generation.current ||
+      controller.getSnapshot().activeSessionId !== target.sessionId
+    )
+      throw new Error(
+        "The conversation changed before sending. Please try again.",
+      );
+    const prompt = appendUploadMentions(text, paths);
+    if (!prompt.trim())
+      throw new Error("Attach a file or enter a message first.");
+    await controller.edit(
+      target.messageId,
+      prompt,
+      { ...runOptions(), skillIds: usedSkills },
+      target.sessionId,
+    );
+    setEditing((current) =>
+      current?.messageId === target.messageId ? null : current,
+    );
+    setError(null);
+    await Promise.allSettled([
+      client.harness.saveRecentModel(model, effort),
+      loadOverview(true),
+    ]);
+  };
+
   const upsertSchedule = schedules.upsert;
   /**
    * "Send later": an open chat gets a scheduled message; a new chat becomes a
@@ -1240,6 +1333,7 @@ export function MainScreen(): React.JSX.Element {
     if (!options.notificationTarget) notifications.controller?.consumeTarget();
     // The chat opened next shows its own draft.
     followDraft(null);
+    setEditing(null);
     const revision = ++navigationRevision.current;
     generation.current += 1;
     selectedWorkspaceRef.current = workspaceId;
@@ -1627,7 +1721,7 @@ export function MainScreen(): React.JSX.Element {
   const insertIntoChat = chatUnavailable
     ? undefined
     : (text: string) => {
-        setDraft((current) =>
+        setComposerText((current) =>
           !current || /\s$/.test(current)
             ? `${current}${text}`
             : `${current} ${text}`,
@@ -1726,21 +1820,32 @@ export function MainScreen(): React.JSX.Element {
         <ChatLayout
           composer={
             <ChatComposer
-              draft={draft}
-              onDraftChange={(value) => setDraft(value)}
-              onSend={send}
-              onSchedule={offline ? undefined : scheduleDraft}
+              draft={activeEdit ? activeEdit.text : draft}
+              onDraftChange={(value) => setComposerText(value)}
+              onSend={activeEdit ? submitEdit : send}
+              onSchedule={offline || activeEdit ? undefined : scheduleDraft}
+              editing={
+                activeEdit
+                  ? {
+                      id: activeEdit.messageId,
+                      onCancel: () => setEditing(null),
+                    }
+                  : undefined
+              }
               onStop={async () => {
                 // Stopping drops queued messages; give them back to the draft.
                 const restored = (await controller?.stop()) ?? [];
                 restoreToDraft(restored);
               }}
               busy={navigationReady && chat.busy}
-              steering={steering}
+              // An edit restarts the chat; it never steers a running turn.
+              steering={steering && !activeEdit}
               // Offline a prompt can be written, not sent.
               disabled={offline ? false : chatUnavailable}
               canSend={!offline}
-              placeholder={steering ? "Steer the agent…" : "Ask OpenCuria"}
+              placeholder={
+                steering && !activeEdit ? "Steer the agent…" : "Ask OpenCuria"
+              }
               workspace={newChatWorkspace}
               settings={
                 offline
@@ -1759,8 +1864,8 @@ export function MainScreen(): React.JSX.Element {
               }))}
               selectedSkillIds={skillIds}
               onSelectedSkillIdsChange={setSkillIds}
-              attachments={attachments}
-              onAttachmentsChange={setAttachments}
+              attachments={activeEdit ? activeEdit.attachments : attachments}
+              onAttachmentsChange={setComposerAttachments}
               onSearchMentions={offline ? undefined : searchMentions}
               onTakePhoto={async () => pickPhoto("camera")}
               onChoosePhotos={async () => pickPhoto("library")}
@@ -1859,18 +1964,9 @@ export function MainScreen(): React.JSX.Element {
                   : "No chats are saved on this device yet."
                 : undefined
             }
-            onEdit={
-              offline
-                ? undefined
-                : async (messageId, text) => {
-                    await controller!.edit(
-                      messageId,
-                      text,
-                      runOptions(),
-                      chat.activeSessionId,
-                    );
-                  }
-            }
+            // Subtasks take no prompts from the user.
+            onEdit={offline || activeIsSubtask ? undefined : startEdit}
+            editingMessageId={activeEdit?.messageId ?? null}
             onFork={
               offline
                 ? undefined

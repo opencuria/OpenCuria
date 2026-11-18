@@ -76,7 +76,8 @@ const mockTranscript: {
   props?: {
     resolveMedia?: (path: string) => Promise<unknown>;
     onFork?: unknown;
-    onEdit?: unknown;
+    onEdit?: (message: unknown) => void;
+    editingMessageId?: string | null;
   };
 } = {};
 
@@ -184,6 +185,7 @@ jest.mock("../components", () => {
       onStop?: () => Promise<void>;
       steering?: boolean;
       queue?: { onEdit: (id: string) => Promise<void> };
+      editing?: { id: string; onCancel: () => void };
     }) {
       const [menuOpen, setMenuOpen] = ReactRuntime.useState(false);
       mockComposer.onDraftChange = props.onDraftChange;
@@ -294,6 +296,13 @@ jest.mock("../components", () => {
             void props.queue?.onEdit("later-1");
           },
         }),
+        props.editing
+          ? ReactRuntime.createElement(
+              Pressable,
+              { testID: "composer-editing", onPress: props.editing.onCancel },
+              ReactRuntime.createElement(Text, null, props.editing.id),
+            )
+          : null,
       );
     },
     ChatLayout: ({
@@ -317,6 +326,8 @@ jest.mock("../components", () => {
       emptyText?: string;
       resolveMedia?: (path: string) => Promise<unknown>;
       messages: Array<{ content: string }>;
+      onEdit?: (message: unknown) => void;
+      editingMessageId?: string | null;
       onPullUpAtEnd?: () => void;
       onOpenFile: (path: string) => void;
       onOpenAttachment: (attachment: {
@@ -2392,6 +2403,72 @@ describe("steering and send later", () => {
       ),
     );
     expect(mockController.withdrawScheduled).toHaveBeenCalledWith("later-1");
+    tree.unmount();
+  });
+
+  it("edits a sent prompt in the composer and keeps the draft for afterwards", async () => {
+    const { tree } = await renderOpenChat("idle");
+    const prompt = {
+      id: "prompt-1",
+      session_id: "session-a",
+      role: "user",
+      content: "What does GoBD compliant mean?",
+      parts: [],
+    };
+    const answer = {
+      id: "answer-1",
+      session_id: "session-a",
+      role: "assistant",
+      content: "An answer",
+      parts: [],
+    };
+    const showMessages = (messages: unknown[]) =>
+      act(async () => {
+        snapshot = { ...snapshot, messages: messages as never[] };
+        listeners.forEach((listener) => listener());
+      });
+    await showMessages([prompt, answer]);
+    act(() => mockComposer.onDraftChange!("My own draft"));
+    const draft = () => screen.getByTestId("composer-draft");
+
+    act(() => mockTranscript.props!.onEdit!(prompt));
+    expect(draft()).toHaveTextContent("What does GoBD compliant mean?");
+    expect(screen.getByTestId("composer-editing")).toHaveTextContent(
+      "prompt-1",
+    );
+    expect(mockTranscript.props?.editingMessageId).toBe("prompt-1");
+
+    // Cancelling brings the chat's own draft back.
+    fireEvent.press(screen.getByTestId("composer-editing"));
+    expect(draft()).toHaveTextContent("My own draft");
+    expect(mockTranscript.props?.editingMessageId).toBeNull();
+
+    act(() => mockTranscript.props!.onEdit!(prompt));
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() =>
+      expect(mockController.edit).toHaveBeenCalledWith(
+        "prompt-1",
+        "hello from mobile",
+        expect.objectContaining({
+          harnessId: "native",
+          mode: "build",
+          skillIds: [],
+        }),
+        "session-a",
+      ),
+    );
+    expect(mockController.send).not.toHaveBeenCalled();
+    await waitFor(() => expect(draft()).toHaveTextContent("My own draft"));
+    expect(screen.queryByTestId("composer-editing")).toBeNull();
+
+    // An edit ends once its prompt is gone, e.g. edited elsewhere.
+    act(() => mockTranscript.props!.onEdit!(prompt));
+    expect(screen.getByTestId("composer-editing")).toBeTruthy();
+    await showMessages([answer]);
+    await waitFor(() =>
+      expect(screen.queryByTestId("composer-editing")).toBeNull(),
+    );
+    expect(draft()).toHaveTextContent("My own draft");
     tree.unmount();
   });
 
